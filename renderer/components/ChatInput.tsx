@@ -24,6 +24,7 @@ import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } f
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
+import type { ChatFileDraft } from "@/lib/chat-files";
 import { openPricing } from "@/components/UpgradeCta";
 
 type ModelOption = { id: string; label: string; tag?: string };
@@ -130,6 +131,7 @@ interface MentionContext {
 
 interface SendOptions {
   images?: ImageAttachment[];
+  files?: ChatFileDraft[];
   /** 사용자가 활성화한 모드 — 백엔드 invocation에 전달 (V1) */
   planMode?: boolean;
   goalMode?: boolean;
@@ -406,7 +408,7 @@ function ChatInputComponent({
   }
   const [images, setImages] = useState<PreviewedImage[]>([]);
   // 비이미지 첨부 — 내용 업로드가 아니라 경로 참조(capability). 파일·폴더·영상 공통.
-  const [fileGrants, setFileGrants] = useState<Array<{ path: string; kind: "file" | "directory" }>>([]);
+  const [fileGrants, setFileGrants] = useState<ChatFileDraft[]>([]);
   // 붙여넣은 긴 텍스트 — 입력창을 채우지 않고 에셋 칩으로 접어 동봉.
   const [pastedTexts, setPastedTexts] = useState<Array<{ name: string; text: string }>>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -576,18 +578,26 @@ function ChatInputComponent({
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
     const accepted: PreviewedImage[] = [];
-    const grantedFiles: Array<{ path: string; kind: "file" | "directory" }> = [];
+    const grantedFiles: ChatFileDraft[] = [];
     const rejected: string[] = [];
     const errors: string[] = [];
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) {
-        // 이미지 외(파일·폴더·영상·문서): 내용을 올리지 않고 경로만 참조한다 —
-        // 로컬 에이전트가 파일시스템 도구로 읽는다. grant가 접근 권한을 등록한다.
-        const grant = await grantForDroppedFile(file);
-        if (grant?.path) grantedFiles.push({ path: grant.path, kind: grant.kind });
-        else rejected.push(file.name);
+      const grant = await grantForDroppedFile(file);
+      if (grant?.path) {
+        grantedFiles.push({
+          grant,
+          name: file.name || grant.path.split("/").filter(Boolean).at(-1) || (grant.kind === "directory" ? "folder" : "file"),
+          mediaType: file.type || "application/octet-stream",
+          size: file.size,
+          kind: grant.kind,
+        });
+      } else if (!file.type.startsWith("image/")) {
+        rejected.push(file.name);
         continue;
       }
+      // Images keep the existing multimodal payload while also receiving the
+      // same durable file-card binding as every other attachment.
+      if (!file.type.startsWith("image/")) continue;
       if (file.size > 5 * 1024 * 1024) {
         errors.push(t("chatinput.image_too_large", { name: file.name }));
         continue;
@@ -728,6 +738,7 @@ function ChatInputComponent({
       images.length > 0 ? images.map(({ mediaType, data, name }) => ({ mediaType, data, name })) : undefined;
     return {
       images: attachments,
+      files: fileGrants.length > 0 ? fileGrants.map((item) => ({ ...item, grant: { ...item.grant } })) : undefined,
       planMode: planMode || undefined,
       goalMode: effectiveGoalMode || undefined,
       permissions,
@@ -741,7 +752,7 @@ function ChatInputComponent({
   /** 첨부(파일·폴더 경로 + 붙여넣은 텍스트)를 메시지 본문에 동봉 — 로컬 에이전트가 경로로 읽는다. */
   function withAttachmentContext(base: string): string {
     const parts: string[] = [];
-    for (const g of fileGrants) parts.push(`- ${g.kind === "directory" ? "폴더" : "파일"}: ${g.path}`);
+    for (const g of fileGrants) parts.push(`- ${g.kind === "directory" ? "폴더" : "파일"}: ${g.grant.path}`);
     for (const p of pastedTexts) parts.push(`- ${locale === "ko" ? "붙여넣은 텍스트" : "pasted text"} "${p.name}":\n${p.text}`);
     if (parts.length === 0) return base;
     return `${base}${base ? "\n\n" : ""}[${locale === "ko" ? "첨부" : "attachments"}]\n${parts.join("\n")}`;
@@ -1101,7 +1112,7 @@ function ChatInputComponent({
           }}
         >
           <IconFileUp size={17} style={{ color: "var(--accent)" }} />
-          <span>{t("chatinput.drop_images")}</span>
+          <span>{locale === "ko" ? "파일 또는 폴더를 놓아 첨부" : "Drop files or folders to attach"}</span>
         </div>
       )}
 
@@ -1135,7 +1146,13 @@ function ChatInputComponent({
             if (!api) return;
             try {
               const grant = await api.fs.pickDirectory();
-              if (grant?.path) setFileGrants((a) => [...a, { path: grant.path, kind: grant.kind }]);
+              if (grant?.path) setFileGrants((a) => [...a, {
+                grant,
+                name: grant.path.split("/").filter(Boolean).at(-1) || "folder",
+                mediaType: "application/vnd.agentlas.directory+json",
+                size: 0,
+                kind: grant.kind,
+              }]);
             } catch {
               /* cancelled or denied */
             }
@@ -1558,14 +1575,14 @@ function ChatInputComponent({
         {(fileGrants.length > 0 || pastedTexts.length > 0) && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 4px 6px" }}>
             {fileGrants.map((g, i) => (
-              <span key={`f${i}`} title={g.path} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, #d8d8d8)", background: "var(--paper-2, #f4f4f5)", fontSize: 12 }}>
+              <span key={`${g.grant.scope.token}:${i}`} title={g.grant.path} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, var(--paper-edge-strong))", background: "var(--paper-2, var(--paper-2))", fontSize: 12 }}>
                 <span aria-hidden="true">{g.kind === "directory" ? "📁" : "📎"}</span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.path.split("/").pop() || g.path}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</span>
                 <button type="button" aria-label={locale === "ko" ? "첨부 제거" : "Remove attachment"} onClick={() => setFileGrants((a) => a.filter((_, j) => j !== i))} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>×</button>
               </span>
             ))}
             {pastedTexts.map((p, i) => (
-              <span key={`t${i}`} title={p.text.slice(0, 300)} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, #d8d8d8)", background: "var(--paper-2, #f4f4f5)", fontSize: 12 }}>
+              <span key={`t${i}`} title={p.text.slice(0, 300)} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, var(--paper-edge-strong))", background: "var(--paper-2, var(--paper-2))", fontSize: 12 }}>
                 <span aria-hidden="true">📝</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
                 <button type="button" aria-label={locale === "ko" ? "텍스트 제거" : "Remove text"} onClick={() => setPastedTexts((a) => a.filter((_, j) => j !== i))} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>×</button>

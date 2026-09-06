@@ -1687,7 +1687,7 @@
       "mcp": {
         "name": "analyze_light_curve_periodicity",
         "route": "/v1/labs/data-visualization/tools/astronomy-light-curve-periodicity",
-        "description": "Project one exact immutable Data Table into a bounded irregular astronomical light curve and run a deterministic weighted floating-mean generalized Lomb-Scargle analysis. Every nullable observation is preserved, no measurement is imputed, the source artifact version/hash and column mapping remain bound to the run, and the result materializes publication tables plus a durable Vega-Lite Figure. This tool does not claim a false-alarm probability or period confidence interval.",
+        "description": "Project one exact immutable Data Table into a bounded irregular astronomical light curve and run a deterministic weighted floating-mean generalized Lomb-Scargle analysis. Every nullable observation is preserved, no measurement is imputed, the source artifact version/hash and column mapping remain bound to the run, and the result materializes publication tables plus a durable Vega-Lite Figure. It reports a Baluev (2008) analytic false-alarm upper bound and a Montgomery-O'Donoghue (1999) period standard-error estimate when numerically resolvable; these are model estimates rather than calibrated detection probabilities or confidence intervals, and a returned 0 is a numerical floor rather than exact certainty.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1758,8 +1758,7 @@
                 "observation_id_column",
                 "time_column",
                 "value_column",
-                "standard_error_column",
-                "use_column"
+                "standard_error_column"
               ],
               "additionalProperties": false
             },
@@ -1829,6 +1828,230 @@
               "minimum": 1,
               "maximum": 20,
               "default": 5
+            }
+          },
+          "required": [
+            "tool_call_id",
+            "title",
+            "source_table",
+            "columns",
+            "target_id",
+            "time_system",
+            "time_offset_days",
+            "value_kind",
+            "value_unit",
+            "weighting",
+            "minimum_period_days",
+            "maximum_period_days",
+            "frequency_count"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.astronomy-light-curve-periodicity-depth",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "data-visualization",
+      "operation": "execute",
+      "primaryArtifact": {
+        "ordinal": 1,
+        "kind": "chart.vega",
+        "rendererId": "agentlas.vega",
+        "labId": "data-visualization"
+      },
+      "mcp": {
+        "name": "analyze_light_curve_periodicity_depth",
+        "route": "/v1/labs/data-visualization/tools/astronomy-light-curve-periodicity-depth",
+        "description": "Project one exact immutable Data Table into a bounded irregular astronomical light curve and run the depth analysis: Baluev analytic upper-bound FAP, optional seeded permutation-bootstrap FAP, peak-width/analytic/bootstrap period uncertainty, daily and sidereal alias screening, and a fixed two-harmonic refinement. Source artifact version/hash and column mapping remain bound to the run, publication tables and a durable Vega-Lite Figure are materialized, and a zero bootstrap exceedance is reported with its finite-sample upper bound rather than as exact FAP=0. White-noise, sampling, time-system, and model limitations remain explicit in the result boundaries.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "source_table": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "artifact_version": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "content_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "artifact_version",
+                "content_sha256"
+              ],
+              "additionalProperties": false
+            },
+            "columns": {
+              "type": "object",
+              "properties": {
+                "observation_id_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "time_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "value_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "standard_error_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "use_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              },
+              "required": [
+                "observation_id_column",
+                "time_column",
+                "value_column",
+                "standard_error_column"
+              ],
+              "additionalProperties": false
+            },
+            "target_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "time_system": {
+              "type": "string",
+              "enum": [
+                "BJD_TDB",
+                "BJD_UTC",
+                "HJD_UTC",
+                "JD_UTC",
+                "MJD_UTC",
+                "relative-day"
+              ]
+            },
+            "time_offset_days": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            },
+            "value_kind": {
+              "type": "string",
+              "enum": [
+                "magnitude",
+                "flux",
+                "relative-flux",
+                "generic"
+              ]
+            },
+            "value_unit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "weighting": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "weighted",
+                "unweighted"
+              ]
+            },
+            "minimum_period_days": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000000000
+            },
+            "maximum_period_days": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000000000
+            },
+            "frequency_count": {
+              "type": "integer",
+              "minimum": 32,
+              "maximum": 5000
+            },
+            "maximum_peaks": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 5
+            },
+            "bootstrap_samples": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000,
+              "default": 200,
+              "description": "Number of seeded permutation and residual-bootstrap replicates; zero skips bootstrap estimates."
+            },
+            "bootstrap_seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 20240901,
+              "description": "Deterministic seed for the permutation and residual bootstrap."
+            },
+            "alias_periods_days": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 1e-06,
+                "maximum": 1000000000
+              },
+              "minItems": 1,
+              "maxItems": 6,
+              "default": [
+                1,
+                0.99726956633
+              ],
+              "description": "Declared daily/sidereal or other alias periods to screen against the sampling window."
+            },
+            "false_alarm_levels": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 1e-12,
+                "maximum": 0.5
+              },
+              "minItems": 1,
+              "maxItems": 6,
+              "default": [
+                0.1,
+                0.01,
+                0.001
+              ],
+              "description": "Baluev upper-bound levels for periodogram threshold construction."
             }
           },
           "required": [
@@ -2259,6 +2482,169 @@
             "catalog_run_id",
             "completeness_magnitude",
             "magnitude_type"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.earth-aftershock-table-study",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "earthquake-observations",
+      "operation": "execute",
+      "primaryArtifact": {
+        "ordinal": 1,
+        "kind": "chart.vega",
+        "rendererId": "agentlas.vega",
+        "labId": "earthquake-observations"
+      },
+      "mcp": {
+        "name": "analyze_aftershock_catalog_table",
+        "route": "/v1/labs/earthquake-observations/tools/aftershock-table-study",
+        "description": "Analyze one exact project Data Table containing event ids, elapsed days since a mainshock, and magnitudes. The trusted host fits a bounded Omori-Utsu decay model and compares Aki b-values before and after one explicit split, preserving the 400-row parent hash, inclusion counts, numeric results, uncertainty, limitations, publication table, Figure, and ResearchRun receipts. Omori parameter intervals, background seismicity, secondary triggering, and uncertainty in the supplied completeness/split boundaries are not computed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "source_table": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "artifact_version": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "content_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "artifact_version",
+                "content_sha256"
+              ],
+              "additionalProperties": false
+            },
+            "columns": {
+              "type": "object",
+              "properties": {
+                "event_id_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "time_days_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "magnitude_column": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              },
+              "required": [
+                "event_id_column",
+                "time_days_column",
+                "magnitude_column"
+              ],
+              "additionalProperties": false
+            },
+            "completeness_start_days": {
+              "type": "number",
+              "minimum": 0,
+              "exclusiveMaximum": 366
+            },
+            "completeness_magnitude": {
+              "type": "number",
+              "minimum": -2,
+              "maximum": 10
+            },
+            "split_time_days": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 366
+            },
+            "bin_width": {
+              "type": "number",
+              "minimum": 0.01,
+              "maximum": 1,
+              "default": 0.01
+            },
+            "rate_bin_width_days": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 31
+            },
+            "parameter_bounds": {
+              "type": "object",
+              "properties": {
+                "p_min": {
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 5
+                },
+                "p_max": {
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 5
+                },
+                "c_min_days": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 366
+                },
+                "c_max_days": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 366
+                }
+              },
+              "required": [
+                "p_min",
+                "p_max",
+                "c_min_days",
+                "c_max_days"
+              ],
+              "additionalProperties": false
+            },
+            "confidence_level": {
+              "type": "number",
+              "enum": [
+                0.9,
+                0.95,
+                0.99
+              ],
+              "default": 0.95
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            }
+          },
+          "required": [
+            "tool_call_id",
+            "source_table",
+            "columns",
+            "completeness_start_days",
+            "completeness_magnitude",
+            "split_time_days",
+            "rate_bin_width_days",
+            "parameter_bounds"
           ],
           "additionalProperties": false
         }

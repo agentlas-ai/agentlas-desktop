@@ -34,8 +34,8 @@
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--ink) 9%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, #e7efe7 72%, var(--paper));
-  color: #405d43;
+  background: color-mix(in srgb, var(--paper-3) 72%, var(--paper));
+  color: var(--ok);
 }
 
 .copy {
@@ -73,13 +73,13 @@
 }
 
 .status[data-tone="ready"] {
-  background: #edf5ed;
-  color: #3e6642;
+  background: var(--paper-3);
+  color: var(--ok);
 }
 
 .status[data-tone="error"] {
-  background: #fff1ec;
-  color: #a54b36;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .details {
@@ -159,8 +159,8 @@
 }
 
 .notice[data-error="true"] {
-  background: #fff1ec;
-  color: #91412f;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 @media (max-width: 720px) {

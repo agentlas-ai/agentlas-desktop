@@ -10,6 +10,8 @@ const ENSEMBL_ORIGIN = "https://rest.ensembl.org";
 const ENSEMBL_FTP_ORIGIN = "https://ftp.ensembl.org";
 const MAX_JSON_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const MAX_FAILURE_RESPONSE_BYTES = 2 * 1024;
+const MAX_FAILURE_RESPONSE_CHARACTERS = 1_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -78,6 +80,29 @@ export interface ExtantReferenceAssemblyResult {
   replayed: boolean;
 }
 
+export interface ExtantReferenceAssemblyFailureReceipt extends JsonRecord {
+  schema: "agentlas.science-extant-reference-assembly-failure-receipt/v1";
+  runId: string | null;
+  provider: "ensembl";
+  status: number;
+  endpoint: string;
+  species: string | null;
+  requestKind: "json" | "text";
+  responseContentType: string;
+  responseSnippet: string;
+  responseSnippetBytes: number;
+  responseSnippetSha256: string;
+  responseSnippetTruncated: boolean;
+  retrievedAt: string;
+}
+
+export class ScienceExtantReferenceAssemblyHttpError extends Error {
+  constructor(public failureReceipt: ExtantReferenceAssemblyFailureReceipt) {
+    super(`science-extant-reference-assembly-http-${failureReceipt.status}`);
+    this.name = "ScienceExtantReferenceAssemblyHttpError";
+  }
+}
+
 function sha256(value: Buffer | string): string { return createHash("sha256").update(value).digest("hex"); }
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -129,21 +154,94 @@ async function readBounded(response: Response, maximum: number): Promise<Buffer>
   if (total < 1) throw new Error("science-extant-reference-assembly-response-invalid");
   return Buffer.concat(chunks, total);
 }
-async function fetchExact(url: string, kind: "json" | "text", fetchImpl: typeof fetch): Promise<{ body: Buffer; retrievedAt: string }> {
+async function readFailureResponse(response: Response): Promise<{ body: Buffer; truncated: boolean }> {
+  if (!response.body) return { body: Buffer.alloc(0), truncated: false };
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let truncated = false;
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      const remaining = MAX_FAILURE_RESPONSE_BYTES - total;
+      if (chunk.length > remaining) {
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        total = MAX_FAILURE_RESPONSE_BYTES;
+        truncated = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total === MAX_FAILURE_RESPONSE_BYTES) {
+        const next = await reader.read();
+        truncated = !next.done;
+        if (!next.done) await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } catch {
+    truncated = true;
+    await reader.cancel().catch(() => undefined);
+  }
+  return { body: Buffer.concat(chunks, total), truncated };
+}
+function safeFailureSnippet(bytes: Buffer): { text: string; characterTruncated: boolean } {
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "\ufffd");
+  return { text: decoded.slice(0, MAX_FAILURE_RESPONSE_CHARACTERS), characterTruncated: decoded.length > MAX_FAILURE_RESPONSE_CHARACTERS };
+}
+async function fetchExact(url: string, kind: "json" | "text", fetchImpl: typeof fetch, species: string | null): Promise<{ body: Buffer; retrievedAt: string }> {
   const parsed = new URL(url);
   const restAllowed = parsed.origin === ENSEMBL_ORIGIN && (parsed.pathname === "/info/data" || parsed.pathname.startsWith("/info/genomes/") || parsed.pathname.startsWith("/info/assembly/"));
   const ftpAllowed = parsed.origin === ENSEMBL_FTP_ORIGIN && /^\/pub\/current_fasta\/[a-z][a-z0-9_]+\/dna\/(?:README|CHECKSUMS)$/u.test(parsed.pathname);
   if ((kind === "json" && !restAllowed) || (kind === "text" && !ftpAllowed)) throw new Error("science-extant-reference-assembly-endpoint-denied");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 35_000);
-  try {
-    const response = await fetchImpl(parsed, { signal: controller.signal, redirect: "error", headers: { accept: kind === "json" ? "application/json" : "text/plain,*/*;q=0.1", "user-agent": "Agentlas-Science/1.0 (extant reference assembly manifest; https://agentlas.ai)" } });
-    if (response.status !== 200) { await response.body?.cancel().catch(() => undefined); throw new Error(`science-extant-reference-assembly-http-${response.status}`); }
-    const mime = (response.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0]!.trim();
-    if (kind === "json" && mime !== "application/json") { await response.body?.cancel().catch(() => undefined); throw new Error("science-extant-reference-assembly-response-invalid"); }
-    if (kind === "text" && !["text/plain", "application/octet-stream", ""].includes(mime)) { await response.body?.cancel().catch(() => undefined); throw new Error("science-extant-reference-assembly-response-invalid"); }
-    return { body: await readBounded(response, kind === "json" ? MAX_JSON_BYTES : MAX_TEXT_BYTES), retrievedAt: new Date().toISOString() };
-  } finally { clearTimeout(timeout); }
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 35_000);
+    try {
+      const response = await fetchImpl(parsed, { signal: controller.signal, redirect: "error", headers: { accept: kind === "json" ? "application/json" : "text/plain,*/*;q=0.1", "user-agent": "Agentlas-Science/1.0 (extant reference assembly manifest; https://agentlas.ai)" } });
+      if (response.status !== 200) {
+        const retrievedAt = new Date().toISOString();
+        const captured = await readFailureResponse(response);
+        const snippet = safeFailureSnippet(captured.body);
+        const error = new ScienceExtantReferenceAssemblyHttpError({
+          schema: "agentlas.science-extant-reference-assembly-failure-receipt/v1",
+          runId: null,
+          provider: "ensembl",
+          status: response.status,
+          endpoint: parsed.toString(),
+          species,
+          requestKind: kind,
+          responseContentType: (response.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0]!.trim().slice(0, 120),
+          responseSnippet: snippet.text,
+          responseSnippetBytes: captured.body.length,
+          responseSnippetSha256: sha256(captured.body),
+          responseSnippetTruncated: captured.truncated || snippet.characterTruncated,
+          retrievedAt,
+        });
+        if (!retryableStatuses.has(response.status) || attempt === 2) throw error;
+        lastError = error;
+      } else {
+        const mime = (response.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0]!.trim();
+        if (kind === "json" && mime !== "application/json") { await response.body?.cancel().catch(() => undefined); throw new Error("science-extant-reference-assembly-response-invalid"); }
+        if (kind === "text" && !["text/plain", "application/octet-stream", ""].includes(mime)) { await response.body?.cancel().catch(() => undefined); throw new Error("science-extant-reference-assembly-response-invalid"); }
+        return { body: await readBounded(response, kind === "json" ? MAX_JSON_BYTES : MAX_TEXT_BYTES), retrievedAt: new Date().toISOString() };
+      }
+    } catch (error) {
+      lastError = error;
+      const transientNetworkFailure = error instanceof Error && (error.name === "AbortError" || error.name === "TypeError");
+      if (!transientNetworkFailure || attempt === 2) throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  throw lastError instanceof Error ? lastError : new Error("science-extant-reference-assembly-fetch-failed");
 }
 
 export class ScienceExtantReferenceAssemblyService {
@@ -180,13 +278,13 @@ export class ScienceExtantReferenceAssemblyService {
     if (created.replayed && run.status === "succeeded") return this.replay(input.projectId, run.id, built.input, title, built, true);
     if (created.replayed) throw new Error(`science-extant-reference-assembly-run-${run.status}`);
     try {
-      const release = await fetchExact(built.releaseUrl, "json", this.fetchImpl);
+      const release = await fetchExact(built.releaseUrl, "json", this.fetchImpl, null);
       const rawSpecies = [];
       for (const request of built.requests) {
-        const genome = await fetchExact(request.genomeUrl, "json", this.fetchImpl);
-        const assembly = await fetchExact(request.assemblyUrl, "json", this.fetchImpl);
-        const readme = await fetchExact(request.readmeUrl, "text", this.fetchImpl);
-        const checksums = await fetchExact(request.checksumsUrl, "text", this.fetchImpl);
+        const genome = await fetchExact(request.genomeUrl, "json", this.fetchImpl, request.species);
+        const assembly = await fetchExact(request.assemblyUrl, "json", this.fetchImpl, request.species);
+        const readme = await fetchExact(request.readmeUrl, "text", this.fetchImpl, request.species);
+        const checksums = await fetchExact(request.checksumsUrl, "text", this.fetchImpl, request.species);
         rawSpecies.push({ request, genome, assembly, readme, checksums });
       }
       const assessment = engine.normalizeReferenceAssemblyManifest({
@@ -209,7 +307,17 @@ export class ScienceExtantReferenceAssemblyService {
       return this.materialize(input.projectId, input.conversationId, input.originMessageId, run.id, assessment, sources.map((item) => ({ source: item.source, url: item.url, sha256: sha256(item.body), role: item.role })), Math.max(...raw.map((item) => Date.parse(item.retrievedAt))), assessmentOrdinal, false);
     } catch (error) {
       const current = this.store.getResearchRunForProject(input.projectId, run.id);
-      if (current?.status === "running") this.store.completeResearchRun({ requestId: stableUuid(`${input.requestId}:failed`), projectId: input.projectId, runId: run.id, status: "failed", outputManifestSha256: sha256(canonicalJson([])), summary: error instanceof Error ? error.message.slice(0, 1000) : "science-extant-reference-assembly-failed", outputs: [] });
+      const outputs = error instanceof ScienceExtantReferenceAssemblyHttpError
+        ? [{
+            role: "extant-reference-assembly-failure-receipt",
+            mimeType: "application/vnd.agentlas.science.extant-reference-assembly-failure-receipt+json",
+            ...this.store.putRunBlob(Buffer.from(canonicalJson({ ...error.failureReceipt, runId: run.id }), "utf8")),
+            artifactId: null,
+            artifactVersion: null,
+          }]
+        : [];
+      if (error instanceof ScienceExtantReferenceAssemblyHttpError) error.failureReceipt = { ...error.failureReceipt, runId: run.id };
+      if (current?.status === "running") this.store.completeResearchRun({ requestId: stableUuid(`${input.requestId}:failed`), projectId: input.projectId, runId: run.id, status: "failed", outputManifestSha256: sha256(canonicalJson(outputs.map(envelope))), summary: error instanceof Error ? error.message.slice(0, 1000) : "science-extant-reference-assembly-failed", outputs });
       throw error;
     }
   }

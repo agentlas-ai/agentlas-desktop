@@ -61,7 +61,7 @@ export const LONG_RUN_ACTIVE_STATUSES: ReadonlySet<LongRunStatus> = new Set([
 ]);
 
 const LONG_RUN_TRANSITIONS: Readonly<Record<LongRunStatus, ReadonlySet<LongRunStatus>>> = {
-  draft: new Set(["queued", "cancelled"]),
+  draft: new Set(["queued", "paused", "cancelled"]),
   queued: new Set(["running", "paused", "failed", "cancelling"]),
   running: new Set([
     "waiting_worker",
@@ -77,7 +77,7 @@ const LONG_RUN_TRANSITIONS: Readonly<Record<LongRunStatus, ReadonlySet<LongRunSt
   waiting_tool: new Set(["running", "verifying", "pausing", "blocked", "failed", "cancelling"]),
   waiting_user: new Set(["running", "pausing", "blocked", "failed", "cancelling"]),
   verifying: new Set(["running", "pausing", "blocked", "completed", "failed", "cancelling"]),
-  pausing: new Set(["paused", "failed"]),
+  pausing: new Set(["paused", "failed", "cancelling"]),
   paused: new Set(["queued", "cancelling", "cancelled"]),
   blocked: new Set(["queued", "cancelling", "cancelled"]),
   completed: new Set(),

@@ -451,6 +451,7 @@
       viewportShowSelectionMode: true,
       viewportShowAnimation: false,
       viewportShowControls: true,
+      viewportBackgroundColor: "#ffffff",
       volumeStreamingDisabled: true,
       preferWebgl1: false,
       powerPreference: "high-performance",

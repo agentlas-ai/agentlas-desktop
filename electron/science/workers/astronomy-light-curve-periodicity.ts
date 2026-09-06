@@ -99,6 +99,7 @@ function main(): void {
       settings: result.settings,
       summary: result.summary,
       warnings: result.warnings,
+      boundaries: result.boundaries,
       bestFit: result.bestFit,
       provenance: result.provenance,
     },

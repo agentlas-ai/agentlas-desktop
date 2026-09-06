@@ -17,7 +17,8 @@ import {
   type WorkbenchSurface,
 } from "./WorkbenchPanel";
 import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, Project, ProjectTimelineSnapshot, ResolvedOrg } from "@/lib/types";
-import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight, IconSparkles } from "./Icon";
+import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight, IconPlus, IconSparkles } from "./Icon";
+import railStyles from "./one/OneActivityTimeline.module.css";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
@@ -35,6 +36,8 @@ import {
   preferredOutputRailWidth,
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
+import { ChatFileTabs, nextFileTabSelection, type ChatFileTab } from "./ChatFileExperience";
+import { previewTabIdentity } from "@/lib/chat-files";
 
 export type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 type PanelViewerSource = "workbench" | "file";
@@ -79,6 +82,10 @@ interface Props {
   hasPipeline?: boolean;
   width?: number;
   onResizeWidth?: (width: number) => void;
+  /** Temporary auto-width for readable output; the parent must not persist it. */
+  onRequestReadableWidth?: (width: number) => void;
+  /** Called after the final file tab closes so the saved width can be restored. */
+  onFileTabsEmpty?: () => void;
   /** null = 세로 전체(기본). 숫자 = 상단 가장자리를 끌어 줄여 둔 높이. */
   height?: number | null;
   onResizeHeight?: (height: number | null) => void;
@@ -114,12 +121,48 @@ export function ChatRightPanel({
   hasPipeline,
   width,
   onResizeWidth,
+  onRequestReadableWidth,
+  onFileTabsEmpty,
   height,
   onResizeHeight,
 }: Props) {
   const { locale } = useT();
   const ko = locale === "ko";
+  const [openViews, setOpenViews] = useState<ChatRightPanelTab[]>([activeTab]);
+  const [addViewOpen, setAddViewOpen] = useState(false);
+  const viewMenuRef = useRef<HTMLSpanElement | null>(null);
+  const viewLabels: Record<ChatRightPanelTab, string> = {
+    agent: ko ? "작업" : "Activity", file: ko ? "파일" : "Files",
+    panel: ko ? "미리보기" : "Preview", memory: ko ? "기억" : "Memory",
+  };
+  useEffect(() => {
+    setOpenViews([activeTab]);
+    setAddViewOpen(false);
+  }, [chatId]);
+  useEffect(() => {
+    setOpenViews((views) => views.includes(activeTab) ? views : [...views, activeTab]);
+  }, [activeTab]);
+  useEffect(() => {
+    if (!addViewOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !viewMenuRef.current?.contains(event.target)) setAddViewOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.stopPropagation(); setAddViewOpen(false); }
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape, true);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape, true); };
+  }, [addViewOpen]);
+  const closeView = (view: ChatRightPanelTab) => {
+    const remaining = openViews.filter((item) => item !== view);
+    if (!remaining.length) { onClose(); return; }
+    setOpenViews(remaining);
+    if (activeTab === view) onTabChange(remaining[remaining.length - 1]);
+  };
   const [filePreview, setFilePreview] = useState<WorkspaceFilePreview | null>(null);
+  const [fileTabs, setFileTabs] = useState<Array<ChatFileTab & { preview: WorkspaceFilePreview }>>([]);
+  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [viewerSource, setViewerSource] = useState<PanelViewerSource>("workbench");
   const [resizing, setResizing] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
@@ -147,6 +190,8 @@ export function ChatRightPanel({
         : "empty";
   useEffect(() => {
     setFilePreview(null);
+    setFileTabs([]);
+    setActiveFileTabId(null);
     setViewerSource("workbench");
   }, [chatId]);
 
@@ -176,14 +221,58 @@ export function ChatRightPanel({
     if (artifact || surface) setViewerSource("workbench");
   }, [artifact?.id, surface?.id]);
 
+  /*
+   * ★사본은 **내용이 채워질 때도** 따라가야 한다(2026-09-04 실측).
+   *
+   * 부모는 자리를 먼저 열고 파일을 읽어 같은 경로의 미리보기를 내용과 함께 다시 보낸다.
+   * 그런데 이 복사는 의존성이 경로·URL 뿐이라 두 번째(내용 있는) 판을 무시했고, 화면에는
+   * 내용 없는 첫 판이 그대로 남아 "이 파일의 내용을 읽지 못했습니다" 가 떴다.
+   * 방금 에이전트가 만든 파일이 영영 안 열렸다 — 읽기는 88자를 정상으로 돌려주고 있었다.
+   */
   useEffect(() => {
     if (!externalFilePreview) return;
+    const id = previewTabIdentity(externalFilePreview);
+    setFileTabs((current) => current.some((tab) => tab.id === id)
+      ? current.map((tab) => tab.id === id ? { ...tab, name: externalFilePreview.name, preview: externalFilePreview } : tab)
+      : [...current, { id, name: externalFilePreview.name, provenance: "linked-file", preview: externalFilePreview }]);
+    setActiveFileTabId(id);
     setFilePreview(externalFilePreview);
     setViewerSource("file");
-  }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
+  }, [externalFilePreview]);
+
+  // The parent clears its chat-scoped preview during navigation. Clear the
+  // panel's local copy too; otherwise a persisted open-rail preference can
+  // remount the panel with the previous chat's file still selected.
+  useEffect(() => {
+    if (externalFilePreview || fileTabs.length > 0) return;
+    setFilePreview(null);
+    setViewerSource("workbench");
+  }, [externalFilePreview, fileTabs.length]);
+
+  const selectFileTab = useCallback((id: string) => {
+    const target = fileTabs.find((tab) => tab.id === id);
+    if (!target) return;
+    setActiveFileTabId(id);
+    setFilePreview(target.preview);
+    setViewerSource("file");
+  }, [fileTabs]);
+  const closeFileTab = useCallback((id: string) => {
+    const nextActive = nextFileTabSelection(fileTabs, id, activeFileTabId);
+    const nextTabs = fileTabs.filter((tab) => tab.id !== id);
+    setFileTabs(nextTabs);
+    setActiveFileTabId(nextActive);
+    if (nextTabs.length === 0) onFileTabsEmpty?.();
+    if (activeFileTabId !== id) return;
+    const target = nextTabs.find((tab) => tab.id === nextActive) ?? null;
+    setFilePreview(target?.preview ?? null);
+    if (!target) {
+      setViewerSource("workbench");
+    }
+  }, [activeFileTabId, fileTabs, onFileTabsEmpty]);
 
   useEffect(() => {
-    if (!onResizeWidth || activeTab !== "panel" || !isWideOutputKind(outputKind)) return;
+    const requestWidth = onRequestReadableWidth ?? onResizeWidth;
+    if (!requestWidth || activeTab !== "panel" || !isWideOutputKind(outputKind)) return;
     // The right rail widens once for a new rich result. The width dependency is
     // intentionally omitted so a person can drag the same result narrower
     // without React immediately fighting the explicit resize.
@@ -191,9 +280,18 @@ export function ChatRightPanel({
     const preferred = typeof window === "undefined"
       ? 640
       : preferredOutputRailWidth(window.innerWidth, 320, 1280);
-    if (currentWidth < preferred) onResizeWidth(preferred);
+    if (currentWidth < preferred) requestWidth(preferred);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, onResizeWidth, outputIdentity, outputKind]);
+  }, [activeTab, onRequestReadableWidth, onResizeWidth, outputIdentity, outputKind]);
+
+  const expandFilePreview = useCallback(() => {
+    const requestWidth = onRequestReadableWidth ?? onResizeWidth;
+    if (!requestWidth) return;
+    const maxWidth = typeof window === "undefined"
+      ? 960
+      : Math.max(560, Math.min(1280, window.innerWidth - 420));
+    requestWidth(maxWidth);
+  }, [onRequestReadableWidth, onResizeWidth]);
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (!onResizeWidth) return;
@@ -323,18 +421,29 @@ export function ChatRightPanel({
           style={resizeHeightHandleStyle}
         />
       )}
-      <header style={headerStyle}>
-      <nav style={tabsStyle} aria-label={ko ? "우측 패널 탭" : "Right panel tabs"}>
-        {/* ★도는 중이라는 사실은 탭을 눌러야 알 수 있으면 안 된다 — 눌러 보기 전에 보여야 한다. */}
-        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "Agents"} icon={<IconNetwork size={13} />} badge={busy || Object.values(liveAgents).some((entry) => entry.active)} />
-        <TabButton tab="file" activeTab={activeTab} onClick={onTabChange} label={ko ? "파일" : "Files"} icon={<IconFolder size={13} />} />
-        <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "미리보기" : "Preview"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
-        <TabButton tab="memory" activeTab={activeTab} onClick={onTabChange} label={ko ? "기억" : "Memory"} icon={<IconSparkles size={13} />} />
+      <nav className={railStyles.artifactTabs} aria-label={ko ? "출력 보기" : "Output views"} role="tablist">
+        <div className={railStyles.artifactTabList}>
+          {openViews.map((view) => (
+            <span key={view} className={railStyles.artifactTab} data-active={activeTab === view ? "true" : "false"}>
+              <button type="button" role="tab" data-right-panel-tab={view} aria-selected={activeTab === view} onClick={() => onTabChange(view)}>
+                {view === "agent" ? <IconNetwork size={13} /> : view === "file" ? <IconFolder size={13} /> : view === "memory" ? <IconSparkles size={13} /> : <IconPanelRight size={13} />}
+                {viewLabels[view]}
+                {view === "agent" && (busy || Object.values(liveAgents).some((entry) => entry.active)) && <span aria-label={ko ? "실행 중" : "Running"}>·</span>}
+              </button>
+              <button type="button" className={railStyles.artifactTabClose} aria-label={ko ? `${viewLabels[view]} 닫기` : `Close ${viewLabels[view]}`} onClick={() => closeView(view)}><IconClose size={11} /></button>
+            </span>
+          ))}
+          <span ref={viewMenuRef} className={railStyles.artifactAddWrap}>
+            <button type="button" aria-label={ko ? "보기 추가" : "Add view"} aria-haspopup="menu" aria-expanded={addViewOpen} onClick={() => setAddViewOpen(!addViewOpen)}><IconPlus size={15} /></button>
+            {addViewOpen && <div className={railStyles.artifactAddMenu} role="menu">
+              {(["agent", "file", "panel", "memory"] as const).map((view) => <button key={view} type="button" role="menuitem" disabled={openViews.includes(view)} onClick={() => { setAddViewOpen(false); onTabChange(view); }}>{viewLabels[view]}</button>)}
+            </div>}
+          </span>
+        </div>
+        <div className={railStyles.artifactHeaderActions}>
+          <button type="button" onClick={onClose} aria-label={ko ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>
+        </div>
       </nav>
-        <button type="button" onClick={onClose} aria-label={ko ? "우측 패널 닫기" : "Close right panel"} title={ko ? "닫기" : "Close"} style={iconButtonStyle}>
-          <IconClose size={14} />
-        </button>
-      </header>
 
       <div style={bodyStyle} data-right-panel-body={activeTab}>
         {activeTab === "file" && (
@@ -396,7 +505,10 @@ export function ChatRightPanel({
               ko={ko}
             />
           ) : showFilePreview ? (
-            <FileViewer file={filePreview} />
+            <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
+              <ChatFileTabs tabs={fileTabs} activeId={activeFileTabId} locale={ko ? "ko" : "en"} onSelect={selectFileTab} onClose={closeFileTab} />
+              <div style={{ minWidth: 0, minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}><FileViewer file={filePreview} onExpand={onResizeWidth || onRequestReadableWidth ? expandFilePreview : undefined} /></div>
+            </div>
           ) : showWorkbench ? (
             <WorkbenchPanel
               embedded
@@ -480,7 +592,7 @@ function ProjectTeamCard({
       </span>
     </div>
   );
-  return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+  return <section className={railStyles.artifactSection} style={{ padding: "16px 2px", flexShrink: 0 }}>
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 에이전트" : "Project agents"}</div>
       <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>{ko ? `${rows.length}명 연결됨` : `${rows.length} connected`}</span>
@@ -582,7 +694,8 @@ function ProjectContextSummary({
       type="button"
       onClick={onOpenMemory}
       aria-label={ko ? "프로젝트 지시와 기억 자세히 보기" : "Open project instructions and memory"}
-      style={{ width: "100%", padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", color: "var(--ink)", textAlign: "left", cursor: "pointer" }}
+      className={railStyles.artifactSection}
+      style={{ width: "100%", padding: "16px 2px", flexShrink: 0, borderTop: 0, borderLeft: 0, borderRight: 0, borderRadius: 0, background: "transparent", color: "var(--ink)", textAlign: "left", cursor: "pointer" }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 맥락" : "Project context"}</span>
@@ -745,6 +858,12 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
               <IconFolder size={12} />
               <span>{ko ? "결과 경로 복사" : "Copy result path"}</span>
             </button>
+          )}
+          {(receipt.errorMessage || receipt.errorCode) && (
+            <div data-run-receipt-error="true" style={receiptErrorStyle}>
+              <div>{receipt.errorMessage || (ko ? "실행 오류" : "Runtime error")}</div>
+              {receipt.errorCode && <code>{receipt.errorCode}</code>}
+            </div>
           )}
           {openError && (
             <div role="alert" style={receiptErrorStyle}>{openError}</div>
@@ -934,38 +1053,57 @@ function FileTab({
   );
 }
 
-function FileViewer({ file }: { file: WorkspaceFilePreview }) {
+function FileUnavailableState({ ko, explicit = false }: { ko: boolean; explicit?: boolean }) {
+  return (
+    <div data-file-unavailable-state="true" style={unsupportedViewerStyle}>
+      <IconFileUp size={28} style={{ color: "var(--muted)" }} />
+      <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
+      <p style={unavailableMessageStyle}>
+        {explicit
+          ? ko
+            ? "파일이 없거나 옮겨졌거나, 이 대화에 읽기 권한이 없습니다. 경로를 확인한 뒤 다시 첨부하세요."
+            : "The file is missing, moved, or not readable by this conversation. Check the path and attach it again."
+          : ko
+            ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 채팅에서 다시 생성하거나 경로를 확인하세요."
+            : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
+      </p>
+    </div>
+  );
+}
+
+function FileViewer({ file, onExpand }: { file: WorkspaceFilePreview; onExpand?: () => void }) {
   const { locale } = useT();
   const ko = locale === "ko";
   const codePreview = isCodeFilePreview(file);
+  const hasDocumentToolbar = file.available !== false
+    && isLiveOutputKind(file.viewerKind)
+    && file.viewerKind !== "image"
+    && file.viewerKind !== "video"
+    && file.viewerKind !== "audio";
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
   return (
     <section style={fileViewerStyle}>
-      {!codePreview && (
+      {!codePreview && !hasDocumentToolbar && (
         <header style={fileViewerHeaderStyle}>
           <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
-            <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
+            {/* ★크기를 모를 때 "0 B" 라고 지어내지 않는다(2026-09-04 실앱 실측: 233KB
+                스크린샷이 레일 머리글에 "이미지 · 0 B" 로 떴다). One 의 결과 카드도
+                크기를 모르면 그 칸을 통째로 생략한다(OneAdaptiveResult) — 같은 규칙을 쓴다. */}
+            <span style={fileViewerMetaStyle}>{typeLabel}{file.size > 0 ? ` · ${formatBytes(file.size)}` : ""}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
           </div>
         </header>
       )}
-      {file.available === false && <div role="status" style={fileNoticeStyle}>{ko ? "파일 교체를 감지했습니다. 새 버전을 기다리는 중…" : "File replacement detected. Waiting for the new version…"}</div>}
       <div style={fileViewerBodyStyle}>
-        {codePreview && !file.content ? (
+        {file.available === false ? (
+          <FileUnavailableState ko={ko} explicit />
+        ) : codePreview && !file.content ? (
           /* ★코드·HTML 도 **백지 대신 이유를 말한다.** 마크다운·JSON·텍스트에는 이미 이
              안내가 있었는데 코드류에는 없어서, 지워지거나 못 읽은 파일이 "빈 편집기"로
              열렸다 — 사람은 그것을 "파일이 비었다"로 읽는다(2026-09-03 실측: 지운 .html 을
              열면 경로와 '읽기 전용'만 뜨고 본문이 백지). */
-          <div style={unsupportedViewerStyle}>
-            <IconFileUp size={28} style={{ color: "var(--muted)" }} />
-            <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
-            <p>
-              {ko
-                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 채팅에서 다시 생성하거나 경로를 확인하세요."
-                : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
-            </p>
-          </div>
+          <FileUnavailableState ko={ko} />
         ) : codePreview ? (
           <CodeIdeViewer path={file.path} name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
         ) : file.viewerKind === "browser" ? (
@@ -981,19 +1119,20 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
             fill
             placement="sidebar"
             imageActions={file.viewerKind === "image"}
+            onOpenExternal={openableExternalTarget(file) ? async () => {
+              const target = openableExternalTarget(file);
+              const bridge = ipc();
+              if (!target || !bridge) throw new Error("file-open-unavailable");
+              const result = await bridge.fs.openPath(target);
+              if (!result.ok) throw new Error(result.message || "file-open-failed");
+            } : undefined}
+            openExternalHint={ko ? "시스템 기본 앱에서 원본 대상 열기" : "Open the original target in the system default app"}
+            onExpand={onExpand}
           />
         ) : isTextualViewerKind(file.viewerKind) && !file.content ? (
           /* ★내용이 없으면 **백지 대신 이유를 말한다.** 헤더만 뜨고 본문이 비어 있는
              화면은 "미리보기가 고장났다"로 읽힌다 — 실제로 그렇게 보고됐다. */
-          <div style={unsupportedViewerStyle}>
-            <IconFileUp size={28} style={{ color: "var(--muted)" }} />
-            <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
-            <p>
-              {ko
-                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 채팅에서 다시 생성하거나 경로를 확인하세요."
-                : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
-            </p>
-          </div>
+          <FileUnavailableState ko={ko} />
         ) : file.viewerKind === "markdown" ? (
           <MarkdownFileViewer file={file} />
         ) : file.viewerKind === "json" || file.viewerKind === "text" ? (
@@ -1056,6 +1195,15 @@ function externalOpenTargets(file: WorkspaceFilePreview): string[] {
     if (value && !out.includes(value)) out.push(value);
   }
   return out;
+}
+
+function openableExternalTarget(file: WorkspaceFilePreview): string | null {
+  return externalOpenTargets(file).find((target) => (
+    /^https?:\/\//iu.test(target)
+    || /^file:\/\//iu.test(target)
+    || /^agentlas:\/\/localfile\//iu.test(target)
+    || /^(?:\/|[A-Za-z]:[\\/])/u.test(target)
+  )) ?? null;
 }
 
 function previewMeta(file: WorkspaceFilePreview, ko: boolean): string {
@@ -1376,7 +1524,9 @@ const agentTabStyle: CSSProperties = {
   minHeight: 0,
   display: "flex",
   flexDirection: "column",
-  overflow: "hidden",
+  overflowY: "auto",
+  overflowX: "hidden",
+  padding: "0 20px",
 };
 
 const receiptCardStyle: CSSProperties = {
@@ -1743,6 +1893,15 @@ const unsupportedViewerStyle: CSSProperties = {
   gap: 10,
   padding: 24,
   color: "var(--ink-soft)",
+};
+
+const unavailableMessageStyle: CSSProperties = {
+  width: "100%",
+  maxWidth: 520,
+  minWidth: 0,
+  margin: 0,
+  lineHeight: 1.55,
+  overflowWrap: "anywhere",
 };
 
 const fileViewerPrimaryButtonStyle: CSSProperties = {

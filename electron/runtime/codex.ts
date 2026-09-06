@@ -10,7 +10,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -37,6 +37,9 @@ import {
 import { AcpRpcError } from "./acp-protocol";
 import {
   CODEX_APP_SERVER_ARGS,
+  CodexModelSelectionError,
+  CodexSessionContinuityError,
+  acknowledgeCodexThreadModel,
   answerCodexApproval,
   codexApprovalCapability,
   codexAppServerSupported,
@@ -45,12 +48,16 @@ import {
   codexResidentSessionAlive,
   codexSessionPool,
   isCodexApprovalRequest,
+  isCodexMcpElicitationRequest,
   looksLikeMissingAppServer,
   markCodexAppServerUnsupported,
   openCodexResidentSession,
+  prepareCodexThreadResume,
   type CodexResidentSession,
   type CodexTurnSink,
 } from "./codex-session";
+import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkforceInventory, waitForCodexWorkforceInventory } from "./codex-workforce";
+import { answerCodexMcpElicitation } from "./codex-elicitation";
 import { residencyDisabledFor } from "./claude-session";
 import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
 import type { AcpSessionLease } from "./acp-session-pool";
@@ -1038,6 +1045,8 @@ async function runCodexResidentTurn(input: {
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
   const policy = codexThreadPolicy(req.permission, cwd);
+  const requestedConfigDigest = inspectCodexWorkforceGrant(req, mcpArgs);
+  let workforceObservation: CodexWorkforceObservation | null = null;
   const approvalsReviewer = req.approvalsReviewer ?? "user";
   const imageDiagnosis = req.untrustedNoTools || req.restrictedReadBoundary || req.judgmentOnly
     ? null
@@ -1080,11 +1089,13 @@ async function runCodexResidentTurn(input: {
       markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
       events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
     }
+    if (req.workforceRuntimeToolGrant) throw err;
     return { retryOneShot: true };
   }
 
   const session = lease.session;
   const reusing = !lease.fresh && Boolean(session.threadId);
+  const explicitResume = Boolean(req.runtimeSessionId);
   let broken = false;
   /** 이 턴에서 화면으로 나간 본문이 있는가 — 있으면 1회성 재시도는 답을 두 번 쓰는 짓이다. */
   let emitted = false;
@@ -1099,6 +1110,9 @@ async function runCodexResidentTurn(input: {
   let estChars = 0;
   let lastEmit = 0;
   let turnId = "";
+  let confirmedTurnId = "";
+  let turnRequestInFlight = false;
+  const pendingModelReroutes = new Map<string, { fromModel: string; toModel: string }>();
   /*
    * 사용량은 알림 콜백에서 채워진다 — 홀더 객체에 담는다(let 변수는 TS 흐름 분석이
    * 콜백 대입을 못 봐서 항상 null 로 좁혀진다).
@@ -1111,6 +1125,12 @@ async function runCodexResidentTurn(input: {
   let interrupted = false;
   let settleTurn: ((reason: "completed" | "closed") => void) | null = null;
   let closedReason = "";
+  let modelSelectionError: CodexModelSelectionError | null = null;
+  // Every blocking MCP elicitation belongs to this one turn, even when the
+  // underlying app-server process survives for later turns. Stop, transport
+  // close, or checkout release must cancel the question before the session can
+  // be reused by another chat/turn.
+  const elicitationAbort = new AbortController();
 
   const openThinking = (): void => {
     if (thinkingOpen) return;
@@ -1132,15 +1152,42 @@ async function runCodexResidentTurn(input: {
     events.onPartial(bodyText());
   };
 
+  const rejectModelReroute = (fromModel: unknown, toModel: unknown): void => {
+    const acknowledged = session.modelAcknowledgement;
+    modelSelectionError = new CodexModelSelectionError(
+      "rerouted",
+      `Codex rerouted the explicitly requested model from ${String(fromModel ?? acknowledged?.model ?? req.model)} to ${String(toModel ?? "unknown")}.`,
+    );
+    broken = true;
+    settleTurn?.("completed");
+  };
+
   const onNotification = (method: string, params: any): void => {
     switch (method) {
+      case "model/rerouted": {
+        const reroutedTurnId = params?.turnId;
+        if (!req.model || params?.threadId !== session.threadId
+          || typeof reroutedTurnId !== "string" || !reroutedTurnId
+          || reroutedTurnId.length > 256 || /[\r\n\x00]/.test(reroutedTurnId)) break;
+        if (confirmedTurnId) {
+          if (reroutedTurnId === confirmedTurnId) rejectModelReroute(params?.fromModel, params?.toModel);
+        } else if (turnRequestInFlight) {
+          pendingModelReroutes.set(reroutedTurnId, {
+            fromModel: String(params?.fromModel ?? req.model),
+            toModel: String(params?.toModel ?? "unknown"),
+          });
+        }
+        break;
+      }
       case "thread/started":
         if (typeof params?.thread?.id === "string") session.threadId = params.thread.id;
         break;
       case "turn/started":
         // 이 자리는 exec 경로와 같은 의미다 — 모델이 생각을 시작했다는 가장 이른 신호.
-        if (typeof params?.turn?.id === "string" && !turnId) turnId = params.turn.id;
-        openThinking();
+        if (typeof params?.turn?.id === "string" && params?.threadId === session.threadId
+          && ((confirmedTurnId && params.turn.id === confirmedTurnId) || (!confirmedTurnId && turnRequestInFlight))) {
+          openThinking();
+        }
         break;
       case "item/started": {
         const item = params?.item;
@@ -1247,6 +1294,7 @@ async function runCodexResidentTurn(input: {
       case "turn/completed": {
         const turn = params?.turn;
         if (!turn || (turnId && String(turn.id ?? "") !== turnId)) break;
+        workforceObservation?.completeTurn(params);
         if (turn.status === "interrupted") interrupted = true;
         failure = codexFailureFromTurn(turn) ?? failure;
         settleTurn?.("completed");
@@ -1269,6 +1317,9 @@ async function runCodexResidentTurn(input: {
   const sink: CodexTurnSink = {
     onNotification,
     onServerRequest: async (method, params) => {
+      if (method === "item/tool/call" || isCodexApprovalRequest(method)) {
+        workforceObservation?.assertRequestContext(params, turnId);
+      }
       if (method === "item/tool/call") {
         const callId = typeof params?.callId === "string" ? params.callId : "";
         const tool = typeof params?.tool === "string" ? params.tool : "";
@@ -1300,6 +1351,7 @@ async function runCodexResidentTurn(input: {
         if (arbiter) {
           try { decision = await arbiter(ask); } catch { decision = "deny"; }
         }
+        workforceObservation?.approval(method, params, decision);
         if (decision === "deny") {
           events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=deny`);
           return {
@@ -1324,6 +1376,38 @@ async function runCodexResidentTurn(input: {
           ],
         };
       }
+      if (isCodexMcpElicitationRequest(method)) {
+        const expectedThreadId = session.threadId ?? "";
+        const expectedTurnId = turnId;
+        const isCurrent = () => (
+          !session.closed
+          && session.active === sink
+          && session.threadId === expectedThreadId
+          && turnId === expectedTurnId
+          && !elicitationAbort.signal.aborted
+        );
+        const outcome = await answerCodexMcpElicitation(params, {
+          chatId: req.approvalChatId ?? chatId,
+          threadId: expectedThreadId,
+          turnId: expectedTurnId,
+          unattended: req.unattended === true || req.noSynchronousAsk === true,
+          signal: elicitationAbort.signal,
+          isCurrent,
+        });
+        // The helper rechecks immediately before accept. Check once more at the
+        // transport boundary so a close/replacement between its return and this
+        // callback cannot send collected form content into a stale app-server.
+        const staleAccept = outcome.response.action === "accept" && !isCurrent();
+        const response = staleAccept ? { action: "cancel" as const } : outcome.response;
+        const receipt = staleAccept
+          ? { ...outcome.receipt, action: "cancel" as const, reason: "stale" as const, fieldCount: 0 }
+          : outcome.receipt;
+        const safe = (value: string) => value.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 96) || "unknown";
+        events.onStatus(
+          `[mcp-elicitation] runtime=${KIND} server=${safe(receipt.serverName)} chat=${safe(receipt.chatId)} thread=${safe(receipt.threadId)} turn=${safe(receipt.turnId)} action=${receipt.action} reason=${receipt.reason} fields=${receipt.fieldCount}`,
+        );
+        return response;
+      }
       /*
        * ★실행 **전** 승인 — codex 가 처음으로 승인 칩에 참여하는 자리.
        * 계약은 ACP `answerPermission` 과 같다: 중재자가 없으면 보수적 기본값,
@@ -1333,6 +1417,7 @@ async function runCodexResidentTurn(input: {
         throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
       }
       const { reply, decision, ask } = await answerCodexApproval(method, params, approvalCtx);
+      workforceObservation?.approval(method, params, decision);
       events.onStatus(
         `[tool-approval] runtime=${KIND} capability=${codexApprovalCapability(ask)} tool=${ask.tool} decision=${decision}`,
       );
@@ -1341,6 +1426,7 @@ async function runCodexResidentTurn(input: {
     onStatus: (status) => events.onStatus(status),
     onTransportClosed: (reason) => {
       closedReason = reason;
+      elicitationAbort.abort(new Error(reason));
       settleTurn?.("closed");
     },
   };
@@ -1350,6 +1436,7 @@ async function runCodexResidentTurn(input: {
   const onAbort = (): void => {
     broken = true;
     interrupted = true;
+    elicitationAbort.abort(req.signal?.reason);
     /*
      * 취소는 프로토콜 1급이다 — 먼저 `turn/interrupt` 로 이 턴을 멈추고, **그 다음** 세션을
      * 버린다(상태를 모르는 세션을 다음 턴에 물려주지 않는다).
@@ -1369,48 +1456,94 @@ async function runCodexResidentTurn(input: {
 
   try {
     session.active = sink;
+    if (req.workforceRuntimeToolGrant) workforceObservation = new CodexWorkforceObservation(req, session.init, req.workforceRuntimeToolGrant.canonicalConfigSha256);
     /* ── 스레드: 살아 있는 세션이면 그대로, 새 프로세스면 resume 또는 start ── */
-    if (!reusing) {
-      const startParams: Record<string, unknown> = {
+    if (!reusing || workforceObservation || explicitResume) {
+      const commonThreadParams: Record<string, unknown> = {
         cwd,
         approvalPolicy: policy.approvalPolicy,
         approvalsReviewer,
         sandbox: policy.sandbox,
+        // Thread start/resume acknowledges effective policy. Request the same
+        // workspace-write values that turn/start will use before admitting a
+        // Workforce model turn; a requested turn override alone is no proof.
+        ...(workforceObservation && req.permission === "write" ? { config: {
+          "sandbox_workspace_write.writable_roots": [path.resolve(cwd)],
+          "sandbox_workspace_write.network_access": true,
+          "sandbox_workspace_write.exclude_tmpdir_env_var": true,
+          "sandbox_workspace_write.exclude_slash_tmp": true,
+        } } : {}),
         developerInstructions: `${buildDeveloperInstructions(req)}\n\n${codexImageToolInstructions(Boolean(imageToolSlot))}`,
-        ...(req.model ? { model: req.model } : {}),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
       let resumed = false;
-      if (resumeThreadId) {
+      // A caller-supplied runtimeSessionId names the thread to resume. A live
+      // same-fingerprint pool entry is only an optimization and cannot replace
+      // that explicit continuity target.
+      const threadToResume = req.runtimeSessionId ?? (reusing ? session.threadId : resumeThreadId);
+      if (threadToResume) {
+        let releaseResume: (() => void) | undefined;
         try {
-          await session.conn.request(
+          releaseResume = await prepareCodexThreadResume(session, threadToResume, req.signal);
+          const response = await session.conn.request(
             "thread/resume",
-            { threadId: resumeThreadId, ...startParams },
+            {
+              threadId: threadToResume,
+              ...commonThreadParams,
+              // A caller-owned runtimeSessionId is an explicit resume request;
+              // retain its model override. Stored same-fingerprint continuity
+              // can inherit the thread model, but still verifies the response.
+              ...(req.runtimeSessionId && req.model ? { model: req.model } : {}),
+            },
             { timeoutMs: 120_000, signal: req.signal },
           );
-          session.threadId = resumeThreadId;
+          const modelAcknowledgement = await acknowledgeCodexThreadModel({
+            request: session.conn.request.bind(session.conn), response,
+            requestedModel: req.model, expectedThreadId: threadToResume,
+            signal: req.signal,
+          });
+          workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer, threadToResume);
+          session.threadId = threadToResume;
+          session.modelAcknowledgement = modelAcknowledgement;
           resumed = true;
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${KIND}`);
-          if (req.unattended) {
-            // 무인 실행은 조용히 새 대화를 만들지 않는다(exec 경로와 같은 규칙).
-            broken = true;
-            throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
-          }
-          clearRuntimeSession(chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+          if (err instanceof CodexModelSelectionError) throw err;
+          throw err instanceof CodexSessionContinuityError ? err : new CodexSessionContinuityError(
+            "resume_failed", `Codex thread resume failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        } finally {
+          releaseResume?.();
         }
       }
       if (!resumed) {
-        const started = await session.conn.request("thread/start", startParams, { timeoutMs: 120_000, signal: req.signal });
-        const id = String(started?.thread?.id ?? "");
-        if (!id) throw new Error("codex app-server thread/start returned no thread id");
+        const started = await session.conn.request("thread/start", {
+          ...commonThreadParams,
+          ...(req.model ? { model: req.model } : {}),
+        }, { timeoutMs: 120_000, signal: req.signal });
+        const modelAcknowledgement = await acknowledgeCodexThreadModel({
+          request: session.conn.request.bind(session.conn), response: started,
+          requestedModel: req.model, signal: req.signal,
+        });
+        const id = started.thread.id as string;
+        workforceObservation?.acknowledgeThread(started, modelAcknowledgement, policy, cwd, approvalsReviewer);
         session.threadId = id;
+        session.modelAcknowledgement = modelAcknowledgement;
       }
       // 버전 스큐 관측 — 이 세션이 어떤 app-server 였는지 영수증에 남긴다.
       events.onStatus(codexProtocolReceipt(session.init));
     }
     if (!session.threadId) throw new Error("codex app-server session has no thread");
+    if (req.model && session.modelAcknowledgement?.requestedModel !== req.model) {
+      throw new CodexModelSelectionError("resolution_unverified", "The resident Codex thread has no acknowledgement for the requested model.");
+    }
+    if (workforceObservation) {
+      workforceObservation.observeInventory(await waitForCodexWorkforceInventory(
+        session.conn.request.bind(session.conn), session.threadId, req.workforceRuntimeToolGrant!, req.signal,
+      ));
+    }
+    if (modelSelectionError) throw modelSelectionError;
 
     /* ── 턴 ── */
     // 새 스레드면 시스템+히스토리 시드, 이어가는 스레드면 사용자 턴만(+gap/turn 컨텍스트).
@@ -1433,7 +1566,6 @@ async function runCodexResidentTurn(input: {
       approvalPolicy: policy.approvalPolicy,
       approvalsReviewer,
       sandboxPolicy: policy.sandboxPolicy,
-      ...(req.model ? { model: req.model } : {}),
       ...(appliedEffort ? { effort: appliedEffort } : {}),
       // ★출력 형태 계약 — app-server 는 스키마를 **인라인**으로 받는다(exec 은 파일 경로만).
       ...(req.outputSchema ? { outputSchema: req.outputSchema.schema } : {}),
@@ -1441,11 +1573,29 @@ async function runCodexResidentTurn(input: {
     const settled = new Promise<"completed" | "closed">((resolve) => {
       settleTurn = (reason) => { settleTurn = null; resolve(reason); };
     });
-    const started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
-    if (typeof started?.turn?.id === "string") turnId = started.turn.id;
+    let started: any;
+    turnRequestInFlight = true;
+    try {
+      started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
+    } finally {
+      turnRequestInFlight = false;
+    }
+    workforceObservation?.startTurn(started);
+    if (typeof started?.turn?.id === "string") {
+      turnId = started.turn.id;
+      confirmedTurnId = started.turn.id;
+    }
+    const bufferedReroute = confirmedTurnId ? pendingModelReroutes.get(confirmedTurnId) : undefined;
+    pendingModelReroutes.clear();
+    if (bufferedReroute) {
+      rejectModelReroute(bufferedReroute.fromModel, bufferedReroute.toModel);
+    }
     events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
+    if (modelSelectionError) throw modelSelectionError;
     const reason = await settled;
     closeThinking();
+
+    if (modelSelectionError) throw modelSelectionError;
 
     if (req.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
@@ -1466,6 +1616,7 @@ async function runCodexResidentTurn(input: {
         markCodexAppServerUnsupported(closedReason || session.conn.lastStderr);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
+      if (workforceObservation) throw new Error("workforce_codex_observation_transport_closed");
       if (!emitted && !bodyText()) return { retryOneShot: true };
       return {
         result: {
@@ -1486,6 +1637,16 @@ async function runCodexResidentTurn(input: {
       throw abortReasonError(req);
     }
 
+    // Record both native inventories. Selected capability changes invalidate
+    // the invocation; unrelated host changes are evidence, never a replay.
+    if (workforceObservation) {
+      if (inspectCodexWorkforceGrant(req, mcpArgs) !== requestedConfigDigest) throw new Error("workforce_codex_observation_config_drift");
+      workforceObservation.observeInventory(await readCodexWorkforceInventory(
+        session.conn.request.bind(session.conn), session.threadId!, req.signal,
+      ));
+    }
+    const workforcePermissionEnforcement = workforceObservation
+      ? workforceObservedHostAuthorityEnforcement(req, KIND, workforceObservation.finish()) : undefined;
     session.completedTurns += 1;
     const text = bodyText().trim();
     /*
@@ -1524,15 +1685,15 @@ async function runCodexResidentTurn(input: {
         ...(failure ? { failure } : {}),
         sessionId: session.threadId,
         ...(usage.last ? { tokens: usage.last.outputTokens, observedUsage: usage.last } : {}),
+        ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
         appliedEffort,
       },
     };
   } catch (err) {
     broken = true;
-    if (req.signal?.aborted) throw err;
-    if (req.unattended && /refusing to create a fresh CLI session/.test(err instanceof Error ? err.message : "")) {
-      throw err;
-    }
+    if (req.signal?.aborted || req.workforceRuntimeToolGrant) throw err;
+    if (err instanceof CodexModelSelectionError) throw err;
+    if (err instanceof CodexSessionContinuityError) throw err;
     if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
       markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
       events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
@@ -1542,6 +1703,7 @@ async function runCodexResidentTurn(input: {
     throw err;
   } finally {
     req.signal?.removeEventListener("abort", onAbort);
+    elicitationAbort.abort(new Error("Codex turn settled"));
     closeThinking();
     // 취소가 프로토콜에 도달한 뒤에 죽인다(상한 2초 — 응답이 없어도 폐기는 반드시 일어난다).
     if (interruptAck) {
@@ -1597,6 +1759,12 @@ export const runCodex: Runner = async (
     throw new Error(
       "Codex is not enabled for remote or unattended read-only execution because its host filesystem boundary is not release-verified.",
     );
+  }
+  // A Workforce receipt exists only on the acknowledged app-server path.
+  // Ordinary Codex exec fallback is not an equivalent evidence producer.
+  if (req.workforceRuntimeToolGrant && (!codexAppServerSupported()
+    || residencyDisabledFor(KIND, req.env ?? process.env) || req.isolatedMcpConfig || !req.chatId)) {
+    throw new Error("workforce_codex_observation_app_server_required");
   }
   const bin = await getBin();
   if (!bin) {
@@ -1740,6 +1908,7 @@ export const runCodex: Runner = async (
     });
     if (attempt.result) return attempt.result;
   }
+  if (runReq.workforceRuntimeToolGrant) throw new Error("workforce_codex_observation_no_exec_fallback");
 
   /*
    * 출력 형태 계약 — codex 는 스키마를 **파일 경로**로만 받는다

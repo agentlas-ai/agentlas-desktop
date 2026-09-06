@@ -30,6 +30,7 @@ import {
   IconCheck,
   IconClose,
   IconFileUp,
+  IconFolder,
   IconMoreHorizontal,
   IconPanelRight,
   IconPlus,
@@ -112,6 +113,7 @@ import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
+import { mergeDurableChatCatchup } from "./durable-chat-catchup";
 import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
@@ -175,6 +177,15 @@ import {
 import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
+import { ChatFileCards } from "@/components/ChatFileExperience";
+import {
+  appendChatFileMarker,
+  chatFileItem,
+  chatFilesBridge,
+  parseChatFileMessage,
+  requestChatFileOpen,
+  type ChatFileItem,
+} from "@/lib/chat-files";
 import {
   OneComposerControls,
   type OneComposerMenuKey,
@@ -244,6 +255,8 @@ const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 324;
  */
 const ONE_CONTEXT_RAIL_WIDTH_MIN = 200;
 const ONE_CONTEXT_RAIL_WIDTH_MAX = 1280;
+/** A file viewer needs enough room for document chrome and readable body text. */
+const ONE_CONTEXT_RAIL_FILE_READABLE_WIDTH = 560;
 /* 오너 지시 2026-08-24: "켜져도 지금의 반만". 0.432 -> 0.216. */
 const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.216;
 
@@ -357,6 +370,10 @@ function preferredContextResultWidth(): number {
     ? Math.round(window.innerWidth * 0.43)
     : Math.round(window.innerWidth * ONE_CONTEXT_RAIL_RESULT_RATIO);
   return clampContextRailWidth(requested);
+}
+
+function readableContextFileWidth(): number {
+  return clampContextRailWidth(ONE_CONTEXT_RAIL_FILE_READABLE_WIDTH);
 }
 
 function readStoredContextRailWidth(): number {
@@ -477,6 +494,8 @@ function decisionRejectCopy(locale: "ko" | "en"): string {
 
 type UiMessage = {
   id: string;
+  /** Exact Main-issued transcript identity for a settled assistant row. */
+  durableMessageId?: string;
   role: "user" | "assistant" | "system";
   text: string;
   streaming?: boolean;
@@ -489,7 +508,9 @@ type UiMessage = {
    * 없어졌다.
    */
   images?: string[];
-  files?: Array<{ name: string; kind: "image" | "file" }>;
+  files?: Array<{ name: string; kind: "image" | "file" | "directory" }>;
+  chatFiles?: ChatFileItem[];
+  chatFileGroupIds?: string[];
   /** Durable rows only (ISO). Optimistic rows have none and sort after every durable row. */
   createdAt?: string;
 };
@@ -526,7 +547,7 @@ type OneAttachmentDraft = {
   name: string;
   mediaType: string;
   size: number;
-  kind: "image" | "file";
+  kind: "image" | "file" | "directory";
   previewUrl: string | null;
 };
 
@@ -661,15 +682,53 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       userTurnAwaitingAnswer = true;
     }
     if (entry.role === "assistant") userTurnAwaitingAnswer = false;
+    const parsedFiles = parseChatFileMessage(entry.text);
     visible.push({
       id: entry.id,
+      durableMessageId: entry.durableMessageId ?? entry.id,
       role: entry.role === "assistant" ? "assistant" : entry.role,
-      text: entry.text,
+      text: parsedFiles.visibleText,
       images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
+      chatFileGroupIds: parsedFiles.groupIds,
       createdAt: entry.createdAt,
     });
   }
   return visible;
+}
+
+/**
+ * Durable history rows only carry attachment group ids. Rejoin any files that
+ * are already in the renderer cache before deciding whether Main needs to be
+ * queried. This matters at run settlement: the optimistic row is replaced by
+ * its durable twin while the cache is still warm.
+ */
+function hydrateCachedChatFiles(messages: UiMessage[], groups: ReadonlyMap<string, ChatFileItem[]>): UiMessage[] {
+  let changed = false;
+  const hydrated = messages.map((message) => {
+    const chatFiles = (message.chatFileGroupIds ?? []).flatMap((groupId) => groups.get(groupId) ?? []);
+    if (chatFiles.length === 0) return message;
+    const currentIds = message.chatFiles?.map((file) => file.id) ?? [];
+    if (currentIds.length === chatFiles.length && currentIds.every((id, index) => id === chatFiles[index]?.id)) {
+      return message;
+    }
+    changed = true;
+    return { ...message, chatFiles };
+  });
+  return changed ? hydrated : messages;
+}
+
+function chatFileGroupsIncludingMessages(
+  groups: ReadonlyMap<string, ChatFileItem[]>,
+  messages: UiMessage[],
+): Map<string, ChatFileItem[]> {
+  const merged = new Map(groups);
+  for (const message of messages) {
+    for (const file of message.chatFiles ?? []) {
+      const current = merged.get(file.groupId) ?? [];
+      if (!current.some((item) => item.id === file.id)) merged.set(file.groupId, [...current, file]);
+    }
+  }
+  return merged;
 }
 
 function isResultContinuationMessage(message: UiMessage): boolean {
@@ -1143,6 +1202,7 @@ export function OneShell() {
   const [teamPreflightBusy, setTeamPreflightBusy] = useState(false);
   const [pendingTeamPrompt, setPendingTeamPrompt] = useState<PendingTeamPrompt | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  const oneChatFileGroupsRef = useRef(new Map<string, ChatFileItem[]>());
   const [surface, setSurface] = useState<OneSurfaceManifestV1 | null>(null);
   // One and Work share the same main-owned generated-app preview. One keeps
   // only the verified descriptor here; the native WebContentsView belongs to
@@ -1321,9 +1381,11 @@ export function OneShell() {
     try { window.localStorage.setItem(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
   }, []);
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
+  const contextRailPreferredWidthRef = useRef(contextRailWidth);
   const setContextRailWidth = useCallback((next: number | ((current: number) => number)) => {
     setContextRailWidthState((current) => {
       const clamped = clampContextRailWidth(typeof next === "function" ? next(current) : next);
+      contextRailPreferredWidthRef.current = clamped;
       try {
         window.localStorage.setItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(clamped));
       } catch {
@@ -1331,6 +1393,12 @@ export function OneShell() {
       }
       return clamped;
     });
+  }, []);
+  const requestReadableContextRailWidth = useCallback((requested = readableContextFileWidth()) => {
+    setContextRailWidthState((current) => Math.max(current, clampContextRailWidth(requested)));
+  }, []);
+  const restorePreferredContextRailWidth = useCallback(() => {
+    setContextRailWidthState(clampContextRailWidth(contextRailPreferredWidthRef.current));
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
@@ -1424,6 +1492,9 @@ export function OneShell() {
       return value;
     });
   }, []);
+  useEffect(() => {
+    if (!contextRailOpen) restorePreferredContextRailWidth();
+  }, [contextRailOpen, restorePreferredContextRailWidth]);
   useEffect(() => {
     if (!taskMenuOpen) return;
     const closeFromPointer = (event: PointerEvent) => {
@@ -1535,21 +1606,7 @@ export function OneShell() {
   const renderedActivityStartedAt = busy && !activeRunOwnsActivity
     ? activeRunStartedAtRef.current
     : runStartedAt;
-  // An optimistic "next instruction" row and its durable twin (persisted by Main
-  // when the queued run starts) must never both render — that was the doubled
-  // user bubble in the 2026-08-15 recording. The durable row wins.
-  const visibleMessages = useMemo(() => {
-    if (!messages.some((message) => message.id.startsWith("one-steer:"))) return messages;
-    return messages.filter((message, index) => {
-      if (!message.id.startsWith("one-steer:")) return true;
-      return !messages.some((other, otherIndex) => (
-        otherIndex !== index
-        && !other.id.startsWith("one-steer:")
-        && other.role === "user"
-        && other.text === message.text
-      ));
-    });
-  }, [messages]);
+  const visibleMessages = messages;
   const liveResponseMounted = messages.some((message) => message.id === "one-live-response");
   const livePromptMounted = Boolean(activeRunPrompt && messages.some((message) => (
     message.role === "user" && message.text === activeRunPrompt.text
@@ -2304,7 +2361,22 @@ export function OneShell() {
       const history = await api.invoke.history(chatId).catch(() => null);
       if (!supersededByNewerRun() && history && shownThreadChatIdRef.current === chatId) {
         const next = toUiMessages(history);
-        setMessages((current) => (next.length === 0 && current.length > 0 ? current : next));
+        setMessages((current) => {
+          // A navigation or a newer run can begin after the history promise
+          // resolves but before React applies this updater. Re-check the
+          // current owners here so an older terminal receipt cannot overwrite
+          // a different chat or its live response.
+          if (
+            shownThreadChatIdRef.current !== chatId
+            || runChatIdRef.current !== chatId
+            || runIdRef.current
+          ) return current;
+          if (next.length === 0 && current.length > 0) return current;
+          return hydrateCachedChatFiles(
+            mergeDurableChatCatchup(current, next),
+            chatFileGroupsIncludingMessages(oneChatFileGroupsRef.current, current),
+          );
+        });
       }
     }
     if (supersededByNewerRun()) return;
@@ -2427,7 +2499,7 @@ export function OneShell() {
       // instruction ran, until the history reload brought it back).
       setMessages((current) => upsertLiveMessage(current, text, false).map((message) => (
         message.id === "one-live-response"
-          ? { ...message, id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString() }
+          ? { ...message, id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
           : message
       )));
       setBusy(false);
@@ -2454,7 +2526,7 @@ export function OneShell() {
       setMessages((current) => current.flatMap((message) => {
         if (message.id !== "one-live-response") return [message];
         if (!message.text.trim()) return [];
-        return [{ ...message, id: `one-answer:${settledRunId ?? uid()}`, streaming: false, createdAt: message.createdAt ?? new Date().toISOString() }];
+        return [{ ...message, id: `one-answer:${settledRunId ?? uid()}`, streaming: false, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }];
       }));
       setBusy(false);
       setLiveRunPrompt((current) => current?.runId === settledRunId ? null : current);
@@ -2636,20 +2708,22 @@ export function OneShell() {
       if (!liveRunOwnsThread) {
         const next = toUiMessages(history);
         setMessages((current) => {
-          // 다른 대화에서 왔으면 비어 있더라도 교체한다 — 남의 화면을 남겨 두는 것이
-          // 바로 "합쳐져 보이는" 증상이다.
-          if (!screenAlreadyOnThisThread) return next;
+          // This request can resolve after a navigation or a new live run.
+          // The callback, not only the request-time snapshot, decides which
+          // chat currently owns the renderer.
+          const screenStillOnThisThread = shownThreadChatIdRef.current === chatId;
+          const liveRunNowOwnsThread = Boolean(
+            runIdRef.current && runChatIdBeforeSwitch === chatId,
+          );
+          if (!screenStillOnThisThread || liveRunNowOwnsThread) return current;
+          const hydratedNext = hydrateCachedChatFiles(
+            next,
+            chatFileGroupsIncludingMessages(oneChatFileGroupsRef.current, current),
+          );
           // 같은 대화인데 서버 스냅샷이 아직 비었다면(첫 실행이 방금 시작됐다면)
           // 사람이 막 친 말과 라이브 응답을 빈 스냅샷으로 지우지 않는다.
-          if (next.length === 0 && current.length > 0) return current;
-          // 큐에 넣은 다음 지시(one-steer:)는 Main이 그 실행을 시작할 때 비로소 원장에
-          // 남는다. 그 사이의 히스토리 재적재가 낙관 행을 지우면 사람이 친 말이 화면에서
-          // 사라졌다가 실행 끝에 다시 나타난다 — 원장에 같은 말이 오기 전까지 유지한다.
-          const pendingSteers = current.filter((message) => (
-            message.id.startsWith("one-steer:")
-            && !next.some((durable) => durable.role === "user" && durable.text === message.text)
-          ));
-          return pendingSteers.length > 0 ? [...next, ...pendingSteers] : next;
+          if (hydratedNext.length === 0 && current.length > 0) return current;
+          return mergeDurableChatCatchup(current, hydratedNext);
         });
       }
       shownThreadChatIdRef.current = chatId;
@@ -2726,6 +2800,33 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  useEffect(() => {
+    oneChatFileGroupsRef.current.clear();
+  }, [activeThreadChatId]);
+  useEffect(() => {
+    if (!activeThreadChatId) return;
+    const bridge = chatFilesBridge();
+    if (!bridge) return;
+    // Settlement replaces the optimistic row with a marker-only durable row.
+    // Reuse the already loaded group immediately instead of waiting for a
+    // reload (or issuing another IPC request) to make its card visible again.
+    setMessages((current) => hydrateCachedChatFiles(current, oneChatFileGroupsRef.current));
+    const groupIds = [...new Set(messages.flatMap((message) => message.chatFileGroupIds ?? []))]
+      .filter((groupId) => !oneChatFileGroupsRef.current.has(groupId));
+    if (groupIds.length === 0) return;
+    let cancelled = false;
+    void Promise.all(groupIds.map(async (groupId) => {
+      const stored = await bridge.listGroup({ chatId: activeThreadChatId, groupId });
+      return [groupId, stored.map((file) => chatFileItem(file, "user-attachment"))] as const;
+    })).then((groups) => {
+      if (cancelled) return;
+      for (const [groupId, files] of groups) oneChatFileGroupsRef.current.set(groupId, files);
+      setMessages((current) => hydrateCachedChatFiles(current, oneChatFileGroupsRef.current));
+    }).catch((cause) => {
+      if (!cancelled) setAttachmentError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { cancelled = true; };
+  }, [activeThreadChatId, messages]);
   const activeThreadChatIdRef = useRef(activeThreadChatId);
   // Keep the guard synchronous with render. An effect leaves one commit where
   // a picker started in chat A can settle after navigation and paint A's path
@@ -3083,6 +3184,7 @@ export function OneShell() {
   }, [activeThreadChatId]);
 
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
+    requestReadableContextRailWidth();
     const normalized = (file.path || file.paths?.[0] || file.href || file.name).replace(/\\/g, "/").toLowerCase();
     const matched = runtimeArtifacts.find((artifact) => {
       const label = artifact.label.replace(/\\/g, "/").toLowerCase();
@@ -3099,7 +3201,29 @@ export function OneShell() {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: file }));
     }
-  }, [runtimeArtifacts]);
+  }, [requestReadableContextRailWidth, runtimeArtifacts]);
+  const openOneChatFile = useCallback(async (file: ChatFileItem) => {
+    setContextRailOpen(true);
+    requestReadableContextRailWidth();
+    const needsText = file.kind === "file"
+      && ["markdown", "json", "text", "browser"].includes(file.viewer.viewerKind)
+      && Boolean(file.fileUrl)
+      && !file.viewer.content;
+    if (!needsText) {
+      requestChatFileOpen(file);
+      return;
+    }
+    try {
+      const response = await fetch(file.fileUrl!);
+      if (!response.ok) throw new Error(`attachment read failed: ${response.status}`);
+      requestChatFileOpen({
+        ...file,
+        viewer: { ...file.viewer, content: await response.text(), available: true, reason: undefined },
+      });
+    } catch {
+      requestChatFileOpen({ ...file, viewer: { ...file.viewer, available: false } });
+    }
+  }, [requestReadableContextRailWidth, setContextRailOpen]);
   const oneOutputKind: OutputPresentationKind = useMemo(() => {
     if (oneLiveAppPreview) return "web";
     const surfaceKind = outputPresentationKindForManifest(surface);
@@ -4136,28 +4260,47 @@ export function OneShell() {
       setSubmissionBusy(true);
       setError(null);
       let preparedAttachments: PreparedOneAttachments | null = null;
+      let runPrompt = value;
       // Resolve new-chat intent in Main before team preflight. A cold model can
       // miss the fast judgment budget, in which case the explicitly labeled
       // undecided result keeps the safe conversational default.
       const requestIntentPromise = taskIntent === "conversation" && attachmentSnapshot.length === 0
-        ? api.oneRequestIntent.resolve(value).catch(() => null)
+        ? api.oneRequestIntent.resolve(runPrompt).catch(() => null)
         : Promise.resolve(null);
       try {
         if (attachmentSnapshot.length > 0) {
+          const fileBridge = chatFilesBridge();
+          if (!fileBridge) throw new Error(appLocale === "ko" ? "Desktop 파일 연결을 사용할 수 없습니다." : "The Desktop file bridge is unavailable.");
+          const snapshot = await fileBridge.snapshot({
+            chatId,
+            files: attachmentSnapshot.map((item) => ({
+              grant: item.grant,
+              name: item.name,
+              mediaType: item.mediaType,
+              size: item.size,
+              kind: item.kind === "image" ? "file" : item.kind,
+            })),
+          });
+          const chatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
+          oneChatFileGroupsRef.current.set(snapshot.groupId, chatFiles);
+          runPrompt = appendChatFileMarker(value, snapshot.groupId);
+          setMessages((current) => current.map((message) => message.id === preflightId
+            ? { ...message, files: undefined, chatFiles, chatFileGroupIds: [snapshot.groupId] }
+            : message));
           const attachments: OneAttachmentPrepareItem[] = attachmentSnapshot.map((item) => ({
             grant: item.grant,
             displayName: item.name,
             claimedMediaType: item.mediaType,
             claimedSize: item.size,
           }));
-          preparedAttachments = await api.oneAttachments.prepare({ chatId, userPrompt: value, attachments });
+          preparedAttachments = await api.oneAttachments.prepare({ chatId, userPrompt: runPrompt, attachments });
         }
         const mainIntent = await requestIntentPromise;
         const resolvedIntent = preparedAttachments
           || taskIntent === "task"
           || recurrenceSnapshot
           || mainIntent?.intent === "task"
-          || classifyOneRequestIntent(value) === "task"
+          || classifyOneRequestIntent(runPrompt) === "task"
           ? "task"
           : "conversation";
         /*
@@ -4187,7 +4330,7 @@ export function OneShell() {
             chatId,
             taskId,
             taskVersion,
-            value,
+            runPrompt,
             "conversation",
             {
               attachments: preparedAttachments,
@@ -4202,7 +4345,7 @@ export function OneShell() {
         }
         const prepared = await api.oneTeamPreflight.prepare({
           chatId,
-          userPrompt: value,
+          userPrompt: runPrompt,
           expectedTaskId: taskId,
           expectedTaskVersion: taskVersion,
           permission: onePermission === "read" ? "read" : "write",
@@ -4231,7 +4374,7 @@ export function OneShell() {
             chatId,
             taskId,
             taskVersion,
-            value,
+            runPrompt,
             resolvedIntent,
             {
               attachments: preparedAttachments,
@@ -4254,7 +4397,7 @@ export function OneShell() {
         setTeamPreflight(prepared.proposal);
         const pendingPrompt: PendingTeamPrompt = {
           proposalId: prepared.proposal.proposalId,
-          text: value,
+          text: runPrompt,
           attachments: preparedAttachments,
           recurrence: recurrenceSnapshot,
           overrides: overrideSnapshot,
@@ -4955,13 +5098,32 @@ export function OneShell() {
    * 부분 본문은 죽은 프로세스의 메모리에 있었으므로 되살릴 수 없다 — 되살릴 수 없는 것을
    * 되살린 척하지 않고, 같은 질문을 다시 보내는 길만 정직하게 연다.
    */
-  const retryUnansweredTurn = useCallback((promptText: string) => {
+  /**
+   * ★ 재시도는 원 실행의 모델로 간다 (UX-2, 2026-09-05).
+   * 실패·미응답 턴의 "다시 시도"가 컴포저의 *지금* 선택으로 나가, 사용자가 그 턴에 고른
+   * 모델이 재시도 한 번에 바뀌었다(실측: 원 실행 qwen3-32b → 재실행 qwen3-235b).
+   * 원장 final 이 남긴 실행 모델이 현재 런타임의 선택지 안에 있을 때만 그 모델을 싣는다 —
+   * 런타임이 바뀌어 그 모델을 고를 수 없으면 모르는 조합을 지어내지 않고 컴포저 선택을 쓴다.
+   */
+  const runtimeSelectionForRetry = useCallback((originalModel: string | null | undefined): RuntimeSelection | undefined => {
+    const model = originalModel?.trim();
+    if (!model || !oneRuntimeSelection || oneRuntimeSelection.model === model) return oneRuntimeSelection;
+    const known = oneModelOptions.some((option) =>
+      option.runtime.kind === oneRuntimeSelection.kind
+      && option.runtime.backend === oneRuntimeSelection.backend
+      && option.id === model);
+    return known ? { ...oneRuntimeSelection, model } : oneRuntimeSelection;
+  }, [oneModelOptions, oneRuntimeSelection]);
+
+  const retryUnansweredTurn = useCallback((promptText: string, originalModel?: string | null) => {
     const chatId = selected?.chatId ?? conversation?.id;
     const prompt = promptText.trim();
     if (!chatId || !prompt || busy) return;
-    void startRun(chatId, null, null, prompt, "conversation", { displayUserMessage: true })
-      .catch((cause) => requestOneOperationalRecovery("one-unanswered-retry", cause));
-  }, [busy, conversation?.id, selected?.chatId, startRun]);
+    void startRun(chatId, null, null, prompt, "conversation", {
+      displayUserMessage: true,
+      runtimeSelection: runtimeSelectionForRetry(originalModel),
+    }).catch((cause) => requestOneOperationalRecovery("one-unanswered-retry", cause));
+  }, [busy, conversation?.id, runtimeSelectionForRetry, selected?.chatId, startRun]);
 
   const sendFocusedFailureToOne = useCallback(() => {
     if (!failureFocus || busy) return;
@@ -5417,8 +5579,8 @@ export function OneShell() {
   const introEligible = false;
   const presentRichOutputRail = useCallback(() => {
     setContextRailOpen(true);
-    setContextRailWidth((current) => Math.max(current, preferredContextResultWidth()));
-  }, [setContextRailOpen, setContextRailWidth]);
+    requestReadableContextRailWidth(preferredContextResultWidth());
+  }, [requestReadableContextRailWidth, setContextRailOpen]);
   const focusOneOutput = useCallback(() => {
     presentRichOutputRail();
     window.requestAnimationFrame(() => {
@@ -5621,6 +5783,13 @@ export function OneShell() {
    * 고를 수 있게 만들어 놓고 화면이 옛 얼굴을 계속 그리면 그 기능은 없는 것과 같다.
    */
   const oneAvatarTone = oneProfile?.avatarIcon?.trim() || "character:orange-dino";
+  // A direct room belongs to its seated agent; the general room and a taskforce
+  // synthesis belong to One. Never borrow either identity for user messages.
+  const assistantSpeaker = activeTaskforce
+    ? { label: "One", tone: oneAvatarTone, status: "quiet" as const }
+    : activeOneMember
+      ? { label: activeOneMember.displayName, tone: activeOneMember.icon, status: activeOneMember.statusKind }
+      : { label: "One", tone: oneAvatarTone, status: "quiet" as const };
   const removeAttachmentDraft = useCallback((id: string) => {
     const current = attachmentDraftsRef.current;
     const removed = current.find((item) => item.id === id);
@@ -5645,7 +5814,7 @@ export function OneShell() {
     let totalBytes = current.reduce((sum, item) => sum + item.size, 0);
     const errors: string[] = [];
     for (const file of incoming) {
-      const kind = attachmentKind(file);
+      let kind: OneAttachmentDraft["kind"] = attachmentKind(file);
       const perFileLimit = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
       if (file.size > perFileLimit) {
         errors.push(tFor(appLocale, "one.shell.attach.file_limit", { name: file.name, limit: kind === "image" ? tFor(appLocale, "one.shell.attach.limit_image") : tFor(appLocale, "one.shell.attach.limit_file") }));
@@ -5663,15 +5832,18 @@ export function OneShell() {
         // 이전 preload와의 일시적 호환: 새 bridge가 아직 없더라도 이미지 붙여넣기는 유지.
         ?? (kind === "image" ? await grantForPastedImage(file) : null);
       if (!grant || grant.kind !== "file") {
-        errors.push(tFor(appLocale, "one.shell.attach.not_regular_file", { name: attachmentDisplayName(file, appLocale) }));
-        continue;
+        if (!grant || grant.kind !== "directory") {
+          errors.push(tFor(appLocale, "one.shell.attach.not_regular_file", { name: attachmentDisplayName(file, appLocale) }));
+          continue;
+        }
+        kind = "directory";
       }
       const previewUrl = kind === "image" ? URL.createObjectURL(file) : null;
       next.push({
         id: uid(),
         grant,
         name: attachmentDisplayName(file, appLocale),
-        mediaType: file.type,
+        mediaType: kind === "directory" ? "application/vnd.agentlas.directory+json" : file.type,
         size: file.size,
         kind,
         previewUrl,
@@ -6391,7 +6563,7 @@ export function OneShell() {
                       {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                     </Fragment>
                   ))}
-                  {visibleMessages.map((message) => {
+                  {visibleMessages.map((message, messageIndex) => {
                     // Narrative output remains the primary final response.
                     // Only a genuinely visual/interactive surface replaces its
                     // duplicate Markdown payload.
@@ -6412,6 +6584,8 @@ export function OneShell() {
                     if (!visibleText && !hasAttachments && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system" ? oneSystemPromptLabel(message) : null;
                     const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
+                    const assistantGroupStart = message.role === "assistant"
+                      && visibleMessages[messageIndex - 1]?.role !== "assistant";
                     return (
                       <Fragment key={message.id}>
                         {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
@@ -6438,12 +6612,28 @@ export function OneShell() {
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
                             data-taskforce={activeTaskforce ? "true" : undefined}
+                            data-one-message-speaker={message.role === "assistant" ? assistantSpeaker.label : undefined}
+                            data-one-avatar-group-start={assistantGroupStart ? "true" : undefined}
                           >
+                            {message.role === "assistant" && (
+                              <span
+                                className={styles.messageAvatarSlot}
+                                data-one-message-avatar={assistantGroupStart ? "true" : "spacer"}
+                                aria-hidden={!assistantGroupStart || undefined}
+                              >
+                                {assistantGroupStart && <OneAgentPortrait
+                                  status={busy && message.streaming ? "working" : assistantSpeaker.status}
+                                  label={assistantSpeaker.label}
+                                  tone={assistantSpeaker.tone}
+                                  size="small"
+                                />}
+                              </span>
+                            )}
+                            <div className={styles.messageContent}>
                             {activeTaskforce && message.role !== "system" && (
                               <div className={styles.taskforceMessageMeta}>
-                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone={oneAvatarTone} size="medium" />}
                                 <span>
-                                  <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : "One"}</strong>
+                                  <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label}</strong>
                                   {message.createdAt && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(appLocale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</time>}
                                 </span>
                               </div>
@@ -6455,6 +6645,9 @@ export function OneShell() {
                                   <img key={`${message.id}-img-${i}`} src={src} alt="" className={styles.messageImage} />
                                 ))}
                               </div>
+                            )}
+                            {message.chatFiles && message.chatFiles.length > 0 && (
+                              <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
                             {(visibleText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
                             <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}>
@@ -6482,6 +6675,7 @@ export function OneShell() {
                                 })())}
                             </div>
                             )}
+                            </div>
                           </article>
                           ))}
                         {graphRequest && activeThreadChatId && (
@@ -6507,7 +6701,7 @@ export function OneShell() {
                               workspacePath={workspacePath}
                               runStatus={block.status}
                               {...(message.role === "user" && message.text.trim()
-                                ? { onRetry: () => retryUnansweredTurn(message.text), retryDisabled: busy }
+                                ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
                             />
                             {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
@@ -6826,7 +7020,7 @@ export function OneShell() {
                   <div key={item.id} className={styles.attachmentChip} data-kind={item.kind}>
                     {item.previewUrl
                       ? <img src={item.previewUrl} alt="" aria-hidden="true" />
-                      : <span className={styles.attachmentFileIcon} aria-hidden="true"><IconFileUp size={15} /></span>}
+                      : <span className={styles.attachmentFileIcon} aria-hidden="true">{item.kind === "directory" ? <IconFolder size={15} /> : <IconFileUp size={15} />}</span>}
                     <span className={styles.attachmentCopy}>
                       <strong>{item.name}</strong>
                       <small>{attachmentTypeLabel(item.mediaType, item.name)} · {attachmentSize(item.size)}</small>
@@ -7484,6 +7678,8 @@ export function OneShell() {
           onClose={() => setContextRailOpen(false)}
           width={contextRailWidth}
           onResize={setContextRailWidth}
+          onRequestReadableWidth={requestReadableContextRailWidth}
+          onRestorePreferredWidth={restorePreferredContextRailWidth}
           minWidth={ONE_CONTEXT_RAIL_WIDTH_MIN}
           maxWidth={contextRailViewportMax()}
           defaultWidth={ONE_CONTEXT_RAIL_WIDTH_DEFAULT}

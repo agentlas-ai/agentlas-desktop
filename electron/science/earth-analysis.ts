@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ScienceArtifact, ScienceDatasetCell, ScienceDatasetTablePayload } from "../../shared/science-contract";
+import type { ScienceArtifact, ScienceDatasetCell, ScienceDatasetTablePayload, ScienceResearchRunAnalysisPlanBinding } from "../../shared/science-contract";
 import { validateScienceTablePayload } from "../../shared/science-table";
 import { ScienceStore } from "./store";
 import { EARTHQUAKE_CATALOG_TOOL_ID, EARTHQUAKE_CATALOG_TOOL_VERSION, type EarthquakeCatalogResult } from "./earthquake-catalog";
@@ -31,6 +31,23 @@ export type EarthAnalysisRecord = JsonRecord & {
 
 type EarthRuntime = {
   PLUGIN_VERSION: string;
+  NORMAL_CRITICAL_VALUES: Record<string, number>;
+  akiB(magnitudes: number[], completenessMagnitude: number, binWidth: number): {
+    sampleSize: number;
+    meanMagnitude: number;
+    effectiveThreshold: number;
+    bValue: number;
+    akiStandardError: number;
+    shiBoltStandardError: number;
+    aValue: number;
+  } | null;
+  fitBoundedOmoriUtsu(eventSeconds: number[], startSeconds: number, endSeconds: number, bounds: {
+    pMin: number;
+    pMax: number;
+    cMinSeconds: number;
+    cMaxSeconds: number;
+  }): { p: number; cSeconds: number; k: number; logLikelihood: number; atBoundary: boolean } | null;
+  omoriIntegral(p: number, cSeconds: number, startSeconds: number, endSeconds: number): number;
   analyzeSeismicityBValue(input: JsonRecord): EarthAnalysisRecord;
   analyzeAftershockProductivity(input: JsonRecord): EarthAnalysisRecord;
   analyzeTidalHarmonics(input: JsonRecord): EarthAnalysisRecord;
@@ -49,6 +66,7 @@ export interface EarthAnalysisContext {
   projectId: string;
   conversationId: string;
   originMessageId: string;
+  analysisPlan?: ScienceResearchRunAnalysisPlanBinding | null;
 }
 
 export interface EarthAnalysisResult {
@@ -68,12 +86,30 @@ interface EarthAnalysisToolSpec {
   labId: "earthquake-observations" | "data-visualization";
   mcpName: string;
   parentKind: ParentKind;
-  pluginFunction: keyof Omit<EarthRuntime, "PLUGIN_VERSION">;
+  pluginFunction: "analyzeSeismicityBValue" | "analyzeAftershockProductivity" | "analyzeTidalHarmonics" | "analyzeClimateTrend" | "analyzeDroughtIndex" | "analyzeFloodFrequency" | "analyzeIsochron" | "analyzeTasClassification" | "analyzeSpatialAutocorrelation";
   defaultTitle: (body: JsonRecord) => string;
   summarize: (analysis: EarthAnalysisRecord) => { summary: string; observations: Array<{ label: string; value: string | number; unit: string | null }> };
 }
 
 const TOOL_SPECS: readonly EarthAnalysisToolSpec[] = [
+  {
+    id: "agentlas.earth-aftershock-table-study", key: "aftershock-table-study", labId: "earthquake-observations", mcpName: "analyze_aftershock_catalog_table", parentKind: "table", pluginFunction: "analyzeAftershockProductivity",
+    defaultTitle: () => "Uploaded aftershock catalogue analysis",
+    summarize: (analysis) => {
+      const omori = analysis.omoriUtsu as JsonRecord;
+      const comparison = analysis.bValueComparison as JsonRecord;
+      return {
+        summary: `Omori–Utsu status ${omori.status}; p=${omori.p ?? "unavailable"}, c=${omori.cDays ?? "unavailable"} d; early b=${comparison.earlyB ?? "unavailable"}, later b=${comparison.laterB ?? "unavailable"}, difference=${comparison.difference ?? "unavailable"} (two-sided normal p=${comparison.pValue ?? "unavailable"}).`,
+        observations: [
+          { label: "Omori p", value: (omori.p as number | null) ?? "unavailable", unit: null },
+          { label: "Omori c", value: (omori.cDays as number | null) ?? "unavailable", unit: "day" },
+          { label: "Early b-value", value: (comparison.earlyB as number | null) ?? "unavailable", unit: null },
+          { label: "Later b-value", value: (comparison.laterB as number | null) ?? "unavailable", unit: null },
+          { label: "b-value difference", value: (comparison.difference as number | null) ?? "unavailable", unit: null },
+        ],
+      };
+    },
+  },
   {
     id: "agentlas.earth-seismicity-b-value-analysis", key: "seismicity-b-value", labId: "earthquake-observations", mcpName: "analyze_earthquake_seismicity_b_value", parentKind: "earthquake-catalog", pluginFunction: "analyzeSeismicityBValue",
     defaultTitle: () => "Seismicity b-value and completeness",
@@ -392,6 +428,46 @@ function projectRequest(spec: EarthAnalysisToolSpec, body: JsonRecord): Projecte
   const code = `science-earth-${spec.key}`;
   const title = exactTitle(body.title, spec.defaultTitle(body));
   switch (spec.key) {
+    case "aftershock-table-study": {
+      exactKeys(body, ["tool_call_id", "source_table", "columns", "title", "completeness_start_days", "completeness_magnitude", "split_time_days", "bin_width", "rate_bin_width_days", "parameter_bounds", "confidence_level"], `${code}-input-invalid`);
+      const parentSpec = tableParentSpec(body, { required: ["event_id_column", "time_days_column", "magnitude_column"], optional: [] }, code);
+      const bounds = record(body.parameter_bounds, `${code}-parameter-bounds-invalid`);
+      exactKeys(bounds, ["p_min", "p_max", "c_min_days", "c_max_days"], `${code}-parameter-bounds-invalid`);
+      const settings: JsonRecord = {
+        completenessStartDays: asNumber(body.completeness_start_days, `${code}-completeness-start-invalid`),
+        completenessMagnitude: asNumber(body.completeness_magnitude, `${code}-completeness-magnitude-invalid`),
+        splitTimeDays: asNumber(body.split_time_days, `${code}-split-time-invalid`),
+        binWidth: optional(body.bin_width, (value) => asNumber(value, `${code}-bin-width-invalid`)) ?? 0.01,
+        rateBinWidthDays: asNumber(body.rate_bin_width_days, `${code}-rate-bin-width-invalid`),
+        parameterBounds: {
+          pMin: asNumber(bounds.p_min, `${code}-parameter-bounds-invalid`),
+          pMax: asNumber(bounds.p_max, `${code}-parameter-bounds-invalid`),
+          cMinDays: asNumber(bounds.c_min_days, `${code}-parameter-bounds-invalid`),
+          cMaxDays: asNumber(bounds.c_max_days, `${code}-parameter-bounds-invalid`),
+        },
+        confidenceLevel: optional(body.confidence_level, (value) => asNumber(value, `${code}-confidence-level-invalid`)) ?? 0.95,
+      };
+      return {
+        title,
+        parent: { kind: "table", spec: parentSpec },
+        descriptorSettings: settings,
+        pluginInput: ({ table, sourceContentSha256 }) => {
+          const idColumn = tableColumn(table!, parentSpec.columns.event_id_column!, `${code}-event-id`);
+          const timeColumn = tableColumn(table!, parentSpec.columns.time_days_column!, `${code}-time`);
+          const magnitudeColumn = tableColumn(table!, parentSpec.columns.magnitude_column!, `${code}-magnitude`);
+          return {
+            sourceContentSha256,
+            sourceTableSha256: table!.payload.receipts.tableSha256,
+            events: table!.payload.rows.map((row) => ({
+              id: textCell(row, idColumn, `${code}-event-id`),
+              timeDays: numberCell(row, timeColumn, `${code}-time`, false),
+              magnitude: numberCell(row, magnitudeColumn, `${code}-magnitude`, false),
+            })),
+            ...settings,
+          };
+        },
+      };
+    }
     case "seismicity-b-value": {
       const catalogRunId = catalogBody(body, ["magnitude_type", "bin_width", "confidence_level", "completeness_selection", "completeness_magnitude", "maximum_curvature_correction", "window_events", "step_events", "stability_window_bins", "return_period_magnitudes"], code);
       const settings: JsonRecord = {
@@ -616,6 +692,202 @@ function projectRequest(spec: EarthAnalysisToolSpec, body: JsonRecord): Projecte
 
 function definedOnly(value: JsonRecord): JsonRecord {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+function rounded(value: number, digits = 9): number {
+  const factor = 10 ** digits;
+  const result = Math.round((value + Number.EPSILON) * factor) / factor;
+  return Object.is(result, -0) ? 0 : result;
+}
+
+function normalCdf(value: number): number {
+  // Abramowitz-Stegun 7.1.26. The approximation error is below 7.5e-8,
+  // which is materially smaller than the asymptotic uncertainty reported by
+  // this bounded catalogue comparison.
+  const sign = value < 0 ? -1 : 1;
+  const x = Math.abs(value) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf = sign * (1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x));
+  return 0.5 * (1 + erf);
+}
+
+function analyzeAftershockTableStudy(runtime: EarthRuntime, value: JsonRecord): EarthAnalysisRecord {
+  const code = "science-earth-aftershock-table-study";
+  const events = Array.isArray(value.events) ? value.events.map((item) => record(item, `${code}-event-invalid`)) : fail(`${code}-events-invalid`);
+  if (events.length < 50 || events.length > 2_000) fail(`${code}-events-invalid`);
+  const sourceContentSha256 = asText(value.sourceContentSha256, `${code}-source-content-invalid`, 64);
+  const sourceTableSha256 = asText(value.sourceTableSha256, `${code}-source-table-content-invalid`, 64);
+  if (!/^[a-f0-9]{64}$/u.test(sourceContentSha256) || !/^[a-f0-9]{64}$/u.test(sourceTableSha256)) fail(`${code}-source-content-invalid`);
+  const completenessStartDays = asNumber(value.completenessStartDays, `${code}-completeness-start-invalid`);
+  const completenessMagnitude = asNumber(value.completenessMagnitude, `${code}-completeness-magnitude-invalid`);
+  const splitTimeDays = asNumber(value.splitTimeDays, `${code}-split-time-invalid`);
+  const binWidth = asNumber(value.binWidth, `${code}-bin-width-invalid`);
+  const rateBinWidthDays = asNumber(value.rateBinWidthDays, `${code}-rate-bin-width-invalid`);
+  const confidenceLevel = asNumber(value.confidenceLevel, `${code}-confidence-level-invalid`);
+  const zCritical = runtime.NORMAL_CRITICAL_VALUES[String(confidenceLevel)];
+  if (!(completenessStartDays >= 0 && completenessStartDays < 366)) fail(`${code}-completeness-start-invalid`);
+  if (!(completenessMagnitude >= -2 && completenessMagnitude <= 10)) fail(`${code}-completeness-magnitude-invalid`);
+  if (!(binWidth >= 0.01 && binWidth <= 1) || Math.abs(completenessMagnitude / binWidth - Math.round(completenessMagnitude / binWidth)) > 1e-8) fail(`${code}-bin-width-invalid`);
+  if (!(rateBinWidthDays > 0 && rateBinWidthDays <= 31) || zCritical === undefined) fail(`${code}-analysis-settings-invalid`);
+  const bounds = record(value.parameterBounds, `${code}-parameter-bounds-invalid`);
+  const parameterBounds = {
+    pMin: asNumber(bounds.pMin, `${code}-parameter-bounds-invalid`),
+    pMax: asNumber(bounds.pMax, `${code}-parameter-bounds-invalid`),
+    cMinSeconds: asNumber(bounds.cMinDays, `${code}-parameter-bounds-invalid`) * 86_400,
+    cMaxSeconds: asNumber(bounds.cMaxDays, `${code}-parameter-bounds-invalid`) * 86_400,
+  };
+  if (!(parameterBounds.pMin >= 0.1 && parameterBounds.pMax <= 5 && parameterBounds.pMin < parameterBounds.pMax
+    && parameterBounds.cMinSeconds > 0 && parameterBounds.cMinSeconds < parameterBounds.cMaxSeconds)) fail(`${code}-parameter-bounds-invalid`);
+
+  const seen = new Set<string>();
+  const normalized = events.map((event) => {
+    const id = asText(event.id, `${code}-event-id-invalid`, 160);
+    if (seen.has(id)) fail(`${code}-event-id-duplicate`);
+    seen.add(id);
+    const timeDays = asNumber(event.timeDays, `${code}-event-time-invalid`);
+    const magnitude = asNumber(event.magnitude, `${code}-event-magnitude-invalid`);
+    if (!(timeDays > 0 && timeDays <= 366) || magnitude < -2 || magnitude > 10) fail(`${code}-event-invalid`);
+    if (Math.abs(magnitude / binWidth - Math.round(magnitude / binWidth)) > 1e-8) fail(`${code}-magnitude-bin-alignment-invalid`);
+    return { id, timeDays, magnitude };
+  }).sort((left, right) => left.timeDays - right.timeDays || left.id.localeCompare(right.id));
+  const observationEndDays = normalized.at(-1)!.timeDays;
+  if (!(splitTimeDays > completenessStartDays && splitTimeDays < observationEndDays)) fail(`${code}-split-time-invalid`);
+  const selected = normalized.filter((event) => event.timeDays >= completenessStartDays && event.magnitude >= completenessMagnitude);
+  const startSeconds = completenessStartDays * 86_400;
+  const endSeconds = observationEndDays * 86_400;
+  const eventSeconds = selected.map((event) => event.timeDays * 86_400);
+  const rateBinWidthSeconds = rateBinWidthDays * 86_400;
+  const binCount = Math.ceil((endSeconds - startSeconds) / rateBinWidthSeconds);
+  if (binCount < 4 || binCount > 500) fail(`${code}-rate-bin-count-invalid`);
+  const occupiedTimeBins = new Set(eventSeconds.map((time) => Math.min(binCount - 1, Math.floor((time - startSeconds) / rateBinWidthSeconds)))).size;
+  const statusReasons: string[] = [];
+  if (selected.length < 20) statusReasons.push("minimum-included-events-not-met");
+  if (new Set(eventSeconds).size < 5) statusReasons.push("temporal-spread-inadequate");
+  if (occupiedTimeBins < 4) statusReasons.push("minimum-occupied-time-bins-not-met");
+  const fit = statusReasons.length ? null : runtime.fitBoundedOmoriUtsu(eventSeconds, startSeconds, endSeconds, parameterBounds);
+  if (!fit && !statusReasons.length) statusReasons.push("numerical-fit-failed");
+  if (fit?.atBoundary) statusReasons.push("parameter-estimate-at-boundary");
+  const status = statusReasons.length ? (fit?.atBoundary ? "invalid" : "insufficient-data") : "complete";
+  const decayRows = Array.from({ length: binCount }, (_, index) => {
+    const binStartSeconds = startSeconds + index * rateBinWidthSeconds;
+    const binEndSeconds = Math.min(endSeconds, binStartSeconds + rateBinWidthSeconds);
+    const count = eventSeconds.filter((time) => time >= binStartSeconds && (index === binCount - 1 ? time <= binEndSeconds : time < binEndSeconds)).length;
+    const expectedCount = fit ? fit.k * runtime.omoriIntegral(fit.p, fit.cSeconds, binStartSeconds, binEndSeconds) : null;
+    return {
+      binStartDays: rounded(binStartSeconds / 86_400),
+      binEndDays: rounded(binEndSeconds / 86_400),
+      centerDays: rounded((binStartSeconds + binEndSeconds) / (2 * 86_400)),
+      count,
+      expectedCount: expectedCount === null ? null : rounded(expectedCount),
+      observedRatePerDay: count === 0 ? null : rounded(count / ((binEndSeconds - binStartSeconds) / 86_400)),
+      fittedRatePerDay: expectedCount === null ? null : rounded(expectedCount / ((binEndSeconds - binStartSeconds) / 86_400)),
+      pearsonResidual: expectedCount && expectedCount > 0 ? rounded((count - expectedCount) / Math.sqrt(expectedCount)) : null,
+    };
+  });
+  const pearsonChiSquare = decayRows.reduce((sum, row) => sum + (row.pearsonResidual === null ? 0 : row.pearsonResidual ** 2), 0);
+
+  const earlyMagnitudes = selected.filter((event) => event.timeDays < splitTimeDays).map((event) => event.magnitude);
+  const laterMagnitudes = selected.filter((event) => event.timeDays >= splitTimeDays).map((event) => event.magnitude);
+  if (earlyMagnitudes.length < 50 || laterMagnitudes.length < 50) fail(`${code}-b-value-window-sample-inadequate`);
+  const early = runtime.akiB(earlyMagnitudes, completenessMagnitude, binWidth);
+  const later = runtime.akiB(laterMagnitudes, completenessMagnitude, binWidth);
+  if (!early || !later) fail(`${code}-b-value-mle-invalid`);
+  const difference = early.bValue - later.bValue;
+  const differenceStandardError = Math.sqrt(early.shiBoltStandardError ** 2 + later.shiBoltStandardError ** 2);
+  const z = difference / differenceStandardError;
+  const pValue = 2 * (1 - normalCdf(Math.abs(z)));
+  const bValueComparison = {
+    splitTimeDays,
+    earlyWindow: { startDays: completenessStartDays, endDaysExclusive: splitTimeDays, sampleSize: early.sampleSize },
+    laterWindow: { startDaysInclusive: splitTimeDays, endDays: observationEndDays, sampleSize: later.sampleSize },
+    estimator: "Aki maximum likelihood with discrete-bin correction",
+    uncertainty: "Shi and Bolt standard errors; independent-window normal approximation for the difference",
+    earlyB: rounded(early.bValue),
+    earlyStandardError: rounded(early.shiBoltStandardError),
+    earlyConfidenceInterval: { lower: rounded(Math.max(0, early.bValue - zCritical * early.shiBoltStandardError)), upper: rounded(early.bValue + zCritical * early.shiBoltStandardError) },
+    laterB: rounded(later.bValue),
+    laterStandardError: rounded(later.shiBoltStandardError),
+    laterConfidenceInterval: { lower: rounded(Math.max(0, later.bValue - zCritical * later.shiBoltStandardError)), upper: rounded(later.bValue + zCritical * later.shiBoltStandardError) },
+    difference: rounded(difference),
+    differenceStandardError: rounded(differenceStandardError),
+    differenceConfidenceInterval: { lower: rounded(difference - zCritical * differenceStandardError), upper: rounded(difference + zCritical * differenceStandardError) },
+    z: rounded(z),
+    pValue: rounded(Math.max(0, Math.min(1, pValue)), 12),
+    confidenceLevel,
+  };
+  const omoriUtsu = {
+    status,
+    statusReasons,
+    includedCount: selected.length,
+    occupiedTimeBins,
+    binCount,
+    p: fit ? rounded(fit.p) : null,
+    cDays: fit ? rounded(fit.cSeconds / 86_400) : null,
+    kEventsDayPower: fit ? rounded(fit.k * 86_400 ** (1 - fit.p)) : null,
+    logLikelihood: fit ? rounded(fit.logLikelihood) : null,
+    pearsonChiSquare: fit ? rounded(pearsonChiSquare) : null,
+    degreesOfFreedom: fit ? Math.max(0, binCount - 3) : null,
+    parameterBounds: { pMin: parameterBounds.pMin, pMax: parameterBounds.pMax, cMinDays: parameterBounds.cMinSeconds / 86_400, cMaxDays: parameterBounds.cMaxSeconds / 86_400 },
+    parameterUncertainty: "not-computed; this bounded grid fit returns point estimates and bin-level Pearson diagnostics only",
+  };
+  const publicationTable = {
+    schema: "agentlas.science-table/v1",
+    title: "Uploaded aftershock catalogue: Omori–Utsu and early/later b-value results",
+    columns: [
+      { id: "quantity", label: "Quantity", type: "string", unit: null },
+      { id: "estimate", label: "Estimate", type: "number", unit: null },
+      { id: "lower", label: `${confidenceLevel * 100}% lower`, type: "number", unit: null },
+      { id: "upper", label: `${confidenceLevel * 100}% upper`, type: "number", unit: null },
+      { id: "note", label: "Method / limit", type: "string", unit: null },
+    ],
+    rows: [
+      ["Omori p", omoriUtsu.p, null, null, omoriUtsu.parameterUncertainty],
+      ["Omori c (days)", omoriUtsu.cDays, null, null, omoriUtsu.parameterUncertainty],
+      ["Omori K", omoriUtsu.kEventsDayPower, null, null, "events*day^(p-1); point estimate"],
+      ["Early b", bValueComparison.earlyB, bValueComparison.earlyConfidenceInterval.lower, bValueComparison.earlyConfidenceInterval.upper, `${early.sampleSize} events`],
+      ["Later b", bValueComparison.laterB, bValueComparison.laterConfidenceInterval.lower, bValueComparison.laterConfidenceInterval.upper, `${later.sampleSize} events`],
+      ["b early - later", bValueComparison.difference, bValueComparison.differenceConfidenceInterval.lower, bValueComparison.differenceConfidenceInterval.upper, `z=${bValueComparison.z}; two-sided p=${bValueComparison.pValue}`],
+    ],
+  };
+  const vegaLite = {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    title: "Aftershock rate and bounded Omori–Utsu fit",
+    width: 600,
+    height: 340,
+    background: "white",
+    data: { values: decayRows },
+    layer: [
+      { mark: { type: "point", filled: true, color: "#2E6F62", size: 70 }, encoding: { x: { field: "centerDays", type: "quantitative", scale: { type: "log" }, title: "Days since mainshock (log)" }, y: { field: "observedRatePerDay", type: "quantitative", scale: { type: "log" }, title: "Events per day (log)" }, tooltip: [{ field: "count", type: "quantitative" }, { field: "pearsonResidual", type: "quantitative", format: ".3f" }] } },
+      { mark: { type: "line", color: "#B85C38", strokeWidth: 2 }, encoding: { x: { field: "centerDays", type: "quantitative", scale: { type: "log" } }, y: { field: "fittedRatePerDay", type: "quantitative", scale: { type: "log" } } } },
+    ],
+  };
+  const warnings = [
+    "Omori–Utsu p, c, and K are bounded point estimates; parameter confidence intervals, background seismicity, secondary triggering, and forecast validation are not implemented.",
+    "The b-value difference uses an independent-window normal approximation with a fixed researcher-supplied completeness threshold and split; uncertainty in Mc and the split is not propagated.",
+  ];
+  const contentReceipts = {
+    publicationTable: { sha256: sha256(canonicalJson(publicationTable)) },
+    figure: { sha256: sha256(canonicalJson(vegaLite)) },
+  };
+  const core = {
+    schema: "agentlas.earth.uploaded-aftershock-study/v1",
+    methodRevision: "bounded-omori-aki-window-comparison/v1",
+    source: { provider: "Project Data Table", contentSha256: sourceContentSha256, tableSha256: sourceTableSha256, rowCount: normalized.length },
+    selection: { completenessStartDays, completenessMagnitude, splitTimeDays, binWidth, rateBinWidthDays, includedCount: selected.length, earlyCount: early.sampleSize, laterCount: later.sampleSize, includedEventIdsSha256: sha256(canonicalJson(selected.map((event) => event.id).sort())) },
+    omoriUtsu,
+    bValueComparison,
+    decayRows,
+    publicationTable,
+    vegaLite,
+    contentReceipts,
+    warnings,
+    assumptions: [
+      "days_since_mainshock is treated as elapsed SI days from the declared mainshock origin; no wall-clock timestamp is inferred.",
+      "The same fixed magnitude-completeness threshold is applied to both b-value windows and the Omori–Utsu fit.",
+      "The first window ends immediately before split_time_days; the later window begins at split_time_days.",
+    ],
+  };
+  return { ...core, analysisSha256: sha256(canonicalJson(core)) } as EarthAnalysisRecord;
 }
 
 // ---------------------------------------------------------------------------
@@ -884,9 +1156,24 @@ export class ScienceEarthAnalysisService {
     const parent = request.parent.kind === "earthquake-catalog"
       ? exactEarthquakeParent(this.store, spec, context.projectId, request.parent.catalogRunId)
       : exactTableParent(this.store, spec, context.projectId, request.parent.spec);
+    const analysisPlan = context.analysisPlan ?? null;
+    if (analysisPlan) {
+      const exactPlan = this.store.getAnalysisSpecForProject(context.projectId, analysisPlan.analysisSpecId);
+      const expectedInput = exactPlan?.version.document.data.inputs[0];
+      if (!exactPlan || exactPlan.status !== "frozen" || exactPlan.currentVersion !== analysisPlan.version
+        || exactPlan.currentDocumentSha256 !== analysisPlan.contentSha256
+        || parent.sourceSummary.kind !== "table" || exactPlan.version.document.data.inputs.length !== 1
+        || expectedInput?.artifactId !== parent.sourceSummary.artifactId
+        || expectedInput?.artifactVersion !== parent.sourceSummary.artifactVersion
+        || expectedInput?.contentSha256 !== parent.sourceSummary.contentSha256) {
+        fail(`${code}-analysis-plan-input-binding-invalid`);
+      }
+    }
     const runtime = earthRuntime();
     const pluginInput = request.pluginInput(parent.pluginContext);
-    const analysis = runtime[spec.pluginFunction](pluginInput);
+    const analysis = spec.key === "aftershock-table-study"
+      ? analyzeAftershockTableStudy(runtime, pluginInput)
+      : runtime[spec.pluginFunction](pluginInput);
     const artifactSchema = `agentlas.science.earth-${spec.key}-artifact/v1`;
     const analysisRole = `earth-${spec.key}-analysis`;
     const analysisMime = `application/vnd.agentlas.earth.${spec.key}-analysis+json`;
@@ -911,7 +1198,7 @@ export class ScienceEarthAnalysisService {
     const created = this.store.createResearchRun({
       requestId: context.requestId, projectId: context.projectId, conversationId: context.conversationId, originMessageId: context.originMessageId,
       parentRunId: parent.parentRunId, toolId: spec.id, toolVersion: EARTH_ANALYSIS_TOOL_VERSION, runtime: "electron-main",
-      inputManifestSha256: sha256(canonicalJson(inputs)), environmentSha256, inputs,
+      inputManifestSha256: sha256(canonicalJson(inputs)), environmentSha256, analysisPlan, inputs,
     });
     let run = this.store.getResearchRunForProject(context.projectId, created.run.id) ?? created.run;
     if (created.replayed && run.status === "succeeded") {
@@ -927,6 +1214,9 @@ export class ScienceEarthAnalysisService {
       const analysisBlob = this.store.putRunBlob(Buffer.from(canonicalJson(analysis), "utf8"));
       const tableBlob = this.store.putRunBlob(Buffer.from(canonicalJson(analysis.publicationTable), "utf8"));
       const figureBlob = this.store.putRunBlob(Buffer.from(canonicalJson(analysis.vegaLite), "utf8"));
+      // Validate and compose the renderable artifact before the run becomes immutable succeeded.
+      // Otherwise a renderer-contract failure leaves a succeeded analysis run with no artifact.
+      const spec_ = composeStaticVega(analysis.vegaLite);
       const outputs = [
         { role: analysisRole, mimeType: analysisMime, ...analysisBlob, artifactId: null, artifactVersion: null },
         { role: `earth-${spec.key}-publication-table`, mimeType: "application/vnd.agentlas.science-table+json", ...tableBlob, artifactId: null, artifactVersion: null },
@@ -937,7 +1227,6 @@ export class ScienceEarthAnalysisService {
         requestId: stableUuid(`${context.requestId}:complete`), projectId: context.projectId, runId: run.id, status: "succeeded",
         outputManifestSha256: sha256(canonicalJson(outputs)), summary: summarized.summary.slice(0, 2_000), outputs,
       }).run;
-      const spec_ = composeStaticVega(analysis.vegaLite);
       const payload = {
         schema: artifactSchema,
         analysis,

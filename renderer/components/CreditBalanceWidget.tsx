@@ -256,7 +256,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
                 borderRadius: 8,
                 border: "none",
                 background: canTransfer ? "var(--green-deep)" : "var(--paper-edge)",
-                color: canTransfer ? "#fff" : "var(--muted-deep)",
+                color: canTransfer ? "var(--white)" : "var(--muted-deep)",
                 fontSize: 12,
                 fontWeight: 700,
                 cursor: canTransfer ? "pointer" : "not-allowed",

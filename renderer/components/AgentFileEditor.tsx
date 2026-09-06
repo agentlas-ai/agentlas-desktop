@@ -203,19 +203,19 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
       </p>
 
       {notice && (
-        <p style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, #8a5a00)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <p style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, var(--warn))", fontSize: 11.5, lineHeight: 1.5 }}>
           {notice}
         </p>
       )}
 
       {listError && (
-        <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--danger, #b42318)" }}>
+        <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--danger, var(--danger))" }}>
           {ko ? "파일 목록을 불러오지 못했습니다: " : "Could not list files: "}{listError}
         </p>
       )}
 
       {sourceMissing && (
-        <p role="status" style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, #8a5a00)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <p role="status" style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, var(--warn))", fontSize: 11.5, lineHeight: 1.5 }}>
           {ko ? "에이전트 원본 폴더를 찾지 못했습니다. 에이전트는 목록에 남아 있습니다. 원본을 다시 연결한 뒤 새로고침하세요." : "The agent source folder is missing. The installed agent remains listed; reconnect the source and refresh."}
       </p>
       )}
@@ -286,7 +286,7 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
                     minHeight: 34, padding: "0 14px", borderRadius: 8,
                     border: "1px solid var(--paper-edge)",
                     background: dirty && !busy ? "var(--accent)" : "var(--paper-2)",
-                    color: dirty && !busy ? "#fff" : "var(--muted-deep)",
+                    color: dirty && !busy ? "var(--white)" : "var(--muted-deep)",
                     fontWeight: 700, fontSize: 12,
                     cursor: dirty && !busy ? "pointer" : "default",
                   }}
@@ -298,7 +298,7 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
                   {dirty ? (ko ? " · 저장하지 않은 변경" : " · unsaved changes") : ""}
                 </span>
                 {status.kind !== "idle" && (
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: status.kind === "saved" ? "var(--green-deep)" : "var(--danger, #b42318)" }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: status.kind === "saved" ? "var(--green-deep)" : "var(--danger, var(--danger))" }}>
                     {status.text}
                   </span>
                 )}

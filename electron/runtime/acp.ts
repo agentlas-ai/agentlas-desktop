@@ -24,6 +24,8 @@ import {
   AcpRpcError,
   acpMcpServersFromConfig,
   chooseAuthMethod,
+  legacyModelSelectionFromSession,
+  modelConfigOptionFromSession,
   modeOptionsFromNewSession,
   modelOptionsFromNewSession,
   type AcpMcpTranslation,
@@ -650,6 +652,72 @@ async function readMcpConfig(mcpConfigPath: string | undefined): Promise<unknown
   }
 }
 
+/**
+ * Cursor's source-owned `auto` row delegates model choice to Cursor itself.
+ * It is not a generic alias: every other requested model needs the session's
+ * advertised selection contract before any prompt can be sent.
+ */
+function isCursorAutomaticModel(spec: AcpAgentSpec, model: string): boolean {
+  return spec.id === "cursor" && model === "auto";
+}
+
+/**
+ * Select an explicitly requested model before prompting. ACP v1 configOptions
+ * is the authoritative path; session/set_model remains only for the older
+ * vendor `models.availableModels` envelope. A rejection or incomplete config
+ * acknowledgement throws so the caller discards this session instead of
+ * silently continuing on the provider default.
+ */
+export async function configureAcpSessionModel(
+  spec: AcpAgentSpec,
+  conn: Pick<AcpConnection, "request">,
+  sessionId: string,
+  response: unknown,
+  requestedModel: string | undefined,
+): Promise<void> {
+  const model = typeof requestedModel === "string" && requestedModel.trim() ? requestedModel : undefined;
+  if (!model) return;
+
+  const config = modelConfigOptionFromSession(response);
+  if (config) {
+    if (!config.values.includes(model)) {
+      throw new Error(`ACP model ${model} is not advertised by ${spec.id}`);
+    }
+    if (config.currentValue === model) return;
+    const acknowledged = await conn.request(
+      "session/set_config_option",
+      { sessionId, configId: config.configId, value: model },
+      { timeoutMs: 10_000 },
+    );
+    const confirmed = modelConfigOptionFromSession(acknowledged, config.configId);
+    if (!confirmed || confirmed.currentValue !== model) {
+      throw new Error(`ACP model selection for ${model} was not acknowledged by ${spec.id}`);
+    }
+    return;
+  }
+
+  const legacy = legacyModelSelectionFromSession(response);
+  if (legacy) {
+    if (!legacy.modelIds.includes(model)) {
+      throw new Error(`ACP model ${model} is not advertised by ${spec.id}`);
+    }
+    if (legacy.currentModelId === model) return;
+    await conn.request(
+      "session/set_model",
+      { sessionId, modelId: model },
+      { timeoutMs: 10_000 },
+    );
+    return;
+  }
+
+  // Cursor's source-owned `auto` row delegates only when no ACP selection
+  // contract was advertised. If an agent did advertise one, apply it above so
+  // `auto` cannot silently leave an advertised current model unchanged.
+  if (isCursorAutomaticModel(spec, model)) return;
+
+  throw new Error(`ACP runtime ${spec.id} did not advertise a model selection contract for ${model}`);
+}
+
 /** Runner factory — one Runner per ACP agent spec. */
 export function createAcpRunner(spec: AcpAgentSpec): Runner {
   /**
@@ -796,6 +864,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       let sessionId = "";
       let resumed = false;
       let created: any = null;
+      let loaded: any = null;
       if (reusing) {
         /*
          * ★상주 세션을 이어 쓴다 — session/load 조차 필요 없다(그 세션이 이 프로세스
@@ -809,7 +878,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (!sessionId && resumeSessionId && canLoadSession) {
         client.beginReplay();
         try {
-          await session.conn.request(
+          loaded = await session.conn.request(
             "session/load",
             { sessionId: resumeSessionId, cwd, mcpServers: mcp.servers },
             { timeoutMs: 120_000, signal: req.signal },
@@ -837,12 +906,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         if (!sessionId) throw new Error("ACP session/new returned no sessionId");
         events.onStatus(`[runtime-session] created kind=${sessionKind}`);
       }
-      // 세션은 이제 이 프로세스의 것이다 — 다음 턴이 그대로 이어 쓸 수 있게 붙여 둔다.
-      session.acpSessionId = sessionId;
+      // 새 세션과 session/load 응답은 둘 다 현재 모델 계약을 광고할 수 있다. 응답을
+      // 버리면 load 뒤에는 선택 실패를 감지할 방법이 없어 provider 기본 모델로 흘렀다.
+      // 풀에서 이미 살아 있는 세션은 지문에 모델이 들어 있어 다시 선택하지 않는다.
       if (!reusing && req.model) {
-        // Best effort: not every agent implements session/set_model.
-        try { await session.conn.request("session/set_model", { sessionId, modelId: req.model }, { timeoutMs: 10_000 }); } catch { /* optional */ }
+        await configureAcpSessionModel(spec, session.conn, sessionId, created ?? loaded, req.model);
       }
+      // 모델 선택을 확인한 세션만 다음 턴에 재사용할 수 있게 붙인다.
+      session.acpSessionId = sessionId;
       /*
        * ★모드 — plan 모드는 ACP 로는 고를 방법이 아예 없었다(session/set_mode 미호출).
        * 모드는 세션을 만들 때 광고되므로 새 세션에서만 고른다. resume 턴에서는 세션이

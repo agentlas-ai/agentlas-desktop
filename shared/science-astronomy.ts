@@ -38,7 +38,7 @@ export interface ScienceAstronomyRendererReceipt extends ScienceAstronomyRendere
 
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_ID = "agentlas.astronomy-light-curve-periodicity" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_VERSION = "1.0.0" as const;
-export const SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION = "1.2.1" as const;
+export const SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION = "1.2.2" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_INPUT_SCHEMA = "agentlas.science.astronomy-light-curve-periodicity-input/v1" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_ARTIFACT_SCHEMA = "agentlas.science.astronomy-light-curve-periodicity-artifact/v1" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_INPUT_ROLE = "astronomy-light-curve-periodicity-input" as const;
@@ -75,7 +75,11 @@ export interface ScienceAstronomyLightCurveColumnMapping {
   timeColumn: string;
   valueColumn: string;
   standardErrorColumn: string;
-  useColumn: string;
+  /**
+   * Optional inclusion mask. Published photometry does not carry one, so requiring it refused every
+   * real light curve; null means every measurement is used, and the receipt records that.
+   */
+  useColumn: string | null;
 }
 
 export interface ScienceAstronomyLightCurveMeasurement {
@@ -177,8 +181,12 @@ function exactArtifactBinding(value: unknown): ScienceAstronomyLightCurveArtifac
 function exactColumnMapping(value: unknown): ScienceAstronomyLightCurveColumnMapping | null {
   const item = record(value);
   const keys = ["observationIdColumn", "timeColumn", "valueColumn", "standardErrorColumn", "useColumn"] as const;
-  if (!item || !exactKeys(item, keys) || keys.some((key) => !exactText(item[key], 240) || item[key] !== String(item[key]).trim())) return null;
-  const values = keys.map((key) => String(item[key]));
+  const required = keys.filter((key) => key !== "useColumn");
+  if (!item || !exactKeys(item, keys)
+    || required.some((key) => !exactText(item[key], 240) || item[key] !== String(item[key]).trim())) return null;
+  // The mask is the one column that may be absent; when present it is held to the same rule.
+  if (item.useColumn !== null && (!exactText(item.useColumn, 240) || item.useColumn !== String(item.useColumn).trim())) return null;
+  const values = keys.map((key) => item[key]).filter((entry): entry is string => typeof entry === "string").map(String);
   if (new Set(values.map((entry) => entry.toLocaleLowerCase("en-US"))).size !== values.length) return null;
   return item as unknown as ScienceAstronomyLightCurveColumnMapping;
 }
@@ -284,7 +292,7 @@ export function validateScienceAstronomyLightCurveArtifactPayload(value: unknown
     || figure.schema !== "agentlas.astronomy.light-curve-publication-figure/v1" || figure.rendererId !== "vega-lite"
     || !record(figure.spec) || scienceAstronomySha256Json(spec) !== scienceAstronomySha256Json(figure.spec)
     || provenance.schema !== "agentlas.astronomy.analysis-provenance/v1" || provenance.pluginId !== "agentlas-astronomy"
-    || provenance.pluginVersion !== SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION
+    || !["1.2.1", SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION].includes(String(provenance.pluginVersion))
     || provenance.sourceContentSha256 !== sourceArtifact.rawSha256
     || !exactSha256(provenance.inputSha256) || !exactSha256(provenance.algorithmSha256)
     || provenance.observationsTableSha256 !== scienceAstronomySha256Json(observationsTable)
@@ -296,6 +304,25 @@ export function validateScienceAstronomyLightCurveArtifactPayload(value: unknown
     || !Array.isArray(periodogramTable.rows) || periodogramTable.rows.length < SCIENCE_ASTRONOMY_LIGHT_CURVE_LIMITS.minimumFrequencyCount || periodogramTable.rows.length > SCIENCE_ASTRONOMY_LIGHT_CURVE_LIMITS.maximumFrequencyCount
     || !Array.isArray(peaksTable.rows) || peaksTable.rows.length < 1 || peaksTable.rows.length > SCIENCE_ASTRONOMY_LIGHT_CURVE_LIMITS.maximumPeaks) {
     throw new Error("science-astronomy-light-curve-artifact-integrity-failed");
+  }
+  // Historical 1.2.1 artifacts keep their immutable payloads. Newly produced
+  // results must carry the method boundaries and consistent value/warning pairs.
+  if (provenance.pluginVersion === SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION) {
+    const fit = record(analysis.bestFit);
+    const warnings = analysis.warnings;
+    if (!fit || !Array.isArray(warnings) || warnings.some((item) => typeof item !== "string")
+      || !Array.isArray(analysis.boundaries) || analysis.boundaries.length === 0
+      || analysis.boundaries.some((item) => typeof item !== "string" || !item.trim())) {
+      throw new Error("science-astronomy-light-curve-method-boundary-invalid");
+    }
+    for (const [field, warning] of [["falseAlarmProbability", "false-alarm-probability-not-computed"], ["periodStandardErrorDays", "period-uncertainty-not-computed"]]) {
+      const value = fit[field];
+      if ((value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0
+        || (field === "falseAlarmProbability" && value > 1)))
+        || (value === null) !== warnings.includes(warning)) {
+        throw new Error("science-astronomy-light-curve-value-warning-conflict");
+      }
+    }
   }
   return { schema: SCIENCE_ASTRONOMY_LIGHT_CURVE_ARTIFACT_SCHEMA, analysis, publication, spec, source: { artifact: sourceArtifact, columns } };
 }

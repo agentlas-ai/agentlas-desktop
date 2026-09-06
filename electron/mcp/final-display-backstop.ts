@@ -17,14 +17,28 @@
  *  - **값을 버리지 않는다.** 유효한 매니페스트는 삭제가 아니라 surface 이벤트로
  *    승격해 원래 보여야 했던 화면을 보여준다.
  */
-import type { AgentlasSurfaceManifest } from "../../shared/types";
+import type {
+  AgentlasSurfaceManifest,
+  AgentlasUserDecisionRequest,
+} from "../../shared/types";
 import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
+import {
+  canonicalAskFenceText,
+  extractAskFences,
+} from "../../shared/ask-fence-flatten";
 import { SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 
 export interface FinalDisplayBackstopResult {
   /** 사용자에게 보여도 되는 텍스트. 프로토콜 원문은 여기 남지 않는다. */
   text: string;
+  /**
+   * Main-private assistant body. It contains only canonical, validated ask
+   * fences so existing confirmation/reload consumers keep the exact Decision.
+   */
+  durableText: string;
+  /** A question request is not an approval or an execution grant. */
+  userDecisionRequest?: AgentlasUserDecisionRequest;
   /** 텍스트에서 건져 올린 유효 매니페스트 — 호출부가 surface 이벤트로 승격한다. */
   surfaces: AgentlasSurfaceManifest[];
   /** 무언가 잘라냈는가(게이트·로그용). false면 입력이 이미 깨끗했다는 뜻. */
@@ -55,6 +69,29 @@ function sanitizeDisplayText(text: string): string {
   return stripAgentControlBlocks(text).replace(/\uFFFD+/gu, "…");
 }
 
+function decisionProjection(text: string): {
+  visibleText: string;
+  durableAskText: string;
+  userDecisionRequest?: AgentlasUserDecisionRequest;
+} {
+  const extracted = extractAskFences(text);
+  if (extracted.questions.length === 0) {
+    return { visibleText: extracted.text, durableAskText: "" };
+  }
+  return {
+    visibleText: extracted.text,
+    durableAskText: canonicalAskFenceText(extracted.questions),
+    userDecisionRequest: {
+      schemaVersion: "agentlas.user-decision-request.v1",
+      questions: extracted.questions,
+    },
+  };
+}
+
+function durableDisplayText(visibleText: string, durableAskText: string): string {
+  return [visibleText.trim(), durableAskText].filter(Boolean).join("\n\n");
+}
+
 /**
  * @param allowSurfaceRender 신뢰 경계. Agent App 같은 미신뢰 실행에서는 모델이 쓴
  *   매니페스트를 렌더하지 않는다 — 그때는 조용히 잘라내기만 한다.
@@ -66,9 +103,12 @@ export function applyFinalDisplayBackstop(
   const original = typeof rawText === "string" ? rawText : "";
   const withoutMarkers = stripBareMarkers(original);
   if (!withoutMarkers.includes(SURFACE_OPEN_FENCE)) {
-    const cleaned = sanitizeDisplayText(withoutMarkers);
+    const decision = decisionProjection(withoutMarkers);
+    const cleaned = sanitizeDisplayText(decision.visibleText);
     return {
       text: cleaned,
+      durableText: durableDisplayText(cleaned, decision.durableAskText),
+      ...(decision.userDecisionRequest ? { userDecisionRequest: decision.userDecisionRequest } : {}),
       surfaces: [],
       changed: cleaned !== original,
     };
@@ -80,13 +120,18 @@ export function applyFinalDisplayBackstop(
   } catch {
     // 파서가 넘어져도 원문은 못 나간다. 거절된 본문은 로그에도 남기지 않는다 —
     // Main 전용 전송값이나 로컬 경로가 들어 있을 수 있다.
-    return { text: surfaceDroppedLine(opts.locale), surfaces: [], changed: true };
+    const text = surfaceDroppedLine(opts.locale);
+    return { text, durableText: text, surfaces: [], changed: true };
   }
 
   const surfaces = opts.allowSurfaceRender ? parsed.surfaces.map((entry) => entry.manifest) : [];
-  const cleaned = sanitizeDisplayText(parsed.cleanedText).trim();
+  const decision = decisionProjection(parsed.cleanedText);
+  const cleaned = sanitizeDisplayText(decision.visibleText).trim();
+  const text = cleaned || (surfaces.length > 0 ? surfaceReadyLine(opts.locale) : surfaceDroppedLine(opts.locale));
   return {
-    text: cleaned || (surfaces.length > 0 ? surfaceReadyLine(opts.locale) : surfaceDroppedLine(opts.locale)),
+    text,
+    durableText: durableDisplayText(text, decision.durableAskText),
+    ...(decision.userDecisionRequest ? { userDecisionRequest: decision.userDecisionRequest } : {}),
     surfaces,
     changed: true,
   };

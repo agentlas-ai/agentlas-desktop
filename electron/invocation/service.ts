@@ -16,14 +16,25 @@ import {
   listLongRunTasks,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
+  transitionLongRun,
 } from "../store/long-runs";
+import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
+import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
+import { applyFinalDisplayBackstop } from "../mcp/final-display-backstop";
+import { extractAskFences } from "../../shared/ask-fence-flatten";
+import {
+  committedQuestionContinuationIsCurrent,
+  getCommittedQuestionContinuation,
+} from "../confirm";
 import { deriveGoalAcceptanceCriteria, ensureGoalLedgerGoal } from "../mcp/goal-ledger";
 import { resolveDesktopWorkforceGoalId } from "../mcp/workforce-goal-continuity";
 import {
   invocationWorkspaceBindingsEqual,
+  isRemoteInvocationWorkspaceBindingSource,
+  assertInvocationWorkspaceSourceContext,
   normalizeRemoteInvocationPermission,
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
@@ -144,8 +155,10 @@ import {
 import type {
   InvocationRunReceipt,
   InvocationSteerResult,
+  AgentlasUserDecisionRequest,
   McpInvocationEvent,
   McpInvocationRequest,
+  QuestionContinuationReceipt,
   RuntimeSelection,
 } from "../../shared/types";
 
@@ -185,6 +198,8 @@ export interface InvocationSettledEnvelope {
   oneMode: boolean;
   /** Host-owned approval/input wait discovered from the terminal response. */
   pendingQuestion?: boolean;
+  /** Semantic wait projection only; never an approval or execution grant. */
+  userDecisionRequest?: AgentlasUserDecisionRequest;
   /** Main-memory-only original goal; never projected as a wire receipt. */
   goal: string;
   workspaceBinding?: InvocationWorkspaceBinding;
@@ -207,8 +222,13 @@ interface RunRecord {
   oneMode: boolean;
   goal: string;
   pendingQuestion: boolean;
+  userDecisionRequest?: AgentlasUserDecisionRequest;
+  questionContinuationSourceMessageId?: string;
+  questionContinuationRequestHash?: string;
   settlementPublished: boolean;
   longRunProjection?: DesktopLongRunInvocationProjection;
+  automaticGoalId?: string;
+  automaticGoalDeadline?: ReturnType<typeof setTimeout>;
   /** Main-owned monotonic sequence shared by provider and resident-process events. */
   observableStepSequence: number;
   executionSource?: InvocationExecutionContext["source"];
@@ -588,6 +608,18 @@ function recordManifestArtifactEvidence(
   }
 }
 
+export function invocationEventRequestsDecision(event: McpInvocationEvent): boolean {
+  if (event.kind !== "final") return false;
+  if (
+    event.userDecisionRequest?.schemaVersion === "agentlas.user-decision-request.v1"
+    && event.userDecisionRequest.questions.length > 0
+  ) return true;
+  // Display hygiene removes ask fences. Re-parse the Main-only durable body so
+  // malformed, incomplete, and zero/one-option templates never become waits.
+  const body = event.durableTextForVerification ?? event.text;
+  return extractAskFences(body).questions.length > 0;
+}
+
 export function invocationEventPromotesTask(event: McpInvocationEvent): boolean {
   // Runtime progress is transported as a status-only `tool-use` event too
   // (for example, "Calling Claude Code CLI..."). That is not user work and
@@ -600,7 +632,14 @@ export function invocationEventPromotesTask(event: McpInvocationEvent): boolean 
     event.kind === "surface" ||
     (Boolean(event.agentId) && (event.phase === "delegate" || (event.tier ?? 1) > 1)) ||
     event.phase === "delegate" ||
-    (event.kind === "final" && typeof event.text === "string" && event.text.includes("<<agentlas-ask"));
+    invocationEventRequestsDecision(event);
+}
+
+function isRetryableDecisionStoreError(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || code === "SQLITE_PROTOCOL";
 }
 
 export function attachOneSurfaceProjection(
@@ -666,6 +705,7 @@ export class InvocationService {
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
   private readonly settledListeners = new Set<InvocationSettledListener>();
+  private readonly pendingGoalVerifications = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
   private acceptingStarts = true;
 
@@ -694,11 +734,133 @@ export class InvocationService {
   }
 
   activeChatIds(): string[] {
-    return this.activeRuns.activeChatIds();
+    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.pendingGoalVerifications.values()].map((record) => record.chatId)])];
   }
 
   activeRunIds(): string[] {
-    return [...this.activeRuns.entries()].map(([runId]) => runId);
+    return [...new Set([...this.activeRuns.entries()].map(([runId]) => runId).concat([...this.pendingGoalVerifications.keys()]))];
+  }
+
+  /**
+   * Start only the request Main sealed with the accepted Decision. The caller
+   * supplies no runtime or permission fields here, so remount/replay cannot
+   * widen the original continuation. A stable run id collapses response-loss
+   * retries onto the existing live/durable run.
+   */
+  async continueCommittedQuestion(
+    chatId: string,
+    sourceMessageId: string,
+    reply: string,
+  ): Promise<QuestionContinuationReceipt> {
+    let intent;
+    try {
+      intent = getCommittedQuestionContinuation(chatId, sourceMessageId, reply);
+    } catch (error) {
+      if (!isRetryableDecisionStoreError(error)) {
+        return { chatId, sourceMessageId, runId: "", status: "rejected", reasonCode: "invalid-intent" };
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      try { intent = getCommittedQuestionContinuation(chatId, sourceMessageId, reply); } catch {
+        return { chatId, sourceMessageId, runId: "", status: "rejected", reasonCode: "start-rejected" };
+      }
+    }
+    if (!intent) {
+      return { chatId, sourceMessageId, runId: "", status: "rejected", reasonCode: "invalid-intent" };
+    }
+    const live = this.activeRuns.get(intent.runId);
+    if (live) {
+      const exact = live.chatId === chatId
+        && live.questionContinuationSourceMessageId === sourceMessageId
+        && live.questionContinuationRequestHash === intent.requestHash;
+      return exact
+        ? { chatId, sourceMessageId, runId: intent.runId, status: "already-running", runStatus: "running" }
+        : { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "invalid-intent" };
+    }
+    const existing = getInvocationRunReceipt(intent.runId);
+    if (existing) {
+      const bound = existing.chatId === chatId && Boolean(getDb().prepare(
+        `SELECT 1 AS found FROM run_events
+          WHERE run_id = ? AND kind = 'invoke_started'
+            AND json_extract(payload_json, '$.questionContinuationSourceMessageId') = ?
+            AND json_extract(payload_json, '$.questionContinuationRequestHash') = ?
+          LIMIT 1`,
+      ).get(intent.runId, sourceMessageId, intent.requestHash));
+      if (!bound) {
+        return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "invalid-intent" };
+      }
+      // With no matching in-memory owner, a start-only receipt is already
+      // projected as `interrupted` by the ledger. Never replay it after a host
+      // crash: the provider may have performed a side effect before the crash.
+      return {
+        chatId,
+        sourceMessageId,
+        runId: intent.runId,
+        status: "already-terminal",
+        runStatus: existing.status,
+      };
+    }
+    if (!committedQuestionContinuationIsCurrent(chatId, sourceMessageId)) {
+      return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "invalid-intent" };
+    }
+    if (!this.acceptingStarts) {
+      return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "admission-closed" };
+    }
+    if (this.activeChatIds().includes(chatId)) {
+      return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "chat-busy" };
+    }
+
+    const tryStart = (): QuestionContinuationReceipt => {
+      const started = this.start(intent.request, undefined, undefined, {
+        sourceMessageId,
+        requestHash: intent.requestHash,
+      });
+      if (started.runId !== intent.runId) {
+        return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "invalid-intent" };
+      }
+      return { chatId, sourceMessageId, runId: intent.runId, status: "started", runStatus: "running" };
+    };
+    try {
+      return tryStart();
+    } catch (error) {
+      // Only machine-coded transient SQLite admission failures receive one
+      // bounded retry. Permission, billing, cancellation, and provider errors
+      // either have a durable terminal receipt or are returned without retry.
+      if (isRetryableDecisionStoreError(error)) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+        let raced: InvocationRunReceipt | null;
+        try { raced = getInvocationRunReceipt(intent.runId); } catch {
+          return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "start-rejected" };
+        }
+        if (raced) {
+          let bound = false;
+          try {
+            bound = raced.chatId === chatId && Boolean(getDb().prepare(
+              `SELECT 1 AS found FROM run_events
+                WHERE run_id = ? AND kind = 'invoke_started'
+                  AND json_extract(payload_json, '$.questionContinuationSourceMessageId') = ?
+                  AND json_extract(payload_json, '$.questionContinuationRequestHash') = ?
+                LIMIT 1`,
+            ).get(intent.runId, sourceMessageId, intent.requestHash));
+          } catch {
+            return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "start-rejected" };
+          }
+          if (!bound) {
+            return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "invalid-intent" };
+          }
+          return {
+            chatId,
+            sourceMessageId,
+            runId: intent.runId,
+            status: raced.status === "running" || raced.status === "cancelling"
+              ? "already-running"
+              : "already-terminal",
+            runStatus: raced.status,
+          };
+        }
+        try { return tryStart(); } catch { /* bounded: never loop */ }
+      }
+      return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "start-rejected" };
+    }
   }
 
   openAppAdmission(): void {
@@ -737,8 +899,12 @@ export class InvocationService {
      * 원격 대화형 채널(telegram 등)은 반드시 넘긴다.
      */
     executionContext?: InvocationExecutionContext,
+    /** Main-only exact Decision continuation binding; never accepted over IPC. */
+    questionContinuation?: { sourceMessageId: string; requestHash: string },
   ): InvocationStartResult {
+    assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
+    if ([...this.pendingGoalVerifications.values()].some((record) => record.chatId === req.chatId)) throw new Error("goal_verification_pending");
     const incoming = req as OneInvocationRequest;
     const {
       oneProfileContext: _untrustedOneProfileContext,
@@ -843,6 +1009,10 @@ export class InvocationService {
     const runWorkspaceBinding = workspaceBinding
       ? immutableWorkspaceBinding(workspaceBinding)
       : undefined;
+    // A workspace capability is not necessarily a Mobile surface. Science
+    // keeps its local persistence/projection while sharing directory identity checks.
+    const remoteWorkspaceBinding = Boolean(runWorkspaceBinding
+      && isRemoteInvocationWorkspaceBindingSource(runWorkspaceBinding.source));
     const controller = new AbortController();
     const startedAt = new Date().toISOString();
     const preparedOneTeamPreflight = requestedOneTeamPreflightRef
@@ -1050,6 +1220,12 @@ export class InvocationService {
       oneMode: requestedOneMode,
       goal: invocationRequest.userPrompt.slice(0, 4_000),
       pendingQuestion: false,
+      ...(questionContinuation
+        ? {
+            questionContinuationSourceMessageId: questionContinuation.sourceMessageId,
+            questionContinuationRequestHash: questionContinuation.requestHash,
+          }
+        : {}),
       settlementPublished: false,
       observableStepSequence: 0,
       ...(executionContext?.source ? { executionSource: executionContext.source } : {}),
@@ -1060,7 +1236,7 @@ export class InvocationService {
       if (
         recoverablePartialPersisted
         || runReq.agentAppMode
-        || runWorkspaceBinding
+        || remoteWorkspaceBinding
         || !record.partialText.trim()
       ) return;
       try {
@@ -1148,6 +1324,8 @@ export class InvocationService {
             synchronousAskSurface: executionContext?.source === "mobile"
               ? "durable-decision"
               : undefined,
+            questionContinuationSourceMessageId: questionContinuation?.sourceMessageId,
+            questionContinuationRequestHash: questionContinuation?.requestHash,
             oneTaskKindRef: oneTaskKindRef ?? undefined,
             oneParticipantVersionBindings,
             oneTeamPreflightProposalId: preparedOneTeamPreflight?.proposalId,
@@ -1338,7 +1516,7 @@ export class InvocationService {
     // from leaving One and Mobile stuck on a run that never became authoritative.
     const invocationOrigin = requestedOneMode
       ? "one" as const
-      : runWorkspaceBinding
+      : remoteWorkspaceBinding
         ? "mobile" as const
         : "work" as const;
     let canonicalTask: CanonicalTask | null;
@@ -1411,9 +1589,13 @@ export class InvocationService {
         console.warn("[long-run] first Goal materialization failed:", error);
       }
     }
-    const goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
-    const goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
-    const goalInvocationProjection = goalLongRun && goalLongRunTask
+    let goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
+    let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+    let goalInvocationProjection: DesktopLongRunInvocationProjection | null = null;
+    const refreshGoalProjection = (): void => {
+      goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
+      goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+      goalInvocationProjection = goalLongRun && goalLongRunTask
       ? new DesktopLongRunInvocationProjection({
           longRunId: goalLongRun.id,
           taskId: goalLongRunTask.id,
@@ -1427,7 +1609,14 @@ export class InvocationService {
           permissionProfile: runReq.permissions ?? "read",
         })
       : null;
-    if (goalInvocationProjection) record.longRunProjection = goalInvocationProjection;
+      if (goalInvocationProjection) record.longRunProjection = goalInvocationProjection;
+    };
+    refreshGoalProjection();
+    if (goalLongRun && getChatGoalRevision(goalLongRun.goalId) && !executionContext && !runWorkspaceBinding && goalLongRun.surface !== "science") {
+      record.automaticGoalId = goalLongRun.goalId;
+      const remaining = Date.parse(goalLongRun.budget.wallclockDeadline ?? "") - Date.now();
+      if (Number.isFinite(remaining)) record.automaticGoalDeadline = setTimeout(() => this.cancelWithReason(runId, new Error("automatic_goal_time_budget")), Math.max(1, remaining));
+    }
     let goalControllerAttemptId: string | null = null;
     let goalControllerAttemptSettled = false;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
@@ -1510,6 +1699,10 @@ export class InvocationService {
       runReq,
       (rawEvent) => {
         rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
+        // One provider/run gets one terminal settlement. Late duplicate finals,
+        // EOF callbacks, and post-cancel deliveries cannot reopen a Decision.
+        if (terminalObserved && (rawEvent.kind === "final" || rawEvent.kind === "error")) return;
+        if (rawEvent.kind === "final" && controller.signal.aborted) return;
         // Agent App remains a separately isolated browser surface. A paired
         // Mobile client is a Desktop remote, so its live partial stream follows
         // the same chat behavior as the Desktop renderer.
@@ -1575,12 +1768,32 @@ export class InvocationService {
         if (event.kind === "final" && !(event.text ?? "").trim()) {
           const durableFinal = latestDurableAssistantMessage(runReq.chatId, startedAt);
           if (durableFinal?.text.trim()) {
-            event = { ...event, text: stripPermissionEscalationMarker(durableFinal.text) };
+            const durableText = stripPermissionEscalationMarker(durableFinal.text);
+            const hygiene = applyFinalDisplayBackstop(durableText, {
+              locale: pickLocale(runReq),
+              allowSurfaceRender: !runReq.agentAppMode,
+            });
+            event = {
+              ...event,
+              text: hygiene.text,
+              durableTextForVerification: durableText,
+              durableAssistantMessageIdForVerification: durableFinal.id,
+              ...(hygiene.userDecisionRequest
+                ? {
+                    userDecisionRequest: {
+                      ...hygiene.userDecisionRequest,
+                      sourceMessageId: durableFinal.id,
+                    },
+                  }
+                : {}),
+            };
           }
         }
-        const terminalRequestsDecision = event.kind === "final" &&
-          (event.text ?? "").includes("<<agentlas-ask");
-        if (terminalRequestsDecision) record.pendingQuestion = true;
+        const terminalRequestsDecision = invocationEventRequestsDecision(event);
+        if (terminalRequestsDecision) {
+          record.pendingQuestion = true;
+          if (event.userDecisionRequest) record.userDecisionRequest = event.userDecisionRequest;
+        }
         if (!taskMaterialized && (invocationEventPromotesTask(event) || terminalRequestsDecision)) {
           tryRecordRunEvent({
             runId,
@@ -1648,7 +1861,7 @@ export class InvocationService {
         // Desktop Work owns and consumes its native Work surface. Only One or
         // the separately bounded Mobile bridge receives the closed One/Mobile
         // semantic projection; ordinary project work must not mint One state.
-        if (requestedOneMode || runWorkspaceBinding) {
+        if (requestedOneMode || remoteWorkspaceBinding) {
           event = attachOneSurfaceProjection(event, runReq.chatId);
         }
         if (event.oneFriendlyFollowups) {
@@ -1739,7 +1952,7 @@ export class InvocationService {
         // semantic projection or durable write fails. A raw payload may carry
         // a Main-private local path/file URL; projection success must not be a
         // prerequisite for stripping that authority-bearing transport.
-        if ((requestedOneMode || runWorkspaceBinding) && event.kind === "surface" && event.surface) {
+        if ((requestedOneMode || remoteWorkspaceBinding) && event.kind === "surface" && event.surface) {
           event = {
             ...event,
             surface: undefined,
@@ -1760,9 +1973,19 @@ export class InvocationService {
           observedAt: new Date().toISOString(),
         };
         const durableTextForVerification = event.durableTextForVerification;
-        // Main-only persistence receipt: keep it out of renderer/mobile events.
-        if (durableTextForVerification !== undefined) {
-          event = { ...event, durableTextForVerification: undefined };
+        const durableMessageId = event.durableAssistantMessageIdForVerification;
+        // Preserve only the opaque committed-message identity for history
+        // catch-up. The body used to verify it remains Main-only.
+        if (
+          durableTextForVerification !== undefined
+          || event.durableAssistantMessageIdForVerification !== undefined
+        ) {
+          event = {
+            ...event,
+            ...(durableMessageId ? { durableMessageId } : {}),
+            durableTextForVerification: undefined,
+            durableAssistantMessageIdForVerification: undefined,
+          };
         }
         if (goalInvocationProjection) {
           try {
@@ -1774,7 +1997,7 @@ export class InvocationService {
         if (
           event.kind === "final"
           && !runReq.agentAppMode
-          && !runWorkspaceBinding
+          && !remoteWorkspaceBinding
           && typeof event.text === "string"
           && event.text.trim()
           && !hasDurableAssistantMessage(
@@ -1971,6 +2194,34 @@ export class InvocationService {
       controller.signal,
       runWorkspaceBinding,
       executionContext,
+      async (sourceMessageId) => {
+        // Only ordinary local, user-authored root-chat work enters automatic
+        // Goal. Science and remote/automation authority keep their own adapters.
+        if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
+            runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
+        try {
+          const admitted = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
+            userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal });
+          if (!admitted || controller.signal.aborted) return;
+          projectionGoalId = admitted.goalId;
+          record.automaticGoalId = admitted.goalId;
+          transitionLongRun({ runId: admitted.id, to: "running", actorKind: "host", reason: "automatic-goal-user-dispatch" });
+          refreshGoalProjection();
+          setChatGoalBinding(chat.id, admitted.goalId);
+          const goalEvent: McpInvocationEvent = { kind: "tool-use", tool: { name: "Goal", result:
+            `${admitted.objective}\n\n${admitted.acceptanceCriteria.map((criterion) => `• ${criterion}`).join("\n")}\n\n` +
+            (pickLocale(runReq) === "ko" ? "최대 3회 실행 · 10분 후 미완료 목표는 유지합니다. 금액 사용량은 아직 계측되지 않습니다." :
+              "Up to 3 passes / 10 minutes; unfinished criteria are retained. Monetary usage is not yet metered.") } };
+          record.events.push(goalEvent);
+          recordMcpInvocationEvent(runId, runReq, goalEvent);
+          this.publishRunEvent(record, { runId, chatId: chat.id, event: goalEvent });
+          const remaining = Date.parse(admitted.budget.wallclockDeadline!) - Date.now();
+          record.automaticGoalDeadline = setTimeout(() => this.cancelWithReason(runId, new Error("automatic_goal_time_budget")), Math.max(1, remaining));
+        } catch {
+          tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_binding_failed", payload: { sourceMessageId } });
+          // Goal enrichment failure must never swallow the original request.
+        }
+      },
     )
       .then((result) => {
         // A compromised runtime must not turn the private attachment staging
@@ -1993,26 +2244,62 @@ export class InvocationService {
             hasFinalText: Boolean(result.finalText?.trim()),
           },
         });
-        const completionClaim = result.goalCompletionClaim;
+        const completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
+          ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
+          : undefined);
         if (completionClaim?.claimed && completionClaim.goalId) {
           // The client records only a verification request. The independent
           // judge starts here, after invoke_completed/mcp_final and the result
           // receipt are durable, so model prose can never outrun host evidence.
+          this.pendingGoalVerifications.set(runId, record);
+          this.publishActiveChats();
           void import("../long-run/verifier")
             .then(({ verifyGoalCompletionClaim }) => verifyGoalCompletionClaim({
               goalId: completionClaim.goalId!,
+              signal: controller.signal,
               outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
               evidence: completionClaim.evidence,
               invocationRunId: runId,
               projectDir: getChatWorkingFolder(chat.id),
             }))
+            .then((verification) => {
+              if (!record.automaticGoalId || controller.signal.aborted) return;
+              if (verification?.completed) {
+                completeChatGoalContract(record.automaticGoalId, "completed");
+                if (getChat(chat.id)?.goalId === record.automaticGoalId) setChatGoalBinding(chat.id, null);
+              } else {
+                const current = getLongRunByGoalId(record.automaticGoalId);
+                if (current && ["running", "verifying"].includes(current.status)) transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "verification_inconclusive" });
+              }
+            })
             .catch((error: unknown) => {
               console.warn("[long-run] terminal verification failed:", error);
+              if (record.automaticGoalId && !controller.signal.aborted) {
+                const current = getLongRunByGoalId(record.automaticGoalId);
+                if (current && ["running", "verifying"].includes(current.status)) {
+                  transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "verification_unavailable" });
+                }
+              }
+            })
+            .finally(() => {
+              this.pendingGoalVerifications.delete(runId);
+              this.publishActiveChats();
+              if (record.automaticGoalDeadline) clearTimeout(record.automaticGoalDeadline);
+              this.settleAutomaticGoalInterruption(record);
+              this.drainSteerQueue(record.chatId);
             });
         }
       })
       .catch((error: unknown) => {
         settleGoalControllerAttempt(false);
+        if (record.automaticGoalId && !controller.signal.aborted) {
+          try {
+            const current = getLongRunByGoalId(record.automaticGoalId);
+            if (current && ["queued", "running", "waiting_worker", "waiting_tool"].includes(current.status)) {
+              transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "invocation_failed" });
+            }
+          } catch { /* Keep the original provider failure visible. */ }
+        }
         const rawMessage = redactOneAttachmentText(
           runReq,
           error instanceof Error ? error.message : String(error),
@@ -2081,7 +2368,9 @@ export class InvocationService {
         }
       })
       .finally(() => {
+        if (record.automaticGoalDeadline && !this.pendingGoalVerifications.has(runId)) clearTimeout(record.automaticGoalDeadline);
         settleGoalControllerAttempt(false);
+        if (!this.pendingGoalVerifications.has(runId)) this.settleAutomaticGoalInterruption(record);
         if (!terminalObserved) {
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
@@ -2174,6 +2463,21 @@ export class InvocationService {
     }
   }
 
+  private settleAutomaticGoalInterruption(record: RunRecord): void {
+    if (!record.automaticGoalId || !record.controller.signal.aborted) return;
+    try {
+      const current = getLongRunByGoalId(record.automaticGoalId);
+      if (current && ["pausing", "cancelling"].includes(current.status)) {
+        const next = transitionLongRun({ runId: current.id, to: current.status === "cancelling" ? "cancelled" : "paused", actorKind: "host",
+          reason: record.controller.signal.reason instanceof Error && record.controller.signal.reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
+        if (next.status === "cancelled") {
+          completeChatGoalContract(next.goalId, "cancelled");
+          if (getChat(record.chatId)?.goalId === next.goalId) setChatGoalBinding(record.chatId, null);
+        }
+      }
+    } catch { /* Requested stop remains durable and non-admitting. */ }
+  }
+
   cancel(runId: string): "requested" | "already-requested" | "not-found" {
     return this.cancelWithReason(runId, new Error("stopped_by_user"));
   }
@@ -2182,14 +2486,30 @@ export class InvocationService {
     runId: string,
     reason: Error,
   ): "requested" | "already-requested" | "not-found" {
-    const record = this.activeRuns.get(runId);
+    const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId);
+    if (record?.automaticGoalId) {
+      try {
+        const goal = getLongRunByGoalId(record.automaticGoalId);
+        if (goal && !["completed", "failed", "cancelled", "cancelling", "paused"].includes(goal.status)) {
+          transitionLongRun({ runId: goal.id,
+            to: reason.message === "stopped_by_user" ? "cancelling" : "pausing",
+            actorKind: reason.message === "stopped_by_user" ? "user" : "host",
+            reason: reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
+        }
+      } catch { /* Always abort the actual invocation even if persistence fails. */ }
+    }
     // Stop is terminal for the visible work item: it also clears directions
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
       this.steerQueues.delete(record.chatId);
       cancelQueuedSteersForChat(record.chatId);
     }
-    const result = this.activeRuns.requestCancelWithReason(runId, reason);
+    let result = this.activeRuns.requestCancelWithReason(runId, reason);
+    if (result === "not-found" && record && this.pendingGoalVerifications.has(runId)) {
+      result = record.controller.signal.aborted ? "already-requested" : "requested";
+      record.cancelRequestedAt ??= new Date().toISOString();
+      record.controller.abort(reason);
+    }
     if (result === "requested") {
       if (record) {
         const sequence = nextObservableSequence(record);
@@ -2340,7 +2660,7 @@ export class InvocationService {
 
   attach(chatId: string): InvocationAttachResult | null {
     let found: InvocationAttachResult | null = null;
-    for (const [runId, record] of this.activeRuns.entries()) {
+    for (const [runId, record] of new Map([...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
       if (record.chatId === chatId) {
         found = {
           runId,
@@ -2358,7 +2678,7 @@ export class InvocationService {
   }
 
   receipt(runId: string): InvocationRunReceipt | null {
-    const record = this.activeRuns.get(runId);
+    const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId);
     const durable = getInvocationRunReceipt(runId);
     if (!record) return durable;
     return {
@@ -2377,7 +2697,7 @@ export class InvocationService {
   }
 
   latestReceipt(chatId: string): InvocationRunReceipt | null {
-    for (const [runId, record] of this.activeRuns.entries()) {
+    for (const [runId, record] of new Map([...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
       if (record.chatId === chatId) return this.receipt(runId);
     }
     return getLatestInvocationRunReceipt(chatId);
@@ -2498,6 +2818,7 @@ export class InvocationService {
       receipt,
       oneMode: record.oneMode,
       pendingQuestion: record.pendingQuestion,
+      ...(record.userDecisionRequest ? { userDecisionRequest: record.userDecisionRequest } : {}),
       goal: record.goal,
       ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
     };
@@ -2535,7 +2856,7 @@ export class InvocationService {
   }
 
   private drainSteerQueue(chatId: string): void {
-    if ([...this.activeRuns.entries()].some(([, record]) => record.chatId === chatId)) return;
+    if (this.activeChatIds().includes(chatId)) return;
     const queue = this.steerQueues.get(chatId);
     if (!queue?.length) return;
     const next = queue.shift();

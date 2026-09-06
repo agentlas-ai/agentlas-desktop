@@ -243,8 +243,8 @@ export default function LibraryMcpsPage() {
             borderRadius: 999,
             fontSize: 12.5,
             fontWeight: 600,
-            background: "#303532",
-            color: "#fff",
+            background: "var(--one-primary)",
+            color: "var(--white)",
             border: "1px solid transparent",
             display: "inline-flex",
             alignItems: "center",
@@ -368,7 +368,7 @@ export default function LibraryMcpsPage() {
                           borderRadius: 999,
                           border: "1px solid var(--paper-edge)",
                           background: server.enabled ? "rgba(86,161,74,0.16)" : "var(--paper-2)",
-                          color: server.enabled ? "#2f6b2a" : "var(--ink-soft)",
+                          color: server.enabled ? "var(--ok)" : "var(--ink-soft)",
                         }}
                       >
                         {server.enabled ? t("mcps.on") : t("mcps.off")}
@@ -614,6 +614,21 @@ function StatusLine({
             {status.tools.length > 4 ? " …" : ""}
           </span>
         )}
+      </div>
+    );
+  }
+  /*
+   * ★확인을 미룬 것은 실패가 아니다(2026-09-03 실측).
+   *
+   * 브라우저처럼 사람에게 보이는 창을 여는 서버는 수동 점검이 일부러 건너뛴다
+   * (statusAllServers → deferredInteractiveStatus). 그런데 화면은 그 표식을 안 읽고
+   * 빨간 "연결 실패: unknown" 으로 그렸다 — 원인도 해법도 없는 문구다. 실제로는 멀쩡한
+   * 플러그인 둘(Agentlas 브라우저 · Playwright)이 고장난 것처럼 보였다.
+   */
+  if (status.deferred === "interactive") {
+    return (
+      <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
+        {t("mcps.status.deferred")}
       </div>
     );
   }

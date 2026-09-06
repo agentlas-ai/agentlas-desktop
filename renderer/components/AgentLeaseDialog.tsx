@@ -272,7 +272,7 @@ export function AgentLeaseDialog({
                   borderRadius: 9,
                   border: 0,
                   background: "var(--accent)",
-                  color: "#fff",
+                  color: "var(--white)",
                   fontSize: 13,
                   fontWeight: 750,
                   cursor: !validDays || total === null || purchasing ? "default" : "pointer",

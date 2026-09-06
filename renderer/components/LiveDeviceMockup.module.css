@@ -1,7 +1,7 @@
 .shell {
-  --device-shell-bg: var(--design-bg, #fff);
-  --device-shell-line: var(--design-line, #e7e8e5);
-  --device-shell-muted: var(--design-muted, #858a86);
+  --device-shell-bg: var(--design-bg, var(--white));
+  --device-shell-line: var(--design-line, var(--paper-edge));
+  --device-shell-muted: var(--design-muted, var(--muted-deep));
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -9,7 +9,7 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--device-shell-bg);
-  color: var(--design-ink, #20221f);
+  color: var(--design-ink, var(--ink));
 }
 
 .windowBar {
@@ -20,7 +20,7 @@
   gap: 12px;
   padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--device-shell-line);
-  background: color-mix(in srgb, var(--device-shell-bg) 94%, var(--design-panel-muted, #f4f5f1));
+  background: color-mix(in srgb, var(--device-shell-bg) 94%, var(--design-panel-muted, var(--paper-3)));
 }
 
 .windowTitle,
@@ -42,7 +42,7 @@
 /* 창 제목 옆의 종류 표기 — 무엇을 보고 있는지(미리보기)를 말하되 장치를 단정하지 않는다. */
 .windowKind {
   flex: 0 0 auto;
-  color: #8b9195;
+  color: var(--muted-deep);
   font-size: 10px;
   font-weight: 600;
   white-space: nowrap;
@@ -53,15 +53,15 @@
   height: 8px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: #3da45a;
+  background: var(--ok);
   box-shadow: 0 0 0 3px rgb(61 164 90 / 13%);
 }
 
 .liveBadge {
   padding: 3px 6px;
-  border: 1px solid color-mix(in srgb, var(--design-accent, #6b6e52) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--design-accent, var(--accent)) 35%, transparent);
   border-radius: 999px;
-  color: var(--design-accent, #6b6e52);
+  color: var(--design-accent, var(--accent));
   font-size: 9px;
   font-weight: 800;
   letter-spacing: .08em;
@@ -89,8 +89,8 @@
 .deviceControls button:hover,
 .deviceControls button:focus-visible {
   outline: none;
-  background: var(--design-accent-soft, #eef0e8);
-  color: var(--design-ink, #20221f);
+  background: var(--design-accent-soft, var(--paper-3));
+  color: var(--design-ink, var(--ink));
 }
 
 .deviceArea {
@@ -101,7 +101,7 @@
   overflow: hidden;
   padding: 20px 16px 18px;
   background:
-    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--design-accent, #6b6e52) 9%, transparent), transparent 48%),
+    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--design-accent, var(--accent)) 9%, transparent), transparent 48%),
     var(--device-shell-bg);
 }
 
@@ -125,9 +125,9 @@
   aspect-ratio: 393 / 852;
   flex: 0 0 auto;
   padding: 8px;
-  border: 1px solid #777b7d;
+  border: 1px solid var(--muted-deep);
   border-radius: 48px;
-  background: linear-gradient(145deg, #fafafa 0%, #a9adb0 16%, #f7f7f6 42%, #868b8f 100%);
+  background: linear-gradient(145deg, var(--paper-2) 0%, var(--muted-deep) 16%, var(--paper-2) 42%, var(--muted-deep) 100%);
   box-shadow:
     0 26px 54px rgb(24 28 26 / 18%),
     inset 0 0 0 2px rgb(255 255 255 / 75%),
@@ -147,10 +147,10 @@
   width: 100%;
   height: 100%;
   padding: 8px;
-  border: 2px solid #070808;
+  border: 2px solid var(--black);
   border-radius: 40px;
-  background: #050505;
-  box-shadow: inset 0 0 0 2px #2b2d2d, inset 0 0 0 4px #000;
+  background: var(--black);
+  box-shadow: inset 0 0 0 2px var(--black), inset 0 0 0 4px var(--black);
 }
 
 .deviceScreen {
@@ -159,7 +159,7 @@
   height: 100%;
   overflow: hidden;
   border-radius: 31px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .dynamicIsland {
@@ -171,7 +171,7 @@
   height: 22px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: #050505;
+  background: var(--black);
   box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
   pointer-events: none;
 }
@@ -191,7 +191,7 @@
   right: -4px;
   width: 4px;
   border-radius: 0 3px 3px 0;
-  background: linear-gradient(#777b7c, #303335);
+  background: linear-gradient(var(--muted-deep), var(--black));
   box-shadow: 1px 0 1px rgb(0 0 0 / 15%);
 }
 
@@ -206,9 +206,9 @@
   align-content: center;
   gap: 10px;
   padding: 24px;
-  color: #747975;
+  color: var(--muted-deep);
   text-align: center;
-  background: #f7f7f6;
+  background: var(--paper-2);
 }
 
 .poweredOff strong { font-size: 12px; }
@@ -217,8 +217,8 @@
   padding: 0 13px;
   border: 0;
   border-radius: 999px;
-  color: #fff;
-  background: #111;
+  color: var(--white);
+  background: var(--black);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
@@ -255,7 +255,7 @@
   font-size: 10px;
 }
 
-.deviceControls .passiveControl { color: #b5bab5; }
+.deviceControls .passiveControl { color: var(--muted); }
 
 .shell[data-expanded="true"] .deviceFrame { width: min(390px, 100%); }
 

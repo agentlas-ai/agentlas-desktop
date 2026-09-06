@@ -22,6 +22,8 @@ import {
 } from "@shared/agent-control-blocks";
 import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
+import { ChatFileCards } from "./ChatFileExperience";
+import type { ChatFileItem } from "@/lib/chat-files";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -49,6 +51,8 @@ export interface StreamStep {
   delegateTo?: string[];
   /** 채팅 안에서 카드로 보여줄 활동 상태. */
   activity?: "start" | "handoff" | "tool" | "complete" | "status";
+  /** 런타임이 사용자에게 공개한 reasoning summary 행. 원시 chain-of-thought가 아니다. */
+  reasoning?: boolean;
   /** 이 단계가 화면에 들어온 시각. 긴 실행 중 마지막 활동 표시용. */
   createdAt?: number;
   /** 이 도구 이벤트가 도착했을 때까지 스트리밍된 본문 길이 — 단일 실행에서 텍스트 사이에
@@ -99,15 +103,26 @@ export interface StreamMessage {
   busy?: boolean;
   /** 첨부된 이미지 미리보기 URL — data:image/... base64 */
   imageDataUrls?: string[];
+  /** Durable generic attachment groups are resolved to in-app file cards. */
+  chatFiles?: ChatFileItem[];
+  chatFileGroupIds?: string[];
   /** 본문에서 fence로 추출된 질문들 — UI는 본문 텍스트 아래에 카드로 렌더 */
   questions?: ChatQuestion[];
+  /** Main-owned durable assistant row that owns the current question batch. */
+  questionSourceMessageId?: string;
+  /** Durable answer accepted before its continuation run began; used only to retry. */
+  pendingCommittedReply?: string;
+  /** Main-reserved run identity for the pending committed continuation. */
+  pendingContinuationRunId?: string;
+  /** A transport loss may auto-resume; typed rejection deliberately may not. */
+  pendingContinuationAutoResume?: boolean;
   /** 생성 토큰 수 — "N tokens" 표시 (Claude Code 스타일) */
   tokens?: number;
   /** 라이브 누적 토큰(usage 이벤트, 단조 증가) — final 전 실시간 "N tokens" 표시 */
   liveTokens?: number;
   /** reasoning(thinking) 구간 상태 — 상태줄 문구 회전("생각 중…")과 "N초 동안 생각함"의 근거.
    *  lastMs는 직전 구간 지속시간으로, 이후 새 활동(텍스트/도구)이 오면 지워진다. */
-  thinking?: { active: boolean; startedAt?: number; cumMs: number; lastMs?: number };
+  thinking?: { active: boolean; startedAt?: number; cumMs: number; lastMs?: number; headline?: string };
   /** 파이프라인 단계 계획 — 있으면 메시지 상단에 스테퍼로 표시(PRD→배포 가시화). */
   pipeline?: PipelineStage[];
   /** 멀티모달 엔진 미연결 — 본문 아래에 "설정으로 가기" 버튼을 렌더한다. */
@@ -120,6 +135,8 @@ export interface StreamMessage {
    * 심각도와 함께 뜨고, 기계 원문은 접혀 있다.
    */
   notices?: ChatNotice[];
+  /** Main-authoritative terminal failure, kept separate from assistant copy. */
+  failure?: { code: string; message: string };
 }
 
 export interface ChatNotice {
@@ -155,6 +172,7 @@ export function ChatStream({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
+  onOpenChatFile,
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
@@ -174,6 +192,7 @@ export function ChatStream({
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  onOpenChatFile?: (file: ChatFileItem) => void;
   onOpenWorkflow?: () => void;
   onStop?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
@@ -359,6 +378,7 @@ export function ChatStream({
               onOpenArtifact={onOpenArtifact}
               onOpenMedia={onOpenMedia}
               onOpenLinkedFile={onOpenLinkedFile}
+              onOpenChatFile={onOpenChatFile}
               onOpenWorkflow={onOpenWorkflow}
               onStop={onStop}
               onAnswerQuestion={onAnswerQuestion}
@@ -744,6 +764,7 @@ const Bubble = memo(function Bubble({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
+  onOpenChatFile,
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
@@ -758,6 +779,7 @@ const Bubble = memo(function Bubble({
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  onOpenChatFile?: (file: ChatFileItem) => void;
   onOpenWorkflow?: () => void;
   onStop?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
@@ -779,6 +801,9 @@ const Bubble = memo(function Bubble({
     }
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
+        {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
+          <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
+        )}
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {message.imageDataUrls.map((url, i) => (
@@ -821,6 +846,7 @@ const Bubble = memo(function Bubble({
     const isError = message.text.trim().startsWith("⚠️");
     return (
       <div
+        data-chat-failure-code={message.failure?.code}
         style={{
           alignSelf: "stretch",
           maxWidth: 760,
@@ -839,12 +865,15 @@ const Bubble = memo(function Bubble({
     );
   }
   // agent — Markdown 렌더링.
-  // 단일 실행은 영상형 인터리브 본문(텍스트 사이 도구 그룹) + 하단 ✳ 상태줄로,
-  // 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
+  // 단일 실행은 기본적으로 영상형 인터리브 본문을 쓰되, 런타임이 공개한 reasoning
+  // summary가 있으면 One과 같은 투명 활동 타임라인으로 남긴다.
   const displayText = userFacingAssistantText(message.text, Boolean(message.streaming));
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
-  const showParallelWork = hasProgress && isParallelWorkMessage(message);
+  const showWorkActivity = hasProgress && (
+    isParallelWorkMessage(message)
+    || (message.steps ?? []).some((step) => step.reasoning === true)
+  );
   return (
     <div className="agentlas-chat-turn" style={{ display: "flex", gap: 0, alignSelf: "stretch", maxWidth: 740 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
@@ -854,10 +883,13 @@ const Bubble = memo(function Bubble({
         className="agentlas-chat-answer"
         style={{ minWidth: 0, flex: 1, padding: "9px 0 14px" }}
       >
-        {message.pipeline && message.pipeline.length > 0 && showParallelWork && (
+        {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
+          <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
+        )}
+        {message.pipeline && message.pipeline.length > 0 && showWorkActivity && (
           <PipelineStepper stages={message.pipeline} running={Boolean(message.busy)} />
         )}
-        {showParallelWork && (
+        {showWorkActivity && (
           <WorkingPanel
             steps={message.steps ?? []}
             fallback={message.status}
@@ -868,7 +900,7 @@ const Bubble = memo(function Bubble({
             stopRequested={stopRequested}
           />
         )}
-        {showParallelWork && displayText && message.busy && (
+        {showWorkActivity && displayText && message.busy && (
           <LiveOutputPanel
             text={displayText}
             streaming={message.streaming}
@@ -879,7 +911,7 @@ const Bubble = memo(function Bubble({
             mediaBasePaths={mediaBasePaths}
           />
         )}
-        {showParallelWork && displayText && !message.busy && (
+        {showWorkActivity && displayText && !message.busy && (
           <div
             style={{
               color: "var(--ink)",
@@ -899,7 +931,7 @@ const Bubble = memo(function Bubble({
             {message.streaming && <BlinkingCursor />}
           </div>
         )}
-        {!showParallelWork && (
+        {!showWorkActivity && (
           <SingleRunBody
             message={displayMessage}
             onOpenArtifact={onOpenArtifact}
@@ -926,7 +958,7 @@ const Bubble = memo(function Bubble({
             ))}
           </div>
         )}
-        {!showParallelWork && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
+        {!showWorkActivity && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
         {/* 질문은 이제 바텀 시트(ChatQuestionSheet)에서 답한다 — 스트림에는 답변이 끝난
             질문만 잠긴 기록으로 남긴다. ("—"는 시트에서 스킵된 질문의 잠금 마커라 숨김.) */}
         {message.questions && message.questions.some((q) => q.answer && q.answer.length > 0 && q.answer[0] !== "—") && (
@@ -962,7 +994,7 @@ const Bubble = memo(function Bubble({
                 borderRadius: 12,
                 border: "1px solid var(--accent)",
                 background: "var(--accent)",
-                color: "var(--on-accent, #fff)",
+                color: "var(--on-accent, var(--white))",
                 fontWeight: 700,
                 fontSize: 13,
                 boxShadow: "var(--neu-raised)",
@@ -1539,6 +1571,7 @@ function ToolGroupRow({
       >
         <span style={{ flexShrink: 0, color: "var(--muted-deep)", fontWeight: 550 }}>{view.verb}</span>
         <span
+          className="agentlas-working-tool-verb"
           style={{
             minWidth: 0,
             overflow: "hidden",
@@ -1730,6 +1763,14 @@ function runStatusPhrase(
   t: ReturnType<typeof useT>["t"],
 ): string {
   if (!thinking) return "";
+  /*
+   * ★모델이 남긴 추론 요약이 있으면 그것을 보여준다(2026-09-04, One 과 같은 규칙).
+   *
+   * 예전에는 경과 시간으로 도는 상투구("생각 중…")만 보여주고 추론 텍스트는 통째로
+   * 버렸다. 같은 순간 One 은 모델이 쓴 한 줄("Planning applypatch creation")을 그대로
+   * 띄운다 — 무엇을 하고 있는지가 보인다. 텍스트가 없을 때만 예전 문구로 되돌아간다.
+   */
+  if (thinking.active && thinking.headline) return thinking.headline;
   if (thinking.active) {
     const cumSec = Math.floor(thinking.cumMs / 1000) + activeElapsedSec;
     if (cumSec < 2) return t("chatstream.think_1");
@@ -1928,7 +1969,7 @@ const QuestionBlock = memo(function QuestionBlock({
       style={{
         border: "1px solid color-mix(in srgb, var(--accent) 20%, var(--paper-edge))",
         borderRadius: 8,
-        background: "linear-gradient(180deg, #fff 0%, var(--fill-1) 100%)",
+        background: "linear-gradient(180deg, var(--paper) 0%, var(--fill-1) 100%)",
         padding: 14,
         display: "flex",
         flexDirection: "column",
@@ -1938,12 +1979,13 @@ const QuestionBlock = memo(function QuestionBlock({
     >
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 2 }}>
         <span
+          className="agentlas-working-tool-copy"
           style={{
             flexShrink: 0,
             fontSize: 11,
             fontFamily: "var(--font-mono)",
             color: "var(--accent)",
-            background: "color-mix(in srgb, var(--accent) 10%, #fff)",
+            background: "color-mix(in srgb, var(--accent) 10%, var(--paper))",
             padding: "2px 7px",
             borderRadius: 999,
             fontWeight: 750,
@@ -1980,7 +2022,7 @@ const QuestionBlock = memo(function QuestionBlock({
                   ? "1px solid color-mix(in srgb, var(--accent) 56%, var(--paper-edge))"
                   : "1px solid transparent",
                 background: selected
-                  ? "linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, #fff), color-mix(in srgb, var(--amber-deep) 8%, #fff))"
+                  ? "linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--paper)), color-mix(in srgb, var(--amber-deep) 8%, var(--paper)))"
                   : "var(--paper-2)",
                 boxShadow: selected ? "0 8px 18px color-mix(in srgb, var(--accent) 14%, transparent)" : "none",
                 opacity: dim ? 0.45 : 1,
@@ -2001,7 +2043,7 @@ const QuestionBlock = memo(function QuestionBlock({
                     ? "1px solid var(--accent)"
                     : "1px solid var(--paper-edge)",
                   background: selected ? "var(--accent)" : "var(--paper)",
-                  color: selected ? "#fff" : "var(--ink-soft)",
+                  color: selected ? "var(--white)" : "var(--ink-soft)",
                   fontFamily: "var(--font-mono)",
                   fontSize: 11,
                   fontWeight: 800,
@@ -2045,6 +2087,7 @@ const QuestionBlock = memo(function QuestionBlock({
       {!answered && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span
+            className="agentlas-working-tool-result"
             style={{
               fontSize: 10,
               fontWeight: 700,
@@ -2256,25 +2299,25 @@ function WorkingPanel({
   return (
     <div
       data-testid="thinking-text-stream"
+      data-state={done ? "completed" : "busy"}
+      className="agentlas-work-activity"
       style={{
         color: "var(--muted-deep)",
-        padding: "2px 0 6px",
         display: "flex",
         flexDirection: "column",
-        gap: 3,
-        maxWidth: 820,
       }}
     >
       <div
+        className="agentlas-work-activity-header"
         style={{
           display: "flex",
           alignItems: "center",
           gap: 10,
-          minHeight: 28,
           minWidth: 0,
         }}
       >
         <button
+          className="agentlas-work-activity-toggle"
           type="button"
           onClick={() => allRows.length > 0 && setOverride(!expanded)}
           aria-expanded={allRows.length > 0 ? expanded : undefined}
@@ -2282,7 +2325,8 @@ function WorkingPanel({
           style={{
             minWidth: 0,
             flex: 1,
-            display: "flex",
+            display: "grid",
+            gridTemplateColumns: "18px auto minmax(0, 1fr) auto 14px",
             alignItems: "center",
             gap: 8,
             border: "none",
@@ -2299,9 +2343,14 @@ function WorkingPanel({
           <span aria-hidden style={{ width: 18, height: 18, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: done ? "var(--muted)" : "var(--accent)" }}>
             {done ? <ThinkingGlyph /> : <GlyphSpinner active />}
           </span>
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{headerLabel}</span>
+          <strong className="agentlas-work-activity-title">{locale === "ko" ? "활동" : "Activity"}</strong>
+          <span className="agentlas-work-activity-meta">{headerLabel}</span>
+          <span className="agentlas-work-activity-count" aria-label={locale === "ko" ? `${allRows.length}개 단계` : `${allRows.length} steps`}>
+            {allRows.length || ""}
+          </span>
           {allRows.length > 0 && (
             <span
+              className="agentlas-work-activity-chevron"
               aria-hidden
               style={{
                 display: "inline-flex",
@@ -2365,7 +2414,7 @@ function WorkingPanel({
           role="status"
           style={{
             marginLeft: 26,
-            color: liveState.tone === "stale" ? "#b42318" : "var(--amber-deep)",
+            color: liveState.tone === "stale" ? "var(--danger)" : "var(--amber-deep)",
             fontSize: 11.5,
             lineHeight: 1.45,
           }}
@@ -2378,20 +2427,19 @@ function WorkingPanel({
 
       {expanded && allRows.length > 0 && (
         <div
+          className="agentlas-work-activity-rows"
           style={{
             display: "flex",
             flexDirection: "column",
-            padding: "3px 0 2px 25px",
             minWidth: 0,
-            maxHeight: "min(52vh, 560px)",
             overflowY: "auto",
           }}
         >
           {allRows.map((s, idx) => (
             <div
               key={s.id}
-              // ★간격은 이웃 쌍이 정한다: 도구가 연달아 나오면 붙여서 한 블록으로 읽힌다.
-              style={{ marginTop: activityRowGap(allRows[idx - 1], s) }}
+              className="agentlas-work-activity-row"
+              data-kind={s.tool ? "tool" : "reasoning"}
             >
               <ActivityRow
                 step={s}
@@ -2407,16 +2455,6 @@ function WorkingPanel({
       )}
     </div>
   );
-}
-
-/** 활동 행 사이 간격 — 도구 연속은 0, 종류가 바뀌는 경계에서만 벌어진다. */
-function activityRowGap(above: StreamStep | undefined, below: StreamStep): number {
-  if (!above) return 0;
-  const aboveIsTool = Boolean(above.tool);
-  const belowIsTool = Boolean(below.tool);
-  if (aboveIsTool && belowIsTool) return 0;
-  if (!aboveIsTool && !belowIsTool) return 4;
-  return 6;
 }
 
 function ActivityRow({
@@ -2554,10 +2592,10 @@ function ToolActivityCard({
           style={{
             ...toolPre,
             background: step.resultIsError
-              ? "color-mix(in srgb, #fef3f2 78%, var(--paper) 22%)"
-              : "color-mix(in srgb, #f0fdf4 72%, var(--paper) 28%)",
-            borderColor: step.resultIsError ? "#fecdca" : "#bbf7d0",
-            color: step.resultIsError ? "#7a271a" : "#14532d",
+              ? "color-mix(in srgb, var(--danger-soft) 78%, var(--paper) 22%)"
+              : "color-mix(in srgb, var(--ok-soft) 72%, var(--paper) 28%)",
+            borderColor: step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)",
+            color: step.resultIsError ? "var(--danger)" : "var(--ok)",
           }}
         >
           {step.result}
@@ -2575,7 +2613,7 @@ function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean })
         display: "flex",
         alignItems: "center",
         gap: 7,
-        minHeight: 26,
+        minHeight: 38,
         minWidth: 0,
         fontSize: 12.5,
         color: "var(--ink-soft)",
@@ -2624,9 +2662,10 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
   const hasDisclosure = false;
   return (
     <div
+      className="agentlas-working-tool-row"
       style={{
         minWidth: 0,
-        minHeight: 26,
+        minHeight: 38,
         padding: "2px 0",
         display: "flex",
         flexDirection: "column",
@@ -2691,7 +2730,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
         {hasResult && (
           <span
             style={{
-              color: step.resultIsError ? "#b42318" : "#15803d",
+              color: step.resultIsError ? "var(--danger)" : "var(--ok)",
               fontSize: 11,
               fontWeight: 700,
               flexShrink: 0,
@@ -2718,8 +2757,8 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
             onClick={() => setResultOpen((v) => !v)}
             style={{
               ...toolMiniButton,
-              color: resultOpen ? (step.resultIsError ? "#b42318" : "#15803d") : "var(--muted-deep)",
-              borderColor: resultOpen ? (step.resultIsError ? "#fecdca" : "#bbf7d0") : "var(--paper-edge)",
+              color: resultOpen ? (step.resultIsError ? "var(--danger)" : "var(--ok)") : "var(--muted-deep)",
+              borderColor: resultOpen ? (step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)") : "var(--paper-edge)",
             }}
           >
             {step.resultIsError ? t("chatstream.tool_error") : t("chatstream.tool_result")}
@@ -2742,10 +2781,10 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           style={{
             ...toolPre,
             background: step.resultIsError
-              ? "color-mix(in srgb, #fef3f2 78%, var(--paper) 22%)"
-              : "color-mix(in srgb, #f0fdf4 72%, var(--paper) 28%)",
-            borderColor: step.resultIsError ? "#fecdca" : "#bbf7d0",
-            color: step.resultIsError ? "#7a271a" : "#14532d",
+              ? "color-mix(in srgb, var(--danger-soft) 78%, var(--paper) 22%)"
+              : "color-mix(in srgb, var(--ok-soft) 72%, var(--paper) 28%)",
+            borderColor: step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)",
+            color: step.resultIsError ? "var(--danger)" : "var(--ok)",
           }}
         >
           {step.result}
@@ -3015,14 +3054,14 @@ function toolActivityEyebrow(view: ToolViewModel, locale: "ko" | "en"): string {
 
 function toolTone(group: ToolGroup, isError: boolean): { accent: string; bg: string; border: string } {
   if (isError) {
-    return { accent: "#b42318", bg: "#fef3f2", border: "#fecdca" };
+    return { accent: "var(--danger)", bg: "var(--danger-soft)", border: "var(--danger-soft)" };
   }
   const tones: Record<ToolGroup, { accent: string; bg: string; border: string }> = {
-    command: { accent: "#2563eb", bg: "#eff6ff", border: "#bfdbfe" },
-    read: { accent: "#0f766e", bg: "#ecfdf5", border: "#99f6e4" },
-    edit: { accent: "#b45309", bg: "#fffbeb", border: "#fde68a" },
-    search: { accent: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
-    other: { accent: "#475569", bg: "#f8fafc", border: "#cbd5e1" },
+    command: { accent: "var(--info)", bg: "var(--info-soft)", border: "var(--info-soft)" },
+    read: { accent: "var(--info)", bg: "var(--ok-soft)", border: "var(--ok-soft)" },
+    edit: { accent: "var(--warn)", bg: "var(--warn-soft)", border: "var(--warn-soft)" },
+    search: { accent: "var(--purple-deep)", bg: "var(--purple-soft)", border: "var(--purple-soft)" },
+    other: { accent: "var(--info)", bg: "var(--info-soft)", border: "var(--info-soft)" },
   };
   return tones[group];
 }
@@ -3098,8 +3137,8 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
   }
   const tone = {
     info: { fg: "var(--accent)", icon: "ⓘ" },
-    success: { fg: "#2f7d4f", icon: "✓" },
-    warning: { fg: "#9a6700", icon: "!" },
+    success: { fg: "var(--ok)", icon: "✓" },
+    warning: { fg: "var(--warn)", icon: "!" },
     error: { fg: "var(--red-deep)", icon: "×" },
   }[notice.level];
   const expandable = Boolean(notice.details || notice.code);

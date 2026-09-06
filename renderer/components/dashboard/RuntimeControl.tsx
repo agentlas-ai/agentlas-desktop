@@ -318,7 +318,7 @@ export function RuntimeControl() {
   }
 
   function runtimeOptionsForRole(role: RuntimeRole) {
-    return runtimesForRole(role).map((runtime, index) => ({
+    return runtimesForRole(role).filter((runtime) => runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
       runtime,
       index,
       label: runtimeLabel(runtime),
@@ -442,6 +442,7 @@ export function RuntimeControl() {
     runtime: RuntimeStatus,
     role: RuntimeRole,
   ): RuntimeSelection[] {
+    if (runtime.credentialAccess?.status === "unavailable") return [];
     const base = selectionFromRuntime(runtime, role);
     const modelRows = modelsByRuntime[runtimeKey(runtime)]
       ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));

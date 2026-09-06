@@ -7,10 +7,12 @@ export const ONE_ATTACHMENT_LIMITS = Object.freeze({
   maxImageBytes: 5 * 1024 * 1024,
   maxFileBytes: 64 * 1024 * 1024,
   maxTotalBytes: 96 * 1024 * 1024,
+  maxDirectoryEntries: 512,
+  maxRelativePathBytes: 768,
   capabilityTtlMs: 30 * 60 * 1_000,
 });
 
-export type OneAttachmentKind = "image" | "file";
+export type OneAttachmentKind = "image" | "file" | "directory";
 
 /**
  * Picker/drop metadata is only a UX consistency claim. Main resolves the

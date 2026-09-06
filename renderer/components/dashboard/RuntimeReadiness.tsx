@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { navigate } from "@/lib/navigation";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import type {
   AuthSession,
@@ -433,6 +434,15 @@ export function RuntimeReadiness() {
             <div>
               <strong>{item.label}</strong>
               {item.detail && <span>{item.detail}</span>}
+              {item.id === "plugins" && item.status === "attention" && (
+                <button
+                  type="button"
+                  data-dashboard-action="true"
+                  onClick={() => navigate("/settings")}
+                >
+                  {ko ? "설정 열기" : "Open settings"}
+                </button>
+              )}
               {item.actions?.map((action) => (
                 <button
                   type="button"

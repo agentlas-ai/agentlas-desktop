@@ -24,7 +24,8 @@ import { getAgentConcurrencyInfo } from "../store/concurrency";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
-import { materializeAgentFiles } from "../agents/files";
+import { agentFolderPath, materializeAgentFiles } from "../agents/files";
+import { removeRoute, setRoute } from "../agents/routes";
 import { appendChatMessage, createChat, getOrCreateOneMemberChat } from "../store/chats";
 import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
 import { seatEventText } from "../../shared/one-seat-events";
@@ -368,7 +369,23 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
       chatId = createChat({ agentId: id, title: name, originSurface: "one", taskMode: "conversation" }).id;
     })();
     committed = true;
-    materializeAgentFiles(id);
+    // 좌석만 만들고 끝내면 이 팀원은 폴더를 가진 적이 없는 채로 남는다 — Cloud 업로드
+    // 목록의 경계는 정확히 "폴더를 가진 적이 있는가"이므로(registered-upload.ts), 로컬
+    // 임포트·커머스팀과 같은 방식으로 실제 폴더를 만들고 그 경로를 route로 등록해야
+    // 이 팀원도 나중에 발행할 수 있는 진짜 꾸러미가 된다. 등록하지 않으면 파일은 디스크에
+    // 있는데 localPath는 영영 비어, 사용자가 만든 팀원을 발행할 길이 없는 막다른 골목이 된다.
+    const agentDir = materializeAgentFiles(id);
+    if (agentDir) {
+      setRoute({
+        agentId: id,
+        path: agentDir,
+        runtime: "generic",
+        labels: ["generic", "codex", "claude-code", "gemini"],
+        kind: "agent",
+        importedAt: now,
+        source: "local-import",
+      });
+    }
     if (avatar) writeOneTeamAvatar({ agentId: id, slug, ...avatar });
   } catch (error) {
     if (committed) {
@@ -378,6 +395,10 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
         db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id);
       })();
     }
+    // 트랜잭션을 정직하게 유지한다: 폴더 등록(route)이 반쯤 됐거나, 폴더 쓰기 자체가
+    // 실패했다면 그 흔적을 지운다. 행이 갖지도 않은 폴더를 가진 척해서는 안 된다.
+    try { removeRoute(id); } catch { /* 등록된 적이 없으면 no-op */ }
+    try { fs.rmSync(agentFolderPath(slug), { recursive: true, force: true }); } catch { /* best-effort */ }
     removeOneTeamAvatarDirectory(slug);
     throw error;
   }

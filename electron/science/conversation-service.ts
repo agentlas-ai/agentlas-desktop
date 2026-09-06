@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   McpInvocationEvent,
   McpInvocationRequest,
+  RuntimeSelection,
 } from "../../shared/types";
 import type {
   ScienceMessage,
@@ -16,6 +17,8 @@ import {
   type InvocationAttachResult,
 } from "../invocation/service";
 import type { InvocationExecutionContext } from "../mcp/client";
+import { captureScienceInvocationBinding, type InvocationWorkspaceBinding } from "../invocation/workspace-binding";
+import { validateScienceProjectFolderPath } from "./project-folder-selection";
 import {
   ensureScienceRuntimeChat,
   latestDurableAssistantMessage,
@@ -32,6 +35,7 @@ import {
   type ScienceResearchDirectorRuntime,
 } from "./research-director";
 import type { ScienceEvidenceGraphService } from "./evidence-graph";
+import { normalizeScienceRuntimeSelection } from "./runtime-selection";
 
 export type ScienceComposerStartInput = {
   requestId: string;
@@ -39,6 +43,7 @@ export type ScienceComposerStartInput = {
   conversationId: string;
   locale?: "ko" | "en";
   parentTurnId?: string | null;
+  runtimeSelection?: RuntimeSelection | null;
 } & (
   | { mode: "existing-user-message"; userMessageId: string }
   | { mode: "append-user-message"; content: string }
@@ -61,7 +66,7 @@ export interface ScienceConversationInvocationRuntime {
   onSettled(listener: (envelope: InvocationSettledEnvelope) => void | Promise<void>): () => void;
   start(
     request: McpInvocationRequest,
-    workspaceBinding?: undefined,
+    workspaceBinding?: InvocationWorkspaceBinding,
     executionContext?: InvocationExecutionContext,
   ): InvocationStartResult;
   cancel(runId: string): "requested" | "already-requested" | "not-found";
@@ -122,7 +127,7 @@ export class ScienceConversationService {
     private readonly evidenceGraphService: ScienceEvidenceGraphService | null = null,
   ) {
     this.removeEventListener = this.runtime.onEvent((envelope) => this.projectRuntimeEvent(envelope));
-    this.removeSettledListener = this.runtime.onSettled((envelope) => this.settleRuntimeTurn(envelope));
+    this.removeSettledListener = this.runtime.onSettled((envelope) => this.handleRuntimeSettlement(envelope));
   }
 
   close(): void {
@@ -167,10 +172,18 @@ export class ScienceConversationService {
     const existing = this.store.getTurnByRequestId(input.requestId);
     if (existing) {
       if (existing.projectId !== input.projectId || existing.conversationId !== input.conversationId) throw new Error("science-turn-request-scope-conflict");
+      if (input.runtimeSelection !== undefined && JSON.stringify(normalizeScienceRuntimeSelection(input.runtimeSelection)) !== JSON.stringify(existing.runtimeSelection ?? null)) {
+        throw new Error("science-turn-runtime-selection-conflict");
+      }
       const userMessage = this.store.getMessageForProject(existing.projectId, existing.conversationId, existing.userMessageId);
       if (!userMessage) throw new Error("science-turn-user-message-integrity-failed");
       if (existing.status === "queued" && this.runtime.receipt(existing.invocationRunId) === null) {
-        this.dispatchTurn(existing, userMessage, input.locale ?? currentUiLocale());
+        try {
+          this.dispatchTurn(existing, userMessage, input.locale ?? currentUiLocale());
+        } catch (error) {
+          this.appendTerminalError(existing, "failed", error instanceof Error ? error.message : "invocation-start-failed");
+          throw error;
+        }
       }
       return { turn: this.store.getTurnForProject(existing.projectId, existing.id) ?? existing, userMessage, replayed: true };
     }
@@ -194,6 +207,7 @@ export class ScienceConversationService {
       runtimeChatId: binding.runtimeChatId,
       invocationRunId,
       parentTurnId: input.parentTurnId ?? null,
+      runtimeSelection: normalizeScienceRuntimeSelection(input.runtimeSelection),
       ...(input.mode === "existing-user-message"
         ? { mode: input.mode, userMessageId: input.userMessageId }
         : input.mode === "append-user-message"
@@ -204,21 +218,24 @@ export class ScienceConversationService {
       this.dispatchTurn(started.turn, started.userMessage, input.locale ?? currentUiLocale());
     } catch (error) {
       const current = this.store.getTurnForProject(project.id, started.turn.id) ?? started.turn;
-      if (current.status === "queued") {
-        const failed = this.store.appendTurnEvent({
-          requestId: stableUuid(`science:dispatch-failed:v1:${current.invocationRunId}`),
-          projectId: current.projectId,
-          conversationId: current.conversationId,
-          turnId: current.id,
-          sequence: current.lastSequence + 1,
-          kind: "error",
-          code: "failed",
-          payload: {
-            errorCode: "invocation-start-failed",
-            message: bounded(error instanceof Error ? error.message : String(error), 1_000) ?? "Invocation start failed",
-          },
-        });
-        this.emit(failed.event);
+      // Adapters may have delivered `invoke-started` before throwing or
+      // returning a receipt for another run. In either case the durable turn
+      // is already running, so a queued-only cleanup leaves it stranded until
+      // restart recovery. Close every non-terminal turn with the bounded
+      // dispatch cause; the loop reservation was already failed inside
+      // dispatchTurn and therefore remains paused.
+      if (!["completed", "failed", "cancelled", "interrupted"].includes(current.status)) {
+        try {
+          this.appendTerminalError(
+            current,
+            "failed",
+            bounded(error instanceof Error ? error.message : String(error), 240) ?? "invocation-start-failed",
+          );
+        } catch {
+          // Preserve the original adapter failure. A later attach/recovery
+          // path can still inspect the non-terminal turn if persistence itself
+          // was interrupted.
+        }
       }
       throw error;
     }
@@ -229,7 +246,34 @@ export class ScienceConversationService {
   cancel(input: { projectId: string; conversationId: string; turnId: string }): "requested" | "already-requested" | "terminal" {
     const turn = this.store.getTurnForProject(input.projectId, input.turnId);
     if (!turn || turn.conversationId !== input.conversationId) throw new Error("science-turn-not-found");
-    if (["completed", "failed", "cancelled", "interrupted"].includes(turn.status)) return "terminal";
+    if (["completed", "failed", "cancelled", "interrupted"].includes(turn.status)) {
+      // A synchronous settlement can durably create a loop-continuation child
+      // before a renderer sends the user's stop for the parent. Follow only
+      // that exact active descendant chain; an unrelated new user turn must
+      // remain untouched and a terminal parent without a child stays terminal.
+      const active = this.store.getActiveTurn(turn.projectId, turn.conversationId);
+      const loop = this.store.getActiveLoopSession(turn.projectId);
+      if (!active || active.origin !== "loop-continuation"
+        || !loop || loop.status !== "running" || loop.activeRunId !== active.invocationRunId) return "terminal";
+      let cursor: ScienceTurn | null = active;
+      const seen = new Set<string>();
+      let descendant = false;
+      while (cursor?.parentTurnId && !seen.has(cursor.id)) {
+        if (cursor.parentTurnId === turn.id) { descendant = true; break; }
+        seen.add(cursor.id);
+        cursor = this.store.getTurnForProject(turn.projectId, cursor.parentTurnId);
+      }
+      if (!descendant) return "terminal";
+      return this.cancel({ projectId: active.projectId, conversationId: active.conversationId, turnId: active.id });
+    }
+    // Close continuation admission before requesting asynchronous adapter
+    // cancellation; a simultaneous completed receipt must not spawn a child.
+    this.store.pauseLoopAfterControllerSettlement({
+      projectId: turn.projectId,
+      invocationRunId: turn.invocationRunId,
+      receiptStatus: "cancelled",
+      errorCode: "researcher-cancelled",
+    });
     this.toolRuntime?.cancelInvocation(turn.invocationRunId);
     this.revokeToolGrant(turn.invocationRunId);
     const result = this.runtime.cancel(turn.invocationRunId);
@@ -250,8 +294,110 @@ export class ScienceConversationService {
     return result;
   }
 
+  /**
+   * Dispatch exactly one controller turn after an explicit loop resume.
+   *
+   * The caller must have durably transitioned the loop from paused to queued
+   * first. This method never scans for work or resumes a loop at startup; it
+   * binds the request to the loop's persisted chat and runtime pin, and
+   * idempotently replays an already-created turn when the IPC response is
+   * retried.
+   */
+  resumeLoop(input: {
+    requestId: string;
+    projectId: string;
+    conversationId: string;
+    loopSessionId: string;
+    expectedLoopVersion: number;
+    expectedLoopStateSha256: string;
+    locale?: "ko" | "en";
+  }): ScienceComposerStartResult {
+    const session = this.store.getLoopSessionForProject(input.projectId, input.loopSessionId);
+    if (!session) throw new Error("science-loop-not-found");
+    if (session.runtimeSelection === null || !session.runtimeSelection.model) {
+      throw new Error("science-runtime-selection-required");
+    }
+    const requestId = stableUuid(`science:loop-resume:v1:${input.requestId}:${session.id}`);
+    if (session.status === "running") {
+      if (!session.activeRunId) throw new Error("science-loop-running-turn-missing");
+      const turn = this.store.getTurnByInvocationRunId(session.activeRunId);
+      if (!turn || turn.projectId !== input.projectId || turn.conversationId !== input.conversationId) {
+        throw new Error("science-loop-running-turn-missing");
+      }
+      if (turn.requestId !== requestId) throw new Error("science-loop-resume-request-conflict");
+      const userMessage = this.store.getMessageForProject(turn.projectId, turn.conversationId, turn.userMessageId);
+      if (!userMessage) throw new Error("science-turn-user-message-integrity-failed");
+      return { turn, userMessage, replayed: true };
+    }
+    const priorResumeTurn = this.store.getTurnByRequestId(requestId);
+    if (priorResumeTurn) {
+      if (priorResumeTurn.projectId !== input.projectId || priorResumeTurn.conversationId !== input.conversationId) {
+        throw new Error("science-loop-resume-request-scope-conflict");
+      }
+      const userMessage = this.store.getMessageForProject(priorResumeTurn.projectId, priorResumeTurn.conversationId, priorResumeTurn.userMessageId);
+      if (!userMessage) throw new Error("science-turn-user-message-integrity-failed");
+      return { turn: priorResumeTurn, userMessage, replayed: true };
+    }
+    if (session.status !== "queued") throw new Error("science-loop-resume-not-queued");
+    if (session.version !== input.expectedLoopVersion || session.stateSha256 !== input.expectedLoopStateSha256) {
+      throw new Error("science-loop-resume-version-conflict");
+    }
+    const contract = this.store.getResearchContractForProject(input.projectId, session.contractId);
+    if (!contract || contract.status !== "approved" || contract.version !== session.contractVersion) {
+      throw new Error("science-loop-contract-changed");
+    }
+    const lifecycle = this.store.getResearchLifecycleForProject(input.projectId);
+    const fullStudyFinalization = contract.completionScope === "full-study"
+      && lifecycle?.phase === "ready_to_submit" && lifecycle.status === "complete";
+    if (!lifecycle || lifecycle.studyId !== session.lifecycleStudyId
+      || (!fullStudyFinalization && lifecycle.status !== "active")
+      || lifecycle.openBlockingDecisions.length > 0 || lifecycle.blockers.length > 0
+      || this.store.listResearchEpisodes(input.projectId, session.id).some((episode) => episode.status === "waiting-for-decision")) {
+      throw new Error("science-loop-researcher-decision-required");
+    }
+    if (!Number.isFinite(Date.parse(session.deadlineAt)) || Date.now() >= Date.parse(session.deadlineAt)) {
+      throw new Error("science-loop-deadline-exhausted");
+    }
+    if (session.currentEpisode >= session.maxEpisodes) throw new Error("science-loop-episode-budget-exhausted");
+    const binding = this.store.getConversationRuntimeBinding(input.projectId, input.conversationId);
+    if (!binding || binding.runtimeChatId !== session.runtimeChatId) {
+      throw new Error("science-loop-runtime-chat-binding-mismatch");
+    }
+    const latest = this.store.getLatestTurn(input.projectId, input.conversationId);
+    if (!latest) throw new Error("science-loop-resume-turn-missing");
+    if (!["completed", "failed", "cancelled", "interrupted"].includes(latest.status)) {
+      throw new Error("science-loop-resume-turn-active");
+    }
+    const continuationBasis = {
+      ...(latest.continuationBasis ?? {}),
+      schema: "agentlas.science.loop-resume-basis/v1",
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      loopSessionId: session.id,
+      sourceTurnId: latest.id,
+      sourceInvocationRunId: latest.invocationRunId,
+      loopVersion: session.version,
+      loopStateSha256: session.stateSha256,
+      noProgressStreak: 0,
+    };
+    return this.start({
+      requestId,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      parentTurnId: latest.id,
+      mode: "append-controller-message",
+      content: "Resume the authorized research loop from its canonical state. Inspect the loop, lifecycle, evidence graph, and exact OCC receipts first. Plan and execute at most one successor episode, complete the loop if verified, or pause at a concrete decision, blocker, deadline, or budget boundary.",
+      continuationBasis,
+      runtimeSelection: session.runtimeSelection,
+      locale: input.locale ?? currentUiLocale(),
+    });
+  }
+
   attach(input: { projectId: string; conversationId: string }): ScienceComposerAttachResult | null {
-    const turn = this.store.getActiveTurn(input.projectId, input.conversationId);
+    // A fast failure may finish before the renderer subscribes. Reattach its
+    // durable receipt as well; absence of an active run does not mean ready.
+    const turn = this.store.getActiveTurn(input.projectId, input.conversationId)
+      ?? this.store.getLatestTurn(input.projectId, input.conversationId);
     if (!turn) return null;
     return { turn, events: this.store.listTurnEvents(input.projectId, turn.id) };
   }
@@ -294,12 +440,21 @@ export class ScienceConversationService {
   private dispatchTurn(turn: ScienceTurn, userMessage: ScienceMessage, locale: "ko" | "en"): void {
     const project = this.store.getProject(turn.projectId);
     if (!project) throw new Error("science-project-not-found");
+    // Snapshot the host-owned folder before director/loop side effects. Legacy
+    // projects keep their existing unbound behavior; prompt text cannot select a path.
+    let workspaceBinding: InvocationWorkspaceBinding | undefined;
+    if (project.folderPath != null) {
+      const canonical = validateScienceProjectFolderPath(project.folderPath);
+      if (canonical !== project.folderPath) throw new Error("science-project-folder-selection-changed");
+      workspaceBinding = captureScienceInvocationBinding(canonical);
+    }
     const dinosaurRouteEnabled = isDinosaurComparativeRequest(
       [project.title, project.question, userMessage.content].filter(Boolean).join("\n"),
     );
     const researchLifecycle = this.store.getResearchLifecycleForProject(project.id);
     if (!researchLifecycle) throw new Error("science-research-lifecycle-canonical-missing");
     const researchLoop = this.store.getActiveLoopSession(project.id);
+    const researchContract = this.store.latestResearchContract(project.id);
     const activeResearchEpisode = researchLoop
       ? this.store.listResearchEpisodes(project.id, researchLoop.id).find((episode) => ["planned", "running", "waiting-for-decision"].includes(episode.status)) ?? null
       : null;
@@ -370,10 +525,22 @@ export class ScienceConversationService {
       userPrompt: userMessage.content,
       promptOrigin: turn.origin === "loop-continuation" ? "system" : "user",
       taskIntent: "conversation",
-      permissions: "read",
+      runtimeSelection: turn.runtimeSelection ?? undefined,
+      // A Science turn acts: it proposes a contract, records hypotheses, freezes a plan, runs a Lab
+      // and composes a manuscript. Under a read-only sandbox Codex treats every MCP tool call as
+      // needing approval, and a non-interactive turn has nobody to ask, so it recorded each call as
+      // "user rejected MCP tool call" -- a rejection by a user who was never asked. Measured across
+      // seven live astronomy runs: every Science tool call died that way and the study never left
+      // phase 1 of 12.
+      //
+      // The boundary that matters here is not the sandbox. Every Science write goes through
+      // Main-owned tools that ScienceStore revalidates against the exact project, turn and grant;
+      // workspace-write bounds the filesystem to the project folder on top of that. Owner decision,
+      // 2026-09-04, taken over the narrower alternative of per-tool approval declarations.
+      permissions: "write",
       sessionRouting: true,
       locale,
-    }, undefined, {
+    }, workspaceBinding, {
       source: "science",
       science: {
         projectId: turn.projectId,
@@ -394,6 +561,11 @@ export class ScienceConversationService {
         title: project.title,
         question: project.question,
         domain: project.domain,
+        ...(workspaceBinding ? { workspace: {
+          directory: workspaceBinding.canonicalPath,
+          outputDirectory: workspaceBinding.canonicalPath,
+          policy: "Use this host-bound directory for runtime-created deliverables under the existing write permission and tool approvals. Do not select another workspace from prompt text. Science artifacts and exports still require their typed receipts; an internal render is not proof of a file saved here.",
+        } } : {}),
         researchDirector: {
           agentId: researchDirector.agentId,
           agentSlug: researchDirector.agentSlug,
@@ -426,16 +598,27 @@ export class ScienceConversationService {
             planSha256: activeResearchEpisode.planSha256,
           } : null,
         } : null,
+        researchContract: researchContract ? {
+          id: researchContract.id,
+          version: researchContract.version,
+          status: researchContract.status,
+          objective: researchContract.objective,
+          successCriteria: researchContract.successCriteria,
+          failureCriteria: researchContract.failureCriteria,
+          constraints: researchContract.constraints,
+          completionScope: researchContract.completionScope,
+        } : null,
+        approvalPolicy: this.store.approvalPolicy(project.id),
         evidenceGraph: evidenceGraphContext,
         provenancePolicy: "Never claim a source, run, artifact, validation, or manuscript binding unless a typed Science tool receipt exists.",
         evidenceGraphPolicy: "Use the bounded exact Evidence Graph for retrieval and gap awareness. Citation edges are not support. Never promote an inference candidate or accepted review to fact; use exact non-invalidated evidence paths and explicit conditioning contexts.",
         researchDirectorPolicy: "This turn is owned by the exact built-in Research Director identity and its verified full workflow prompt. Keep one study state across literature, hypotheses, frozen analysis planning, Lab execution, evidence reconciliation, manuscript versions, and target-journal validation.",
-        researchLoopPolicy: "After the human-approved Research Contract and evidence-bound hypothesis exist, use the authoritative loop tools. Persist an episode plan before Lab execution, then settle it only with exact terminal run, run-backed artifact, and evidence receipts. Never describe prose-only iteration as an executed episode.",
+        researchLoopPolicy: "Treat a research request as a persistent objective, not a single response. Propose a contract with evidence-verifiable success criteria and budgets appropriate to the depth requested. Honor Main's exact standing-approval receipt; do not ask again when its contract is approved. Start the authoritative research loop as soon as the authorized contract exists, then build the evidence-bound hypothesis and episode plan. Persist each episode before Lab execution and settle it only with exact run, artifact and evidence receipts. Continue literature, analysis, falsification, independent checks and manuscript revision while criteria remain unmet. A provider turn ending, elapsed minutes, page count or a first manuscript is not goal completion. Verify every success criterion through the loop tools before completion; preserve concrete blockers and budget exhaustion as paused/incomplete. Never describe prose-only iteration as an executed episode.",
         literaturePolicy: dinosaurRouteEnabled
           ? "For a dinosaur or de-extinction question, the dedicated comparative-proxy route has priority over broad literature discovery: call search_paleontology_occurrences first, then advance through the dedicated paleontology/genomics tools in dinosaurResearchRoutePolicy. Use search_academic_literature only as supplementary evidence after the dedicated route has a receipt. Metadata discovery is not full-text verification."
           : "For prior research, novelty, state-of-the-art, citation, related-paper, or literature-review work, call search_academic_literature before answering. Metadata discovery is not full-text verification.",
         statisticsPolicy: "For statistical inference, make the estimand, variables, assumptions, multiplicity handling, diagnostics, and sensitivity plan explicit; freeze confirmatory choices before calling run_statistical_analysis. Persist only its receipt-bound Lab artifact.",
-        astronomyPolicy: "For a sky-field or astronomical catalog task, route through the installed @agentlas-astronomy provider policy, call search_astronomy_catalog with exact ICRS coordinates, and then build_astronomy_sky_map from its returned runId. For irregular time-series already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with its exact version/hash, explicit column mapping, time system, period grid, and weighting policy; preserve missing rows and treat the strongest grid period as a candidate, not a confirmed physical period, because false-alarm probability and period uncertainty are not computed. Preserve exact provider bytes and null measurements; never invent catalog rows, impute missing measurements, or bypass the bounded SIMBAD policy.",
+        astronomyPolicy: "For a sky-field or astronomical catalog task, route through the installed @agentlas-astronomy provider policy, call search_astronomy_catalog with exact ICRS coordinates, and then build_astronomy_sky_map from its returned runId. For irregular time-series already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with its exact version/hash, explicit column mapping, time system, period grid, and weighting policy; preserve missing rows and treat the strongest grid period as a candidate, not a confirmed physical period, and interpret any analytic false-alarm upper bound and model period standard error only within the returned assumptions, not as a confidence interval or calibrated discovery claim. Use analyze_light_curve_periodicity_depth when the frozen plan calls for sampling-window, alias, bootstrap, or robustness analysis with explicit inputs. Preserve exact provider bytes and null measurements; never invent catalog rows, impute missing measurements, or bypass the bounded SIMBAD policy.",
         domainPluginPolicy: "Astronomy, Earth-science, physics, and paleontology work may route to the installed @agentlas-astronomy, @agentlas-earth-science, @agentlas-physics, and @agentlas-paleontology plugins. Verify the live tool and preserve provider/raw/normalized receipts; PBDB fossil occurrences support taxonomic, geographic, and stratigraphic claims only and never direct DNA, genome, embryo, hatching, or de-extinction claims; never describe unavailable simulation engines as executed.",
         dinosaurResearchRoute: {
           enabled: dinosaurRouteEnabled,
@@ -454,22 +637,31 @@ export class ScienceConversationService {
         },
       }),
       });
+      if (result.runId !== turn.invocationRunId) throw new Error("science-invocation-run-receipt-mismatch");
     } catch (error) {
       if (loopDispatchState) {
         try {
-          const currentLoop = this.store.getLoopSessionForProject(loopDispatchState.projectId, loopDispatchState.id) ?? loopDispatchState;
           this.store.failLoopResumeDispatch({
-            projectId: currentLoop.projectId,
-            loopSessionId: currentLoop.id,
-            expectedLoopVersion: currentLoop.version,
-            expectedLoopStateSha256: currentLoop.stateSha256,
-            errorCode: error instanceof Error ? error.message : String(error),
+            projectId: loopDispatchState.projectId,
+            loopSessionId: loopDispatchState.id,
+            expectedLoopVersion: loopDispatchState.version,
+            expectedLoopStateSha256: loopDispatchState.stateSha256,
+            invocationRunId: turn.invocationRunId,
+            errorCode: bounded(error instanceof Error ? error.message : String(error), 240) ?? "science-runtime-start-failed",
           });
         } catch { /* a newer canonical Science state wins */ }
       }
+      // An adapter may throw after spawning its process. Close this request's
+      // tool authority and request cancellation even when no valid start
+      // receipt was returned; never cancel the mismatched receipt's other ID.
+      try {
+        this.appendTerminalError(turn, "failed", bounded(error instanceof Error ? error.message : String(error), 240) ?? "science-runtime-start-failed");
+      } catch { /* preserve the dispatch failure if storage is unavailable */ }
+      this.revokeToolGrant(turn.invocationRunId);
+      try { this.toolRuntime?.cancelInvocation(turn.invocationRunId); } catch { /* preserve the dispatch failure */ }
+      try { this.runtime.cancel(turn.invocationRunId); } catch { /* preserve the dispatch failure */ }
       throw error;
     }
-    if (result.runId !== turn.invocationRunId) throw new Error("science-invocation-run-receipt-mismatch");
   }
 
   private projectRuntimeEvent(envelope: InvocationEventEnvelope): void {
@@ -543,7 +735,30 @@ export class ScienceConversationService {
   }
 
   private projectEvent(turn: ScienceTurn, event: McpInvocationEvent): Pick<Parameters<ScienceStore["appendTurnEvent"]>[0], "kind" | "code" | "payload" | "delta"> {
-    const common = { genericSequence: event.sequence ?? null, genericObservedAt: event.observedAt ?? null, genericKind: event.kind };
+    const common = {
+      genericSequence: event.sequence ?? null,
+      genericObservedAt: event.observedAt ?? null,
+      genericKind: event.kind,
+      ...(event.runtimeSelection ? { runtimeSelection: event.runtimeSelection } : {}),
+    };
+    if (event.runtimeSelection && turn.runtimeSelection) {
+      const actual = event.runtimeSelection;
+      const expected = turn.runtimeSelection;
+      if (actual.kind !== expected.kind || actual.model !== expected.model
+        || (expected.backend && actual.backend !== expected.backend)
+        || (expected.source && actual.source !== expected.source)) {
+        this.store.pauseLoopAfterControllerSettlement({
+          projectId: turn.projectId,
+          invocationRunId: turn.invocationRunId,
+          receiptStatus: "failed",
+          errorCode: "science-runtime-selection-mismatch",
+        });
+        this.toolRuntime?.cancelInvocation(turn.invocationRunId);
+        this.revokeToolGrant(turn.invocationRunId);
+        this.runtime.cancel(turn.invocationRunId);
+        return { kind: "error", code: "failed", payload: { ...common, errorCode: "science-runtime-selection-mismatch" } };
+      }
+    }
     if (event.kind === "lifecycle") {
       return {
         kind: "lifecycle",
@@ -621,6 +836,7 @@ export class ScienceConversationService {
           projectId: turn.projectId,
           invocationRunId: turn.invocationRunId,
           receiptStatus: envelope.receipt.status,
+          errorCode: "result-not-durable",
         });
         this.appendTerminalError(turn, "failed", "result-not-durable");
         return;
@@ -632,6 +848,7 @@ export class ScienceConversationService {
           projectId: turn.projectId,
           invocationRunId: turn.invocationRunId,
           receiptStatus: envelope.receipt.status,
+          errorCode: "science-result-empty-after-presentation-normalization",
         });
         this.appendTerminalError(turn, "failed", "science-result-empty-after-presentation-normalization");
         return;
@@ -670,11 +887,25 @@ export class ScienceConversationService {
       projectId: turn.projectId,
       invocationRunId: turn.invocationRunId,
       receiptStatus: envelope.receipt.status,
+      ...(envelope.receipt.errorCode ? { errorCode: bounded(envelope.receipt.errorCode, 240) ?? "runtime-failed" } : {}),
     });
     const status = envelope.receipt.status === "cancelled" ? "cancelled"
       : envelope.receipt.status === "interrupted" ? "interrupted"
         : "failed";
     this.appendTerminalError(turn, status, envelope.receipt.errorCode ?? status);
+  }
+
+  private handleRuntimeSettlement(envelope: InvocationSettledEnvelope): void {
+    try {
+      this.settleRuntimeTurn(envelope);
+    } catch (error) {
+      const turn = this.store.getTurnByInvocationRunId(envelope.runId);
+      if (!turn || ["completed", "failed", "cancelled", "interrupted"].includes(turn.status)) return;
+      const cause = error instanceof Error && /^science-[a-z0-9-]+$/.test(error.message)
+        ? error.message
+        : "runtime-settlement-projection-failed";
+      this.appendTerminalError(turn, "failed", cause);
+    }
   }
 
   private prepareAndDispatchLoopContinuation(turn: ScienceTurn, receiptStatus: string): void {
@@ -703,7 +934,8 @@ export class ScienceConversationService {
         this.store.pauseLoopAfterControllerSettlement({
           projectId: turn.projectId,
           invocationRunId: turn.invocationRunId,
-          receiptStatus: `continuation-preparation-failed:${error instanceof Error ? error.message : String(error)}`,
+          receiptStatus: "failed",
+          errorCode: bounded(error instanceof Error ? error.message : String(error), 240) ?? "science-continuation-preparation-failed",
         });
       } catch { /* the newer loop state wins */ }
       return;
@@ -735,6 +967,12 @@ export class ScienceConversationService {
   private appendTerminalError(turn: ScienceTurn, status: "failed" | "cancelled" | "interrupted", errorCode: string): void {
     const current = this.store.getTurnForProject(turn.projectId, turn.id);
     if (!current || ["completed", "failed", "cancelled", "interrupted"].includes(current.status)) return;
+    this.store.pauseLoopAfterControllerSettlement({
+      projectId: current.projectId,
+      invocationRunId: current.invocationRunId,
+      receiptStatus: status,
+      errorCode: bounded(errorCode, 240) ?? status,
+    });
     const appended = this.store.appendTurnEvent({
       requestId: stableUuid(`science:terminal:v1:${turn.invocationRunId}:${status}`),
       projectId: turn.projectId,

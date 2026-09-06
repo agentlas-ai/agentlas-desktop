@@ -15,15 +15,15 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 110,
-    "bundledRuntimeVersion": "1.2.40"
+    "targetSchemaVersion": 112,
+    "bundledRuntimeVersion": "1.2.44"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.40",
-    "commit": "0c29abdb9505df32b61522861a17bbc537de5263",
-    "assetName": "hephaestus-runtime-v1.2.40.tar.gz",
-    "assetSha256": "f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2"
+    "ref": "v1.2.44",
+    "commit": "1f6d64374502cfd5f8581ad3c1fb18691ed61b1d",
+    "assetName": "hephaestus-runtime-v1.2.44.tar.gz",
+    "assetSha256": "795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",

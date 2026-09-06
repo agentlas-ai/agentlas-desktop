@@ -4,6 +4,12 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { strFromU8, unzipSync } from "fflate";
+import { validateScienceProjectFolderPath } from "./project-folder-selection";
+import type { RuntimeSelection } from "../../shared/types";
+import {
+  normalizeScienceRuntimeSelection,
+  scienceRuntimeSelectionSha256,
+} from "./runtime-selection";
 import {
   SCIENCE_ARTIFACT_KINDS,
   SCIENCE_ARTIFACT_ORIGIN_SURFACES,
@@ -11,6 +17,8 @@ import {
   SCIENCE_PROJECT_DESTINATIONS,
   SCIENCE_PROJECT_LAB_ACTIVATORS,
   SCIENCE_PROJECT_WORKSPACE_TAB_KINDS,
+  SCIENCE_RESEARCH_TEMPLATE_IDS,
+  SCIENCE_RESEARCH_COMPLETION_SCOPES,
   SCIENCE_RENDERER_IDS,
   SCIENCE_RESEARCH_RUN_RUNTIMES,
   SCIENCE_SOURCE_ACCESS_STATES,
@@ -90,6 +98,8 @@ import {
   type StartScienceTurnInput,
   type StartScienceTurnResult,
   type ScienceProject,
+  type ScienceProjectLibrarySummary,
+  type ScienceResearchTemplateId,
   type ScienceProjectDestination,
   type ScienceProjectLabBinding,
   type ScienceProjectNavigationState,
@@ -235,6 +245,7 @@ import {
   type ScienceAnalysisSpecDocument,
   type ScienceAnalysisSpec,
   type ScienceAnalysisSpecVersion,
+  type ScienceAnalysisPlanReviewReceipt,
   type ScienceAnalysisDecisionDraft,
   type ScienceDecisionOption,
   type ScienceDecisionRequest,
@@ -246,6 +257,8 @@ import {
   type AnswerScienceDecisionResult,
   type FreezeScienceAnalysisSpecInput,
   type FreezeScienceAnalysisSpecResult,
+  type ReviewScienceAnalysisPlanInput,
+  type ReviewScienceAnalysisPlanResult,
   SCIENCE_APPROVAL_SCOPES,} from "../../shared/science-contract";
 import {
   assertScienceEpisodeResultReviewReceipt,
@@ -274,11 +287,22 @@ import {
   type ScienceRendererRenderRequest,
 } from "../../shared/science-renderer-runtime";
 import {
+  SCIENCE_PAIRED_TABLE_ALIGNER_ID,
+  SCIENCE_PAIRED_TABLE_ALIGNER_INPUT_SCHEMA,
+  SCIENCE_PAIRED_TABLE_ALIGNER_OUTPUT_MIME,
+  SCIENCE_PAIRED_TABLE_ALIGNER_VERSION,
+  SCIENCE_PAIRED_TABLE_METHODS,
   SCIENCE_TABLE_ARTIFACT_KIND,
   SCIENCE_TABLE_LAB_ID,
+  SCIENCE_TABLE_LIMITS,
   SCIENCE_TABLE_RENDERER_ID,
   SCIENCE_TABLE_RENDERER_VERSION,
+  alignSciencePairedSeries,
+  scienceTableSha256,
   validateScienceTablePayload,
+  type PrepareSciencePairedStatisticsTableInput,
+  type PrepareSciencePairedStatisticsTableResult,
+  type SciencePairedSeriesAlignmentSource,
 } from "../../shared/science-table";
 import {
   SCIENCE_NUMERIC_SURFACE_ARTIFACT_KIND,
@@ -344,6 +368,8 @@ import {
   SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V3_SCHEMA,
   SCIENCE_STATISTICS_TOOL_ID,
   SCIENCE_STATISTICS_TOOL_VERSION,
+  isScienceStatisticsMethod,
+  scienceStatisticsMethodMatchesAnalysisModel,
   scienceStatisticsSha256,
   validateScienceStatisticsAnalysisPayload,
   validateScienceStatisticsFigureArtifactPayload,
@@ -351,6 +377,10 @@ import {
   validateScienceStatisticsFigureVectorArtifactPayload,
   type ScienceStatisticsFigureVectorArtifactPayload,
 } from "../../shared/science-statistics";
+import {
+  SCIENCE_ECONOMICS_ARTIFACT_SCHEMA,
+  validateScienceEconomicIndicatorArtifactPayload,
+} from "../../shared/science-economics";
 import type {
   ScienceStatisticsFigureSvgExport,
   ScienceStatisticsFigureSvgPreviewPng,
@@ -554,7 +584,7 @@ import {
   builtinAgentId,
 } from "../architecture/manifest";
 
-export const SCIENCE_SCHEMA_VERSION = 55;
+export const SCIENCE_SCHEMA_VERSION = 58;
 const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SCIENCE_SOURCE_TEXT_CHUNK_MAX_BYTES = 2_400;
@@ -697,6 +727,13 @@ function safeText(value: unknown, maximum: number, field: string): string {
   return normalized;
 }
 
+function safeTurnEventDelta(value: unknown): string {
+  // A stream fragment is not a label: leading/trailing whitespace, CRLF, and
+  // whitespace-only chunks are part of the provider's exact response bytes.
+  if (typeof value !== "string" || value.length === 0 || value.length > 65_536) throw new Error("science-turn-event-delta-invalid");
+  return value;
+}
+
 function safeStatisticsCategory(value: unknown, maximum: number, field: string): string {
   if (typeof value === "number") {
     if (!Number.isSafeInteger(value)) throw new Error(`science-${field}-invalid`);
@@ -718,6 +755,12 @@ function statisticsNumericRange(values: readonly number[]): { minimum: number; m
 function safeDomain(value: unknown): ScienceDomain {
   if (!SCIENCE_DOMAINS.includes(value as ScienceDomain)) throw new Error("science-domain-invalid");
   return value as ScienceDomain;
+}
+
+function safeResearchTemplateId(value: unknown): ScienceResearchTemplateId {
+  const templateId = String(value ?? "");
+  if (!(SCIENCE_RESEARCH_TEMPLATE_IDS as readonly string[]).includes(templateId)) throw new Error("science-research-template-invalid");
+  return templateId as ScienceResearchTemplateId;
 }
 
 function safePositiveInteger(value: unknown, minimum: number, maximum: number, field: string): number {
@@ -1956,6 +1999,44 @@ function parseObject(value: unknown): Record<string, unknown> {
   }
 }
 
+function normalizeScienceRuntimeSelectionForStore(value: unknown): RuntimeSelection | null {
+  if (value === null || value === undefined) return null;
+  const normalized = normalizeScienceRuntimeSelection(value);
+  if (!normalized) throw new Error("science-runtime-selection-invalid");
+  return normalized;
+}
+
+function scienceRuntimeSelectionFromRow(row: Record<string, unknown>): {
+  selection: RuntimeSelection | null;
+  sha256: string | null;
+} {
+  const rawJson = row.runtime_selection_json;
+  const rawSha256 = row.runtime_selection_sha256;
+  if (rawJson === null || rawJson === undefined || rawJson === "") {
+    if (rawSha256 !== null && rawSha256 !== undefined && rawSha256 !== "") {
+      throw new Error("science-runtime-selection-integrity-failed");
+    }
+    return { selection: null, sha256: null };
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(String(rawJson));
+  } catch {
+    throw new Error("science-runtime-selection-integrity-failed");
+  }
+  let selection: RuntimeSelection | null;
+  try {
+    selection = normalizeScienceRuntimeSelection(decoded);
+  } catch {
+    throw new Error("science-runtime-selection-integrity-failed");
+  }
+  const sha256 = rawSha256 === null || rawSha256 === undefined || rawSha256 === "" ? null : String(rawSha256);
+  if (!selection || !sha256 || !SHA256_RE.test(sha256) || scienceRuntimeSelectionSha256(selection) !== sha256) {
+    throw new Error("science-runtime-selection-integrity-failed");
+  }
+  return { selection, sha256 };
+}
+
 function parseArray(value: unknown): unknown[] {
   try {
     const parsed = JSON.parse(String(value));
@@ -1986,6 +2067,9 @@ function projectFromRow(row: Record<string, unknown>, relatedDomains: ScienceDom
     question: String(row.question),
     domain: String(row.domain) as ScienceDomain,
     relatedDomains,
+    researchTemplateId: row.research_template_id === null || row.research_template_id === undefined ? null : safeResearchTemplateId(row.research_template_id),
+    initialLabId: row.initial_lab_id === null || row.initial_lab_id === undefined ? null : safeResearchTemplateId(row.initial_lab_id),
+    folderPath: row.folder_path === null || row.folder_path === undefined ? null : String(row.folder_path),
     status: String(row.status) as ScienceProject["status"],
     version: Number(row.version),
     createdAt: String(row.created_at),
@@ -2066,6 +2150,7 @@ function conversationRuntimeBindingFromRow(row: Record<string, unknown>): Scienc
 }
 
 function scienceTurnFromRow(row: Record<string, unknown>): ScienceTurn {
+  const runtimeSelection = scienceRuntimeSelectionFromRow(row);
   return {
     id: String(row.id),
     requestId: String(row.request_id),
@@ -2081,6 +2166,8 @@ function scienceTurnFromRow(row: Record<string, unknown>): ScienceTurn {
       ? null : parseObject(row.continuation_basis_json),
     continuationBasisSha256: row.continuation_basis_sha256 === null || row.continuation_basis_sha256 === undefined
       ? null : String(row.continuation_basis_sha256),
+    runtimeSelection: runtimeSelection.selection,
+    runtimeSelectionSha256: runtimeSelection.sha256,
     status: String(row.status) as ScienceTurn["status"],
     lastSequence: Number(row.last_sequence),
     partialText: String(row.partial_text ?? ""),
@@ -2333,6 +2420,11 @@ function stagedMessageEvidenceFromRow(row: Record<string, unknown>): ScienceStag
 }
 
 function contractFromRow(row: Record<string, unknown>): ScienceResearchContract {
+  const completionScope = row.completion_scope === null || row.completion_scope === undefined || row.completion_scope === ""
+    ? null : String(row.completion_scope);
+  if (completionScope !== null && !SCIENCE_RESEARCH_COMPLETION_SCOPES.includes(completionScope as typeof SCIENCE_RESEARCH_COMPLETION_SCOPES[number])) {
+    throw new Error("science-research-completion-scope-invalid");
+  }
   return {
     id: String(row.id),
     projectId: String(row.project_id),
@@ -2342,6 +2434,7 @@ function contractFromRow(row: Record<string, unknown>): ScienceResearchContract 
     successCriteria: parseTextList(row.success_criteria_json),
     failureCriteria: parseTextList(row.failure_criteria_json),
     constraints: parseTextList(row.constraints_json),
+    completionScope: completionScope as ScienceResearchContract["completionScope"],
     maxEpisodes: Number(row.max_episodes),
     maxWallTimeMinutes: Number(row.max_wall_time_minutes),
     approvedAt: row.approved_at === null || row.approved_at === undefined ? null : String(row.approved_at),
@@ -2351,8 +2444,7 @@ function contractFromRow(row: Record<string, unknown>): ScienceResearchContract 
 }
 
 export function scienceResearchContractContentSha256(contract: ScienceResearchContract): string {
-  return sha256Json({
-    schema: "agentlas.science-research-contract/v1",
+  const terms = {
     id: contract.id,
     projectId: contract.projectId,
     version: contract.version,
@@ -2363,12 +2455,24 @@ export function scienceResearchContractContentSha256(contract: ScienceResearchCo
     maxEpisodes: contract.maxEpisodes,
     maxWallTimeMinutes: contract.maxWallTimeMinutes,
     approvedAt: contract.approvedAt,
-  });
+  };
+  // Preserve the exact v1 hash for legacy rows created before the typed scope
+  // existed. New scoped contracts bind the scope into a new canonical shape.
+  return contract.completionScope === null || contract.completionScope === undefined
+    ? sha256Json({ schema: "agentlas.science-research-contract/v1", ...terms })
+    : sha256Json({ schema: "agentlas.science-research-contract/v2", ...terms, completionScope: contract.completionScope });
 }
 
 function scienceLoopSessionStateSha256(input: Omit<ScienceLoopSession, "stateSha256">): string {
   const { stateSha256: _ignored, ...state } = input as ScienceLoopSession;
   if (state.completionReceiptSetSha256 === null) delete (state as Partial<ScienceLoopSession>).completionReceiptSetSha256;
+  // Legacy sessions were hashed before the Science pin fields existed. Keep
+  // null-compatible rows on that canonical shape; selected sessions include
+  // the immutable pin and its receipt in the state hash.
+  if (state.runtimeSelection === null && state.runtimeSelectionSha256 === null) {
+    delete (state as Partial<ScienceLoopSession>).runtimeSelection;
+    delete (state as Partial<ScienceLoopSession>).runtimeSelectionSha256;
+  }
   return sha256Json({ schema: "agentlas.science-research-loop-state/v1", ...state });
 }
 
@@ -2422,6 +2526,7 @@ function hypothesisFromRow(row: Record<string, unknown>, evidenceSpanIds: string
 }
 
 function loopSessionFromRow(row: Record<string, unknown>): ScienceLoopSession {
+  const runtimeSelection = scienceRuntimeSelectionFromRow(row);
   const session: ScienceLoopSession = {
     id: String(row.id),
     projectId: String(row.project_id),
@@ -2432,6 +2537,8 @@ function loopSessionFromRow(row: Record<string, unknown>): ScienceLoopSession {
     lifecycleStartRevision: Number(row.lifecycle_start_revision),
     lifecycleStartStateSha256: String(row.lifecycle_start_state_sha256),
     runtimeChatId: String(row.runtime_chat_id),
+    runtimeSelection: runtimeSelection.selection,
+    runtimeSelectionSha256: runtimeSelection.sha256,
     activeRunId: row.active_run_id === null || row.active_run_id === undefined ? null : String(row.active_run_id),
     status: String(row.status) as ScienceLoopSession["status"],
     stage: String(row.stage) as ScienceLoopSession["stage"],
@@ -3293,6 +3400,24 @@ function normalizeScienceDependence(value: unknown): ScienceAnalysisSpecDocument
   throw new Error("science-analysis-dependence-invalid");
 }
 
+function normalizeScienceAnalysisModel(value: unknown): NonNullable<ScienceAnalysisSpecDocument["model"]> {
+  const item = safeJsonRecord(value, 64 * 1024, "analysis-model");
+  if (!hasExactKeys(item, ["family", "formula", "distribution", "link", "groupingVariables", "randomEffects", "rationale"])
+    || typeof item.family !== "string"
+    || !SCIENCE_ANALYSIS_MODEL_FAMILIES.includes(item.family as NonNullable<ScienceAnalysisSpecDocument["model"]>["family"])) {
+    throw new Error("science-analysis-model-invalid");
+  }
+  return {
+    family: item.family as NonNullable<ScienceAnalysisSpecDocument["model"]>["family"],
+    formula: safeText(item.formula, 4_000, "analysis-model-formula"),
+    distribution: nullableAnalysisText(item.distribution, 120, "analysis-model-distribution"),
+    link: nullableAnalysisText(item.link, 120, "analysis-model-link"),
+    groupingVariables: safeTextList(item.groupingVariables, 32, 240, "analysis-model-grouping", 0),
+    randomEffects: safeTextList(item.randomEffects, 32, 500, "analysis-model-random-effect", 0),
+    rationale: safeText(item.rationale, 8_000, "analysis-model-rationale"),
+  };
+}
+
 function normalizeScienceAnalysisDocument(value: unknown): ScienceAnalysisSpecDocument {
   const record = safeJsonRecord(value, 2 * 1024 * 1024, "analysis-spec");
   const expected = ["schemaVersion", "purpose", "researchQuestion", "population", "estimand", "design", "data", "model", "missingData", "multiplicity", "requiredDiagnostics", "sensitivityAnalyses", "seed", "runtimePolicy", "expectedArtifacts"];
@@ -3304,7 +3429,10 @@ function normalizeScienceAnalysisDocument(value: unknown): ScienceAnalysisSpecDo
   const seed = safeJsonRecord(record.seed, 4 * 1024, "analysis-seed");
   const runtimePolicy = safeJsonRecord(record.runtimePolicy, 8 * 1024, "analysis-runtime-policy");
   if (!hasExactKeys(design, ["studyType", "experimentalUnit", "observationUnit", "dependence"])) throw new Error("science-analysis-design-invalid");
-  if (!hasExactKeys(data, ["inputs", "outcomeVariables", "predictorVariables", "transformations", "exclusions"])) throw new Error("science-analysis-data-invalid");
+  const legacyDataKeys = ["inputs", "outcomeVariables", "predictorVariables", "transformations", "exclusions"];
+  const acquisitionDataKeys = [...legacyDataKeys, "acquisition"];
+  const hasAcquisitionField = Object.prototype.hasOwnProperty.call(data, "acquisition");
+  if (!hasExactKeys(data, hasAcquisitionField ? acquisitionDataKeys : legacyDataKeys)) throw new Error("science-analysis-data-invalid");
   if (!hasExactKeys(missingData, ["strategy", "rationale"]) || !["unresolved", "complete-case", "multiple-imputation", "model-based", "not-applicable"].includes(String(missingData.strategy))) throw new Error("science-analysis-missing-data-invalid");
   if (!hasExactKeys(multiplicity, ["strategy", "families", "rationale"]) || !["unresolved", "none", "fdr", "fwer"].includes(String(multiplicity.strategy))) throw new Error("science-analysis-multiplicity-invalid");
   if (!hasExactKeys(seed, ["algorithm", "value"]) || seed.algorithm !== "fixed") throw new Error("science-analysis-seed-invalid");
@@ -3317,24 +3445,32 @@ function normalizeScienceAnalysisDocument(value: unknown): ScienceAnalysisSpecDo
     return { artifactId: String(item.artifactId), artifactVersion: safePositiveInteger(item.artifactVersion, 1, Number.MAX_SAFE_INTEGER, "analysis-input-version"), contentSha256: safeSha256(item.contentSha256, "analysis-input-content-sha256") };
   });
   if (new Set(inputs.map((item) => `${item.artifactId}:${item.artifactVersion}`)).size !== inputs.length) throw new Error("science-analysis-input-duplicate");
+  let acquisition: ScienceAnalysisSpecDocument["data"]["acquisition"] = undefined;
+  if (hasAcquisitionField) {
+    if (data.acquisition === null) acquisition = null;
+    else {
+      const acquisitionRecord = safeJsonRecord(data.acquisition, 256 * 1024, "analysis-acquisition");
+      if (!hasExactKeys(acquisitionRecord, ["strategy", "sources"]) || acquisitionRecord.strategy !== "acquire-before-execution") throw new Error("science-analysis-acquisition-invalid");
+      const sourcesRaw = Array.isArray(acquisitionRecord.sources) ? acquisitionRecord.sources : null;
+      if (!sourcesRaw || sourcesRaw.length < 1 || sourcesRaw.length > 100) throw new Error("science-analysis-acquisition-sources-invalid");
+      const sources = sourcesRaw.map((entry) => {
+        const item = safeJsonRecord(entry, 16 * 1024, "analysis-acquisition-source");
+        if (!hasExactKeys(item, ["provider", "sourceRefs", "retrievalPlan", "expectedArtifactKind"])) throw new Error("science-analysis-acquisition-source-invalid");
+        return {
+          provider: safeText(item.provider, 500, "analysis-acquisition-provider"),
+          sourceRefs: safeTextList(item.sourceRefs, 100, 4_000, "analysis-acquisition-source-ref"),
+          retrievalPlan: safeText(item.retrievalPlan, 8_000, "analysis-acquisition-retrieval-plan"),
+          expectedArtifactKind: safeText(item.expectedArtifactKind, 500, "analysis-acquisition-artifact-kind"),
+        };
+      });
+      if (sources.some((source) => source.sourceRefs.length < 1)) throw new Error("science-analysis-acquisition-source-ref-required");
+      acquisition = { strategy: "acquire-before-execution", sources };
+    }
+  }
   const studyType = String(design.studyType ?? "") as ScienceAnalysisSpecDocument["design"]["studyType"];
   if (!["randomized-experiment", "observational", "quasi-experiment", "simulation"].includes(studyType)) throw new Error("science-analysis-study-type-invalid");
   let model: ScienceAnalysisSpecDocument["model"] = null;
-  if (record.model !== null) {
-    const item = safeJsonRecord(record.model, 64 * 1024, "analysis-model");
-    if (!hasExactKeys(item, ["family", "formula", "distribution", "link", "groupingVariables", "randomEffects", "rationale"])
-      || typeof item.family !== "string"
-      || !SCIENCE_ANALYSIS_MODEL_FAMILIES.includes(item.family as NonNullable<ScienceAnalysisSpecDocument["model"]>["family"])) throw new Error("science-analysis-model-invalid");
-    model = {
-      family: item.family as NonNullable<ScienceAnalysisSpecDocument["model"]>["family"],
-      formula: safeText(item.formula, 4_000, "analysis-model-formula"),
-      distribution: nullableAnalysisText(item.distribution, 120, "analysis-model-distribution"),
-      link: nullableAnalysisText(item.link, 120, "analysis-model-link"),
-      groupingVariables: safeTextList(item.groupingVariables, 32, 240, "analysis-model-grouping", 0),
-      randomEffects: safeTextList(item.randomEffects, 32, 500, "analysis-model-random-effect", 0),
-      rationale: safeText(item.rationale, 8_000, "analysis-model-rationale"),
-    };
-  }
+  if (record.model !== null) model = normalizeScienceAnalysisModel(record.model);
   const artifactsRaw = Array.isArray(record.expectedArtifacts) ? record.expectedArtifacts : null;
   if (!artifactsRaw || artifactsRaw.length > 32) throw new Error("science-analysis-expected-artifacts-invalid");
   const expectedArtifacts = artifactsRaw.map((entry) => {
@@ -3351,6 +3487,7 @@ function normalizeScienceAnalysisDocument(value: unknown): ScienceAnalysisSpecDo
     design: { studyType, experimentalUnit: nullableAnalysisText(design.experimentalUnit, 500, "analysis-experimental-unit"), observationUnit: safeText(design.observationUnit, 500, "analysis-observation-unit"), dependence: normalizeScienceDependence(design.dependence) },
     data: {
       inputs,
+      ...(hasAcquisitionField ? { acquisition } : {}),
       outcomeVariables: safeTextList(data.outcomeVariables, 100, 240, "analysis-outcome-variable"),
       predictorVariables: safeTextList(data.predictorVariables, 200, 240, "analysis-predictor-variable", 0),
       transformations: safeTextList(data.transformations, 200, 2_000, "analysis-transformation", 0),
@@ -4074,6 +4211,54 @@ export class ScienceStore {
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_science_loop_continuation_parent ON science_turns(parent_turn_id) WHERE origin = 'loop-continuation' AND parent_turn_id IS NOT NULL");
   }
 
+  /**
+   * Add the immutable Science runtime pin columns without requiring an
+   * installed database version bump.  Null remains the legacy shape; selected
+   * rows are paired with a receipt hash and protected by dedicated triggers so
+   * older scope triggers do not need to know about the new columns.
+   */
+  private ensureRuntimeSelectionColumns(): void {
+    const turnColumns = new Set((this.db.pragma("table_info('science_turns')") as Array<{ name: string }>).map((item) => item.name));
+    if (turnColumns.size > 0) {
+      if (!turnColumns.has("runtime_selection_json")) this.db.exec("ALTER TABLE science_turns ADD COLUMN runtime_selection_json TEXT CHECK (runtime_selection_json IS NULL OR json_valid(runtime_selection_json))");
+      if (!turnColumns.has("runtime_selection_sha256")) this.db.exec("ALTER TABLE science_turns ADD COLUMN runtime_selection_sha256 TEXT CHECK (runtime_selection_sha256 IS NULL OR length(runtime_selection_sha256) = 64)");
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_science_turn_runtime_selection_insert
+        BEFORE INSERT ON science_turns BEGIN
+          SELECT CASE WHEN (NEW.runtime_selection_json IS NULL AND NEW.runtime_selection_sha256 IS NOT NULL)
+            OR (NEW.runtime_selection_json IS NOT NULL AND NEW.runtime_selection_sha256 IS NULL)
+            THEN RAISE(ABORT, 'science-turn-runtime-selection-pair-invalid') END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_turn_runtime_selection_update
+        BEFORE UPDATE ON science_turns BEGIN
+          SELECT CASE WHEN COALESCE(NEW.runtime_selection_json, '') != COALESCE(OLD.runtime_selection_json, '')
+            OR COALESCE(NEW.runtime_selection_sha256, '') != COALESCE(OLD.runtime_selection_sha256, '')
+            THEN RAISE(ABORT, 'science-turn-runtime-selection-immutable') END;
+        END;
+      `);
+    }
+
+    const loopColumns = new Set((this.db.pragma("table_info('loop_sessions')") as Array<{ name: string }>).map((item) => item.name));
+    if (loopColumns.size > 0) {
+      if (!loopColumns.has("runtime_selection_json")) this.db.exec("ALTER TABLE loop_sessions ADD COLUMN runtime_selection_json TEXT CHECK (runtime_selection_json IS NULL OR json_valid(runtime_selection_json))");
+      if (!loopColumns.has("runtime_selection_sha256")) this.db.exec("ALTER TABLE loop_sessions ADD COLUMN runtime_selection_sha256 TEXT CHECK (runtime_selection_sha256 IS NULL OR length(runtime_selection_sha256) = 64)");
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_science_loop_runtime_selection_insert
+        BEFORE INSERT ON loop_sessions BEGIN
+          SELECT CASE WHEN (NEW.runtime_selection_json IS NULL AND NEW.runtime_selection_sha256 IS NOT NULL)
+            OR (NEW.runtime_selection_json IS NOT NULL AND NEW.runtime_selection_sha256 IS NULL)
+            THEN RAISE(ABORT, 'science-loop-runtime-selection-pair-invalid') END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_loop_runtime_selection_update
+        BEFORE UPDATE ON loop_sessions BEGIN
+          SELECT CASE WHEN COALESCE(NEW.runtime_selection_json, '') != COALESCE(OLD.runtime_selection_json, '')
+            OR COALESCE(NEW.runtime_selection_sha256, '') != COALESCE(OLD.runtime_selection_sha256, '')
+            THEN RAISE(ABORT, 'science-loop-runtime-selection-immutable') END;
+        END;
+      `);
+    }
+  }
+
   /** Recreate the scope triggers after an installed v55 database gains origin/basis columns. */
   private refreshScienceTurnScopeTriggers(): void {
     this.db.exec(`
@@ -4131,15 +4316,92 @@ export class ScienceStore {
     `);
   }
 
+  private ensureProjectFolderColumn(): void {
+    const columns = this.db.pragma("table_info('projects')") as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some((column) => column.name === "folder_path")) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN folder_path TEXT");
+    }
+  }
+
+  /**
+   * Add the completion scope as an additive contract field.  NULL preserves
+   * legacy contract hashes and keeps old fixtures bounded by their existing
+   * criterion semantics; newly proposed contracts should carry an explicit
+   * scope from the tool route.
+   */
+  private ensureResearchContractCompletionScopeColumn(): void {
+    const columns = this.db.pragma("table_info('research_contracts')") as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some((column) => column.name === "completion_scope")) {
+      this.db.exec("ALTER TABLE research_contracts ADD COLUMN completion_scope TEXT CHECK (completion_scope IS NULL OR completion_scope IN ('full-study','bounded-deliverable'))");
+    }
+  }
+
+  private ensureStandingAnalysisPlanApprovals(): void {
+    // Keep the existing human-only receipts and their hashes intact. Standing
+    // approval is a different authority and carries the exact policy snapshot.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS analysis_plan_standing_approvals (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        analysis_spec_id TEXT NOT NULL,
+        analysis_spec_version INTEGER NOT NULL CHECK (analysis_spec_version >= 1),
+        analysis_spec_content_sha256 TEXT NOT NULL CHECK (length(analysis_spec_content_sha256) = 64),
+        analysis_spec_lock_version INTEGER NOT NULL CHECK (analysis_spec_lock_version >= 1),
+        decision TEXT NOT NULL CHECK (decision = 'approve'),
+        rationale TEXT,
+        actor TEXT NOT NULL CHECK (actor = 'standing-policy'),
+        resulting_status TEXT NOT NULL CHECK (resulting_status = 'frozen'),
+        approval_policy_json TEXT NOT NULL CHECK (json_valid(approval_policy_json)),
+        approval_policy_sha256 TEXT NOT NULL CHECK (length(approval_policy_sha256) = 64),
+        created_at TEXT NOT NULL,
+        receipt_sha256 TEXT NOT NULL UNIQUE CHECK (length(receipt_sha256) = 64),
+        UNIQUE(analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256),
+        FOREIGN KEY (analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256)
+          REFERENCES analysis_spec_versions(analysis_spec_id, version, document_sha256) ON DELETE RESTRICT
+      );
+      CREATE INDEX IF NOT EXISTS idx_science_analysis_plan_standing_latest
+        ON analysis_plan_standing_approvals(project_id, analysis_spec_id, created_at DESC);
+      CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_standing_scope_insert
+      BEFORE INSERT ON analysis_plan_standing_approvals BEGIN
+        SELECT RAISE(ABORT, 'science-analysis-plan-standing-scope-invalid') WHERE NOT EXISTS (
+          SELECT 1 FROM analysis_specs s
+          WHERE s.id = NEW.analysis_spec_id AND s.project_id = NEW.project_id AND s.status = 'draft'
+            AND s.current_version = NEW.analysis_spec_version
+            AND s.current_document_sha256 = NEW.analysis_spec_content_sha256
+            AND s.lock_version = NEW.analysis_spec_lock_version
+        );
+        SELECT RAISE(ABORT, 'science-analysis-plan-standing-policy-invalid') WHERE
+          json_extract(NEW.approval_policy_json, '$.projectId') IS NOT NEW.project_id
+          OR json_extract(NEW.approval_policy_json, '$.mode') IS NOT 'autonomous'
+          OR NOT EXISTS (SELECT 1 FROM json_each(NEW.approval_policy_json, '$.scopes') WHERE value = 'analysis-plan');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_standing_immutable_update
+      BEFORE UPDATE ON analysis_plan_standing_approvals BEGIN
+        SELECT RAISE(ABORT, 'science-analysis-plan-standing-immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_standing_immutable_delete
+      BEFORE DELETE ON analysis_plan_standing_approvals BEGIN
+        SELECT RAISE(ABORT, 'science-analysis-plan-standing-immutable');
+      END;
+    `);
+  }
+
   private migrate(): void {
     const found = Number(this.db.pragma("user_version", { simple: true }));
     if (!Number.isSafeInteger(found) || found < 0 || found > SCIENCE_SCHEMA_VERSION) throw new Error("science-schema-incompatible");
     if (found === SCIENCE_SCHEMA_VERSION) {
       this.db.transaction(() => {
+        // Optional project folders are an additive schema-57 extension; old
+        // projects retain NULL and existing installations remain compatible.
+        this.ensureProjectFolderColumn();
+        this.ensureResearchContractCompletionScopeColumn();
+        this.ensureStandingAnalysisPlanApprovals();
         // The visibility/origin extension is a backward-compatible minor
         // migration retained at schema 55 so existing contract fixtures and
         // installed databases do not need a destructive version jump.
         this.ensureLoopContinuationColumns();
+        this.ensureRuntimeSelectionColumns();
         this.refreshScienceTurnScopeTriggers();
         this.refreshManuscriptBindingValidationTriggers();
       })();
@@ -4152,6 +4414,7 @@ export class ScienceStore {
       // Existing pre-continuation turn tables must gain these columns before
       // the schema SQL below recreates triggers that reference NEW.origin.
       this.ensureLoopContinuationColumns();
+      this.ensureRuntimeSelectionColumns();
       this.db.exec("DROP TRIGGER IF EXISTS trg_science_turn_scope_insert; DROP TRIGGER IF EXISTS trg_science_turn_scope_update;");
       if (found > 0 && found < 35) {
         const loopTableExists = Boolean(this.db.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'loop_sessions'").get());
@@ -4236,6 +4499,9 @@ export class ScienceStore {
           title TEXT NOT NULL,
           question TEXT NOT NULL,
           domain TEXT NOT NULL CHECK (domain IN ('general','life-science','chemistry','physics','materials-science','genomics','astronomy','earth-ecology','statistics','economics','finance')),
+          research_template_id TEXT CHECK (research_template_id IS NULL OR research_template_id IN ('data-table','statistics-analysis','data-visualization','economic-indicators','literature-network','astronomy-sky','biodiversity-map','paleontology-evidence','earthquake-observations','physics-data','materials-structures','genomics-variants','comparative-genomics','molecular-structure','chemistry')),
+          initial_lab_id TEXT CHECK (initial_lab_id IS NULL OR initial_lab_id IN ('data-table','statistics-analysis','data-visualization','economic-indicators','literature-network','astronomy-sky','biodiversity-map','paleontology-evidence','earthquake-observations','physics-data','materials-structures','genomics-variants','comparative-genomics','molecular-structure','chemistry')),
+          folder_path TEXT,
           status TEXT NOT NULL CHECK (status IN ('draft','active','paused','archived')),
           version INTEGER NOT NULL CHECK (version >= 1),
           created_at TEXT NOT NULL,
@@ -4284,6 +4550,8 @@ export class ScienceStore {
           origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user','loop-continuation')),
           continuation_basis_json TEXT CHECK (continuation_basis_json IS NULL OR json_valid(continuation_basis_json)),
           continuation_basis_sha256 TEXT CHECK (continuation_basis_sha256 IS NULL OR length(continuation_basis_sha256) = 64),
+          runtime_selection_json TEXT CHECK (runtime_selection_json IS NULL OR json_valid(runtime_selection_json)),
+          runtime_selection_sha256 TEXT CHECK (runtime_selection_sha256 IS NULL OR length(runtime_selection_sha256) = 64),
           status TEXT NOT NULL CHECK (status IN ('queued','running','cancelling','completed','failed','cancelled','interrupted')),
           last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
           partial_text TEXT NOT NULL DEFAULT '' CHECK (length(partial_text) <= 2097152),
@@ -4623,6 +4891,7 @@ export class ScienceStore {
           success_criteria_json TEXT NOT NULL,
           failure_criteria_json TEXT NOT NULL,
           constraints_json TEXT NOT NULL,
+          completion_scope TEXT CHECK (completion_scope IS NULL OR completion_scope IN ('full-study','bounded-deliverable')),
           max_episodes INTEGER NOT NULL CHECK (max_episodes BETWEEN 1 AND 1000),
           max_wall_time_minutes INTEGER NOT NULL CHECK (max_wall_time_minutes BETWEEN 1 AND 10080),
           approved_at TEXT,
@@ -4709,6 +4978,8 @@ export class ScienceStore {
           lifecycle_start_revision INTEGER NOT NULL CHECK (lifecycle_start_revision >= 1),
           lifecycle_start_state_sha256 TEXT NOT NULL CHECK (length(lifecycle_start_state_sha256) = 64),
           runtime_chat_id TEXT NOT NULL UNIQUE,
+          runtime_selection_json TEXT CHECK (runtime_selection_json IS NULL OR json_valid(runtime_selection_json)),
+          runtime_selection_sha256 TEXT CHECK (runtime_selection_sha256 IS NULL OR length(runtime_selection_sha256) = 64),
           active_run_id TEXT,
           status TEXT NOT NULL CHECK (status IN ('queued','running','pausing','paused','completed','failed','cancelled')),
           stage TEXT NOT NULL CHECK (stage IN ('contract-approved','evidence','hypothesis','experiment-design','preflight','awaiting-approval','executing','evaluating','deciding','verifying','writing')),
@@ -6186,6 +6457,50 @@ export class ScienceStore {
           FOREIGN KEY (analysis_spec_id, project_id) REFERENCES analysis_specs(id, project_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_science_analysis_spec_versions ON analysis_spec_versions(analysis_spec_id, version DESC);
+
+        CREATE TABLE IF NOT EXISTS analysis_plan_review_receipts (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+          analysis_spec_id TEXT NOT NULL,
+          analysis_spec_version INTEGER NOT NULL CHECK (analysis_spec_version >= 1),
+          analysis_spec_content_sha256 TEXT NOT NULL CHECK (length(analysis_spec_content_sha256) = 64),
+          analysis_spec_lock_version INTEGER NOT NULL CHECK (analysis_spec_lock_version >= 1),
+          decision TEXT NOT NULL CHECK (decision IN ('approve','revise')),
+          rationale TEXT CHECK (rationale IS NULL OR length(rationale) BETWEEN 1 AND 8000),
+          actor TEXT NOT NULL CHECK (actor = 'human'),
+          resulting_status TEXT NOT NULL CHECK (resulting_status IN ('draft','frozen')),
+          created_at TEXT NOT NULL,
+          receipt_sha256 TEXT NOT NULL UNIQUE CHECK (length(receipt_sha256) = 64),
+          FOREIGN KEY (analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256)
+            REFERENCES analysis_spec_versions(analysis_spec_id, version, document_sha256) ON DELETE RESTRICT,
+          CHECK ((decision = 'approve' AND resulting_status = 'frozen') OR (decision = 'revise' AND resulting_status = 'draft'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_science_analysis_plan_review_latest
+          ON analysis_plan_review_receipts(project_id, analysis_spec_id, created_at DESC, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_science_analysis_plan_one_approval
+          ON analysis_plan_review_receipts(analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256)
+          WHERE decision = 'approve';
+        CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_scope_insert
+        BEFORE INSERT ON analysis_plan_review_receipts BEGIN
+          SELECT RAISE(ABORT, 'science-analysis-plan-review-scope-invalid') WHERE NOT EXISTS (
+            SELECT 1 FROM analysis_specs s
+            JOIN analysis_spec_versions v ON v.analysis_spec_id = s.id AND v.version = s.current_version
+            WHERE s.id = NEW.analysis_spec_id AND s.project_id = NEW.project_id AND s.status = 'draft'
+              AND s.current_version = NEW.analysis_spec_version
+              AND s.current_document_sha256 = NEW.analysis_spec_content_sha256
+              AND s.lock_version = NEW.analysis_spec_lock_version
+              AND v.document_sha256 = NEW.analysis_spec_content_sha256
+          );
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_immutable_update
+        BEFORE UPDATE ON analysis_plan_review_receipts BEGIN
+          SELECT RAISE(ABORT, 'science-analysis-plan-review-immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_immutable_delete
+        BEFORE DELETE ON analysis_plan_review_receipts BEGIN
+          SELECT RAISE(ABORT, 'science-analysis-plan-review-immutable');
+        END;
 
         CREATE TABLE IF NOT EXISTS research_run_analysis_plan_bindings (
           run_id TEXT PRIMARY KEY REFERENCES research_runs(id) ON DELETE CASCADE,
@@ -8821,6 +9136,58 @@ export class ScienceStore {
           `);
         }
         if (found < 28) this.repairCanonicalResearchLifecycles();
+        if (found < 56) {
+          const projectColumns = new Set((this.db.pragma("table_info('projects')") as Array<{ name: string }>).map((column) => column.name));
+          if (!projectColumns.has("research_template_id")) this.db.exec("ALTER TABLE projects ADD COLUMN research_template_id TEXT");
+          if (!projectColumns.has("initial_lab_id")) this.db.exec("ALTER TABLE projects ADD COLUMN initial_lab_id TEXT");
+        }
+        if (found < 57) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS analysis_plan_review_receipts (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              analysis_spec_id TEXT NOT NULL,
+              analysis_spec_version INTEGER NOT NULL CHECK (analysis_spec_version >= 1),
+              analysis_spec_content_sha256 TEXT NOT NULL CHECK (length(analysis_spec_content_sha256) = 64),
+              analysis_spec_lock_version INTEGER NOT NULL CHECK (analysis_spec_lock_version >= 1),
+              decision TEXT NOT NULL CHECK (decision IN ('approve','revise')),
+              rationale TEXT CHECK (rationale IS NULL OR length(rationale) BETWEEN 1 AND 8000),
+              actor TEXT NOT NULL CHECK (actor = 'human'),
+              resulting_status TEXT NOT NULL CHECK (resulting_status IN ('draft','frozen')),
+              created_at TEXT NOT NULL,
+              receipt_sha256 TEXT NOT NULL UNIQUE CHECK (length(receipt_sha256) = 64),
+              FOREIGN KEY (analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256)
+                REFERENCES analysis_spec_versions(analysis_spec_id, version, document_sha256) ON DELETE RESTRICT,
+              CHECK ((decision = 'approve' AND resulting_status = 'frozen') OR (decision = 'revise' AND resulting_status = 'draft'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_analysis_plan_review_latest
+              ON analysis_plan_review_receipts(project_id, analysis_spec_id, created_at DESC, id DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_science_analysis_plan_one_approval
+              ON analysis_plan_review_receipts(analysis_spec_id, analysis_spec_version, analysis_spec_content_sha256)
+              WHERE decision = 'approve';
+            CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_scope_insert
+            BEFORE INSERT ON analysis_plan_review_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-analysis-plan-review-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM analysis_specs s
+                JOIN analysis_spec_versions v ON v.analysis_spec_id = s.id AND v.version = s.current_version
+                WHERE s.id = NEW.analysis_spec_id AND s.project_id = NEW.project_id AND s.status = 'draft'
+                  AND s.current_version = NEW.analysis_spec_version
+                  AND s.current_document_sha256 = NEW.analysis_spec_content_sha256
+                  AND s.lock_version = NEW.analysis_spec_lock_version
+                  AND v.document_sha256 = NEW.analysis_spec_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_immutable_update
+            BEFORE UPDATE ON analysis_plan_review_receipts BEGIN SELECT RAISE(ABORT, 'science-analysis-plan-review-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_analysis_plan_review_immutable_delete
+            BEFORE DELETE ON analysis_plan_review_receipts BEGIN SELECT RAISE(ABORT, 'science-analysis-plan-review-immutable'); END;
+          `);
+        }
+        this.ensureProjectFolderColumn();
+        this.ensureResearchContractCompletionScopeColumn();
+        this.ensureStandingAnalysisPlanApprovals();
+        this.ensureRuntimeSelectionColumns();
         const migrationForeignKeyViolations = this.db.pragma("foreign_key_check") as Array<Record<string, unknown>>;
         if (migrationForeignKeyViolations.length > 0) throw new Error("science-schema-foreign-key-invalid");
         this.db.pragma(`user_version = ${SCIENCE_SCHEMA_VERSION}`);
@@ -9646,13 +10013,118 @@ export class ScienceStore {
     return rows.map((row) => projectFromRow(row, this.listProjectRelatedDomains(String(row.id))));
   }
 
-  createProject(input: CreateScienceProjectInput): CreateScienceProjectResult {
+  listProjectLibrarySummaries(limit = 100): ScienceProjectLibrarySummary[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT p.id AS project_id,
+      (SELECT COUNT(*) FROM artifacts a WHERE a.project_id = p.id AND a.status = 'ready' AND a.kind = 'table') AS table_count,
+      (SELECT COUNT(*) FROM research_runs r WHERE r.project_id = p.id AND r.status = 'succeeded') AS analysis_count,
+      (SELECT COUNT(*) FROM manuscripts m WHERE m.project_id = p.id) AS manuscript_count
+      FROM projects p WHERE p.status != 'archived' ORDER BY p.updated_at DESC, p.id LIMIT ?`).all(safeLimit) as Record<string, unknown>[];
+    const summaries = new Map(rows.map((row) => [String(row.project_id), {
+      projectId: String(row.project_id),
+      fileCount: 0,
+      dataCount: Number(row.table_count),
+      analysisCount: Number(row.analysis_count),
+      manuscriptCount: Number(row.manuscript_count),
+      pdfCount: 0,
+    }]));
+    if (!summaries.size) return [];
+    const ids = [...summaries.keys()];
+    const placeholders = ids.map(() => "?").join(",");
+
+    const sourceRows = this.db.prepare(`SELECT s.project_id, s.id AS source_id, s.kind, s.current_version,
+      v.id AS source_version_id, v.version FROM sources s JOIN source_versions v ON v.source_id = s.id
+      WHERE s.project_id IN (${placeholders}) AND v.asset_ref IS NOT NULL`).all(...ids) as Record<string, unknown>[];
+    for (const row of sourceRows) {
+      const summary = summaries.get(String(row.project_id));
+      if (!summary) continue;
+      try {
+        const source = this.getSourceVersionForProject(String(row.project_id), String(row.source_id), String(row.source_version_id));
+        if (!source || !this.verifiedSourceBytes(source)) continue;
+        summary.fileCount += 1;
+        if (row.kind === "dataset" && Number(row.version) === Number(row.current_version)) summary.dataCount += 1;
+      } catch {}
+    }
+
+    const figureRows = this.db.prepare(`SELECT id, project_id FROM source_figures
+      WHERE project_id IN (${placeholders}) AND asset_ref IS NOT NULL`).all(...ids) as Record<string, unknown>[];
+    for (const row of figureRows) {
+      const summary = summaries.get(String(row.project_id));
+      if (!summary) continue;
+      try {
+        if (this.sourceFigureBytesForProject(String(row.project_id), String(row.id))) summary.fileCount += 1;
+      } catch {}
+    }
+
+    const captureRows = this.db.prepare(`SELECT avc.*, a.project_id FROM artifact_visual_captures avc
+      JOIN artifacts a ON a.id = avc.artifact_id
+      WHERE a.project_id IN (${placeholders}) AND avc.adopted = 1`).all(...ids) as Record<string, unknown>[];
+    for (const row of captureRows) {
+      const summary = summaries.get(String(row.project_id));
+      const assetSha256 = String(row.asset_sha256 ?? "");
+      if (!summary || !SHA256_RE.test(assetSha256)) continue;
+      try {
+        const target = path.join(this.assetRoot, assetSha256.slice(0, 2), `${assetSha256}.png`);
+        const stat = fs.lstatSync(target);
+        const bytes = fs.readFileSync(target);
+        const dimensions = pngDimensions(bytes);
+        if (!stat.isSymbolicLink() && stat.isFile()
+          && bytes.length === Number(row.byte_size)
+          && dimensions.width === Number(row.width)
+          && dimensions.height === Number(row.height)
+          && createHash("sha256").update(bytes).digest("hex") === assetSha256) summary.fileCount += 1;
+      } catch {}
+    }
+
+    const exportRows = this.db.prepare(`SELECT project_id, package_ref, package_sha256, package_byte_size
+      FROM submission_exports WHERE project_id IN (${placeholders}) AND status = 'ready'
+      AND package_ref IS NOT NULL AND package_sha256 IS NOT NULL AND package_byte_size IS NOT NULL`).all(...ids) as Record<string, unknown>[];
+    for (const row of exportRows) {
+      const summary = summaries.get(String(row.project_id));
+      if (!summary) continue;
+      try {
+        const bytes = this.readPrivateCas(this.submissionExportRoot, "science-submission-cas", "zip", String(row.package_ref), String(row.package_sha256));
+        if (bytes.length !== Number(row.package_byte_size)) continue;
+        const bundle = unzipSync(bytes);
+        summary.fileCount += 1;
+        if (bundle["manuscript/manuscript.pdf"]?.length) summary.pdfCount += 1;
+      } catch {}
+    }
+    return ids.map((id) => summaries.get(id)!);
+  }
+
+  createProject(input: CreateScienceProjectInput, selectedFolderPath?: string): CreateScienceProjectResult {
     if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    const folderSelectionId = input.folderSelectionId;
+    if (folderSelectionId !== undefined && (typeof folderSelectionId !== "string" || !UUID_RE.test(folderSelectionId))) {
+      throw new Error("science-project-folder-selection-invalid");
+    }
+    if (folderSelectionId === undefined && selectedFolderPath !== undefined) throw new Error("science-project-folder-selection-required");
     const question = safeText(input.question, 20_000, "question");
     const title = input.title === undefined || input.title === "" ? defaultTitle(question) : safeText(input.title, 160, "title");
     const domain = safeDomain(input.domain);
     const relatedDomains = normalizeRelatedDomains(input.relatedDomains, domain);
-    const inputSha256 = sha256Json({ question, title, domain, relatedDomains });
+    const hasResearchTemplate = input.researchTemplateId !== undefined || input.initialLabId !== undefined;
+    if (hasResearchTemplate && (input.researchTemplateId === undefined || input.initialLabId === undefined)) throw new Error("science-research-template-binding-invalid");
+    const researchTemplateId = hasResearchTemplate ? safeResearchTemplateId(input.researchTemplateId) : null;
+    const initialLabId = hasResearchTemplate ? safeResearchTemplateId(input.initialLabId) : null;
+    if (researchTemplateId !== initialLabId) throw new Error("science-research-template-binding-invalid");
+    if (input.initialLabIds !== undefined && (!Array.isArray(input.initialLabIds)
+      || input.initialLabIds.some((labId) => typeof labId !== "string" || !(SCIENCE_RESEARCH_TEMPLATE_IDS as readonly string[]).includes(labId)))) {
+      throw new Error("science-initial-lab-ids-invalid");
+    }
+    const initialLabIds = [...new Set<ScienceResearchTemplateId>([
+      ...(initialLabId ? [initialLabId] : []),
+      ...(input.initialLabIds ?? []),
+    ])];
+    // Keep pre-multi-Lab request digests byte-for-byte compatible when the field is omitted.
+    const hashInput = researchTemplateId
+      ? { question, title, domain, relatedDomains, researchTemplateId, initialLabId }
+      : { question, title, domain, relatedDomains };
+    const labHashInput = input.initialLabIds === undefined ? hashInput : { ...hashInput, initialLabIds };
+    // Hash the Main-owned immutable selection identity, never renderer paths.
+    // Omission preserves the exact legacy digest and its replay compatibility.
+    const inputSha256 = sha256Json(folderSelectionId === undefined ? labHashInput : { ...labHashInput, folderSelectionId });
     const result = this.db.transaction(() => {
       const prior = this.replay<CreateScienceProjectResult>(input.requestId, "project.create", inputSha256);
       if (prior) {
@@ -9662,24 +10134,41 @@ export class ScienceStore {
         if (!lifecycle) throw new Error("science-research-lifecycle-not-found");
         return { ...prior, project, lifecycle, replayed: true };
       }
+      // Successful retries are resolved above, even after Main's ephemeral
+      // selection grant expires or the selected directory is later removed.
+      if (folderSelectionId !== undefined && selectedFolderPath === undefined) throw new Error("science-project-folder-selection-required");
+      const folderPath = folderSelectionId === undefined ? null : validateScienceProjectFolderPath(selectedFolderPath);
       const now = new Date().toISOString();
-      const project: ScienceProject = { id: randomUUID(), title, question, domain, relatedDomains, status: "draft", version: 1, createdAt: now, updatedAt: now };
+      const project: ScienceProject = { id: randomUUID(), title, question, domain, relatedDomains, researchTemplateId, initialLabId, folderPath, status: "draft", version: 1, createdAt: now, updatedAt: now };
       const conversation: ScienceConversation = { id: randomUUID(), projectId: project.id, title, createdAt: now, updatedAt: now };
       const message: ScienceMessage = { id: randomUUID(), projectId: project.id, conversationId: conversation.id, role: "user", visibility: "visible", content: question, createdAt: now };
-      this.db.prepare("INSERT INTO projects (id,title,question,domain,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
-        .run(project.id, project.title, project.question, project.domain, project.status, project.version, now, now);
+      this.db.prepare("INSERT INTO projects (id,title,question,domain,research_template_id,initial_lab_id,folder_path,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        .run(project.id, project.title, project.question, project.domain, project.researchTemplateId, project.initialLabId, project.folderPath, project.status, project.version, now, now);
       this.db.prepare("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)")
         .run(conversation.id, conversation.projectId, conversation.title, now, now);
       this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
         .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
       const insertRelatedDomain = this.db.prepare("INSERT INTO project_related_domains (project_id,domain,display_order,created_at) VALUES (?,?,?,?)");
       relatedDomains.forEach((relatedDomain, index) => insertRelatedDomain.run(project.id, relatedDomain, index, now));
+      const insertLabBinding = this.db.prepare(`INSERT INTO project_lab_bindings
+        (id,project_id,lab_id,enabled,pinned,display_order,activated_by,config_json,created_at,updated_at)
+        VALUES (?,?,?,1,?,?,?,?,?,?)`);
+      initialLabIds.forEach((labId, index) => {
+        const isInitialLab = labId === project.initialLabId;
+        insertLabBinding.run(randomUUID(), project.id, labId, isInitialLab ? 1 : 0, index,
+          isInitialLab ? "template" : "user", JSON.stringify(isInitialLab ? { researchTemplateId: project.researchTemplateId } : {}), now, now);
+      });
       this.db.prepare(`INSERT INTO project_navigation_states
-        (project_id,destination,selected_conversation_id,selected_lab_id,updated_at) VALUES (?,'overview',?,NULL,?)`)
-        .run(project.id, conversation.id, now);
+        (project_id,destination,selected_conversation_id,selected_lab_id,updated_at) VALUES (?,'overview',?,?,?)`)
+        .run(project.id, conversation.id, project.initialLabId, now);
       this.db.prepare(`INSERT INTO project_workspace_tabs
         (id,project_id,kind,target_id,exact_version,exact_content_sha256,dirty,selected,display_order,created_at,updated_at)
-        VALUES ('research',?,'research',NULL,NULL,NULL,0,1,0,?,?)`).run(project.id, now, now);
+        VALUES ('research',?,'research',NULL,NULL,NULL,0,?,0,?,?)`).run(project.id, project.initialLabId ? 0 : 1, now, now);
+      if (project.initialLabId) {
+        this.db.prepare(`INSERT INTO project_workspace_tabs
+          (id,project_id,kind,target_id,exact_version,exact_content_sha256,dirty,selected,display_order,created_at,updated_at)
+          VALUES (?,?,'lab',?,NULL,NULL,0,1,1,?,?)`).run(`lab:${project.initialLabId}`, project.id, project.initialLabId, now, now);
+      }
       const studyId = randomUUID();
       this.insertCanonicalResearchStudy({
         projectId: project.id,
@@ -9988,7 +10477,17 @@ export class ScienceStore {
     } else {
       throw new Error("science-turn-mode-invalid");
     }
-    const inputSha256 = sha256Json({ projectId: input.projectId, conversationId: input.conversationId, runtimeChatId: input.runtimeChatId, invocationRunId: input.invocationRunId, parentTurnId, ...normalizedMode });
+    const runtimeSelection = normalizeScienceRuntimeSelectionForStore(input.runtimeSelection);
+    const runtimeSelectionSha256 = runtimeSelection ? scienceRuntimeSelectionSha256(runtimeSelection) : null;
+    const inputSha256 = sha256Json({
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runtimeChatId: input.runtimeChatId,
+      invocationRunId: input.invocationRunId,
+      parentTurnId,
+      ...normalizedMode,
+      ...(runtimeSelection ? { runtimeSelection } : {}),
+    });
     return this.db.transaction(() => {
       const prior = this.replay<StartScienceTurnResult>(input.requestId, "science.turn.start", inputSha256);
       if (prior) return { ...prior, replayed: true };
@@ -10030,10 +10529,11 @@ export class ScienceStore {
       const continuationBasisSha256 = continuationBasis === null ? null : sha256Json(continuationBasis);
       const turnId = randomUUID();
       this.db.prepare(`INSERT INTO science_turns
-        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
+        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,runtime_selection_json,runtime_selection_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
         .run(turnId, input.requestId, input.projectId, input.conversationId, userMessage.id, input.runtimeChatId, input.invocationRunId, parentTurnId, origin,
-          continuationBasis === null ? null : JSON.stringify(canonicalValue(continuationBasis)), continuationBasisSha256, now, now);
+          continuationBasis === null ? null : JSON.stringify(canonicalValue(continuationBasis)), continuationBasisSha256,
+          runtimeSelection === null ? null : JSON.stringify(runtimeSelection), runtimeSelectionSha256, now, now);
       this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, input.conversationId);
       this.db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(now, input.projectId);
       const turn = this.getTurnForProject(input.projectId, turnId);
@@ -10081,6 +10581,14 @@ export class ScienceStore {
     const row = this.db.prepare(`SELECT * FROM science_turns
       WHERE project_id = ? AND conversation_id = ? AND status IN ('queued','running','cancelling')
       ORDER BY created_at DESC LIMIT 1`).get(projectId, conversationId) as Record<string, unknown> | undefined;
+    return row ? this.verifiedTurnFromRow(row) : null;
+  }
+
+  getLatestTurn(projectId: string, conversationId: string): ScienceTurn | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(conversationId)) return null;
+    const row = this.db.prepare(`SELECT * FROM science_turns
+      WHERE project_id = ? AND conversation_id = ?
+      ORDER BY created_at DESC, id DESC LIMIT 1`).get(projectId, conversationId) as Record<string, unknown> | undefined;
     return row ? this.verifiedTurnFromRow(row) : null;
   }
 
@@ -10156,7 +10664,7 @@ export class ScienceStore {
     const sourceSequence = hasAnySourceIdentity ? safePositiveInteger(input.sourceSequence, 1, Number.MAX_SAFE_INTEGER, "turn-source-sequence") : null;
     const sourceEventSha256 = hasAnySourceIdentity ? safeSha256(input.sourceEventSha256, "turn-source-event-sha256") : null;
     const payload = safeJsonRecord(input.payload, 256 * 1024, "turn-event-payload");
-    const delta = input.delta == null ? null : safeText(input.delta, 65_536, "turn-event-delta");
+    const delta = input.delta == null ? null : safeTurnEventDelta(input.delta);
     if (input.kind === "partial" && delta === null) throw new Error("science-turn-partial-delta-required");
     if (input.kind !== "partial" && delta !== null) throw new Error("science-turn-event-delta-forbidden");
     const inputSha256 = sha256Json({ projectId: input.projectId, conversationId: input.conversationId, turnId: input.turnId, sequence, kind: input.kind, code, sourceDeliveryId, sourceRunEventId, sourceSequence, sourceEventSha256, payload, delta });
@@ -10239,7 +10747,16 @@ export class ScienceStore {
       if (current.assistantMessageId) throw new Error("science-turn-assistant-already-committed");
       if (current.status !== "running" && current.status !== "cancelling") throw new Error("science-turn-state-conflict");
       if (sequence !== current.lastSequence + 1) throw new Error("science-turn-event-sequence-conflict");
-      if (current.partialText && !content.startsWith(current.partialText)) throw new Error("science-turn-final-content-mismatch");
+      const coreMessageId = typeof payload.coreMessageId === "string" ? payload.coreMessageId : "";
+      const coreMessageSha256 = typeof payload.coreMessageSha256 === "string" ? payload.coreMessageSha256 : "";
+      const hasCanonicalRuntimeFinal = UUID_RE.test(coreMessageId) && coreMessageSha256 === sha256Text(content);
+      // Streaming text is presentation-only and may contain transport markers
+      // that Main removes before it commits the canonical assistant message.
+      // Keep the legacy prefix guard for direct/local callers, but let an exact
+      // Main durable-message receipt replace the transient partial projection.
+      if (current.partialText && !content.startsWith(current.partialText) && !hasCanonicalRuntimeFinal) {
+        throw new Error("science-turn-final-content-mismatch");
+      }
       const now = new Date().toISOString();
       const message: ScienceMessage = {
         id: randomUUID(),
@@ -11234,6 +11751,269 @@ export class ScienceStore {
     })();
   }
 
+  preparePairedStatisticsTable(input: PrepareSciencePairedStatisticsTableInput): PrepareSciencePairedStatisticsTableResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.conversationId ?? ""))
+      || !UUID_RE.test(String(input.originMessageId ?? ""))) throw new Error("science-paired-table-origin-invalid");
+    const title = safeText(input.title, 240, "science-paired-table-title-invalid");
+    const outputKeyColumn = safeText(input.outputKeyColumn, 120, "science-paired-table-output-column-invalid");
+    const safeColumnName = (value: unknown): string => {
+      const name = safeText(value, 120, "science-paired-table-output-column-invalid");
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,119}$/u.test(name)) throw new Error("science-paired-table-output-column-invalid");
+      return name;
+    };
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,119}$/u.test(outputKeyColumn)) throw new Error("science-paired-table-output-column-invalid");
+    if (!Array.isArray(input.sources) || input.sources.length !== 2) throw new Error("science-paired-table-sources-invalid");
+    if (!Array.isArray(input.methods) || input.methods.length < 1 || input.methods.length > SCIENCE_PAIRED_TABLE_METHODS.length
+      || new Set(input.methods).size !== input.methods.length
+      || input.methods.some((method) => !SCIENCE_PAIRED_TABLE_METHODS.includes(method))) {
+      throw new Error("science-paired-table-methods-invalid");
+    }
+    const minimumCompletePairs = safePositiveInteger(
+      input.minimumCompletePairs,
+      3,
+      SCIENCE_TABLE_LIMITS.maxRows,
+      "science-paired-table-minimum-complete-pairs-invalid",
+    );
+    const model = normalizeScienceAnalysisModel(input.model);
+    for (const method of input.methods) {
+      if (!scienceStatisticsMethodMatchesAnalysisModel(method, model)) throw new Error("science-analysis-statistics-method-model-mismatch");
+    }
+    const modelSha256 = scienceStatisticsSha256(model);
+    const resolved = input.sources.map((raw, index) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)
+        || !hasExactKeys(raw as unknown as Record<string, unknown>, ["artifactId", "artifactVersion", "contentSha256", "keyColumn", "valueColumn", "outputColumn", "label"])
+        || !UUID_RE.test(String(raw.artifactId ?? ""))) throw new Error(`science-paired-table-source-${index + 1}-invalid`);
+      const artifactVersion = safePositiveInteger(raw.artifactVersion, 1, Number.MAX_SAFE_INTEGER, "science-paired-table-source-version-invalid");
+      const contentSha256 = safeSha256(raw.contentSha256, "science-paired-table-source-content-invalid");
+      const keyColumn = safeText(raw.keyColumn, 240, "science-paired-table-key-column-invalid");
+      const valueColumn = safeText(raw.valueColumn, 240, "science-paired-table-value-column-invalid");
+      const outputColumn = safeColumnName(raw.outputColumn);
+      const label = safeText(raw.label, 240, "science-paired-table-label-invalid");
+      const context = this.getArtifactContextForProject(input.projectId, raw.artifactId, artifactVersion);
+      if (!context || context.selectedVersion.contentSha256 !== contentSha256
+        || context.artifact.kind !== "chart.vega" || context.selectedVersion.rendererId !== "agentlas.vega"
+        || context.selectedVersion.payload.schema !== SCIENCE_ECONOMICS_ARTIFACT_SCHEMA || !context.artifact.sourceRunId) {
+        throw new Error(`science-paired-table-source-${index + 1}-not-found`);
+      }
+      const payload = validateScienceEconomicIndicatorArtifactPayload(context.selectedVersion.payload);
+      const keyDefinition = payload.table.columns.find((column) => column.id === keyColumn);
+      const valueDefinition = payload.table.columns.find((column) => column.id === valueColumn);
+      if (!keyDefinition || keyDefinition.type !== "string" || !valueDefinition || valueDefinition.type !== "number") {
+        throw new Error(`science-paired-table-source-${index + 1}-columns-invalid`);
+      }
+      const sourceRun = this.getResearchRunForProject(input.projectId, context.artifact.sourceRunId);
+      const artifactBinding = this.getRunArtifactBinding(input.projectId, context.artifact.sourceRunId);
+      if (!sourceRun || sourceRun.status !== "succeeded" || !artifactBinding
+        || artifactBinding.artifactId !== context.artifact.id || artifactBinding.artifactVersion !== artifactVersion
+        || artifactBinding.artifactContentSha256 !== contentSha256) {
+        throw new Error(`science-paired-table-source-${index + 1}-lineage-invalid`);
+      }
+      const values = new Map<string, number | null>();
+      for (const row of payload.table.rows) {
+        const key = row[keyColumn as keyof typeof row];
+        const value = row[valueColumn as keyof typeof row];
+        if (typeof key !== "string" || !key.trim() || Buffer.byteLength(key, "utf8") > SCIENCE_TABLE_LIMITS.maxCellTextBytes
+          || (value !== null && (typeof value !== "number" || !Number.isFinite(value)))) {
+          throw new Error(`science-paired-table-source-${index + 1}-row-invalid`);
+        }
+        if (values.has(key)) throw new Error(`science-paired-table-source-${index + 1}-duplicate-key`);
+        values.set(key, value as number | null);
+      }
+      return {
+        artifactId: context.artifact.id,
+        artifactVersion,
+        contentSha256,
+        keyColumn,
+        valueColumn,
+        outputColumn,
+        label,
+        context,
+        payload,
+        sourceRun,
+        values,
+      };
+    });
+    if (resolved[0]!.artifactId === resolved[1]!.artifactId && resolved[0]!.artifactVersion === resolved[1]!.artifactVersion) {
+      throw new Error("science-paired-table-source-duplicate");
+    }
+    const alignmentSource = (source: typeof resolved[number]): SciencePairedSeriesAlignmentSource => ({
+      outputColumn: source.outputColumn,
+      values: [...source.values].map(([key, value]) => ({ key, value })),
+    });
+    const alignment = alignSciencePairedSeries(outputKeyColumn, [alignmentSource(resolved[0]!), alignmentSource(resolved[1]!)]);
+    const { rows, nullCount } = alignment;
+    const columns: ScienceDatasetTablePayload["columns"] = [
+      { name: outputKeyColumn, logicalType: "string", nullable: false },
+      { name: "paired_eligible", logicalType: "boolean", nullable: false },
+      ...resolved.flatMap((source): ScienceDatasetTablePayload["columns"] => [
+        { name: source.outputColumn, logicalType: "number", nullable: true },
+        { name: `${source.outputColumn}_missing`, logicalType: "boolean", nullable: false },
+      ]),
+    ];
+    const profile = { rowCount: rows.length, columnCount: columns.length, nullCount, formulaLikeCellCount: 0 };
+    const descriptor = {
+      schema: SCIENCE_PAIRED_TABLE_ALIGNER_INPUT_SCHEMA,
+      policy: "full-outer-by-exact-string-key-preserve-null/v1",
+      title,
+      outputKeyColumn,
+      sources: resolved.map((source) => ({
+        artifactId: source.artifactId,
+        artifactVersion: source.artifactVersion,
+        contentSha256: source.contentSha256,
+        sourceRunId: source.sourceRun.id,
+        keyColumn: source.keyColumn,
+        valueColumn: source.valueColumn,
+        outputColumn: source.outputColumn,
+        label: source.label,
+      })),
+      methods: [...input.methods],
+      model,
+      modelSha256,
+      completePairCount: alignment.completePairCount,
+      minimumCompletePairs,
+    };
+    const rawSha256 = scienceTableSha256(descriptor);
+    const table = validateScienceTablePayload({
+      schema: "agentlas.science-table/v1",
+      columns,
+      rows,
+      profile,
+      receipts: {
+        parserId: SCIENCE_PAIRED_TABLE_ALIGNER_ID,
+        parserVersion: SCIENCE_PAIRED_TABLE_ALIGNER_VERSION,
+        rawSha256,
+        headerSha256: scienceTableSha256(columns.map((column) => column.name)),
+        rowsSha256: scienceTableSha256(rows),
+        tableSha256: scienceTableSha256({ schema: "agentlas.science-table/v1", columns, rows, profile }),
+      },
+    });
+    const descriptorBlob = this.putRunBlob(Buffer.from(JSON.stringify(canonicalValue(descriptor)), "utf8"));
+    if (descriptorBlob.sha256 !== rawSha256) throw new Error("science-paired-table-descriptor-hash-invalid");
+    const sourceBlobs = resolved.map((source) => this.putRunBlob(Buffer.from(JSON.stringify(canonicalValue(source.payload)), "utf8")));
+    const inputs: ScienceResearchRunResourceInput[] = [
+      {
+        role: "paired-table-alignment-descriptor",
+        mimeType: "application/vnd.agentlas.science.paired-table-alignment-input+json",
+        ...descriptorBlob,
+        artifactId: null,
+        artifactVersion: null,
+      },
+      ...sourceBlobs.map((blob, index) => ({
+        role: `paired-table-source-${index + 1}`,
+        mimeType: "application/vnd.agentlas.science.artifact+json",
+        ...blob,
+        artifactId: resolved[index]!.artifactId,
+        artifactVersion: resolved[index]!.artifactVersion,
+      })),
+    ];
+    const environmentSha256 = sha256Json({ toolId: SCIENCE_PAIRED_TABLE_ALIGNER_ID, toolVersion: SCIENCE_PAIRED_TABLE_ALIGNER_VERSION, runtime: process.version });
+    const created = this.createResearchRun({
+      requestId: input.requestId,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      originMessageId: input.originMessageId,
+      parentRunId: resolved[0]!.sourceRun.id,
+      parentBindings: resolved.map((source, index) => ({ ordinal: index + 1, role: index === 0 ? "primary" : `paired-source-${index + 1}`, parentRunId: source.sourceRun.id })),
+      toolId: SCIENCE_PAIRED_TABLE_ALIGNER_ID,
+      toolVersion: SCIENCE_PAIRED_TABLE_ALIGNER_VERSION,
+      runtime: "electron-main",
+      inputManifestSha256: sha256Json(inputs),
+      environmentSha256,
+      inputs,
+    });
+    let run = this.getResearchRunForProject(input.projectId, created.run.id) ?? created.run;
+    if (created.replayed && run.status === "failed") throw new Error("science-paired-table-prior-run-failed");
+    if (created.replayed && run.status === "running") throw new Error("science-paired-table-run-in-progress");
+    if (!created.replayed) {
+      const outputBlob = this.putRunBlob(Buffer.from(JSON.stringify(canonicalValue(table)), "utf8"));
+      const outputs: ScienceResearchRunResourceInput[] = [{
+        role: "normalized-table",
+        mimeType: SCIENCE_PAIRED_TABLE_ALIGNER_OUTPUT_MIME,
+        ...outputBlob,
+        artifactId: null,
+        artifactVersion: null,
+      }];
+      run = this.completeResearchRun({
+        requestId: stableUuid(`${input.requestId}:complete`),
+        projectId: input.projectId,
+        runId: run.id,
+        status: "succeeded",
+        outputManifestSha256: sha256Json(outputs),
+        summary: `${rows.length} exact keys aligned from two immutable source artifacts; missing measurements remain null with explicit flags.`,
+        outputs,
+      }).run;
+    }
+    let artifact = this.getArtifactForSourceRun(input.projectId, run.id, SCIENCE_TABLE_LAB_ID);
+    if (!artifact) {
+      artifact = this.createArtifact({
+        projectId: input.projectId,
+        sourceRunId: run.id,
+        kind: SCIENCE_TABLE_ARTIFACT_KIND,
+        title,
+        rendererId: SCIENCE_TABLE_RENDERER_ID,
+        rendererVersion: SCIENCE_TABLE_RENDERER_VERSION,
+        rendererBinding: null,
+        payload: table as unknown as Record<string, unknown>,
+        semantic: {
+          title,
+          summary: `${rows.length} exact join keys aligned from two immutable artifacts without imputing measurements.`,
+          entities: resolved.map((source) => ({ id: source.outputColumn, label: source.label, type: "measured-series" })),
+          observations: [
+            { label: "Aligned keys", value: rows.length, unit: null },
+            { label: "Missing measurements", value: nullCount, unit: null },
+          ],
+          warnings: nullCount > 0 ? [`${nullCount} missing measurement cell(s) remain null and are marked by explicit boolean columns.`] : [],
+        },
+        provenance: {
+          sourceRunId: run.id,
+          sourceRefs: resolved.map((source) => source.payload.evidence.source.canonicalUri),
+          datasetSha256: resolved.map((source) => source.contentSha256),
+          codeSha256: sha256Json({ toolId: SCIENCE_PAIRED_TABLE_ALIGNER_ID, toolVersion: SCIENCE_PAIRED_TABLE_ALIGNER_VERSION }),
+          environmentSha256,
+        },
+        linkage: {
+          labId: SCIENCE_TABLE_LAB_ID,
+          origin: { surface: "conversation", conversationId: input.conversationId, messageId: input.originMessageId, loopSessionId: null, runId: run.id, branchId: null },
+          parent: null,
+          inputs: resolved.map((source) => ({ artifactId: source.artifactId, version: source.artifactVersion })),
+        },
+      });
+      this.bindSucceededRunArtifact({
+        requestId: stableUuid(`science-paired-table-run-artifact-binding:v1:${input.projectId}:${run.id}:${artifact.id}:${artifact.currentVersion}`),
+        projectId: input.projectId,
+        runId: run.id,
+        outputOrdinal: 1,
+        artifactId: artifact.id,
+        artifactVersion: artifact.currentVersion,
+        expectedArtifactContentSha256: artifact.version.contentSha256,
+      });
+    }
+    const preparation = {
+      dataInputs: [{ artifactId: artifact.id, artifactVersion: artifact.currentVersion, contentSha256: artifact.version.contentSha256 }],
+      model,
+      modelSha256,
+      requiredDiagnostics: input.methods.map((method) => `agentlas.statistics.method:${method}`),
+      sourceTables: input.methods.map((method) => ({
+        artifact_id: artifact!.id,
+        artifact_version: artifact!.currentVersion,
+        content_sha256: artifact!.version.contentSha256,
+        method,
+        projection_kind: "declared-columns",
+        columns: {
+          x: { column: resolved[0]!.outputColumn },
+          y: { column: resolved[1]!.outputColumn },
+          xLabel: { value: resolved[0]!.label },
+          yLabel: { value: resolved[1]!.label },
+        },
+      })),
+      completePairCount: alignment.completePairCount,
+      minimumCompletePairs,
+      readyForStatistics: alignment.completePairCount >= minimumCompletePairs,
+    };
+    return { run, artifact, table, preparation, replayed: created.replayed };
+  }
+
   createResearchRun(input: CreateScienceResearchRunInput): CreateScienceResearchRunResult {
     if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
     if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.conversationId ?? "")) || !UUID_RE.test(String(input.originMessageId ?? ""))) throw new Error("science-run-origin-invalid");
@@ -11797,7 +12577,9 @@ export class ScienceStore {
           time: typeof row[columns.timeColumn] === "number" ? row[columns.timeColumn] as number : null,
           value: typeof row[columns.valueColumn] === "number" ? row[columns.valueColumn] as number : null,
           standardError: typeof row[columns.standardErrorColumn] === "number" ? row[columns.standardErrorColumn] as number : null,
-          use: row[columns.useColumn] === true,
+          // Reconstruction has to agree with the gateway: no declared mask means every row is in,
+          // or this integrity check would reject exactly the tables the tool now accepts.
+          use: columns.useColumn === null ? true : row[columns.useColumn] === true,
         }));
         if (scienceAstronomySha256Json(reconstructedMeasurements) !== scienceAstronomySha256Json(descriptor.measurements)) {
           throw new Error("science-astronomy-light-curve-source-table-invalid");
@@ -13454,6 +14236,77 @@ export class ScienceStore {
           throw new Error("science-materials-run-lineage-invalid");
         }
       } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === SCIENCE_PAIRED_TABLE_ALIGNER_ID
+        && sourceRun.toolVersion === SCIENCE_PAIRED_TABLE_ALIGNER_VERSION) {
+        const table = validateScienceTablePayload(payload);
+        const descriptorInput = sourceRun.inputs[0];
+        const sourceInputs = sourceRun.inputs.slice(1);
+        const output = sourceRun.outputs[0];
+        if (sourceRun.status !== "succeeded" || sourceRun.inputs.length !== 3 || sourceRun.outputs.length !== 1
+          || !descriptorInput || descriptorInput.ordinal !== 1 || descriptorInput.role !== "paired-table-alignment-descriptor"
+          || descriptorInput.mimeType !== "application/vnd.agentlas.science.paired-table-alignment-input+json"
+          || !output || output.ordinal !== 1 || output.role !== "normalized-table" || output.mimeType !== SCIENCE_PAIRED_TABLE_ALIGNER_OUTPUT_MIME
+          || table.receipts.parserId !== SCIENCE_PAIRED_TABLE_ALIGNER_ID
+          || table.receipts.parserVersion !== SCIENCE_PAIRED_TABLE_ALIGNER_VERSION
+          || table.receipts.rawSha256 !== descriptorInput.sha256
+          || !this.readRunBlob(output).equals(Buffer.from(JSON.stringify(canonicalValue(table)), "utf8"))) {
+          throw new Error("science-paired-table-run-lineage-invalid");
+        }
+        let descriptor: Record<string, unknown>;
+        try { descriptor = JSON.parse(this.readRunBlob(descriptorInput).toString("utf8")) as Record<string, unknown>; }
+        catch { throw new Error("science-paired-table-descriptor-invalid"); }
+        const descriptorSources = Array.isArray(descriptor.sources) ? descriptor.sources : null;
+        if (!hasExactKeys(descriptor, ["schema", "policy", "title", "outputKeyColumn", "sources", "methods", "model", "modelSha256", "completePairCount", "minimumCompletePairs"])
+          || descriptor.schema !== SCIENCE_PAIRED_TABLE_ALIGNER_INPUT_SCHEMA
+          || descriptor.policy !== "full-outer-by-exact-string-key-preserve-null/v1"
+          || !descriptorSources || descriptorSources.length !== 2
+          || !Number.isSafeInteger(descriptor.completePairCount) || Number(descriptor.completePairCount) < 0
+          || !Number.isSafeInteger(descriptor.minimumCompletePairs) || Number(descriptor.minimumCompletePairs) < 3
+          || scienceStatisticsSha256(normalizeScienceAnalysisModel(descriptor.model)) !== descriptor.modelSha256) {
+          throw new Error("science-paired-table-descriptor-invalid");
+        }
+        const descriptorOutputColumns = descriptorSources.map((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+          ? String((entry as Record<string, unknown>).outputColumn ?? "") : "");
+        if (descriptorOutputColumns.some((name) => !/^[A-Za-z][A-Za-z0-9_]{0,119}$/u.test(name))) {
+          throw new Error("science-paired-table-descriptor-invalid");
+        }
+        let exactCompletePairCount = 0;
+        for (const row of table.rows) {
+          const eligible = descriptorOutputColumns.every((name) => row[name] !== null);
+          if (row.paired_eligible !== eligible
+            || descriptorOutputColumns.some((name) => row[`${name}_missing`] !== (row[name] === null))) {
+            throw new Error("science-paired-table-eligibility-invalid");
+          }
+          if (eligible) exactCompletePairCount += 1;
+        }
+        if (descriptor.completePairCount !== exactCompletePairCount) {
+          throw new Error("science-paired-table-eligibility-invalid");
+        }
+        const parents = this.getResearchRunParentBindings(projectId, sourceRun.id);
+        if (parents.length !== 2 || sourceInputs.length !== 2) {
+          throw new Error("science-paired-table-parent-lineage-invalid");
+        }
+        const exactInputHashes: string[] = [];
+        descriptorSources.forEach((entry, index) => {
+          const item = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : null;
+          const runInput = sourceInputs[index];
+          if (!item || !hasExactKeys(item, ["artifactId", "artifactVersion", "contentSha256", "sourceRunId", "keyColumn", "valueColumn", "outputColumn", "label"])
+            || !runInput || runInput.role !== `paired-table-source-${index + 1}`
+            || runInput.artifactId !== item.artifactId || runInput.artifactVersion !== item.artifactVersion
+            || parents[index]?.ordinal !== index + 1 || parents[index]?.role !== (index === 0 ? "primary" : `paired-source-${index + 1}`)
+            || parents[index]?.parentRunId !== item.sourceRunId) {
+            throw new Error("science-paired-table-parent-lineage-invalid");
+          }
+          const sourceContext = this.getArtifactContextForProject(projectId, String(item.artifactId), Number(item.artifactVersion));
+          if (!sourceContext || sourceContext.selectedVersion.contentSha256 !== item.contentSha256
+            || sourceContext.artifact.sourceRunId !== item.sourceRunId
+            || !this.readRunBlob(runInput).equals(Buffer.from(JSON.stringify(canonicalValue(sourceContext.selectedVersion.payload)), "utf8"))) {
+            throw new Error("science-paired-table-source-lineage-invalid");
+          }
+          exactInputHashes.push(String(item.contentSha256));
+        });
+        if (exactInputHashes.length !== 2) throw new Error("science-paired-table-source-lineage-invalid");
+      } else if (payload.schema === "agentlas.science-table/v1"
         && sourceRun?.toolId === "agentlas.paleontology-candidate-comparison"
         && sourceRun.toolVersion === "1.0.0") {
         const columns = Array.isArray(payload.columns) ? payload.columns : null;
@@ -13975,6 +14828,14 @@ export class ScienceStore {
         if (prior.inputSha256 !== inputSha256) throw new Error("science-staged-evidence-request-conflict");
         return { stagedEvidence: prior, replayed: true };
       }
+      const coordinateRow = this.db.prepare(`SELECT * FROM staged_message_evidence
+        WHERE turn_id = ? AND block_ordinal = ? AND citation_ordinal = ?`)
+        .get(input.turnId, blockOrdinal, citationOrdinal) as Record<string, unknown> | undefined;
+      if (coordinateRow) {
+        const prior = stagedMessageEvidenceFromRow(coordinateRow);
+        if (prior.inputSha256 !== inputSha256) throw new Error("science-staged-evidence-coordinate-conflict");
+        return { stagedEvidence: prior, replayed: true };
+      }
       const turn = this.getTurnForProject(input.projectId, input.turnId);
       if (!turn || turn.conversationId !== input.conversationId || turn.invocationRunId !== input.invocationRunId) {
         throw new Error("science-staged-evidence-turn-scope-mismatch");
@@ -14133,8 +14994,7 @@ export class ScienceStore {
   approvedResearchContractSha256(projectId: string): string | null {
     const contract = this.latestResearchContract(projectId);
     if (!contract || contract.status !== "approved" || !contract.approvedAt) return null;
-    return sha256Json({
-      schema: "agentlas.science.research-contract-terms/v1",
+    const terms = {
       contractId: contract.id,
       projectId: contract.projectId,
       version: contract.version,
@@ -14144,7 +15004,10 @@ export class ScienceStore {
       constraints: contract.constraints,
       maxEpisodes: contract.maxEpisodes,
       maxWallTimeMinutes: contract.maxWallTimeMinutes,
-    });
+    };
+    return contract.completionScope === null || contract.completionScope === undefined
+      ? sha256Json({ schema: "agentlas.science.research-contract-terms/v1", ...terms })
+      : sha256Json({ schema: "agentlas.science.research-contract-terms/v2", ...terms, completionScope: contract.completionScope });
   }
 
   /**
@@ -14163,11 +15026,11 @@ export class ScienceStore {
       : undefined;
     if (!row) {
       return {
-        id: stableUuid(`science-approval-policy-default:v1:${projectId}`),
+        id: stableUuid(`science-approval-policy-default:v2:${projectId}`),
         projectId,
         revision: 0,
         mode: "autonomous",
-        scopes: ["research-contract", "hypothesis", "journal-identity"],
+        scopes: ["research-contract", "hypothesis", "analysis-plan", "journal-identity"],
         grantedBy: "project-default",
         note: "Default policy: the study proceeds and records each authorization. The submission attestation still asks, because it is made in the researcher's name to a publisher.",
         createdAt: new Date(0).toISOString(),
@@ -14242,9 +15105,16 @@ export class ScienceStore {
     const successCriteria = safeTextList(input.successCriteria, 30, 2_000, "success-criteria");
     const failureCriteria = safeTextList(input.failureCriteria, 30, 2_000, "failure-criteria");
     const constraints = safeTextList(input.constraints, 50, 2_000, "constraints", 0);
+    const completionScope = input.completionScope === undefined || input.completionScope === null ? null : input.completionScope;
+    if (completionScope !== null && !SCIENCE_RESEARCH_COMPLETION_SCOPES.includes(completionScope)) {
+      throw new Error("science-research-completion-scope-invalid");
+    }
     const maxEpisodes = safePositiveInteger(input.maxEpisodes, 1, 1000, "max-episodes");
     const maxWallTimeMinutes = safePositiveInteger(input.maxWallTimeMinutes, 1, 10080, "max-wall-time-minutes");
-    const inputSha256 = sha256Json({ projectId: input.projectId, expectedProjectVersion, objective, successCriteria, failureCriteria, constraints, maxEpisodes, maxWallTimeMinutes });
+    const inputSha256 = completionScope === null
+      ? sha256Json({ projectId: input.projectId, expectedProjectVersion, objective, successCriteria, failureCriteria, constraints, maxEpisodes, maxWallTimeMinutes })
+      : sha256Json({ projectId: input.projectId, expectedProjectVersion, objective, successCriteria, failureCriteria, constraints,
+        completionScope, maxEpisodes, maxWallTimeMinutes });
     return this.db.transaction(() => {
       const prior = this.replay<SaveScienceResearchContractResult>(input.requestId, "contract.save", inputSha256);
       if (prior) return { ...prior, replayed: true };
@@ -14260,13 +15130,14 @@ export class ScienceStore {
       this.db.prepare("UPDATE research_contracts SET status = 'superseded', updated_at = ? WHERE project_id = ? AND status = 'draft'").run(now, project.id);
       const contract: ScienceResearchContract = {
         id: randomUUID(), projectId: project.id, version, status: "draft", objective,
-        successCriteria, failureCriteria, constraints, maxEpisodes, maxWallTimeMinutes,
+        successCriteria, failureCriteria, constraints, completionScope, maxEpisodes, maxWallTimeMinutes,
         approvedAt: null, createdAt: now, updatedAt: now,
       };
       this.db.prepare(`INSERT INTO research_contracts
-        (id,project_id,version,status,objective,success_criteria_json,failure_criteria_json,constraints_json,max_episodes,max_wall_time_minutes,approved_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(contract.id, contract.projectId, contract.version, contract.status, contract.objective, JSON.stringify(contract.successCriteria), JSON.stringify(contract.failureCriteria), JSON.stringify(contract.constraints), contract.maxEpisodes, contract.maxWallTimeMinutes, null, now, now);
+        (id,project_id,version,status,objective,success_criteria_json,failure_criteria_json,constraints_json,completion_scope,max_episodes,max_wall_time_minutes,approved_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(contract.id, contract.projectId, contract.version, contract.status, contract.objective, JSON.stringify(contract.successCriteria), JSON.stringify(contract.failureCriteria), JSON.stringify(contract.constraints), contract.completionScope,
+          contract.maxEpisodes, contract.maxWallTimeMinutes, null, now, now);
       this.db.prepare("UPDATE projects SET version = version + 1, updated_at = ? WHERE id = ? AND version = ?").run(now, project.id, expectedProjectVersion);
       const updatedProject = projectFromRow(this.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id) as Record<string, unknown>);
       const result: SaveScienceResearchContractResult = { project: updatedProject, contract, replayed: false };
@@ -14766,6 +15637,137 @@ export class ScienceStore {
     return loopEventFromRow(this.db.prepare("SELECT * FROM loop_events WHERE id = ?").get(id) as Record<string, unknown>);
   }
 
+  /**
+   * Hash only durable scientific state that can prove research progress. Turn
+   * prose, loop status events, and controller output are deliberately absent:
+   * a different receipt-backed source/evidence/run/hypothesis/artifact row is
+   * the boundary that can release the no-progress guard.
+   *
+   * Hypothesis rows are immutable and receive a fresh id for every proposal or
+   * revision.  IDs therefore cannot be evidence of progress: a controller can
+   * otherwise evade the no-progress guard by inserting the same proposed
+   * hypothesis repeatedly.  The hypothesis projection below is content-keyed
+   * and deduplicated; status, role, and receipt-backed bindings remain part of
+   * the canonical value so a real scientific transition still changes it.
+   */
+  private scientificProgressSha256(projectId: string): string {
+    const sources = (this.db.prepare(`
+      SELECT s.id AS source_id, v.id AS source_version_id, v.content_sha256, v.access_state
+      FROM sources s JOIN source_versions v ON v.source_id = s.id
+      WHERE s.project_id = ? ORDER BY s.id, v.version, v.id
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      sourceId: String(row.source_id),
+      sourceVersionId: String(row.source_version_id),
+      contentSha256: row.content_sha256 === null || row.content_sha256 === undefined ? null : String(row.content_sha256),
+      accessState: String(row.access_state),
+    }));
+    const evidenceSpans = (this.db.prepare(`
+      SELECT id, excerpt_sha256 FROM evidence_spans
+      WHERE project_id = ? ORDER BY id
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id),
+      excerptSha256: String(row.excerpt_sha256),
+    }));
+    const succeededRuns = (this.db.prepare(`
+      SELECT id, output_manifest_sha256 FROM research_runs
+      WHERE project_id = ? AND status = 'succeeded' ORDER BY id
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id),
+      outputManifestSha256: String(row.output_manifest_sha256),
+    }));
+    const hypotheses = (this.db.prepare(`
+      SELECT statement, rationale, falsification_criteria_json, hypothesis_role, status FROM hypotheses
+      WHERE project_id = ? ORDER BY statement, rationale, hypothesis_role, status
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      statement: String(row.statement),
+      rationale: String(row.rationale),
+      falsificationCriteria: parseTextList(row.falsification_criteria_json),
+      role: String(row.hypothesis_role),
+      status: String(row.status),
+    }));
+    const distinctHypotheses = [...new Map(hypotheses.map((hypothesis) => [
+      JSON.stringify(hypothesis), hypothesis,
+    ])).values()].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    const hypothesisEvidence = (this.db.prepare(`
+      SELECT h.statement, h.rationale, h.falsification_criteria_json, h.hypothesis_role, h.status, e.excerpt_sha256
+      FROM hypothesis_evidence_bindings b
+      JOIN hypotheses h ON h.id = b.hypothesis_id AND h.project_id = b.project_id
+      JOIN evidence_spans e ON e.id = b.evidence_span_id AND e.project_id = b.project_id
+      WHERE b.project_id = ? ORDER BY h.statement, h.rationale, h.hypothesis_role, h.status, e.excerpt_sha256
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      hypothesis: {
+        statement: String(row.statement),
+        rationale: String(row.rationale),
+        falsificationCriteria: parseTextList(row.falsification_criteria_json),
+        role: String(row.hypothesis_role),
+        status: String(row.status),
+      },
+      evidenceExcerptSha256: String(row.excerpt_sha256),
+    }));
+    const distinctHypothesisEvidence = [...new Map(hypothesisEvidence.map((binding) => [
+      JSON.stringify(binding), binding,
+    ])).values()];
+    const episodeResults = (this.db.prepare(`
+      SELECT e.hypothesis_content_sha256, e.status AS episode_status, r.outcome, r.result_sha256
+      FROM research_episode_results r
+      JOIN research_episodes e ON e.id = r.episode_id AND e.project_id = r.project_id
+      WHERE r.project_id = ? ORDER BY e.hypothesis_content_sha256, r.result_sha256
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      hypothesisContentSha256: String(row.hypothesis_content_sha256),
+      episodeStatus: String(row.episode_status),
+      outcome: String(row.outcome),
+      resultSha256: String(row.result_sha256),
+    }));
+    const distinctEpisodeResults = [...new Map(episodeResults.map((result) => [
+      JSON.stringify(result), result,
+    ])).values()];
+    const artifactVersions = (this.db.prepare(`
+      SELECT v.id, v.content_sha256
+      FROM artifact_versions v JOIN artifacts a ON a.id = v.artifact_id
+      WHERE a.project_id = ? ORDER BY v.id
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id),
+      contentSha256: String(row.content_sha256),
+    }));
+    const manuscriptVersions = (this.db.prepare(`
+      SELECT m.status, v.content_sha256, v.binding_manifest_sha256
+      FROM manuscripts m JOIN manuscript_versions v ON v.manuscript_id = m.id
+      WHERE m.project_id = ? ORDER BY v.content_sha256, v.binding_manifest_sha256, m.status
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      status: String(row.status),
+      contentSha256: String(row.content_sha256),
+      bindingManifestSha256: String(row.binding_manifest_sha256),
+    }));
+    const distinctManuscriptVersions = [...new Map(manuscriptVersions.map((version) => [
+      JSON.stringify(version), version,
+    ])).values()];
+    const analysisPlans = (this.db.prepare(`
+      SELECT s.status, s.current_document_sha256, v.document_sha256
+      FROM analysis_specs s
+      JOIN analysis_spec_versions v ON v.analysis_spec_id = s.id AND v.version = s.current_version
+      WHERE s.project_id = ? ORDER BY s.current_document_sha256, s.status
+    `).all(projectId) as Array<Record<string, unknown>>).map((row) => ({
+      status: String(row.status),
+      documentSha256: String(row.document_sha256),
+      currentDocumentSha256: String(row.current_document_sha256),
+    }));
+    const distinctAnalysisPlans = [...new Map(analysisPlans.map((plan) => [
+      JSON.stringify(plan), plan,
+    ])).values()];
+    return sha256Json({
+      schema: "agentlas.science.scientific-progress/v2",
+      sources,
+      evidenceSpans,
+      succeededRuns,
+      hypotheses: distinctHypotheses,
+      hypothesisEvidence: distinctHypothesisEvidence,
+      episodeResults: distinctEpisodeResults,
+      artifactVersions,
+      manuscriptVersions: distinctManuscriptVersions,
+      analysisPlans: distinctAnalysisPlans,
+    });
+  }
+
   private updateLoopSession(current: ScienceLoopSession, patch: Partial<Pick<ScienceLoopSession,
     "activeRunId" | "status" | "stage" | "currentEpisode" | "startedAt" | "finishedAt" | "terminalCode" | "completionReceiptSetSha256">>, now: string): ScienceLoopSession {
     const nextWithoutHash: Omit<ScienceLoopSession, "stateSha256"> = {
@@ -14836,7 +15838,16 @@ export class ScienceStore {
       || !UUID_RE.test(String(input.contractId ?? ""))) throw new Error("science-loop-input-invalid");
     const expectedProjectVersion = safePositiveInteger(input.expectedProjectVersion, 1, Number.MAX_SAFE_INTEGER, "loop-project-version");
     const expectedContractVersion = safePositiveInteger(input.expectedContractVersion, 1, Number.MAX_SAFE_INTEGER, "loop-contract-version");
-    const canonical = { projectId: input.projectId, conversationId: input.conversationId, contractId: input.contractId, expectedProjectVersion, expectedContractVersion };
+    const runtimeSelection = normalizeScienceRuntimeSelectionForStore(input.runtimeSelection);
+    const runtimeSelectionSha256 = runtimeSelection ? scienceRuntimeSelectionSha256(runtimeSelection) : null;
+    const canonical = {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      contractId: input.contractId,
+      expectedProjectVersion,
+      expectedContractVersion,
+      ...(runtimeSelection ? { runtimeSelection } : {}),
+    };
     const inputSha256 = sha256Json(canonical);
     return this.db.transaction(() => {
       const prior = this.replay<StartScienceLoopSessionResult>(input.requestId, "research-loop.start", inputSha256);
@@ -14873,6 +15884,8 @@ export class ScienceStore {
         lifecycleStartRevision: lifecycle.revision,
         lifecycleStartStateSha256: lifecycle.stateSha256,
         runtimeChatId: binding.runtimeChatId,
+        runtimeSelection,
+        runtimeSelectionSha256,
         activeRunId: null,
         status: "queued",
         stage: "contract-approved",
@@ -14891,12 +15904,13 @@ export class ScienceStore {
       const stateSha256 = scienceLoopSessionStateSha256(sessionWithoutHash);
       this.db.prepare(`INSERT INTO loop_sessions
         (id,project_id,contract_id,contract_version,contract_content_sha256,lifecycle_study_id,lifecycle_start_revision,
-         lifecycle_start_state_sha256,runtime_chat_id,active_run_id,status,stage,current_episode,max_episodes,max_wall_time_minutes,
+         lifecycle_start_state_sha256,runtime_chat_id,runtime_selection_json,runtime_selection_sha256,active_run_id,status,stage,current_episode,max_episodes,max_wall_time_minutes,
          deadline_at,version,state_sha256,terminal_code,started_at,finished_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,NULL,'queued','contract-approved',0,?,?,?,?,?,NULL,?,NULL,?,?)`)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,'queued','contract-approved',0,?,?,?,?,?,NULL,?,NULL,?,?)`)
         .run(id, input.projectId, contract.id, contract.version, sessionWithoutHash.contractContentSha256,
-          lifecycle.studyId, lifecycle.revision, lifecycle.stateSha256, binding.runtimeChatId, contract.maxEpisodes,
-          contract.maxWallTimeMinutes, deadlineAt, 1, stateSha256, now, now, now);
+          lifecycle.studyId, lifecycle.revision, lifecycle.stateSha256, binding.runtimeChatId,
+          runtimeSelection === null ? null : JSON.stringify(runtimeSelection), runtimeSelectionSha256,
+          contract.maxEpisodes, contract.maxWallTimeMinutes, deadlineAt, 1, stateSha256, now, now, now);
       const session = this.getLoopSessionForProject(input.projectId, id);
       if (!session) throw new Error("science-loop-create-failed");
       this.appendLoopEvent({ projectId: input.projectId, loopSessionId: id, kind: "lifecycle", code: "loop.started",
@@ -15466,6 +16480,12 @@ export class ScienceStore {
               || receipt.criterionTextSha256 !== sha256Text(contract.successCriteria[index]!))) {
             throw new Error("science-loop-completion-verification-missing");
           }
+          if (contract.completionScope === "full-study") {
+            const lifecycle = this.getResearchLifecycleForProject(input.projectId);
+            if (!lifecycle || lifecycle.phase !== "ready_to_submit" || lifecycle.status !== "complete") {
+              throw new Error("science-full-study-completion-gate-missing");
+            }
+          }
           const receiptIds = latestReceipts.map((receipt) => receipt.id);
           const receiptSha256s = latestReceipts.map((receipt) => receipt.receiptSha256);
           completionReceiptSet = { receiptIds, receiptSha256s, setSha256: sha256Json({
@@ -15521,6 +16541,14 @@ export class ScienceStore {
         throw new Error("science-loop-version-conflict");
       }
       if (session.status !== "queued" || session.activeRunId !== null) throw new Error("science-loop-not-queued");
+      const turn = this.getTurnByInvocationRunId(input.invocationRunId);
+      // Legacy unpinned rows remain readable, but every selected-model loop
+      // requires the exact durable controller turn before reserving its run.
+      if ((!turn && session.runtimeSelectionSha256 !== null) || (turn && (
+        turn.projectId !== session.projectId || turn.runtimeChatId !== session.runtimeChatId
+        || turn.runtimeSelectionSha256 !== session.runtimeSelectionSha256
+        || ["completed", "failed", "cancelled", "interrupted"].includes(turn.status)
+      ))) throw new Error("science-loop-dispatch-turn-binding-mismatch");
       const activeEpisode = this.listResearchEpisodes(input.projectId, session.id)
         .find((episode) => ["planned", "running", "waiting-for-decision"].includes(episode.status)) ?? null;
       const now = new Date().toISOString();
@@ -15553,6 +16581,7 @@ export class ScienceStore {
     expectedLoopVersion: number;
     expectedLoopStateSha256: string;
     errorCode: string;
+    invocationRunId?: string;
   }): ScienceLoopSession {
     return this.db.transaction(() => {
       const session = this.getLoopSessionForProject(input.projectId, input.loopSessionId);
@@ -15560,7 +16589,9 @@ export class ScienceStore {
       if (session.version !== input.expectedLoopVersion || session.stateSha256 !== input.expectedLoopStateSha256) {
         throw new Error("science-loop-version-conflict");
       }
-      if (session.status !== "queued") throw new Error("science-loop-not-queued");
+      const reservedRunFailed = session.status === "running" && input.invocationRunId
+        && session.activeRunId === input.invocationRunId;
+      if (session.status !== "queued" && !reservedRunFailed) throw new Error("science-loop-dispatch-reservation-mismatch");
       const now = new Date().toISOString();
       const updated = this.updateLoopSession(session, { status: "paused", activeRunId: null, stage: "awaiting-approval" }, now);
       this.appendLoopEvent({
@@ -15586,6 +16617,7 @@ export class ScienceStore {
     projectId: string;
     invocationRunId: string;
     receiptStatus: string;
+    errorCode?: string;
   }): ScienceLoopSession | null {
     if (!UUID_RE.test(input.projectId) || !UUID_RE.test(input.invocationRunId)) return null;
     return this.db.transaction(() => {
@@ -15604,7 +16636,11 @@ export class ScienceStore {
         summary: "The active Science controller turn settled. No successor was dispatched, so the loop requires explicit continuation.",
         payload: {
           action: "pause",
-          pauseReason: "approval_required",
+          pauseReason: input.receiptStatus === "cancelled" ? "runtime_cancelled"
+            : input.receiptStatus === "interrupted" ? "runtime_interrupted"
+              : input.receiptStatus === "failed" ? "runtime_failed"
+                : input.errorCode ? "runtime_result_invalid" : "approval_required",
+          ...(input.errorCode ? { errorCode: safeText(input.errorCode, 240, "science-loop-settlement-error-code") } : {}),
           automaticResume: false,
           priorActiveRunId: input.invocationRunId,
           receiptStatus: safeText(input.receiptStatus, 80, "science-loop-receipt-status"),
@@ -15734,7 +16770,9 @@ export class ScienceStore {
       if (!contract || contract.version !== session.contractVersion || scienceResearchContractContentSha256(contract) !== session.contractContentSha256) {
         return pause("contract_changed", "The approved research contract changed while the controller was running; continuation requires a fresh review.");
       }
-      if (!lifecycle || lifecycle.studyId !== session.lifecycleStudyId || lifecycle.status !== "active"
+      const fullStudyLifecycleComplete = contract.completionScope === "full-study"
+        && lifecycle?.phase === "ready_to_submit" && lifecycle.status === "complete";
+      if (!lifecycle || lifecycle.studyId !== session.lifecycleStudyId || (!fullStudyLifecycleComplete && lifecycle.status !== "active")
         || lifecycle.openBlockingDecisions.length > 0 || lifecycle.blockers.length > 0) {
         return pause("researcher_decision_required", "The canonical research lifecycle has an open decision or blocker; the loop is paused for the researcher.");
       }
@@ -15753,15 +16791,116 @@ export class ScienceStore {
       if (activeEpisode?.status === "waiting-for-decision") {
         return pause("researcher_decision_required", "The active research episode is waiting for a material researcher decision.");
       }
-      const latestEventRow = this.db.prepare("SELECT * FROM loop_events WHERE loop_session_id = ? ORDER BY sequence DESC LIMIT 1")
-        .get(session.id) as Record<string, unknown> | undefined;
-      if (latestEventRow) {
-        const latestEvent = loopEventFromRow(latestEventRow);
-        if (latestEvent.code === "loop.resume_dispatched" && latestEvent.payload.activeRunId === input.sourceInvocationRunId) {
-          return pause("no_loop_progress", "The controller settled without recording a loop transition; the loop is paused instead of spinning a no-op continuation.");
+      const continuationBasis = sourceTurn.continuationBasis;
+      const basisLifecycleRevision = continuationBasis && Number.isSafeInteger(continuationBasis.lifecycleRevision)
+        ? Number(continuationBasis.lifecycleRevision)
+        : null;
+      const basisLifecycleProgressFingerprint = continuationBasis && typeof continuationBasis.lifecycleProgressFingerprintSha256 === "string"
+        && SHA256_RE.test(continuationBasis.lifecycleProgressFingerprintSha256)
+        ? continuationBasis.lifecycleProgressFingerprintSha256
+        : null;
+      const basisScientificProgressSha256 = continuationBasis && typeof continuationBasis.scientificProgressSha256 === "string"
+        && SHA256_RE.test(continuationBasis.scientificProgressSha256)
+        ? continuationBasis.scientificProgressSha256
+        : null;
+      const basisEpisodeProgressFingerprintSha256 = continuationBasis && typeof continuationBasis.episodeProgressFingerprintSha256 === "string"
+        && SHA256_RE.test(continuationBasis.episodeProgressFingerprintSha256)
+        ? continuationBasis.episodeProgressFingerprintSha256
+        : null;
+      const currentScientificProgressSha256 = this.scientificProgressSha256(input.projectId);
+      const currentLifecycleProgressFingerprint = sha256Json({
+        schema: "agentlas.science.lifecycle-progress-fingerprint/v1",
+        phase: lifecycle.phase,
+        status: lifecycle.status,
+        openBlockingDecisions: lifecycle.openBlockingDecisions,
+        blockers: lifecycle.blockers,
+        frozenAnalysisPlan: lifecycle.frozenAnalysisPlan,
+        submissionExport: lifecycle.submissionExport,
+      });
+      const currentEpisodeProgressFingerprint = sha256Json({
+        schema: "agentlas.science.episode-progress-fingerprint/v1",
+        currentEpisode: session.currentEpisode,
+        activeEpisode: activeEpisode ? {
+          status: activeEpisode.status,
+          kind: activeEpisode.kind,
+          hypothesisContentSha256: activeEpisode.hypothesisContentSha256,
+          objective: activeEpisode.objective,
+          method: activeEpisode.method,
+          expectedObservations: activeEpisode.expectedObservations,
+          falsificationCriteria: activeEpisode.falsificationCriteria,
+          toolIntents: activeEpisode.toolIntents,
+          planSha256: activeEpisode.planSha256,
+          resultSha256: activeEpisode.result?.resultSha256 ?? null,
+        } : null,
+      });
+      const lifecycleProgressed = contract.completionScope === "full-study"
+        ? basisLifecycleProgressFingerprint !== null && currentLifecycleProgressFingerprint !== basisLifecycleProgressFingerprint
+        : basisLifecycleRevision !== null && lifecycle.revision > basisLifecycleRevision;
+      const scientificProgressed = basisScientificProgressSha256 !== null
+        && currentScientificProgressSha256 !== basisScientificProgressSha256;
+      const episodeProgressed = contract.completionScope === "full-study"
+        && basisEpisodeProgressFingerprintSha256 !== null
+        && currentEpisodeProgressFingerprint !== basisEpisodeProgressFingerprintSha256;
+      // The initial user controller can be dispatched after its contract was
+      // approved, so approval/turn timestamps do not reliably identify it.
+      // A basis-less user turn at the first episode is the durable admission
+      // boundary; later successor turns always carry a continuation basis.
+      const firstContractAdmissionProgress = contract.completionScope === "full-study"
+        && sourceTurn.origin === "user"
+        && continuationBasis === null
+        && session.currentEpisode <= 1;
+      const continuationPreparedForSource = Boolean(this.db.prepare(`
+        SELECT 1 FROM loop_events
+        WHERE loop_session_id = ? AND code = 'loop.continuation_prepared'
+          AND json_extract(payload_json, '$.sourceTurnId') = ?
+        LIMIT 1
+      `).get(session.id, sourceTurn.id));
+      const previousNoProgressStreak = continuationBasis && Number.isSafeInteger(continuationBasis.noProgressStreak)
+        && Number(continuationBasis.noProgressStreak) >= 0
+        ? Math.min(Number(continuationBasis.noProgressStreak), 100)
+        : 0;
+      // A lifecycle that just reached ready_to_submit gets one final controller
+      // turn to verify and close the loop. If that turn settles without
+      // completing, the unchanged fingerprint must re-enter the full-study
+      // no-progress guard instead of granting an unlimited final-turn reset.
+      const fullStudyReadyForCompletion = fullStudyLifecycleComplete
+        && (basisLifecycleProgressFingerprint === null || currentLifecycleProgressFingerprint !== basisLifecycleProgressFingerprint);
+      const sourceResumeDispatched = Boolean(this.db.prepare(`
+        SELECT 1 FROM loop_events
+        WHERE loop_session_id = ? AND code = 'loop.resume_dispatched'
+          AND json_extract(payload_json, '$.activeRunId') = ?
+        LIMIT 1
+      `).get(session.id, input.sourceInvocationRunId));
+      const sourceWasSuccessor = contract.completionScope === "full-study"
+        ? sourceResumeDispatched
+        : false;
+      const latestEventRow = contract.completionScope === "full-study"
+        ? null
+        : this.db.prepare("SELECT * FROM loop_events WHERE loop_session_id = ? ORDER BY sequence DESC LIMIT 1")
+          .get(session.id) as Record<string, unknown> | undefined;
+      const latestEvent = latestEventRow ? loopEventFromRow(latestEventRow) : null;
+      const legacySourceWasSuccessor = latestEvent?.code === "loop.resume_dispatched"
+        && latestEvent.payload.activeRunId === input.sourceInvocationRunId;
+      const sourceResumeWasDispatched = contract.completionScope === "full-study"
+        ? sourceWasSuccessor
+        : legacySourceWasSuccessor;
+      const fullStudyProgressed = lifecycleProgressed || scientificProgressed || episodeProgressed;
+      const noProgressStreak = sourceResumeWasDispatched
+        && !firstContractAdmissionProgress && !fullStudyProgressed && !fullStudyReadyForCompletion
+        ? previousNoProgressStreak + 1
+        : 0;
+      const noProgressLimit = contract.completionScope === "full-study" ? 3 : 1;
+      if (sourceResumeWasDispatched) {
+        if (continuationPreparedForSource || noProgressStreak >= noProgressLimit) {
+          return pause("no_loop_progress", noProgressStreak > 1
+            ? `The controller settled without durable progress for ${noProgressStreak} consecutive successor turns; the full study is paused for a corrective research decision.`
+            : "The controller settled without recording durable scientific progress; the loop is paused instead of spinning a no-op continuation.");
         }
       }
-      const continuationBasis = canonicalValue({
+      const correctivePrompt = noProgressStreak > 0
+        ? ` The previous successor turn recorded no durable progress (${noProgressStreak}/${noProgressLimit}); take a materially different evidence-bound action, advance a verified lifecycle gate, or record the exact blocker instead of repeating a proposal.`
+        : "";
+      const nextContinuationBasis = canonicalValue({
         schema: "agentlas.science.loop-continuation-basis/v1",
         projectId: input.projectId,
         conversationId: input.conversationId,
@@ -15774,6 +16913,9 @@ export class ScienceStore {
         lifecycleStudyId: lifecycle.studyId,
         lifecycleRevision: lifecycle.revision,
         lifecycleStateSha256: lifecycle.stateSha256,
+        lifecycleProgressFingerprintSha256: currentLifecycleProgressFingerprint,
+        scientificProgressSha256: currentScientificProgressSha256,
+        episodeProgressFingerprintSha256: currentEpisodeProgressFingerprint,
         contractId: contract.id,
         contractVersion: contract.version,
         contractContentSha256: session.contractContentSha256,
@@ -15791,9 +16933,11 @@ export class ScienceStore {
         currentEpisode: session.currentEpisode,
         maxEpisodes: session.maxEpisodes,
         deadlineAt: session.deadlineAt,
+        completionScope: contract.completionScope,
+        noProgressStreak,
       });
-      const continuationBasisSha256 = sha256Json(continuationBasis);
-      const content = "Continue the authorized research loop from its canonical state. Inspect the loop, lifecycle, evidence graph, and exact OCC receipts first. Plan and execute at most one successor episode, complete the loop if verified, or pause at a concrete decision, blocker, deadline, or budget boundary.";
+      const continuationBasisSha256 = sha256Json(nextContinuationBasis);
+      const content = `Continue the authorized research loop from its canonical state. Inspect the loop, lifecycle, evidence graph, and exact OCC receipts first. Plan and execute at most one successor episode, complete the loop if verified, or pause at a concrete decision, blocker, deadline, or budget boundary.${correctivePrompt}`;
       const now = new Date().toISOString();
       const message: ScienceMessage = {
         id: randomUUID(),
@@ -15808,10 +16952,11 @@ export class ScienceStore {
         .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
       const turnId = randomUUID();
       this.db.prepare(`INSERT INTO science_turns
-        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
+        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,runtime_selection_json,runtime_selection_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
         .run(turnId, input.requestId, input.projectId, input.conversationId, message.id, session.runtimeChatId, input.targetInvocationRunId,
-          sourceTurn.id, "loop-continuation", JSON.stringify(continuationBasis), continuationBasisSha256, now, now);
+          sourceTurn.id, "loop-continuation", JSON.stringify(nextContinuationBasis), continuationBasisSha256,
+          session.runtimeSelection === null ? null : JSON.stringify(session.runtimeSelection), session.runtimeSelectionSha256, now, now);
       // Older installed databases intentionally keep their schema-55 trigger
       // surface.  Its transition matrix predates running -> queued, so make
       // the same atomic transaction pass through the already-authorized
@@ -15977,6 +17122,21 @@ export class ScienceStore {
           || source.canonicalUri !== validated.source.canonicalUri || rawOutput?.sha256 !== validated.responseSha256 || !catalogOutput
           || !provenance.datasetSha256.includes(validated.responseSha256) || !provenance.datasetSha256.includes(validated.normalized.normalizedSha256)) {
           throw new Error("science-materials-run-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === SCIENCE_PAIRED_TABLE_ALIGNER_ID
+        && sourceRun.toolVersion === SCIENCE_PAIRED_TABLE_ALIGNER_VERSION) {
+        this.validateArtifactPayloadForProject(input.projectId, SCIENCE_TABLE_RENDERER_ID, payload, sourceRunId);
+        const descriptorInput = sourceRun.inputs[0]!;
+        const descriptor = JSON.parse(this.readRunBlob(descriptorInput).toString("utf8")) as Record<string, unknown>;
+        const descriptorSources = descriptor.sources as Array<Record<string, unknown>>;
+        const expectedInputs = descriptorSources.map((entry) => ({ artifactId: String(entry.artifactId), version: Number(entry.artifactVersion) }));
+        const expectedHashes = descriptorSources.map((entry) => String(entry.contentSha256));
+        if (linkage.labId !== SCIENCE_TABLE_LAB_ID || linkage.origin.runId !== sourceRun.id || linkage.parent !== null
+          || sha256Json(linkage.inputs) !== sha256Json(expectedInputs)
+          || sha256Json(provenance.datasetSha256) !== sha256Json(expectedHashes)
+          || provenance.codeSha256 !== sha256Json({ toolId: SCIENCE_PAIRED_TABLE_ALIGNER_ID, toolVersion: SCIENCE_PAIRED_TABLE_ALIGNER_VERSION })) {
+          throw new Error("science-paired-table-provenance-invalid");
         }
       } else if (payload.schema === "agentlas.science-table/v1"
         && sourceRun?.toolId === "agentlas.paleontology-candidate-comparison"
@@ -18407,10 +19567,142 @@ export class ScienceStore {
   }
 
   private validateAnalysisDocumentReferences(projectId: string, document: ScienceAnalysisSpecDocument): void {
+    const plannedStatisticsMethods = document.requiredDiagnostics
+      .filter((entry) => entry.startsWith("agentlas.statistics.method:"))
+      .map((entry) => entry.slice("agentlas.statistics.method:".length));
     for (const input of document.data.inputs) {
       const context = this.getArtifactContextForProject(projectId, input.artifactId, input.artifactVersion);
       if (!context || context.selectedVersion.contentSha256 !== input.contentSha256) throw new Error("science-analysis-input-not-found");
     }
+    // Acquisition-only plans may be approved before bytes exist. Once a plan binds inputs for a
+    // registered statistics method, however, approval must mean that the exact frozen document is
+    // executable: the gateway accepts one immutable Data Table, a concrete compatible model, and
+    // the method token(s). Rejecting this here keeps a human from approving a plan that can only
+    // fail later at the runner boundary.
+    if (document.data.inputs.length > 0 && plannedStatisticsMethods.length > 0) {
+      if (document.data.inputs.length !== 1) throw new Error("science-analysis-statistics-source-table-required");
+      const input = document.data.inputs[0]!;
+      const context = this.getArtifactContextForProject(projectId, input.artifactId, input.artifactVersion);
+      if (!context || context.artifact.kind !== SCIENCE_TABLE_ARTIFACT_KIND
+        || context.selectedVersion.rendererId !== SCIENCE_TABLE_RENDERER_ID
+        || context.linkage.labId !== SCIENCE_TABLE_LAB_ID) {
+        throw new Error("science-analysis-statistics-source-table-required");
+      }
+      const table = validateScienceTablePayload(context.selectedVersion.payload);
+      const sourceRun = context.artifact.sourceRunId
+        ? this.getResearchRunForProject(projectId, context.artifact.sourceRunId)
+        : null;
+      if (sourceRun?.toolId === SCIENCE_PAIRED_TABLE_ALIGNER_ID
+        && sourceRun.toolVersion === SCIENCE_PAIRED_TABLE_ALIGNER_VERSION) {
+        const descriptorInput = sourceRun.inputs.find((item) => item.role === "paired-table-alignment-descriptor");
+        let descriptor: Record<string, unknown> | null = null;
+        try {
+          descriptor = descriptorInput
+            ? JSON.parse(this.readRunBlob(descriptorInput).toString("utf8")) as Record<string, unknown>
+            : null;
+        } catch {
+          descriptor = null;
+        }
+        const pairedEligibleCount = table.rows.filter((row) => row.paired_eligible === true).length;
+        if (!descriptor || descriptor.completePairCount !== pairedEligibleCount
+          || !Number.isSafeInteger(descriptor.minimumCompletePairs)
+          || pairedEligibleCount < Number(descriptor.minimumCompletePairs)) {
+          throw new Error("science-analysis-statistics-insufficient-complete-pairs");
+        }
+      }
+      if (!document.model) throw new Error("science-analysis-statistics-model-required");
+      for (const method of plannedStatisticsMethods) {
+        if (!isScienceStatisticsMethod(method) || !scienceStatisticsMethodMatchesAnalysisModel(method, document.model)) {
+          throw new Error("science-analysis-statistics-method-model-mismatch");
+        }
+      }
+    }
+  }
+
+  private analysisPlanReviewFromRow(row: Record<string, unknown>): ScienceAnalysisPlanReviewReceipt {
+    const receipt: ScienceAnalysisPlanReviewReceipt = {
+      id: String(row.id), requestId: String(row.request_id), projectId: String(row.project_id),
+      analysisSpecId: String(row.analysis_spec_id), analysisSpecVersion: Number(row.analysis_spec_version),
+      analysisSpecContentSha256: safeSha256(row.analysis_spec_content_sha256, "analysis-review-content-sha256"),
+      analysisSpecLockVersion: Number(row.analysis_spec_lock_version),
+      decision: String(row.decision) as ScienceAnalysisPlanReviewReceipt["decision"],
+      rationale: row.rationale === null || row.rationale === undefined ? null : String(row.rationale),
+      actor: String(row.actor) as ScienceAnalysisPlanReviewReceipt["actor"],
+      resultingStatus: String(row.resulting_status) as ScienceAnalysisPlanReviewReceipt["resultingStatus"],
+      createdAt: String(row.created_at), receiptSha256: safeSha256(row.receipt_sha256, "analysis-review-receipt-sha256"),
+    };
+    if (receipt.actor === "standing-policy") {
+      const policy = parseObject(row.approval_policy_json);
+      const policyContentSha256 = safeSha256(row.approval_policy_sha256, "analysis-review-policy-sha256");
+      if (sha256Json(policy) !== policyContentSha256 || policy.projectId !== receipt.projectId
+        || !UUID_RE.test(String(policy.id)) || !Number.isSafeInteger(policy.revision) || Number(policy.revision) < 0
+        || policy.mode !== "autonomous" || !Array.isArray(policy.scopes) || !policy.scopes.includes("analysis-plan")
+        || typeof policy.grantedBy !== "string" || !policy.grantedBy.trim()
+        || receipt.decision !== "approve") throw new Error("science-analysis-plan-review-integrity-failed");
+      receipt.approvalPolicy = { id: String(policy.id), revision: Number(policy.revision),
+        grantedBy: policy.grantedBy, contentSha256: policyContentSha256 };
+    }
+    const expectedSha256 = sha256Json({
+      requestId: receipt.requestId, projectId: receipt.projectId, analysisSpecId: receipt.analysisSpecId,
+      analysisSpecVersion: receipt.analysisSpecVersion, analysisSpecContentSha256: receipt.analysisSpecContentSha256,
+      analysisSpecLockVersion: receipt.analysisSpecLockVersion, decision: receipt.decision, rationale: receipt.rationale,
+      actor: receipt.actor, resultingStatus: receipt.resultingStatus, createdAt: receipt.createdAt,
+      ...(receipt.approvalPolicy ? { approvalPolicy: receipt.approvalPolicy } : {}),
+    });
+    if (receipt.receiptSha256 !== expectedSha256
+      || !UUID_RE.test(receipt.id) || !UUID_RE.test(receipt.requestId) || !UUID_RE.test(receipt.projectId) || !UUID_RE.test(receipt.analysisSpecId)
+      || !Number.isSafeInteger(receipt.analysisSpecVersion) || receipt.analysisSpecVersion < 1
+      || !Number.isSafeInteger(receipt.analysisSpecLockVersion) || receipt.analysisSpecLockVersion < 1
+      || !["approve", "revise"].includes(receipt.decision)
+      || !["human", "standing-policy"].includes(receipt.actor)
+      || receipt.resultingStatus !== (receipt.decision === "approve" ? "frozen" : "draft")) {
+      throw new Error("science-analysis-plan-review-integrity-failed");
+    }
+    return receipt;
+  }
+
+  getLatestAnalysisPlanReview(projectId: string, analysisSpecId: string): ScienceAnalysisPlanReviewReceipt | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(analysisSpecId)) return null;
+    const current = this.db.prepare(`SELECT status,current_version,current_document_sha256,lock_version
+      FROM analysis_specs WHERE project_id = ? AND id = ?`).get(projectId, analysisSpecId) as Record<string, unknown> | undefined;
+    if (!current) return null;
+    const currentVersion = safePositiveInteger(current.current_version, 1, Number.MAX_SAFE_INTEGER, "analysis-review-current-version");
+    const currentContentSha256 = safeSha256(current.current_document_sha256, "analysis-review-current-content-sha256");
+    const currentLockVersion = safePositiveInteger(current.lock_version, 1, Number.MAX_SAFE_INTEGER, "analysis-review-current-lock-version");
+    const receiptLockVersion = current.status === "frozen" ? currentLockVersion - 1 : currentLockVersion;
+    if (receiptLockVersion < 1) return null;
+    const row = this.db.prepare(`SELECT * FROM analysis_plan_review_receipts
+      WHERE project_id = ? AND analysis_spec_id = ? AND analysis_spec_version = ?
+        AND analysis_spec_content_sha256 = ? AND analysis_spec_lock_version = ?
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(projectId, analysisSpecId, currentVersion, currentContentSha256, receiptLockVersion) as Record<string, unknown> | undefined;
+    const standing = this.db.prepare(`SELECT * FROM analysis_plan_standing_approvals
+      WHERE project_id = ? AND analysis_spec_id = ? AND analysis_spec_version = ?
+        AND analysis_spec_content_sha256 = ? AND analysis_spec_lock_version = ?
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(projectId, analysisSpecId, currentVersion, currentContentSha256, receiptLockVersion) as Record<string, unknown> | undefined;
+    const receipts = [row, standing].filter((item): item is Record<string, unknown> => Boolean(item))
+      .map((item) => this.analysisPlanReviewFromRow(item));
+    receipts.sort((left, right) => right.createdAt.localeCompare(left.createdAt)
+      || Number(right.decision === "approve") - Number(left.decision === "approve"));
+    return receipts[0] ?? null;
+  }
+
+  private hasHumanAnalysisPlanRevisionForContent(projectId: string, analysisSpecId: string, contentSha256: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 AS found FROM analysis_plan_review_receipts
+      WHERE project_id = ? AND analysis_spec_id = ? AND decision = 'revise'
+        AND actor = 'human' AND analysis_spec_content_sha256 = ? LIMIT 1`)
+      .get(projectId, analysisSpecId, contentSha256));
+  }
+
+  getAnalysisPlanReviewByRequestId(requestId: string): ScienceAnalysisPlanReviewReceipt | null {
+    if (!UUID_RE.test(requestId)) return null;
+    const row = this.db.prepare("SELECT * FROM analysis_plan_review_receipts WHERE request_id = ?")
+      .get(requestId) as Record<string, unknown> | undefined;
+    const standing = this.db.prepare("SELECT * FROM analysis_plan_standing_approvals WHERE request_id = ?")
+      .get(requestId) as Record<string, unknown> | undefined;
+    if (row && standing) throw new Error("science-analysis-plan-review-replay-integrity-failed");
+    return row || standing ? this.analysisPlanReviewFromRow((row || standing)!) : null;
   }
 
   private analysisSpecFromRow(row: Record<string, unknown>): ScienceAnalysisSpec {
@@ -18431,6 +19723,7 @@ export class ScienceStore {
     return {
       id: String(row.id), projectId: String(row.project_id), title: String(row.title), status: String(row.status) as ScienceAnalysisSpec["status"],
       currentVersion: Number(row.current_version), currentDocumentSha256: documentSha256, lockVersion: Number(row.lock_version), version,
+      latestReview: this.getLatestAnalysisPlanReview(String(row.project_id), String(row.id)),
       frozenAt: row.frozen_at === null || row.frozen_at === undefined ? null : String(row.frozen_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     };
   }
@@ -18516,6 +19809,7 @@ export class ScienceStore {
     if (!UUID_RE.test(String(input.projectId ?? ""))) throw new Error("science-project-id-invalid");
     const title = safeText(input.title, 500, "analysis-title");
     const document = normalizeScienceAnalysisDocument(input.document);
+    if (document.data.inputs.length === 0 && !document.data.acquisition?.sources.length) throw new Error("science-analysis-input-plan-required");
     const drafts = Array.isArray(input.decisions) ? input.decisions.map(normalizeScienceDecisionDraft) : null;
     if (!drafts || drafts.length > 3 || new Set(drafts.map((draft) => draft.decisionKey)).size !== drafts.length) throw new Error("science-analysis-decisions-invalid");
     if ((document.estimand === null) !== drafts.some((draft) => draft.decisionKey === "analysis.estimand")) throw new Error("science-analysis-estimand-decision-mismatch");
@@ -18672,7 +19966,83 @@ export class ScienceStore {
     })();
   }
 
-  freezeAnalysisSpec(input: FreezeScienceAnalysisSpecInput): FreezeScienceAnalysisSpecResult {
+  private assertAnalysisPlanCompleteForApproval(analysisSpec: ScienceAnalysisSpec): void {
+    const openDecisions = this.listDecisionRequests(analysisSpec.projectId, analysisSpec.id, ["queued", "presented", "deferred"]);
+    if (openDecisions.length) throw new Error("science-analysis-open-decision");
+    const document = analysisSpec.version.document;
+    const incomplete = [
+      ...(!document.estimand ? ["estimand"] : []),
+      ...(document.design.dependence.kind === "unresolved" ? ["dependence"] : []),
+      ...(document.missingData.strategy === "unresolved" ? ["missing-data"] : []),
+      ...(document.multiplicity.strategy === "unresolved" ? ["multiplicity"] : []),
+      ...(document.requiredDiagnostics.length === 0 ? ["diagnostics"] : []),
+      ...(document.data.inputs.length === 0 && !document.data.acquisition?.sources.length ? ["inputs-or-acquisition"] : []),
+    ];
+    if (incomplete.length) throw new Error(`science-analysis-spec-incomplete:${incomplete.join(",")}`);
+    this.validateAnalysisDocumentReferences(analysisSpec.projectId, document);
+  }
+
+  reviewAnalysisPlan(input: ReviewScienceAnalysisPlanInput): ReviewScienceAnalysisPlanResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "analysis-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "analysis-content-sha256");
+    const expectedLockVersion = safePositiveInteger(input.expectedLockVersion, 1, Number.MAX_SAFE_INTEGER, "analysis-lock-version");
+    if (input.decision !== "approve" && input.decision !== "revise") throw new Error("science-analysis-plan-review-decision-invalid");
+    const rationale = input.rationale === undefined || input.rationale === null || input.rationale === ""
+      ? null : safeText(input.rationale, 8_000, "science-analysis-plan-review-rationale-invalid");
+    const requestSha256 = sha256Json({
+      projectId: input.projectId, analysisSpecId: input.analysisSpecId, expectedVersion,
+      expectedContentSha256, expectedLockVersion, decision: input.decision, rationale,
+    });
+    return this.db.transaction(() => {
+      const prior = this.replay<ReviewScienceAnalysisPlanResult>(input.requestId, "analysis.plan.review", requestSha256);
+      if (prior) {
+        const receipt = this.getAnalysisPlanReviewByRequestId(input.requestId);
+        const analysisSpec = this.getAnalysisSpecForProject(input.projectId, input.analysisSpecId);
+        if (!receipt || receipt.requestId !== input.requestId || receipt.receiptSha256 !== prior.receipt.receiptSha256 || !analysisSpec) {
+          throw new Error("science-analysis-plan-review-replay-integrity-failed");
+        }
+        return { receipt, analysisSpec, replayed: true };
+      }
+      const analysisSpec = this.getAnalysisSpecForProject(input.projectId, input.analysisSpecId);
+      if (!analysisSpec) throw new Error("science-analysis-spec-not-found");
+      if (analysisSpec.status !== "draft" || analysisSpec.currentVersion !== expectedVersion
+        || analysisSpec.currentDocumentSha256 !== expectedContentSha256 || analysisSpec.lockVersion !== expectedLockVersion) {
+        throw new Error("science-analysis-version-conflict");
+      }
+      if (input.decision === "approve") {
+        this.assertAnalysisPlanCompleteForApproval(analysisSpec);
+      }
+      const now = new Date().toISOString();
+      const resultingStatus = input.decision === "approve" ? "frozen" : "draft";
+      const receiptId = randomUUID();
+      const receiptSha256 = sha256Json({
+        requestId: input.requestId, projectId: input.projectId, analysisSpecId: analysisSpec.id,
+        analysisSpecVersion: expectedVersion, analysisSpecContentSha256: expectedContentSha256,
+        analysisSpecLockVersion: expectedLockVersion, decision: input.decision, rationale,
+        actor: "human", resultingStatus, createdAt: now,
+      });
+      this.db.prepare(`INSERT INTO analysis_plan_review_receipts
+        (id,request_id,project_id,analysis_spec_id,analysis_spec_version,analysis_spec_content_sha256,analysis_spec_lock_version,
+         decision,rationale,actor,resulting_status,created_at,receipt_sha256)
+        VALUES (?,?,?,?,?,?,?,?,?,'human',?,?,?)`).run(
+        receiptId, input.requestId, input.projectId, analysisSpec.id, expectedVersion, expectedContentSha256,
+        expectedLockVersion, input.decision, rationale, resultingStatus, now, receiptSha256,
+      );
+      if (input.decision === "approve") {
+        this.db.prepare("UPDATE analysis_specs SET status = 'frozen', lock_version = lock_version + 1, frozen_at = ?, updated_at = ? WHERE id = ? AND project_id = ? AND lock_version = ?")
+          .run(now, now, analysisSpec.id, input.projectId, expectedLockVersion);
+      }
+      const reviewed = this.getAnalysisSpecForProject(input.projectId, analysisSpec.id);
+      const receipt = this.getLatestAnalysisPlanReview(input.projectId, analysisSpec.id);
+      if (!reviewed || !receipt || receipt.id !== receiptId || receipt.receiptSha256 !== receiptSha256) throw new Error("science-analysis-plan-review-readback-failed");
+      const result: ReviewScienceAnalysisPlanResult = { receipt, analysisSpec: reviewed, replayed: false };
+      this.remember(input.requestId, "analysis.plan.review", requestSha256, result, now);
+      return result;
+    })();
+  }
+
+  freezeAnalysisSpec(input: FreezeScienceAnalysisSpecInput, options?: { allowStandingApproval: boolean }): FreezeScienceAnalysisSpecResult {
     if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
     const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "analysis-version");
     const expectedContentSha256 = safeSha256(input.expectedContentSha256, "analysis-content-sha256");
@@ -18683,18 +20053,67 @@ export class ScienceStore {
       if (prior) return { ...prior, replayed: true };
       const analysisSpec = this.getAnalysisSpecForProject(input.projectId, input.analysisSpecId);
       if (!analysisSpec) throw new Error("science-analysis-spec-not-found");
-      if (analysisSpec.status !== "draft" || analysisSpec.currentVersion !== expectedVersion || analysisSpec.currentDocumentSha256 !== expectedContentSha256 || analysisSpec.lockVersion !== expectedLockVersion) throw new Error("science-analysis-version-conflict");
-      const document = analysisSpec.version.document;
-      const openDecisions = this.listDecisionRequests(input.projectId, analysisSpec.id, ["queued", "presented", "deferred"]);
-      if (openDecisions.length) throw new Error("science-analysis-open-decision");
-      if (!document.estimand || !document.design.experimentalUnit || document.design.dependence.kind === "unresolved" || !document.model || document.missingData.strategy === "unresolved" || document.multiplicity.strategy === "unresolved" || document.requiredDiagnostics.length === 0 || document.data.inputs.length === 0) throw new Error("science-analysis-spec-incomplete");
-      this.validateAnalysisDocumentReferences(input.projectId, document);
-      const now = new Date().toISOString();
-      this.db.prepare("UPDATE analysis_specs SET status = 'frozen', lock_version = lock_version + 1, frozen_at = ?, updated_at = ? WHERE id = ? AND project_id = ? AND lock_version = ?")
-        .run(now, now, analysisSpec.id, input.projectId, expectedLockVersion);
-      const frozen = this.getAnalysisSpecForProject(input.projectId, analysisSpec.id)!;
-      const result: FreezeScienceAnalysisSpecResult = { analysisSpec: frozen, replayed: false };
-      this.remember(input.requestId, "analysis.spec.freeze", requestSha256, result, now);
+      if (analysisSpec.status === "draft" && options?.allowStandingApproval
+        && this.approvalIsStanding(input.projectId, "analysis-plan")) {
+        if (analysisSpec.currentVersion !== expectedVersion || analysisSpec.currentDocumentSha256 !== expectedContentSha256
+          || analysisSpec.lockVersion !== expectedLockVersion) throw new Error("science-analysis-version-conflict");
+        if (analysisSpec.latestReview?.actor === "human"
+          && analysisSpec.latestReview.decision === "revise"
+          && analysisSpec.latestReview.resultingStatus === "draft"
+          && analysisSpec.latestReview.analysisSpecVersion === expectedVersion
+          && analysisSpec.latestReview.analysisSpecContentSha256 === expectedContentSha256
+          && analysisSpec.latestReview.analysisSpecLockVersion === expectedLockVersion) {
+          throw new Error("science-analysis-plan-human-approval-required");
+        }
+        if (this.hasHumanAnalysisPlanRevisionForContent(input.projectId, analysisSpec.id, expectedContentSha256)) {
+          throw new Error("science-analysis-plan-human-approval-required");
+        }
+        if (this.latestResearchContract(input.projectId)?.status !== "approved") throw new Error("science-research-contract-not-approved");
+        this.assertAnalysisPlanCompleteForApproval(analysisSpec);
+        const policy = this.approvalPolicy(input.projectId);
+        const approvalPolicy = { id: policy.id, revision: policy.revision, grantedBy: policy.grantedBy, contentSha256: sha256Json(policy) };
+        const now = new Date().toISOString();
+        const receiptId = randomUUID();
+        const reviewRequestId = stableUuid(`science-analysis-plan-standing-approval:v1:${input.requestId}`);
+        const rationale = "The host validated this exact plan under the project's standing analysis-plan authorization.";
+        const receiptSha256 = sha256Json({
+          requestId: reviewRequestId, projectId: input.projectId, analysisSpecId: analysisSpec.id,
+          analysisSpecVersion: expectedVersion, analysisSpecContentSha256: expectedContentSha256,
+          analysisSpecLockVersion: expectedLockVersion, decision: "approve", rationale,
+          actor: "standing-policy", resultingStatus: "frozen", createdAt: now, approvalPolicy,
+        });
+        this.db.prepare(`INSERT INTO analysis_plan_standing_approvals
+          (id,request_id,project_id,analysis_spec_id,analysis_spec_version,analysis_spec_content_sha256,analysis_spec_lock_version,
+           decision,rationale,actor,resulting_status,approval_policy_json,approval_policy_sha256,created_at,receipt_sha256)
+          VALUES (?,?,?,?,?,?,?,'approve',?,'standing-policy','frozen',?,?,?,?)`).run(
+          receiptId, reviewRequestId, input.projectId, analysisSpec.id, expectedVersion, expectedContentSha256,
+          expectedLockVersion, rationale, JSON.stringify(policy), approvalPolicy.contentSha256, now, receiptSha256,
+        );
+        this.db.prepare("UPDATE analysis_specs SET status = 'frozen', lock_version = lock_version + 1, frozen_at = ?, updated_at = ? WHERE id = ? AND project_id = ? AND lock_version = ?")
+          .run(now, now, analysisSpec.id, input.projectId, expectedLockVersion);
+        const frozen = this.getAnalysisSpecForProject(input.projectId, analysisSpec.id);
+        if (!frozen || frozen.status !== "frozen" || frozen.lockVersion !== expectedLockVersion + 1
+          || frozen.latestReview?.id !== receiptId || frozen.latestReview.receiptSha256 !== receiptSha256) {
+          throw new Error("science-analysis-plan-review-readback-failed");
+        }
+        const result: FreezeScienceAnalysisSpecResult = { analysisSpec: frozen, replayed: false };
+        this.remember(input.requestId, "analysis.spec.freeze", requestSha256, result, now);
+        return result;
+      }
+      if (analysisSpec.status !== "frozen" || analysisSpec.currentVersion !== expectedVersion
+        || analysisSpec.currentDocumentSha256 !== expectedContentSha256 || analysisSpec.lockVersion !== expectedLockVersion) {
+        if (analysisSpec.status === "draft") throw new Error("science-analysis-plan-human-approval-required");
+        throw new Error("science-analysis-version-conflict");
+      }
+      const approval = analysisSpec.latestReview;
+      if (!approval || approval.decision !== "approve" || approval.resultingStatus !== "frozen"
+        || approval.analysisSpecVersion !== analysisSpec.currentVersion
+        || approval.analysisSpecContentSha256 !== analysisSpec.currentDocumentSha256
+        || approval.analysisSpecLockVersion + 1 !== analysisSpec.lockVersion) {
+        throw new Error("science-analysis-plan-human-approval-required");
+      }
+      const result: FreezeScienceAnalysisSpecResult = { analysisSpec, replayed: false };
+      this.remember(input.requestId, "analysis.spec.freeze", requestSha256, result, new Date().toISOString());
       return result;
     })();
   }
@@ -23075,6 +24494,22 @@ export class ScienceStore {
     const { contentSha256, consumedByExportId: _consumed, ...core } = receipt;
     if (sha256Json(core) !== contentSha256) throw new Error("science-journal-attestation-integrity-failed");
     return receipt;
+  }
+
+  /**
+   * How many human attestations this project has that no export has consumed yet.
+   *
+   * The submission gate needs an attestation made in the researcher's name, and only the human
+   * channel may mint one. Without a count there is no way to tell "the researcher has not signed
+   * yet" from "the director has not asked" -- and the director, seeing no signal, retries the gate
+   * instead of stopping. Zero here means the study is waiting on a person.
+   */
+  countUnconsumedJournalHumanAttestations(projectId: string): number {
+    if (!UUID_RE.test(projectId)) return 0;
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM journal_human_attestation_receipts r
+      LEFT JOIN journal_human_attestation_consumptions c ON c.receipt_id = r.id
+      WHERE r.project_id = ? AND c.receipt_id IS NULL`).get(projectId) as { n?: number } | undefined;
+    return Number(row?.n ?? 0);
   }
 
   private journalProfileFromRow(row: Record<string, unknown>): ScienceJournalProfile {

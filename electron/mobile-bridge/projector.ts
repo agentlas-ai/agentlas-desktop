@@ -19,6 +19,7 @@ import {
   listChatMessages,
   listRecentChats,
 } from "../store/chats";
+import { listChatFileSnapshot } from "../store/chat-message-attachments";
 import {
   ensureCanonicalTaskForChat,
   findCanonicalTaskForChat,
@@ -100,7 +101,9 @@ import {
   type MobileBridgeAutomationDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeToolApprovalDto,
+  type MobileBridgeUserInputDto,
   type MobileBridgeChatDto,
+  type MobileBridgeChatFileDto,
   type MobileBridgeChatImageDto,
   type MobileBridgeChatMessageDto,
   type MobileBridgeFirmDto,
@@ -146,6 +149,10 @@ const CHAT_ATTACHMENT_MARKDOWN_RE = new RegExp(
   `!\\[[^\\]\\n]*\\]\\(\\s*agentlas://chat-attachment/(${CHAT_ATTACHMENT_ID_PATTERN})(?:\\s+"[^"\\n]*")?\\s*\\)`,
   "giu",
 );
+const CHAT_FILE_GROUP_MARKER_RE = /<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu;
+const CHAT_FILE_SHA256_RE = /^[0-9a-f]{64}$/iu;
+const CHAT_FILE_NAME_RE = /^(?!\.{1,2}$)[^/\\\u0000-\u001f\u007f]{1,180}$/u;
+const CHAT_FILE_MEDIA_TYPE_RE = /^[^\u0000-\u001f\u007f]{1,160}$/u;
 
 function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBridgeChatImageDto[] {
   if (!urls?.length) return [];
@@ -167,6 +174,56 @@ function stripProjectedChatAttachmentMarkdown(text: string, images: readonly Mob
   return text.replace(CHAT_ATTACHMENT_MARKDOWN_RE, (whole, rawId: string) => (
     allowed.has(rawId.toLowerCase()) ? "" : whole
   )).replace(/\n{3,}/gu, "\n\n").trim();
+}
+
+function stripProjectedChatFileMarkers(text: string): string {
+  if (!text.includes("agentlas-chat-files:v1:")) return text;
+  return text.replace(CHAT_FILE_GROUP_MARKER_RE, "").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
+function mobileBridgeChatFiles(
+  chatId: string | undefined,
+  role: ChatHistoryEntry["role"],
+  text: string,
+): MobileBridgeChatFileDto[] {
+  if (!chatId || role !== "user") return [];
+  const groupIds = new Set<string>();
+  for (const match of text.matchAll(CHAT_FILE_GROUP_MARKER_RE)) {
+    const groupId = match[1]?.toLowerCase();
+    if (groupId) groupIds.add(groupId);
+    if (groupIds.size >= 4) break;
+  }
+  if (groupIds.size === 0) return [];
+  const files: MobileBridgeChatFileDto[] = [];
+  for (const groupId of groupIds) {
+    for (const file of listChatFileSnapshot({ chatId, groupId })) {
+      if (
+        !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(file.id)
+        || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(file.groupId)
+        || !CHAT_FILE_NAME_RE.test(file.name)
+        || !CHAT_FILE_MEDIA_TYPE_RE.test(file.mediaType)
+        || !Number.isSafeInteger(file.size)
+        || file.size < 0
+        || file.size > 96 * 1024 * 1024
+        || !CHAT_FILE_SHA256_RE.test(file.sha256)
+        || (file.kind !== "file" && file.kind !== "directory")
+      ) continue;
+      const entryCount = file.kind === "directory" ? (file.manifest?.length ?? 0) : undefined;
+      if (entryCount !== undefined && (!Number.isSafeInteger(entryCount) || entryCount < 0 || entryCount > 512)) continue;
+      files.push({
+        attachmentId: file.id,
+        groupId: file.groupId,
+        name: file.name,
+        mediaType: file.mediaType,
+        size: file.size,
+        sha256: file.sha256,
+        kind: file.kind,
+        ...(entryCount !== undefined ? { entryCount } : {}),
+      });
+      if (files.length >= 4) return files;
+    }
+  }
+  return files;
 }
 
 async function settleInitialProjectionWithin<T>(
@@ -203,6 +260,8 @@ export interface MobileBridgeProjectionOptions {
   pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
   /** 실행 전에 사람을 기다리는 런타임 도구 승인(live 만). 없으면 빈 배열로 내려 낡은 카드를 지운다. */
   pendingToolApprovals?: readonly MobileBridgeToolApprovalDto[];
+  /** Chat-bound synchronous runtime questions. */
+  pendingUserInputs?: readonly MobileBridgeUserInputDto[];
   now?: Date;
   ontology?: {
     supported: boolean;
@@ -784,6 +843,7 @@ export function projectMobileBridgeHistory(
   history: readonly ChatHistoryEntry[],
   limit: number,
   budgetBytes = MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+  chatId?: string,
 ): MobileBridgeChatMessageDto[] {
   const budget = Math.max(1_024, Math.min(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES, Math.floor(budgetBytes)));
   const out: MobileBridgeChatMessageDto[] = [];
@@ -795,12 +855,14 @@ export function projectMobileBridgeHistory(
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const message = selected[index];
     const images = mobileBridgeChatImages(message.imageDataUrls);
+    const files = mobileBridgeChatFiles(chatId, message.role, message.text);
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
       text: "",
       createdAt: message.createdAt,
       ...(images.length ? { images } : {}),
+      ...(files.length ? { files } : {}),
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
@@ -814,9 +876,12 @@ export function projectMobileBridgeHistory(
       // ② 폰이 자기 낙관적 에코를 되돌아온 텍스트와 대조하는데 원문과 잘린 본문이
       //    영영 일치하지 않아 "보내는 중…" 말풍선이 중복으로 남았다.
       text: sanitizeMobileBridgeText(
-        stripProjectedChatAttachmentMarkdown(message.role === "user"
-          ? message.text
-          : stripMobileBridgeControlFences(message.text), images),
+        stripProjectedChatAttachmentMarkdown(
+          stripProjectedChatFileMarkers(message.role === "user"
+            ? message.text
+            : stripMobileBridgeControlFences(message.text)),
+          images,
+        ),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
     };
@@ -847,6 +912,7 @@ function messagesDto(
       listChatMessages(chatId, maxMessagesPerChat),
       maxMessagesPerChat,
       perChatBudget,
+      chatId,
     );
     const entryBytes =
       mobileBridgeJsonBytes(chatId) + 1 + mobileBridgeJsonBytes(projected) + (entries > 0 ? 1 : 0);
@@ -1405,6 +1471,9 @@ export function projectMobileBridgeAutomation(
           })),
         }
       : null,
+    runtimeSelection: automation.runtimeSelection
+      ? projectMobileBridgeRuntimeSelection(automation.runtimeSelection)
+      : null,
     // DESKTOP_MOBILE_BRIDGE: promptTemplate, node config, webhook token, fs path,
     // and poll-source configuration remain on the Desktop.
   };
@@ -1415,6 +1484,15 @@ function automationsDto(): MobileBridgeAutomationDto[] {
 }
 
 /** DESKTOP_MOBILE_BRIDGE: Runtime source paths and credential locators are intentionally omitted. */
+function runtimeCredentialUnavailable(runtime: RuntimeStatus): boolean {
+  // Keep this adapter buildable against an older shared/types snapshot while
+  // the credential-access field rolls out additively.
+  const access = (
+    runtime as RuntimeStatus & { credentialAccess?: { status?: string } }
+  ).credentialAccess;
+  return access?.status === "unavailable";
+}
+
 export function projectMobileBridgeRuntimes(
   runtimes: readonly RuntimeStatus[],
 ): MobileBridgeRuntimeDto[] {
@@ -1423,6 +1501,9 @@ export function projectMobileBridgeRuntimes(
     backend: runtime.backend,
     version: runtime.version,
     active: runtime.active,
+    ...(runtimeCredentialUnavailable(runtime)
+      ? { credentialUnavailable: true }
+      : {}),
     model: runtime.model ?? null,
     effort: runtime.effort ?? null,
     efforts: (runtime.efforts ?? []).slice(0, 20).map((effort) => ({
@@ -1527,6 +1608,9 @@ export function projectMobileBridgeUsage(
       kind: window.kind,
       usedPercent: Math.max(0, Math.min(100, window.usedPercent)),
       resetAt: window.resetAt ?? null,
+      windowDurationMins: window.windowDurationMins ?? null,
+      limitId: window.limitId ?? null,
+      limitName: window.limitName ?? null,
       model: window.model ?? null,
       used: window.used ?? null,
       limit: window.limit ?? null,
@@ -1643,6 +1727,7 @@ export async function projectMobileBridgeSnapshot(
     pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations),
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
     pendingToolApprovals: [...(options.pendingToolApprovals ?? [])],
+    pendingUserInputs: [...(options.pendingUserInputs ?? [])],
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,

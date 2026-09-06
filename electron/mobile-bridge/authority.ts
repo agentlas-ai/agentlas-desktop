@@ -13,6 +13,11 @@ import {
   resolveToolApproval,
 } from "../runtime/tool-approval";
 import {
+  listPendingAskUserRequests,
+  onAskUserLifecycle,
+  submitAskUserAnswer,
+} from "../confirm/ask-user";
+import {
   browserResolveApproval,
   listPendingBrowserApprovals,
   onBrowserApprovalLifecycle,
@@ -110,7 +115,11 @@ import {
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
-import { isOneInvocationChat, iterateRecentChatOneArtifactEvents } from "../store/run-events";
+import {
+  isOneInvocationChat,
+  iterateRecentChatOneArtifactEvents,
+  listRecentOneArtifactsForMobile,
+} from "../store/run-events";
 import {
   createDesktopMobileBridgeBuildActions,
   createDesktopMobileBridgeCloudAgentActions,
@@ -137,6 +146,7 @@ import type {
   RuntimeKind,
   RuntimeRole,
   RuntimeSelection,
+  RuntimeStatus,
 } from "../../shared/types";
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
@@ -172,6 +182,7 @@ import {
   type MobileBridgeToolCallDisplayDto,
   type MobileBridgeToolPayloadSize,
   type MobileBridgeToolPayloadSummaryDto,
+  type MobileBridgeUserInputDto,
 } from "../../shared/mobile-bridge";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
@@ -206,9 +217,11 @@ import type {
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
+const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 /** 도구 승인 id — tool-approval 이 발급하는 `approval:<t>:<rand>` / `denied:<t>:<rand>`. */
 const TOOL_APPROVAL_ID_RE = /^(approval|denied):[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
 const TERMINAL_APPROVAL_ID_RE = /^approval:[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
+const ASK_USER_REQUEST_ID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const EVENT_TEXT_MAX_BYTES = 200_000;
 const EVENT_DELTA_MAX_BYTES = 64_000;
 const EVENT_ONE_ARTIFACT_LIMIT = 32;
@@ -221,6 +234,13 @@ const BUILD_HISTORY_ENTRY_MAX_BYTES = 16_000;
 const BUILD_HISTORY_MAX_ENTRIES = 32;
 const MOBILE_RUNTIME_KINDS = RUNTIME_KINDS;
 const MOBILE_RUNTIME_BACKENDS = RUNTIME_BACKENDS;
+
+function runtimeCredentialUnavailable(runtime: RuntimeStatus): boolean {
+  const access = (
+    runtime as RuntimeStatus & { credentialAccess?: { status?: string } }
+  ).credentialAccess;
+  return access?.status === "unavailable";
+}
 const MOBILE_RUNTIME_ROLES = ["orchestrator", "worker"] as const;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
 const TERMINAL_PREVIEW_TTL_MS = 60_000;
@@ -846,6 +866,7 @@ function invocationParams(
           "userPrompt",
           "locale",
           "permissions",
+          "steeringMode",
           "planMode",
           "goalMode",
           "networkMode",
@@ -888,6 +909,9 @@ function invocationParams(
   const runId = optionalIdentifier(params, "runId", 160);
   const locale = optionalEnum(params, "locale", ["ko", "en"] as const);
   const permissions = optionalEnum(params, "permissions", ["read", "write", "full"] as const);
+  const steeringMode = steering
+    ? optionalEnum(params, "steeringMode", ["queue", "interrupt"] as const)
+    : undefined;
   const planMode = optionalBoolean(params, "planMode");
   const goalMode = optionalBoolean(params, "goalMode");
   const networkMode = optionalBoolean(params, "networkMode");
@@ -926,6 +950,14 @@ function invocationParams(
   if (runId !== undefined) invocation.runId = runId;
   if (locale !== undefined) invocation.locale = locale;
   if (permissions !== undefined) invocation.permissions = permissions;
+  if (steeringMode !== undefined) {
+    invocation.steeringMode = steeringMode;
+  } else if (steering && getChat(chatId)?.kind === "user") {
+    // Older Mobile builds do not know the steeringMode field. Their One/Work
+    // steering must still follow the Desktop interactive contract rather than
+    // silently falling back to the old additive queue behavior.
+    invocation.steeringMode = "interrupt";
+  }
   if (planMode !== undefined) invocation.planMode = planMode;
   if (goalMode !== undefined) invocation.goalMode = goalMode;
   if (networkMode !== undefined) invocation.sessionRouting = networkMode;
@@ -1014,6 +1046,9 @@ async function resolveMobileRoleSelection(
     (selection.backend === undefined || candidate.backend === selection.backend),
   );
   if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+  if (runtimeCredentialUnavailable(runtime)) {
+    throw new Error("The selected Desktop runtime credential is unavailable");
+  }
   if (
     selection.model &&
     (runtime.availableModels?.length ?? 0) > 0 &&
@@ -1151,12 +1186,13 @@ async function bindMobileOneTurn(
   };
 }
 
-/** DESKTOP_MOBILE_BRIDGE: History strips in-memory data URLs; attachments never cross this v1 method. */
+/** DESKTOP_MOBILE_BRIDGE: History strips in-memory data URLs; generic files cross as bounded metadata only. */
 function projectInvocationHistory(
   history: ReturnType<typeof invocationService.history>,
   limit: number,
+  chatId: string,
 ): MobileBridgeJsonValue {
-  return asJsonValue(projectMobileBridgeHistory(history, limit), "invoke.history");
+  return asJsonValue(projectMobileBridgeHistory(history, limit, undefined, chatId), "invoke.history");
 }
 
 /** DESKTOP_MOBILE_BRIDGE: resultFolder is a local absolute path and is never projected. */
@@ -2485,11 +2521,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return preview ? asJsonValue(preview, request.method) : null;
       }
       case "one.artifacts.recent": {
-        const params = guardedParams(request, ["chatId", "limit"]);
+        const params = guardedParams(request, ["chatId", "limit", "cursor"]);
         const chatId = requiredIdentifier(params, "chatId");
-        const limit = optionalInteger(params, "limit", 1, RECENT_ONE_ARTIFACT_LIMIT)
-          ?? RECENT_ONE_ARTIFACT_LIMIT;
-        return asJsonValue(projectMobileBridgeRecentOneArtifacts(chatId, limit), request.method);
+        requireChat(chatId);
+        const limit = optionalInteger(params, "limit", 1, 100) ?? 100;
+        const cursor = params.cursor === undefined
+          ? undefined
+          : requiredIdentifier(params, "cursor", MOBILE_ONE_ARTIFACT_CURSOR_RE);
+        return asJsonValue(
+          listRecentOneArtifactsForMobile({ chatId, limit, cursor }),
+          request.method,
+        );
       }
       case "chat.attachment.imagePreview": {
         const params = guardedParams(request, ["chatId", "messageId", "attachmentId"]);
@@ -2581,7 +2623,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["chatId", "limit"]);
         const chatId = requiredIdentifier(params, "chatId");
         const limit = optionalInteger(params, "limit", 1, 200) ?? 200;
-        return projectInvocationHistory(invocationService.history(chatId), limit);
+        return projectInvocationHistory(invocationService.history(chatId), limit, chatId);
       }
       case "one.invoke.start": {
         assertMobileOneDeviceAuthority(context);
@@ -2791,6 +2833,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }, request.method);
       }
 
+      case "runtime.submitUserInput": {
+        const params = guardedParams(request, ["requestId", "answer"]);
+        const requestId = requiredIdentifier(params, "requestId", ASK_USER_REQUEST_ID_RE);
+        let answer: string | null = null;
+        if (params.answer !== null) {
+          answer = requiredText(params, "answer", 4_000).trim();
+          if (!answer) throw new TypeError("answer must be non-empty text or null");
+        }
+        const resolved = submitAskUserAnswer(requestId, answer);
+        this.scheduleSnapshotUpdated();
+        return asJsonValue({
+          resolved,
+          requestId,
+          idempotencyKey: request.idempotencyKey ?? null,
+        }, request.method);
+      }
+
       // DESKTOP_MOBILE_BRIDGE: Automation reads/writes use the same SQLite store
       // and scheduler as IPC; prompt/graph/trigger secrets stay in the projector.
       case "automations.list": {
@@ -2811,20 +2870,40 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(projectMobileBridgeAutomation(automation), request.method);
       }
       case "automations.setRuntime": {
-        // ★모바일에서 자동화 런타임을 바꾸는 액션은 지금까지 없었다 — 원격 UI가
-        // 무엇을 바꾸든 automations.runtime_selection_json 에 닿지 않았고, 오너가
-        // 원격으로 소넷 전환 후 실행했는데 antigravity 로 돈 실측이 그 증거다.
+        // ★모바일에서 자동화 런타임을 바꾸는 액션은 지금까지 없었다 — 채팅
+        // 런타임을 바꿔도 다음 무인 실행은 자동화의 별도 칸을 읽는다.
         // 채팅 런타임(setChatRuntimeSelection)과 자동화 런타임은 다른 칸이다.
         const params = guardedParams(request, ["id", "runtimeSelection"]);
         const id = requiredIdentifier(params, "id");
         if (!getAutomation(id)) throw new Error(`Automation not found: ${id}`);
-        const selection = params.runtimeSelection;
-        if (selection !== null && (typeof selection !== "object" || Array.isArray(selection) || typeof (selection as { kind?: unknown }).kind !== "string")) {
-          throw new Error("runtimeSelection must be null or an object with a string `kind`");
-        }
+        const rawSelection = params.runtimeSelection;
+        // Resolve against the live Desktop catalog before persisting. This
+        // keeps a phone pin exact and prevents a stale/unknown model from
+        // becoming a durable automation contract. An explicit null clears the
+        // pin and returns to the orchestrator role default.
+        const selection = rawSelection === null
+          ? null
+          : await resolveMobileRoleSelection(
+              mobileRuntimeSelectionFromValue(rawSelection, "orchestrator"),
+            );
+        // Automation rows use the historical execution contract (kind,
+        // backend/source/model/longContext/effort). Role and inheritance are
+        // conversation/worker-pool metadata, and are intentionally not stored
+        // in this automation column; the mobile projection supplies the
+        // orchestrator defaults when it reads the row back.
+        const automationSelection = selection === null
+          ? null
+          : {
+              kind: selection.kind,
+              ...(selection.backend !== undefined ? { backend: selection.backend } : {}),
+              ...(selection.source !== undefined ? { source: selection.source } : {}),
+              ...(selection.model !== undefined ? { model: selection.model } : {}),
+              longContext: selection.longContext === true,
+              ...(selection.effort !== undefined ? { effort: selection.effort } : {}),
+            };
         const { updateAutomation } = await import("../store/automations");
         const automation = updateAutomation(id, {
-          runtimeSelection: (selection ?? undefined) as import("../../shared/types").RuntimeSelection | undefined,
+          runtimeSelection: automationSelection,
         });
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(projectMobileBridgeAutomation(automation), request.method);
@@ -2904,6 +2983,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const runtime = candidates.find((candidate) =>
           candidate.kind === kind && (backend === undefined || candidate.backend === backend));
         if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+        if (runtimeCredentialUnavailable(runtime)) {
+          throw new Error("The selected Desktop runtime credential is unavailable");
+        }
         const model = optionalIdentifier(params, "model", 200);
         if (
           model &&
@@ -3786,19 +3868,56 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     // live 요청만 폰에 보낸다 — 사후 고지(post-denial)는 데스크탑에서도 카드가 아니다.
     const pendingToolApprovals = listPendingToolApprovals()
       .filter((approval) => approval.mode === "live")
-      .map((approval) => ({
-        id: approval.id,
-        runtime: approval.runtime,
-        tool: approval.tool,
-        ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
-        ...(approval.cwd ? { cwd: approval.cwd } : {}),
-        mode: approval.mode,
-        ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
-        requestedAt: approval.requestedAt,
-        ...(approval.chatId ? { chatId: approval.chatId } : {}),
-        ...(approval.capability ? { capability: approval.capability } : {}),
-        ...(approval.agentId ? { agentId: approval.agentId } : {}),
-      }));
+      .map((approval) => {
+        // `expiresAt` was added after the original tool-approval event. Read it
+        // structurally so this bridge remains source-compatible with an older
+        // runtime registry while newer Desktop builds forward the exact
+        // deadline to Mobile.
+        const expiresAt = (approval as { expiresAt?: unknown }).expiresAt;
+        return {
+          id: approval.id,
+          runtime: approval.runtime,
+          tool: approval.tool,
+          ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
+          ...(approval.cwd ? { cwd: approval.cwd } : {}),
+          mode: approval.mode,
+          ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
+          requestedAt: approval.requestedAt,
+          ...(typeof expiresAt === "string" && expiresAt ? { expiresAt } : {}),
+          ...(approval.chatId ? { chatId: approval.chatId } : {}),
+          ...(approval.capability ? { capability: approval.capability } : {}),
+          ...(approval.agentId ? { agentId: approval.agentId } : {}),
+        };
+      });
+    const pendingUserInputs: MobileBridgeUserInputDto[] = listPendingAskUserRequests()
+      .flatMap((request) => {
+        // Only a live One/Work chat-bound request is a Mobile surface. Generic
+        // Desktop prompts stay local, and an expired row never becomes a card.
+        if (!request.chatId || !getChat(request.chatId) || request.expiresAt <= Date.now()) return [];
+        const question = boundedRedactedText(request.question, 1_200);
+        if (!question) return [];
+        const options = request.options.flatMap((option) => {
+          const label = boundedRedactedText(option.label, 200);
+          if (!label) return [];
+          const description = option.description
+            ? boundedRedactedText(option.description, 400)
+            : "";
+          return [{ label, ...(description ? { description } : {}) }];
+        }).slice(0, 8);
+        const askedBy = request.askedBy
+          ? boundedRedactedText(request.askedBy, 200)
+          : "";
+        return [{
+          requestId: request.requestId,
+          question,
+          options,
+          allowFreeText: request.allowFreeText,
+          ...(askedBy ? { askedBy } : {}),
+          chatId: request.chatId,
+          createdAt: new Date(request.createdAt).toISOString(),
+          expiresAt: new Date(request.expiresAt).toISOString(),
+        }];
+      });
     const ontology = await this.projectOntology(this.ontologyRefreshRequested);
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,
@@ -3808,6 +3927,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       includeMessagesForChatIds: activeChatIds,
       pendingBrowserApprovals,
       pendingToolApprovals,
+      pendingUserInputs,
       ontology,
     });
   }
@@ -3868,6 +3988,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       onBrowserApprovalLifecycle((event) => this.forwardBrowserApproval(event)),
       onToolApprovalRequested(() => this.scheduleSnapshotUpdated()),
       onToolApprovalResolved(() => this.scheduleSnapshotUpdated()),
+      onAskUserLifecycle((event) => {
+        if (!event.chatId || !getChat(event.chatId)) return false;
+        this.scheduleSnapshotUpdated();
+        return true;
+      }),
       onDesktopStoreChange((change) => {
         this.scheduleSnapshotUpdated(change.entity === "automation" ? change.id : undefined);
       }),

@@ -1932,9 +1932,6 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
 export const BROWSER_CDP_LAUNCHER_CONTRACT = 14;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
-const CURRENT_BROWSER_RUNTIME = resolveAgentlasBrowserRuntime();
-const CURRENT_LAUNCHER_IS_PACKAGED = CURRENT_BROWSER_RUNTIME?.source === "packaged";
-
 /** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
 export function readLauncherContractVersion(source: string): number | null {
   const match = source.match(/@agentlas-browser-cdp-contract\s+(\d+)/);
@@ -1979,7 +1976,10 @@ export function hasUsableLauncherRuntimeBindings(source: string): boolean {
   );
 }
 
-const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
+function createLauncherSource(
+  CURRENT_BROWSER_RUNTIME: ReturnType<typeof resolveAgentlasBrowserRuntime>,
+): string {
+  const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
 // @agentlas-browser-cdp-contract ${BROWSER_CDP_LAUNCHER_CONTRACT}
 // @agentlas-browser-cdp-writer ${BROWSER_CDP_LAUNCHER_WRITER}
 // Agentlas Browser (CDP) — 범용 엔진. Agentlas 전용 Chrome 프로필을 원격 디버깅 포트로 띄우고
@@ -2472,10 +2472,25 @@ if (process.argv[2] === '--agentlas-cdp-reap') {
   main().catch((e) => { console.error('[agentlas-browser] fatal', e && e.stack || e); process.exit(1); });
 }
 `;
+  return LAUNCHER_SOURCE;
+}
+
+type LauncherRuntimeContext = {
+  source: string;
+  isPackaged: boolean;
+};
+
+function resolveLauncherContext(): LauncherRuntimeContext {
+  const CURRENT_BROWSER_RUNTIME = resolveAgentlasBrowserRuntime();
+  return {
+    source: createLauncherSource(CURRENT_BROWSER_RUNTIME),
+    isPackaged: CURRENT_BROWSER_RUNTIME?.source === "packaged",
+  };
+}
 
 /** Regression-only source view; does not materialize or launch Chrome. */
 export function browserCdpLauncherSourceForTest(): string {
-  return LAUNCHER_SOURCE;
+  return resolveLauncherContext().source;
 }
 
 /**
@@ -2486,9 +2501,10 @@ export function browserCdpLauncherSourceForTest(): string {
  * 실패하고 마지막 lease 뒤 브라우저가 남는다. 같은 계약의 다른 writer와 더 높은 계약은
  * 덮지 않아 Desktop/Core 간 write oscillation을 막는다.
  */
-export function shouldReplaceBrowserCdpLauncher(
+function shouldReplaceBrowserCdpLauncherWithContext(
   existing: string | null,
-  candidateIsPackaged = CURRENT_LAUNCHER_IS_PACKAGED,
+  candidateIsPackaged: boolean,
+  LAUNCHER_SOURCE: string,
 ): boolean {
   // Never publish a launcher that is already known to be unusable. This is
   // especially important in development, where a transient cross-arch build
@@ -2512,6 +2528,18 @@ export function shouldReplaceBrowserCdpLauncher(
   return installedWriter === BROWSER_CDP_LAUNCHER_WRITER;
 }
 
+export function shouldReplaceBrowserCdpLauncher(
+  existing: string | null,
+  candidateIsPackaged?: boolean,
+): boolean {
+  const context = resolveLauncherContext();
+  return shouldReplaceBrowserCdpLauncherWithContext(
+    existing,
+    candidateIsPackaged ?? context.isPackaged,
+    context.source,
+  );
+}
+
 /**
  * 런처 소스를 ~/.agentlas/agentlas-browser-cdp.mjs 로 쓴다(멱등, 내용 바뀌면 갱신).
  * ensureDefaultMcpPluginsInstalled 에서 부팅 시 호출.
@@ -2519,6 +2547,10 @@ export function shouldReplaceBrowserCdpLauncher(
 export function materializeBrowserCdpLauncher(): string {
   const dest = browserCdpLauncherPath();
   try {
+    const context = resolveLauncherContext();
+    const LAUNCHER_SOURCE = context.source;
+    const shouldReplaceBrowserCdpLauncher = (existing: string | null): boolean =>
+      shouldReplaceBrowserCdpLauncherWithContext(existing, context.isPackaged, LAUNCHER_SOURCE);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const existing = fs.existsSync(dest) ? fs.readFileSync(dest, "utf8") : null;
     if (existing === LAUNCHER_SOURCE) return dest;

@@ -284,20 +284,25 @@ export function renderManuscriptLatex(doc: ManuscriptDocument, assets: ResolvedM
   const correspondingLine = corresponding.length ? `\\\\[4pt] {\\small $^{*}$Correspondence: ${corresponding.map((author) => `${escapeLatex(author.name)} (\\texttt{${escapeLatex(author.email!)}})`).join("; ")}}` : "";
   const author = [authorLine, affiliationLines ? `\\\\[6pt]\n${affiliationLines}` : "", correspondingLine].filter(Boolean).join("\n");
 
-  const abstract = doc.abstract.length ? `\\begin{abstract}\n${doc.abstract.map((block) => writer.block(block)).join("\n\n")}${doc.keywords.length ? `\n\n\\noindent\\textbf{Keywords:} ${doc.keywords.map(escapeLatex).join("; ")}` : ""}\n\\end{abstract}` : "";
-  const body = doc.body.map((block) => writer.block(block)).join("\n\n");
-
   const entries = doc.citations.map((citation) => {
     const resolved = assets.citations.get(citation.locator);
     return resolved ? { ...resolved.entry, ordinal: citation.ordinal } : { locator: citation.locator, ordinal: citation.ordinal, title: citation.locator, authors: [], year: null, containerTitle: null, publisher: null, canonicalUri: "", kind: "unknown", doi: null, unresolved: true };
   });
   const ordered = orderReferences(entries, options.style);
   const references = ordered.map((entry) => formatReference(entry, options.style));
+  const abstract = doc.abstract.length ? `\\begin{abstract}\n${doc.abstract.map((block) => writer.block(block)).join("\n\n")}${doc.keywords.length ? `\n\n\\noindent\\textbf{Keywords:} ${doc.keywords.map(escapeLatex).join("; ")}` : ""}\n\\end{abstract}` : "";
+  const body = doc.body.map((block) => writer.block(block)).join("\n\n");
   const hasReferencesHeading = doc.headings.some((heading) => heading.role === "references");
+  const numberedBibliography = `\\begin{thebibliography}{${references.length}}\n${references.map((reference) => `${options.style === "nature" ? `\\hypertarget{${latexLabel("ref", reference.locator)}}{}` : ""}\\bibitem{${latexLabel("ref", reference.locator)}} ${escapeLatex(reference.text)}`).join("\n")}\n\\end{thebibliography}`;
   const bibliography = references.length
     ? options.style === "apa"
       ? `${hasReferencesHeading ? "" : "\\section*{References}\n"}\\begin{flushleft}\n${references.map((reference) => `\\hangindent=2em \\hangafter=1 \\noindent ${escapeLatex(reference.text)}\\par`).join("\n")}\n\\end{flushleft}`
-      : `${hasReferencesHeading ? "" : "\\section*{References}\n"}\\begin{thebibliography}{${references.length}}\n${references.map((reference) => `${options.style === "nature" ? `\\hypertarget{${latexLabel("ref", reference.locator)}}{}` : ""}\\bibitem{${latexLabel("ref", reference.locator)}} ${escapeLatex(reference.text)}`).join("\n")}\n\\end{thebibliography}`
+      // article.cls makes thebibliography print its own References heading. Preserve an
+      // author-written heading (and any prose beneath it), but suppress the environment's
+      // duplicate heading inside a local group. With no source heading, the environment owns it.
+      : hasReferencesHeading
+        ? `\\begingroup\n\\def\\section#1#2{}\n${numberedBibliography}\n\\endgroup`
+        : numberedBibliography
     : "";
 
   const statements: Array<[string, string | null]> = metadata ? [

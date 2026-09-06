@@ -1,14 +1,14 @@
 import fs from "node:fs";
 
 /**
- * Main-process-only capability captured at the Mobile Bridge trust boundary.
+ * Main-process-only workspace capability captured at a trusted host boundary.
  *
  * This deliberately does not live in shared/ or any wire DTO. A phone may ask
  * Desktop to run a chat, but it can never supply or alter the local path that
  * Desktop has already bound to that chat.
  */
-/** 원격 표면에서 들어온 요청임을 나타내는 source 집합. 로컬 Desktop 턴은 바인딩이 없다. */
-export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one";
+/** Science binds its own selected directory without becoming a remote surface. */
+export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one" | "science";
 
 const REMOTE_BINDING_SOURCES: readonly InvocationWorkspaceBindingSource[] = [
   "mobile",
@@ -16,8 +16,12 @@ const REMOTE_BINDING_SOURCES: readonly InvocationWorkspaceBindingSource[] = [
   "telegram-one",
 ];
 
-function isRemoteBindingSource(value: string): value is InvocationWorkspaceBindingSource {
+export function isRemoteInvocationWorkspaceBindingSource(value: string): boolean {
   return (REMOTE_BINDING_SOURCES as readonly string[]).includes(value);
+}
+
+function isWorkspaceBindingSource(value: string): value is InvocationWorkspaceBindingSource {
+  return value === "science" || isRemoteInvocationWorkspaceBindingSource(value);
 }
 
 export interface InvocationWorkspaceBinding {
@@ -28,6 +32,16 @@ export interface InvocationWorkspaceBinding {
     readonly device: string;
     readonly inode: string;
   } | null;
+}
+
+/** Legacy unbound Science runs remain valid; a bound run must match its host surface. */
+export function assertInvocationWorkspaceSourceContext(
+  binding: InvocationWorkspaceBinding | undefined,
+  executionSource: string | undefined,
+): void {
+  if (binding && (binding.source === "science") !== (executionSource === "science")) {
+    throw new Error("science-workspace-context-mismatch");
+  }
 }
 
 function unavailableWorkspaceError(): Error {
@@ -121,6 +135,17 @@ export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding 
   });
 }
 
+/** Capture only the canonical directory already selected and validated by Science Main. */
+export function captureScienceInvocationBinding(canonicalPath: string): InvocationWorkspaceBinding {
+  const directory = canonicalDirectory(canonicalPath);
+  if (directory.canonicalPath !== canonicalPath) throw replacedWorkspaceError();
+  return Object.freeze({
+    source: "science",
+    canonicalPath: directory.canonicalPath,
+    directoryIdentity: directory.directoryIdentity,
+  });
+}
+
 /**
  * Main-only identity for a Telegram One turn.
  *
@@ -154,10 +179,11 @@ export function captureTelegramOneInvocationBinding(
 export function revalidateInvocationWorkspaceBinding(
   binding: InvocationWorkspaceBinding,
 ): string | null {
-  if (!isRemoteBindingSource(binding.source)) {
+  if (!isWorkspaceBindingSource(binding.source)) {
     throw unavailableWorkspaceError();
   }
   if (binding.canonicalPath === null) {
+    if (binding.source === "science") throw unavailableWorkspaceError();
     if (binding.directoryIdentity !== null) throw unavailableWorkspaceError();
     return null;
   }
@@ -179,9 +205,10 @@ export function invocationWorkspaceBindingsEqual(
 ): boolean {
   if (!left || !right) return left === right;
   if (left.source !== right.source) return false;
-  if (!isRemoteBindingSource(left.source) || !isRemoteBindingSource(right.source)) return false;
+  if (!isWorkspaceBindingSource(left.source) || !isWorkspaceBindingSource(right.source)) return false;
   if (left.canonicalPath !== right.canonicalPath) return false;
   if (left.canonicalPath === null) {
+    if (left.source === "science") return false;
     return left.directoryIdentity === null && right.directoryIdentity === null;
   }
   if (!left.directoryIdentity || !right.directoryIdentity) return false;

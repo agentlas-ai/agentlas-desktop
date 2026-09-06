@@ -22,7 +22,7 @@ type EvidenceMap = Partial<Record<string, boolean>>;
 
 const CARD_EDGE = "color-mix(in oklch, var(--dash-amber) 46%, transparent)";
 const CARD_BG = "color-mix(in oklch, var(--dash-amber) 9%, var(--dash-surface))";
-const HEAD_BG = "color-mix(in oklch, var(--dash-amber) 17%, #ffffff)";
+const HEAD_BG = "color-mix(in oklch, var(--dash-amber) 17%, var(--paper))";
 
 export function QuestBoard() {
   const { locale } = useT();
@@ -359,7 +359,7 @@ export function QuestBoard() {
             fontSize: 12,
             fontWeight: 700,
             color: "var(--green-deep)",
-            background: "color-mix(in oklch, var(--green-deep) 10%, #ffffff)",
+            background: "color-mix(in oklch, var(--green-deep) 10%, var(--paper))",
             borderBottom: `1px solid ${CARD_EDGE}`,
           }}
         >
@@ -453,9 +453,9 @@ function QuestRow({
   // 상태 칩: 수령 완료 > (client-attested 로컬 증거 확보) 완료 가능 > 진행 전.
   // server 검증 퀘스트는 로컬에서 완료 여부를 모른다 — 미수령이면 "진행 전"으로 두되 클레임은 항상 허용.
   const chip = quest.claimed
-    ? { text: ko ? "수령 완료" : "Claimed", color: "var(--green-deep)", bg: "color-mix(in oklch, var(--green-deep) 12%, #ffffff)" }
+    ? { text: ko ? "수령 완료" : "Claimed", color: "var(--green-deep)", bg: "color-mix(in oklch, var(--green-deep) 12%, var(--paper))" }
     : quest.verification === "client-attested" && evidence === true
-      ? { text: ko ? "완료 가능" : "Ready", color: "var(--amber-deep)", bg: "color-mix(in oklch, var(--dash-amber) 22%, #ffffff)" }
+      ? { text: ko ? "완료 가능" : "Ready", color: "var(--amber-deep)", bg: "color-mix(in oklch, var(--dash-amber) 22%, var(--paper))" }
       : { text: ko ? "진행 전" : "Open", color: "var(--dash-muted)", bg: "rgba(255,255,255,0.55)" };
 
   return (
@@ -522,7 +522,7 @@ function QuestRow({
               borderRadius: 8,
               border: "none",
               background: claiming ? "var(--dash-line)" : "var(--dash-teal)",
-              color: "#ffffff",
+              color: "var(--white)",
               fontSize: 11,
               fontWeight: 700,
               cursor: claiming ? "default" : "pointer",
@@ -566,7 +566,7 @@ function UnauthedBody({
             borderRadius: 8,
             border: "none",
             background: signingIn ? "var(--dash-line)" : "var(--dash-teal)",
-            color: "#ffffff",
+            color: "var(--white)",
             fontSize: 11.5,
             fontWeight: 700,
             cursor: signingIn ? "default" : "pointer",

@@ -8,7 +8,6 @@
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
 import { startInstallBeacon } from "./install-beacon";
-import { scienceStatisticsMethodCatalogue } from "./science/statistics-method-catalogue";
 import {
   app,
   autoUpdater as electronAutoUpdater,
@@ -36,6 +35,8 @@ import {
   type InstallIdentity,
 } from "./install-identity";
 import { registerIpcHandlers } from "./ipc";
+import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "./science/project-folder-selection";
+import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
 import { onDesktopStoreChange } from "./store/change-bus";
@@ -67,6 +68,7 @@ import {
   getAuthenticatedActorIds,
   getAuthSession,
   onAuthSessionInvalidated,
+  onAuthSessionRestored,
   retryTemporaryAuthRestore,
   type AuthRestoreResult,
 } from "./auth";
@@ -136,6 +138,7 @@ import {
   installScienceExtension,
   installScienceSuite,
   scienceExtensionStatus,
+  activeScienceExtension,
   scienceSuiteStatus,
   scienceRendererPackStatuses,
   resolveVerifiedScienceRenderer,
@@ -176,29 +179,29 @@ import {
   scienceStore,
   scienceToolGateway,
   shutdownScienceRuntimeForAppClose,
-} from "./science/runtime";
+  configureScienceServiceAvailability, retryFailedScienceServiceLoad,
+  scienceStatisticsMethodCatalogue, createScienceDatasetIngestionService, scienceSchemaVersion,
+} from "./science/lazy-services";
 import type {
   MaterializeScienceEvidenceGraphInferenceInput,
   ProposeScienceEvidenceGraphInferenceInput,
   RefreshScienceEvidenceGraphInput,
   ReviewScienceEvidenceGraphInferenceInput,
 } from "../shared/science-evidence-graph";
-import { ScienceDatasetIngestionService } from "./science/dataset-ingestion";
-import { SCIENCE_SCHEMA_VERSION } from "./science/store";
-import { scienceLabDecisionProjectionsForProject } from "./science/lab-decision-projection-service";
-import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "./science/result-review-service";
-import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/vega-editor";
+import { scienceLabDecisionProjectionsForProject } from "./science/lazy-services";
+import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "./science/lazy-services";
+import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/lazy-services";
 import {
   renderScienceStatisticsFigurePdf,
   renderScienceStatisticsFigurePng,
   renderScienceStatisticsFigureSvg,
   renderScienceStatisticsFigureSvgPreviewPng,
   renderScienceStatisticsFigureTiff,
-} from "./science/statistics-figure-export";
-import { validateScienceNumericSurfacePngBytes } from "./science/numeric-surface-export";
-import { validateScienceResidueInteraction } from "./science/protein-residue-validator";
-import { draftManuscript } from "./science/manuscript";
-import { inspectScienceManuscriptDepth } from "./science/manuscript/depth-preflight";
+} from "./science/lazy-services";
+import { validateScienceNumericSurfacePngBytes } from "./science/lazy-services";
+import { validateScienceResidueInteraction } from "./science/lazy-services";
+import { draftManuscript } from "./science/lazy-services";
+import { inspectScienceManuscriptDepth } from "./science/lazy-services";
 import type {
   ReviseScienceHypothesisInput,
   ScienceManuscriptBinding,
@@ -230,12 +233,17 @@ import type {
   AnswerScienceDecisionInput,
   DeferScienceDecisionInput,
   PresentScienceDecisionInput,
+  ReviewScienceAnalysisPlanInput,
   ScienceDecisionRequest,
 } from "../shared/science-contract";
 import type { ProductExtensionPermission } from "../shared/product-extension";
 import type { ScienceComposerStartInput } from "./science/conversation-service";
 
 const activeScienceChemistryCommits = new Set<string>();
+configureScienceServiceAvailability(() => {
+  const status = scienceExtensionStatus();
+  return status.phase === "installed" && status.enabled;
+});
 import {
   SCIENCE_RENDERER_REQUEST_SCHEMA,
   SCIENCE_RESIDUE_INTERACTION_SCHEMA,
@@ -253,6 +261,7 @@ export { currentUiLocale } from "./ui-locale";
 const isDev = process.env.NODE_ENV === "development";
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
+let disposeAuthSessionRestoration: (() => void) | null = null;
 let disposeMobileBridgeStateChange: (() => void) | null = null;
 let disposeOneTeamNotificationBridge: (() => void) | null = null;
 let deferredAuthRestorePromise: Promise<AuthRestoreResult> | null = null;
@@ -406,12 +415,15 @@ function initializeInstallIdentity(): InstallIdentity {
     // service. Only non-official identities receive an explicit namespace.
     app.setName(identity.appName);
     const userDataDir = identity.userDataOverride
-      ?? (identity.channel === "local-candidate"
+      ?? (identity.channel === "local-candidate" || identity.channel === "dev"
         ? path.join(app.getPath("appData"), identity.userDataNamespace)
         : null);
     if (userDataDir) {
       fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
       app.setPath("userData", userDataDir);
+    }
+    if (identity.channel === "dev") {
+      console.info("[Agentlas-Dev] 별도의 개발 프로필을 사용합니다. 공식 Agentlas의 로그인과 데이터는 기존 프로필에 그대로 보존됩니다. 개발 프로필은 처음에는 비어 있을 수 있습니다.");
     }
     return identity;
   } catch (error) {
@@ -1069,6 +1081,8 @@ function stopQuitServices(): Promise<void> {
   try { disposeSiteAgentAppRuntimes(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
+  try { disposeAuthSessionRestoration?.(); } catch {}
+  disposeAuthSessionRestoration = null;
   try { disposeMobileBridgeStateChange?.(); } catch {}
   disposeMobileBridgeStateChange = null;
 
@@ -1088,6 +1102,13 @@ function stopQuitServices(): Promise<void> {
 }
 
 async function prepareAutomaticUpdateQuit(): Promise<void> {
+  // The native updater must not capture its install journal while Science can
+  // still accept or persist work. This is a no-op for users who never opened
+  // Science because the runtime has no active store in that case.
+  const scienceShutdown = await shutdownScienceRuntimeForAppClose();
+  if (scienceShutdown.timedOut) {
+    throw new Error("science-runtime-update-shutdown-timed-out");
+  }
   const report = await shutdownAppRuntimeCoordinator(15_000);
   if (report.failedParticipantNames.length > 0) {
     throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
@@ -1401,6 +1422,7 @@ app.whenReady().then(async () => {
   traceUpdaterStartup(`auth-restore-complete:${initialAuthRestore.status}`);
   traceStartup(`auth-${initialAuthRestore.status}`);
   const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
+  const initialAuthRestoreWasUnavailable = initialAuthRestoreWasTemporary || initialAuthRestore.status === "native-unavailable";
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies before deferred repairs resume.
   if (installIdentity.updatesEnabled) {
@@ -1552,6 +1574,7 @@ app.whenReady().then(async () => {
     const leaseId = scienceViewLeaseId(rawLeaseId);
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) return { id: "agentlas-science", leaseId, state: "error", errorCode: "owner-window-missing", errorMessage: "The Desktop window is unavailable." };
+    retryFailedScienceServiceLoad();
     return openScienceExtensionView({
       ownerId: event.sender.id,
       leaseId,
@@ -1573,6 +1596,18 @@ app.whenReady().then(async () => {
     assertScienceExtensionViewPermission(event.sender.id, permission);
     return status;
   };
+  ipcMain.handle("science:askUser:list", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    return listPendingAskUserRequests().filter((request) => request.askedBy === "agentlas-science");
+  });
+  ipcMain.handle("science:askUser:answer", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" ? envelope as { requestId?: unknown; answer?: unknown } : {};
+    const requestId = typeof input.requestId === "string" ? input.requestId : "";
+    const pending = listPendingAskUserRequests().find((request) => request.requestId === requestId && request.askedBy === "agentlas-science");
+    if (!pending) return false;
+    return submitAskUserAnswer(requestId, typeof input.answer === "string" ? input.answer : null);
+  });
   const scienceTurnSubscribers = new Map<number, { projectId: string; conversationId: string }>();
   const scienceLifecycleSubscribers = new Map<number, string>();
   let scienceLifecycleProjectionStarted = false;
@@ -1617,7 +1652,7 @@ app.whenReady().then(async () => {
     return {
       extensionId: status.id,
       extensionVersion: status.version ?? "0.0.0",
-      schemaVersion: SCIENCE_SCHEMA_VERSION,
+      schemaVersion: scienceSchemaVersion(),
       locale: currentUiLocale(),
       projects: scienceStore().listProjects(),
       rendererPacks: scienceRendererPackStatuses(),
@@ -1631,10 +1666,83 @@ app.whenReady().then(async () => {
     assertScienceSender(event, input);
     return scienceStore().listProjects();
   });
-  ipcMain.handle("science:projects:create", (event, envelope: unknown) => {
+  ipcMain.handle("science:projects:library", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    return scienceStore().listProjectLibrarySummaries();
+  });
+  const scienceProjectFolders = new ScienceProjectFolderSelections();
+  const scienceFolderPickers = new Set<number>();
+  const scienceFolderDocuments = new Map<number, number>();
+  const trackScienceFolderDocument = (sender: Electron.WebContents) => {
+    if (scienceFolderDocuments.has(sender.id)) return;
+    scienceFolderDocuments.set(sender.id, 0);
+    sender.once("destroyed", () => { scienceProjectFolders.clear(sender.id); scienceFolderDocuments.delete(sender.id); });
+    sender.on("did-start-navigation", (_navigationEvent, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) {
+        scienceProjectFolders.clear(sender.id);
+        scienceFolderDocuments.set(sender.id, (scienceFolderDocuments.get(sender.id) ?? 0) + 1);
+      }
+    });
+  };
+  const assertScienceProjectDocument = (event: Electron.IpcMainInvokeEvent, envelope: unknown): string => {
     assertScienceSender(event, envelope);
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("science-extension-subframe-denied");
+    const release = activeScienceExtension();
+    const actualUrl = new URL(event.senderFrame.url);
+    actualUrl.hash = "";
+    if (!release || actualUrl.href !== pathToFileURL(release.entryPath).href) throw new Error("science-project-folder-origin-denied");
+    trackScienceFolderDocument(event.sender);
+    return `${event.senderFrame.processId}:${event.senderFrame.routingId}:${scienceFolderDocuments.get(event.sender.id)}:${actualUrl.href}`;
+  };
+  ipcMain.handle("science:projects:pickFolder", async (event, envelope: unknown) => {
+    const documentId = assertScienceProjectDocument(event, envelope);
+    const senderId = event.sender.id;
+    if (scienceFolderPickers.has(senderId)) throw new Error("science-project-folder-picker-busy");
+    scienceFolderPickers.add(senderId);
+    try {
+      // Read activation in an isolated world without manufacturing a user gesture.
+      const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
+      if (active !== true) throw new Error("science-project-folder-user-gesture-required");
+      if (assertScienceProjectDocument(event, envelope) !== documentId) throw new Error("science-project-folder-document-changed");
+      const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+      if (!owner || owner.isDestroyed()) throw new Error("science-owner-window-missing");
+      const selected = await dialog.showOpenDialog(owner, { title: "Choose project folder", properties: ["openDirectory"] });
+      if (assertScienceProjectDocument(event, envelope) !== documentId) throw new Error("science-project-folder-document-changed");
+      if (selected.canceled) return { canceled: true };
+      if (selected.filePaths.length !== 1) throw new Error("science-project-folder-selection-invalid");
+      return { canceled: false, ...scienceProjectFolders.select(senderId, documentId, selected.filePaths[0]) };
+    } finally {
+      scienceFolderPickers.delete(senderId);
+    }
+  });
+  ipcMain.handle("science:projects:create", (event, envelope: unknown) => {
+    const documentId = assertScienceProjectDocument(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().createProject(input as CreateScienceProjectInput);
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-project-input-invalid");
+    if ("folderPath" in input) throw new Error("science-project-folder-raw-path-forbidden");
+    const request = input as CreateScienceProjectInput;
+    const selectedPath = request.folderSelectionId === undefined ? undefined
+      : scienceProjectFolders.resolve(request.folderSelectionId, event.sender.id, documentId, request.requestId);
+    const result = scienceStore().createProject(request, selectedPath);
+    if (request.folderSelectionId) scienceProjectFolders.commit(request.folderSelectionId, request.requestId);
+    return result;
+  });
+  ipcMain.handle("science:projects:openFolder", async (event, envelope: unknown) => {
+    const documentId = assertScienceProjectDocument(event, envelope);
+    const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
+    if (active !== true) throw new Error("science-project-folder-user-gesture-required");
+    if (assertScienceProjectDocument(event, envelope) !== documentId) throw new Error("science-project-folder-document-changed");
+    const projectId = envelope && typeof envelope === "object" && "projectId" in envelope
+      ? (envelope as { projectId?: unknown }).projectId : null;
+    if (typeof projectId !== "string") throw new Error("science-project-id-invalid");
+    const project = scienceStore().getProject(projectId);
+    if (!project) throw new Error("science-project-not-found");
+    if (!project.folderPath) throw new Error("science-project-folder-not-selected");
+    const canonical = validateScienceProjectFolderPath(project.folderPath);
+    if (canonical !== project.folderPath) throw new Error("science-project-folder-selection-changed");
+    const error = await shell.openPath(canonical);
+    if (error) throw new Error("science-project-folder-open-failed");
+    return { opened: true };
   });
   ipcMain.handle("science:projects:get", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -1713,15 +1821,79 @@ app.whenReady().then(async () => {
       events: session ? scienceStore().listLoopEvents(session.id, 0, 1_000) : [],
     };
   });
-  ipcMain.handle("science:researchLoops:start", (event, envelope: unknown) => {
+  ipcMain.handle("science:researchLoops:start", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().startLoopSession(input as StartScienceLoopSessionInput);
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-loop-input-invalid");
+    const record = input as StartScienceLoopSessionInput;
+    const { scienceRuntimePreference } = await import("./science/runtime-preferences");
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const runtimeSelection = scienceRuntimePreference(scienceStore(), record);
+    if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
+    return scienceStore().startLoopSession({ ...record, runtimeSelection });
   });
   ipcMain.handle("science:researchLoops:transition", (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().transitionLoopSession(input as TransitionScienceLoopSessionInput);
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-loop-input-invalid");
+    const record = input as TransitionScienceLoopSessionInput;
+    const store = scienceStore();
+    const prior = store.getLoopSessionForProject(record.projectId, record.loopSessionId);
+    const result = store.transitionLoopSession(record);
+
+    // A pause/cancel is durable before adapter cancellation is requested. Use
+    // the exact active run captured before the transition because terminal
+    // cancel clears activeRunId, and keep this cleanup unconditional for the
+    // cancel action so a stale stop cannot deadlock on provider state.
+    if ((record.action === "pause" || record.action === "cancel") && prior?.activeRunId) {
+      const turn = store.getTurnByInvocationRunId(prior.activeRunId);
+      if (turn && turn.projectId === record.projectId) {
+        try {
+          scienceConversationService().cancel({
+            projectId: turn.projectId,
+            conversationId: turn.conversationId,
+            turnId: turn.id,
+          });
+        } catch (error) {
+          console.error("[science-runtime] loop transition cancellation failed", error);
+        }
+      }
+    }
+
+    if (record.action === "resume" && result.session.status === "queued") {
+      try {
+        if (!result.session.runtimeSelection?.model) throw new Error("science-runtime-selection-required");
+        const conversation = store.listConversations(record.projectId)
+          .find((candidate) => store.getConversationRuntimeBinding(record.projectId, candidate.id)?.runtimeChatId === result.session.runtimeChatId);
+        if (!conversation) throw new Error("science-loop-resume-conversation-missing");
+        scienceConversationService().resumeLoop({
+          requestId: record.requestId,
+          projectId: record.projectId,
+          conversationId: conversation.id,
+          loopSessionId: result.session.id,
+          expectedLoopVersion: result.session.version,
+          expectedLoopStateSha256: result.session.stateSha256,
+        });
+        const current = store.getLoopSessionForProject(record.projectId, result.session.id);
+        return { ...result, session: current ?? result.session };
+      } catch (error) {
+        const current = store.getLoopSessionForProject(record.projectId, result.session.id);
+        if (current && current.status === "queued"
+          && current.version === result.session.version && current.stateSha256 === result.session.stateSha256) {
+          try {
+            store.failLoopResumeDispatch({
+              projectId: current.projectId,
+              loopSessionId: current.id,
+              expectedLoopVersion: current.version,
+              expectedLoopStateSha256: current.stateSha256,
+              errorCode: (error instanceof Error ? error.message : String(error)).slice(0, 240) || "science-loop-resume-failed",
+            });
+          } catch { /* a concurrent canonical transition wins */ }
+        }
+        throw error;
+      }
+    }
+    return result;
   });
   ipcMain.handle("science:conversations:list", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -1734,16 +1906,42 @@ app.whenReady().then(async () => {
     const conversationId = input && typeof input === "object" && "conversationId" in input ? String((input as { conversationId?: unknown }).conversationId ?? "") : "";
     return scienceStore().listMessagesForProject(projectId, conversationId);
   });
-  ipcMain.handle("science:composer:start", (event, envelope: unknown) => {
+  const scienceRuntimeInput = (envelope: unknown) => {
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-runtime-input-invalid");
+    const record = input as Record<string, unknown>;
+    if (typeof record.projectId !== "string" || typeof record.conversationId !== "string") throw new Error("science-runtime-input-invalid");
+    return { projectId: record.projectId, conversationId: record.conversationId, selection: record.selection };
+  };
+  ipcMain.handle("science:runtime:inspect", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = scienceRuntimeInput(envelope);
+    const { inspectScienceRuntime } = await import("./science/runtime-preferences");
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    return inspectScienceRuntime(scienceStore(), input);
+  });
+  ipcMain.handle("science:runtime:select", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = scienceRuntimeInput(envelope);
+    const { selectScienceRuntime } = await import("./science/runtime-preferences");
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    return selectScienceRuntime(scienceStore(), input);
+  });
+  ipcMain.handle("science:composer:start", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
     const record = input as Record<string, unknown>;
     const projectId = String(record.projectId ?? "");
     const conversationId = String(record.conversationId ?? "");
+    const { normalizeScienceRuntimeSelection } = await import("./science/runtime-selection");
+    const { scienceRuntimePreference } = await import("./science/runtime-preferences");
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const runtimeSelection = normalizeScienceRuntimeSelection(record.runtimeSelection ?? scienceRuntimePreference(scienceStore(), { projectId, conversationId }));
+    if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
     ensureScienceTurnProjection();
     scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
-    return scienceConversationService().start(input as ScienceComposerStartInput);
+    return scienceConversationService().start({ ...input, runtimeSelection } as ScienceComposerStartInput);
   });
   ipcMain.handle("science:composer:cancel", (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
@@ -1860,7 +2058,7 @@ app.whenReady().then(async () => {
     const selected = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
     if (selected.canceled || selected.filePaths.length !== 1) return { canceled: true };
     const store = scienceStore();
-    const imported = await new ScienceDatasetIngestionService(store).importFile(selected.filePaths[0], {
+    const imported = await createScienceDatasetIngestionService(store).importFile(selected.filePaths[0], {
       requestId: String(record.requestId ?? ""),
       projectId: String(record.projectId ?? ""),
       conversationId: String(record.conversationId ?? ""),
@@ -2851,6 +3049,16 @@ app.whenReady().then(async () => {
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     return scienceStore().getAnalysisSpecForProject(String(record.projectId ?? ""), String(record.analysisSpecId ?? ""));
   });
+  // Analysis-plan approval is a human authorization boundary. The MCP-visible freeze route can
+  // only verify an already approved/frozen exact version; it cannot manufacture this receipt.
+  ipcMain.handle("science:analysisSpecs:review", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-analysis-plan-review-input-invalid");
+    return scienceStore().reviewAnalysisPlan(input as ReviewScienceAnalysisPlanInput);
+  });
   ipcMain.handle("science:decisions:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -3125,12 +3333,12 @@ app.whenReady().then(async () => {
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
-  const startMobileBridgeAfterAuth = async () => {
-    if (!shellReadyForWindows) return;
+  const startMobileBridgeAfterAuth = async (requireSignedIn = false) => {
+    if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
     const daemon = await daemonStartupPromise;
     let claimed = false;
     try {
-      if (!shellReadyForWindows) return;
+      if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
       if (daemon && daemon.outcome.status !== "disabled" && daemon.outcome.status !== "failed") {
         claimed = await daemon.module.claimDaemonMobileBridge(userDataDir(), process.pid);
         if (!claimed) {
@@ -3141,7 +3349,7 @@ app.whenReady().then(async () => {
         }
         daemonMobileBridgeClaimed = true;
       }
-      if (!shellReadyForWindows) {
+      if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) {
         if (claimed && daemon) {
           daemonMobileBridgeClaimed = false;
           await daemon.module.releaseDaemonMobileBridge(userDataDir(), process.pid);
@@ -3160,14 +3368,28 @@ app.whenReady().then(async () => {
       console.error("[mobile-bridge] start failed:", err);
     }
   };
-  if (initialAuthRestoreWasTemporary && !deferredAuthRestorePromise) {
+  let explicitBridgeRestore: Promise<void> | null = null;
+  disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
+    if (!shellReadyForWindows || !sessionSnapshot.signedIn || !getAuthSession().signedIn) return;
+    reconcileMobileBridgeDevicesForAccount(userDataDir());
+    failCloseActiveHubBookmarks();
+    broadcastAuthSession(sessionSnapshot);
+    broadcastHubBookmarkSnapshot();
+    void syncHubBookmarks({ rerunIfBusy: true });
+    if (mobileBridgeRuntimeStatus().running || explicitBridgeRestore) return;
+    const started = startMobileBridgeAfterAuth(true);
+    explicitBridgeRestore = started;
+    void started.then(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; },
+      () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
+  });
+  if (initialAuthRestoreWasUnavailable && !deferredAuthRestorePromise) {
     // Temporary authentication recovery intentionally owns the next action.
     // Never let an unknown initial Keychain state start the bridge, which would treat it
     // as a logout and revoke every stored device pairing.
-    console.warn("[mobile-bridge] start skipped; initial account restore is temporarily unavailable");
+    console.warn("[mobile-bridge] start skipped; initial account restore is unavailable");
   } else if (deferredAuthRestorePromise) {
     void deferredAuthRestorePromise.then((result) => {
-      if (result.status === "temporarily-unavailable") {
+      if (result.status === "temporarily-unavailable" || result.status === "native-unavailable") {
         // Starting while auth is unknown would make Mobile Bridge interpret a
         // temporary Keychain miss as logout and revoke every paired device.
         console.warn("[mobile-bridge] start deferred; account restore is still temporarily unavailable");

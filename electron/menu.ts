@@ -4,6 +4,7 @@
 // 메뉴는 OS-native라 사용자가 자연스럽게 찾아옴 (앱 안 별도 버튼 안 만들어도 됨).
 import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { checkSafely as updaterCheck, getUpdaterState } from "./updater";
+import { credentialRecoveryMenuItems } from "./secrets/recovery-menu";
 
 const WEB_BASE = "https://agentlas.cloud";
 
@@ -334,6 +335,8 @@ export function buildAppMenu(
     {
       role: "help",
       submenu: [
+        ...credentialRecoveryMenuItems(getWindow, locale),
+        { type: "separator" },
         {
           label: L.checkUpdates,
           click: () => void checkUpdatesInteractive(getWindow()),

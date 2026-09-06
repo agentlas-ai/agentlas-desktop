@@ -5,8 +5,16 @@
 //   사용자가 챗에서 답하면 후속 user 메시지가 쌓여 마지막이 더 이상 assistant가 아니게 되므로 자동 해소된다.
 // fence 포맷은 renderer/lib/ask-question.ts와 동일: <<agentlas-ask>>{json}<</agentlas-ask>>.
 import { createHash } from "node:crypto";
-import { isUnfilledQuestionTemplate } from "../../shared/types";
-import type { CommittedQuestionAnswer, PendingConfirmation } from "../../shared/types";
+import {
+  isUnfilledQuestionTemplate,
+  QUESTION_CONTINUATION_REPLY_MAX_BYTES,
+  QUESTION_CONTINUATION_REPLY_MAX_LENGTH,
+  type CommittedQuestionAnswer,
+  type McpInvocationRequest,
+  type PendingConfirmation,
+  type QuestionContinuationOptions,
+} from "../../shared/types";
+import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
@@ -17,7 +25,6 @@ import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 
 const OPEN = "<<agentlas-ask>>";
-const CLOSE = "<</agentlas-ask>>";
 const claimedQuestionMessages = new Set<string>();
 
 // 답변 확정 영수증 — "마지막 메시지" 휴리스틱의 보완 정본. 답장 user 메시지 persist는
@@ -26,6 +33,127 @@ const claimedQuestionMessages = new Set<string>();
 const ANSWER_RECEIPT_KIND = "question_answer_committed";
 const SNOOZE_RECEIPT_KIND = "question_answer_snoozed";
 const answerReceiptRunId = (chatId: string): string => `confirm:${chatId}`;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const CANONICAL_REPLY_FIELD = "continuationReplyCanonicalBase64";
+const CANONICAL_REPLY_MAX_BASE64_LENGTH = Math.ceil(QUESTION_CONTINUATION_REPLY_MAX_BYTES / 3) * 4;
+
+interface DurableQuestionContinuation {
+  runId: string;
+  requestHash: string;
+  request: McpInvocationRequest;
+}
+
+function questionContinuationRunId(chatId: string, sourceMessageId: string): string {
+  const chars = createHash("sha256").update(`${chatId}\0${sourceMessageId}`).digest("hex").slice(0, 32).split("");
+  chars[12] = "5";
+  chars[16] = ((Number.parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
+  const value = chars.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+function normalizeContinuationOptions(value?: QuestionContinuationOptions): QuestionContinuationOptions {
+  const runtimeSelectionJson = value?.runtimeSelection ? JSON.stringify(value.runtimeSelection) : "";
+  if (runtimeSelectionJson.length > 700) throw new Error("Decision continuation runtime selection is too large");
+  const runtimeSelection = runtimeSelectionJson
+    ? JSON.parse(runtimeSelectionJson) as QuestionContinuationOptions["runtimeSelection"]
+    : undefined;
+  return {
+    ...(value?.locale === "ko" || value?.locale === "en" ? { locale: value.locale } : {}),
+    ...(value?.permissions === "read" || value?.permissions === "write" || value?.permissions === "full"
+      ? { permissions: value.permissions }
+      : {}),
+    ...(value?.sessionRouting === true ? { sessionRouting: true } : {}),
+    ...(runtimeSelection ? { runtimeSelection } : {}),
+  };
+}
+
+function continuationRequest(
+  chatId: string,
+  reply: string,
+  options?: QuestionContinuationOptions,
+): McpInvocationRequest {
+  const normalized = normalizeContinuationOptions(options);
+  return {
+    chatId,
+    userPrompt: reply,
+    locale: normalized.locale,
+    permissions: normalized.permissions,
+    sessionRouting: normalized.sessionRouting,
+    runtimeSelection: normalized.runtimeSelection,
+  };
+}
+
+function continuationRequestHash(request: McpInvocationRequest): string {
+  return createHash("sha256").update(JSON.stringify(request)).digest("hex");
+}
+
+function continuationReplySha256(reply: string): string {
+  return createHash("sha256").update(reply, "utf8").digest("hex");
+}
+
+function payloadContinuationReply(payload: Record<string, unknown>): string {
+  if (Object.hasOwn(payload, CANONICAL_REPLY_FIELD)) {
+    const encoded = payload[CANONICAL_REPLY_FIELD];
+    if (
+      typeof encoded !== "string"
+      || encoded.length > CANONICAL_REPLY_MAX_BASE64_LENGTH
+      || typeof payload.continuationReplySha256 !== "string"
+      || !SHA256_RE.test(payload.continuationReplySha256)
+    ) return "";
+    const bytes = Buffer.from(encoded, "base64");
+    if (
+      bytes.length < 1
+      || bytes.length > QUESTION_CONTINUATION_REPLY_MAX_BYTES
+      || bytes.toString("base64") !== encoded
+    ) return "";
+    const reply = bytes.toString("utf8");
+    if (
+      reply.length < 1
+      || reply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH
+      || !Buffer.from(reply, "utf8").equals(bytes)
+      || continuationReplySha256(reply) !== payload.continuationReplySha256
+    ) return "";
+    return reply;
+  }
+  // Read compatibility for receipts written before the canonical Main-only
+  // field existed. New writes never duplicate user text into these diagnostic
+  // reply/chunk fields.
+  if (Array.isArray(payload.continuationReplyChunks)) {
+    const chunks = payload.continuationReplyChunks.filter((item): item is string => typeof item === "string");
+    const reply = chunks.join("");
+    if (reply.length > 0 && reply.length <= QUESTION_CONTINUATION_REPLY_MAX_LENGTH) return reply;
+  }
+  return typeof payload.reply === "string" && payload.reply.length <= QUESTION_CONTINUATION_REPLY_MAX_LENGTH
+    ? payload.reply
+    : "";
+}
+
+function payloadContinuationOptions(payload: Record<string, unknown>): QuestionContinuationOptions {
+  let runtimeSelection: QuestionContinuationOptions["runtimeSelection"];
+  if (typeof payload.continuationRuntimeSelectionJson === "string") {
+    try {
+      const parsed = JSON.parse(payload.continuationRuntimeSelectionJson) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        runtimeSelection = parsed as QuestionContinuationOptions["runtimeSelection"];
+      }
+    } catch {
+      // Invalid binding fails hash verification below.
+    }
+  }
+  return normalizeContinuationOptions({
+    ...(payload.continuationLocale === "ko" || payload.continuationLocale === "en"
+      ? { locale: payload.continuationLocale }
+      : {}),
+    ...(payload.continuationPermissions === "read"
+      || payload.continuationPermissions === "write"
+      || payload.continuationPermissions === "full"
+      ? { permissions: payload.continuationPermissions }
+      : {}),
+    ...(payload.continuationSessionRouting === true ? { sessionRouting: true } : {}),
+    ...(runtimeSelection ? { runtimeSelection } : {}),
+  });
+}
 
 function approvalEventId(sourceMessageId: string): string {
   const digest = createHash("sha256").update(sourceMessageId).digest("hex").slice(0, 32);
@@ -72,53 +200,16 @@ function firstQuestion(
   options: Array<{ label: string; description?: string }>;
   multiSelect: boolean;
 } | null {
-  const open = text.indexOf(OPEN);
-  if (open < 0) return null;
-  const after = text.slice(open + OPEN.length);
-  const close = after.indexOf(CLOSE);
-  if (close < 0) return null; // 닫는 fence 없음 = 스트리밍 중 미완성 → 대기 아님
-  let body = after.slice(0, close).trim();
-  body = body
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object") return null;
-    const question = typeof parsed.question === "string" ? parsed.question.trim() : "";
-    if (!question) return null;
-    const optionsRaw = Array.isArray(parsed.options) ? parsed.options : [];
-    const options = optionsRaw
-      .flatMap((option) => {
-        if (!option || typeof option !== "object") return [];
-        const raw = option as Record<string, unknown>;
-        const label = typeof raw.label === "string" ? raw.label.trim() : "";
-        if (!label) return [];
-        const description = typeof raw.description === "string" ? raw.description.trim() : "";
-        return [{
-          label: label.slice(0, 200),
-          ...(description ? { description: description.slice(0, 1_000) } : {}),
-        }];
-      })
-      .slice(0, 8);
-    if (options.length < 2) return null;
-    // 오너 규칙: 답할 수 없는 것은 보여주지 않는다. 봇이 질문 서식을 채우지 않고
-    // 그대로 낸 것은 사용자가 답할 수 있는 질문이 아니므로 대기 목록에 올리지 않는다.
-    if (isUnfilledQuestionTemplate({
-      question,
-      header: typeof parsed.header === "string" ? parsed.header : undefined,
-      options,
-    })) return null;
-    return {
-      question: question.slice(0, 4_000),
-      header: typeof parsed.header === "string" ? parsed.header.trim().slice(0, 200) || undefined : undefined,
-      optionCount: options.length,
-      options,
-      multiSelect: parsed.multiSelect === true,
-    };
-  } catch {
-    return null;
-  }
+  const parsed = extractAskFences(text).questions[0];
+  if (!parsed) return null;
+  if (isUnfilledQuestionTemplate(parsed)) return null;
+  return {
+    question: parsed.question,
+    header: parsed.header,
+    optionCount: parsed.options.length,
+    options: parsed.options,
+    multiSelect: parsed.multiSelect,
+  };
 }
 
 /** 채팅의 답변 확정 영수증들(오래된 순). 손상 행은 건너뛴다. */
@@ -126,17 +217,33 @@ export function listCommittedQuestionAnswers(chatId: string): CommittedQuestionA
   if (!chatId) return [];
   try {
     const rows = getDb()
-      .prepare("SELECT ts, payload_json FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq ASC")
-      .all(answerReceiptRunId(chatId), ANSWER_RECEIPT_KIND) as Array<{ ts: string; payload_json: string }>;
+      .prepare("SELECT ts, chat_id, payload_json FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq ASC")
+      .all(answerReceiptRunId(chatId), ANSWER_RECEIPT_KIND) as Array<{ ts: string; chat_id: string | null; payload_json: string }>;
     const out: CommittedQuestionAnswer[] = [];
     for (const row of rows) {
       try {
         const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-        if (typeof payload.sourceMessageId !== "string" || !payload.sourceMessageId) continue;
+        if (row.chat_id !== chatId || typeof payload.sourceMessageId !== "string" || !payload.sourceMessageId) continue;
+        const reply = payloadContinuationReply(payload);
+        if (Object.hasOwn(payload, CANONICAL_REPLY_FIELD)) {
+          if (
+            !reply
+            || typeof payload.continuationRunId !== "string"
+            || !UUID_RE.test(payload.continuationRunId)
+            || payload.continuationRunId !== questionContinuationRunId(chatId, payload.sourceMessageId)
+            || typeof payload.continuationRequestHash !== "string"
+            || !SHA256_RE.test(payload.continuationRequestHash)
+            || continuationRequestHash(continuationRequest(chatId, reply, payloadContinuationOptions(payload)))
+              !== payload.continuationRequestHash
+          ) continue;
+        }
         out.push({
           sourceMessageId: payload.sourceMessageId,
-          reply: typeof payload.reply === "string" ? payload.reply : "",
+          reply,
           ts: row.ts,
+          ...(typeof payload.continuationRunId === "string" && UUID_RE.test(payload.continuationRunId)
+            ? { continuationRunId: payload.continuationRunId }
+            : {}),
         });
       } catch {
         // 손상된 영수증 하나가 목록 전체를 죽여선 안 된다.
@@ -158,7 +265,10 @@ export function recordCommittedAnswerReceipt(
     runId: answerReceiptRunId(chatId),
     kind: ANSWER_RECEIPT_KIND,
     chatId,
-    payload: { sourceMessageId, reply: reply.slice(0, 4_000) },
+    // Mobile already owns the accepted invocation/user turn. Keep only a
+    // diagnostic equality digest here; raw answer bytes are neither needed nor
+    // exposed through the broadly readable run ledger.
+    payload: { sourceMessageId, replySha256: continuationReplySha256(reply) },
   });
 }
 
@@ -170,7 +280,8 @@ export function commitPendingConfirmationAnswer(
   chatId: string,
   reply: string,
   sourceMessageId?: string,
-): { chatId: string; sourceMessageId: string } {
+  continuation?: QuestionContinuationOptions,
+): { chatId: string; sourceMessageId: string; continuationRunId: string } {
   const last = getLastChatMessage(chatId);
   if (
     !last ||
@@ -181,17 +292,49 @@ export function commitPendingConfirmationAnswer(
   ) {
     throw new Error("Question is stale or no longer pending");
   }
-  // 이미 확정(영수증)됐거나 다른 표면(모바일)이 클레임한 답변의 중복 제출은 되돌릴 수
-  // 없는 선택을 두 번 실행시킬 수 있으므로 조용히 통과시키지 않는다.
-  if (
-    claimedQuestionMessages.has(`${chatId}\0${last.id}`) ||
-    listCommittedQuestionAnswers(chatId).some((r) => r.sourceMessageId === last.id)
-  ) {
+  const normalizedReply = reply.trim();
+  if (!normalizedReply) throw new Error("Decision response is empty");
+  if (normalizedReply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH) {
+    throw new Error(`Decision response exceeds the ${QUESTION_CONTINUATION_REPLY_MAX_LENGTH} character limit`);
+  }
+  const existing = listCommittedQuestionAnswers(chatId)
+    .filter((receipt) => receipt.sourceMessageId === last.id)
+    .at(-1);
+  if (existing) {
+    // The renderer can lose the IPC reply after Main committed it. Retrying the
+    // exact answer is acknowledgement recovery, not a second user decision.
+    if (existing.reply !== normalizedReply) throw new Error("This question answer was already accepted");
+    if (existing.continuationRunId) {
+      claimedQuestionMessages.add(`${chatId}\0${last.id}`);
+      return { chatId, sourceMessageId: last.id, continuationRunId: existing.continuationRunId };
+    }
+  }
+  if (!existing && claimedQuestionMessages.has(`${chatId}\0${last.id}`)) {
     throw new Error("This question answer was already accepted");
   }
-  const normalizedReply = reply.trim().slice(0, 4_000);
-  if (!normalizedReply) throw new Error("Decision response is empty");
-  recordCommittedAnswerReceipt(chatId, last.id, normalizedReply);
+  const continuationRunId = questionContinuationRunId(chatId, last.id);
+  const request = continuationRequest(chatId, normalizedReply, continuation);
+  const normalizedContinuation = normalizeContinuationOptions(continuation);
+  // Unlike the Mobile helper's best-effort diagnostic write, Desktop commit is
+  // an acknowledgement boundary: never close the sheet without durable bytes.
+  recordRunEvent({
+    runId: answerReceiptRunId(chatId),
+    kind: ANSWER_RECEIPT_KIND,
+    chatId,
+    payload: {
+      sourceMessageId: last.id,
+      [CANONICAL_REPLY_FIELD]: Buffer.from(normalizedReply, "utf8").toString("base64"),
+      continuationReplySha256: continuationReplySha256(normalizedReply),
+      continuationRunId,
+      continuationLocale: normalizedContinuation.locale,
+      continuationPermissions: normalizedContinuation.permissions,
+      continuationSessionRouting: normalizedContinuation.sessionRouting,
+      continuationRuntimeSelectionJson: normalizedContinuation.runtimeSelection
+        ? JSON.stringify(normalizedContinuation.runtimeSelection)
+        : undefined,
+      continuationRequestHash: continuationRequestHash(request),
+    },
+  });
   claimedQuestionMessages.add(`${chatId}\0${last.id}`);
   invalidatePendingConfirmationsCache();
   // A committed user answer is the real approval-resolution boundary. This
@@ -214,7 +357,58 @@ export function commitPendingConfirmationAnswer(
       ],
     });
   }
-  return { chatId, sourceMessageId: last.id };
+  return { chatId, sourceMessageId: last.id, continuationRunId };
+}
+
+/** Main-only exact request bound to the accepted source question and answer. */
+export function getCommittedQuestionContinuation(
+  chatId: string,
+  sourceMessageId: string,
+  reply: string,
+): DurableQuestionContinuation | null {
+  const normalizedReply = reply.trim();
+  if (
+    !chatId
+    || !sourceMessageId
+    || !normalizedReply
+    || normalizedReply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH
+  ) return null;
+  const rows = getDb()
+    .prepare("SELECT chat_id, payload_json FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 100")
+    .all(answerReceiptRunId(chatId), ANSWER_RECEIPT_KIND) as Array<{ chat_id: string | null; payload_json: string }>;
+  for (const row of rows) {
+    if (row.chat_id !== chatId) continue;
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { continue; }
+    if (payload.sourceMessageId !== sourceMessageId || payloadContinuationReply(payload) !== normalizedReply) continue;
+    if (typeof payload.continuationRunId !== "string" || !UUID_RE.test(payload.continuationRunId)) return null;
+    if (
+      Object.hasOwn(payload, CANONICAL_REPLY_FIELD)
+      && payload.continuationRunId !== questionContinuationRunId(chatId, sourceMessageId)
+    ) return null;
+    const request = continuationRequest(chatId, normalizedReply, payloadContinuationOptions(payload));
+    if (
+      typeof payload.continuationRequestHash !== "string"
+      || payload.continuationRequestHash !== continuationRequestHash(request)
+    ) return null;
+    return {
+      runId: payload.continuationRunId,
+      requestHash: payload.continuationRequestHash,
+      request: { ...request, runId: payload.continuationRunId },
+    };
+  }
+  return null;
+}
+
+/** A not-yet-started intent may run only while its exact Decision is still current. */
+export function committedQuestionContinuationIsCurrent(chatId: string, sourceMessageId: string): boolean {
+  const last = getLastChatMessage(chatId);
+  return Boolean(
+    last
+    && last.id === sourceMessageId
+    && last.role === "assistant"
+    && firstQuestion(last.text),
+  );
 }
 
 /**
@@ -290,9 +484,13 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     if (!last.text.includes(OPEN)) continue;
     const q = firstQuestion(last.text);
     if (!q) continue;
-    // 답변 확정 영수증이 있으면 이미 답한 질문 — 후속 user 메시지가 아직(또는 영영)
-    // 안 쌓였어도 대기 목록/배지에 다시 올리지 않는다.
-    if (listCommittedQuestionAnswers(c.id).some((r) => r.sourceMessageId === last.id)) continue;
+    // A committed answer is no longer an unanswered confirmation.  Continuation
+    // recovery reads the exact receipt through `committedAnswers` and must not
+    // reuse this pending-question projection as a second question surface.
+    if (listCommittedQuestionAnswers(c.id).some((answer) => answer.sourceMessageId === last.id)) continue;
+    // A committed answer without a later user turn is handled by the separate
+    // committedAnswers/continuation-recovery projection above; this list stays
+    // limited to questions that still need a user decision.
     const snoozedUntil = latestDecisionSnooze(c.id, last.id);
     const firm = c.firmId ? getFirm(c.firmId) : null;
     const agent = getAgentById(c.agentId);
@@ -347,6 +545,12 @@ export function claimPendingConfirmationAnswer(
     !firstQuestion(last.text)
   ) {
     throw new Error("Question is stale or no longer pending");
+  }
+  // A successful Mobile admission seals a digest-only receipt after claiming.
+  // On process restart the in-memory claim set is empty, so consult that
+  // durable source binding before admitting the same irreversible Decision.
+  if (listCommittedQuestionAnswers(chatId).some((receipt) => receipt.sourceMessageId === sourceMessageId)) {
+    throw new Error("This question answer was already accepted");
   }
   claimedQuestionMessages.add(key);
   invalidatePendingConfirmationsCache();

@@ -44,6 +44,8 @@ interface PoolEntry<S> {
   inUse: boolean;
   lastActivityAt: number;
   reaperExempt: boolean;
+  retireOnRelease?: boolean;
+  retain?: () => boolean;
 }
 
 export interface AcpSessionLease<S> {
@@ -128,9 +130,9 @@ export class AcpSessionPool<S> {
    * 키가 같은 **유휴·생존** 세션을 빌리거나, 없으면 `open()` 으로 새로 연다.
    * 반드시 `release()` 또는 `discard()` 로 돌려줘야 한다(try/finally).
    */
-  async acquire(key: string, meta: AcpPoolMeta, open: () => Promise<S>): Promise<AcpSessionLease<S>> {
+  async acquire(key: string, meta: AcpPoolMeta, open: () => Promise<S>, retain?: () => boolean): Promise<AcpSessionLease<S>> {
     this.reapDead();
-    const reusable = this.entries.find((e) => e.key === key && !e.inUse);
+    const reusable = this.entries.find((e) => e.key === key && !e.inUse && !e.retireOnRelease);
     if (reusable) {
       reusable.inUse = true;
       reusable.lastActivityAt = this.now();
@@ -152,6 +154,8 @@ export class AcpSessionPool<S> {
       inUse: true,
       lastActivityAt: this.now(),
       reaperExempt: meta.reaperExempt ?? isResidencyExemptAgent(meta.agentId),
+      retain,
+      retireOnRelease: retain ? !retain() : false,
     };
     this.entries.push(entry);
     registerAgentResidency({
@@ -179,6 +183,10 @@ export class AcpSessionPool<S> {
     const entry = this.leases.get(lease);
     if (!entry) return;
     this.leases.delete(lease);
+    if (entry.retireOnRelease || (entry.retain && !entry.retain())) {
+      this.remove(entry, { close: true, reason: "shutdown" });
+      return;
+    }
     let alive = false;
     try { alive = this.opts.alive(entry.session); } catch { alive = false; }
     if (!alive) {
@@ -200,6 +208,32 @@ export class AcpSessionPool<S> {
     if (!entry) return;
     this.leases.delete(lease);
     this.remove(entry, { close: true, reason: "error" });
+  }
+
+  /** Retire matching idle owners atomically; never interrupt a checked-out owner. */
+  retireIdleMatching(matches: (session: S) => boolean): { busy: boolean; retired: S[] } {
+    this.reapDead();
+    const matched = this.entries.filter((entry) => matches(entry.session));
+    if (matched.some((entry) => entry.inUse)) return { busy: true, retired: [] };
+    for (const entry of matched) this.remove(entry, { close: true, reason: "shutdown" });
+    return { busy: false, retired: matched.map((entry) => entry.session) };
+  }
+
+  /** Retire obsolete sessions without interrupting their checked-out calls. */
+  retireMatching(matches: (session: S) => boolean): { retired: number; pending: number } {
+    let retired = 0;
+    let pending = 0;
+    for (const entry of [...this.entries]) {
+      if (!matches(entry.session)) continue;
+      if (entry.inUse) {
+        entry.retireOnRelease = true;
+        pending += 1;
+      } else {
+        this.remove(entry, { close: true, reason: "shutdown" });
+        retired += 1;
+      }
+    }
+    return { retired, pending };
   }
 
   /** 12h 무입력 리퍼. 사용 중·면제(One)는 건드리지 않는다. 반환: 닫은 수. */

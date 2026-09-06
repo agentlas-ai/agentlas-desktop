@@ -7,6 +7,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { EnvVarMeta } from "@/lib/types";
+import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "../../../../../shared/credential-recovery";
+import { CredentialRecoveryPanel } from "@/components/CredentialRecoveryPanel";
 import {
   IconCheck,
   IconChevronRight,
@@ -41,11 +43,31 @@ export default function LibraryEnvPage() {
   const [newValue, setNewValue] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [importNote, setImportNote] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [recoveryRefresh, setRecoveryRefresh] = useState(0);
 
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    setVars(await api.env.list());
+    try {
+      setVars(await api.env.list());
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setRecoveryRefresh((value) => value + 1);
+    }
+  }, []);
+
+  const recovered = useCallback(async (failure: CredentialRecoveryFailure, result: CredentialRecoveryResult) => {
+    if (failure.operation === "list") {
+      // Listing recovery must not silently turn into reads of all newly found keys.
+      return;
+    }
+    if (failure.kind !== "env" || !result.env) return;
+    const updated = result.env;
+    setVars((current) => current.map((entry) => entry.key === updated.key
+      ? { ...entry, ...updated, credentialAccess: "available" } : entry));
   }, []);
 
   useEffect(() => {
@@ -76,8 +98,8 @@ export default function LibraryEnvPage() {
   const sections = useMemo<Section[]>(() => {
     const q = search.trim().toLowerCase();
     const matches = (v: EnvVarMeta) => {
-      if (filter === "set" && !v.hasValue) return false;
-      if (filter === "unset" && v.hasValue) return false;
+      if (filter === "set" && v.hasValue !== true) return false;
+      if (filter === "unset" && v.hasValue !== false) return false;
       if (!q) return true;
       return (
         v.key.toLowerCase().includes(q) ||
@@ -194,6 +216,14 @@ export default function LibraryEnvPage() {
           {t("env.security_note")} <span style={{ color: "var(--muted-deep)" }}>· {t("env.drop_env_hint")}</span>
         </span>
       </div>
+
+      <CredentialRecoveryPanel locale={locale} refreshKey={recoveryRefresh} onRecovered={recovered} />
+      {loadError && <p role="alert" style={{ color: "var(--red-deep)", fontSize: 12 }}>
+        {locale === "ko" ? "연결 키 상태를 불러오지 못했습니다. 기존 항목은 유지했습니다." : "Connection status could not be loaded. Existing entries were kept."}
+      </p>}
+      <button type="button" onClick={() => void refresh()} style={{ marginBottom: 10, fontSize: 12 }}>
+        {locale === "ko" ? "연결 목록 새로고침" : "Refresh connection list"}
+      </button>
 
       {/* 툴바 */}
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }} data-tour-id="env.toolbar">
@@ -464,7 +494,11 @@ function EnvRow({
         <code style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, fontWeight: 600, color: "var(--ink)", wordBreak: "break-all", flex: 1, minWidth: 0 }}>
           {v.key}
         </code>
-        {v.hasValue ? (
+        {v.hasValue === null || v.credentialAccess === "unavailable" ? (
+          <span role="status" style={{ fontSize: 11, color: "var(--red-deep)" }}>
+            {locale === "ko" ? "접근 불가 · 위 복구 항목에서 다시 시도" : "Access unavailable · retry in the recovery list above"}
+          </span>
+        ) : v.hasValue ? (
           <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 999, background: "rgba(168,217,155,0.20)", color: "var(--green-deep)", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
             <IconCheck size={10} /> {t("env.saved")}
           </span>

@@ -28,7 +28,7 @@
 }
 
 .loading { color: var(--ink-soft); }
-.error { border-color: color-mix(in srgb, #ba3b2f 32%, var(--paper-edge)); color: #8e352b; }
+.error { border-color: color-mix(in srgb, var(--danger) 32%, var(--paper-edge)); color: var(--danger); }
 .error span,
 .error small { color: inherit; }
 
@@ -69,8 +69,8 @@
 .hubDraftHeading span {
   padding: 4px 8px;
   border-radius: 999px;
-  background: color-mix(in srgb, #ba3b2f 10%, var(--paper));
-  color: #8e352b;
+  background: color-mix(in srgb, var(--danger) 10%, var(--paper));
+  color: var(--danger);
   font-size: 9px;
   font-weight: 800;
 }
@@ -112,7 +112,7 @@
 .diffGrid code { overflow-wrap: anywhere; color: var(--ink); font-size: 9.5px; }
 .diffGrid li span { color: var(--muted-deep); font-size: 9px; }
 .diffGrid section > p { margin-top: 6px; overflow-wrap: anywhere; font-size: 9.5px; }
-.copy .publishLock { max-width: none; color: #7d4a23; font-size: 10px; }
+.copy .publishLock { max-width: none; color: var(--warn); font-size: 10px; }
 
 .refs {
   flex: 0 0 auto;

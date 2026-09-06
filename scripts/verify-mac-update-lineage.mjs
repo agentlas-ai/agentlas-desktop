@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// gate-args: --source-contract-only
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -853,5 +854,9 @@ export function verifyDifferentialBaselineContract(
 
 if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
   console.log(JSON.stringify(verifyDifferentialBaselineContract()));
-  await main();
+  if (process.argv.includes("--source-contract-only")) {
+    console.log("NATIVE MAC UPDATE LINEAGE: NOT VERIFIED — source-contract-only mode did not inspect releases, signatures, notarization, feeds, or artifacts.");
+  } else {
+    await main();
+  }
 }

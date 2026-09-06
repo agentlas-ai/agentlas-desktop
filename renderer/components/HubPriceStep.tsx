@@ -157,8 +157,8 @@ export function HubPriceStep({ slug }: { slug: string }) {
                   height: 30,
                   padding: "0 10px",
                   borderRadius: 8,
-                  border: `1px solid ${bad ? "var(--danger, #d9534f)" : "var(--line, rgba(0,0,0,.14))"}`,
-                  background: "var(--surface, #fff)",
+                  border: `1px solid ${bad ? "var(--danger, var(--danger))" : "var(--line, rgba(0,0,0,.14))"}`,
+                  background: "var(--surface, var(--paper))",
                   color: "inherit",
                   fontFamily: "var(--font-mono)",
                   fontSize: 13,
@@ -166,7 +166,7 @@ export function HubPriceStep({ slug }: { slug: string }) {
               />
               {/* The bound is stated with the field, so "you cannot go higher"
                   arrives while it is relevant rather than after a refusal. */}
-              <span style={{ fontSize: 10.5, color: bad ? "var(--danger, #d9534f)" : "var(--muted-deep)" }}>
+              <span style={{ fontSize: 10.5, color: bad ? "var(--danger, var(--danger))" : "var(--muted-deep)" }}>
                 {bad ? (ko ? `${range} 사이` : `${range} only`) : `${range} cr`}
               </span>
             </label>
@@ -174,7 +174,7 @@ export function HubPriceStep({ slug }: { slug: string }) {
         })}
       </div>
 
-      {error && <span style={{ fontSize: 12, color: "var(--danger, #d9534f)" }}>{error}</span>}
+      {error && <span style={{ fontSize: 12, color: "var(--danger, var(--danger))" }}>{error}</span>}
 
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button
@@ -186,8 +186,8 @@ export function HubPriceStep({ slug }: { slug: string }) {
             padding: "0 14px",
             borderRadius: 8,
             border: "1px solid var(--line, rgba(0,0,0,.14))",
-            background: anyBad || !anySet ? "transparent" : "var(--accent, #111)",
-            color: anyBad || !anySet ? "var(--muted-deep)" : "#fff",
+            background: anyBad || !anySet ? "transparent" : "var(--accent, var(--black))",
+            color: anyBad || !anySet ? "var(--muted-deep)" : "var(--white)",
             fontSize: 12,
             cursor: anyBad || !anySet ? "default" : "pointer",
           }}

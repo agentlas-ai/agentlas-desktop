@@ -15,8 +15,29 @@
 .mediaStatus { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; background: rgba(15, 20, 17, .74); color: #f5f8f6; font-size: 12px; text-align: center; backdrop-filter: blur(4px); }
 .mediaStatus[data-state="error"] { background: rgba(64, 31, 31, .84); }
 .mediaStatus > span, .loading > span { width: 17px; height: 17px; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: output-spin .8s linear infinite; }
-.documentEngine { width: 100%; height: 100%; min-height: 420px; position: relative; overflow: hidden; background: #f5f7f5; }
-.documentEngineRoot { width: 100%; height: 100%; min-height: 420px; display: block; }
+.documentEngine { width: 100%; height: 100%; min-height: 420px; position: relative; overflow: hidden; display: flex; flex-direction: column; background: #f5f7f5; }
+.documentEngineRoot { width: 100%; height: auto; min-height: 420px; flex: 1 1 auto; display: block; }
+.documentToolbar { position: relative; z-index: 5; min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 10px; border-bottom: 1px solid #d9dde3; background: #fff; color: #252a31; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+.documentIdentity { min-width: 0; flex: 1 1 auto; display: flex; align-items: baseline; gap: 7px; }
+.documentIdentity strong { min-width: 0; overflow: hidden; font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.documentIdentity span { flex: 0 0 auto; color: #7a818b; font-size: 9.5px; }
+.documentToolbarActions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
+.documentToolbar button, .documentInfo > summary { min-height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #555d68; font: inherit; font-size: 10px; cursor: pointer; white-space: nowrap; }
+.documentToolbar button:hover, .documentToolbar button:focus-visible, .documentInfo > summary:hover, .documentInfo > summary:focus-visible { border-color: #cfd4dc; background: #f3f4f6; color: #242a32; outline: none; }
+.documentToolbar button:disabled { cursor: wait; opacity: .55; }
+.documentZoom { height: 30px; display: inline-flex; align-items: center; border: 1px solid #dfe3e8; border-radius: 7px; background: #fafbfc; }
+.documentZoom button { min-width: 27px; height: 28px; min-height: 28px; padding: 0 5px; border: 0; border-radius: 0; font-size: 14px; }
+.documentZoom .documentZoomLabel { min-width: 43px; border-inline: 1px solid #e5e7eb; font-size: 9.5px; }
+.documentIconButton { width: 30px; padding: 0 !important; }
+.documentInfo { position: relative; }
+.documentInfo > summary { width: 28px; padding: 0; list-style: none; border-color: #dfe3e8; border-radius: 50%; font-weight: 700; }
+.documentInfo > summary::-webkit-details-marker { display: none; }
+.documentInfo > div { position: absolute; top: calc(100% + 7px); right: 0; z-index: 8; width: min(320px, calc(100vw - 24px)); display: grid; gap: 4px; padding: 10px; border: 1px solid #d9dde3; border-radius: 8px; background: #fff; color: #555d68; box-shadow: 0 12px 30px rgba(15,23,42,.16); font-size: 9.5px; overflow-wrap: anywhere; }
+.documentActionError { position: absolute; top: 100%; right: 8px; z-index: 7; padding: 5px 8px; border: 1px solid #efc5c5; border-radius: 0 0 6px 6px; background: #fff2f2; color: #9b3131; font-size: 9.5px; }
+/* Shadow toolbar must fit the file rail, not the browser viewport. */
+.documentEngineRoot::part(toolbar) { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.documentEngineRoot::part(toolbar-group) { min-width: 0; max-width: 100%; box-sizing: border-box; flex-wrap: wrap; }
+.documentEngineRoot::part(input) { flex: 1 1 128px; min-width: 128px; max-width: 100%; }
 .documentEngine[data-fill="true"], .documentEngine[data-fill="true"] .documentEngineRoot { height: 100%; min-height: 0; }
 .documentEngine[data-compact="true"], .documentEngine[data-compact="true"] .documentEngineRoot { min-height: 240px; max-height: 320px; }
 .documentError { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; background: rgba(250, 247, 247, .95); color: #724747; text-align: center; }
@@ -90,6 +111,11 @@
   border: 0;
   border-radius: 0;
   box-shadow: none;
+}
+@media (max-width: 520px) {
+  .documentToolbar { flex-wrap: wrap; }
+  .documentIdentity { flex-basis: 100%; }
+  .documentToolbarActions { width: 100%; justify-content: flex-end; overflow-x: auto; }
 }
 .mediaHidden {
   min-height: 74px;

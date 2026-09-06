@@ -1,7 +1,7 @@
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #fff; }
-body { color: #272522; font: 12px/1.4 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-#editor { position: absolute; inset: 0 0 auto 0; z-index: 30; min-height: 82px; display: flex; align-items: end; gap: 10px; padding: 10px 12px 9px; border-bottom: 1px solid #e4e1de; background: rgba(252,251,250,.98); }
+body { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr); color: #27272a; font: 12px/1.4 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+#editor { position: relative; grid-area: 1 / 1; z-index: 30; display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; background: #fff; }
 .editor-title { min-width: 132px; display: grid; gap: 1px; align-self: center; }
 .editor-title span { color: #77716c; font-size: 9px; font-weight: 700; letter-spacing: .08em; }
 .editor-title strong { font-size: 12px; }
@@ -15,13 +15,13 @@ body { color: #272522; font: 12px/1.4 ui-sans-serif, -apple-system, BlinkMacSyst
 #editor button:focus-visible, #editor select:focus-visible { outline: 2px solid #272522; outline-offset: 2px; }
 #save-version { border-color: #272522 !important; background: #272522 !important; color: #fff !important; }
 #editor button:disabled { cursor: default; opacity: .42; }
-#editor-note { position: absolute; left: 12px; right: 12px; bottom: 5px; margin: 0; overflow: hidden; color: #77716c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-#viewer { position: absolute; inset: 82px 0 0; width: 100%; overflow: hidden; }
+#editor-note { flex: 0 0 100%; margin: 0; color: #71717a; font-size: 10px; line-height: 1.4; pointer-events: none; }
+#viewer { position: relative; grid-area: 2 / 1; min-height: 0; width: 100%; overflow: hidden; }
 #viewer .msp-plugin { position: absolute; inset: 0; }
 #viewer .msp-plugin-content, #viewer .msp-layout-main { background: #fff; border: 0; }
 #status { position: absolute; left: 12px; bottom: 10px; z-index: 20; padding: 5px 8px; border: 1px solid #dedad6; border-radius: 6px; background: rgba(255,255,255,.92); color: #6f6a65; font-size: 10px; pointer-events: none; }
 #status[data-ready="true"] { color: #2f7652; }
-#selection-panel { position: absolute; z-index: 40; top: 72px; right: 12px; width: min(360px, calc(100% - 24px)); padding: 14px; border: 1px solid #d9d5d1; border-radius: 10px; background: rgba(252,251,250,.99); box-shadow: 0 14px 36px rgba(45,40,36,.14); }
+#selection-panel { position: absolute; grid-area: 2 / 1; z-index: 40; top: 12px; right: 12px; width: min(360px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; padding: 14px; border: 1px solid #d4d4d8; border-radius: 10px; background: #fff; box-shadow: 0 14px 36px rgba(39,39,42,.14); }
 #selection-panel[hidden] { display: none; }
 .selection-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .selection-panel-heading > div { display: grid; gap: 1px; }
@@ -41,11 +41,8 @@ body { color: #272522; font: 12px/1.4 ui-sans-serif, -apple-system, BlinkMacSyst
 .selection-fields button:focus-visible, .selection-fields input:focus-visible, .selection-fields select:focus-visible, .selection-actions button:focus-visible, #selection-close:focus-visible { outline: 2px solid #272522; outline-offset: 2px; }
 .selection-actions button:disabled, .selection-fields button:disabled { cursor: default; opacity: .42; }
 @media (max-width: 720px) {
-  #editor { min-height: 112px; align-content: start; align-items: center; flex-wrap: wrap; padding-bottom: 25px; }
+  #editor { align-items: center; }
   .editor-title { min-width: 112px; }
   #editor label { min-width: 104px; }
   #editor select { min-width: 108px; max-width: 150px; }
-  #editor-note { white-space: normal; line-height: 1.25; }
-  #viewer { top: 112px; }
-  #selection-panel { top: 102px; }
 }

@@ -1,37 +1,37 @@
 /* One floating-dialog token. Feature dialogs inherit this contract and own only their content styles. */
 .layer {
   /* One's sheets follow the app's neutral surface language (the composer
-     popovers, settings): white paper, hairline #e0e2e3, quiet gray labels.
+     popovers, settings): white paper, hairline var(--paper-3), quiet gray labels.
      Owner decision 2026-08-16 — the warm-paper/oversized-title look was
      the odd one out. */
-  --one-sheet-surface: #ffffff;
-  --one-sheet-ink: #202326;
-  --one-sheet-muted: #7b8185;
-  --one-sheet-accent: #515956;
-  --one-sheet-line: #e0e2e3;
+  --one-sheet-surface: var(--white);
+  --one-sheet-ink: var(--ink);
+  --one-sheet-muted: var(--muted-deep);
+  --one-sheet-accent: var(--ink);
+  --one-sheet-line: var(--paper-edge);
   --one-sheet-scrim: rgba(20, 25, 20, 0.28);
-  --one-sheet-control-surface: #ffffff;
-  --one-sheet-control-border: #e0e2e3;
+  --one-sheet-control-surface: var(--white);
+  --one-sheet-control-border: var(--paper-edge);
   --one-sheet-control-radius: 10px;
   --one-sheet-control-height: 44px;
-  --one-sheet-card-surface: #ffffff;
-  --one-sheet-card-muted: #f3f4f4;
+  --one-sheet-card-surface: var(--white);
+  --one-sheet-card-muted: var(--paper-3);
   --one-sheet-card-radius: 12px;
-  --one-sheet-label-ink: #25292c;
+  --one-sheet-label-ink: var(--ink);
   --one-sheet-section-gap: 22px;
   --one-sheet-section-padding: 22px;
   --one-sheet-title-size: 17px;
   --one-sheet-body-size: 13px;
   --one-sheet-label-size: 11px;
   --one-sheet-focus: 0 0 0 3px rgba(46, 52, 49, 0.16);
-  --one-sheet-primary: #303532;
-  --one-sheet-primary-hover: #202421;
-  --one-sheet-danger: #9c3f35;
-  --one-sheet-danger-surface: #fff3f1;
-  --one-sheet-danger-line: #f0d0ca;
-  --one-sheet-success: #373d39;
-  --one-sheet-success-surface: #f4f4f3;
-  --one-sheet-success-line: #dedfdd;
+  --one-sheet-primary: var(--ink);
+  --one-sheet-primary-hover: var(--ink);
+  --one-sheet-danger: var(--danger);
+  --one-sheet-danger-surface: var(--danger-soft);
+  --one-sheet-danger-line: var(--danger-soft);
+  --one-sheet-success: var(--ink);
+  --one-sheet-success-surface: var(--paper-3);
+  --one-sheet-success-line: var(--paper-edge);
   --one-sheet-radius: 16px;
   --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
   --one-sheet-body-padding-top: 16px;
@@ -121,7 +121,7 @@
 
 .eyebrow {
   margin: 0 0 4px;
-  color: #8b9195;
+  color: var(--muted-deep);
   font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.01em;

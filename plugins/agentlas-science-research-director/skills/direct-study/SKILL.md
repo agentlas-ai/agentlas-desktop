@@ -14,11 +14,25 @@ to `../write-manuscript/SKILL.md`.
 Run the whole arc autonomously: problem framing -> literature synthesis -> hypotheses -> design and
 power -> data acquisition -> analysis -> robustness -> conclusions -> manuscript -> journal profile ->
 submission validation. Open each result as it is produced and continue. Do not stop between stages
-for confirmation. Stop only for a host-required human receipt (research contract approval,
-hypothesis approval successor, frozen plan, journal manual attestation) or a genuine fork: two or
-more materially different directions, an ambiguous request, or a missing required input. Ask with
-concrete options and a recommendation ("A or B? I recommend A because ..."). A bounded request
-("just the literature review") ends at that scope with a report and a proposed next step.
+for confirmation. Stop only for a host-required human receipt that is actually pending under the
+project's approval policy, a journal manual attestation, a Research Contract that Main returned
+as a draft/checkpoint, or a genuine fork: two or more materially different directions, an ambiguous
+request, or a missing required input. Main's exact Research Contract status `approved` plus its
+approval receipt, including a standing-policy receipt, satisfies contract approval and requires no
+second confirmation. The same rule applies when `freeze_analysis_plan` returns a frozen plan with
+an exact standing-policy approval: proceed with its returned version and hash, and never claim a
+human personally reviewed it. Incomplete plans and unresolved design decisions still fail closed.
+Ask with concrete options and a recommendation ("A or B? I recommend A
+because ..."). A bounded request ("just the literature review") ends at that scope with a report and
+a proposed next step; an unqualified study request remains active until its criteria are verified or
+a recorded blocker, budget exhaustion, or deadline stops it.
+
+Record `completion_scope: "full-study"` for the whole study, or `"bounded-deliverable"` when the
+researcher explicitly limits the deliverable. For full-study work, keep the same loop and selected
+model through manuscript revision and the verified `ready_to_submit` gate. Inspect Main's progress
+and continuation receipts after each turn. Repeated proposals, unchanged lifecycle updates, or
+rewritten chat summaries do not establish progress. When Main reports a no-progress retry, choose
+a materially different evidence-bound action or persist the concrete blocker.
 
 ## Steps
 
@@ -39,9 +53,13 @@ concrete options and a recommendation ("A or B? I recommend A because ..."). A b
    `clarifyingQuestions` to decide whether anything must be asked before starting.
 3. During intake, frame the question (population/system, outcome, exposure, comparison,
    contribution, useful negative result) and call `propose_research_contract` when no approved
-   contract exists, bundling the inferred scope, budgets, and your recommendation for any fork
-   already visible. Never approve the draft yourself or infer approval from chat prose; wait until
-   the human decision surface returns the exact contract as approved.
+   contract exists, bundling the inferred scope, evidence-verifiable criteria, budgets sized for the
+   objective, and your recommendation for any fork already visible. If the host returns the exact
+   contract as `approved` with an exact Main approval receipt whose project, policy, scope, and
+   contract version match, honor it immediately and call `inspect_research_loop`; if no loop exists,
+   call `start_research_loop` before ending the turn. Never approve a draft yourself or infer approval
+   from chat prose or a policy name alone. A draft or unresolved checkpoint must wait for the exact
+   human decision surface receipt.
 4. Before each tool call, record its intended capability, bound inputs, and expected receipt kinds.
    Afterward, retain the exact IDs and hashes returned by the host.
 5. Ask a bottom-sheet decision only when the answer changes the estimand, design, frozen plan,
@@ -66,15 +84,25 @@ concrete options and a recommendation ("A or B? I recommend A because ..."). A b
 8. Draft the design with `propose_analysis_plan` (estimand, units, design, definitions, exclusions,
    missing data, model, multiplicity, diagnostics, sensitivity analyses, expected artifacts) and
    record power or precision planning where the live coverage supports it, or an explicit gap
-   where it does not. Freeze with `freeze_analysis_plan` before confirmatory execution. After the
-   approved contract and current hypothesis exist, inspect or start the authoritative Research
-   Loop. Persist and start an exact Research Episode before Lab execution; after execution, settle
-   it exactly once with terminal run IDs, run-backed artifact versions/hashes, and committed
-   evidence spans. Revise a hypothesis only after that result exists, binding its exact episode ID
-   in `episode_result_ids`; supported or contradicted states without a matching succeeded episode
-   result are invalid. Before loop completion, call `verify_research_success_criterion` for every
-   approved criterion using only evidence and exact artifact versions already bound to succeeded
-   episodes; completion without the current passing receipt set is invalid. Before interpreting any
+   where it does not. For paired statistics sourced from two World Bank chart artifacts, first call
+   `prepare_paired_statistics_table` with the plan's prespecified minimum complete-pair count. Keep
+   its full-outer Data Table visible even when insufficient, but propose the successor only when
+   `readyForStatistics` is true; then bind that single table plus its concrete model and method
+   tokens. Never present two chart inputs or `model: null` as executable. Freeze with
+   `freeze_analysis_plan` before confirmatory execution. Once the exact approved contract and Main
+   approval receipt exist, the authoritative Research Loop must already have been inspected or
+   started; do this immediately after contract admission rather than waiting for a provider response,
+   page, or manuscript. Persist and start an exact Research Episode before Lab execution; after
+   execution, settle it exactly once with terminal run IDs, run-backed artifact versions/hashes, and
+   committed evidence spans. Revise a hypothesis only after that result exists, binding its exact
+   episode ID in `episode_result_ids`; supported or contradicted states without a matching succeeded
+   episode result are invalid. Before loop completion, call `verify_research_success_criterion` for
+   every approved criterion using only evidence and exact artifact versions already bound to succeeded
+   episodes; completion without the current passing receipt set is invalid. A completed provider
+   turn, a first manuscript, a page/word target, or a single episode never closes an unbounded study
+   objective. Re-read the durable loop and study state after each material turn, record the actual
+   evidence/receipt progress or a precise blocker, and continue until every approved success criterion
+   is verified or the host records a bounded stop. Before interpreting any
    visual, spatial, molecular, genomic, astronomical, network, graphical, or tabular result, pair
    `inspect_science_artifact` with `inspect_science_artifact_visual` for the same exact current
    version and verify that the MCP image block, capture ID, pixel hash, and artifact content hash

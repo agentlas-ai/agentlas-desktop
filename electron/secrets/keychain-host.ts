@@ -20,11 +20,39 @@
 // 여기서 상한을 걸면 사용자가 프롬프트를 읽는 동안 정상 요청이 취소된다.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { runWithCredentialRecovery } from "./recovery-state";
 
 export type KeychainCredential = { account: string };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 120_000;
+
+// One native request per exact operation/resource. Keep failed requests latched:
+// a renderer refresh or background retry is not a new user permission decision.
+// Successful reads are cached by vault; this layer only coalesces native work.
+const nativeRequests = new Map<string, Promise<unknown>>();
+const failedRequests = new Set<string>();
+
+function requestKey(operation: string, service: string, account: string): string {
+  return JSON.stringify([operation, service, account]);
+}
+
+function sharedNativeRequest<T>(operation: "read" | "list", service: string, account: string, run: () => Promise<T>, explicit = false): Promise<T> {
+  const key = requestKey(operation, service, account);
+  const current = nativeRequests.get(key);
+  if (current) return current as Promise<T>;
+  if (failedRequests.has(key) && !explicit) return Promise.reject(new KeychainUnavailableError(operation, account || null, "automatic retry suppressed", true));
+  const started = Promise.resolve().then(() => runWithCredentialRecovery({ operation, service, account }, explicit, run));
+  nativeRequests.set(key, started);
+  void started.then(
+    () => { failedRequests.delete(key); if (nativeRequests.get(key) === started) nativeRequests.delete(key); },
+    () => {
+      failedRequests.add(key);
+      if (nativeRequests.get(key) === started) nativeRequests.delete(key);
+    },
+  );
+  return started;
+}
 
 /**
  * 이 호스트가 키체인 승인 프롬프트에 답할 수 있는가 = 화면이 있는가.
@@ -46,15 +74,19 @@ export function keychainCallTimeoutMs(): number {
 }
 
 export class KeychainUnavailableError extends Error {
+  readonly code = "keychain_unavailable";
   readonly account: string | null;
-  constructor(operation: string, account: string | null, reason: string) {
+  readonly operation: string;
+  readonly automaticRetrySuppressed: boolean;
+  constructor(operation: string, account: string | null, reason: string, automaticRetrySuppressed = false) {
     super(
       `keychain_unavailable: ${operation}${account ? ` ${account}` : ""} — ${reason}. `
-      + "이 호스트에는 macOS 키체인 승인 창을 띄울 화면이 없습니다. "
-      + "데스크탑 앱에서 한 번 실행해 접근을 허용하거나, 해당 값을 환경변수로 넘겨 주세요.",
+      + "저장소 접근을 완료하지 못했습니다. 같은 요청을 자동으로 반복하지 않습니다.",
     );
     this.name = "KeychainUnavailableError";
     this.account = account;
+    this.operation = operation;
+    this.automaticRetrySuppressed = automaticRetrySuppressed;
   }
 }
 
@@ -145,23 +177,35 @@ process.stdin.on("end", () => { go().catch(fail); });
   });
 }
 
-/**
- * 읽기. 답할 화면이 없는 호스트에서 상한을 넘기면 **없는 것으로 본다** —
- * 제품에는 이미 "키가 없다" 는 정직한 갈래(missing-key → 그 도구 없이 진행)가 있고,
- * 멈춰 서는 것보다 그 갈래로 가는 편이 낫다. 대신 조용히 넘어가지 않고 사유를 남긴다.
+/** Missing credentials return null; failed native access remains unavailable.
+ * A timeout or rejection is not evidence that the credential does not exist.
  */
 export async function keychainGet(
   service: string,
   account: string,
   direct: () => Promise<string | null>,
+  explicit = false,
 ): Promise<string | null> {
-  if (keychainPromptsAreAnswerable()) return direct();
-  const result = await runKeychainChild("get", service, account, null);
-  if (result.error) {
-    reportKeychainUnavailable("read", account, result.error);
-    return null;
-  }
-  return result.value ?? null;
+  return sharedNativeRequest("read", service, account, async () => {
+    if (keychainPromptsAreAnswerable()) {
+      try { return await direct(); }
+      catch { throw new KeychainUnavailableError("read", account, "native request rejected"); }
+    }
+    const result = await runKeychainChild("get", service, account, null);
+    if (result.error) throw new KeychainUnavailableError("read", account, result.error);
+    return result.value ?? null;
+  }, explicit);
+}
+
+/** Call only from a deliberate user retry for this exact credential. Passive
+ * discovery, polling and startup recovery must keep using keychainGet.
+ */
+export function retryKeychainReadFromUser(
+  service: string,
+  account: string,
+  direct: () => Promise<string | null>,
+): Promise<string | null> {
+  return keychainGet(service, account, direct, true);
 }
 
 /** 쓰기·삭제는 실패를 삼키지 않는다 — 저장했다고 착각하는 쪽이 더 나쁘다. */
@@ -171,9 +215,14 @@ export async function keychainSet(
   value: string,
   direct: () => Promise<void>,
 ): Promise<void> {
-  if (keychainPromptsAreAnswerable()) return direct();
-  const result = await runKeychainChild("set", service, account, value);
-  if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+  await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
+    if (keychainPromptsAreAnswerable()) await direct();
+    else {
+      const result = await runKeychainChild("set", service, account, value);
+      if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+    }
+  });
+  failedRequests.delete(requestKey("read", service, account));
 }
 
 export async function keychainDelete(
@@ -181,30 +230,34 @@ export async function keychainDelete(
   account: string,
   direct: () => Promise<void>,
 ): Promise<void> {
-  if (keychainPromptsAreAnswerable()) return direct();
-  const result = await runKeychainChild("delete", service, account, null);
-  if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+  await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
+    if (keychainPromptsAreAnswerable()) await direct();
+    else {
+      const result = await runKeychainChild("delete", service, account, null);
+      if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+    }
+  });
+  failedRequests.delete(requestKey("read", service, account));
 }
 
 /** 계정 목록. 비밀 값은 자식이 아예 돌려주지 않는다 — 필요한 건 이름뿐이다. */
 export async function keychainListAccounts(
   service: string,
   direct: () => Promise<string[]>,
+  explicit = false,
 ): Promise<string[]> {
-  if (keychainPromptsAreAnswerable()) return direct();
-  const result = await runKeychainChild("find", service, "", null);
-  if (result.error) {
-    reportKeychainUnavailable("list", null, result.error);
-    return [];
-  }
-  return result.accounts ?? [];
+  return sharedNativeRequest("list", service, "", async () => {
+    if (keychainPromptsAreAnswerable()) {
+      try { return await direct(); }
+      catch { throw new KeychainUnavailableError("list", null, "native request rejected"); }
+    }
+    const result = await runKeychainChild("find", service, "", null);
+    if (result.error) throw new KeychainUnavailableError("list", null, result.error);
+    return result.accounts ?? [];
+  }, explicit);
 }
 
-/** 같은 사유를 매 호출마다 반복하지 않는다 — 한 번은 반드시 보이게 한다. */
-const reported = new Set<string>();
-function reportKeychainUnavailable(operation: string, account: string | null, reason: string): void {
-  const key = `${operation}:${account ?? "*"}:${reason}`;
-  if (reported.has(key)) return;
-  reported.add(key);
-  console.error(new KeychainUnavailableError(operation, account, reason).message);
+/** Explicit retry of the list operation only; credential read latches remain. */
+export function retryKeychainListFromUser(service: string, direct: () => Promise<string[]>): Promise<string[]> {
+  return keychainListAccounts(service, direct, true);
 }

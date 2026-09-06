@@ -12,6 +12,14 @@ on:
       tag:
         description: "GitHub release tag"
         required: true
+      science_catalog_url:
+        description: "Optional published Science candidate catalog URL; requires its SHA-256"
+        required: false
+        type: string
+      science_catalog_sha256:
+        description: "SHA-256 of the exact Science candidate catalog bytes"
+        required: false
+        type: string
       draft:
         description: "Create or keep the GitHub release as draft"
         required: true
@@ -49,6 +57,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
+      AGENTLAS_SCIENCE_RELEASE_CATALOG_URL: ${{ inputs.science_catalog_url }}
+      AGENTLAS_SCIENCE_RELEASE_CATALOG_SHA256: ${{ inputs.science_catalog_sha256 }}
       # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
@@ -59,12 +69,12 @@ jobs:
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: >-
         {"agentlas-product-extension-release-v1":"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhdzhuUqdSa8P+ydZZZ9pgrvoPDLZJq9mBohjEw9qa8g=\n-----END PUBLIC KEY-----"}
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
-      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.40
-      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
-      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
+      HEPHAESTUS_REF: v1.2.44
+      HEPHAESTUS_COMMIT: 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.44.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,8 +234,6 @@ jobs:
       # it proves this tag's pinned Core, schema version, README, and CHANGELOG
       # agree, which is what makes the artifact a valid release at all.
       - name: Verify deterministic release contracts
-        env:
-          GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           npm run release:preflight
           npm run build:electron
@@ -273,14 +281,13 @@ jobs:
       # while making the release-owned policy available on the macOS runner.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: >-
         {"agentlas-product-extension-release-v1":"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhdzhuUqdSa8P+ydZZZ9pgrvoPDLZJq9mBohjEw9qa8g=\n-----END PUBLIC KEY-----"}
-      AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
-      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.40
-      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
-      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
+      HEPHAESTUS_REF: v1.2.44
+      HEPHAESTUS_COMMIT: 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.44.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -441,12 +448,12 @@ jobs:
     env:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
-      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.40
-      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
-      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
+      HEPHAESTUS_REF: v1.2.44
+      HEPHAESTUS_COMMIT: 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.44.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

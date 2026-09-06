@@ -1,5 +1,6 @@
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
+import { createHash } from "node:crypto";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
@@ -199,14 +200,16 @@ export interface WorkforceRuntimeToolGrant {
 
 export interface WorkforcePermissionEnforcementReceipt {
   permissionPolicyDigest: string;
-  enforcementMode: "native-sandbox" | "no-authority-sandbox" | "zero-tools";
+  enforcementMode: "native-sandbox" | "no-authority-sandbox" | "zero-tools" | "host-native" | "host-broker";
   status: "enforced";
   approvalReceiptIds: string[];
   enforcementEvidence: {
     runtimeKind: string;
     runtimeVersion: string | null;
-    sandboxMode: "read-only" | "no-filesystem" | "host-native" | "not-applicable";
-    toolInventory: "empty" | "non-authoritative" | "policy-filtered";
+    sandboxMode: "read-only" | "no-filesystem" | "host-native" | "host-broker" | "not-applicable";
+    toolInventory: "empty" | "non-authoritative" | "policy-filtered" | "host-observed" | "broker-observed";
+    hostObservation?: WorkforceHostObservation;
+    brokerObservation?: import("./workforce-broker").WorkforceBrokerObservation;
     disabledCapabilities: string[];
     ephemeral: boolean;
     ignoredUserConfig: boolean;
@@ -216,8 +219,141 @@ export interface WorkforcePermissionEnforcementReceipt {
   };
 }
 
+/** Native protocol observations, collected by the runner rather than authored by a model.
+ * toolIds cover inventoryScope only; they never imply unobserved built-in isolation.
+ */
+export interface WorkforceHostObservation {
+  schemaVersion: "agentlas.workforce-host-observation.v1";
+  permissionPolicyDigest: string;
+  toolInventoryDigest: string;
+  runtimeKind: string;
+  runtimeVersion: string;
+  sessionId: string;
+  turnId: string;
+  nativePolicy: Record<string, unknown>;
+  toolIds: string[];
+  connectedServers: string[];
+  approvalEvents: Array<{ requestId: string; decision: string }>;
+  completed: true;
+  inventoryScope: "connected-mcp-tools" | "native-init-tools";
+  nativeToolsEnumerated: boolean;
+  requestedConfigDigest: string | null;
+  inventoryEvidence?: WorkforceHostInventoryEvidence;
+  observationDigest: string;
+}
+
+/** Descriptor fingerprints are native observations, not endpoint attestations.
+ * Only connected tools count as available; cached descriptors remain fingerprints.
+ */
+export interface WorkforceHostInventorySnapshot {
+  toolIds: string[];
+  connectedServers: string[];
+  serverStates: Array<{
+    name: string;
+    runtimeStatus: string;
+    toolsDigest: string;
+    serverInfoDigest: string;
+    toolsError: boolean;
+  }>;
+  selectedBindings: Array<{ toolId: string; serverName: string; descriptorDigest: string }>;
+  selectedServers: Array<{ name: string; serverInfoDigest: string }>;
+  inventoryDigest: string;
+  selectedBindingDigest: string;
+}
+
+export interface WorkforceHostInventoryEvidence {
+  schemaVersion: "agentlas.workforce-host-inventory-observation.v1";
+  stability: "selected-grant-bindings";
+  before: WorkforceHostInventorySnapshot;
+  after: WorkforceHostInventorySnapshot;
+}
+
+export function workforceHostObservationDigest(
+  value: Omit<WorkforceHostObservation, "observationDigest">,
+): string {
+  return workforceObservationValueDigest(value);
+}
+
+function workforceObservationValueDigest(value: unknown): string {
+  const canonical = (row: unknown): unknown => {
+    if (Array.isArray(row)) return row.map(canonical);
+    if (!row || typeof row !== "object") return row;
+    return Object.fromEntries(Object.keys(row).sort().map((key) => [
+      key, canonical((row as Record<string, unknown>)[key]),
+    ]));
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(canonical(value)), "utf8").digest("hex")}`;
+}
+
 const WORKFORCE_SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 const WORKFORCE_TOOL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127}$/;
+
+/** Check the measured inventory window separately from the native policy.
+ * Host authority permits unrelated tools to connect; selected bindings must
+ * be available with identical fingerprints at both observation boundaries.
+ */
+function validWorkforceInventoryEvidence(
+  observation: WorkforceHostObservation,
+  grant: WorkforceRuntimeToolGrant,
+): boolean {
+  const window = observation.inventoryEvidence;
+  if (window === undefined) return true;
+  const object = (value: unknown): value is Record<string, any> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const keys = (value: unknown, expected: string[]) => object(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+  const ordered = (values: unknown, max: number): values is string[] =>
+    Array.isArray(values) && values.length <= max && values.every((value, index) =>
+      typeof value === "string" && WORKFORCE_TOOL_ID_RE.test(value) &&
+      (index === 0 || values[index - 1] < value));
+  const same = (a: unknown, b: unknown) => workforceObservationValueDigest(a) === workforceObservationValueDigest(b);
+  if (observation.runtimeKind !== "codex" || observation.inventoryScope !== "connected-mcp-tools" ||
+    !keys(window, ["schemaVersion", "stability", "before", "after"]) ||
+    window.schemaVersion !== "agentlas.workforce-host-inventory-observation.v1" ||
+    window.stability !== "selected-grant-bindings") return false;
+  for (const snapshot of [window.before, window.after]) {
+    if (!keys(snapshot, ["toolIds", "connectedServers", "serverStates", "selectedBindings", "selectedServers", "inventoryDigest", "selectedBindingDigest"]) ||
+      !ordered(snapshot.toolIds, 4096) || !ordered(snapshot.connectedServers, 256) ||
+      !Array.isArray(snapshot.serverStates) || !Array.isArray(snapshot.selectedBindings) || !Array.isArray(snapshot.selectedServers) ||
+      !ordered(snapshot.serverStates.map((row) => row?.name), 256) ||
+      !ordered(snapshot.selectedBindings.map((row) => row?.toolId), 128) ||
+      !ordered(snapshot.selectedServers.map((row) => row?.name), 64)) return false;
+    const states = new Map<string, WorkforceHostInventorySnapshot["serverStates"][number]>();
+    for (const state of snapshot.serverStates) {
+      if (!keys(state, ["name", "runtimeStatus", "toolsDigest", "serverInfoDigest", "toolsError"]) ||
+        !["notStarted", "starting", "connected", "authenticationRequired", "failed", "cancelled", "disabled"].includes(state.runtimeStatus) ||
+        !WORKFORCE_SHA256_RE.test(state.toolsDigest) || !WORKFORCE_SHA256_RE.test(state.serverInfoDigest) ||
+        typeof state.toolsError !== "boolean") return false;
+      states.set(state.name, state);
+    }
+    const connected = snapshot.serverStates.filter((row) => row.runtimeStatus === "connected" && !row.toolsError).map((row) => row.name);
+    if (!same(snapshot.connectedServers, connected)) return false;
+    for (const toolId of snapshot.toolIds) {
+      if (!snapshot.connectedServers.some((name) => toolId.startsWith(`mcp__${name}__`) && toolId.length > name.length + 7)) return false;
+    }
+    for (const binding of snapshot.selectedBindings) {
+      if (!keys(binding, ["toolId", "serverName", "descriptorDigest"]) ||
+        !WORKFORCE_SHA256_RE.test(binding.descriptorDigest) ||
+        !snapshot.toolIds.includes(binding.toolId) || !snapshot.connectedServers.includes(binding.serverName) ||
+        !binding.toolId.startsWith(`mcp__${binding.serverName}__`) ||
+        binding.toolId.length <= binding.serverName.length + 7) return false;
+    }
+    if (!same(snapshot.selectedBindings.map((row) => row.toolId), [...grant.grantedToolIds].sort())) return false;
+    const expectedServers = [...new Set([...grant.expectedServerConfigKeys, ...snapshot.selectedBindings.map((row) => row.serverName)])].sort();
+    if (!same(snapshot.selectedServers.map((row) => row.name), expectedServers)) return false;
+    for (const server of snapshot.selectedServers) {
+      if (!keys(server, ["name", "serverInfoDigest"]) || !snapshot.connectedServers.includes(server.name) ||
+        server.serverInfoDigest !== states.get(server.name)?.serverInfoDigest) return false;
+    }
+    if (snapshot.inventoryDigest !== workforceObservationValueDigest({
+      toolIds: snapshot.toolIds, connectedServers: snapshot.connectedServers, serverStates: snapshot.serverStates,
+    }) || snapshot.selectedBindingDigest !== workforceObservationValueDigest({
+      selectedBindings: snapshot.selectedBindings, selectedServers: snapshot.selectedServers,
+    })) return false;
+  }
+  return window.before.selectedBindingDigest === window.after.selectedBindingDigest &&
+    same(observation.toolIds, window.after.toolIds) && same(observation.connectedServers, window.after.connectedServers);
+}
 
 function validatedWorkforceGrant(req: RunnerRequest): WorkforceRuntimeToolGrant | null {
   const grant = req.workforceRuntimeToolGrant;
@@ -270,6 +406,97 @@ export function workforceZeroToolsEnforcement(
       ignoredRules: true,
       toolInventoryDigest: grant.toolInventoryDigest,
       grantedToolIds: [],
+    },
+  };
+}
+
+/**
+ * Runtime-owned receipt for a host-authority row (policy `host`, 2026-09-05): the run
+ * executed under the host's own permission mode and capability grants, not a sandbox.
+ * Evidence is honest about that — nothing was made ephemeral or ignored.
+ */
+export function workforceHostAuthorityEnforcement(
+  req: RunnerRequest,
+  runtimeKind: string,
+): WorkforcePermissionEnforcementReceipt | undefined {
+  const grant = validatedWorkforceGrant(req);
+  if (!grant) return undefined;
+  return {
+    permissionPolicyDigest: grant.permissionPolicyDigest,
+    enforcementMode: "native-sandbox",
+    status: "enforced",
+    approvalReceiptIds: [],
+    enforcementEvidence: {
+      runtimeKind,
+      runtimeVersion: grant.runtimeVersion,
+      sandboxMode: "host-native",
+      toolInventory: "policy-filtered",
+      disabledCapabilities: [],
+      ephemeral: false,
+      ignoredUserConfig: false,
+      ignoredRules: false,
+      toolInventoryDigest: grant.toolInventoryDigest,
+      grantedToolIds: [...grant.grantedToolIds],
+    },
+  };
+}
+
+/** Admit only an invocation-bound native observation. Runtime-specific adapters
+ * must compare the acknowledged native policy with the requested host boundary.
+ * This receipt describes observed host authority, never a package sandbox.
+ */
+export function workforceObservedHostAuthorityEnforcement(
+  req: RunnerRequest,
+  runtimeKind: string,
+  observation: WorkforceHostObservation,
+): WorkforcePermissionEnforcementReceipt | undefined {
+  const grant = validatedWorkforceGrant(req);
+  if (!grant) return undefined;
+  const { observationDigest, ...payload } = observation;
+  const validIds = (values: string[], max: number) => Array.isArray(values) &&
+    values.length <= max && new Set(values).size === values.length &&
+    values.every((value) => typeof value === "string" && WORKFORCE_TOOL_ID_RE.test(value));
+  if (
+    observation.schemaVersion !== "agentlas.workforce-host-observation.v1" ||
+    observation.permissionPolicyDigest !== grant.permissionPolicyDigest ||
+    observation.toolInventoryDigest !== grant.toolInventoryDigest ||
+    observation.runtimeKind !== runtimeKind ||
+    !observation.runtimeVersion?.trim() || observation.runtimeVersion.length > 256 ||
+    !observation.sessionId?.trim() || observation.sessionId.length > 256 ||
+    !observation.turnId?.trim() || observation.turnId.length > 256 ||
+    observation.completed !== true || req.signal?.aborted ||
+    !observation.nativePolicy || typeof observation.nativePolicy !== "object" ||
+    Array.isArray(observation.nativePolicy) || Object.keys(observation.nativePolicy).length === 0 ||
+    !validIds(observation.toolIds, 4096) || !validIds(observation.connectedServers, 256) ||
+    !["connected-mcp-tools", "native-init-tools"].includes(observation.inventoryScope) ||
+    observation.nativeToolsEnumerated !== (observation.inventoryScope === "native-init-tools") ||
+    observation.requestedConfigDigest !== grant.canonicalConfigSha256 ||
+    !Array.isArray(observation.approvalEvents) || observation.approvalEvents.length > 256 ||
+    observation.approvalEvents.some((event) => !event.requestId?.trim() ||
+      event.requestId.length > 256 || !event.decision?.trim() || event.decision.length > 128) ||
+    grant.grantedToolIds.some((id) => !observation.toolIds.includes(id)) ||
+    grant.expectedServerConfigKeys.some((name) => !observation.connectedServers.includes(name)) ||
+    !validWorkforceInventoryEvidence(observation, grant) ||
+    !WORKFORCE_SHA256_RE.test(observationDigest) ||
+    observationDigest !== workforceHostObservationDigest(payload)
+  ) throw new Error("workforce_host_observation_invalid");
+  return {
+    permissionPolicyDigest: grant.permissionPolicyDigest,
+    enforcementMode: "host-native",
+    status: "enforced",
+    approvalReceiptIds: [],
+    enforcementEvidence: {
+      runtimeKind,
+      runtimeVersion: observation.runtimeVersion,
+      sandboxMode: "host-native",
+      toolInventory: "host-observed",
+      disabledCapabilities: [],
+      ephemeral: false,
+      ignoredUserConfig: false,
+      ignoredRules: false,
+      toolInventoryDigest: grant.toolInventoryDigest,
+      grantedToolIds: [...grant.grantedToolIds],
+      hostObservation: structuredClone(observation),
     },
   };
 }
@@ -561,6 +788,30 @@ This run is unattended — no user is present and nobody can answer questions.
 - Never emit <<agentlas-ask>> blocks: nobody can answer, and the run would end as a silent failure.
 - When a decision has an obvious safe default, take it and state the assumption in your reply.
 - If required information or a decision has no safe default, do NOT guess or fabricate. Stop and reply with a single line starting with "NEEDS-INPUT:" describing exactly what is missing.`;
+
+/**
+ * 사람이 보고 있는 Work 실행에서 **묻는 방법**을 알려 준다.
+ *
+ * 배경(2026-09-04 실측): Work 에는 질문 시트 UI 가 있고 렌더러는 `<<agentlas-ask>>` 를
+ * 읽어 그 시트를 그린다. 그런데 **그 형식을 알려 주는 곳이 태스크포스 합성 프롬프트뿐**이었다.
+ * 내장 `ask_user` 도구는 로컬 런타임(local-tool-loop·byok)에만 실리고 CLI 런타임
+ * (claude-code·codex)에는 없다. 그래서 기본 경로인 CLI 실행은 구조화해서 물을 수단이
+ * 하나도 없었고, 모델은 산문으로 되물었다("…새로 만들까요, 아니면 수정할까요?").
+ * 그 물음은 시트로 뜨지 않으니 사용자는 고를 것이 없고 답을 타이핑해야 했다.
+ *
+ * 남용을 막기 위해 조건을 좁게 적는다 — 진짜로 막힌 갈림길에서 한 번만.
+ */
+export const ATTENDED_ASK_DIRECTIVE = `## Asking the person (this surface can answer)
+A person is watching this run and can answer.
+- If an \`ask_user\` tool is available, use it and do not also emit the block below.
+- Otherwise, when the work is genuinely blocked on a choice only the person can make, end the
+  answer with exactly one block and stop:
+<<agentlas-ask>>
+{"question":"<one short question ending with ?>","header":"<short label>","multiSelect":false,"options":[{"label":"<option>","description":"<what happens if chosen>"},{"label":"<other option>","description":"<what happens if chosen>"}]}
+<</agentlas-ask>>
+- Use it only for a real fork with no safe default. If a sensible default exists, take it and say
+  which assumption you made. Never ask what you can find out yourself.
+- Keep the prose before the block natural, and never print or explain the wire format.`;
 
 export const MOBILE_DURABLE_ASK_DIRECTIVE = `## Mobile decision surface (final authority)
 The synchronous ask_user tool is unavailable on this remote surface. Never call it.

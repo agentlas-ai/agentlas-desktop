@@ -1,6 +1,7 @@
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
+import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
@@ -38,6 +39,10 @@ import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher
  */
 
 const ANTIGRAVITY_KIND = "antigravity";
+// `agy models` is a network-backed catalog. A cold 1.1.26 fetch can remain
+// silent for more than five seconds before returning a complete list; timing
+// it out there leaves a first-time user's picker empty despite a healthy CLI.
+export const ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
 
 export function antigravityCandidatePaths(
   platform = process.platform,
@@ -135,7 +140,7 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
       // pipe alive. Preserve the validated stdout instead of turning a healthy
       // catalog into an empty engine-setting picker.
       finish({ timedOut: parseAgyModels(stdout).length === 0 });
-    }, 5_000);
+    }, ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_MS);
     timer.unref?.();
     child.stdout?.on("data", (chunk: Buffer) => {
       if (stdout.length < 32_768) stdout = (stdout + probeDecoder.write(chunk)).slice(0, 32_768);
@@ -1290,37 +1295,17 @@ export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
-  /*
-   * ★판정(untrustedNoTools)은 agy 로도 수행한다 — 예전에는 여기서 무조건 throw 했다.
-   *
-   * 그 거절의 근거는 "호스트 파일시스템·도구 경계가 릴리스 검증되지 않았다"였는데, 그 결과는
-   * **agy만 쓰는 사용자의 모든 판정이 죽는 것**이었다. 실측 2026-08-19: 파일 저장 자동화가
-   * 산출물을 정확히 만들고 독립 재조회까지 끝냈는데, 마지막 채점만 EVAL_UNAVAILABLE 로 떨어져
-   * 자동화 전체가 error 로 끝났다. claude 가 깔린 기계에서는 폴백으로 가려지고, agy 단독
-   * 사용자에게만 제품이 통째로 안 되는 모양이었다.
-   *
-   * 실제로 되는지부터 확인했다: 같은 채점표 프롬프트를 agy 에 그대로 주자 도구를 한 번도
-   * 부르지 않고 규격 JSON(`{"items":[{"id","verdict","why"}]}`)을 정확히 냈다. 못 하는 게
-   * 아니라 막아 둔 것이었다.
-   *
-   * 경계는 선언이 아니라 인자로 만든다:
-   *  · 도구 승인 자동허용 플래그(--dangerously-skip-permissions)를 **주지 않는다** → 승인 없이
-   *    도구가 실행될 수 없다. permission을 "read"로 낮춰 그 상태를 강제한다.
-   *  · --sandbox 로 터미널 제한을 켠다.
-   *  · --disable-slash-commands 로 입력 안의 슬래시 명령/스킬 확장을 끈다(판정 대상은
-   *    신뢰할 수 없는 데이터라 확장 자체가 경계 구멍이다).
-   *  · 작업 디렉터리를 붙이지 않는다(--add-dir 없음) → 워크스페이스가 열리지 않는다.
-   */
+  // agy 1.1.26 exposes terminal sandboxing and slash-command suppression,
+  // but neither removes built-in tools or inherited global MCP servers. A
+  // read permission without auto-approval is not a verified no-tools envelope.
+  // Refuse before discovery, attachment staging, MCP reconciliation or spawn;
+  // trusted invocations retain their existing permission and session contracts.
   if (req.untrustedNoTools) {
-    const bin = await getBin({ source: req.runtimeSource });
-    if (!bin) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
-    return runPreparedAntigravity(
-      // permission:"read" 가 곧 도구 경계다 — buildAntigravitySpawnArgs 는 read 에
-      // 자동승인 플래그를 주지 않고, MCP 배선(agyToolsAllowed)도 붙지 않는다.
-      { ...req, permission: "read" },
-      events,
-      bin,
-      [],
+    throw new RuntimeJudgmentRefusal(
+      "antigravity",
+      req.locale === "ko"
+        ? "현재 Antigravity CLI에서 기본 도구와 기존 MCP 서버를 모두 차단하는 격리가 검증되지 않아 비신뢰 실행을 시작할 수 없습니다. 격리 실행을 지원하는 런타임이 필요합니다."
+        : "Antigravity CLI has no verified isolation that disables all built-in tools and inherited MCP servers. This untrusted run cannot start; use a runtime with verified isolation.",
     );
   }
   if (req.restrictedReadBoundary) {

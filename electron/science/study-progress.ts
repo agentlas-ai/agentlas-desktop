@@ -86,7 +86,7 @@ const EDGE_EVIDENCE: Record<string, { evidenceFrom: string; extraKeys?: readonly
   "literature->hypothesis": { evidenceFrom: "the literature manifest's manifestSha256, from list_project_evidence" },
   "hypothesis->analysis_plan_draft": { evidenceFrom: "the hypothesis manifest's manifestSha256, from list_research_hypotheses" },
   "analysis_plan_draft->analysis_plan_frozen": { evidenceFrom: "the frozen plan's currentDocumentSha256, from list_analysis_plans (send it as frozen_analysis_plan.contentSha256)" },
-  "analysis_plan_frozen->execution": { evidenceFrom: "the frozen plan's currentDocumentSha256 again; the plan must also have been frozen BEFORE this revision" },
+  "analysis_plan_frozen->execution": { evidenceFrom: "the frozen plan's currentDocumentSha256 again; it must have been frozen BEFORE this revision and bind at least one exact immutable input artifact version" },
   "execution->evidence_reconciliation": { evidenceFrom: "the version contentSha256 of a ready artifact produced by a succeeded run bound to the frozen plan" },
   "evidence_reconciliation->conclusions": {
     evidenceFrom: "the claim ledger's gate.reportSha256, from inspect_manuscript_claim_ledger; the ledger must be sealed and its gate ready",

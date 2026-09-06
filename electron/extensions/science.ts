@@ -38,7 +38,7 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<{
 }> = [
   {
     id: SCIENCE_EXTENSION_ID,
-    version: "0.1.0",
+    version: "0.1.1",
     displayName: "Science Workspace",
     description: "Projects, literature, evidence graphs, statistics, and research writing",
     packageBytes: 11_000_000,
@@ -46,7 +46,7 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<{
   },
   {
     id: "agentlas-science-renderer-ketcher",
-    version: "1.1.0",
+    version: "1.1.1",
     displayName: "Chemistry Tools",
     description: "Ketcher structure editor and Indigo chemistry runtime",
     packageBytes: 46_697_538,
@@ -54,7 +54,7 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<{
   },
   {
     id: "agentlas-science-renderer-molstar",
-    version: "1.2.0",
+    version: "1.2.1",
     displayName: "Molecular Visualization",
     description: "Mol* protein and molecular structure viewer",
     packageBytes: 5_144_268,

@@ -90,12 +90,12 @@ const STARTERS: { ko: string; en: string; promptKo: string; promptEn: string }[]
 // 사용자에게 보이는 실제 순서 — 요구사항을 먼저 확인한 뒤 엔진/MCP를 준비하고,
 // 그 다음에만 에이전트가 조사·생성·검증·배포를 수행한다.
 const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn: string; icon: typeof IconRoute; color: string }[] = [
-  { key: "brief", label: "요구사항 확인", labelEn: "Confirm brief", sub: "완료 기준 · 입력 · 사용 맥락 · 권한", subEn: "outcome · inputs · context · authority", icon: IconRoute, color: "#4DABF7" },
-  { key: "setup", label: "엔진·MCP 준비", labelEn: "Engine & MCP", sub: "모델 선택 · 연결 범위 확인", subEn: "model choice · connection review", icon: IconRoute, color: "#22B8CF" },
-  { key: "research", label: "리서치·설계", labelEn: "Research & plan", sub: "요구사항 기반 조사 · 패키지 설계", subEn: "brief-led research · package plan", icon: IconSearch, color: "#9775FA" },
-  { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "설치할 수 있는 패키지 파일을 만들어요", subEn: "Creates the installable package files", icon: IconWand, color: "#F783AC" },
-  { key: "verify", label: "검증", labelEn: "Verify", sub: "보안·무결성 자동 검사", subEn: "automatic security & integrity checks", icon: IconShield, color: "#4DD4AC" },
-  { key: "deliver", label: "배포", labelEn: "Deliver", sub: "내 라이브러리에 설치 · 클라우드에 올리기", subEn: "install to my library · upload to the cloud", icon: IconStore, color: "#FFA94D" },
+  { key: "brief", label: "요구사항 확인", labelEn: "Confirm brief", sub: "완료 기준 · 입력 · 사용 맥락 · 권한", subEn: "outcome · inputs · context · authority", icon: IconRoute, color: "var(--info)" },
+  { key: "setup", label: "엔진·MCP 준비", labelEn: "Engine & MCP", sub: "모델 선택 · 연결 범위 확인", subEn: "model choice · connection review", icon: IconRoute, color: "var(--info)" },
+  { key: "research", label: "리서치·설계", labelEn: "Research & plan", sub: "요구사항 기반 조사 · 패키지 설계", subEn: "brief-led research · package plan", icon: IconSearch, color: "var(--info)" },
+  { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "설치할 수 있는 패키지 파일을 만들어요", subEn: "Creates the installable package files", icon: IconWand, color: "var(--purple-deep)" },
+  { key: "verify", label: "검증", labelEn: "Verify", sub: "보안·무결성 자동 검사", subEn: "automatic security & integrity checks", icon: IconShield, color: "var(--ok)" },
+  { key: "deliver", label: "배포", labelEn: "Deliver", sub: "내 라이브러리에 설치 · 클라우드에 올리기", subEn: "install to my library · upload to the cloud", icon: IconStore, color: "var(--warn)" },
 ];
 
 function engineLabel(r: RuntimeStatus, ko: boolean): string {

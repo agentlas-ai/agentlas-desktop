@@ -17,6 +17,7 @@ import { disposeAcpSessionPool } from "./acp";
 import { disposeClaudeSessionPool } from "./claude-session";
 import { disposeCodexSessionPool } from "./codex-session";
 import { userDataPath } from "../runtime-paths";
+import { emitDesktopStoreChange } from "../store/change-bus";
 
 const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "kimi", "grok"];
 const PACKAGE_BY_KIND: Record<InstallableCli, string> = {
@@ -410,6 +411,10 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
         // codex 상주(`codex app-server`)도 같은 병 — 갱신된 바이너리는 새 세션부터 쓴다.
         disposeCodexSessionPool();
         runtimes = await detectRuntimes();
+        // 자동 업데이트도 수동 업데이트와 같은 renderer 무효화 계약을 지킨다.
+        // 그렇지 않으면 화면의 runtime/listModels 스냅샷이 TTL 동안 남아 모델을
+        // 다시 눌러야만 연결이 살아나는 것처럼 보인다.
+        emitDesktopStoreChange({ entity: "runtime" });
       }
     } catch {
       record.state = "update-failed";

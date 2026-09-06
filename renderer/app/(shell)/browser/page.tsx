@@ -431,10 +431,10 @@ export default function BrowserPage() {
           flex-shrink: 0;
         }
         .dot.ok {
-          background: var(--rd-ok, #22a06b);
+          background: var(--rd-ok);
         }
         .dot.warn {
-          background: var(--rd-warn, #d98a00);
+          background: var(--rd-warn);
         }
         .browser-status {
           display: grid;
@@ -461,10 +461,10 @@ export default function BrowserPage() {
           font-weight: 600;
         }
         .stat-val.ok {
-          color: var(--rd-ok, #22a06b);
+          color: var(--rd-ok);
         }
         .stat-val.err {
-          color: var(--rd-err, #e5484d);
+          color: var(--rd-err);
         }
         .stat-val.mono {
           font-family: ui-monospace, Menlo, monospace;
@@ -524,7 +524,7 @@ export default function BrowserPage() {
         }
         .browser-btn.accent {
           background: var(--rd-accent);
-          color: #fff;
+          color: var(--white);
           border-color: transparent;
         }
         .browser-btn.ghost {
@@ -578,7 +578,7 @@ export default function BrowserPage() {
         }
         .log-result.denied,
         .log-result.blocked {
-          color: var(--rd-err, #e5484d);
+          color: var(--rd-err);
         }
         .log-approval {
           font-size: 11px;
@@ -713,7 +713,7 @@ function SiteCard({
           opacity: 0.55;
         }
         .sc-actions button.danger {
-          color: var(--rd-err, #e5484d);
+          color: var(--rd-err);
         }
       `}</style>
     </div>
@@ -856,7 +856,7 @@ function SiteEditor({
         }
         .be-actions button.accent {
           background: var(--rd-accent);
-          color: #fff;
+          color: var(--white);
           border-color: transparent;
         }
       `}</style>

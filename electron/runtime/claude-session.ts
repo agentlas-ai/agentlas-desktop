@@ -40,6 +40,7 @@ export interface ClaudeTurnSink {
 }
 
 export interface ClaudeResidentSession {
+  executableOwner: { chatId: string; sessionOwnerId: string | null; isolateOwner: boolean; generation: string };
   child: ChildProcess;
   active: ClaudeTurnSink | null;
   /** 우리가 놓았다(풀 축출·리퍼·호스트 종료). */
@@ -79,6 +80,7 @@ const STDERR_TAIL_MAX = 8 * 1024;
 
 /** `--input-format stream-json` 을 붙여 프로세스를 띄운다. stdin 은 **닫지 않는다**. */
 export function openClaudeResidentSession(opts: {
+  executableOwner: ClaudeResidentSession["executableOwner"];
   bin: string;
   args: string[];
   cwd: string;
@@ -92,6 +94,7 @@ export function openClaudeResidentSession(opts: {
     ...detachedSpawnOpts(),
   });
   const session: ClaudeResidentSession = {
+    executableOwner: { ...opts.executableOwner },
     child,
     active: null,
     closed: false,
@@ -185,6 +188,37 @@ export function writeClaudeResidentTurn(session: ClaudeResidentSession, text: st
 
 let sessionPool: AcpSessionPool<ClaudeResidentSession> | null = null;
 
+const executableOwners = new Map<string, { generation: string; current: boolean }>();
+
+/** Capture before asynchronous preparation so an older turn cannot supersede a newer owner. */
+export function captureClaudeExecutableOwner(owner: ClaudeResidentSession["executableOwner"]): () => boolean {
+  const key = JSON.stringify([owner.chatId, owner.sessionOwnerId, owner.isolateOwner]);
+  let token = executableOwners.get(key);
+  if (!token || token.generation !== owner.generation) {
+    if (token) token.current = false;
+    token = { generation: owner.generation, current: true };
+  }
+  executableOwners.delete(key);
+  executableOwners.set(key, token);
+  if (executableOwners.size > 128) {
+    const oldest = executableOwners.keys().next().value!;
+    executableOwners.get(oldest)!.current = false;
+    executableOwners.delete(oldest);
+  }
+  return () => token.current;
+}
+
+/** Scope retirement to the same conversation and session owner, including relocated executables. */
+export function retireSupersededClaudeSessions(
+  pool: AcpSessionPool<ClaudeResidentSession>,
+  owner: ClaudeResidentSession["executableOwner"],
+): void {
+  pool.retireMatching((session) => session.executableOwner.chatId === owner.chatId
+    && session.executableOwner.sessionOwnerId === owner.sessionOwnerId
+    && session.executableOwner.isolateOwner === owner.isolateOwner
+    && session.executableOwner.generation !== owner.generation);
+}
+
 export function claudeSessionPool(): AcpSessionPool<ClaudeResidentSession> {
   if (!sessionPool) {
     sessionPool = new AcpSessionPool<ClaudeResidentSession>({
@@ -255,6 +289,9 @@ export function residencyDisabledFor(kind: string, env: NodeJS.ProcessEnv = proc
 export function claudePoolKey(input: {
   chatId: string;
   fingerprint: string;
+  sessionOwnerId?: string | null;
+  isolateOwner?: boolean;
+  executableGeneration: string;
   cwd: string;
   bin: string;
   mcpConfigPath?: string;
@@ -273,7 +310,9 @@ export function claudePoolKey(input: {
     .createHash("sha256")
     .update("claude-pool-v1\0")
     .update(input.chatId).update("\0")
+    .update(JSON.stringify([input.sessionOwnerId ?? null, input.isolateOwner ?? false])).update("\0")
     .update(input.fingerprint).update("\0")
+    .update(input.executableGeneration).update("\0")
     .update(input.cwd).update("\0")
     .update(input.bin).update("\0")
     .update(input.mcpConfigPath ?? "").update("\0")

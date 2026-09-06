@@ -342,6 +342,11 @@
         "bytes": 2832
       },
       {
+        "path": "skills/research/SKILL.md",
+        "sha256": "ac186b80dc021f9f83b3affa3aada44eb37dc0825720aba8ba9e38f3805c3906",
+        "bytes": 1860
+      },
+      {
         "path": "skills/seed-design/references/component-guidelines.md",
         "sha256": "169eb0d53cfea15dbfc0a9926517af7d4c0a69604c472efd6c0d35264862115f",
         "bytes": 5267

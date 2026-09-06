@@ -16,6 +16,7 @@ import type {
   ScienceManuscriptEditProposal,
   ScienceManuscriptSelectionContext,
 } from "./science-manuscript-proposal";
+import type { RuntimeSelection } from "./types";
 
 export * from "./science-manuscript-document";
 export * from "./science-manuscript-proposal";
@@ -38,6 +39,25 @@ export const SCIENCE_DOMAINS = [
 ] as const;
 export type ScienceDomain = typeof SCIENCE_DOMAINS[number];
 
+export const SCIENCE_RESEARCH_TEMPLATE_IDS = [
+  "data-table",
+  "statistics-analysis",
+  "data-visualization",
+  "economic-indicators",
+  "literature-network",
+  "astronomy-sky",
+  "biodiversity-map",
+  "paleontology-evidence",
+  "earthquake-observations",
+  "physics-data",
+  "materials-structures",
+  "genomics-variants",
+  "comparative-genomics",
+  "molecular-structure",
+  "chemistry",
+] as const;
+export type ScienceResearchTemplateId = typeof SCIENCE_RESEARCH_TEMPLATE_IDS[number];
+
 export interface ScienceProject {
   id: string;
   title: string;
@@ -45,10 +65,25 @@ export interface ScienceProject {
   domain: ScienceDomain;
   /** Additional discovery metadata. `domain` remains the backwards-compatible primary domain. */
   relatedDomains: ScienceDomain[];
+  /** Exact creation template. Legacy projects remain null and keep their original domain semantics. */
+  researchTemplateId?: ScienceResearchTemplateId | null;
+  /** The first Lab bound by the creation template. It is stored independently for auditability. */
+  initialLabId?: ScienceResearchTemplateId | null;
+  /** Canonical folder explicitly selected in the Science UI; absent for legacy projects. */
+  folderPath?: string | null;
   status: "draft" | "active" | "paused" | "archived";
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ScienceProjectLibrarySummary {
+  projectId: string;
+  fileCount: number;
+  dataCount: number;
+  analysisCount: number;
+  manuscriptCount: number;
+  pdfCount: number;
 }
 
 export const SCIENCE_PROJECT_DESTINATIONS = [
@@ -259,6 +294,9 @@ export interface ScienceTurn {
   origin: "user" | "loop-continuation";
   continuationBasis: Record<string, unknown> | null;
   continuationBasisSha256: string | null;
+  /** Exact Science-owned orchestrator pin captured when this turn was created. */
+  runtimeSelection: RuntimeSelection | null;
+  runtimeSelectionSha256: string | null;
   status: ScienceTurnStatus;
   lastSequence: number;
   partialText: string;
@@ -277,6 +315,8 @@ export type StartScienceTurnInput = {
   runtimeChatId: string;
   invocationRunId: string;
   parentTurnId?: string | null;
+  /** Optional for legacy internal callers; new Science UI calls must provide an exact pin. */
+  runtimeSelection?: RuntimeSelection | null;
 } & (
   | { mode: "existing-user-message"; userMessageId: string }
   | { mode: "append-user-message"; content: string }
@@ -474,7 +514,7 @@ export interface ScienceDatasetTablePayload {
     formulaLikeCellCount: number;
   };
   receipts: {
-    parserId: "agentlas.csv-to-table" | "agentlas.comparative-genomics-publication-table";
+    parserId: "agentlas.csv-to-table" | "agentlas.comparative-genomics-publication-table" | "agentlas.paired-artifact-table-aligner";
     parserVersion: "1.0.0";
     rawSha256: string;
     headerSha256: string;
@@ -704,11 +744,21 @@ export interface ReconcileScienceMessageEvidenceResult {
 
 export interface CreateScienceProjectInput {
   requestId: string;
+  /** Opaque Main-issued folder selection. Raw paths are not accepted from the renderer. */
+  folderSelectionId?: string;
   question: string;
   title?: string;
   domain: ScienceDomain;
   relatedDomains?: ScienceDomain[];
+  researchTemplateId?: ScienceResearchTemplateId;
+  initialLabId?: ScienceResearchTemplateId;
+  /** Labs to bind at creation, deduplicated in selection order after the active initialLabId. */
+  initialLabIds?: ScienceResearchTemplateId[];
 }
+
+export type PickScienceProjectFolderResult =
+  | { canceled: true }
+  | { canceled: false; selectionId: string; path: string };
 
 export interface CreateScienceProjectResult {
   project: ScienceProject;
@@ -735,12 +785,22 @@ export interface ScienceResearchContract {
   successCriteria: string[];
   failureCriteria: string[];
   constraints: string[];
+  /**
+   * `full-study` keeps the authoritative loop alive through the lifecycle's
+   * journal-ready gate.  `bounded-deliverable` permits completion at the
+   * contract's own evidence criteria.  Null is retained for legacy contracts
+   * and keeps their pre-scope hash semantics.
+   */
+  completionScope: ScienceResearchCompletionScope | null;
   maxEpisodes: number;
   maxWallTimeMinutes: number;
   approvedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+export const SCIENCE_RESEARCH_COMPLETION_SCOPES = ["full-study", "bounded-deliverable"] as const;
+export type ScienceResearchCompletionScope = typeof SCIENCE_RESEARCH_COMPLETION_SCOPES[number];
 
 /**
  * The decisions a project can authorize in advance.
@@ -753,6 +813,7 @@ export interface ScienceResearchContract {
 export const SCIENCE_APPROVAL_SCOPES = Object.freeze([
   "research-contract",
   "hypothesis",
+  "analysis-plan",
   "journal-identity",
   "submission-attestation",
 ] as const);
@@ -787,6 +848,7 @@ export interface SaveScienceResearchContractInput {
   successCriteria: string[];
   failureCriteria: string[];
   constraints: string[];
+  completionScope?: ScienceResearchCompletionScope | null;
   maxEpisodes: number;
   maxWallTimeMinutes: number;
 }
@@ -884,6 +946,9 @@ export interface ScienceLoopSession {
   lifecycleStartRevision: number;
   lifecycleStartStateSha256: string;
   runtimeChatId: string;
+  /** Exact Science-owned orchestrator pin captured for the whole loop. */
+  runtimeSelection: RuntimeSelection | null;
+  runtimeSelectionSha256: string | null;
   activeRunId: string | null;
   status: "queued" | "running" | "pausing" | "paused" | "completed" | "failed" | "cancelled";
   stage: ScienceLoopStage;
@@ -1087,6 +1152,8 @@ export interface StartScienceLoopSessionInput {
   contractId: string;
   expectedProjectVersion: number;
   expectedContractVersion: number;
+  /** Optional for legacy internal callers; new Science UI calls must provide an exact pin. */
+  runtimeSelection?: RuntimeSelection | null;
 }
 
 export interface StartScienceLoopSessionResult {
@@ -2212,6 +2279,16 @@ export interface ScienceAnalysisArtifactRef {
   contentSha256: string;
 }
 
+export interface ScienceAnalysisAcquisitionPlan {
+  strategy: "acquire-before-execution";
+  sources: Array<{
+    provider: string;
+    sourceRefs: string[];
+    retrievalPlan: string;
+    expectedArtifactKind: string;
+  }>;
+}
+
 export interface ScienceEstimand {
   population: string;
   treatmentOrExposure: string;
@@ -2274,6 +2351,12 @@ export interface ScienceAnalysisSpecDocument {
   };
   data: {
     inputs: ScienceAnalysisArtifactRef[];
+    /**
+     * Present on plans approved before collection. Execution still requires a successor plan whose
+     * `inputs` bind exact immutable artifact versions; this field specifies what may be acquired and
+     * never acts as an execution-time data binding by itself. Absent only on legacy v1 documents.
+     */
+    acquisition?: ScienceAnalysisAcquisitionPlan | null;
     outcomeVariables: string[];
     predictorVariables: string[];
     transformations: string[];
@@ -2313,6 +2396,29 @@ export interface ScienceAnalysisSpecVersion {
   createdAt: string;
 }
 
+export interface ScienceAnalysisPlanReviewReceipt {
+  id: string;
+  requestId: string;
+  projectId: string;
+  analysisSpecId: string;
+  analysisSpecVersion: number;
+  analysisSpecContentSha256: string;
+  analysisSpecLockVersion: number;
+  decision: "approve" | "revise";
+  rationale: string | null;
+  actor: "human" | "standing-policy";
+  /** Present only for a host-authorized standing approval; never a human click. */
+  approvalPolicy?: {
+    id: string;
+    revision: number;
+    grantedBy: string;
+    contentSha256: string;
+  };
+  resultingStatus: "draft" | "frozen";
+  createdAt: string;
+  receiptSha256: string;
+}
+
 export interface ScienceAnalysisSpec {
   id: string;
   projectId: string;
@@ -2322,6 +2428,7 @@ export interface ScienceAnalysisSpec {
   currentDocumentSha256: string;
   lockVersion: number;
   version: ScienceAnalysisSpecVersion;
+  latestReview: ScienceAnalysisPlanReviewReceipt | null;
   frozenAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -2445,6 +2552,23 @@ export interface FreezeScienceAnalysisSpecInput {
 }
 
 export interface FreezeScienceAnalysisSpecResult {
+  analysisSpec: ScienceAnalysisSpec;
+  replayed: boolean;
+}
+
+export interface ReviewScienceAnalysisPlanInput {
+  requestId: string;
+  projectId: string;
+  analysisSpecId: string;
+  expectedVersion: number;
+  expectedContentSha256: string;
+  expectedLockVersion: number;
+  decision: "approve" | "revise";
+  rationale?: string | null;
+}
+
+export interface ReviewScienceAnalysisPlanResult {
+  receipt: ScienceAnalysisPlanReviewReceipt;
   analysisSpec: ScienceAnalysisSpec;
   replayed: boolean;
 }

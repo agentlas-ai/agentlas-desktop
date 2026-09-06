@@ -908,6 +908,7 @@ export function appendChatMessage(
   emitDesktopStoreChange({ entity: "chat", id: chatId });
   return {
     id,
+    durableMessageId: id,
     role,
     text,
     createdAt: now,
@@ -964,6 +965,7 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   return rows.map((r) => ({
     id: r.id,
+    durableMessageId: r.id,
     role: r.role,
     text: r.text,
     createdAt: r.created_at,

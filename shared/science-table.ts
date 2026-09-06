@@ -1,11 +1,120 @@
 import { createHash } from "node:crypto";
-import type { ScienceDatasetCell, ScienceDatasetTablePayload } from "./science-contract";
+import type {
+  ScienceAnalysisModelSpec,
+  ScienceArtifact,
+  ScienceDatasetCell,
+  ScienceDatasetTablePayload,
+  ScienceResearchRun,
+} from "./science-contract";
 
 export const SCIENCE_TABLE_SCHEMA = "agentlas.science-table/v1" as const;
 export const SCIENCE_TABLE_RENDERER_ID = "agentlas.table" as const;
 export const SCIENCE_TABLE_RENDERER_VERSION = "1.0.0" as const;
 export const SCIENCE_TABLE_ARTIFACT_KIND = "table" as const;
 export const SCIENCE_TABLE_LAB_ID = "data-table" as const;
+export const SCIENCE_PAIRED_TABLE_ALIGNER_ID = "agentlas.paired-artifact-table-aligner" as const;
+export const SCIENCE_PAIRED_TABLE_ALIGNER_VERSION = "1.0.0" as const;
+export const SCIENCE_PAIRED_TABLE_ALIGNER_INPUT_SCHEMA = "agentlas.science.paired-table-alignment-input/v1" as const;
+export const SCIENCE_PAIRED_TABLE_ALIGNER_OUTPUT_MIME = "application/vnd.agentlas.science.table+json" as const;
+export const SCIENCE_PAIRED_TABLE_METHODS = [
+  "pearson_correlation",
+  "spearman_correlation",
+  "kendall_correlation",
+  "paired_t_test",
+  "wilcoxon_signed_rank",
+] as const;
+export type SciencePairedTableMethod = typeof SCIENCE_PAIRED_TABLE_METHODS[number];
+
+export interface SciencePairedTableSourceInput {
+  artifactId: string;
+  artifactVersion: number;
+  contentSha256: string;
+  keyColumn: string;
+  valueColumn: string;
+  outputColumn: string;
+  label: string;
+}
+
+export interface PrepareSciencePairedStatisticsTableInput {
+  requestId: string;
+  projectId: string;
+  conversationId: string;
+  originMessageId: string;
+  title: string;
+  outputKeyColumn: string;
+  sources: [SciencePairedTableSourceInput, SciencePairedTableSourceInput];
+  methods: SciencePairedTableMethod[];
+  model: ScienceAnalysisModelSpec;
+  minimumCompletePairs: number;
+}
+
+export interface PrepareSciencePairedStatisticsTableResult {
+  run: ScienceResearchRun;
+  artifact: ScienceArtifact;
+  table: ScienceDatasetTablePayload;
+  preparation: {
+    dataInputs: Array<{ artifactId: string; artifactVersion: number; contentSha256: string }>;
+    model: ScienceAnalysisModelSpec;
+    modelSha256: string;
+    requiredDiagnostics: string[];
+    sourceTables: Array<Record<string, unknown>>;
+    completePairCount: number;
+    minimumCompletePairs: number;
+    readyForStatistics: boolean;
+  };
+  replayed: boolean;
+}
+
+export interface SciencePairedSeriesAlignmentSource {
+  outputColumn: string;
+  values: ReadonlyArray<{ key: string; value: number | null }>;
+}
+
+export interface SciencePairedSeriesAlignment {
+  rows: Array<Record<string, string | number | boolean | null>>;
+  nullCount: number;
+  completePairCount: number;
+}
+
+/** Full-outer exact-key alignment without imputation. Statistical sufficiency is a later gate. */
+export function alignSciencePairedSeries(
+  outputKeyColumn: string,
+  sources: readonly [SciencePairedSeriesAlignmentSource, SciencePairedSeriesAlignmentSource],
+): SciencePairedSeriesAlignment {
+  const outputNames = [outputKeyColumn, "paired_eligible", ...sources.flatMap((source) => [source.outputColumn, `${source.outputColumn}_missing`])];
+  if (new Set(outputNames.map((name) => name.toLocaleLowerCase("en-US"))).size !== outputNames.length) {
+    throw new Error("science-paired-table-output-column-duplicate");
+  }
+  const maps = sources.map((source, sourceIndex) => {
+    const values = new Map<string, number | null>();
+    for (const entry of source.values) {
+      if (typeof entry.key !== "string" || !entry.key.trim()
+        || (entry.value !== null && (typeof entry.value !== "number" || !Number.isFinite(entry.value)))) {
+        throw new Error(`science-paired-table-source-${sourceIndex + 1}-row-invalid`);
+      }
+      if (values.has(entry.key)) throw new Error(`science-paired-table-source-${sourceIndex + 1}-duplicate-key`);
+      values.set(entry.key, entry.value);
+    }
+    return values;
+  }) as [Map<string, number | null>, Map<string, number | null>];
+  const keys = [...new Set(maps.flatMap((values) => [...values.keys()]))]
+    .sort((left, right) => left.localeCompare(right, "en-US", { numeric: true, sensitivity: "variant" }));
+  const completePairCount = keys.filter((key) => maps.every((values) => values.has(key) && values.get(key) !== null)).length;
+  if (keys.length < 1) throw new Error("science-paired-table-no-keys");
+  const rows = keys.map((key) => {
+    const row: Record<string, string | number | boolean | null> = { [outputKeyColumn]: key, paired_eligible: true };
+    sources.forEach((source, sourceIndex) => {
+      const values = maps[sourceIndex]!;
+      const value = values.has(key) ? values.get(key)! : null;
+      row[source.outputColumn] = value;
+      row[`${source.outputColumn}_missing`] = value === null;
+      if (value === null) row.paired_eligible = false;
+    });
+    return row;
+  });
+  const nullCount = rows.reduce((count, row) => count + Object.values(row).filter((value) => value === null).length, 0);
+  return { rows, nullCount, completePairCount };
+}
 export const SCIENCE_TABLE_LIMITS = {
   maxPayloadBytes: 4 * 1024 * 1024, maxColumns: 1_000, maxRows: 5_000,
   maxCells: 250_000, maxCellTextBytes: 16 * 1024, maxColumnNameBytes: 240,
@@ -74,7 +183,7 @@ export function validateScienceTablePayload(value: unknown): ScienceDatasetTable
     || profile.formulaLikeCellCount !== formulaLikeCellCount) throw new Error("science-table-counts-invalid");
   const receipts = record(payload.receipts);
   if (!receipts || !exactKeys(receipts, ["parserId", "parserVersion", "rawSha256", "headerSha256", "rowsSha256", "tableSha256"])
-    || !["agentlas.csv-to-table", "agentlas.comparative-genomics-publication-table"].includes(String(receipts.parserId))
+    || !["agentlas.csv-to-table", "agentlas.comparative-genomics-publication-table", SCIENCE_PAIRED_TABLE_ALIGNER_ID].includes(String(receipts.parserId))
     || receipts.parserVersion !== "1.0.0"
     || ![receipts.rawSha256, receipts.headerSha256, receipts.rowsSha256, receipts.tableSha256].every((entry) => typeof entry === "string" && SHA256_RE.test(entry))) throw new Error("science-table-hashes-invalid");
   if (receipts.headerSha256 !== scienceTableSha256(names) || receipts.rowsSha256 !== scienceTableSha256(rows)

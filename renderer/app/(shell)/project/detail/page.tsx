@@ -58,11 +58,13 @@ import type { OntologyProjectStatus } from "@shared/types";
  */
 function ProjectOntologyPanel({
   projectId,
+  folderPath,
   locale,
   cardStyle,
   eyebrowStyle,
 }: {
   projectId: string;
+  folderPath: string | null;
   locale: "ko" | "en";
   cardStyle: CSSProperties;
   eyebrowStyle: CSSProperties;
@@ -73,11 +75,12 @@ function ProjectOntologyPanel({
   const [note, setNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!folderPath) return;
     const api = ipc();
     if (!api?.ontology) return;
     const next = await api.ontology.getProject(projectId).catch(() => null);
     setStatus(next);
-  }, [projectId]);
+  }, [projectId, folderPath]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -94,6 +97,22 @@ function ProjectOntologyPanel({
       setBusy(null);
     }
   };
+
+  if (!folderPath) {
+    return (
+      <section style={{ ...cardStyle, marginBottom: 16 }}>
+        <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{ko ? "프로젝트 지식" : "Project knowledge"}</div>
+        <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>
+          {ko ? "로컬 폴더 미연결" : "No local folder connected"}
+        </strong>
+        <p style={{ margin: "6px 0 0", fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+          {ko
+            ? "프로젝트 지식은 로컬 폴더가 있는 프로젝트에서 사용할 수 있습니다. 폴더 없이도 대화와 작업은 시작할 수 있습니다."
+            : "Project knowledge is available for projects with a local folder. You can still start conversations and tasks without one."}
+        </p>
+      </section>
+    );
+  }
 
   const stateLabel = !status
     ? (ko ? "확인 중" : "Checking")
@@ -132,8 +151,13 @@ function ProjectOntologyPanel({
           {status.warnings[0]}
         </span>
       ) : null}
+      {status?.error ? (
+        <span role="status" style={{ display: "block", marginTop: 6, fontSize: 11.5, color: "var(--danger, var(--danger))", overflowWrap: "anywhere" }}>
+          {status.error}
+        </span>
+      ) : null}
       {note ? (
-        <span style={{ display: "block", marginTop: 6, fontSize: 11.5, color: "var(--danger, #9a4e45)" }} role="status">{note}</span>
+        <span style={{ display: "block", marginTop: 6, fontSize: 11.5, color: "var(--danger, var(--danger))" }} role="status">{note}</span>
       ) : null}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
         {status?.state === "failed" || !status?.memoryDir ? (
@@ -819,7 +843,7 @@ function ProjectPage() {
                       type="button"
                       onClick={() => void importExternalSession(session)}
                       disabled={Boolean(externalSessionImporting)}
-                      style={{ minWidth: 104, minHeight: 44, padding: "0 14px", borderRadius: 9, background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 750, opacity: externalSessionImporting && !busy ? .48 : 1 }}
+                      style={{ minWidth: 104, minHeight: 44, padding: "0 14px", borderRadius: 9, background: "var(--accent)", color: "var(--white)", fontSize: 12, fontWeight: 750, opacity: externalSessionImporting && !busy ? .48 : 1 }}
                     >
                       {busy ? (locale === "ko" ? "가져오는 중…" : "Importing…") : (locale === "ko" ? "이 프로젝트로 가져오기" : "Import into this project")}
                     </button>
@@ -1080,7 +1104,7 @@ function ProjectPage() {
                 {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
               </span> : null}
             </section>
-            <ProjectOntologyPanel projectId={project.id} locale={locale} cardStyle={cardStyle} eyebrowStyle={eyebrowStyle} />
+            <ProjectOntologyPanel projectId={project.id} folderPath={project.folderPath ?? null} locale={locale} cardStyle={cardStyle} eyebrowStyle={eyebrowStyle} />
             <ProjectTimelinePanel timeline={timeline} locale={locale} recoveryPending={recoveryPending} />
           </div>
         </aside>

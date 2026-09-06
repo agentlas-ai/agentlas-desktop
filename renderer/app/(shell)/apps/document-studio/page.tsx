@@ -699,9 +699,9 @@ export default function DocumentStudioPage() {
                     ...draftPersistenceStatus,
                     color:
                       draftPersistence.state === "failed"
-                        ? "#c0392b"
+                        ? "var(--danger)"
                         : draftPersistence.state === "degraded"
-                          ? "#9a6700"
+                          ? "var(--warn)"
                           : draftPersistence.state === "saved"
                             ? "var(--green-deep)"
                             : "var(--muted-deep)",
@@ -730,7 +730,7 @@ export default function DocumentStudioPage() {
             </div>
 
             {statusMsg && (
-              <div style={{ ...statusBar, color: statusMsg.kind === "error" ? "#c0392b" : statusMsg.kind === "ok" ? "var(--green-deep)" : "var(--muted-deep)" }}>
+              <div style={{ ...statusBar, color: statusMsg.kind === "error" ? "var(--danger)" : statusMsg.kind === "ok" ? "var(--green-deep)" : "var(--muted-deep)" }}>
                 {statusMsg.text}
               </div>
             )}
@@ -983,24 +983,26 @@ function mdToHtml(md: string): string {
   return html;
 }
 
+// 내려받는 독립 HTML 문서다 — 앱의 토큰 블록이 따라가지 않으므로 색을 값으로 적는다.
+/* colour-literal-allowed: standalone exported document, app tokens are not present there */
 function buildHtmlDoc(title: string, body: string, refs: Reference[], style: CitationStyle, bibliographyMd: string, figureMd: string, figureSrc: string): string {
   const bodyHtml = mdToHtml(body);
   // 도표: 생성 이미지(data URI, 스킴 검증) + 캡션. 이미지가 없으면 캡션만.
-  const safeImg = figureSrc && /^data:image\//i.test(figureSrc) ? `<img src="${figureSrc.replace(/"/g, "%22")}" alt="figure" style="max-width:100%;border-radius:8px;border:1px solid #eceef2" />` : "";
+  const safeImg = figureSrc && /^data:image\//i.test(figureSrc) ? `<img src="${figureSrc.replace(/"/g, "%22")}" alt="figure" style="max-width:100%;border-radius:8px;border:1px solid #eceef2" />` : ""; /* colour-literal-allowed: exported document */
   const figHtml = figureMd || safeImg ? `<figure style="margin:24px 0">${safeImg}${figureMd ? mdToHtml(figureMd) : ""}</figure>` : "";
   const bibHtml = refs.length ? mdToHtml(bibliographyMd) : "";
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${mdInline(title)}</title>
 <style>
-  body{max-width:760px;margin:48px auto;padding:0 24px;font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;color:#1a1d23}
+  body{max-width:760px;margin:48px auto;padding:0 24px;font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;color:#1a1d23} /* colour-literal-allowed: exported document */
   h1{font-size:30px;line-height:1.2;margin:0 0 24px}
-  h2{font-size:21px;margin:32px 0 10px;border-bottom:1px solid #eceef2;padding-bottom:6px}
+  h2{font-size:21px;margin:32px 0 10px;border-bottom:1px solid #eceef2;padding-bottom:6px} /* colour-literal-allowed: exported document */
   h3{font-size:17px;margin:22px 0 8px}
   p{margin:0 0 14px}
   ul{margin:0 0 14px 22px}
-  a{color:#2563eb}
-  .cite-style{color:#8a90a0;font-size:13px;margin-bottom:28px}
+  a{color:#2563eb} /* colour-literal-allowed: exported document */
+  .cite-style{color:#8a90a0;font-size:13px;margin-bottom:28px} /* colour-literal-allowed: exported document */
 </style></head><body>
 <h1>${mdInline(title)}</h1>
 <div class="cite-style">Citation style: ${style}</div>
@@ -1025,13 +1027,13 @@ const topToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(
 const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, textDecoration: "none" };
 const newDocumentButton: CSSProperties = { minHeight: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 5, padding: "0 9px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
 const citationButton: CSSProperties = { height: 32, minWidth: 84, border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 12px", color: "var(--ink)", fontWeight: 800 };
-const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid #e2e5ea", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
+const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid var(--paper-3)", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
 const citationList: CSSProperties = { display: "grid", gap: 1, maxHeight: 320, overflowY: "auto" };
 const citationOption: CSSProperties = { minHeight: 32, border: "none", background: "transparent", color: "var(--ink)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "0 8px", borderRadius: 6, textAlign: "left", fontSize: 13, cursor: "pointer" };
-const exportButton: CSSProperties = { height: 32, border: "none", borderRadius: 7, background: "#108334", color: "#ffffff", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 12px", fontWeight: 900, cursor: "pointer" };
+const exportButton: CSSProperties = { height: 32, border: "none", borderRadius: 7, background: "var(--ok)", color: "var(--white)", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 12px", fontWeight: 900, cursor: "pointer" };
 const exportStatusStyle: CSSProperties = { color: "var(--green-deep)", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" };
 const aiToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 10, padding: "6px 18px", flexShrink: 0 };
-const aiBadge: CSSProperties = { minWidth: 26, height: 22, borderRadius: 7, background: "#fff4bf", color: "#7c5800", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 900 };
+const aiBadge: CSSProperties = { minWidth: 26, height: 22, borderRadius: 7, background: "var(--warn-soft)", color: "var(--warn)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 900 };
 const goalBox: CSSProperties = { minWidth: 280, flex: 1, height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", display: "flex", alignItems: "center", gap: 8, padding: "0 9px" };
 const goalInput: CSSProperties = { minWidth: 0, flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--ink)", fontSize: 12.5 };
 const modeChip: CSSProperties = { border: "none", borderRadius: 999, padding: "6px 9px", fontSize: 11.5, fontWeight: 900, cursor: "pointer" };
@@ -1052,8 +1054,8 @@ const miniIconButton: CSSProperties = { width: 26, border: "1px solid var(--pape
 const refForm: CSSProperties = { border: "1px solid var(--accent-soft)", borderRadius: 8, padding: 11, display: "grid", gap: 7, background: "var(--paper)" };
 const formField: CSSProperties = { display: "grid", gap: 3 };
 const formLabel: CSSProperties = { color: "var(--muted-deep)", fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" };
-const formInput: CSSProperties = { border: "1px solid var(--paper-edge)", borderRadius: 6, padding: "6px 8px", fontSize: 12.5, outline: "none", background: "#fff", color: "var(--ink)", width: "100%" };
-const formSaveBtn: CSSProperties = { flex: 1, border: "none", borderRadius: 6, background: "#108334", color: "#fff", padding: "7px 0", fontWeight: 800, fontSize: 12, cursor: "pointer" };
+const formInput: CSSProperties = { border: "1px solid var(--paper-edge)", borderRadius: 6, padding: "6px 8px", fontSize: 12.5, outline: "none", background: "var(--paper)", color: "var(--ink)", width: "100%" };
+const formSaveBtn: CSSProperties = { flex: 1, border: "none", borderRadius: 6, background: "var(--ok)", color: "var(--white)", padding: "7px 0", fontWeight: 800, fontSize: 12, cursor: "pointer" };
 const formCancelBtn: CSSProperties = { border: "1px solid var(--paper-edge)", borderRadius: 6, background: "var(--paper)", color: "var(--ink-soft)", padding: "7px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
 const editorStage: CSSProperties = { minWidth: 0, minHeight: 0, overflowY: "auto", padding: "40px 40px 64px" };
 const paper: CSSProperties = { width: "min(760px, 100%)", minHeight: "calc(100vh - 220px)", margin: "0 auto", background: "var(--paper)", border: "1px solid var(--paper-edge)", boxShadow: "0 20px 70px rgba(15,23,42,.08)", padding: "48px 60px" };
@@ -1061,12 +1063,12 @@ const titleInput: CSSProperties = { width: "100%", border: "none", outline: "non
 const docMeta: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, color: "var(--muted-deep)", fontSize: 11.5, marginTop: 8 };
 const draftPersistenceStatus: CSSProperties = { fontWeight: 800, lineHeight: 1.4 };
 const editToolbar: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 16, marginBottom: 8, paddingBottom: 12, borderBottom: "1px solid var(--paper-edge)" };
-const editToolbarLabel: CSSProperties = { color: "#7c5800", background: "#fff4bf", borderRadius: 6, padding: "3px 7px", fontSize: 10.5, fontWeight: 900 };
-const editToolbarBtn: CSSProperties = { border: "1px solid var(--paper-edge)", background: "#fff", color: "var(--ink-soft)", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };
+const editToolbarLabel: CSSProperties = { color: "var(--warn)", background: "var(--warn-soft)", borderRadius: 6, padding: "3px 7px", fontSize: 10.5, fontWeight: 900 };
+const editToolbarBtn: CSSProperties = { border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink-soft)", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };
 const statusBar: CSSProperties = { fontSize: 12, fontWeight: 700, marginBottom: 12 };
 const editor: CSSProperties = { width: "100%", minHeight: 480, border: "none", outline: "none", resize: "vertical", background: "var(--paper)", color: "var(--ink)", fontFamily: "var(--font-body)", fontSize: 15.5, lineHeight: 1.85 };
 const inspector: CSSProperties = { borderLeft: "1px solid var(--paper-edge)", background: "var(--paper)", padding: 14, overflowY: "auto", display: "grid", alignContent: "start", gap: 12 };
 const bibPreview: CSSProperties = { display: "grid", gap: 10 };
 const bibEntry: CSSProperties = { margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.5, paddingLeft: 14, textIndent: -14 };
 const figureInput: CSSProperties = { width: "100%", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", padding: 10, resize: "vertical", outline: "none", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.5 };
-const figureImg: CSSProperties = { width: "100%", borderRadius: 8, border: "1px solid var(--paper-edge)", display: "block", background: "#111" };
+const figureImg: CSSProperties = { width: "100%", borderRadius: 8, border: "1px solid var(--paper-edge)", display: "block", background: "var(--black)" };

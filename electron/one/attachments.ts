@@ -230,6 +230,55 @@ function hashFd(sourceFd: number, maxBytes: number): { size: number; digest: `sh
   return { size: offset, digest: `sha256:${hash.digest("hex")}` };
 }
 
+function stableDirectorySnapshot(sourceRoot: string, targetRoot?: string): { size: number; digest: `sha256:${string}`; entries: number } {
+  const aggregate = createHash("sha256");
+  let totalBytes = 0;
+  let entries = 0;
+  if (targetRoot) fs.mkdirSync(targetRoot, { mode: 0o700 });
+  const visit = (sourceDir: string, targetDir: string | null) => {
+    let names: string[];
+    try { names = fs.readdirSync(sourceDir).sort((left, right) => left.localeCompare(right, "en")); }
+    catch { throw new OneAttachmentError("stale_grant", "The approved folder could not be read."); }
+    for (const name of names) {
+      const source = path.join(sourceDir, name);
+      const relative = path.relative(sourceRoot, source).replaceAll(path.sep, "/");
+      if (Buffer.byteLength(relative, "utf8") > ONE_ATTACHMENT_LIMITS.maxRelativePathBytes) {
+        throw new OneAttachmentError("invalid_request", `A folder entry path is too long: ${relative.slice(0, 120)}`);
+      }
+      let stat: fs.Stats;
+      try { stat = fs.lstatSync(source); }
+      catch { throw new OneAttachmentError("changed_source", `A folder entry disappeared: ${relative}`); }
+      if (stat.isSymbolicLink()) throw new OneAttachmentError("unsupported_type", `Symbolic links are not supported in folder attachments: ${relative}`);
+      if (stat.isDirectory()) {
+        aggregate.update(`D\u0000${relative}\n`, "utf8");
+        const nextTarget = targetDir ? path.join(targetDir, name) : null;
+        if (nextTarget) fs.mkdirSync(nextTarget, { mode: 0o700 });
+        visit(source, nextTarget);
+        continue;
+      }
+      if (!stat.isFile()) throw new OneAttachmentError("unsupported_type", `Unsupported folder entry: ${relative}`);
+      entries += 1;
+      if (entries > ONE_ATTACHMENT_LIMITS.maxDirectoryEntries) {
+        throw new OneAttachmentError("too_many", `A folder attachment may contain at most ${ONE_ATTACHMENT_LIMITS.maxDirectoryEntries} files.`);
+      }
+      totalBytes += stat.size;
+      if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new OneAttachmentError("too_large", "The folder attachment exceeds One's safe total size limit.");
+      const opened = openStableRegularFile(source);
+      try {
+        const measured = targetDir
+          ? copyAndHashFd(opened.fd, path.join(targetDir, name), ONE_ATTACHMENT_LIMITS.maxFileBytes)
+          : hashFd(opened.fd, ONE_ATTACHMENT_LIMITS.maxFileBytes);
+        if (measured.size !== stat.size) throw new OneAttachmentError("changed_source", `A folder entry changed while it was read: ${relative}`);
+        aggregate.update(`F\u0000${relative}\u0000${measured.size}\u0000${measured.digest}\n`, "utf8");
+      } finally {
+        fs.closeSync(opened.fd);
+      }
+    }
+  };
+  visit(sourceRoot, targetRoot ?? null);
+  return { size: totalBytes, entries, digest: `sha256:${aggregate.digest("hex")}` };
+}
+
 function safeRemove(target: string | null): void {
   if (!target) return;
   try { fs.rmSync(target, { recursive: true, force: true, maxRetries: 2 }); } catch {}
@@ -367,11 +416,35 @@ export function prepareOneAttachments(input: PrepareOneAttachmentsInput): Prepar
         || !Number.isSafeInteger(item.claimedSize) || item.claimedSize < 0) {
         throw new OneAttachmentError("invalid_request", "Invalid attachment metadata.");
       }
-      const sourcePath = pathFromGrant(item.grant, "file");
+      const requestedKind = item.grant?.kind === "directory" ? "directory" : "file";
+      const sourcePath = pathFromGrant(item.grant, requestedKind);
       if (pathInside(sourcePath, attachmentRoot()) || seenSources.has(sourcePath)) {
         throw new OneAttachmentError("invalid_request", "Duplicate or internal One staging files cannot be attached.");
       }
       seenSources.add(sourcePath);
+      if (requestedKind === "directory") {
+        let rootStat: fs.BigIntStats;
+        try { rootStat = fs.lstatSync(sourcePath, { bigint: true }); }
+        catch { throw new OneAttachmentError("stale_grant", "The approved folder no longer exists."); }
+        if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new OneAttachmentError("stale_grant", "The approved folder is no longer a regular directory.");
+        const originalName = safeBasename(path.basename(sourcePath), `folder-${index + 1}`);
+        const stagedName = `${String(index + 1).padStart(2, "0")}-${originalName}`;
+        usedNames.add(stagedName.toLowerCase());
+        const pendingPath = path.join(pendingDir, stagedName);
+        const copied = stableDirectorySnapshot(sourcePath, pendingPath);
+        totalBytes += copied.size;
+        if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new OneAttachmentError("too_large", "The selected attachments exceed One's safe total size limit.");
+        const safe: OneAttachmentSafeItem = {
+          attachmentId: `attachment:${index + 1}:${copied.digest.slice("sha256:".length, "sha256:".length + 24)}`,
+          name: originalName,
+          mediaType: "application/vnd.agentlas.directory",
+          size: copied.size,
+          kind: "directory",
+          digest: copied.digest,
+        };
+        items.push({ grant: item.grant, sourcePath, identity: statIdentity(rootStat), safe, pendingPath });
+        continue;
+      }
       const canonicalType = canonicalMediaType(sourcePath);
       const kind: OneAttachmentKind = canonicalType.startsWith("image/") ? "image" : "file";
       const maxBytes = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
@@ -441,8 +514,20 @@ export function prepareOneAttachments(input: PrepareOneAttachmentsInput): Prepar
 }
 
 function revalidatePreparedItem(item: PreparedItemRecord): void {
-  const currentPath = pathFromGrant(item.grant, "file");
+  const expectedKind = item.safe.kind === "directory" ? "directory" : "file";
+  const currentPath = pathFromGrant(item.grant, expectedKind);
   if (currentPath !== item.sourcePath) throw new OneAttachmentError("changed_source", "The approved attachment path changed.");
+  if (item.safe.kind === "directory") {
+    let currentStat: fs.BigIntStats;
+    try { currentStat = fs.lstatSync(currentPath, { bigint: true }); }
+    catch { throw new OneAttachmentError("changed_source", "The approved folder is no longer available."); }
+    if (currentStat.isSymbolicLink() || !currentStat.isDirectory() || !identitiesEqual(statIdentity(currentStat), item.identity)) {
+      throw new OneAttachmentError("changed_source", "A folder attachment changed after it was selected.");
+    }
+    const current = stableDirectorySnapshot(currentPath);
+    if (current.size !== item.safe.size || current.digest !== item.safe.digest) throw new OneAttachmentError("changed_source", "A folder attachment's contents changed after it was selected.");
+    return;
+  }
   const opened = openStableRegularFile(currentPath);
   try {
     if (!identitiesEqual(opened.identity, item.identity)) throw new OneAttachmentError("changed_source", "An attachment changed after it was selected.");
@@ -456,6 +541,11 @@ function revalidatePreparedItem(item: PreparedItemRecord): void {
 }
 
 function copyPreparedFile(source: string, target: string, expected: OneAttachmentSafeItem): void {
+  if (expected.kind === "directory") {
+    const copied = stableDirectorySnapshot(source, target);
+    if (copied.size !== expected.size || copied.digest !== expected.digest) throw new OneAttachmentError("changed_source", "The prepared folder copy is no longer valid.");
+    return;
+  }
   const opened = openStableRegularFile(source);
   try {
     const copied = copyAndHashFd(opened.fd, target, expected.kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes);
@@ -526,7 +616,7 @@ export function claimOneAttachments(input: {
       images,
       runtimeContext: [
         "[Agentlas One attachments - Main verified]",
-        `The user attached ${record.items.length} file(s). Read only the exact staged copies below.`,
+        `The user attached ${record.items.length} file or folder item(s). Read only the exact staged copies below.`,
         ...lines,
         "Do not search Downloads or recent files. Do not repeat internal staging paths in the answer; refer to each file by its original name.",
         "[/Agentlas One attachments]",
@@ -671,6 +761,6 @@ export function isSafeOneAttachmentReceipt(value: OneAttachmentSafeItem): boolea
     && value.name.length > 0 && value.name.length <= 96
     && SAFE_MEDIA_RE.test(value.mediaType)
     && Number.isSafeInteger(value.size) && value.size >= 0
-    && (value.kind === "image" || value.kind === "file")
+    && (value.kind === "image" || value.kind === "file" || value.kind === "directory")
     && SHA256_RE.test(value.digest);
 }

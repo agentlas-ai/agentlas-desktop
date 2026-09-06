@@ -17,8 +17,8 @@ const MAX_RELEASE_BYTES = 512 * 1024 * 1024;
  * Reconciliation must update a pin whenever a built-in plugin manifest moves.
  */
 const SOURCE_MANIFEST_PINS: Readonly<Record<string, string>> = Object.freeze({
-  "agentlas-comparative-genomics": "69a2e990ebb7fc7f2ad970fa23e8a23439925095475d480f9f123740c1d62a44",
-  "agentlas-astronomy": "1da127c708831b7bde50647dbd608f06e1ee94956cc616ea65f81a6b2fd0c37e",
+  "agentlas-comparative-genomics": "962b9f5ca94853471d3500f41b04819a0c950e63b70cdf8352d7a07cd31fe95e",
+  "agentlas-astronomy": "bbe7be29d107701d1201cd9fedf45d8ce806fc7bed6d8699af6b10952ac4a770",
   "agentlas-earth-science": "f536feae47f1241065b620b7ddc5f7f47a6b671f307ea34eea0844c9942159c0",
   "agentlas-physics": "946c84cc3d7e64182608624c64286170d5ad95aadc7d49d5b08f4749a73d050b",
   "agentlas-materials-science": "fe4b6a90efb60d0f60c424ef3fb9e063f8728ae6566b5a19452b173903a3725e",
@@ -146,6 +146,14 @@ export type SciencePluginRuntime<T> = SciencePluginFile & {
   runtime: T;
   executionPath: string;
   releaseSha256: string;
+};
+
+export type SciencePluginRuntimeLoadOptions = {
+  /**
+   * Optional allowlist for CommonJS builtin requests. Omit it to preserve the
+   * historical loader behavior, which permits every Node builtin.
+   */
+  allowedBuiltins?: readonly string[];
 };
 
 function sha256(bytes: Buffer | string): string {
@@ -453,7 +461,23 @@ function resolveMemoryDependency(release: SciencePluginRelease, parentPath: stri
   return resolved;
 }
 
-function compileVerifiedCommonJs(release: SciencePluginRelease, entryPath: string): unknown {
+function normalizeBuiltinAllowlist(input: readonly string[] | undefined): ReadonlySet<string> {
+  if (input === undefined) return BUILTIN_MODULES;
+  if (!Array.isArray(input)) throw new Error("science-plugin-runtime-builtin-policy-invalid");
+  const allowed = new Set(input);
+  if ([...allowed].some((request) => typeof request !== "string" || !BUILTIN_MODULES.has(request))) {
+    throw new Error("science-plugin-runtime-builtin-policy-invalid");
+  }
+  return allowed;
+}
+
+function assertBuiltinAllowed(request: string, allowedBuiltins: ReadonlySet<string>): void {
+  if (BUILTIN_MODULES.has(request) && !allowedBuiltins.has(request)) {
+    throw new Error("science-plugin-runtime-builtin-denied");
+  }
+}
+
+function compileVerifiedCommonJs(release: SciencePluginRelease, entryPath: string, allowedBuiltins: ReadonlySet<string>): unknown {
   const cache = new Map<string, MemoryModule>();
   const virtualRoot = path.join(os.tmpdir(), "agentlas-verified-plugin", release.releaseSha256);
   const load = (relativePath: string): unknown => {
@@ -491,6 +515,7 @@ function compileVerifiedCommonJs(release: SciencePluginRelease, entryPath: strin
     cache.set(relativePath, moduleRecord);
     const localRequire = ((request: string) => {
       if (typeof request !== "string" || !request) throw new Error("science-plugin-runtime-dependency-invalid");
+      assertBuiltinAllowed(request, allowedBuiltins);
       if (BUILTIN_MODULES.has(request)) return NATIVE_REQUIRE(request);
       const dependencyPath = resolveMemoryDependency(release, relativePath, request);
       const dependency = load(dependencyPath);
@@ -499,6 +524,7 @@ function compileVerifiedCommonJs(release: SciencePluginRelease, entryPath: strin
       return dependency;
     }) as NodeJS.Require;
     localRequire.resolve = ((request: string) => {
+      assertBuiltinAllowed(request, allowedBuiltins);
       if (BUILTIN_MODULES.has(request)) return request;
       return path.join(virtualRoot, ...resolveMemoryDependency(release, relativePath, request).split("/"));
     }) as NodeJS.RequireResolve;
@@ -535,6 +561,7 @@ export function loadSciencePluginRuntime<T extends object>(
   slug: string,
   relativePathInput: string,
   maximumBytes = DEFAULT_MAX_FILE_BYTES,
+  options?: SciencePluginRuntimeLoadOptions,
 ): SciencePluginRuntime<T> {
   const relativePath = normalizeRelativePath(relativePathInput);
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > DEFAULT_MAX_FILE_BYTES) {
@@ -545,7 +572,8 @@ export function loadSciencePluginRuntime<T extends object>(
   const file = release.files.get(relativePath);
   if (!file) throw new Error("science-plugin-runtime-integrity-missing");
   if (file.bytes.length > maximumBytes) throw new Error("science-plugin-runtime-file-invalid");
-  const runtime = validateRuntimeExport<T>(compileVerifiedCommonJs(release, relativePath), release);
+  const allowedBuiltins = normalizeBuiltinAllowlist(options?.allowedBuiltins);
+  const runtime = validateRuntimeExport<T>(compileVerifiedCommonJs(release, relativePath, allowedBuiltins), release);
   return {
     ...file,
     runtime,

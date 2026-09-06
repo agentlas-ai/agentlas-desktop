@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 110;
+const SCHEMA_VERSION = 112;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -850,16 +850,25 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
   try {
     const source = db.name;
     if (!source || source === ":memory:") return null;
-    // A resident follower may still hold WAL/SHM mappings while the Desktop
-    // migration owner starts. FULL makes the main file copyable without
-    // resizing either shared sidecar under that peer; TRUNCATE here can SIGBUS
-    // a mapped wal-index page. If a reader prevents a full checkpoint, skip the
-    // optional backup rather than copy an incomplete main file.
-    const checkpoint = db.pragma("wal_checkpoint(FULL)") as Array<{ busy?: number }>;
-    if (checkpoint.some((row) => Number(row.busy ?? 0) !== 0)) return null;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const target = `${source}.${tag}-${stamp}.bak`;
-    fs.copyFileSync(source, target);
+    // ★ Copy through SQLite, never through fs (2026-09-05). Until this date the
+    // backup was `wal_checkpoint(FULL)` + `fs.copyFileSync(source, target)`. On
+    // POSIX, closing *any* descriptor a process holds on a file releases every
+    // fcntl lock that process holds on it — so the copy's open/close silently
+    // dropped this connection's SHARED lock on the main file for the rest of
+    // the app's life. From then on any peer that closed (agentlasd, a headless
+    // wake, the terminal follower) could take EXCLUSIVE, delete -wal/-shm under
+    // our mapping, and the next wal-index touch was EXC_BAD_ACCESS/SIGBUS —
+    // every upgrade start re-armed it (crash reports 2026-08-28…09-04, all in
+    // walIndexAppend/walFindFrame). `VACUUM INTO` writes a consistent copy of
+    // the current content (WAL included) using SQLite's own VFS descriptors,
+    // which share this connection's inode bookkeeping, so no lock is lost and
+    // no checkpoint is needed. It must not run inside a transaction — callers
+    // take the backup before they open theirs. Gate:
+    // scripts/store-sidecar-lock-safety-contract.cjs (probes the fcntl locks).
+    db.prepare("VACUUM INTO ?").run(target);
+    hardenStoreFile(target);
     return target;
   } catch {
     return null;
@@ -4780,6 +4789,18 @@ export function initStore(options: StoreInitOptions = {}): void {
       ["base_core_hash", "base_core_hash TEXT"],
       ["module_set_hash", "module_set_hash TEXT"],
     ],
+    // Durable tool consent identity columns are additive: existing global,
+    // agent, and chat grants remain legacy rows instead of being rewritten or
+    // silently widened. New exact rows set binding_version=1 and all fields.
+    capability_grants: [
+      ["binding_version", "binding_version INTEGER NOT NULL DEFAULT 0"],
+      ["user_identity", "user_identity TEXT"],
+      ["workspace_identity", "workspace_identity TEXT"],
+      ["requester_identity", "requester_identity TEXT"],
+      ["resource_identity", "resource_identity TEXT"],
+      ["permission_scope", "permission_scope TEXT"],
+      ["tool_identity", "tool_identity TEXT"],
+    ],
   };
   /*
    * ★잔존 금지 트리거 — 버전 무관으로 매 부팅 제거한다.
@@ -4801,6 +4822,25 @@ export function initStore(options: StoreInitOptions = {}): void {
     );
     for (const [name, ddl] of columns) {
       if (!present.has(name)) _db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  }
+  if (tableExists(_db, "capability_grants")) {
+    const grantColumns = new Set(schemaColumns(_db, "capability_grants").map((column) => column.name));
+    if ([
+      "binding_version",
+      "user_identity",
+      "workspace_identity",
+      "requester_identity",
+      "resource_identity",
+      "permission_scope",
+    ].every((column) => grantColumns.has(column))) {
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_capability_grants_exact_binding
+          ON capability_grants(
+            binding_version, user_identity, workspace_identity,
+            requester_identity, resource_identity, permission_scope
+          );
+      `);
     }
   }
 
@@ -4952,9 +4992,11 @@ export function initStore(options: StoreInitOptions = {}): void {
    *
    * capability — 능력 클래스(execute|edit|delete|network|other), 도구 규칙(tool:<name>),
    *              또는 '*'(그 스코프의 모든 승인 채널 통과 — 기존 대화 단위 "항상 승인"의 이관처).
-   * pattern    — 선택적 인자 프리픽스(Claude Code 스타일: "git push *"). NULL = 인자 무관.
-   * scope      — 'global' | 'agent:<id>' | 'chat:<id>'. 구체성 chat > agent > global,
-   *              같은 구체성에서 deny > allow.
+   * pattern/scope — 레거시 행은 선택적 인자 프리픽스와 global/agent/chat 의미를 유지한다.
+   *                 binding_version=1 행은 Main이 만든 exact consent digest scope를 쓴다.
+   *                 user/workspace/requester/resource/permission 칸이 모두 맞아야 매치된다.
+   *                 새 행은 토큰 wildcard를 만들지 않는다.
+   * 레거시 우선순위는 구체성 chat > agent > global, 같은 스코프 deny > allow.
    * 결제·브라우저 위험코드는 이 표로 뚫리지 않는다(각 채널이 매번 확인 — 기존 예외 유지).
    * 사다리 끝 append — 이미 지나간 단계에 끼우면 기존 설치가 못 받는다.
    */
@@ -4967,9 +5009,24 @@ export function initStore(options: StoreInitOptions = {}): void {
       scope TEXT NOT NULL DEFAULT 'global',
       source TEXT NOT NULL DEFAULT 'chip',
       created_at TEXT NOT NULL,
+      -- v1 exact durable-consent binding. Legacy rows stay NULL/0 and keep
+      -- their historical scope semantics; new allow-always rows must carry
+      -- every identity component so an old grant cannot broaden a new one.
+      binding_version INTEGER NOT NULL DEFAULT 0,
+      user_identity TEXT,
+      workspace_identity TEXT,
+      requester_identity TEXT,
+      resource_identity TEXT,
+      permission_scope TEXT CHECK(permission_scope IS NULL OR permission_scope IN ('read','write','full')),
+      tool_identity TEXT,
       UNIQUE(capability, pattern, scope)
     );
     CREATE INDEX IF NOT EXISTS idx_capability_grants_scope ON capability_grants(scope);
+    CREATE INDEX IF NOT EXISTS idx_capability_grants_exact_binding
+      ON capability_grants(
+        binding_version, user_identity, workspace_identity,
+        requester_identity, resource_identity, permission_scope
+      );
   `);
 
   /*
@@ -6036,6 +6093,33 @@ export function initStore(options: StoreInitOptions = {}): void {
         "ALTER TABLE automation_runs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0 CHECK(dry_run IN (0, 1))",
       );
     }
+  }
+
+  // v111: append-only goal amendments; the v94 original remains unchanged.
+  // No backfill: old requests cannot acquire invented message provenance.
+  if (userVersion < 111) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS chat_goal_revisions (
+          goal_id TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK(revision > 0),
+          source_message_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(goal_id, revision),
+          UNIQUE(goal_id, source_message_id),
+          FOREIGN KEY(goal_id) REFERENCES chat_goal_contracts(goal_id) ON DELETE CASCADE
+        );
+      `);
+    })();
+  }
+
+  // v112: exact durable tool-consent identity columns.  The columns are also
+  // checked in the version-independent REQUIRED_COLUMNS backstop above so a
+  // partially upgraded v111 store cannot be queried without them.
+  if (userVersion < 112 && tableExists(_db, "capability_grants")) {
+    // No additional DDL is needed here; the backstop has already added every
+    // column before this ladder reaches the version marker.
   }
 
   } catch (error) {

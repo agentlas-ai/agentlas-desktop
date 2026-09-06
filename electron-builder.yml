@@ -215,28 +215,21 @@ extraResources:
       - "!**/*.pyc"
   # Startup Founder Studio 패키지 — 자체 GUI 런처 + 빌드된 SPA(web/dist). 앱이 런처를 spawn 해
   # 실제 스튜디오를 로컬 서빙하고 렌더러가 iframe 으로 띄운다. node_modules/소스/git 제외.
+  # Desktop runtime allowlist; validated again by studio-runtime-contract.cjs.
   - from: studio-pack
     to: studio-pack
     filter:
-      - "**/*"
-      - "!**/.studio-runtime/**"
-      - "!**/.studio-runtime"
-      - "!**/node_modules/**"
-      - "!.git/**"
-      - "!.git"
-      - "!web/src/**"
-      - "!web/node_modules/**"
-      - "!web/dist/generated/**"
-      - "!web/dist/studio-data.json"
-      - "!web/public/generated/**"
-      - "!web/public/studio-data.json"
-      - "!.agentlas/**"
-      - "!.agentlas"
-      - "!field-test/**"
-      - "!**/__pycache__/**"
-      - "!**/*.pyc"
-      - "!**/*.map"
-      - "!**/.DS_Store"
+      - "scripts/open-studio-gui.py"
+      - "clean-studio-data.json"
+      - "templates/startup-brief.md"
+      - "templates/founder-execution-packet.md"
+      - "web/dist/index.html"
+      - "web/dist/favicon.svg"
+      - "web/dist/manifest.webmanifest"
+      - "web/dist/assets/*.js"
+      - "web/dist/assets/*.css"
+  - from: build-resources/studio-runtime-manifest.json
+    to: studio-pack/manifest.json
 
 # macOS first — Hardened Runtime + notarization 준비
 mac:
@@ -331,9 +324,9 @@ linux:
   icon: build-resources/icon-1024.png
   artifactName: "Agentlas-${version}-Linux-x64.${ext}"
 
-# 배포 채널: 공개 "릴리스 전용" 레포. 데스크탑 SOURCE 레포(agentlas-desktop)는 비공개라 공개
-# 다운로드를 못 주므로, 컴파일된 바이너리만 이 공개 레포에 게시한다(소스 노출 없음). electron-builder
-# 가 산출물 + latest*.yml 을 여기에 올리고 electron-updater 가 폴링한다.
+# 공개 릴리스 채널은 소스 저장소와 별개다. 소스 저장소 공개 여부와 무관하게
+# 검증된 런타임 산출물만 게시한다. electron-builder가 산출물 + latest*.yml을
+# 여기에 올리고 electron-updater가 폴링한다.
 # CI 는 AGENTLAS_DESKTOP_RELEASE_TOKEN(크로스-레포 PAT)으로 publish.
 publish:
   - provider: github

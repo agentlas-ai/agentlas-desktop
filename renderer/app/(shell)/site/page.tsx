@@ -973,7 +973,7 @@ export default function SiteStudioPage() {
           {diagnostics.length > 0 && (
             <div style={diagnosticCard}>
               <div style={selectionCardHeader}>
-                <span style={{ color: diagnostics[diagnostics.length - 1].level === "error" ? "#c0392b" : "#96690d" }}>
+                <span style={{ color: diagnostics[diagnostics.length - 1].level === "error" ? "var(--danger)" : "var(--warn)" }}>
                   {diagnostics[diagnostics.length - 1].level === "error" ? (ko ? "미리보기 오류" : "Preview error") : ko ? "미리보기 경고" : "Preview warning"}
                 </span>
                 <button type="button" onClick={() => setDiagnostics([])} style={chipX} aria-label={ko ? "닫기" : "Dismiss"}>
@@ -1190,7 +1190,7 @@ const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", 
 const wordmark: CSSProperties = { fontSize: 13, fontWeight: 800, color: "var(--ink)" };
 const projectContext: CSSProperties = { fontSize: 11.5, color: "var(--muted-deep)" };
 const ghostBtn: CSSProperties = { height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };
-const primaryBtn: CSSProperties = { height: 30, border: "none", borderRadius: 7, background: "var(--accent)", color: "#fff", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 13px", fontSize: 12, fontWeight: 900, cursor: "pointer" };
+const primaryBtn: CSSProperties = { height: 30, border: "none", borderRadius: 7, background: "var(--accent)", color: "var(--white)", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 13px", fontSize: 12, fontWeight: 900, cursor: "pointer" };
 const ghostIconBtn: CSSProperties = { width: 24, height: 24, border: "none", borderRadius: 6, background: "transparent", color: "var(--muted-deep)", cursor: "pointer", fontSize: 12, lineHeight: "24px", flexShrink: 0 };
 const segBtn: CSSProperties = { height: 28, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", padding: "0 10px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
 const segBtnOn: CSSProperties = { borderColor: "var(--accent)", color: "var(--accent)", background: "var(--fill-1, rgba(0,0,0,.03))" };
@@ -1204,7 +1204,7 @@ const chatStatus: CSSProperties = { marginTop: 1, padding: "4px 7px", borderRadi
 const chatTimeline: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, padding: "16px 14px" };
 const chatBubble: CSSProperties = { maxWidth: "92%", padding: "10px 11px", borderRadius: 12, fontSize: 12.5, lineHeight: 1.52, whiteSpace: "pre-wrap" };
 const assistantBubble: CSSProperties = { alignSelf: "flex-start", background: "var(--fill-1, rgba(0,0,0,.035))", color: "var(--ink-soft)", border: "1px solid var(--paper-edge)" };
-const userBubble: CSSProperties = { alignSelf: "flex-end", background: "var(--accent)", color: "#fff" };
+const userBubble: CSSProperties = { alignSelf: "flex-end", background: "var(--accent)", color: "var(--white)" };
 const conversationContext: CSSProperties = { display: "block", width: "max-content", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 6, padding: "2px 5px", borderRadius: 4, background: "color-mix(in srgb, currentColor 14%, transparent)", fontSize: 10.5, fontWeight: 800 };
 const liveActivityCard: CSSProperties = { alignSelf: "flex-start", width: "100%", padding: 11, borderRadius: 12, border: "1px solid var(--accent)", background: "var(--fill-1, rgba(0,0,0,.035))", color: "var(--ink)" };
 const liveActivityHeader: CSSProperties = { display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, lineHeight: 1.35 };
@@ -1244,10 +1244,10 @@ const frameHolder: CSSProperties = { maxWidth: "100%", minHeight: 0, display: "f
 const APP_FRAME_WIDTH = 393;
 const appDeviceFrame: CSSProperties = {
   width: APP_FRAME_WIDTH, height: 852, padding: 12, borderRadius: 44,
-  background: "#111", boxShadow: "0 18px 48px rgba(0,0,0,.28)", flexShrink: 0,
+  background: "var(--black)", boxShadow: "0 18px 48px rgba(0,0,0,.28)", flexShrink: 0,
 };
 const appDeviceScreen: CSSProperties = { height: "100%", minHeight: 0, borderRadius: 32, border: "none" };
-const frameStyle: CSSProperties = { width: "100%", height: "100%", minHeight: 480, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "#fff", boxShadow: "var(--rd-shadow-1, 0 6px 24px rgba(0,0,0,.08))" };
+const frameStyle: CSSProperties = { width: "100%", height: "100%", minHeight: 480, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", boxShadow: "var(--rd-shadow-1, 0 6px 24px rgba(0,0,0,.08))" };
 const busyOverlay: CSSProperties = { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "color-mix(in srgb, var(--paper) 55%, transparent)", zIndex: 5 };
 const busyCard: CSSProperties = { padding: "10px 18px", borderRadius: 10, background: "var(--paper)", border: "1px solid var(--paper-edge)", fontSize: 13, fontWeight: 800, color: "var(--ink)" };
 const canvasEmptyState: CSSProperties = { margin: "auto", color: "var(--muted-deep)", fontSize: 13, textAlign: "center" };

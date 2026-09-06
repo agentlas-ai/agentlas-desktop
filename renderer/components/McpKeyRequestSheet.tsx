@@ -175,8 +175,8 @@ export function McpKeyRequestSheet({
           width: var(--popup-3-width);
           max-height: min(70vh, 560px);
           overflow-y: auto;
-          background: var(--rd-bg, #14151a);
-          color: var(--rd-ink, #f3f4f8);
+          background: var(--rd-bg);
+          color: var(--rd-ink);
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
           border-radius: 16px;
           padding: 16px 18px;
@@ -209,8 +209,8 @@ export function McpKeyRequestSheet({
           font-weight: 800;
           padding: 2px 9px;
           border-radius: 999px;
-          background: var(--rd-accent, #7c7cff);
-          color: #fff;
+          background: var(--rd-accent);
+          color: var(--white);
         }
         .mkr-timer {
           font-size: 12px;
@@ -245,7 +245,7 @@ export function McpKeyRequestSheet({
         }
         .mkr-setup {
           font-size: 12px;
-          color: var(--rd-accent, #7c7cff);
+          color: var(--rd-accent);
           text-decoration: none;
         }
         .mkr-field {
@@ -263,7 +263,7 @@ export function McpKeyRequestSheet({
           border-radius: 8px;
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.14));
           background: rgba(255, 255, 255, 0.04);
-          color: var(--rd-ink, #f3f4f8);
+          color: var(--rd-ink);
           padding: 8px 10px;
           font-size: 13px;
           font-family: ui-monospace, Menlo, monospace;
@@ -286,7 +286,7 @@ export function McpKeyRequestSheet({
           cursor: pointer;
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.14));
           background: none;
-          color: var(--rd-ink, #f3f4f8);
+          color: var(--rd-ink);
         }
         .mkr-actions button:disabled {
           opacity: 0.5;
@@ -296,8 +296,8 @@ export function McpKeyRequestSheet({
           margin-right: auto;
         }
         .mkr-actions .save {
-          background: var(--rd-accent, #7c7cff);
-          color: #fff;
+          background: var(--rd-accent);
+          color: var(--white);
           border-color: transparent;
         }
         .mkr-one {
@@ -358,7 +358,7 @@ export function McpKeyRequestSheet({
         .mkr-one .mkr-actions .save {
           border-color: var(--one-sheet-primary);
           background: var(--one-sheet-primary);
-          color: #fff;
+          color: var(--white);
         }
       `}</style>
     </>

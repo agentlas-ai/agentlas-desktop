@@ -72,17 +72,35 @@ export function ToolApprovalSheet() {
           pointer-events: none;
         }
         .tab > * { pointer-events: auto; }
+        :global(body:has([aria-labelledby="work-onboarding-title"])) .tab {
+          top: 100px;
+          bottom: auto;
+          z-index: 1401;
+        }
         .tab-pill {
           display: inline-flex; align-items: center; gap: 8px;
           padding: 8px 12px; border-radius: 999px;
-          border: 1px solid var(--one-sheet-primary, #2f6f4f);
-          background: var(--surface, #fff); color: inherit; font-size: 13px; cursor: pointer;
+          border: 1px solid var(--accent-strong);
+          background: var(--paper); color: var(--ink); font-size: 13px; cursor: pointer;
           box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
         }
-        .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--one-sheet-primary, #2f6f4f); }
+        .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong); }
         .tab-cards {
-          background: var(--surface, #fff); border-radius: 14px; padding: 4px 8px;
+          background: var(--paper); border-radius: 14px; padding: 4px 8px;
           box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16); max-height: 60vh; overflow: auto;
+        }
+        @media (max-width: 600px) {
+          .tab {
+            right: 16px;
+            left: 16px;
+            max-width: none;
+            align-items: stretch;
+          }
+          :global(body:has([aria-labelledby="work-onboarding-title"])) .tab { top: 126px; bottom: auto; }
+          :global(body:has([data-testid="tool-approval-badge"]) [aria-labelledby="work-onboarding-title"] > section > main) {
+            padding-top: 88px;
+          }
+          .tab-pill { justify-content: center; text-align: center; }
         }
       `}</style>
     </div>

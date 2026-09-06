@@ -418,7 +418,9 @@ export class ScienceEvidenceGraphService {
           population: plan.version.document.population || null,
           outcome: plan.version.document.data.outcomeVariables.join(", ") || null,
           method: plan.version.document.model?.family ?? plan.version.document.design.studyType,
-          datasetOrSetting: plan.version.document.data.inputs.map((item) => item.artifactId).join(", ") || null,
+          datasetOrSetting: plan.version.document.data.inputs.map((item) => item.artifactId).join(", ")
+            || plan.version.document.data.acquisition?.sources.map((source) => `${source.provider}: ${source.sourceRefs.join(", ")}`).join("; ")
+            || null,
         },
         evidenceScope: "human",
       }));

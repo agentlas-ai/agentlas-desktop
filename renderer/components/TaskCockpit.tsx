@@ -36,7 +36,7 @@ import type {
 } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
-import { normalizeToolCall } from "@shared/tool-call-detail";
+import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-detail";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -68,6 +68,14 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
+import {
+  appendChatFileMarker,
+  chatFileItem,
+  chatFilesBridge,
+  parseChatFileMessage,
+  type ChatFileDraft,
+  type ChatFileItem,
+} from "@/lib/chat-files";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -98,17 +106,28 @@ function receiptRecoveryMessage(
   if (!receipt || receipt.status === "completed" || receipt.status === "running" || receipt.status === "cancelling") {
     return null;
   }
-  const text = receipt.status === "cancelled"
+  const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
+  const baseText = receipt.status === "cancelled"
     ? (locale === "ko"
       ? "이전 모델 실행이 최종 답변 전에 취소되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
       : "The previous model turn was cancelled before a final response. Your last instruction and conversation are preserved.")
     : (locale === "ko"
       ? "이전 모델 실행이 최종 답변 전에 중단되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
       : "The previous model turn stopped before a final response. Your last instruction and conversation are preserved.");
+  const errorCode = receipt.errorCode?.trim();
+  const errorMessage = receipt.errorMessage?.trim();
+  const failure = isFailure && (errorCode || errorMessage)
+    ? { code: errorCode || "runtime_error", message: errorMessage || baseText }
+    : undefined;
+  const failureDetail = isFailure && (errorMessage || errorCode)
+    ? `\n${locale === "ko" ? "실패 사유" : "Failure reason"}: ${errorMessage || (locale === "ko" ? "실행 오류" : "Runtime error")}${errorCode ? ` [${errorCode}]` : ""}`
+    : "";
+  const text = `${isFailure ? "⚠️ " : ""}${baseText}${failureDetail}`;
   return {
     id: `run-recovery:${receipt.runId}:${receipt.status}`,
     role: "system",
     text,
+    ...(failure ? { failure } : {}),
   };
 }
 
@@ -498,6 +517,10 @@ const RIGHT_PANEL_OVERLAY_MAX_VIEWPORT = 760;
  */
 const CHAT_COLUMN_RESERVED_WIDTH = 274 + RIGHT_PANEL_MIN_WIDTH;
 const RIGHT_PANEL_RESULT_RATIO = 0.432;
+/** 좌측 사이드바 실측 폭 — 대화 열을 계산할 때 먼저 빼 둔다. */
+const CHAT_SIDEBAR_WIDTH = 274;
+/** 한국어 본문이 한 줄에 충분히 들어가는 최소 대화 열 폭(실측 기준). */
+const MIN_READABLE_CHAT_COLUMN = 520;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
 const RIGHT_PANEL_HEIGHT_KEY = "agentlas.chat.right_panel_height";
 
@@ -552,7 +575,16 @@ function clampRightPanelWidth(width: number): number {
     ? RIGHT_PANEL_MAX_WIDTH
     : window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
       ? Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 40)
-      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - CHAT_COLUMN_RESERVED_WIDTH);
+      /*
+       * ★남는 자리는 대화 몫부터 뗀다(2026-09-04 실측).
+       *
+       * 예전 식(innerWidth - 274 - 레일최소)은 **레일이 최소 320 을 받도록** 남겨 두고
+       * 나머지를 대화에 줬다. 그래서 1024px 창에서 레일 430 · 작성창 288 이 됐다 —
+       * 같은 폭에서 One 은 작성창 720 을 지킨다(레일이 224 로 줄어든다).
+       * 이제 대화가 읽을 수 있는 폭을 먼저 떼고, 그러고도 레일이 자기 최소보다 작아지면
+       * 레일 최소가 이긴다(둘 다는 못 지키는 폭에서의 마지막 방어선).
+       */
+      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - CHAT_SIDEBAR_WIDTH - MIN_READABLE_CHAT_COLUMN);
   return Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
@@ -562,7 +594,18 @@ function preferredRichResultWidth(): number {
   // 흩어져 있어 한 곳만 고치면 반쪽만 착지했다.
   const requested = window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
     ? Math.round(window.innerWidth * 0.86)
-    : Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO);
+    /*
+     * ★결과가 커도 대화가 읽을 수 있어야 한다(2026-09-04 실측).
+     *
+     * 비율(0.432)만 보고 넓히면 1240px 창에서 레일 536 · 작성창 398 이 됐다. 한국어 본문이
+     * 한 줄에 서른 자쯤에서 꺾이는 폭이다(같은 창에서 One 은 720). 그래서 비율은 그대로 두되
+     * **대화 열의 최소 폭을 먼저 떼어 놓고** 남는 만큼만 결과에 준다. 큰 화면에서는 예전처럼
+     * 비율이 이기고, 좁은 화면에서만 이 상한이 걸린다.
+     */
+    : Math.min(
+        Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO),
+        window.innerWidth - CHAT_SIDEBAR_WIDTH - MIN_READABLE_CHAT_COLUMN,
+      );
   return clampRightPanelWidth(requested);
 }
 
@@ -848,19 +891,22 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
 }
 
 function historyEntryToStreamMessage(entry: { id: string; role: string; text: string; imageDataUrls?: string[] }): StreamMessage {
+  const parsedFiles = parseChatFileMessage(entry.text);
   const role: StreamMessage["role"] =
     entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
   if (role !== "agent") {
-    return { id: entry.id, role, text: entry.text, imageDataUrls: entry.imageDataUrls };
+    return { id: entry.id, role, text: parsedFiles.visibleText, imageDataUrls: entry.imageDataUrls, chatFileGroupIds: parsedFiles.groupIds };
   }
-  const parsed = extractQuestions(entry.text, entry.id);
+  const parsed = extractQuestions(parsedFiles.visibleText, entry.id);
   const setup = stripMultimodalSetup(parsed.text);
   return {
     id: entry.id,
     role,
     text: setup.text,
     imageDataUrls: entry.imageDataUrls,
+    chatFileGroupIds: parsedFiles.groupIds,
     questions: parsed.questions.length > 0 ? parsed.questions : undefined,
+    questionSourceMessageId: parsed.questions.length > 0 ? entry.id : undefined,
     needsMultimodalSetup: setup.needsSetup || undefined,
   };
 }
@@ -881,20 +927,24 @@ function reconcileTranscriptSnapshot(
   if (current.some((message) => message.busy || message.streaming)) return current;
   const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
   // History rows intentionally store only the assistant text. Preserve the
-  // rich tool steps that arrived live when a terminal reconciliation races
-  // the history read; otherwise the MCP card flashes and disappears as soon
-  // as the run finishes.
+  // rich tool steps and host notices that arrived live when a terminal
+  // reconciliation races the history read; otherwise the MCP card or a
+  // runtime-fallback disclosure flashes and disappears as soon as the run
+  // finishes.
   const richBySignature = new Map<string, StreamMessage>();
   for (const message of current) {
-    if (message.role !== "agent" || !message.steps?.some((step) => step.tool && step.result)) continue;
+    const hasRichSteps = message.steps?.some((step) => step.tool && step.result) === true;
+    const hasNotices = (message.notices?.length ?? 0) > 0;
+    if (message.role !== "agent" || (!hasRichSteps && !hasNotices)) continue;
     richBySignature.set(signature(message), message);
   }
   const durableWithRichSteps = durable.map((message) => {
     const live = richBySignature.get(signature(message));
-    return live?.steps?.length
+    return live
       ? {
           ...message,
-          steps: live.steps,
+          ...(live.steps?.length ? { steps: live.steps } : {}),
+          ...(live.notices?.length ? { notices: live.notices } : {}),
           ...(live.finishedAt != null ? { finishedAt: live.finishedAt } : {}),
           ...(live.tokens != null ? { tokens: live.tokens } : {}),
         }
@@ -946,15 +996,18 @@ function preserveRichStepsBySignature(
   const richBySignature = new Map<string, StreamMessage>();
   for (const message of current) {
     const steps = Array.isArray(message.steps) ? message.steps : [];
-    if (message.role !== "agent" || !steps.some((step) => step.tool && step.result)) continue;
+    const hasRichSteps = steps.some((step) => (step.tool && step.result) || step.reasoning === true);
+    const hasNotices = (message.notices?.length ?? 0) > 0;
+    if (message.role !== "agent" || (!hasRichSteps && !hasNotices)) continue;
     richBySignature.set(signature(message), message);
   }
   return durable.map((message) => {
     const live = richBySignature.get(signature(message));
-    return live?.steps?.length
+    return live
       ? {
           ...message,
-          steps: live.steps,
+          ...(live.steps?.length ? { steps: live.steps } : {}),
+          ...(live.notices?.length ? { notices: live.notices } : {}),
           ...(live.finishedAt != null ? { finishedAt: live.finishedAt } : {}),
           ...(live.tokens != null ? { tokens: live.tokens } : {}),
         }
@@ -972,6 +1025,23 @@ function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
   const steps: StreamStep[] = [];
   const byToolId = new Map<string, number>();
   for (const event of events) {
+    if (event.kind === "mcp_reasoning" && event.payload?.reasoningPhase === "end") {
+      const text = reasoningSummary(
+        typeof event.payload.reasoningText === "string" ? event.payload.reasoningText : undefined,
+      );
+      if (text) {
+        const createdAt = Date.parse(event.ts);
+        steps.push({
+          id: `ledger-reasoning:${event.id}`,
+          kind: "thinking",
+          text,
+          reasoning: true,
+          activity: "status",
+          ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+        });
+      }
+      continue;
+    }
     if (event.kind !== "mcp_tool-use") continue;
     const payload = event.payload ?? {};
     const toolName = typeof payload.toolName === "string" ? payload.toolName.trim() : "";
@@ -1020,6 +1090,34 @@ function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
  * 열면 첫 실행에서 만든 파일이 없어졌다(2026-09-03 실측: 산출물 2개 중 1개만 남음).
  * One 은 이미 같은 원장(runLedger.chatTimeline)으로 지난 턴을 되살린다.
  */
+/**
+ * 추론 텍스트에서 상태줄에 실을 한 줄을 고른다.
+ *
+ * 모델의 사고는 문단으로 흐르므로 **마지막 완성 문장**이 지금 하는 일에 가장 가깝다.
+ * 마크다운 장식과 제어 표식은 걷어내고, 너무 길면 자른다. 뽑을 것이 없으면 null 이라
+ * 호출부가 예전 문구로 되돌아간다.
+ */
+function reasoningHeadline(text: string | undefined): string | null {
+  if (!text) return null;
+  const lines = text
+    .split(/\n+/)
+    .map((line) => line.replace(/^[#>*\-\s]+/, "").replace(/[*_`]/g, "").trim())
+    .filter((line) => line.length >= 4 && !line.startsWith("{") && !line.startsWith("["));
+  const last = lines[lines.length - 1];
+  if (!last) return null;
+  return last.length > 90 ? `${last.slice(0, 89)}…` : last;
+}
+
+/** Work 활동 타임라인에 남길 공개 reasoning summary. */
+function reasoningSummary(text: string | undefined): string | null {
+  const clean = text
+    ?.replace(/\u0000/g, "")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+  if (!clean) return null;
+  return clean.length > 2_000 ? `${clean.slice(0, 1_999)}…` : clean;
+}
+
 function stepsByMessageFromTimeline(
   history: readonly { id: string; role: string; createdAt?: string }[],
   timeline: readonly { receipt: InvocationRunReceipt; events: RunEventUi[] }[],
@@ -1065,10 +1163,13 @@ function attachMcpStepsToLatestAgent(messages: StreamMessage[], steps: StreamSte
 async function fetchCommittedReplies(
   api: ReturnType<typeof ipc>,
   chatId: string,
-): Promise<Map<string, string>> {
+): Promise<Map<string, { reply: string; continuationRunId?: string }>> {
   try {
     const rows = await api?.confirm?.committedAnswers?.(chatId);
-    return new Map((rows ?? []).map((row) => [row.sourceMessageId, row.reply]));
+    return new Map((rows ?? []).map((row) => [row.sourceMessageId, {
+      reply: row.reply,
+      continuationRunId: row.continuationRunId,
+    }]));
   } catch {
     return new Map();
   }
@@ -1076,14 +1177,31 @@ async function fetchCommittedReplies(
 
 function restoreAnsweredQuestions(
   messages: StreamMessage[],
-  committedReplies?: Map<string, string>,
+  committedReplies?: Map<string, { reply: string; continuationRunId?: string }>,
 ): StreamMessage[] {
   return messages.map((msg, i) => {
     if (!msg.questions || msg.questions.length === 0) return msg;
-    // 마지막 메시지 = 아직 답할 차례 — 단, 답변 확정 영수증이 있으면 이미 답한 질문이다.
-    // (후속 user 메시지 persist가 실행 분기에서 유실돼도 시트를 다시 열지 않는다.)
-    const committedReply = committedReplies?.get(msg.id)?.trim() ?? "";
-    if (i >= messages.length - 1 && !committedReply) return msg;
+    // Last assistant question + committed receipt means Main accepted the
+    // choice but no continuation user turn became durable. Reopen with the
+    // exact saved reply instead of losing it or inventing a second answer.
+    const committed = committedReplies?.get(msg.id);
+    const committedReply = committed?.reply.trim() ?? "";
+    if (i >= messages.length - 1) {
+      return committedReply ? {
+        ...msg,
+        pendingCommittedReply: committedReply,
+        pendingContinuationRunId: committed?.continuationRunId,
+        pendingContinuationAutoResume: Boolean(committed?.continuationRunId),
+      } : msg;
+    }
+    if (committedReply) {
+      // An accepted receipt proves the batch was answered, not how arbitrary
+      // free text should be split back into questions. Preserve that boundary.
+      return {
+        ...msg,
+        questions: msg.questions.map((q) => q.answer?.length ? q : { ...q, answer: ["✓"] }),
+      };
+    }
     const nextUser = i >= messages.length - 1
       ? undefined
       : messages.slice(i + 1).find((m) => m.role === "user");
@@ -1211,6 +1329,55 @@ function ChatPage() {
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
+  const hydratedChatFileGroupsRef = useRef(new Map<string, ChatFileItem[]>());
+  useEffect(() => {
+    hydratedChatFileGroupsRef.current.clear();
+  }, [chatId]);
+  useEffect(() => {
+    if (!chatId) return;
+    const bridge = chatFilesBridge();
+    if (!bridge) return;
+    const groupIds = [...new Set(messages.flatMap((message) => message.chatFileGroupIds ?? []))]
+      .filter((groupId) => !hydratedChatFileGroupsRef.current.has(groupId));
+    if (groupIds.length === 0) return;
+    let cancelled = false;
+    void Promise.all(groupIds.map(async (groupId) => {
+      const stored = await bridge.listGroup({ chatId, groupId });
+      return [groupId, stored.map((file) => chatFileItem(file, "user-attachment"))] as const;
+    })).then((groups) => {
+      if (cancelled) return;
+      for (const [groupId, files] of groups) hydratedChatFileGroupsRef.current.set(groupId, files);
+      setMessages((current) => current.map((message) => {
+        const files = (message.chatFileGroupIds ?? []).flatMap((groupId) => hydratedChatFileGroupsRef.current.get(groupId) ?? []);
+        return files.length > 0 ? { ...message, chatFiles: files } : message;
+      }));
+    }).catch(() => {
+      if (!cancelled) setSessionNotice(locale === "ko" ? "첨부 파일 기록을 불러오지 못했습니다." : "Attachment records could not be loaded.");
+    });
+    return () => { cancelled = true; };
+  }, [chatId, locale, messages]);
+  // A chat transition renders once with the previous transcript while the new
+  // history is loading. Rich-output auto-restore must wait for the current
+  // chat's snapshot, or the previous chat's latest artifact can briefly appear
+  // in the new chat.
+  const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
+  const currentChatIdRef = useRef(chatId);
+  const chatGenerationRef = useRef(0);
+  if (currentChatIdRef.current !== chatId) {
+    currentChatIdRef.current = chatId;
+    chatGenerationRef.current += 1;
+  }
+  const chatGeneration = chatGenerationRef.current;
+  const chatMountedRef = useRef(true);
+  useEffect(() => {
+    chatMountedRef.current = true;
+    return () => { chatMountedRef.current = false; };
+  }, []);
+  // A -> B -> A is a new view even though the chat id matches again. Pending
+  // IPC may settle durably for the old view, but must not mutate the new one.
+  const isCurrentChat = useCallback(() => chatMountedRef.current
+    && currentChatIdRef.current === chatId
+    && chatGenerationRef.current === chatGeneration, [chatId, chatGeneration]);
   const [busy, setBusy] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   // Every renderer-owned transcript mutation advances this clock. Async
@@ -1329,6 +1496,7 @@ function ChatPage() {
       optimisticMessageId: string;
       opts?: {
         images?: ImageAttachment[];
+        files?: ChatFileDraft[];
         permissions?: PermissionLevel;
         planMode?: boolean;
         goalMode?: boolean;
@@ -1434,6 +1602,41 @@ function ChatPage() {
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
+  const rightPanelPreferredWidthRef = useRef(rightPanelWidth);
+  const requestReadableRightPanelWidth = useCallback((requested = preferredRichResultWidth()) => {
+    setRightPanelWidth((current) => Math.max(current, clampRightPanelWidth(requested)));
+  }, []);
+  const restorePreferredRightPanelWidth = useCallback(() => {
+    setRightPanelWidth(clampRightPanelWidth(rightPanelPreferredWidthRef.current));
+  }, []);
+  const clearRightPanelFilePreview = useCallback(() => {
+    setMediaPreview(null);
+    restorePreferredRightPanelWidth();
+  }, [restorePreferredRightPanelWidth]);
+  const readableRightPanelActive = rightPanelOpen && rightPanelTab === "panel" && Boolean(mediaPreview);
+  /*
+   * ★창이 좁아지면 레일도 같이 줄어든다(2026-09-04 실측).
+   *
+   * 폭은 열 때 한 번만 계산했고 창 크기 변화에는 반응하지 않았다. 그래서 1240px 에서
+   * 결과를 연 뒤 1024px 로 줄이면 레일은 446 을 그대로 붙들고 작성창이 **272px** 로
+   * 눌렸다 — 고치기 전(398)보다 나빴다. 저장은 하지 않는다: 창 크기에 맞춰 줄어든 값은
+   * 사용자가 고른 폭이 아니라 지금 화면이 허용하는 폭이다.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onResize = () => setRightPanelWidth((current) => {
+      const clamped = clampRightPanelWidth(current);
+      // A file/result rail may contract while the window is narrow, but that
+      // contraction is not a new user preference. When room returns, restore
+      // the same temporary readable width that opening the file requested.
+      const next = readableRightPanelActive
+        ? Math.max(clamped, preferredRichResultWidth())
+        : clamped;
+      return next === current ? current : next;
+    });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [readableRightPanelActive]);
   const [rightPanelHeight, setRightPanelHeight] = useState<number | null>(() => readRightPanelHeight());
   const workspaceOpen = rightPanelOpen && rightPanelTab === "file";
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
@@ -1455,6 +1658,19 @@ function ChatPage() {
   const [agentScreen, setAgentScreen] = useState<{ mode: "browser" | "computer" } | null>(null);
   const [questionCommitPending, setQuestionCommitPending] = useState(false);
   const questionCommitPendingRef = useRef<string | null>(null);
+  const continuationResumeAttemptsRef = useRef(new Set<string>());
+  const continuationTransportRetryableRef = useRef(new Set<string>());
+  const [continuationReconnectEpoch, setContinuationReconnectEpoch] = useState(0);
+  useEffect(() => { continuationResumeAttemptsRef.current.clear(); }, [chatId]);
+  useEffect(() => {
+    const onOnline = () => {
+      if (continuationTransportRetryableRef.current.size === 0) return;
+      continuationResumeAttemptsRef.current.clear();
+      setContinuationReconnectEpoch((value) => value + 1);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
   const [recap, setRecap] = useState<{ summary: string; count: number } | null>(null);
   const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
@@ -1509,7 +1725,11 @@ function ChatPage() {
         || entry.baseKey !== baseKey
         || entry.stepsKey !== stepsKey
       ) {
+        /* 도구 기록이 같은 이름을 절대경로로 갖고 있으면 그 기록이 정본이다. 산문에서
+           찍어 만든 경로는 실행 폴더를 잘못 고른 "만든 적 없는 파일"일 수 있다. */
+        const recordedPaths = [...toolPaths, ...outputToolPaths];
         const textPreviews = linkedFileArtifactsInText(text, mediaBasePaths)
+          .filter((file) => !shadowsToolRecordedPath(file.path, recordedPaths, file.href))
           .map((file) => workspacePreviewFromLinkedFile(file));
         const toolPreviews = toolPaths
           .map((filePath) => workspacePreviewFromLinkedFile(linkedFileArtifactFromPath(filePath)));
@@ -1549,6 +1769,13 @@ function ChatPage() {
     }
     return { files: out, outputs: outputOut };
   }, [messages, mediaBasePaths]);
+  const hasViewablePanelContent = Boolean(
+    artifact
+    || surface
+    || mediaPreview
+    || agentScreen
+    || linkedOutputFiles.length > 0
+  );
 
   // 사용자가 직접 패널을 접고/펴면 선호값을 영속화 (자동 노출과 구분).
   const setWorkspaceOpenPersisted = useCallback((open: boolean) => {
@@ -1576,18 +1803,25 @@ function ChatPage() {
     setRightPanelOpen(true);
     writeRightPanelPreference(true, tab);
     if (tab === "panel") {
-      setRightPanelWidth((current) => {
-        const next = Math.max(current, preferredRichResultWidth());
-        if (next !== current) writeRightPanelWidth(next);
-        return next;
-      });
+      /*
+       * ★자동으로 넓힌 폭은 사용자의 선택이 아니므로 저장하지 않는다(2026-09-03 실측).
+       *
+       * 예전에는 여기서 넓힌 값을 그대로 기록했고, 넓히기는 Math.max 라 줄어들지 않았다.
+       * 그래서 결과를 한 번 연 것만으로 레일이 1240px 창에서 536px 을 영구 점유했고,
+       * 이후 **모든 대화**가 작성창 398px 로 눌렸다(같은 창에서 One 은 레일 252 · 작성창 720).
+       * 빈 레일이 대화보다 넓은 화면은 그렇게 만들어졌다. 수리 뒤 새 대화는 레일 392 ·
+       * 작성창 542 로 돌아온다(실측). 손으로 끌어 정한 폭은 그대로 저장된다 — 그건 선택이다.
+       */
+      requestReadableRightPanelWidth();
     }
-  }, []);
+  }, [requestReadableRightPanelWidth]);
   const closeRightPanel = useCallback(() => {
     setRightPanelOpen(false);
+    restorePreferredRightPanelWidth();
     writeRightPanelPreference(false, rightPanelTab);
-  }, [rightPanelTab]);
+  }, [restorePreferredRightPanelWidth, rightPanelTab]);
   const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview) => {
+    const requestChatId = chatId;
     let next = preview;
     const api = ipc();
     /* ★읽을 경로는 `path` 하나가 아니라 후보 전체에서 고른다.
@@ -1619,11 +1853,14 @@ function ChatPage() {
     openPanelTab("panel");
     const shouldReadText =
       api &&
-      Boolean(chatId) &&
+      Boolean(requestChatId) &&
       Boolean(readablePath) &&
       ["markdown", "json", "text", "browser"].includes(preview.viewerKind);
     if (shouldReadText && readablePath) {
-      const text = await api.fs.readTextFile(readablePath, { kind: "chat-assets", chatId }).catch(() => null);
+      const text = await api.fs.readTextFile(readablePath, { kind: "chat-assets", chatId: requestChatId }).catch(() => null);
+      // The user may have moved to another chat while Main was reading. Do
+      // not let that late response put the old file back into the new rail.
+      if (currentChatIdRef.current !== requestChatId) return;
       if (text) {
         next = {
           ...next,
@@ -1633,9 +1870,15 @@ function ChatPage() {
           truncated: text.truncated,
           reason: text.reason,
         };
+      } else {
+        // A persisted transcript link can outlive the file it referenced.
+        // Keep the tab and show an explicit unavailable state instead of an
+        // empty viewer that looks like a successfully opened blank document.
+        next = { ...next, content: "", available: false };
       }
     }
     // 읽은 내용으로 채운다. 자리는 위에서 이미 열었으므로 여기서 다시 열지 않는다.
+    if (currentChatIdRef.current !== requestChatId) return;
     setMediaPreview(next);
   }, [chatId, openPanelTab]);
 
@@ -1645,7 +1888,7 @@ function ChatPage() {
   // respected until a different output key arrives.
   const autoPresentedWorkspaceOutputRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!chatId || busy || linkedOutputFiles.length === 0) return;
+    if (!chatId || hydratedChatId !== chatId || busy || linkedOutputFiles.length === 0) return;
     const candidate = [...linkedOutputFiles].reverse().find((file) => (
       ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]
         .includes(file.viewerKind)
@@ -1655,9 +1898,24 @@ function ChatPage() {
     if (autoPresentedWorkspaceOutputRef.current === key) return;
     autoPresentedWorkspaceOutputRef.current = key;
     void openWorkspaceFilePreview(candidate);
-  }, [busy, chatId, linkedOutputFiles, openWorkspaceFilePreview]);
+  }, [busy, chatId, hydratedChatId, linkedOutputFiles, openWorkspaceFilePreview]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
+  }, [openWorkspaceFilePreview]);
+  const openChatFile = useCallback((file: ChatFileItem) => {
+    void (async () => {
+      let preview = file.viewer;
+      if (file.kind === "file" && file.fileUrl && ["markdown", "json", "text", "browser"].includes(preview.viewerKind)) {
+        try {
+          const response = await fetch(file.fileUrl);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          preview = { ...preview, content: await response.text(), available: true };
+        } catch {
+          preview = { ...preview, available: false, content: "" };
+        }
+      }
+      await openWorkspaceFilePreview(preview);
+    })();
   }, [openWorkspaceFilePreview]);
 
   useEffect(() => {
@@ -1675,6 +1933,7 @@ function ChatPage() {
   }, []);
   const resizeRightPanel = useCallback((width: number) => {
     const next = clampRightPanelWidth(width);
+    rightPanelPreferredWidthRef.current = next;
     setRightPanelWidth(next);
     writeRightPanelWidth(next);
   }, []);
@@ -1958,10 +2217,32 @@ function ChatPage() {
             if (phase === "start") {
               return { ...msg, thinking: { active: true, startedAt: Date.now(), cumMs: th.cumMs } };
             }
+            if (phase === "delta") {
+              // ★모델이 쓴 추론의 첫 줄을 상태줄에 싣는다 — 예전에는 이 텍스트를 버리고
+              //   시간만 기록해서 화면에 "생각 중…" 만 돌았다(One 은 이 줄을 보여준다).
+              const line = reasoningHeadline(ev.reasoning?.text);
+              return line ? { ...msg, thinking: { ...th, active: true, headline: line } } : msg;
+            }
             const dur = durationMs ?? (th.startedAt != null ? Date.now() - th.startedAt : 0);
+            const summary = reasoningSummary(ev.reasoning?.text);
+            const steps = msg.steps ?? [];
+            const nextSteps = summary && !steps.some((step) => step.reasoning === true && step.text === summary)
+              ? [
+                  ...steps,
+                  {
+                    id: uid(),
+                    kind: "thinking" as const,
+                    text: summary,
+                    reasoning: true,
+                    createdAt: Date.now(),
+                    activity: "status" as const,
+                  },
+                ]
+              : steps;
             return {
               ...msg,
               thinking: { active: false, cumMs: th.cumMs + dur, lastMs: dur },
+              steps: nextSteps,
             };
           }),
         );
@@ -2189,8 +2470,15 @@ function ChatPage() {
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
             const raw = ev.text ?? "";
-            const { text, questions } = extractQuestions(raw, msg.id);
-            const setup = stripMultimodalSetup(text);
+            const parsed = extractQuestions(raw, msg.id);
+            const projectedQuestions = ev.userDecisionRequest?.schemaVersion === "agentlas.user-decision-request.v1"
+              ? ev.userDecisionRequest.questions.map((question, index) => ({
+                  id: `${msg.id}-q${index}`,
+                  ...question,
+                }))
+              : [];
+            const questions = projectedQuestions.length > 0 ? projectedQuestions : parsed.questions;
+            const setup = stripMultimodalSetup(parsed.text);
             return {
               ...msg,
               text: setup.text,
@@ -2213,7 +2501,15 @@ function ChatPage() {
                   createdAt: Date.now(),
                 },
               ],
-              questions: questions.length > 0 ? questions : msg.questions,
+              // The terminal event is authoritative. A completed partial fence
+              // must not survive a divergent/malformed final or cancellation.
+              questions: questions.length > 0 ? questions : undefined,
+              questionSourceMessageId: questions.length > 0
+                ? ev.userDecisionRequest?.sourceMessageId ?? msg.questionSourceMessageId
+                : undefined,
+              pendingCommittedReply: undefined,
+              pendingContinuationRunId: undefined,
+              pendingContinuationAutoResume: undefined,
             };
           }),
         );
@@ -2277,11 +2573,24 @@ function ChatPage() {
         });
       } else if (ev.kind === "error") {
         // 어느 경로든 이미 스트리밍된 텍스트는 지우지 않고 완료된 버블로 남긴다.
-        // Steering is not an error path: Main queues it without cancelling this run.
+        // Interrupt steering intentionally cancels only the superseded provider turn.
+        // The queued user instruction remains authoritative and Main immediately owns
+        // the replacement run, so this internal cancellation must not become a red
+        // user-facing failure card.
         const wasUserCancel = cancelRequestedRef.current;
         const terminalStatus = wasUserCancel
           ? (locale === "ko" ? "취소됨" : "Cancelled")
           : (locale === "ko" ? "중단됨" : "Stopped");
+        const failureCode = ev.error?.code?.trim() || "runtime_error";
+        const wasSteeringCancel = !wasUserCancel
+          && failureCode.toLowerCase() === "cancelled"
+          && steerQueueRef.current.length > 0;
+        const failureMessage = ev.error?.message?.trim()
+          || (locale === "ko" ? "실행이 완료되지 않았습니다." : "The run did not complete.");
+        const failureId = `run-error:${placeholderId}`;
+        const failureText = locale === "ko"
+          ? `⚠️ 작업이 완료되지 않았습니다.\n사유: ${failureMessage} [${failureCode}]`
+          : `⚠️ The work did not complete.\nReason: ${failureMessage} [${failureCode}]`;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
             if (msg.id !== placeholderId) return [msg];
@@ -2293,9 +2602,28 @@ function ChatPage() {
               finishedAt: Date.now(),
               thinking: msg.thinking ? { ...msg.thinking, active: false } : msg.thinking,
               pipeline: completePipeline(msg.pipeline),
+              // A failed/cancelled run cannot leave a question extracted from
+              // an earlier partial chunk eligible for confirmation or reload.
+              questions: undefined,
+              questionSourceMessageId: undefined,
+              pendingCommittedReply: undefined,
+              pendingContinuationRunId: undefined,
+              pendingContinuationAutoResume: undefined,
             }];
           });
-        setMessages(keepPlaceholder);
+        setMessages((current) => {
+          const settled = keepPlaceholder(current);
+          if (wasUserCancel || wasSteeringCancel || settled.some((message) => message.id === failureId)) return settled;
+          return [
+            ...settled,
+            {
+              id: failureId,
+              role: "system",
+              text: failureText,
+              failure: { code: failureCode, message: failureMessage },
+            },
+          ];
+        });
         setBusy(false);
         setCancelPending(false);
         cancelRequestedRef.current = false;
@@ -2330,19 +2658,20 @@ function ChatPage() {
   }, [consumeEvent]);
 
   // runId 채널 구독 — send()와 재접속 경로 공용. lastStatusRef를 받으면(리플레이 후) 이어서 쓴다.
-  // deps [] 로 안정화(consumeEvent는 ref로 접근) — 한 번 건 구독이 렌더 도중 교체돼 이벤트를 흘리지 않게.
+  // Stable within a chat generation; a queued event from an older view cannot
+  // reach the new view's consumeEvent ref, even after A -> B -> A.
   const subscribeRun = useCallback(
     (runId: string, placeholderId: string, lastStatusRef: { text: string } = { text: "" }) => {
       const api = ipc();
       const events = ipcEvents();
-      if (!api || !events) return;
+      if (!api || !events || !isCurrentChat()) return;
       const channel = api.invoke.eventChannel(runId);
       subRef.current?.();
-      subRef.current = events.on(channel, (ev: McpInvocationEvent) =>
-        consumeEventRef.current(ev, placeholderId, lastStatusRef),
-      );
+      subRef.current = events.on(channel, (ev: McpInvocationEvent) => {
+        if (isCurrentChat()) consumeEventRef.current(ev, placeholderId, lastStatusRef);
+      });
     },
-    [],
+    [isCurrentChat],
   );
 
   // Esc는 현재 보이는 우측 레일만 닫는다. 산출물 자체를 지우면 사용자가 작업을 잃은 것처럼 보인다.
@@ -2378,6 +2707,7 @@ function ChatPage() {
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
+    setHydratedChatId(null);
     transcriptRevisionRef.current += 1;
     // 이전 채팅 뷰를 캐시에 저장 — 되돌아올 때 히스토리 로드를 기다리지 않고 즉시 복원.
     const prevChatId = prevChatIdRef.current;
@@ -2392,6 +2722,9 @@ function ChatPage() {
     const restored = readChatViewSnapshot(chatId);
     setMessages(restored?.messages ?? []);
     setBusy(false);
+    questionCommitPendingRef.current = null;
+    setQuestionCommitPending(false);
+    continuationTransportRetryableRef.current.clear();
     setCancelPending(false);
     runIdRef.current = null;
     lastRunIdRef.current = null;
@@ -2406,6 +2739,7 @@ function ChatPage() {
     setArtifact(null);
     setSurface(null);
     setMediaPreview(null);
+    restorePreferredRightPanelWidth();
     setRightPanelOpen(false);
     setRightPanelTab("agent");
     setLiveAgents(restored?.liveAgents ?? {});
@@ -2425,7 +2759,50 @@ function ChatPage() {
       // 내용을 한 번 더 쓰는 것뿐이라 무해(멱등)하다.
       saveChatViewSnapshot(chatId, viewSnapshotRef.current);
     };
-  }, [chatId]);
+  }, [chatId, restorePreferredRightPanelWidth]);
+
+  // CLI auto-update가 현재 열려 있는 Work 대화에도 즉시 반영되게 한다. 대시보드는
+  // runtime store 방송을 듣지만, 이 화면이 초기 detect 결과만 붙들면 모델/바이너리가
+  // 바뀐 뒤 사용자가 모델을 한 번 더 눌러야 새 런타임이 보이는 것처럼 남는다.
+  useEffect(() => {
+    const api = ipc();
+    const events = ipcEvents();
+    if (!api || !events?.onStoreChanged || !chatId) return;
+    let generation = 0;
+    const refresh = () => {
+      const requestGeneration = ++generation;
+      void api.runtime.detect().then((list) => {
+        if (requestGeneration !== generation) return;
+        const selection = chat?.runtimeSelection ?? null;
+        const matched = selection
+          ? list.find(
+              (runtime) =>
+                runtime.kind === selection.kind &&
+                (!selection.backend || runtime.backend === selection.backend) &&
+                (!selection.source || runtime.source === selection.source),
+            )
+          : list.find((runtime) => runtime.active);
+        // A dead pin is handled by the metadata hydration path on re-entry. Do not
+        // blank an already usable header when a transient probe returns no match.
+        if (selection && !matched) return;
+        setActiveRuntime(
+          matched
+            ? {
+                ...matched,
+                active: true,
+                model: selection?.model ?? matched.model,
+                effort: selection?.effort ?? matched.effort,
+                longContextEnabled:
+                  selection?.longContext ?? matched.longContextEnabled,
+              }
+            : null,
+        );
+      }).catch(() => undefined);
+    };
+    return events.onStoreChanged((change) => {
+      if (change.entity === "runtime") refresh();
+    });
+  }, [chat?.runtimeSelection, chatId]);
 
   // The transcript is durable, so the Agent work panel must be durable too.
   // Rebuild terminal run activity from Main's redacted run ledger after a
@@ -2557,6 +2934,7 @@ function ChatPage() {
             : attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
           const recovery = receiptRecoveryMessage(receipt, locale);
           const restoredMessages = recovery ? [...historyWithMcp, recovery] : historyWithMcp;
+          setHydratedChatId(chatId);
           setMessages((current) => {
             if (transcriptRevisionRef.current !== hydrationRevision) return current;
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
@@ -2568,6 +2946,7 @@ function ChatPage() {
             return hasLiveDraft ? current : preserveRichStepsBySignature(current, restoredMessages);
           });
         }).catch(() => {
+          if (!cancelled) setHydratedChatId(chatId);
           if (!cancelled && requestedFocusMessageId) {
             setSessionNotice(
               locale === "ko"
@@ -2636,13 +3015,13 @@ function ChatPage() {
       void api.workspace.get(chatId).then((savedFolder) => {
         if (cancelled) return;
         const rightPanelPreference = readRightPanelPreference();
-        if (rightPanelPreference?.open) {
+        if (rightPanelPreference?.open && rightPanelPreference.tab !== "panel") {
           setRightPanelTab(rightPanelPreference.tab);
           setRightPanelOpen(true);
         } else if (!rightPanelPreference && savedFolder) {
           setRightPanelTab("file");
           setRightPanelOpen(true);
-        } else {
+        } else if (rightPanelPreference?.tab !== "panel") {
           setRightPanelOpen(false);
         }
         // ContinuityReceipt — 복원된 작업 폴더가 있을 때만 배너를 띄운다(없으면 null → 렌더 안 함).
@@ -3039,6 +3418,7 @@ function ChatPage() {
       userPrompt: string,
       opts?: {
         images?: ImageAttachment[];
+        files?: ChatFileDraft[];
         permissions?: PermissionLevel;
         planMode?: boolean;
         goalMode?: boolean;
@@ -3054,14 +3434,18 @@ function ChatPage() {
         /** Current session roster first; Agent Hub/Cloud only when the model identifies a capability gap. */
         sessionRouting?: boolean;
         stormbreakerMode?: boolean;
+        /** Main-owned exact Decision continuation; never used by ordinary sends. */
+        decisionContinuation?: { sourceMessageId: string; runId: string };
       },
     ) => {
       const api = ipc();
       const events = ipcEvents();
       if (
+        !isCurrentChat() ||
         !api ||
         !events ||
         !chat ||
+        chat.id !== chatId ||
         busy ||
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
@@ -3071,9 +3455,31 @@ function ChatPage() {
         // existing active contract instead of overwriting it, so a later
         // steering turn can never become the goal by accident.
         const defined = await api.chats.defineGoal(chat.id, userPrompt, locale).catch(() => null);
+        if (!isCurrentChat()) return false;
         if (defined) setGoalContext(defined);
       }
-      const routeInput = userPrompt;
+      let attachedChatFiles: ChatFileItem[] | undefined;
+      let boundUserPrompt = userPrompt;
+      if (opts?.files?.length) {
+        const bridge = chatFilesBridge();
+        if (!bridge) {
+          setSessionNotice(locale === "ko" ? "Desktop 파일 연결을 사용할 수 없어 첨부를 보내지 않았습니다." : "The attachment was not sent because the Desktop file bridge is unavailable.");
+          return false;
+        }
+        try {
+          const snapshot = await bridge.snapshot({ chatId: chat.id, files: opts.files });
+          if (!isCurrentChat()) return false;
+          attachedChatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
+          hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
+          boundUserPrompt = appendChatFileMarker(userPrompt, snapshot.groupId);
+        } catch (cause) {
+          if (!isCurrentChat()) return false;
+          const detail = cause instanceof Error ? cause.message : String(cause);
+          setSessionNotice(locale === "ko" ? `첨부를 보내지 않았습니다: ${detail}` : `The attachment was not sent: ${detail}`);
+          return false;
+        }
+      }
+      const routeInput = boundUserPrompt;
       const invocationPrompt = routeInput;
       const visiblePrompt = userPrompt;
       if (isPlaceholderTaskTitle(chat.title)) {
@@ -3081,6 +3487,7 @@ function ChatPage() {
         if (nextTitle) {
           try {
             const renamed = await api.chats.rename(chat.id, nextTitle);
+            if (!isCurrentChat()) return false;
             setChat(renamed);
             setTitleDraft(renamed.title);
             window.dispatchEvent(new Event("agentlas:tasks-changed"));
@@ -3090,6 +3497,7 @@ function ChatPage() {
           }
         }
       }
+      if (!isCurrentChat()) return false;
       const images = opts?.images;
       const placeholderId = uid();
       const imageDataUrls = images?.map(
@@ -3120,9 +3528,10 @@ function ChatPage() {
         if (!duplicate) effectiveTaskForceTargets.push(target);
       }
       transcriptRevisionRef.current += 1;
+      const userMessageId = uid();
       setMessages((m) => [
         ...m,
-        { id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls },
+        { id: userMessageId, role: "user" as const, text: visiblePrompt, imageDataUrls, chatFiles: attachedChatFiles },
         {
           id: placeholderId,
           role: "agent",
@@ -3185,7 +3594,7 @@ function ChatPage() {
 
       // runId를 렌더러가 먼저 생성하고 invoke 왕복 전에 구독한다(subscribe-before-trigger) —
       // 런타임이 즉시 emit하는 초기 이벤트도 절대 놓치지 않아 스트리밍/최종 답변이 라이브로 뜬다.
-      const runId = crypto.randomUUID();
+      const runId = opts?.decisionContinuation?.runId ?? crypto.randomUUID();
       runIdRef.current = runId;
       lastRunIdRef.current = runId;
       partialTextRef.current = "";
@@ -3195,34 +3604,92 @@ function ChatPage() {
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
       subscribeRun(runId, placeholderId);
       try {
-        // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
-        await api.invoke.run({
-          runId,
-          chatId: chat.id,
-          userPrompt: invocationPrompt,
-          images,
-          locale,
-          permissions: opts?.permissions ?? DEFAULT_PERMISSION,
-          planMode: opts?.planMode,
-          goalMode: opts?.goalMode,
-          appsGenerateMode: opts?.appsGenerateMode,
-          borrowAgents: effectiveBorrowAgents,
-          taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
-          pipelineStages: opts?.pipelineStages,
-          routerAgent: opts?.routerAgent,
-          // Project Work is orchestrated by default: attached tools first,
-          // Network recruitment only for a real capability/tool gap.
-          sessionRouting: project ? true : opts?.sessionRouting,
-          stormbreakerMode: opts?.stormbreakerMode,
-          runtimeSelection: chat.runtimeSelection ?? undefined,
-        });
+        if (opts?.decisionContinuation) {
+          const continuationInput = {
+            chatId: chat.id,
+            sourceMessageId: opts.decisionContinuation.sourceMessageId,
+            reply: invocationPrompt,
+          };
+          let continued;
+          try {
+            continued = await api.confirm.continueAnswer(continuationInput);
+          } catch {
+            if (!isCurrentChat()) return false;
+            // One response-loss reconciliation only. Main owns the stable run
+            // id/hash, so this cannot mint a second execution.
+            continued = await api.confirm.continueAnswer(continuationInput).catch(() => null);
+            if (!isCurrentChat()) return false;
+            if (!continued) {
+              continuationTransportRetryableRef.current.add(runId);
+              throw new Error("decision_continuation_transport_unavailable");
+            }
+          }
+          if (!isCurrentChat()) return false;
+          if (!continued || continued.runId !== runId || continued.status === "rejected") {
+            continuationTransportRetryableRef.current.delete(runId);
+            throw new Error(continued?.reasonCode ?? "decision_continuation_rejected");
+          }
+          continuationTransportRetryableRef.current.delete(runId);
+          if (continued.status === "already-terminal") {
+            subRef.current?.();
+            subRef.current = null;
+            setMessages((messages) => messages.filter((message) => (
+              message.id !== userMessageId && message.id !== placeholderId
+            )));
+            setBusy(false);
+            setCancelPending(false);
+            runIdRef.current = null;
+            lastRunIdRef.current = runId;
+            setSessionNotice(locale === "ko"
+              ? `답변은 이미 전달됐으며 후속 실행은 ${continued.runStatus ?? "종료"} 상태입니다. 자동으로 다시 실행하지 않았습니다.`
+              : `The answer was already delivered and its follow-up is ${continued.runStatus ?? "settled"}. It was not run again automatically.`);
+            return true;
+          }
+        } else {
+          // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
+          await api.invoke.run({
+            runId,
+            chatId: chat.id,
+            userPrompt: invocationPrompt,
+            images,
+            locale,
+            permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+            planMode: opts?.planMode,
+            goalMode: opts?.goalMode,
+            appsGenerateMode: opts?.appsGenerateMode,
+            borrowAgents: effectiveBorrowAgents,
+            taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
+            pipelineStages: opts?.pipelineStages,
+            routerAgent: opts?.routerAgent,
+            // Project Work is orchestrated by default: attached tools first,
+            // Network recruitment only for a real capability/tool gap.
+            sessionRouting: project ? true : opts?.sessionRouting,
+            stormbreakerMode: opts?.stormbreakerMode,
+            runtimeSelection: chat.runtimeSelection ?? undefined,
+          });
+        }
+        if (!isCurrentChat()) return false;
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
         if (cancelRequestedRef.current) requestRunCancellation(runId);
         return true;
       } catch {
+        if (!isCurrentChat()) return false;
         // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
         subRef.current?.();
         subRef.current = null;
+        if (opts?.decisionContinuation) {
+          // Main rejected the continuation or its transport was unavailable.
+          // Keep the durable Decision card as the only retry surface; an
+          // optimistic user row here would look like a second accepted answer.
+          setMessages((messages) => messages.filter((message) => (
+            message.id !== userMessageId && message.id !== placeholderId
+          )));
+          setBusy(false);
+          setCancelPending(false);
+          runIdRef.current = null;
+          lastRunIdRef.current = runId;
+          return false;
+        }
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
@@ -3252,6 +3719,8 @@ function ChatPage() {
       allAgents,
       allGeneratedApps,
       chat,
+      chatId,
+      isCurrentChat,
       busy,
       goalContext?.objective,
       locale,
@@ -3298,35 +3767,49 @@ function ChatPage() {
         const api = ipc();
         if (!api || !chat) return;
         const optimisticMessageId = `steer:${uid()}`;
-        steerQueueRef.current.push({ text, opts, optimisticMessageId });
-        setQueuedSteers(steerQueueRef.current.map((q) => q.text));
-        transcriptRevisionRef.current += 1;
-        setMessages((current) => [...current, {
-          id: optimisticMessageId,
-          role: "user",
-          text,
-          imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
-        }]);
-        void api.invoke.steer({
-          chatId: chat.id,
-          userPrompt: text,
-          steeringMode: "interrupt",
-          images: opts?.images,
-          locale,
-          permissions: opts?.permissions ?? DEFAULT_PERMISSION,
-          planMode: opts?.planMode,
-          goalMode: opts?.goalMode,
-          appsGenerateMode: opts?.appsGenerateMode,
-          taskForceTargets: opts?.taskForceTargets,
-          sessionRouting: project ? true : opts?.sessionRouting,
-          stormbreakerMode: opts?.stormbreakerMode,
-          runtimeSelection: chat.runtimeSelection ?? undefined,
-        }).catch(() => {
+        void (async () => {
+          let boundText = text;
+          let attachedChatFiles: ChatFileItem[] | undefined;
+          if (opts?.files?.length) {
+            const bridge = chatFilesBridge();
+            if (!bridge) throw new Error(locale === "ko" ? "Desktop 파일 연결을 사용할 수 없습니다." : "The Desktop file bridge is unavailable.");
+            const snapshot = await bridge.snapshot({ chatId: chat.id, files: opts.files });
+            attachedChatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
+            hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
+            boundText = appendChatFileMarker(text, snapshot.groupId);
+          }
+          steerQueueRef.current.push({ text: boundText, opts, optimisticMessageId });
+          setQueuedSteers(steerQueueRef.current.map((q) => parseChatFileMessage(q.text).visibleText));
+          transcriptRevisionRef.current += 1;
+          setMessages((current) => [...current, {
+            id: optimisticMessageId,
+            role: "user",
+            text,
+            imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
+            chatFiles: attachedChatFiles,
+          }]);
+          await api.invoke.steer({
+            chatId: chat.id,
+            userPrompt: boundText,
+            steeringMode: "interrupt",
+            images: opts?.images,
+            locale,
+            permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+            planMode: opts?.planMode,
+            goalMode: opts?.goalMode,
+            appsGenerateMode: opts?.appsGenerateMode,
+            taskForceTargets: opts?.taskForceTargets,
+            sessionRouting: project ? true : opts?.sessionRouting,
+            stormbreakerMode: opts?.stormbreakerMode,
+            runtimeSelection: chat.runtimeSelection ?? undefined,
+          });
+        })().catch((cause) => {
           steerQueueRef.current = steerQueueRef.current.filter((item) => item.optimisticMessageId !== optimisticMessageId);
           setQueuedSteers(steerQueueRef.current.map((item) => item.text));
           setMessages((current) => current.map((message) => message.id === optimisticMessageId
             ? { id: message.id, role: "system", text: locale === "ko" ? "방향 전환을 전달하지 못했습니다. 다시 보내 주세요." : "The new direction was not delivered. Please send it again." }
             : message));
+          setSessionNotice(cause instanceof Error ? cause.message : String(cause));
         });
         return;
       }
@@ -3393,8 +3876,8 @@ function ChatPage() {
    * 시트에서 안 고른 질문도 잠금("—")해 시트가 다시 뜨지 않게 한다.
    */
   const answerQuestionBatch = useCallback(
-    async (messageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
-      if (busy || questionCommitPendingRef.current) return;
+    async (messageId: string, sourceMessageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
+      if (!isCurrentChat() || busy || questionCommitPendingRef.current) return;
       const api = ipc();
       if (!api?.confirm?.commitAnswer) {
         setSessionNotice(locale === "ko"
@@ -3407,18 +3890,80 @@ function ChatPage() {
       setSessionNotice(null);
       const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
       try {
+        let receipt: { chatId: string; sourceMessageId: string; continuationRunId: string } | null = null;
         try {
           // The exact current question must be durably accepted before either the
           // answered UI or the follow-up run changes. A stale/mismatched receipt
           // leaves the sheet and every typed answer intact.
-          const receipt = await api.confirm.commitAnswer({ chatId, reply, sourceMessageId: messageId });
-          if (!receipt || receipt.chatId !== chatId || receipt.sourceMessageId !== messageId) {
+          receipt = await api.confirm.commitAnswer({
+            chatId,
+            reply,
+            sourceMessageId,
+            continuation: {
+              locale,
+              permissions: perms ?? DEFAULT_PERMISSION,
+              sessionRouting: project ? true : undefined,
+              runtimeSelection: chat?.runtimeSelection ?? undefined,
+            },
+          });
+          if (!receipt || receipt.chatId !== chatId || receipt.sourceMessageId !== sourceMessageId
+            || typeof receipt.continuationRunId !== "string" || !receipt.continuationRunId.trim()) {
             throw new Error("question_commit_receipt_mismatch");
           }
         } catch {
-          setSessionNotice(locale === "ko"
-            ? "이 질문의 답변을 저장하지 못했습니다. 질문과 입력은 그대로이므로 다시 시도해 주세요."
-            : "The answer was not saved for this exact question. The question and your input are unchanged; try again.");
+          if (!isCurrentChat()) return;
+          // IPC can lose its response after Main commits. Recover only the
+          // exact same source+reply+Main run binding; never infer acceptance.
+          let rows: Awaited<ReturnType<typeof api.confirm.committedAnswers>> = [];
+          try {
+            rows = await api.confirm.committedAnswers?.(chatId) ?? [];
+          } catch { /* Missing or unavailable recovery keeps the editable draft. */ }
+          if (!isCurrentChat()) return;
+          const recovered = (Array.isArray(rows) ? rows : [])
+            .find((item) => item && item.sourceMessageId === sourceMessageId
+              // Main already scopes these rows by chat; its real shape has no
+              // chatId. Reject only an explicitly contradictory bridge field.
+              && (!("chatId" in item) || item.chatId === chatId)
+              && item.reply === reply.trim()
+              && typeof item.continuationRunId === "string" && Boolean(item.continuationRunId.trim()));
+          if (recovered?.continuationRunId) {
+            receipt = { chatId, sourceMessageId, continuationRunId: recovered.continuationRunId };
+          } else {
+            setSessionNotice(locale === "ko"
+              ? "이 질문의 답변을 저장하지 못했습니다. 질문과 입력은 그대로이므로 다시 시도해 주세요."
+              : "The answer was not saved for this exact question. The question and your input are unchanged; try again.");
+            return;
+          }
+        }
+        window.dispatchEvent(new Event("agentlas:attention-refresh"));
+        if (!isCurrentChat()) return;
+        const sent = await send(reply, {
+          permissions: perms ?? DEFAULT_PERMISSION,
+          decisionContinuation: {
+            sourceMessageId,
+            runId: receipt.continuationRunId,
+          },
+        }).catch(() => false);
+        if (!isCurrentChat()) return;
+        if (!sent) {
+          const retryable = receipt?.continuationRunId
+            ? continuationTransportRetryableRef.current.has(receipt.continuationRunId)
+            : false;
+          setMessages((messages) => messages.map((message) => message.id === messageId
+            ? {
+                ...message,
+                pendingCommittedReply: reply,
+                pendingContinuationRunId: receipt?.continuationRunId,
+                pendingContinuationAutoResume: retryable,
+              }
+            : message));
+          setSessionNotice(retryable
+            ? (locale === "ko"
+              ? "답변은 안전하게 저장됐습니다. 연결이 복구되면 같은 실행으로 자동 재개합니다."
+              : "Your answer is safely saved. It will resume with the same run when the connection recovers.")
+            : (locale === "ko"
+              ? "답변은 안전하게 저장됐지만 후속 실행은 시작되지 않았습니다. 자동으로 다시 실행하지 않았습니다."
+              : "Your answer is safely saved, but the follow-up did not start. It was not run again automatically."));
           return;
         }
         setMessages((m) =>
@@ -3426,6 +3971,9 @@ function ChatPage() {
             msg.id === messageId
               ? {
                   ...msg,
+                  pendingCommittedReply: undefined,
+                  pendingContinuationRunId: undefined,
+                  pendingContinuationAutoResume: undefined,
                   questions: msg.questions?.map((q) => {
                     const hit = perQuestion.find((p) => p.questionId === q.id);
                     if (hit && hit.answers.length) return { ...q, answer: hit.answers };
@@ -3435,15 +3983,8 @@ function ChatPage() {
               : msg,
           ),
         );
-        window.dispatchEvent(new Event("agentlas:attention-refresh"));
-        const sent = await send(reply, { permissions: perms ?? DEFAULT_PERMISSION }).catch(() => false);
-        if (!sent) {
-          setSessionNotice(locale === "ko"
-            ? "답변은 저장됐지만 후속 작업은 시작하지 못했습니다. 같은 대화에서 다시 지시해 주세요."
-            : "The answer was saved, but the follow-up work did not start. Send the instruction again in this task.");
-        }
       } finally {
-        if (questionCommitPendingRef.current === messageId) {
+        if (isCurrentChat() && questionCommitPendingRef.current === messageId) {
           questionCommitPendingRef.current = null;
           setQuestionCommitPending(false);
         }
@@ -3451,7 +3992,7 @@ function ChatPage() {
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, chatId, locale, send],
+    [busy, chat, chatId, isCurrentChat, locale, project, send],
   );
 
   /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */
@@ -3477,11 +4018,80 @@ function ChatPage() {
       const m = messages[i];
       if (m.role === "agent" && m.questions && m.questions.length > 0) {
         const unanswered = m.questions.filter((q) => !q.answer || q.answer.length === 0);
-        return unanswered.length > 0 ? { messageId: m.id, questions: unanswered } : null;
+        return unanswered.length > 0
+          ? {
+              messageId: m.id,
+              sourceMessageId: m.questionSourceMessageId ?? m.id,
+              questions: unanswered,
+              initialReply: m.pendingCommittedReply,
+              continuationRunId: m.pendingContinuationRunId,
+              autoResume: m.pendingContinuationAutoResume,
+            }
+          : null;
       }
     }
     return null;
   }, [messages]);
+
+  // Both automatic reconciliation and explicit Retry use the accepted bytes
+  // and Main-owned run. Neither path commits or parses a new answer.
+  const resumeCommittedQuestion = useCallback(async () => {
+    const sheet = pendingQuestionSheet;
+    const reply = sheet?.initialReply;
+    const continuationRunId = sheet?.continuationRunId;
+    if (!isCurrentChat() || !sheet || !reply?.trim() || !continuationRunId?.trim() || busy || questionCommitPendingRef.current) return;
+    questionCommitPendingRef.current = sheet.messageId;
+    setQuestionCommitPending(true);
+    const key = `${chatId}\0${sheet.sourceMessageId}\0${continuationRunId}`;
+    continuationResumeAttemptsRef.current.add(key);
+    try {
+      const resumed = await send(reply, {
+        decisionContinuation: {
+          sourceMessageId: sheet.sourceMessageId,
+          runId: continuationRunId,
+        },
+      }).catch(() => false);
+      if (!isCurrentChat()) return;
+      if (!resumed) {
+        const retryable = continuationTransportRetryableRef.current.has(continuationRunId);
+        setMessages((messages) => messages.map((message) => message.id === sheet.messageId
+          ? { ...message, pendingContinuationAutoResume: retryable }
+          : message));
+        setSessionNotice(retryable
+          ? (locale === "ko"
+            ? "저장된 답변의 연결이 아직 복구되지 않았습니다. 연결 복구 시 같은 실행으로 한 번 더 확인합니다."
+            : "The saved answer is still offline. It will reconcile once more with the same run after reconnection.")
+          : (locale === "ko"
+            ? "저장된 답변의 후속 실행은 시작되지 않았습니다. 자동으로 다시 실행하지 않았습니다."
+            : "The saved answer's follow-up did not start. It was not run again automatically."));
+        return;
+      }
+      setMessages((messages) => messages.map((message) => {
+        if (message.id !== sheet.messageId) return message;
+        return {
+          ...message,
+          pendingCommittedReply: undefined,
+          pendingContinuationRunId: undefined,
+          pendingContinuationAutoResume: undefined,
+          questions: message.questions?.map((question) => question.answer?.length
+            ? question : { ...question, answer: ["✓"] }),
+        };
+      }));
+    } finally {
+      if (isCurrentChat() && questionCommitPendingRef.current === sheet.messageId) {
+        questionCommitPendingRef.current = null;
+        setQuestionCommitPending(false);
+      }
+    }
+  }, [busy, chatId, isCurrentChat, locale, pendingQuestionSheet, send]);
+
+  useEffect(() => {
+    const sheet = pendingQuestionSheet;
+    if (!sheet?.initialReply?.trim() || !sheet.continuationRunId || sheet.autoResume === false || busy || questionCommitPending) return;
+    const key = `${chatId}\0${sheet.sourceMessageId}\0${sheet.continuationRunId}`;
+    if (continuationResumeAttemptsRef.current.has(key)) return;
+    void resumeCommittedQuestion();
+  }, [busy, chatId, continuationReconnectEpoch, pendingQuestionSheet, questionCommitPending, resumeCommittedQuestion]);
 
   const handleSurfaceAction = useCallback(
     async (activeSurface: WorkbenchSurface, action: AgentlasSurfaceAction) => {
@@ -4163,6 +4773,7 @@ function ChatPage() {
     text: string,
     opts?: {
       images?: ImageAttachment[];
+      files?: ChatFileDraft[];
       permissions?: PermissionLevel;
       planMode?: boolean;
       goalMode?: boolean;
@@ -4174,6 +4785,7 @@ function ChatPage() {
   ) => {
     submitOrQueue(text, {
       images: opts?.images,
+      files: opts?.files,
       permissions: opts?.permissions,
       planMode: opts?.planMode,
       goalMode: opts?.goalMode,
@@ -4279,7 +4891,14 @@ function ChatPage() {
 
   return (
     <div className="task-cockpit-shell" style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
-      <div className="task-cockpit-main" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      {/* ★대화 영역은 One 과 같이 흰 면 위에 놓는다(2026-09-04 실측).
+          예전에는 이 열이 투명이라 페이지 배경(--paper-2)이 그대로 비쳤고, 작성창만 흰
+          카드로 떠 보였다. One 은 workspace 전체가 흰 면이라 대화가 한 장의 면 위에 앉는다.
+          같은 뜻의 토큰(--paper)을 쓴다 — 다크 테마에서도 함께 따라간다. */}
+      <div
+        className="task-cockpit-main"
+        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, background: "var(--paper)" }}
+      >
       <header
         className="task-cockpit-header titlebar-drag"
         style={{
@@ -4395,10 +5014,15 @@ function ChatPage() {
           onClick={() => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel"))}
           className="task-cockpit-header-action"
           data-right-panel-trigger="panel"
-          aria-label={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
-          title={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
+          aria-label={hasViewablePanelContent
+            ? (locale === "ko" ? "뷰어 패널" : "Viewer panel")
+            : (locale === "ko" ? "아직 열 결과가 없습니다" : "No result to view yet")}
+          title={hasViewablePanelContent
+            ? (locale === "ko" ? "뷰어 패널" : "Viewer panel")
+            : (locale === "ko" ? "아직 열 결과가 없습니다" : "No result to view yet")}
           data-active={rightPanelOpen && rightPanelTab === "panel" ? "true" : "false"}
-          data-has-content={artifact || surface || mediaPreview || linkedOutputFiles.length > 0 ? "true" : "false"}
+          data-has-content={hasViewablePanelContent ? "true" : "false"}
+          disabled={!hasViewablePanelContent}
         >
           <IconPanelRight size={16} />
         </button>
@@ -4413,7 +5037,12 @@ function ChatPage() {
         </div>
       </header>
 
-      <KeyStatusBanner mode="banner" />
+      {/* ★상단 알림도 아래 배너와 같은 여백을 쓴다(2026-09-04 오너 제보).
+          이 배너만 감싸는 것이 없어 창 양끝에 그대로 붙었고, 바로 아래 배너는
+          margin 0 16px 라 두 줄이 서로 어긋나 보였다. */}
+      <div style={{ margin: "0 16px" }}>
+        <KeyStatusBanner mode="banner" compact />
+      </div>
 
       <div style={{ margin: "0 16px" }}>
         <OneSuggestionReviewHandoffBanner surface="work" locale={locale} />
@@ -4592,6 +5221,7 @@ function ChatPage() {
           onOpenArtifact={handleOpenArtifact}
           onOpenMedia={handleOpenMedia}
           onOpenLinkedFile={openLinkedFile}
+          onOpenChatFile={openChatFile}
           onOpenWorkflow={handleOpenWorkflow}
           onOpenMultimodalSetup={handleOpenMultimodalSetup}
           interactionBusy={busy}
@@ -4614,15 +5244,35 @@ function ChatPage() {
       {pendingQuestionSheet && (
         <ChatQuestionSheet
           questions={pendingQuestionSheet.questions}
+          initialReply={pendingQuestionSheet.initialReply}
+          onRetryCommitted={pendingQuestionSheet.continuationRunId ? () => { void resumeCommittedQuestion(); } : undefined}
           busy={busy || questionCommitPending}
           onConfirm={(reply, perQuestion) =>
-            answerQuestionBatch(pendingQuestionSheet.messageId, reply, perQuestion)
+            answerQuestionBatch(
+              pendingQuestionSheet.messageId,
+              pendingQuestionSheet.sourceMessageId,
+              reply,
+              perQuestion,
+            )
           }
           onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
         />
       )}
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
-      {!project && <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 8 }}>
+      {!project && <div
+        data-chat-folder-row="true"
+        style={{
+          width: "min(calc(100% - 32px), 740px)",
+          margin: "0 auto",
+          // Align the visible folder control with the textarea's text inset,
+          // not merely with the composer's outer border.
+          padding: "6px 0 0 18px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          boxSizing: "border-box",
+        }}
+      >
         <ProjectFolderBar
           chatId={chatId || null}
           reloadToken={folderReload}
@@ -4637,7 +5287,8 @@ function ChatPage() {
           role="status"
           data-chat-session-notice="true"
           style={{
-            margin: "7px 16px 0", padding: "7px 10px", borderRadius: 8,
+            width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0", padding: "7px 10px", borderRadius: 8,
+            boxSizing: "border-box",
             border: "1px solid color-mix(in srgb, var(--green-deep) 24%, var(--paper-edge))",
             background: "color-mix(in srgb, var(--green-deep) 7%, var(--paper))",
             color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.4,
@@ -4710,6 +5361,8 @@ function ChatPage() {
           hasPipeline={hasPipeline}
           width={rightPanelWidth}
           onResizeWidth={resizeRightPanel}
+          onRequestReadableWidth={requestReadableRightPanelWidth}
+          onFileTabsEmpty={clearRightPanelFilePreview}
           height={rightPanelHeight}
           onResizeHeight={resizeRightPanelHeight}
         />

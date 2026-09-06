@@ -155,7 +155,7 @@ function parseCatalog(value: unknown): ScienceReleaseCatalog {
   };
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<ScienceReleaseCatalog> {
   const contentLength = response.headers.get("content-length");
   if (contentLength !== null) {
     const declared = Number(contentLength);
@@ -164,12 +164,23 @@ async function readBoundedJson(response: Response): Promise<unknown> {
     }
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_CATALOG_BYTES) throw new Error("science-catalog-too-large");
+  return parseScienceReleaseCatalogBytes(bytes);
+}
+
+/**
+ * Parse catalog bytes after the caller has fetched and, when required, authenticated them.
+ * Release gates use this same parser for a candidate catalog so the candidate path cannot drift
+ * from the production catalog schema/normalization rules.
+ */
+export function parseScienceReleaseCatalogBytes(bytes: Uint8Array): ScienceReleaseCatalog {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > MAX_CATALOG_BYTES) throw new Error("science-catalog-too-large");
+  let value: unknown;
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new Error("science-catalog-invalid");
   }
+  return parseCatalog(value);
 }
 
 export async function fetchScienceReleaseCatalog(isPackaged: boolean): Promise<ScienceReleaseCatalog> {
@@ -199,7 +210,7 @@ export async function fetchScienceReleaseCatalog(isPackaged: boolean): Promise<S
     throw new Error("science-catalog-redirect-invalid");
   }
   if (!response.ok) throw new Error(`science-catalog-http-${response.status}`);
-  const catalog = parseCatalog(await readBoundedJson(response));
+  const catalog = await readBoundedJson(response);
   cachedCatalog = { url: url.toString(), at: now, value: catalog };
   return catalog;
 }

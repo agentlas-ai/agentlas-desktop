@@ -10,6 +10,15 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   shell: Object.freeze({
     backToWork: () => ipcRenderer.invoke("science:shell:backToWork", { extensionId }),
   }),
+  questions: Object.freeze({
+    list: () => ipcRenderer.invoke("science:askUser:list", { extensionId }),
+    answer: (requestId: string, answer: string | null) => ipcRenderer.invoke("science:askUser:answer", { extensionId, requestId, answer }),
+    onRequest: (callback: (request: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, request: unknown) => callback(request);
+      ipcRenderer.on("science:askUser", listener);
+      return () => ipcRenderer.removeListener("science:askUser", listener);
+    },
+  }),
   rendererPacks: Object.freeze({
     list: () => ipcRenderer.invoke("science:rendererPacks:list", { extensionId }),
   }),
@@ -25,7 +34,16 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     },
   }),
   projects: Object.freeze({
+    pickFolder: () => {
+      if (!navigator.userActivation?.isActive) return Promise.reject(new Error("science-project-folder-user-gesture-required"));
+      return ipcRenderer.invoke("science:projects:pickFolder", { extensionId });
+    },
+    openFolder: (projectId: string) => {
+      if (!navigator.userActivation?.isActive) return Promise.reject(new Error("science-project-folder-user-gesture-required"));
+      return ipcRenderer.invoke("science:projects:openFolder", { extensionId, projectId });
+    },
     list: () => ipcRenderer.invoke("science:projects:list", { extensionId }),
+    library: () => ipcRenderer.invoke("science:projects:library", { extensionId }),
     create: (input: unknown) => ipcRenderer.invoke("science:projects:create", { extensionId, input }),
     get: (projectId: string) => ipcRenderer.invoke("science:projects:get", { extensionId, projectId }),
     updateRelatedDomains: (input: unknown) => ipcRenderer.invoke("science:projects:updateRelatedDomains", { extensionId, input }),
@@ -64,6 +82,10 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   conversations: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:conversations:list", { extensionId, projectId }),
     messages: (projectId: string, conversationId: string) => ipcRenderer.invoke("science:messages:list", { extensionId, projectId, conversationId }),
+  }),
+  runtime: Object.freeze({
+    inspect: (input: unknown) => ipcRenderer.invoke("science:runtime:inspect", { extensionId, input }),
+    select: (input: unknown) => ipcRenderer.invoke("science:runtime:select", { extensionId, input }),
   }),
   composer: Object.freeze({
     start: (input: unknown) => ipcRenderer.invoke("science:composer:start", { extensionId, input }),
@@ -198,6 +220,7 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   analysisSpecs: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:analysisSpecs:list", { extensionId, projectId }),
     get: (projectId: string, analysisSpecId: string) => ipcRenderer.invoke("science:analysisSpecs:get", { extensionId, projectId, analysisSpecId }),
+    review: (input: unknown) => ipcRenderer.invoke("science:analysisSpecs:review", { extensionId, input }),
   }),
   decisions: Object.freeze({
     list: (projectId: string, analysisSpecId?: string, statuses?: string[]) => ipcRenderer.invoke("science:decisions:list", { extensionId, projectId, analysisSpecId, statuses }),

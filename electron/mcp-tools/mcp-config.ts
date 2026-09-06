@@ -422,6 +422,33 @@ function argsWithBrowserProfile(_key: string, args: string[], _opts?: McpConfigB
 }
 
 /**
+ * The official filesystem MCP receives its allowed roots as positional args.
+ * The catalog default is the user's home directory, but a Work project may be
+ * explicitly bound elsewhere (for example a temporary or external volume).
+ * Narrow that one built-in server to the already-authorized per-run folder;
+ * leave custom servers and runs without a folder unchanged.
+ */
+function argsWithToolGateWorkingFolder(
+  server: InstalledMcpServer,
+  args: string[],
+  opts?: McpConfigBuildOptions,
+): string[] {
+  if (server.catalogId !== "filesystem") return args;
+  const rawFolder = opts?.toolGate?.cwd?.trim();
+  if (!rawFolder) return args;
+  let folder: string;
+  try {
+    folder = path.resolve(rawFolder);
+    if (!fs.statSync(folder).isDirectory()) return args;
+  } catch {
+    return args;
+  }
+  // The trusted catalog places the allowed root in the final argument. Keep
+  // the package launcher flags intact and replace only that root.
+  return args.length > 0 ? [...args.slice(0, -1), folder] : [folder];
+}
+
+/**
  * 설치·활성 MCP 서버를 .mcp.json 으로 써서 경로를 반환. 서버가 하나도 없으면 null.
  * stdio 서버는 command/args/env, sse·http 서버는 type/url 형태로 직렬화한다.
  * opts.catalogIds가 있으면 자동 선택된 도구만 직렬화한다. 예: computer-use 모드에서는
@@ -555,6 +582,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     if (s.transport === "stdio" && s.command) {
       let command = resolveStdioCommand(s);
       let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
+      args = argsWithToolGateWorkingFolder(s, args, opts);
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? {

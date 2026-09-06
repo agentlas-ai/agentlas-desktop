@@ -372,7 +372,7 @@ export default function AutomationListPage() {
                       fontWeight: 700,
                       border: "1px solid var(--accent)",
                       background: "var(--accent)",
-                      color: "#fff",
+                      color: "var(--white)",
                     }}
                   >
                     {locale === "en" ? "Needs your call" : "내가 정해야 함"}

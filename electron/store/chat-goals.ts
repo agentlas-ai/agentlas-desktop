@@ -1,5 +1,11 @@
 import { getDb } from "./db";
 import type { ChatGoalContext } from "../../shared/types";
+import {
+  createAutomaticGoalRevision,
+  reviseAutomaticGoal,
+  type GoalRevision,
+  type GoalSourceMessage,
+} from "../../shared/auto-goal";
 
 type GoalStatus = ChatGoalContext["status"];
 
@@ -147,8 +153,8 @@ export function completeChatGoalContract(
   getDb().prepare(
     `UPDATE chat_goal_contracts
      SET status = ?, updated_at = ?, completed_at = ?
-     WHERE goal_id = ? AND status = 'active'`,
-  ).run(status, now, now, normalized);
+     WHERE goal_id = ? AND (status = 'active' OR (? = 'cancelled' AND status = 'blocked'))`,
+  ).run(status, now, now, normalized, status);
   return toContext(readRow(normalized));
 }
 
@@ -156,4 +162,74 @@ export function completeChatGoalContract(
 export function isChatGoalContractArmed(goalId: string): boolean {
   const normalized = goalId.trim();
   return Boolean(normalized && readRow(normalized)?.status === "active");
+}
+
+/** Revision APIs are model storage only, not a scheduler or a permission grant.
+ * Intake adapters must opt into these APIs after their authoritative intent decision.
+ */
+export function getChatGoalRevision(goalId: string, revision?: number): GoalRevision | null {
+  const row = revision === undefined
+    ? getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1").get(goalId)
+    : getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? AND revision = ?").get(goalId, revision);
+  return row ? JSON.parse((row as { payload_json: string }).payload_json) as GoalRevision : null;
+}
+
+function assertStoredUserSource(source: GoalSourceMessage): void {
+  const message = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?").get(source.messageId) as
+    { chat_id: string; role: string; text: string } | undefined;
+  if (!message || message.chat_id !== source.chatId || message.role !== "user" || message.text !== source.text) {
+    throw new Error("goal_source_message_mismatch");
+  }
+}
+
+function previouslyAppliedRevision(goalId: string, source: GoalSourceMessage): GoalRevision | null {
+  const row = getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? AND source_message_id = ?")
+    .get(goalId, source.messageId) as { payload_json: string } | undefined;
+  if (!row) return null;
+  const revision = JSON.parse(row.payload_json) as GoalRevision;
+  if (revision.chatId !== source.chatId || revision.sourceMessage.text !== source.text) throw new Error("goal_source_message_mismatch");
+  return revision;
+}
+
+function insertRevision(revision: GoalRevision): void {
+  getDb().prepare(`INSERT INTO chat_goal_revisions (goal_id, revision, source_message_id, payload_json, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run(revision.goalId, revision.revision, revision.sourceMessage.messageId,
+    JSON.stringify(revision), revision.createdAt);
+}
+
+export function createStoredAutomaticGoal(input: Parameters<typeof createAutomaticGoalRevision>[0]): GoalRevision | null {
+  const revision = createAutomaticGoalRevision(input);
+  if (!revision) return null;
+  return getDb().transaction(() => {
+    assertStoredUserSource(input.source);
+    const replay = previouslyAppliedRevision(input.goalId, input.source);
+    if (replay) return replay;
+    // An existing campaign must be explicitly adopted/revised by its adapter.
+    // Never overwrite it or cancel another active campaign as an intake side effect.
+    if (readRow(input.goalId)) throw new Error("goal_contract_already_exists");
+    getDb().prepare(`INSERT INTO chat_goal_contracts
+      (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, 'active', ?, ?, NULL)`).run(revision.goalId, revision.chatId, revision.objective,
+      JSON.stringify(revision.acceptanceCriteria.map((criterion) => criterion.text)), revision.createdAt, revision.createdAt);
+    insertRevision(revision);
+    return revision;
+  })();
+}
+
+export function reviseStoredAutomaticGoal(input: Omit<Parameters<typeof reviseAutomaticGoal>[0], "current"> & {
+  goalId: string;
+}): GoalRevision {
+  return getDb().transaction(() => {
+    assertStoredUserSource(input.source);
+    const replay = previouslyAppliedRevision(input.goalId, input.source);
+    if (replay) return replay;
+    const contract = readRow(input.goalId);
+    if (!contract || contract.chat_id !== input.source.chatId) throw new Error("goal_chat_mismatch");
+    if (contract.status !== "active") throw new Error("goal_contract_not_active");
+    const current = getChatGoalRevision(input.goalId);
+    if (!current) throw new Error("goal_revision_missing");
+    const next = reviseAutomaticGoal({ ...input, current });
+    insertRevision(next);
+    return next;
+  })();
 }

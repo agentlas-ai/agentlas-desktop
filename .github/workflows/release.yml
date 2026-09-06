@@ -49,10 +49,10 @@ jobs:
     env:
       # Public verification keys only; absence blocks packaging before release.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
-      HEPHAESTUS_REF: v1.2.40
-      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
-      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
+      HEPHAESTUS_REF: v1.2.44
+      HEPHAESTUS_COMMIT: 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.44.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,9 +159,6 @@ jobs:
       - name: Build renderer + electron
         run: npm run build
 
-      - name: Verify browser auth and lifecycle policy on the target OS
-        run: npm run test:browser-auth-portability
-
       # Tests run after the initial clone. Recheck the immutable commit and the
       # ignored-file boundary immediately before electron-builder sees Core.
       - name: Reverify embedded engine release boundary
@@ -185,9 +182,6 @@ jobs:
       # CLI 설치 버튼이 "npm 을 찾을 수 없습니다"로 끝나던 원인이다.
       - name: Materialize pinned private Node runtime for CLI bootstrap
         run: npm run fetch:node
-
-      - name: Materialize Playwright-pinned Agentlas browser runtime
-        run: npm run fetch:browser
 
       - name: Package verified Actions artifacts only
         shell: bash

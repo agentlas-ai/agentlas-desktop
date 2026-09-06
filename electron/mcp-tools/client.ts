@@ -74,6 +74,27 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** Only decide closed, direct object schemas. Composition, references, patterns,
+ * and unfamiliar keywords are left to the server; this is not a schema validator.
+ * Compare supplied keys without dropping transaction receipts or changing args.
+ */
+export function explicitlyRejectedMcpArgumentKeys(
+  inputSchema: unknown,
+  args: Record<string, unknown>,
+): string[] {
+  const schema = recordValue(inputSchema);
+  if (schema?.type !== "object" || schema.additionalProperties !== false) return [];
+  const directObjectKeys = new Set([
+    "type", "properties", "required", "additionalProperties",
+    "$schema", "$id", "$comment", "title", "description", "default", "examples",
+    "deprecated", "readOnly", "writeOnly", "minProperties", "maxProperties",
+  ]);
+  if (Object.keys(schema).some((key) => !directObjectKeys.has(key))) return [];
+  const properties = schema.properties === undefined ? {} : recordValue(schema.properties);
+  if (!properties) return [];
+  return Object.keys(args).filter((key) => !Object.prototype.hasOwnProperty.call(properties, key));
+}
+
 function exactStringSetIssue(
   value: unknown,
   expected: readonly string[],
@@ -801,6 +822,15 @@ async function callServerToolContentInternal(
               ].join("; ");
               throw new Error(
                 `workforce_runtime_incompatible: Agentlas OS runtime is incompatible with Desktop Workforce: ${detail}`,
+              );
+            }
+            const rejectedKeys = explicitlyRejectedMcpArgumentKeys(
+              (inventory.tools as WorkforceMcpInventoryTool[]).find((tool) => tool.name === toolName)?.inputSchema,
+              args,
+            );
+            if (rejectedKeys.length > 0) {
+              throw new Error(
+                `MCP input schema for ${toolName} explicitly rejects supplied arguments: ${rejectedKeys.join(", ")}`,
               );
             }
           }

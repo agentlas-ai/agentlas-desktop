@@ -2211,7 +2211,7 @@ const heroBand: CSSProperties = {
   gap: 14,
   padding: 16,
   borderRadius: 8,
-  background: "#181713",
+  background: "var(--black)",
   color: "white",
   overflow: "hidden",
 };
@@ -2219,13 +2219,13 @@ const heroBand: CSSProperties = {
 const appHeroBand: CSSProperties = {
   ...heroBand,
   background:
-    "linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, #181713) 0%, #181713 58%, #0f172a 100%)",
+    "linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--black)) 0%, var(--black) 58%, var(--black-soft) 100%)",
 };
 
 const appHeroCopy: CSSProperties = {
   margin: "5px 0 0",
   fontSize: 12,
-  color: "#d1d5db",
+  color: "var(--white-soft)",
   lineHeight: 1.45,
   maxWidth: 480,
 };
@@ -2235,7 +2235,7 @@ const genericHero: CSSProperties = {
   minHeight: 112,
   padding: 16,
   borderRadius: 8,
-  background: "#181713",
+  background: "var(--black)",
   color: "white",
 };
 
@@ -2251,7 +2251,7 @@ const genericMapSection: CSSProperties = {
 const eyebrowDark: CSSProperties = {
   fontSize: 10,
   fontWeight: 800,
-  color: "#a7f3d0",
+  color: "var(--white-soft)",
   textTransform: "uppercase",
 };
 
@@ -2277,7 +2277,7 @@ const darkPill: CSSProperties = {
   padding: "5px 8px",
   borderRadius: 8,
   background: "rgba(255,255,255,0.10)",
-  color: "#f8fafc",
+  color: "var(--white)",
   border: "1px solid rgba(255,255,255,0.12)",
 };
 
@@ -2312,7 +2312,7 @@ const appRuntimeStatusDot: CSSProperties = {
   height: 9,
   flex: "0 0 auto",
   borderRadius: 999,
-  background: "#f59e0b",
+  background: "var(--warn)",
   boxShadow: "0 0 0 4px rgba(245,158,11,.12)",
 };
 
@@ -2500,8 +2500,8 @@ const shotCard: CSSProperties = {
 
 const shotPreview: CSSProperties = {
   height: 88,
-  background: "linear-gradient(135deg, #1f2937, #111827)",
-  color: "#e5e7eb",
+  background: "linear-gradient(135deg, var(--info), var(--info))",
+  color: "var(--white-soft)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -2609,7 +2609,7 @@ const assetImage: CSSProperties = {
   aspectRatio: "16 / 10",
   display: "block",
   objectFit: "contain",
-  background: "linear-gradient(135deg, #f7f4ec, #ece7dc)",
+  background: "linear-gradient(135deg, var(--warn-soft), var(--warn-soft))",
 };
 
 const assetInfo: CSSProperties = {
@@ -2702,7 +2702,7 @@ const actionBadgeBase: CSSProperties = {
 
 const actionBadgeDanger: CSSProperties = {
   ...actionBadgeBase,
-  color: "var(--danger, #b4533a)",
+  color: "var(--danger, var(--danger))",
   background: "rgba(180,83,58,0.12)",
   border: "1px solid rgba(180,83,58,0.32)",
 };
@@ -2815,7 +2815,7 @@ function trustTone(tone: "ok" | "claim" | "warn" | "risk" | "neutral"): CSSPrope
   if (tone === "ok") return { color: "var(--green-deep)" };
   if (tone === "claim") return { color: "var(--blue-deep)" };
   if (tone === "warn") return { color: "var(--peach-ink)" };
-  if (tone === "risk") return { color: "var(--danger, #b4533a)" };
+  if (tone === "risk") return { color: "var(--danger, var(--danger))" };
   return { color: "var(--muted-deep)" };
 }
 
@@ -2884,7 +2884,7 @@ const delegationIssue: CSSProperties = {
   borderRadius: 8,
   border: "1px solid rgba(180,83,58,0.28)",
   background: "rgba(180,83,58,0.08)",
-  color: "var(--danger, #b4533a)",
+  color: "var(--danger, var(--danger))",
   fontSize: 10.5,
   lineHeight: 1.35,
 };
@@ -2962,7 +2962,7 @@ function secureCredentialNotice(mode: string | undefined): CSSProperties {
     borderRadius: 8,
     border: brokered ? "1px solid rgba(42,127,98,0.28)" : "1px solid rgba(180,83,58,0.24)",
     background: brokered ? "rgba(42,127,98,0.08)" : "rgba(180,83,58,0.08)",
-    color: brokered ? "var(--green-deep)" : "var(--danger, #b4533a)",
+    color: brokered ? "var(--green-deep)" : "var(--danger, var(--danger))",
     fontSize: 11,
     lineHeight: 1.4,
   };
@@ -3026,7 +3026,7 @@ const linkLikeButton: CSSProperties = {
 
 function delegationStatus(status: string): CSSProperties {
   if (status === "ready") return { color: "var(--green-deep)", fontWeight: 800 };
-  if (status === "blocked-by-contract") return { color: "var(--danger, #b4533a)", fontWeight: 800 };
+  if (status === "blocked-by-contract") return { color: "var(--danger, var(--danger))", fontWeight: 800 };
   if (status.includes("secret") || status.includes("payment")) return { color: "var(--peach-ink)", fontWeight: 800 };
   return { color: "var(--blue-deep)", fontWeight: 800 };
 }

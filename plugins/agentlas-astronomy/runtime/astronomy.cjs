@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 
 const PLUGIN_ID = "agentlas-astronomy";
-const PLUGIN_VERSION = "1.2.1";
+const PLUGIN_VERSION = "1.2.2";
 const SIMBAD_ORIGIN = "https://simbad.cds.unistra.fr";
 const SIMBAD_TAP_PATH = "/simbad/sim-tap/sync";
 const SIMBAD_TAP_ENDPOINT = `${SIMBAD_ORIGIN}${SIMBAD_TAP_PATH}`;
@@ -34,15 +34,85 @@ const LOMB_SCARGLE_ALGORITHM = deepFreeze({
   weighting: "inverse-variance-when-resolved-weighting-is-weighted; otherwise equal-weight",
   timeOrigin: "minimum-analysis-eligible-time",
   windowFunction: "squared-modulus-of-normalized-weighted-complex-sampling-transform",
-  falseAlarmProbability: "not-computed",
-  periodUncertainty: "not-computed",
+  falseAlarmProbability: "baluev-2008-analytic-upper-bound-on-standard-normalized-power",
+  falseAlarmInterpretation: "analytic upper bound under the declared white-noise model; a returned 0 is a numerical floor, not exact certainty",
+  periodUncertainty: "montgomery-odonoghue-1999-frequency-standard-error-propagated-to-period",
+  periodUncertaintyInterpretation: "standard-error estimate under the single-sinusoid model, not a confidence interval",
   reference: {
     title: "The generalised Lomb-Scargle periodogram: A new formalism for the floating-mean and Keplerian periodograms",
     authors: "M. Zechmeister and M. Kuerster",
     doi: "10.1051/0004-6361:200811296",
     url: "https://www.aanda.org/articles/aa/pdf/2009/11/aa11296-08.pdf",
   },
+  falseAlarmReference: {
+    title: "Assessing the statistical significance of periodogram peaks",
+    authors: "R. V. Baluev",
+    doi: "10.1111/j.1365-2966.2008.12689.x",
+    note: "Analytic upper bound via the Davies extreme-value bound; see also VanderPlas 2018, doi:10.3847/1538-4365/aab766, eq. 21-22.",
+  },
+  periodUncertaintyReference: {
+    title: "A derivation of the errors for least squares fitting to time series data",
+    authors: "M. H. Montgomery and D. O'Donoghue",
+    note: "Delta Scuti Star Newsletter 13, 28. Frequency standard error sigma_f = sqrt(6/N) * sigma_residual / (pi * T * amplitude), propagated to period by sigma_P = P^2 * sigma_f.",
+  },
 });
+const LOMB_SCARGLE_BOUNDARIES = deepFreeze([
+  "The Baluev false-alarm probability is an analytic upper bound under an independent Gaussian white-noise model; correlated noise, mis-scaled errors, and aliases can invalidate that interpretation.",
+  "The Montgomery-O'Donoghue period value is a local single-sinusoid standard-error estimate, not a confidence interval and not an alias resolution.",
+  "A returned false-alarm probability of 0 is the numerical lower floor of the bounded calculation, not exact certainty.",
+  "No detrending, red-noise model, multi-harmonic fit, or transit template is applied; the declared astronomical time system is preserved verbatim.",
+]);
+
+/**
+ * The chance that pure noise would produce a peak at least this strong, anywhere in the searched
+ * band.
+ *
+ * The question a light curve is asked is almost always "is this real, or is it the noise?", and a
+ * peak height alone cannot answer it: a tall peak in a wide frequency search is ordinary. This is
+ * the Baluev (2008) analytic bound, which prices the width of the search rather than assuming the
+ * grid points are independent -- the assumption that makes naive estimates wrong by orders of
+ * magnitude. Deterministic, so the same series always gets the same number; no simulation, no seed.
+ *
+ * `power` is the standard normalized power in [0,1], the same quantity this periodogram reports.
+ * Returns a probability in [0,1]; the bound is conservative, so a small value is trustworthy in the
+ * direction that matters.
+ */
+function baluevFalseAlarmProbability(power, pointCount, maximumFrequencyPerDay, points) {
+  // Three fitted parameters (offset, cosine, sine) leave N-3 degrees of freedom.
+  const degreesOfFreedom = pointCount - 3;
+  if (!(degreesOfFreedom > 0) || !(power > 0) || power >= 1) return null;
+  // Weighted spread of the observation times: this, not the raw baseline, sets how many independent
+  // frequencies a search of this width really contains.
+  const weightSum = points.reduce((sum, point) => sum + point.weight, 0);
+  if (!(weightSum > 0)) return null;
+  const meanTime = points.reduce((sum, point) => sum + point.weight * point.time, 0) / weightSum;
+  const timeVariance = points.reduce((sum, point) => sum + point.weight * (point.time - meanTime) ** 2, 0) / weightSum;
+  if (!(timeVariance > 0)) return null;
+  const effectiveBaseline = Math.sqrt(4 * Math.PI * timeVariance);
+  const searchWidth = maximumFrequencyPerDay * effectiveBaseline;
+  // Single-frequency probability, then the extreme-value correction over the whole band.
+  const singleFrequency = (1 - power) ** (0.5 * degreesOfFreedom);
+  const tau = searchWidth * (1 - power) ** (0.5 * (degreesOfFreedom - 1)) * Math.sqrt(0.5 * (pointCount - 1) * power);
+  const combined = -Math.expm1(-tau) + singleFrequency * Math.exp(-tau);
+  if (!Number.isFinite(combined)) return null;
+  return Math.min(1, Math.max(0, combined));
+}
+
+/**
+ * How well the period itself is pinned down, in days.
+ *
+ * A period with no uncertainty cannot be compared with a published one, which is most of what a
+ * reader wants to do with it. Montgomery and O'Donoghue's frequency standard error, propagated to
+ * the period. Null when the fit has no amplitude or no baseline to measure against, because an
+ * invented interval is worse than an absent one.
+ */
+function periodStandardErrorDays(periodDays, pointCount, baselineDays, amplitude, residualRootMeanSquare) {
+  if (!(periodDays > 0) || !(pointCount > 0) || !(baselineDays > 0) || !(amplitude > 0)) return null;
+  if (!Number.isFinite(residualRootMeanSquare) || residualRootMeanSquare <= 0) return null;
+  const frequencyStandardError = Math.sqrt(6 / pointCount) * residualRootMeanSquare / (Math.PI * baselineDays * amplitude);
+  const periodError = periodDays ** 2 * frequencyStandardError;
+  return Number.isFinite(periodError) && periodError > 0 ? periodError : null;
+}
 const LOMB_SCARGLE_LIMITS = deepFreeze({
   minMeasurements: 5,
   maxMeasurements: 2000,
@@ -81,7 +151,7 @@ const DEFAULT_POLICY = deepFreeze({
   maxObjects: 500,
   minRadiusDeg: 0.001,
   maxRadiusDeg: 10,
-  userAgent: "Agentlas-Astronomy/1.2.0 (SIMBAD TAP object research; https://agentlas.ai)",
+  userAgent: "Agentlas-Astronomy/1.2.2 (SIMBAD TAP object research; https://agentlas.ai)",
   contentTypes: CONTENT_TYPE_ALLOWLIST,
   retryableStatusCodes: RETRYABLE_STATUS_CODES,
 });
@@ -1250,7 +1320,8 @@ function lightCurvePeakTable(peaks, metadata) {
     rows: peaks,
     notes: [
       "Peaks are local maxima on the declared finite grid and are not independent detections.",
-      "No false-alarm probability or period confidence interval is computed.",
+      "The result includes a Baluev analytic false-alarm upper bound and a Montgomery-O'Donoghue period standard-error estimate when numerically resolvable; neither is a calibrated detection probability or confidence interval.",
+      "A returned false-alarm probability of 0 is a numerical floor, not exact certainty.",
     ],
   };
 }
@@ -1426,7 +1497,6 @@ function analyzeLightCurvePeriodicity(input) {
   if (normalizedInput.maximumPeriodDays > baselineDays) warnings.push("maximum-period-exceeds-observation-baseline");
   if (medianCadenceDays !== null && normalizedInput.minimumPeriodDays < 2 * medianCadenceDays) warnings.push("minimum-period-below-twice-median-cadence-alias-risk");
   if (medianCadenceDays !== null && maximumGapDays > 5 * medianCadenceDays) warnings.push("large-sampling-gaps-window-alias-risk");
-  warnings.push("false-alarm-probability-not-computed", "period-uncertainty-not-computed", "single-sinusoid-model-only");
 
   const minimumError = resolvedWeighting === "weighted"
     ? Math.min(...eligibleRows.map((row) => row.measurement.standardError))
@@ -1597,17 +1667,30 @@ function analyzeLightCurvePeriodicity(input) {
     maximumPeaks: normalizedInput.maximumPeaks,
     timeOrigin,
   };
+  // The two numbers a reader needs before believing a peak are computed by declared analytic
+  // methods. Each remains null when its inputs cannot resolve the estimate.
+  const residualScale = bestPeak.normalizedResidualRootMeanSquare;
   const bestFitSummary = {
     ...bestPeak,
     constantModelMean: weightedMean,
     constantModelResidualSum,
+    falseAlarmProbability: baluevFalseAlarmProbability(
+      bestPeak.power, points.length, maximumFrequencyPerDay, points,
+    ),
+    periodStandardErrorDays: periodStandardErrorDays(
+      bestPeak.periodDays, points.length, baselineDays, bestPeak.amplitude, residualScale,
+    ),
   };
+  if (bestFitSummary.falseAlarmProbability === null) warnings.push("false-alarm-probability-not-computed");
+  if (bestFitSummary.periodStandardErrorDays === null) warnings.push("period-uncertainty-not-computed");
+  warnings.push("single-sinusoid-model-only");
   const core = {
     schema: LOMB_SCARGLE_SCHEMA,
     algorithm: LOMB_SCARGLE_ALGORITHM,
     settings,
     summary,
     warnings,
+    boundaries: LOMB_SCARGLE_BOUNDARIES,
     periodogram,
     peaks: peakRows,
     bestFit: bestFitSummary,

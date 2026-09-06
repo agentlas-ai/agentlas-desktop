@@ -1,8 +1,8 @@
 .page {
   min-height: 100%;
   padding: 32px clamp(20px, 5vw, 72px) 64px;
-  color: var(--text-primary, #eef2f7);
-  background: radial-gradient(circle at 12% 0%, rgba(72, 102, 148, 0.24), transparent 35%), #0f141c;
+  color: var(--text-primary, var(--white));
+  background: radial-gradient(circle at 12% 0%, rgba(72, 102, 148, 0.24), transparent 35%), var(--black);
 }
 
 .shell {
@@ -11,7 +11,7 @@
 }
 
 .eyebrow {
-  color: #8bb8ff;
+  color: var(--info);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: .12em;
@@ -28,7 +28,7 @@
 .lede {
   max-width: 720px;
   margin: 0;
-  color: #aab6c6;
+  color: var(--white-soft);
   line-height: 1.6;
 }
 
@@ -41,13 +41,13 @@
   border: 1px solid rgba(139, 184, 255, .24);
   border-radius: 14px;
   background: rgba(24, 35, 52, .78);
-  color: #dbe8fb;
+  color: var(--white);
   white-space: pre-wrap;
 }
 
-.error { border-color: rgba(255, 130, 130, .5); color: #ffd1d1; }
-.success { border-color: rgba(101, 224, 157, .45); color: #c8f7d9; }
-.unproven { border-color: rgba(255, 197, 92, .5); color: #ffe5ae; }
+.error { border-color: rgba(255, 130, 130, .5); color: var(--danger-soft); }
+.success { border-color: rgba(101, 224, 157, .45); color: var(--ok-soft); }
+.unproven { border-color: rgba(255, 197, 92, .5); color: var(--warn-soft); }
 
 .card {
   margin-top: 24px;
@@ -61,7 +61,7 @@
 .card h2 { margin: 0 0 18px; font-size: 18px; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .wide { grid-column: 1 / -1; }
-.label { display: grid; gap: 7px; color: #b9c5d5; font-size: 12px; font-weight: 700; }
+.label { display: grid; gap: 7px; color: var(--white-soft); font-size: 12px; font-weight: 700; }
 .input,
 .textarea,
 .select {
@@ -70,36 +70,36 @@
   border: 1px solid rgba(166, 186, 213, .23);
   border-radius: 10px;
   padding: 10px 12px;
-  color: #f2f6fb;
-  background: #111923;
+  color: var(--white);
+  background: var(--black);
   font: inherit;
   font-size: 14px;
 }
 .textarea { min-height: 100px; resize: vertical; line-height: 1.5; }
-.hint { color: #7f8da0; font-size: 11px; font-weight: 400; }
+.hint { color: var(--white-faint); font-size: 11px; font-weight: 400; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
 .button {
   border: 0;
   border-radius: 10px;
   padding: 10px 15px;
-  color: #fff;
-  background: #376ed4;
+  color: var(--white);
+  background: var(--info);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
 }
-.button.secondary { background: #273448; color: #d7e2f2; }
-.button.danger { background: #4a2730; color: #ffd9df; }
+.button.secondary { background: var(--black-soft); color: var(--white-soft); }
+.button.danger { background: var(--danger); color: var(--white); }
 .button:disabled { cursor: wait; opacity: .5; }
 .phase { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
-.phase span { border-radius: 99px; padding: 5px 9px; color: #8492a5; background: #182231; font-size: 11px; }
-.phase span.active { color: #dceaff; background: #274c8e; }
-.phase span.done { color: #bff2d1; background: #1c4936; }
-.gate { margin-top: 18px; padding: 14px; border-radius: 12px; background: #0c1118; }
+.phase span { border-radius: 99px; padding: 5px 9px; color: var(--white-faint); background: var(--black); font-size: 11px; }
+.phase span.active { color: var(--white); background: var(--info); }
+.phase span.done { color: var(--white); background: var(--ok); }
+.gate { margin-top: 18px; padding: 14px; border-radius: 12px; background: var(--black); }
 .gate strong { display: block; margin-bottom: 8px; }
-.gate ul { margin: 0; padding-left: 20px; color: #ffc7c7; font-size: 12px; line-height: 1.55; }
-.log { max-height: 180px; overflow: auto; margin-top: 18px; padding: 12px; border-radius: 12px; background: #0b1017; color: #9fb0c5; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-.small { color: #8492a5; font-size: 12px; line-height: 1.5; }
+.gate ul { margin: 0; padding-left: 20px; color: var(--white-soft); font-size: 12px; line-height: 1.55; }
+.log { max-height: 180px; overflow: auto; margin-top: 18px; padding: 12px; border-radius: 12px; background: var(--black); color: var(--white-soft); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.small { color: var(--white-faint); font-size: 12px; line-height: 1.5; }
 @media (max-width: 680px) {
   .grid { grid-template-columns: 1fr; }
   .wide { grid-column: auto; }

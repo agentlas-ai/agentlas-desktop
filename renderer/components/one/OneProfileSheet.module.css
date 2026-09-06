@@ -69,8 +69,8 @@
   flex: 0 0 auto;
   padding: 5px 8px;
   border-radius: 999px;
-  background: #f2f4ef;
-  color: #777d72;
+  background: var(--paper-3);
+  color: var(--muted-deep);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
@@ -154,14 +154,14 @@
 .primaryButton {
   border: 1px solid var(--one-sheet-primary);
   background: var(--one-sheet-primary);
-  color: #fff;
+  color: var(--white);
 }
 
 .secondaryButton,
 .dangerButton {
   border: 1px solid var(--one-sheet-control-border);
   background: var(--one-sheet-control-surface);
-  color: #42473e;
+  color: var(--ink);
 }
 
 .dangerButton {
@@ -180,9 +180,9 @@
   grid-template-columns: 1fr 1fr;
   gap: 13px;
   padding: 17px;
-  border: 1px solid #e2e6dc;
+  border: 1px solid var(--ok-soft);
   border-radius: var(--one-sheet-card-radius);
-  background: #fafbf8;
+  background: var(--paper-2);
 }
 
 .wideField,
@@ -206,7 +206,7 @@
 
 .principleCard[data-enabled="false"] {
   background: var(--one-sheet-card-muted);
-  color: #777c73;
+  color: var(--muted-deep);
 }
 
 .principleTop {
@@ -224,20 +224,20 @@
   min-height: 26px;
   padding: 0 9px;
   border-radius: 999px;
-  background: #f0f3eb;
-  color: #53613f;
+  background: var(--paper-3);
+  color: var(--accent);
   font-size: 11px;
   font-weight: 700;
 }
 
 .enabledBadge {
-  background: #edf5e5;
-  color: #4b672f;
+  background: var(--ok-soft);
+  color: var(--ok);
 }
 
 .disabledBadge {
-  background: #eeefec;
-  color: #777c73;
+  background: var(--paper-3);
+  color: var(--muted-deep);
 }
 
 .principleContent {
@@ -250,7 +250,7 @@
 
 .approvalMeta {
   margin: 0;
-  color: #777d72;
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -270,7 +270,7 @@
   padding: 25px 18px;
   border: 1px dashed var(--one-sheet-control-border);
   border-radius: 13px;
-  color: #747a70;
+  color: var(--muted-deep);
   text-align: center;
   font-size: 13px;
 }

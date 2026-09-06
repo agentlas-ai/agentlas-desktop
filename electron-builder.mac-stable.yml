@@ -179,28 +179,21 @@ extraResources:
       - "!**/__pycache__/**"
       - "!**/*.pyc"
   # Startup Founder Studio 패키지(런처 + web/dist). base 설정과 동기화 유지.
+  # Desktop runtime allowlist; validated again by studio-runtime-contract.cjs.
   - from: studio-pack
     to: studio-pack
     filter:
-      - "**/*"
-      - "!**/.studio-runtime/**"
-      - "!**/.studio-runtime"
-      - "!**/node_modules/**"
-      - "!.git/**"
-      - "!.git"
-      - "!web/src/**"
-      - "!web/node_modules/**"
-      - "!web/dist/generated/**"
-      - "!web/dist/studio-data.json"
-      - "!web/public/generated/**"
-      - "!web/public/studio-data.json"
-      - "!.agentlas/**"
-      - "!.agentlas"
-      - "!field-test/**"
-      - "!**/__pycache__/**"
-      - "!**/*.pyc"
-      - "!**/*.map"
-      - "!**/.DS_Store"
+      - "scripts/open-studio-gui.py"
+      - "clean-studio-data.json"
+      - "templates/startup-brief.md"
+      - "templates/founder-execution-packet.md"
+      - "web/dist/index.html"
+      - "web/dist/favicon.svg"
+      - "web/dist/manifest.webmanifest"
+      - "web/dist/assets/*.js"
+      - "web/dist/assets/*.css"
+  - from: build-resources/studio-runtime-manifest.json
+    to: studio-pack/manifest.json
 
 mac:
   category: public.app-category.productivity
@@ -242,8 +235,8 @@ dmg:
       type: link
       path: /Applications
 
-# 배포 채널: 공개 "릴리스 전용" 레포(agentlas-desktop). 비공개 소스 레포라 컴파일된
-# 바이너리만 공개 레포에 게시한다. (release.yml 의 base 설정과 동일 채널 유지)
+# 공개 릴리스 전용 채널: agentlas-desktop-releases. 소스 저장소 공개 여부와
+# 무관하게 검증된 런타임 산출물만 게시한다. base 설정과 동일 채널을 유지한다.
 publish:
   - provider: github
     owner: agentlas-ai

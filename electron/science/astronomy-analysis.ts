@@ -10,8 +10,10 @@ import { loadSciencePluginRuntime, readSciencePluginFile } from "./plugin-runtim
  * cosmology, SED blackbody fit, radial-velocity Keplerian orbit).
  *
  * Every analysis reads one exact immutable Data Table artifact version (or, for the
- * cosmology calculator, only declared parameters), runs the plugin runtime in-process
- * with the network denied by construction (the runtimes never import network modules),
+ * cosmology calculator, only declared parameters), runs the plugin runtime in-process.
+ * The depth tool applies a CommonJS require/require.resolve builtin allowlist containing
+ * only node:crypto. This is a module-request boundary for the verified graph, not a process
+ * sandbox: dynamic import and global fetch remain outside that boundary.
  * records a ResearchRun whose single output is the canonical analysis JSON, and
  * materializes one immutable `chart.vega` artifact carrying the publication table and
  * the Vega-Lite figure. Replays are verified against the recomputed result hash.
@@ -27,7 +29,9 @@ export const ASTRONOMY_ANALYSIS_INPUT_MIME = "application/vnd.agentlas.science.a
 export const ASTRONOMY_ANALYSIS_OUTPUT_ROLE = "astronomy-analysis-result" as const;
 export const ASTRONOMY_ANALYSIS_OUTPUT_MIME = "application/vnd.agentlas.science.astronomy-analysis-result+json" as const;
 export const ASTRONOMY_ANALYSIS_PLUGIN_ID = "agentlas-astronomy" as const;
-export const ASTRONOMY_ANALYSIS_PLUGIN_VERSION = "1.2.0" as const;
+export const ASTRONOMY_ANALYSIS_PLUGIN_VERSION = "1.2.2" as const;
+const ASTRONOMY_DEPTH_TOOL_ID = "agentlas.astronomy-light-curve-periodicity-depth" as const;
+const ASTRONOMY_DEPTH_ALLOWED_BUILTINS = ["node:crypto"] as const;
 const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 
@@ -52,6 +56,8 @@ export interface AstronomyAnalysisToolDefinition {
   /** Runtime argument that receives the projected rows; null for parameter-only tools. */
   rowsArgument: string | null;
   rowFields: RowField[];
+  /** Values inserted only for fields deliberately omitted by this tool's source mapping. */
+  defaultRowValues?: Readonly<Record<string, unknown>>;
   /** Runtime module dependencies whose hashes enter the environment receipt. */
   runtimeDependencies: string[];
   titleFallback: (settings: Record<string, unknown>) => string;
@@ -75,7 +81,7 @@ export const ASTRONOMY_ANALYSIS_TOOLS: readonly AstronomyAnalysisToolDefinition[
   {
     toolId: "agentlas.astronomy-light-curve-periodicity-depth", toolVersion: "1.0.0", mcpName: "analyze_light_curve_periodicity_depth",
     runtimeModule: "periodicity-depth.cjs", runtimeExport: "analyzeLightCurvePeriodicityDepth", resultSchema: "agentlas.science.astronomy-light-curve-periodicity-depth-result/v1",
-    rowsArgument: "measurements", rowFields: LIGHT_CURVE_ROWS, runtimeDependencies: ["analysis-common.cjs", "astronomy.cjs"],
+    rowsArgument: "measurements", rowFields: LIGHT_CURVE_ROWS, defaultRowValues: { use: true }, runtimeDependencies: ["analysis-common.cjs", "astronomy.cjs"],
     titleFallback: (settings) => `Periodicity depth · ${text(settings.targetId)}`,
     summaryLine: (result) => `GLS depth: refined period ${number(record(result.summary).refinedPeriodDays)} d, Baluev FAP ${number(record(result.summary).baluevFalseAlarmProbability)}, bootstrap FAP ${String(record(result.summary).bootstrapFalseAlarmProbability)} over ${number(record(result.summary).analysisEligibleRows)} eligible observations.`,
     observations: (result) => [
@@ -282,11 +288,12 @@ function toolDefinition(toolId: string): AstronomyAnalysisToolDefinition {
   return tool;
 }
 
-function loadRuntime(tool: AstronomyAnalysisToolDefinition): { analyze: (input: Record<string, unknown>) => AstronomyAnalysisResult; runtimeSha256: Record<string, string> } {
+function loadRuntime(tool: AstronomyAnalysisToolDefinition, allowedBuiltins?: readonly string[]): { analyze: (input: Record<string, unknown>) => AstronomyAnalysisResult; runtimeSha256: Record<string, string> } {
   const loaded = loadSciencePluginRuntime<Record<string, unknown>>(
     ASTRONOMY_ANALYSIS_PLUGIN_ID,
     `runtime/${tool.runtimeModule}`,
     16 * 1024 * 1024,
+    allowedBuiltins === undefined ? undefined : { allowedBuiltins },
   );
   const runtimeSha256: Record<string, string> = { [tool.runtimeModule]: loaded.sha256 };
   for (const name of tool.runtimeDependencies) {
@@ -310,6 +317,7 @@ function projectRows(tool: AstronomyAnalysisToolDefinition, table: ReturnType<ty
   for (const field of tool.rowFields) {
     const name = columns[field.field];
     if (name === undefined) {
+      if (Object.hasOwn(tool.defaultRowValues ?? {}, field.field)) continue;
       if (field.optional) continue;
       throw new Error(`science-astronomy-analysis-${field.key.replace(/_/gu, "-")}-column-missing`);
     }
@@ -324,8 +332,11 @@ function projectRows(tool: AstronomyAnalysisToolDefinition, table: ReturnType<ty
     const projected: Record<string, unknown> = {};
     for (const field of tool.rowFields) {
       const name = exactColumns[field.field];
-      if (name === undefined) continue;
-      projected[field.field] = row[name] ?? null;
+      if (name !== undefined) {
+        projected[field.field] = row[name] ?? null;
+        continue;
+      }
+      if (Object.hasOwn(tool.defaultRowValues ?? {}, field.field)) projected[field.field] = tool.defaultRowValues?.[field.field];
     }
     return projected;
   });
@@ -370,7 +381,8 @@ export class ScienceAstronomyAnalysisService {
     if (Object.hasOwn(input.analysis, "sourceContentSha256") || (tool.rowsArgument && Object.hasOwn(input.analysis, tool.rowsArgument))) {
       throw new Error("science-astronomy-analysis-input-invalid");
     }
-    const runtime = loadRuntime(tool);
+    const allowedBuiltins = tool.toolId === ASTRONOMY_DEPTH_TOOL_ID ? ASTRONOMY_DEPTH_ALLOWED_BUILTINS : undefined;
+    const runtime = loadRuntime(tool, allowedBuiltins);
 
     // Resolve the exact source table (table-backed tools) and project its rows.
     let source: Record<string, unknown> | null = null;
@@ -455,7 +467,11 @@ export class ScienceAstronomyAnalysisService {
       algorithmSha256: analysis.provenance.algorithmSha256 ?? null,
       runtime: "electron-main",
       node: process.versions.node,
-      networkPolicy: "runtime-imports-no-network-modules",
+      networkPolicy: allowedBuiltins ? "verified-cjs-builtin-allowlist-v1" : "runtime-imports-no-network-modules",
+      networkPolicyScope: allowedBuiltins
+        ? "require-and-require.resolve-only; dynamic-import-and-global-fetch-outside-boundary"
+        : "manifest-pinned-current-runtime-imports",
+      allowedBuiltins: allowedBuiltins ?? null,
     }));
     const created = this.store.createResearchRun({
       requestId: input.requestId, projectId: input.projectId, conversationId: input.conversationId, originMessageId: input.originMessageId,

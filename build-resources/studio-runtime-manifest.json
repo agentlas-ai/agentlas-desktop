@@ -1,0 +1,15 @@
+{
+  "schema_version": "agentlas.desktop-studio.v1",
+  "name": "agentlas-startup-founder-studio",
+  "display_name": "Agentlas Startup Founder Studio",
+  "ui_surface": {
+    "type": "served_spa",
+    "path": "web/dist/index.html",
+    "launcher": "scripts/open-studio-gui.py"
+  },
+  "initial_data": "clean-studio-data.json",
+  "templates": [
+    "templates/startup-brief.md",
+    "templates/founder-execution-packet.md"
+  ]
+}

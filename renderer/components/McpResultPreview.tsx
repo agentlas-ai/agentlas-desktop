@@ -60,9 +60,19 @@ function Block({ block, locale }: { block: McpResultBlock; locale: "ko" | "en" }
     );
   }
   if (block.kind === "data") {
+    /*
+     * ★원시 JSON 을 펼친 채로 두지 않는다(2026-09-03 실측).
+     *
+     * 브라우저 요청 한 번에 채팅이 이런 덩어리로 덮였다:
+     *   { "type": "tool_reference",
+     *     "tool_name": "mcp__plugin_playwright_playwright__browser_navigate" }
+     * 사용자는 내부 도구 이름을 알 필요가 없고, 이 블록은 대화 본문보다 길었다.
+     * 증거는 버리지 않는다 — 접어 두고 누르면 그대로 보인다.
+     * 라벨도 한국어 화면에서 영어("Structured result")로 남아 있었다.
+     */
     return (
-      <details className={styles.data} open>
-        <summary>{block.label}</summary>
+      <details className={styles.data}>
+        <summary>{block.label === "Structured result" && locale === "ko" ? "자세한 결과" : block.label}</summary>
         <pre>{block.value}</pre>
       </details>
     );

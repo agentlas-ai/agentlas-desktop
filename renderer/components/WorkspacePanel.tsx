@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { DirListing, FsReadScope, TextFilePreview, WorkspaceNode } from "@/lib/types";
+import { viewerKindForChatFile } from "@/lib/chat-files";
 import {
   IconChevronRight,
   IconClose,
@@ -749,18 +750,8 @@ function toWorkspaceFilePreview(node: WorkspaceNode, preview: TextFilePreview): 
 }
 
 function viewerKindForFile(name: string, preview: TextFilePreview): WorkspaceFilePreview["viewerKind"] {
-  const ext = extensionOf(name);
-  if ([".md", ".mdx"].includes(ext)) return "markdown";
-  if ([".json", ".jsonl"].includes(ext)) return "json";
-  if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
-  if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
-  if ([".mp3", ".mpeg", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba", ".mid", ".midi"].includes(ext)) return "audio";
-  if (ext === ".pdf") return "pdf";
-  if ([".ppt", ".pptx", ".pptm", ".pot", ".potx", ".ppsx", ".odp", ".key"].includes(ext)) return "presentation";
-  if ([".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".csv", ".tsv", ".ods", ".numbers"].includes(ext)) return "spreadsheet";
-  if (ext === ".zip") return "archive";
-  if ([".doc", ".docx", ".docm", ".dot", ".dotx", ".rtf", ".odt", ".pages", ".hwp", ".hwpx"].includes(ext)) return "document";
+  const classified = viewerKindForChatFile(name, "file");
+  if (classified !== "binary") return classified;
   if (!preview.reason) return "text";
   return "binary";
 }

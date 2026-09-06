@@ -7,39 +7,107 @@
 // stripAgentControlBlocks 로 펜스를 통째 제거했고, 텔레그램만 자기 평문화기를 갖고
 // 있었다). 표면마다 손으로 다시 짜면 한 표면씩 빠진다 — 그래서 한 벌이 소유한다.
 import { AGENT_ASK_OPEN, AGENT_ASK_CLOSE } from "./agent-control-blocks";
+import { renderPlainAskBody } from "./ask-plaintext";
+import { isUnfilledQuestionTemplate } from "./types";
 
-/** 펜스 본문(JSON)을 사람이 읽을 질문+선택지 텍스트로 바꾼다. 파싱 실패 시 null. */
-export function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): string | null {
+export interface AgentlasAskQuestion {
+  question: string;
+  header?: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect: boolean;
+}
+
+export interface ExtractedAskFences {
+  /** Model prose with every complete or partial wire fence removed. */
+  text: string;
+  /** Only complete, bounded, user-answerable questions. */
+  questions: AgentlasAskQuestion[];
+}
+
+const MAX_QUESTIONS = 8;
+const MAX_OPTIONS = 8;
+
+/** Parse one fence body without granting it approval or execution authority. */
+export function parseAskFenceBody(body: string): AgentlasAskQuestion | null {
   const stripped = body.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
-  let obj: unknown;
+  let value: unknown;
   try {
-    obj = JSON.parse(stripped);
+    value = JSON.parse(stripped);
   } catch {
     return null;
   }
-  if (!obj || typeof obj !== "object") return null;
-  const o = obj as Record<string, unknown>;
-  if (typeof o.question !== "string") return null;
-  const lines: string[] = [o.question.trim()];
-  const optionsRaw = Array.isArray(o.options) ? o.options : [];
-  let n = 0;
-  for (const opt of optionsRaw) {
-    if (!opt || typeof opt !== "object") continue;
-    const ob = opt as Record<string, unknown>;
-    if (typeof ob.label !== "string") continue;
-    const desc =
-      typeof ob.description === "string" && ob.description.trim() ? ` — ${ob.description.trim()}` : "";
-    lines.push(`${n + 1}. ${ob.label.trim()}${desc}`);
-    n++;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const question = typeof raw.question === "string" ? raw.question.trim().slice(0, 4_000) : "";
+  const header = typeof raw.header === "string" ? raw.header.trim().slice(0, 200) : "";
+  const options = Array.isArray(raw.options)
+    ? raw.options.flatMap((option) => {
+        if (!option || typeof option !== "object" || Array.isArray(option)) return [];
+        const item = option as Record<string, unknown>;
+        const label = typeof item.label === "string" ? item.label.trim().slice(0, 200) : "";
+        if (!label) return [];
+        const description = typeof item.description === "string"
+          ? item.description.trim().slice(0, 1_000)
+          : "";
+        return [{ label, ...(description ? { description } : {}) }];
+      }).slice(0, MAX_OPTIONS)
+    : [];
+  if (!question || options.length < 2) return null;
+  if (isUnfilledQuestionTemplate({ question, ...(header ? { header } : {}), options })) return null;
+  return {
+    question,
+    ...(header ? { header } : {}),
+    options,
+    multiSelect: raw.multiSelect === true,
+  };
+}
+
+/**
+ * Split display prose from the ask wire format. An unfinished final/streaming
+ * tail is hidden rather than exposed; the next cumulative chunk can parse it
+ * once the closing marker arrives.
+ */
+export function extractAskFences(text: unknown): ExtractedAskFences {
+  if (typeof text !== "string" || !text.includes(AGENT_ASK_OPEN)) {
+    return { text: typeof text === "string" ? text : "", questions: [] };
   }
-  if (n > 0) {
-    lines.push(
-      replyLocale === "en"
-        ? "\nReply with the number (or the option) you want."
-        : "\n원하는 번호(또는 항목)를 답장으로 보내주세요.",
-    );
+  const questions: AgentlasAskQuestion[] = [];
+  let visible = "";
+  let rest = text;
+  for (let guard = 0; guard < 64; guard += 1) {
+    const open = rest.indexOf(AGENT_ASK_OPEN);
+    if (open < 0) {
+      visible += rest;
+      return { text: visible, questions };
+    }
+    visible += rest.slice(0, open);
+    const afterOpen = rest.slice(open + AGENT_ASK_OPEN.length);
+    const close = afterOpen.indexOf(AGENT_ASK_CLOSE);
+    if (close < 0) return { text: visible, questions };
+    const parsed = parseAskFenceBody(afterOpen.slice(0, close));
+    if (parsed && questions.length < MAX_QUESTIONS) questions.push(parsed);
+    rest = afterOpen.slice(close + AGENT_ASK_CLOSE.length);
   }
-  return lines.join("\n");
+  // Adversarially many fences fail closed. No unparsed control payload reaches
+  // a display surface from the truncated tail.
+  return { text: visible, questions };
+}
+
+/** Rebuild only validated fields for durable legacy consumers. */
+export function canonicalAskFenceText(questions: AgentlasAskQuestion[]): string {
+  return questions.slice(0, MAX_QUESTIONS).map((question) => (
+    `${AGENT_ASK_OPEN}${JSON.stringify({
+      question: question.question,
+      ...(question.header ? { header: question.header } : {}),
+      multiSelect: question.multiSelect,
+      options: question.options,
+    })}${AGENT_ASK_CLOSE}`
+  )).join("\n\n");
+}
+
+/** 펜스 본문(JSON)을 사람이 읽을 질문+선택지 텍스트로 바꾼다. 파싱 실패 시 null. */
+export function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): string | null {
+  return renderPlainAskBody(body, replyLocale);
 }
 
 /**

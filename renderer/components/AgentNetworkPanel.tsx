@@ -905,16 +905,16 @@ const RETRO = {
   bg: "var(--paper)",
   bgGrid: "var(--paper-2)",
   card: "var(--paper)",
-  cardRun: "color-mix(in srgb, #F59E0B 10%, var(--paper))",
-  cardDone: "color-mix(in srgb, #10B981 5%, var(--paper))",
+  cardRun: "color-mix(in srgb, var(--warn) 10%, var(--paper))",
+  cardDone: "color-mix(in srgb, var(--ok) 5%, var(--paper))",
   edge: "var(--paper-edge)",
-  edgeRun: "color-mix(in srgb, #F59E0B 42%, var(--paper-edge))",
-  edgeDone: "color-mix(in srgb, #10B981 26%, var(--paper-edge))",
+  edgeRun: "color-mix(in srgb, var(--warn) 42%, var(--paper-edge))",
+  edgeDone: "color-mix(in srgb, var(--ok) 26%, var(--paper-edge))",
   ink: "var(--ink)",
   inkSoft: "var(--ink-soft)",
   muted: "var(--muted-deep)",
-  amber: "#F59E0B",
-  green: "#10B981",
+  amber: "var(--warn)",
+  green: "var(--ok)",
   ghost: "var(--muted)",
 } as const;
 
@@ -990,9 +990,9 @@ function PixelAvatar({
     status === "pending" || status === "closed"
       ? "var(--muted)"
       : status === "failed"
-        ? "#EF4444"
+        ? "var(--danger)"
       : kind === "orchestrator"
-        ? "#F59E0B"
+        ? "var(--warn)"
         : `hsl(${hue} 72% 52%)`;
   const pip =
     status === "running"
@@ -1000,7 +1000,7 @@ function PixelAvatar({
       : status === "done"
         ? RETRO.green
         : status === "failed"
-          ? "#EF4444"
+          ? "var(--danger)"
           : RETRO.muted;
   return (
     <span style={avatarChipStyle(status, size)}>
@@ -1562,8 +1562,8 @@ function idleCardStyle(active: boolean): CSSProperties {
     alignItems: "center",
     gap: 8,
     borderRadius: 8,
-    border: active ? "1px solid #bbf7d0" : "1px solid var(--paper-edge)",
-    background: active ? "color-mix(in srgb, #f0fdf4 68%, var(--paper) 32%)" : "var(--paper)",
+    border: active ? "1px solid var(--ok-soft)" : "1px solid var(--paper-edge)",
+    background: active ? "color-mix(in srgb, var(--ok-soft) 68%, var(--paper) 32%)" : "var(--paper)",
     padding: "10px 12px",
     color: active ? "var(--green-deep)" : "var(--muted-deep)",
     fontSize: 11.5,
@@ -1732,18 +1732,18 @@ function agentRowStyle(kind: "orchestrator" | "group" | "worker", status: OrchSt
           : done
             ? RETRO.edgeDone
             : failed
-              ? "color-mix(in srgb, #EF4444 42%, var(--paper-edge))"
+              ? "color-mix(in srgb, var(--danger) 42%, var(--paper-edge))"
               : RETRO.edge
     }`,
     background:
       kind === "orchestrator"
-        ? "color-mix(in srgb, #F59E0B 12%, var(--paper))"
+        ? "color-mix(in srgb, var(--warn) 12%, var(--paper))"
         : running
           ? RETRO.cardRun
           : done
             ? RETRO.cardDone
             : failed
-              ? "color-mix(in srgb, #EF4444 7%, var(--paper))"
+              ? "color-mix(in srgb, var(--danger) 7%, var(--paper))"
               : closed
                 ? "color-mix(in srgb, var(--muted-deep) 5%, var(--paper))"
                 : RETRO.card,
@@ -1766,11 +1766,11 @@ function avatarChipStyle(status: OrchStatus, size: number): CSSProperties {
     alignItems: "center",
     justifyContent: "center",
     background: running
-      ? "color-mix(in srgb, #F59E0B 13%, var(--paper-2))"
+      ? "color-mix(in srgb, var(--warn) 13%, var(--paper-2))"
       : failed
-        ? "color-mix(in srgb, #EF4444 10%, var(--paper-2))"
+        ? "color-mix(in srgb, var(--danger) 10%, var(--paper-2))"
         : "var(--paper-2)",
-    border: `1px ${closed ? "dashed" : "solid"} ${running ? RETRO.edgeRun : failed ? "color-mix(in srgb, #EF4444 42%, var(--paper-edge))" : RETRO.edge}`,
+    border: `1px ${closed ? "dashed" : "solid"} ${running ? RETRO.edgeRun : failed ? "color-mix(in srgb, var(--danger) 42%, var(--paper-edge))" : RETRO.edge}`,
     boxShadow: running ? `0 0 10px -3px color-mix(in srgb, ${RETRO.amber} 45%, transparent)` : undefined,
   };
 }
@@ -1792,7 +1792,7 @@ function agentNameStyle(kind: "orchestrator" | "group" | "worker", status: OrchS
     color: status === "pending" || status === "closed"
       ? RETRO.inkSoft
       : status === "failed"
-        ? "#EF4444"
+        ? "var(--danger)"
         : kind === "orchestrator" ? RETRO.amber : RETRO.ink,
     fontSize: kind === "worker" ? 12 : 12.5,
     fontWeight: 800,
@@ -1869,7 +1869,7 @@ function modelPillStyle(status: OrchStatus): CSSProperties {
     whiteSpace: "nowrap",
     borderRadius: 5,
     border: `1px solid ${running ? RETRO.edgeRun : RETRO.edge}`,
-    background: running ? "color-mix(in srgb, #FFC061 12%, transparent)" : "transparent",
+    background: running ? "color-mix(in srgb, var(--warn-soft) 12%, transparent)" : "transparent",
     color: running ? RETRO.amber : RETRO.inkSoft,
     padding: "0 5px",
     fontSize: 9.5,
@@ -1887,7 +1887,7 @@ function statusWordStyle(status: OrchStatus): CSSProperties {
       : status === "done"
         ? RETRO.green
         : status === "failed"
-          ? "#EF4444"
+          ? "var(--danger)"
           : RETRO.muted,
     fontWeight: 700,
   };

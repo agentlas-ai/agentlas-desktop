@@ -85,23 +85,25 @@ export default function ScienceHostPage() {
   const unavailable = extension !== null && (extension.phase !== "installed" || !extension.enabled);
   const failed = view?.state === "error";
   return (
-    <div className={styles.page}>
-      <header className={`${styles.header} titlebar-drag`}>
-        <div className="titlebar-nodrag"><ProductModeMenu current="science" darkText locale={ko ? "ko" : "en"} /></div>
-        <div className={styles.title}>{ko ? "재현 가능한 연구 워크벤치" : "Reproducible research workbench"}</div>
-        <div className={styles.status}>{view?.state === "ready" ? (view.title || "Agentlas Science") : view?.state === "opening" ? (ko ? "여는 중" : "Opening") : ""}</div>
-      </header>
-      <div ref={surfaceRef} className={styles.surface}>
-        {(unavailable || failed) && (
-          <div className={styles.fallback}>
-            <div className={styles.fallbackCard}>
-              <h1>{failed ? (ko ? "Science를 열지 못했습니다" : "Science could not be opened") : (ko ? "Science가 설치되어 있지 않습니다" : "Science is not installed")}</h1>
-              <p>{failed ? (view?.errorMessage ?? view?.errorCode) : (ko ? "설정에서 검증된 Science 확장을 설치하거나 다시 켜세요." : "Install or re-enable the verified Science extension in Settings.")}</p>
-              <button type="button" onClick={() => navigate("/settings")}>{ko ? "설정 열기" : "Open Settings"}</button>
+    <>
+      <div className={styles.page}>
+        <header className={`${styles.header} titlebar-drag`}>
+          <div className="titlebar-nodrag"><ProductModeMenu current="science" darkText locale={ko ? "ko" : "en"} /></div>
+          <div className={styles.title}>{ko ? "재현 가능한 연구 워크벤치" : "Reproducible research workbench"}</div>
+          <div className={styles.status}>{view?.state === "ready" ? (view.title || "Agentlas Science") : view?.state === "opening" ? (ko ? "여는 중" : "Opening") : ""}</div>
+        </header>
+        <div ref={surfaceRef} className={styles.surface}>
+          {(unavailable || failed) && (
+            <div className={styles.fallback}>
+              <div className={styles.fallbackCard}>
+                <h1>{failed ? (ko ? "Science를 열지 못했습니다" : "Science could not be opened") : (ko ? "Science가 설치되어 있지 않습니다" : "Science is not installed")}</h1>
+                <p>{failed ? (view?.errorMessage ?? view?.errorCode) : (ko ? "설정에서 검증된 Science 확장을 설치하거나 다시 켜세요." : "Install or re-enable the verified Science extension in Settings.")}</p>
+                <button type="button" onClick={() => navigate("/settings")}>{ko ? "설정 열기" : "Open Settings"}</button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

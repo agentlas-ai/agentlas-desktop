@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { externalToolNames } from "../../shared/tool-activity";
 import { getDb } from "./db";
-import type {
-  FailureEventUi,
-  InvocationRunReceipt,
-  McpInvocationEvent,
-  McpInvocationRequest,
-  OrchestrationTarget,
-  RunEventUi,
+import {
+  QUESTION_CONTINUATION_REPLY_MAX_BYTES,
+  QUESTION_CONTINUATION_REPLY_MAX_LENGTH,
+  type FailureEventUi,
+  type InvocationRunReceipt,
+  type McpInvocationEvent,
+  type McpInvocationRequest,
+  type OrchestrationTarget,
+  type RunEventUi,
 } from "../../shared/types";
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
@@ -285,10 +287,100 @@ export function sanitizeRunEventToolArgs(value: string): string {
   }
 }
 
-function safePayload(input: Record<string, unknown> | undefined): Record<string, unknown> {
+const QUESTION_ANSWER_RECEIPT_KIND = "question_answer_committed";
+const QUESTION_CONTINUATION_REPLY_FIELD = "continuationReplyCanonicalBase64";
+const QUESTION_CONTINUATION_REPLY_MAX_BASE64_LENGTH = Math.ceil(QUESTION_CONTINUATION_REPLY_MAX_BYTES / 3) * 4;
+const SHA256_RE = /^[a-f0-9]{64}$/u;
+const CONTINUATION_RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+interface SafePayloadContext {
+  runId: string;
+  kind: string;
+  chatId: string | null;
+}
+
+function boundedReceiptIdentifier(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 512
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function canonicalQuestionContinuationRunId(chatId: string, sourceMessageId: string): string {
+  const chars = createHash("sha256").update(`${chatId}\0${sourceMessageId}`).digest("hex").slice(0, 32).split("");
+  chars[12] = "5";
+  chars[16] = ((Number.parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
+  const value = chars.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+/**
+ * A Decision reply is user-authored canonical input, not diagnostic prose.
+ * Preserve it only for the exact Main receipt envelope that can restore the
+ * same source/chat/run/hash binding. The encoded value never leaves through
+ * the generic renderer ledger projection (see runRowToUi).
+ */
+function canonicalQuestionContinuationReply(
+  input: Record<string, unknown>,
+  context: SafePayloadContext,
+): string | undefined {
+  const encoded = input[QUESTION_CONTINUATION_REPLY_FIELD];
+  if (encoded === undefined) return undefined;
+  const sourceMessageId = input.sourceMessageId;
+  if (
+    context.kind !== QUESTION_ANSWER_RECEIPT_KIND
+    || !boundedReceiptIdentifier(context.chatId)
+    || context.runId !== `confirm:${context.chatId}`
+    || !boundedReceiptIdentifier(sourceMessageId)
+    || typeof input.continuationRunId !== "string"
+    || !CONTINUATION_RUN_ID_RE.test(input.continuationRunId)
+    || input.continuationRunId !== canonicalQuestionContinuationRunId(context.chatId, sourceMessageId)
+    || typeof input.continuationRequestHash !== "string"
+    || !SHA256_RE.test(input.continuationRequestHash)
+    || typeof input.continuationReplySha256 !== "string"
+    || !SHA256_RE.test(input.continuationReplySha256)
+    || typeof encoded !== "string"
+    || encoded.length < 1
+    || encoded.length > QUESTION_CONTINUATION_REPLY_MAX_BASE64_LENGTH
+    || Object.hasOwn(input, "reply")
+    || Object.hasOwn(input, "continuationReplyChunks")
+  ) {
+    throw new Error("invalid canonical Decision continuation receipt");
+  }
+  const bytes = Buffer.from(encoded, "base64");
+  if (
+    bytes.length < 1
+    || bytes.length > QUESTION_CONTINUATION_REPLY_MAX_BYTES
+    || bytes.toString("base64") !== encoded
+  ) {
+    throw new Error("invalid canonical Decision continuation encoding");
+  }
+  const reply = bytes.toString("utf8");
+  if (
+    reply.length < 1
+    || reply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH
+    || !Buffer.from(reply, "utf8").equals(bytes)
+    || createHash("sha256").update(reply, "utf8").digest("hex") !== input.continuationReplySha256
+  ) {
+    throw new Error("invalid canonical Decision continuation reply");
+  }
+  return encoded;
+}
+
+function safePayload(
+  input: Record<string, unknown> | undefined,
+  context?: SafePayloadContext,
+): Record<string, unknown> {
+  const canonicalReply = context && input
+    ? canonicalQuestionContinuationReply(input, context)
+    : undefined;
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    if (key === QUESTION_CONTINUATION_REPLY_FIELD) {
+      if (canonicalReply !== undefined) out[key] = canonicalReply;
+      continue;
+    }
     // OneSurface is already normalized and redacted by Main. Preserve its exact
     // JSON only after the closed durable contract passes again at the ledger
     // boundary; ordinary strings stay on the small diagnostic limit below.
@@ -669,6 +761,9 @@ function runRowToUi(row: RunEventRow): RunEventUi {
   // API, never through runLedger.events.
   if (row.kind === ONE_SURFACE_SNAPSHOT_EVENT_KIND) delete payload.oneSurfaceJson;
   if (row.kind === ONE_DOMAIN_EVENT_KIND) delete payload.oneDomainEventJson;
+  // Delete unconditionally so a malformed/legacy row cannot smuggle this
+  // Main-only field through another event kind.
+  delete payload[QUESTION_CONTINUATION_REPLY_FIELD];
   enrichOneArtifactContentIdentity(payload);
   return {
     id: row.id,
@@ -686,6 +781,7 @@ function runRowToUi(row: RunEventRow): RunEventUi {
 
 function failureRowToUi(row: FailureEventRow): FailureEventUi {
   const payload = parsePayload(row.payload_json);
+  delete payload[QUESTION_CONTINUATION_REPLY_FIELD];
   // Older rows used the undifferentiated `tool_error` code. Reclassify those
   // rows from their retained result/status so reopening a chat does not turn a
   // user's approval refusal into an infrastructure failure.
@@ -746,7 +842,11 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
     automation_id: input.automationId ?? null,
     node_id: input.nodeId ?? null,
     agent_id: input.agentId ?? null,
-    payload_json: JSON.stringify(safePayload(input.payload)),
+    payload_json: JSON.stringify(safePayload(input.payload, {
+      runId: input.runId,
+      kind: input.kind,
+      chatId: input.chatId ?? null,
+    })),
   };
   getDb()
     .prepare(
@@ -794,7 +894,11 @@ export function recordFailureEvent(input: RecordFailureEventInput): FailureEvent
     agent_id: input.agentId ?? null,
     error_code: input.errorCode ?? null,
     error_message: truncate(input.errorMessage || "Unknown failure", 1_200),
-    payload_json: JSON.stringify(safePayload(input.payload)),
+    payload_json: JSON.stringify(safePayload(input.payload, {
+      runId: input.runId ?? "",
+      kind: "failure_event",
+      chatId: input.chatId ?? null,
+    })),
   };
   getDb()
     .prepare(

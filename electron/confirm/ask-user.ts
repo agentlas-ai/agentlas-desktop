@@ -13,6 +13,7 @@
 //  - 창이 없거나(플러그인·헤드리스) 무인 실행이면 **묻지 않고 즉시 강등**한다.
 //    기다릴 사람이 없는데 기다리는 것은 멈춤이지 질문이 아니다.
 import { randomUUID } from "node:crypto";
+import type { AskUserRequestEvent } from "../../shared/types";
 
 export interface AskUserOption {
   label: string;
@@ -40,10 +41,12 @@ export type AskUserOutcome =
 interface PendingAsk {
   resolve: (outcome: AskUserOutcome) => void;
   timer: NodeJS.Timeout;
+  payload: AskUserRequestEvent;
 }
 
 const ASK_CHANNEL = "agentlas:ask-user";
 const pending = new Map<string, PendingAsk>();
+const lifecycleListeners = new Set<(event: AskUserRequestEvent) => boolean>();
 
 /** 사람이 카드를 보고 답할 시간. 넘으면 timeout — 추측한 답을 만들지 않는다. */
 const ASK_TIMEOUT_MS = 10 * 60_000;
@@ -79,6 +82,26 @@ function emitToRenderer(payload: unknown): boolean {
   return true;
 }
 
+function emitToMobileSurface(payload: AskUserRequestEvent): boolean {
+  let emitted = false;
+  for (const listener of lifecycleListeners) {
+    try {
+      if (listener(payload)) emitted = true;
+    } catch {
+      /* A disconnected Mobile listener must not interrupt another surface. */
+    }
+  }
+  return emitted;
+}
+
+function emitToQuestionSurfaces(payload: AskUserRequestEvent): boolean {
+  // Call both paths independently: renderer success must not short-circuit a
+  // paired phone, and a Mobile listener must keep headless One/Work answerable.
+  const rendererEmitted = emitToRenderer(payload);
+  const mobileEmitted = emitToMobileSurface(payload);
+  return rendererEmitted || mobileEmitted;
+}
+
 /**
  * 사용자에게 묻고 **답을 기다린다.**
  *
@@ -96,7 +119,7 @@ export function askUser(
 
   const requestId = randomUUID();
   const createdAt = Date.now();
-  const payload = {
+  const payload: AskUserRequestEvent = {
     requestId,
     question,
     options: (req.options ?? []).slice(0, 8).map((o) => ({
@@ -118,23 +141,22 @@ export function askUser(
       clearTimeout(entry.timer);
       pending.delete(requestId);
       if (abortListener) opts.signal?.removeEventListener("abort", abortListener);
+      emitToQuestionSurfaces({ ...entry.payload, expiresAt: 0 });
       resolve(outcome);
     };
     const timer = setTimeout(() => {
       // 만료는 이번 질문만 끝낸다. 답을 지어내지 않는다.
-      emitToRenderer({ ...payload, expiresAt: 0 });
       settle({ status: "timeout" });
     }, ASK_TIMEOUT_MS);
-    pending.set(requestId, { resolve: settle, timer });
+    pending.set(requestId, { resolve: settle, timer, payload });
 
-    if (!emitToRenderer(payload)) {
+    if (!emitToQuestionSurfaces(payload)) {
       // 그릴 창이 없다 — 플러그인·헤드리스 표면이다. 기다리면 그냥 멈춘 실행이 된다.
       settle({ status: "no-surface" });
       return;
     }
     if (opts.signal) {
       abortListener = () => {
-        emitToRenderer({ ...payload, expiresAt: 0 });
         settle({ status: "cancelled" });
       };
       opts.signal.addEventListener("abort", abortListener, { once: true });
@@ -157,6 +179,25 @@ export function submitAskUserAnswer(requestId: string, answer: string | null): b
 /** 대기 중인 질문 수 — 테스트와 진단용. */
 export function pendingAskUserCount(): number {
   return pending.size;
+}
+
+/** Safe pending rows for authenticated projections. Callers still own scope filtering. */
+export function listPendingAskUserRequests(): AskUserRequestEvent[] {
+  return [...pending.values()].map(({ payload }) => ({
+    ...payload,
+    options: payload.options.map((option) => ({ ...option })),
+  }));
+}
+
+/**
+ * A listener is an answer-capable surface. The Mobile authority attaches this
+ * only while at least one authenticated bridge client is subscribed.
+ */
+export function onAskUserLifecycle(
+  listener: (event: AskUserRequestEvent) => boolean,
+): () => void {
+  lifecycleListeners.add(listener);
+  return () => lifecycleListeners.delete(listener);
 }
 
 export const ASK_USER_CHANNEL = ASK_CHANNEL;

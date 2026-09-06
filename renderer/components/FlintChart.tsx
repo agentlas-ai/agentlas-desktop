@@ -61,9 +61,9 @@ export function FlintChart({
       }}
     >
       <div ref={containerRef} style={{ minHeight: 150 }} />
-      {status === "loading" && <div style={{ color: "#64748b", fontSize: 12 }}>Rendering chart…</div>}
+      {status === "loading" && <div style={{ color: "var(--info)", fontSize: 12 }}>Rendering chart…</div>}
       {status === "error" && (
-        <div role="status" style={{ color: "#b91c1c", fontSize: 12 }}>
+        <div role="status" style={{ color: "var(--danger)", fontSize: 12 }}>
           Chart could not be rendered{error ? `: ${error}` : "."}
         </div>
       )}

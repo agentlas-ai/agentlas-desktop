@@ -269,6 +269,9 @@
     "결과를 수락": "Accept the result",
     "현재 근거를 다음 단계의 입력으로 사용합니다.": "The current evidence becomes the input to the next step.",
     "기본에서 제외": "Off by default",
+    // 원고 블록의 동작 메뉴 — 액자를 걷어내면서 배지에 있던 정보가 여기로 옮겨 왔다.
+    "출처 아티팩트 열기": "Open the source artifact",
+    "이 블록 삭제": "Delete this block",
     "연구는 이 결정 없이 다음 단계로 가지 않습니다. 승인하거나 기각해 주세요.": "The study does not move on without this decision. Approve or reject them.",
     "결과를 반려": "Send the result back",
     "감사 기록은 보존하고 재설계 또는 반복 동작을 선택합니다.": "The audit record is kept; choose to redesign or to repeat the run.",

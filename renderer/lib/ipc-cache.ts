@@ -151,7 +151,8 @@ function wrapMethod(
     } catch {
       return fn.apply(target, args);
     }
-    const forced = isForcedRead(args);
+    // runtime.detect uses a boolean force flag at the IPC boundary.
+    const forced = (spec === "runtime.detect" && args[0] === true) || isForcedRead(args);
     if (ttl > 0 && !forced) {
       const hit = valueCache.get(key);
       if (hit && Date.now() - hit.at < ttl) {
@@ -160,6 +161,17 @@ function wrapMethod(
     }
     const pending = inFlight.get(key);
     if (pending) return pending.then(cloneValue);
+    if (spec === "runtime.detect" && forced) {
+      // A reconnect refresh supersedes ordinary detection snapshots too.
+      // Detach older reads so a late response cannot restore the old cache.
+      for (const cachedKey of valueCache.keys()) {
+        if (cachedKey.startsWith("runtime.detect:")) valueCache.delete(cachedKey);
+      }
+      for (const pendingKey of inFlight.keys()) {
+        if (pendingKey.startsWith("runtime.detect:")) inFlight.delete(pendingKey);
+      }
+      invalidateViewData("dashboard.runtimes");
+    }
     const requestEpoch = invalidationEpoch;
     let flight!: Promise<unknown>;
     flight = Promise.resolve(fn.apply(target, args)).then(

@@ -458,7 +458,7 @@ export function NodeConfigPanel({
                 {exampleBusy ? t("auto.cfg.eval_from_example_busy") : t("auto.cfg.eval_from_example_go")}
               </button>
               {exampleError ? (
-                <div style={{ fontSize: 11, color: "var(--red-deep, #b4533a)", marginTop: 4 }}>{exampleError}</div>
+                <div style={{ fontSize: 11, color: "var(--red-deep, var(--danger))", marginTop: 4 }}>{exampleError}</div>
               ) : null}
             </details>
           </Field>
@@ -700,7 +700,7 @@ export function NodeConfigPanel({
           borderRadius: "var(--radius-md)",
           border: "1px solid var(--paper-edge)",
           background: "var(--paper)",
-          color: "var(--red-deep, #b4533a)",
+          color: "var(--red-deep, var(--danger))",
           fontSize: 12,
           fontWeight: 600,
           cursor: "pointer",

@@ -389,8 +389,8 @@ export function DescribeAutomation({
       data-presentation={presentation}
       style={{
         position: "relative",
-        border: "1px solid #e8e8ea", borderRadius: 18,
-        background: "#fff", padding: 24, display: "grid", gap: 12,
+        border: "1px solid var(--paper-edge)", borderRadius: 18,
+        background: "var(--paper)", padding: 24, display: "grid", gap: 12,
         boxShadow: "0 12px 30px rgba(20, 25, 30, .06)",
         marginBottom: presentation === "chat" ? 8 : 20,
         ...(presentation === "chat" ? { maxWidth: 720 } : {}),
@@ -402,7 +402,7 @@ export function DescribeAutomation({
             ? (ko ? "One이 이 대화에서 자동화를 설계합니다" : "One is designing this automation in chat")
             : (ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you.")}
         </div>
-        <button type="button" aria-label={ko ? "닫기" : "Close"} onClick={() => setDismissed(true)} style={{ width: 32, height: 32, display: "inline-grid", placeItems: "center", flex: "0 0 auto", marginTop: -8, marginRight: -8, padding: 0, border: 0, borderRadius: 9, background: "transparent", color: "#8a9095", cursor: "pointer" }}>
+        <button type="button" aria-label={ko ? "닫기" : "Close"} onClick={() => setDismissed(true)} style={{ width: 32, height: 32, display: "inline-grid", placeItems: "center", flex: "0 0 auto", marginTop: -8, marginRight: -8, padding: 0, border: 0, borderRadius: 9, background: "transparent", color: "var(--muted-deep)", cursor: "pointer" }}>
           <IconClose size={14} />
         </button>
       </div>
@@ -527,7 +527,7 @@ export function DescribeAutomation({
                      거짓이므로, 바깥으로 나가는 단계는 전부 같은 사실 하나만 알린다:
                      이 단계는 묻지 않고 바깥으로 나간다. 이 화면이 사람이 그 사실을 보는
                      마지막 자리다. */
-                  <span style={{ color: "var(--red-deep, #b4533a)", fontWeight: 600 }}>
+                  <span style={{ color: "var(--red-deep, var(--danger))", fontWeight: 600 }}>
                     {ko ? " — 바깥으로 나감, 확인 없이 바로" : " — goes outside without asking"}
                   </span>
                 ) : null}

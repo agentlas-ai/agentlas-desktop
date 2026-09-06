@@ -25,6 +25,7 @@ import {
 } from "../../shared/long-run";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
+import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 
 export interface LongRunRecord {
   id: string;
@@ -1141,12 +1142,75 @@ export function settleLongRunMessage(input: {
   return result.changes === 1;
 }
 
+export function getLongRunGoalRevisionBinding(runId: string): { revision: number; receiptCursor: number } | null {
+  const row = getDb().prepare(`SELECT payload_json FROM long_run_events
+    WHERE run_id = ? AND kind = 'run.goal_revision_bound' ORDER BY seq DESC LIMIT 1`).get(runId) as
+    { payload_json: string } | undefined;
+  if (!row) return null;
+  const value = JSON.parse(row.payload_json) as { revision: number; receiptCursor: number };
+  if (!Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isSafeInteger(value.receiptCursor) || value.receiptCursor < 0) {
+    throw new Error("long_run_goal_revision_binding_invalid");
+  }
+  return value;
+}
+
+function goalRevisionIsCurrent(run: LongRunRecord): boolean {
+  const goal = getChatGoalRevision(run.goalId);
+  const binding = getLongRunGoalRevisionBinding(run.id);
+  return goal ? getChatGoalContract(run.goalId)?.status === "active" && binding?.revision === goal.revision : binding === null;
+}
+
+/** Apply a user-authored revision only after work has stopped. Old tasks and
+ * receipts remain audit records; none count toward the new contract.
+ */
+export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const run = getLongRun(runId);
+    if (!run || run.surface === "science") throw new Error("long_run_goal_binding_not_allowed");
+    const goal = getChatGoalRevision(run.goalId);
+    if (!goal || goal.chatId !== run.rootChatId) throw new Error("long_run_goal_chat_mismatch");
+    if (getChatGoalContract(run.goalId)?.status !== "active") throw new Error("long_run_goal_contract_not_active");
+    const binding = getLongRunGoalRevisionBinding(runId);
+    if (binding?.revision === goal.revision) return;
+    if (run.version !== expectedVersion) throw new Error("long_run_goal_binding_version_conflict");
+    if (!["draft", "queued", "paused", "blocked", "waiting_user"].includes(run.status)) throw new Error("long_run_goal_binding_requires_stop");
+    const active = db.prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
+      .get(runId) as { n: number };
+    if (active.n > 0) throw new Error("long_run_goal_binding_attempt_unsettled");
+    // The existing projection is bounded. Refuse instead of silently dropping
+    // part of the authoritative objective or acceptance criteria.
+    const objective = goal.objective.replace(/\s+/g, " ").trim();
+    const criteria = goal.acceptanceCriteria.map((criterion) => criterion.text.replace(/\s+/g, " ").trim());
+    if (objective.length > 2_000 || criteria.length > 32 || criteria.some((text) => text.length > 500)) {
+      throw new Error("long_run_goal_projection_limit");
+    }
+    const now = new Date().toISOString();
+    const cursor = db.prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM long_run_verification_receipts WHERE run_id = ?")
+      .get(runId) as { n: number };
+    db.prepare(`UPDATE long_run_tasks SET state = 'cancelled', updated_at = ?, completed_at = ?
+      WHERE run_id = ? AND state NOT IN ('completed','cancelled','failed')`).run(now, now, runId);
+    db.prepare(`UPDATE long_runs SET objective = ?, acceptance_criteria_json = ?, updated_at = ?, version = version + 1
+      WHERE id = ?`).run(objective, JSON.stringify(criteria), now, runId);
+    addLongRunTask({ runId, id: `task:goal-revision:${goal.revision}`, title: objective.slice(0, 240), objective,
+      acceptanceCriteria: criteria, criterionIndices: criteria.map((_, index) => index) });
+    appendEventInDb({ runId, kind: "run.goal_revision_bound", actorKind: "host", at: now,
+      payload: { revision: goal.revision, previousRevision: binding?.revision ?? null, receiptCursor: cursor.n,
+        sourceMessageId: goal.sourceMessage.messageId } });
+  })();
+  const run = getLongRun(runId);
+  if (!run) throw new Error("long_run_goal_binding_readback_failed");
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  return run;
+}
+
 function latestCriterionVerdicts(runId: string): Map<number, { verdict: string; evidenceRefs: string[]; artifactRefs: string[] }> {
+  const binding = getLongRunGoalRevisionBinding(runId);
   const rows = getDb().prepare(
     `SELECT criterion_index, verdict, evidence_refs_json, artifact_refs_json
      FROM long_run_verification_receipts
-     WHERE run_id = ? ORDER BY created_at DESC, rowid DESC`,
-  ).all(runId) as Array<{
+     WHERE run_id = ? AND rowid > ? ORDER BY created_at DESC, rowid DESC`,
+  ).all(runId, binding?.receiptCursor ?? 0) as Array<{
     criterion_index: number;
     verdict: string;
     evidence_refs_json: string;
@@ -1194,9 +1258,15 @@ export function recordLongRunVerification(input: {
   artifactRefs?: readonly string[];
   summary: string;
   authority?: "generic" | "science-projection";
+  goalRevision?: number;
 }): string {
   const run = getLongRun(input.runId);
   if (!run) throw new Error(`long_run_not_found:${input.runId}`);
+  const binding = getLongRunGoalRevisionBinding(run.id);
+  if (!goalRevisionIsCurrent(run) || (binding && input.goalRevision !== binding.revision)) {
+    throw new Error("long_run_verification_goal_revision_conflict");
+  }
+  if (binding && run.status !== "verifying") throw new Error("long_run_verification_not_active");
   if (run.surface === "science" && input.authority !== "science-projection") {
     throw new Error("science_projection_read_only");
   }
@@ -1212,6 +1282,11 @@ export function recordLongRunVerification(input: {
   const now = new Date().toISOString();
   const db = getDb();
   db.transaction(() => {
+    const current = getLongRun(input.runId)!;
+    const currentBinding = getLongRunGoalRevisionBinding(input.runId);
+    if (!goalRevisionIsCurrent(current) || (currentBinding && (input.goalRevision !== currentBinding.revision || current.status !== "verifying"))) {
+      throw new Error("long_run_verification_goal_revision_conflict");
+    }
     db.prepare(
       `INSERT INTO long_run_verification_receipts (
         id, run_id, task_id, criterion_index, verifier_worker_id, verdict,
@@ -1318,18 +1393,21 @@ export function applyScienceLongRunProjectionStatus(input: {
 }
 
 export function tryCompleteVerifiedLongRun(runId: string): boolean {
-  const run = getLongRun(runId);
-  if (!run || run.status !== "verifying") return false;
-  if (run.surface === "science") return false;
-  if (listLongRunTasks(runId, true).length > 0) return false;
-  const latest = latestCriterionVerdicts(runId);
-  const allPassed = run.acceptanceCriteria.every((_, index) => {
-    const receipt = latest.get(index);
-    return receipt?.verdict === "passed" && (receipt.evidenceRefs.length > 0 || receipt.artifactRefs.length > 0);
-  });
-  if (!allPassed) return false;
-  transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
-  return true;
+  return getDb().transaction(() => {
+    const run = getLongRun(runId);
+    if (!run || run.status !== "verifying") return false;
+    if (run.surface === "science") return false;
+    if (!goalRevisionIsCurrent(run)) return false;
+    if (listLongRunTasks(runId, true).length > 0) return false;
+    const latest = latestCriterionVerdicts(runId);
+    const allPassed = run.acceptanceCriteria.every((_, index) => {
+      const receipt = latest.get(index);
+      return receipt?.verdict === "passed" && (receipt.evidenceRefs.length > 0 || receipt.artifactRefs.length > 0);
+    });
+    if (!allPassed) return false;
+    transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
+    return true;
+  })();
 }
 
 export function longRunContinueDecision(goalId: string, now: Date = new Date()): LongRunContinueDecision | null {
@@ -1353,6 +1431,10 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
   if (["paused", "pausing", "cancelling"].includes(run.status)) {
     return decision(false, "goal_paused");
   }
+  if (!goalRevisionIsCurrent(run)) return decision(false, "goal_revision_pending");
+  if (["draft", "waiting_user", "waiting_worker", "waiting_tool", "verifying"].includes(run.status)) {
+    return decision(false, `goal_${run.status}`);
+  }
   const deadline = run.budget.wallclockDeadline ? Date.parse(run.budget.wallclockDeadline) : Number.NaN;
   if (Number.isFinite(deadline) && now.getTime() >= deadline) return decision(false, "budget_wallclock_exhausted");
   if (run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles) {
@@ -1374,7 +1456,7 @@ export function recordLongRunCycle(input: {
   const run = getLongRunByGoalId(input.goalId);
   if (!run) return null;
   if (run.surface === "science") throw new Error("science_projection_read_only");
-  if (LONG_RUN_TERMINAL_STATUSES.has(run.status) || run.status === "blocked" || run.status === "paused") {
+  if (LONG_RUN_TERMINAL_STATUSES.has(run.status) || !["queued", "running"].includes(run.status) || !goalRevisionIsCurrent(run)) {
     return longRunContinueDecision(input.goalId);
   }
   const now = new Date().toISOString();
@@ -1411,16 +1493,20 @@ export function recordLongRunCycle(input: {
 }
 
 export function requestLongRunVerification(goalId: string, evidence?: string | null): boolean {
-  const run = getLongRunByGoalId(goalId);
-  if (!run || !["running", "waiting_worker", "waiting_tool"].includes(run.status)) return false;
-  if (run.surface === "science") return false;
-  transitionLongRun({
-    runId: run.id,
-    to: "verifying",
-    actorKind: "worker",
-    reason: evidence?.slice(0, 500) ?? "model-requested-verification",
-  });
-  return true;
+  return getDb().transaction(() => {
+    const run = getLongRunByGoalId(goalId);
+    if (!run || !goalRevisionIsCurrent(run)) return false;
+    if (run.surface === "science") return false;
+    if (run.status === "verifying") return true;
+    if (!["running", "waiting_worker", "waiting_tool"].includes(run.status)) return false;
+    transitionLongRun({
+      runId: run.id,
+      to: "verifying",
+      actorKind: "worker",
+      reason: evidence?.slice(0, 500) ?? "model-requested-verification",
+    });
+    return true;
+  })();
 }
 
 function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string): string[] {

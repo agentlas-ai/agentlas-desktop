@@ -1,11 +1,28 @@
 # Changelog
 
-## 1.1.2 — 2026-09-03
+## 1.1.2 — 2026-09-06
 
 This source update reconciles the newest Desktop, One, Work, and Science runtime
 changes without treating local QA material as public release content. Release
 artifacts and update feeds remain separate acceptance gates.
 
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d.
+Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
+- Science has its own model selector in the chat composer and preserves that
+  model throughout an active research run, independently of Work settings.
+- Science continues approved research across successive turns until the study
+  criteria are met, a stated budget is reached, or the user stops it. Progress
+  checks pause stalled runs, and approved analysis plans can advance under the
+  study's standing policy.
+- Science preserves the selected research folder during execution and prevents
+  late manuscript responses from replacing a different open project.
+- Astronomy time-series results include method limits, analytic false-alarm
+  bounds, period standard errors, and a deeper periodicity analysis option.
+- Ollama's Connect button opens its local-model settings instead of doing nothing.
+- PDF and presentation navigation no longer covers document content in narrow
+  Work panels; slides refit after navigation changes.
 - One keeps an attached image visible while a new conversation is created and
   renders the image separately from the accompanying chat text.
 - One and Work preserve per-conversation execution identity across stop, retry,

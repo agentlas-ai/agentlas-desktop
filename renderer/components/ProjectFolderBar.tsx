@@ -123,6 +123,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
     <div ref={rootRef} style={{ position: "relative", display: "inline-flex" }} aria-busy={busy}>
       <button
         ref={triggerRef}
+        data-project-folder-trigger="true"
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={!chatId || busy}
@@ -214,8 +215,8 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
           style={{
             position: "absolute", left: 0, top: "calc(100% + 4px)", zIndex: 45,
             width: 300, padding: "6px 8px", borderRadius: 7,
-            border: "1px solid color-mix(in srgb, #c0392b 35%, var(--paper-edge))",
-            background: "var(--paper)", color: "#c0392b", fontSize: 11, lineHeight: 1.35,
+            border: "1px solid color-mix(in srgb, var(--danger) 35%, var(--paper-edge))",
+            background: "var(--paper)", color: "var(--danger)", fontSize: 11, lineHeight: 1.35,
           }}
         >
           {error}

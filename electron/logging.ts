@@ -25,6 +25,23 @@ const PREVIOUS_LOG_FILE = "main.previous.log";
 
 type ConsoleMethod = "log" | "info" | "warn" | "error";
 
+/**
+ * A packaged app can inherit stdout/stderr from a short-lived launcher. Once
+ * that launcher closes its pipe, Node's original console method may throw
+ * EPIPE synchronously. Console mirroring is diagnostic-only, so a dead parent
+ * pipe must never escape into Electron's main-process control flow.
+ */
+export function writeOriginalConsoleSafely(
+  original: (...args: unknown[]) => void,
+  args: unknown[],
+): void {
+  try {
+    original(...args);
+  } catch {
+    // The durable file sink below remains authoritative when stdio is gone.
+  }
+}
+
 let logStream: fs.WriteStream | null = null;
 let activeLogPath: string | null = null;
 /*
@@ -178,7 +195,7 @@ export function initFileLogging(): string | null {
     for (const method of ["log", "info", "warn", "error"] as ConsoleMethod[]) {
       const original = console[method].bind(console);
       console[method] = (...args: unknown[]) => {
-        original(...args);
+        writeOriginalConsoleSafely(original, args);
         try {
           const line = `${new Date().toISOString()} [${method}] ${args.map(formatArgument).join(" ")}\n`;
           const bytes = Buffer.byteLength(line);

@@ -12,6 +12,7 @@ import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure 
 import {
   ensureChildCloseAfterExit,
   startCliHeartbeat,
+  workforceObservedHostAuthorityEnforcement,
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
   wrapSystemPrompt,
@@ -27,6 +28,8 @@ import {
   createNdjsonLineReader,
   openClaudeResidentSession,
   residencyDisabledFor,
+  retireSupersededClaudeSessions,
+  captureClaudeExecutableOwner,
   writeClaudeResidentTurn,
   type AcpSessionLease,
   type ClaudeResidentSession,
@@ -43,7 +46,8 @@ import {
 } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
+import { observeCliExecutableIdentity, type CliExecutableIdentity } from "./cli-executable-identity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createUntrustedRuntimeFailure } from "./untrusted-error";
 import {
@@ -53,6 +57,7 @@ import {
 } from "../store/runtime-sessions";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
+import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
  * tool_result. Admit only exact paths from known mutation tools; Main still
@@ -329,9 +334,8 @@ async function materializeWindowsAgentAppMcpConfig(
   }
 }
 
-// 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(프로세스 수명 동안
+// 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(관측한 실행 파일 세대마다
 // 1회 학습) 이후 실행은 플래그 없이 — 메시지 덩어리 스트리밍으로 — 동작한다.
-let includePartialMessagesSupported = true;
 
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `claude`보다 먼저 시도한다. bare `claude`는
@@ -362,18 +366,37 @@ export interface ClaudeCodeProbe {
 }
 
 export async function probeClaudeCode(): Promise<ClaudeCodeProbe | null> {
-  const found = await firstExistingCli(CANDIDATES);
+  let found: CliExecutableIdentity | null;
+  try { found = getExecutable(); } catch { return null; }
   if (!found) return null;
-  const version = (await probeCliVersion(found)) ?? "unknown";
-  return { path: found, version };
+  const version = (await probeCliVersion(found.executable)) ?? "unknown";
+  return { path: found.executable, version };
 }
 
-let cachedBin: string | null | undefined;
-async function getBin(): Promise<string | null> {
-  if (cachedBin !== undefined) return cachedBin;
-  const probe = await probeClaudeCode();
-  cachedBin = probe?.path ?? null;
-  return cachedBin;
+function getExecutable(source?: string, cwd = process.cwd(), env = process.env): CliExecutableIdentity | null {
+  const childEnv = withCliPath(env);
+  for (const bin of source ? [source] : CANDIDATES) {
+    const identity = observeCliExecutableIdentity({ bin, cwd, env: childEnv });
+    if (identity) return identity;
+  }
+  return null;
+}
+
+type ClaudeExecutableCapabilities = {
+  includePartialMessagesSupported: boolean;
+  residencySupported: boolean;
+  efforts?: Array<{ id: string; label: string }>;
+  effortRead?: Promise<Array<{ id: string; label: string }>>;
+};
+const executableCapabilities = new Map<string, ClaudeExecutableCapabilities>();
+function capabilitiesFor(identity: CliExecutableIdentity): ClaudeExecutableCapabilities {
+  let capabilities = executableCapabilities.get(identity.generation);
+  if (!capabilities) {
+    capabilities = { includePartialMessagesSupported: true, residencySupported: true };
+    executableCapabilities.set(identity.generation, capabilities);
+    if (executableCapabilities.size > 128) executableCapabilities.delete(executableCapabilities.keys().next().value!);
+  }
+  return capabilities;
 }
 
 // ── 작업량(effort) 자동 동기화 ─────────────────────────────
@@ -387,15 +410,15 @@ function effortLabel(id: string): string {
     .join(" ");
 }
 
-function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string> {
+function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string | null> {
   return new Promise((resolve) => {
     let out = "";
     let settled = false;
-    const finish = () => {
+    const finish = (ok = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(out);
+      resolve(ok ? out : null);
     };
     const child = spawnCli(bin, ["--help"], { stdio: ["ignore", "pipe", "pipe"] });
     const timer = setTimeout(() => {
@@ -404,8 +427,8 @@ function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string> {
     }, timeoutMs);
     const outDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (c: Buffer) => (out += outDecoder.write(c)));
-    child.on("error", finish);
-    child.on("close", finish);
+    child.on("error", () => finish());
+    child.on("close", (code) => finish(code === 0));
   });
 }
 
@@ -419,18 +442,26 @@ function parseEffortChoices(help: string): string[] {
     .filter(Boolean);
 }
 
-let cachedEfforts: Array<{ id: string; label: string }> | undefined;
-/** 이 Claude Code 버전이 지원하는 작업량 레벨 — --help 파싱(1회 캐시). 미지원이면 []. */
+/** Cache successful help only for the measured executable generation. */
 export async function probeClaudeEfforts(): Promise<Array<{ id: string; label: string }>> {
-  if (cachedEfforts !== undefined) return cachedEfforts;
-  const bin = await getBin();
-  if (!bin) {
-    cachedEfforts = [];
-    return cachedEfforts;
-  }
-  const help = await runClaudeHelp(bin);
-  cachedEfforts = parseEffortChoices(help).map((id) => ({ id, label: effortLabel(id) }));
-  return cachedEfforts;
+  let identity: CliExecutableIdentity | null;
+  try { identity = getExecutable(); } catch { return []; }
+  if (!identity) return [];
+  const capabilities = capabilitiesFor(identity);
+  if (capabilities.efforts) return capabilities.efforts.map((item) => ({ ...item }));
+  if (capabilities.effortRead) return capabilities.effortRead;
+  const started = (async () => {
+    const help = await runClaudeHelp(identity.executable);
+    let current: CliExecutableIdentity | null;
+    try { current = getExecutable(); } catch { return []; }
+    if (!help?.trim() || !current || current.generation !== identity.generation) return [];
+    const efforts = parseEffortChoices(help).map((id) => ({ id, label: effortLabel(id) }));
+    capabilities.efforts = efforts;
+    return efforts.map((item) => ({ ...item }));
+  })();
+  capabilities.effortRead = started;
+  try { return await started; }
+  finally { if (capabilities.effortRead === started) capabilities.effortRead = undefined; }
 }
 
 function flattenHistory(req: RunnerRequest): string {
@@ -449,7 +480,7 @@ function flattenHistory(req: RunnerRequest): string {
  * 시드가 없는 레거시 호출만 시스템 프롬프트 전체 해시로 폴백한다.
  * Build처럼 runtimeSessionId를 직접 넘기는 표면은 호출자가 세션 수명을 관리한다.
  */
-function systemFingerprint(req: RunnerRequest): string {
+function systemFingerprint(req: RunnerRequest, executableFingerprint: string): string {
   // The model is part of the session identity. A runtime session belongs to the
   // model that created it, so resuming it under a different model is a false
   // resume, not continuity. Leaving the model out made every BYOK model switch
@@ -467,6 +498,7 @@ function systemFingerprint(req: RunnerRequest): string {
     return crypto
       .createHash("sha256")
       .update("seed.v3\0")
+      .update(executableFingerprint).update("\0")
       .update(req.sessionFingerprintSeed)
       .update("\0model\0")
       .update(req.model ?? "")
@@ -474,6 +506,7 @@ function systemFingerprint(req: RunnerRequest): string {
   }
   return crypto
     .createHash("sha256")
+    .update(executableFingerprint).update("\0")
     .update(req.systemPrompt)
     .update("\0")
     .update(req.locale)
@@ -532,10 +565,9 @@ export function claudeFailureFromEvent(
 }
 
 /**
- * 이 CLI 는 `--input-format stream-json` 을 모른다(구형) — 프로세스 수명 동안 1회 학습해
- * 영구히 1회성 `-p` 경로로 강등한다. `--include-partial-messages` 학습과 같은 모양.
+ * 이 CLI 는 `--input-format stream-json` 을 모른다(구형) — 관측한 실행 파일 세대마다 1회 학습해
+ * 해당 세대에서 1회성 `-p` 경로를 사용한다. `--include-partial-messages` 학습과 같은 모양.
  */
-let residencySupported = true;
 
 /** 구형 CLI 판별 — 상주 스폰이 아무 이벤트도 못 내고 죽었을 때 stderr 로만 판정한다. */
 function looksLikeUnknownInputFormat(stderr: string): boolean {
@@ -552,10 +584,23 @@ const runClaudeTurn = async (
       "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
     );
   }
-  const bin = await getBin();
-  if (!bin) {
+  const executableIdentity = getExecutable(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
+  if (!executableIdentity) {
     throw new Error(tStatus(req.locale, "errCliMissingClaude"));
   }
+  const bin = executableIdentity.executable;
+  const executableState = capabilitiesFor(executableIdentity);
+
+  const executableOwner = req.chatId ? {
+    chatId: req.chatId,
+    sessionOwnerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
+    isolateOwner: req.runtimeSessionOwnerId != null,
+    generation: executableIdentity.generation,
+  } : null;
+  const retainExecutableOwner = executableOwner && allowResidency
+    && !req.untrustedNoTools && !req.workforceRuntimeToolGrant
+    && !residencyDisabledFor(KIND, req.env ?? process.env)
+    ? captureClaudeExecutableOwner(executableOwner) : () => true;
 
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
@@ -576,12 +621,16 @@ const runClaudeTurn = async (
   );
   const workforceMcpConfig = await inspectWorkforceMcpConfig(runReq);
   const hasExactWorkforceMcpGrant = Boolean(workforceMcpConfig);
+  // Host-authority Workforce row (2026-09-05): the grant travels for the receipt, but the
+  // run keeps the host's own MCP wiring and permission mode.
+  const hostAuthorityWorkforce = Boolean(runReq.workforceRuntimeToolGrant) && !runReq.untrustedNoTools;
   const workforceGrantHasTools = Boolean(runReq.workforceRuntimeToolGrant?.grantedToolIds.length);
-  if (workforceGrantHasTools && !hasExactWorkforceMcpGrant) {
+  if (workforceGrantHasTools && !hasExactWorkforceMcpGrant && !hostAuthorityWorkforce) {
     throw new Error("workforce_runtime_tool_grant_config_unverified");
   }
   if (
     runReq.workforceRuntimeToolGrant &&
+    !hostAuthorityWorkforce &&
     !workforceGrantHasTools &&
     (runReq.mcpConfigPath || runReq.mcpAllowedTools?.length || runReq.untrustedAllowedMcpTools?.length)
   ) {
@@ -608,7 +657,7 @@ const runClaudeTurn = async (
       : runReq.untrustedAllowedMcpTools,
     runReq.workforceRuntimeToolGrant,
   );
-  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
+  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
   const savedSession = !runReq.untrustedNoTools && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
@@ -696,6 +745,17 @@ const runClaudeTurn = async (
       : req.permission === "write"
         ? ["--permission-mode", "acceptEdits"]
         : ["--disallowed-tools", ...READ_ONLY_DENIED_TOOLS];
+  const hostObservation = hostAuthorityWorkforce && runReq.workforceRuntimeToolGrant
+    ? createClaudeWorkforceObservation({
+        grant: runReq.workforceRuntimeToolGrant,
+        expectedSessionId: resumeSessionId,
+        expectedPermissionMode: runReq.browserOnly ? null
+          : req.permission === "full" ? "bypassPermissions"
+          : req.permission === "write" ? "acceptEdits" : null,
+        deniedTools: !runReq.browserOnly && req.permission !== "write" && req.permission !== "full"
+          ? READ_ONLY_DENIED_TOOLS : [],
+      })
+    : null;
 
   // 모델 선택 — opus/sonnet/haiku 별칭(또는 풀 ID). 미지정이면 Claude Code 설정 사용.
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
@@ -834,7 +894,7 @@ const runClaudeTurn = async (
   // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
   // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
   // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
-  const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
+  const partialFlagArgs = executableState.includePartialMessagesSupported ? ["--include-partial-messages"] : [];
   const systemPromptFileFlag = runReq.untrustedNoTools
     ? "--system-prompt-file"
     : "--append-system-prompt-file";
@@ -900,16 +960,22 @@ const runClaudeTurn = async (
   const runEnv = req.env ?? process.env;
   const residencyEligible =
     allowResidency &&
-    residencySupported &&
+    executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
     !runReq.untrustedNoTools &&
+    // A pooled process does not repeat system/init for each turn. This
+    // Workforce call needs fresh native observations; existing pools stay intact.
+    !hostAuthorityWorkforce &&
     Boolean(runReq.chatId) &&
     Boolean(fingerprint);
   const poolKey =
     residencyEligible && runReq.chatId && fingerprint
       ? claudePoolKey({
           chatId: runReq.chatId,
+          sessionOwnerId: runtimeSessionOwnerId ?? null,
+          isolateOwner: isolateRuntimeSessionOwner,
           fingerprint,
+          executableGeneration: executableIdentity.generation,
           cwd: runCwd,
           bin,
           ...(runReq.mcpConfigPath ? { mcpConfigPath: runReq.mcpConfigPath } : {}),
@@ -922,7 +988,18 @@ const runClaudeTurn = async (
   let lease: AcpSessionLease<ClaudeResidentSession> | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
   let broken = false;
-  if (poolKey) {
+  if (poolKey && executableOwner) {
+    try {
+      const current = getExecutable(req.runtimeSource, runCwd, runEnv);
+      if (!retainExecutableOwner() || current?.generation !== executableIdentity.generation) {
+        throw new Error("cli_executable_identity_changed_during_preparation");
+      }
+    } catch (error) {
+      cleanupSysFile();
+      cleanupAgentAppMcpConfig();
+      throw error;
+    }
+    retireSupersededClaudeSessions(pool, executableOwner);
     try {
       lease = await pool.acquire(
         poolKey,
@@ -936,6 +1013,7 @@ const runClaudeTurn = async (
         },
         async () =>
           openClaudeResidentSession({
+            executableOwner,
             bin,
             // `--input-format stream-json` 은 `--print` 와 함께만 동작한다(claude --help).
             // args 에는 `-p` 가 이미 들어 있다.
@@ -945,6 +1023,7 @@ const runClaudeTurn = async (
             cwd: runCwd,
             env: runEnv,
           }),
+        retainExecutableOwner,
       );
     } catch {
       // 상주 세션을 못 열었으면 조용히 1회성 경로로 — 사용자에게 차이가 없어야 한다.
@@ -1262,6 +1341,13 @@ const runClaudeTurn = async (
         usage?: { output_tokens?: number };
       };
     }): void {
+      if (hostObservation) {
+        hostObservation.observe(ev);
+        if (hostObservation.error) {
+          killCliTree(child, 250);
+          return;
+        }
+      }
       if (agentAppMcpInitFailed) return;
       const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
       if (
@@ -1525,6 +1611,10 @@ const runClaudeTurn = async (
         rejectRuntime(abortReasonError(req));
         return;
       }
+      if (hostObservation?.error) {
+        rejectRuntime(new Error(hostObservation.error));
+        return;
+      }
       /*
        * ★상주 턴이 `result` 를 못 봤다 — 세션이 죽었거나 프로토콜이 깨졌다. 이건 사용자의
        * 문제가 아니라 우리가 물려준 세션의 문제다. 조용히 버리고 기존 1회성 `-p --resume`
@@ -1535,8 +1625,8 @@ const runClaudeTurn = async (
         broken = true;
         const why = (stderr || session.stderrTail).slice(-500);
         if (session.completedTurns === 0 && looksLikeUnknownInputFormat(why)) {
-          // 구형 CLI 는 `--input-format` 자체를 모른다 — 영구 강등(프로세스 수명 동안 1회 학습).
-          residencySupported = false;
+          // 구형 CLI 는 `--input-format` 자체를 모른다 — 해당 실행 파일 세대에서 1회성 경로로 전환.
+          executableState.residencySupported = false;
           console.warn(`[residency] claude-code degraded to one-shot: ${why.trim().slice(0, 200)}`);
           events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
         }
@@ -1564,6 +1654,15 @@ const runClaudeTurn = async (
         return;
       }
       if (code === 0) {
+        let observedHostEnforcement: RunnerResult["workforcePermissionEnforcement"];
+        if (hostObservation && !runnerFailure && !structuredRuntimeError) {
+          try {
+            observedHostEnforcement = workforceObservedHostAuthorityEnforcement(runReq, KIND, hostObservation.finish());
+          } catch (error) {
+            rejectRuntime(error);
+            return;
+          }
+        }
         // 표시 본문은 스트리밍 전사본(모든 assistant 메시지 \n-join) 우선 — result 이벤트의
         // finalText는 '마지막 메시지'만 담아, 이걸 우선하면 도구 사이 중간 해설이 완료 순간
         // 통째로 사라지고 인터리브 앵커가 전부 틀어진다. finalText는 델타 스트리밍이 전혀
@@ -1585,7 +1684,9 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
-          workforcePermissionEnforcement: hasExactWorkforceMcpGrant
+          workforcePermissionEnforcement: hostAuthorityWorkforce
+            ? observedHostEnforcement
+            : hasExactWorkforceMcpGrant
             ? workforceNativeToolEnforcement(
                 runReq,
                 KIND,
@@ -1608,7 +1709,9 @@ const runClaudeTurn = async (
             failure: runnerFailure,
             tokens,
             observedUsage,
-            workforcePermissionEnforcement: hasExactWorkforceMcpGrant
+            workforcePermissionEnforcement: hostAuthorityWorkforce
+            ? undefined
+            : hasExactWorkforceMcpGrant
               ? workforceNativeToolEnforcement(
                   runReq,
                   KIND,
@@ -1626,6 +1729,12 @@ const runClaudeTurn = async (
           rejectRuntime(structuredRuntimeError);
           return;
         }
+        if (hostAuthorityWorkforce) {
+          // A failed host invocation has no completed observation. Replaying
+          // automatically would create a different invocation and hide that gap.
+          rejectRuntime(new Error(`workforce_claude_host_observation_process_failed:${code}`));
+          return;
+        }
         if (runReq.untrustedNoTools) {
           // Pre-init failures already replay once through the exact init gate.
           // After a connected receipt, never issue a second model request: it
@@ -1635,8 +1744,8 @@ const runClaudeTurn = async (
         }
         // 구형 CLI가 --include-partial-messages를 모르면 그 플래그만 빼고 즉시 재시도 —
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
-        if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
-          includePartialMessagesSupported = false;
+        if (executableState.includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
+          executableState.includePartialMessagesSupported = false;
           void runClaudeTurn(req, events, false).then(resolve, reject);
           return;
         }

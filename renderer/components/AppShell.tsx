@@ -554,7 +554,7 @@ function GuideFab({
             borderRadius: "50%",
             border: "none",
             background: "var(--accent)",
-            color: "#fff",
+            color: "var(--white)",
             fontSize: 22,
             fontWeight: 700,
             cursor: "pointer",
@@ -766,7 +766,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
               padding: "14px 12px",
               borderRadius: 10,
               background: "var(--green-soft, rgba(34,197,94,0.12))",
-              color: "var(--green-deep, #16794a)",
+              color: "var(--green-deep, var(--ok))",
               fontSize: 13.5,
               fontWeight: 600,
             }}
@@ -792,7 +792,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
                         borderRadius: 8,
                         border: `1px solid ${active ? "var(--accent)" : "var(--paper-edge)"}`,
                         background: active ? "var(--accent)" : "transparent",
-                        color: active ? "#fff" : "var(--ink)",
+                        color: active ? "var(--white)" : "var(--ink)",
                         fontSize: 12.5,
                         fontWeight: 600,
                         cursor: "pointer",
@@ -819,7 +819,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
             <label style={{ display: "block", marginBottom: 12 }}>
               <span style={bugLabelStyle}>
                 {ko ? "무엇이 잘못됐나요?" : "What went wrong?"}
-                <span style={{ color: "var(--red-deep, #d64545)" }}> *</span>
+                <span style={{ color: "var(--red-deep, var(--danger))" }}> *</span>
               </span>
               <textarea
                 value={message}
@@ -849,7 +849,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
             </label>
 
             {status === "error" && (
-              <div style={{ fontSize: 12.5, color: "var(--red-deep, #d64545)", marginBottom: 12 }}>{errorMsg}</div>
+              <div style={{ fontSize: 12.5, color: "var(--red-deep, var(--danger))", marginBottom: 12 }}>{errorMsg}</div>
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -878,7 +878,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
                   borderRadius: 9,
                   border: "none",
                   background: !message.trim() || status === "sending" ? "var(--paper-edge)" : "var(--accent)",
-                  color: "#fff",
+                  color: "var(--white)",
                   fontSize: 13,
                   fontWeight: 700,
                   cursor: !message.trim() || status === "sending" ? "default" : "pointer",

@@ -83,6 +83,29 @@ export interface ComparativeGenomicsResult {
   replayed: boolean;
 }
 
+export interface ComparativeGenomicsProviderValidationFailureReceipt extends JsonRecord {
+  schema: "agentlas.science-comparative-genomics-provider-validation-failure/v1";
+  runId: string | null;
+  provider: "ensembl-compara";
+  code: string;
+  request: ComparativeGenomicsRequest;
+  releaseEndpoint: string;
+  treeEndpoint: string;
+  observedRootTaxonomyId: number | string | null;
+  observedRootScientificName: string | null;
+  observedTaxonomyIds: Array<number | string>;
+  releaseResponseSha256: string;
+  treeResponseSha256: string;
+  retrievedAt: string;
+}
+
+export class ScienceComparativeGenomicsProviderValidationError extends Error {
+  constructor(public failureReceipt: ComparativeGenomicsProviderValidationFailureReceipt) {
+    super(failureReceipt.code);
+    this.name = "ScienceComparativeGenomicsProviderValidationError";
+  }
+}
+
 function sha256(value: Buffer | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -125,6 +148,33 @@ function parseJson(bytes: Buffer, code: string): JsonRecord {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(code);
     return value as JsonRecord;
   } catch { throw new Error(code); }
+}
+
+function observedRootTaxonomy(treeResponse: JsonRecord): { id: number | string | null; scientificName: string | null } {
+  const tree = treeResponse.tree;
+  if (!tree || typeof tree !== "object" || Array.isArray(tree)) return { id: null, scientificName: null };
+  const taxonomy = (tree as JsonRecord).taxonomy;
+  if (!taxonomy || typeof taxonomy !== "object" || Array.isArray(taxonomy)) return { id: null, scientificName: null };
+  const record = taxonomy as JsonRecord;
+  const id = typeof record.id === "number" || typeof record.id === "string" ? record.id : null;
+  const scientificName = typeof record.scientific_name === "string" ? record.scientific_name.slice(0, 240) : null;
+  return { id, scientificName };
+}
+
+function observedTaxonomyIds(treeResponse: JsonRecord): Array<number | string> {
+  const ids = new Set<number | string>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 256 || ids.size >= 2500 || !value || typeof value !== "object" || Array.isArray(value)) return;
+    const record = value as JsonRecord;
+    const taxonomy = record.taxonomy;
+    if (taxonomy && typeof taxonomy === "object" && !Array.isArray(taxonomy)) {
+      const id = (taxonomy as JsonRecord).id;
+      if (typeof id === "number" || typeof id === "string") ids.add(id);
+    }
+    if (Array.isArray(record.children)) record.children.forEach((child) => visit(child, depth + 1));
+  };
+  visit(treeResponse.tree, 0);
+  return [...ids].sort((left, right) => String(left).localeCompare(String(right), "en"));
 }
 
 async function readBounded(response: Response): Promise<Buffer> {
@@ -226,10 +276,35 @@ export class ScienceComparativeGenomicsService {
     const run = this.store.getResearchRunForProject(input.projectId, created.run.id) ?? created.run;
     if (created.replayed && run.status === "succeeded") return this.replay(input.projectId, run.id, built.input, title, built.releaseUrl, built.treeUrl, true);
     if (created.replayed) throw new Error(`science-comparative-genomics-run-${run.status}`);
+    let providerResponses: { release: Buffer; tree: Buffer } | null = null;
     try {
       const releaseResponse = await fetchJson(new URL(built.releaseUrl), this.fetchImpl);
       const treeResponse = await fetchJson(new URL(built.treeUrl), this.fetchImpl);
-      const assessment = engine.normalizeGeneTree({ request: built.input, releaseResponse: parseJson(releaseResponse.body, "science-comparative-genomics-release-invalid"), treeResponse: parseJson(treeResponse.body, "science-comparative-genomics-tree-invalid"), title });
+      providerResponses = { release: releaseResponse.body, tree: treeResponse.body };
+      const releaseJson = parseJson(releaseResponse.body, "science-comparative-genomics-release-invalid");
+      const treeJson = parseJson(treeResponse.body, "science-comparative-genomics-tree-invalid");
+      let assessment: ComparativeGenomicsAssessment;
+      try {
+        assessment = engine.normalizeGeneTree({ request: built.input, releaseResponse: releaseJson, treeResponse: treeJson, title });
+      } catch (error) {
+        const code = error instanceof Error ? error.message.slice(0, 240) : "science-comparative-genomics-provider-validation-failed";
+        const observedRoot = observedRootTaxonomy(treeJson);
+        throw new ScienceComparativeGenomicsProviderValidationError({
+          schema: "agentlas.science-comparative-genomics-provider-validation-failure/v1",
+          runId: null,
+          provider: "ensembl-compara",
+          code,
+          request: built.input,
+          releaseEndpoint: built.releaseUrl,
+          treeEndpoint: built.treeUrl,
+          observedRootTaxonomyId: observedRoot.id,
+          observedRootScientificName: observedRoot.scientificName,
+          observedTaxonomyIds: observedTaxonomyIds(treeJson),
+          releaseResponseSha256: sha256(releaseResponse.body),
+          treeResponseSha256: sha256(treeResponse.body),
+          retrievedAt: releaseResponse.retrievedAt > treeResponse.retrievedAt ? releaseResponse.retrievedAt : treeResponse.retrievedAt,
+        });
+      }
       const retrievedAt = releaseResponse.retrievedAt > treeResponse.retrievedAt ? releaseResponse.retrievedAt : treeResponse.retrievedAt;
       const releaseSource = this.upsertSource({ requestId: input.requestId, projectId: input.projectId, canonicalUri: built.releaseUrl, title: "Ensembl data release receipt", abstract: "Exact Ensembl release response used to version this comparative analysis.", content: releaseResponse.body, retrievedAt, retrievalMethod: `agentlas-comparative-genomics:release@${COMPARATIVE_GENOMICS_TOOL_VERSION}` });
       const treeSource = this.upsertSource({ requestId: input.requestId, projectId: input.projectId, canonicalUri: built.treeUrl, title, abstract: "Exact rooted Ensembl Compara gene tree and provider alignment; orthology, paralogy, alignment, and topology remain inferred.", content: treeResponse.body, retrievedAt, retrievalMethod: `agentlas-comparative-genomics:gene-tree@${COMPARATIVE_GENOMICS_TOOL_VERSION}` });
@@ -247,7 +322,17 @@ export class ScienceComparativeGenomicsService {
       return this.materialize(input.projectId, input.conversationId, input.originMessageId, run.id, assessment, releaseSource, treeSource, built.releaseUrl, built.treeUrl, sha256(releaseResponse.body), sha256(treeResponse.body), retrievedAt, false);
     } catch (error) {
       const current = this.store.getResearchRunForProject(input.projectId, run.id);
-      if (current?.status === "running") this.store.completeResearchRun({ requestId: stableUuid(`${input.requestId}:failed`), projectId: input.projectId, runId: run.id, status: "failed", outputManifestSha256: sha256(canonicalJson([])), summary: error instanceof Error ? error.message.slice(0, 1000) : "science-comparative-genomics-failed", outputs: [] });
+      const outputs = error instanceof ScienceComparativeGenomicsProviderValidationError && providerResponses
+        ? (() => {
+            error.failureReceipt = { ...error.failureReceipt, runId: run.id };
+            return [
+              { role: "ensembl-release-response", mimeType: "application/json", ...this.store.putRunBlob(providerResponses.release), artifactId: null, artifactVersion: null },
+              { role: "ensembl-compara-gene-tree-response", mimeType: "application/json", ...this.store.putRunBlob(providerResponses.tree), artifactId: null, artifactVersion: null },
+              { role: "comparative-genomics-provider-validation-failure-receipt", mimeType: "application/vnd.agentlas.science.comparative-genomics-provider-validation-failure+json", ...this.store.putRunBlob(Buffer.from(canonicalJson(error.failureReceipt), "utf8")), artifactId: null, artifactVersion: null },
+            ];
+          })()
+        : [];
+      if (current?.status === "running") this.store.completeResearchRun({ requestId: stableUuid(`${input.requestId}:failed`), projectId: input.projectId, runId: run.id, status: "failed", outputManifestSha256: sha256(canonicalJson(outputs.map(runResourceEnvelope))), summary: error instanceof Error ? error.message.slice(0, 1000) : "science-comparative-genomics-failed", outputs });
       throw error;
     }
   }

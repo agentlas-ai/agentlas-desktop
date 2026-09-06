@@ -1,21 +1,21 @@
 .railRoot { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.railHeader { min-height: 54px; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; padding: 2px 4px 10px; border-bottom: 1px solid #e5e5e6; }
-.railHeader > button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #686d72; cursor: pointer; }
-.railHeader > button:hover, .railHeader > button:focus-visible { background: #eaeaeb; outline: none; }
+.railHeader { min-height: 54px; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; padding: 2px 4px 10px; border-bottom: 1px solid var(--paper-3); }
+.railHeader > button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted-deep); cursor: pointer; }
+.railHeader > button:hover, .railHeader > button:focus-visible { background: var(--paper-3); outline: none; }
 .railHeader > div { min-width: 0; display: grid; gap: 3px; }
-.railHeader strong { color: #26292c; font-size: 14px; font-weight: 720; letter-spacing: -.02em; }
-.railHeader small { overflow: hidden; color: #92969a; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.railHeader strong { color: var(--ink); font-size: 14px; font-weight: 720; letter-spacing: -.02em; }
+.railHeader small { overflow: hidden; color: var(--muted-deep); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .railScroll { min-height: 0; overflow: auto; padding: 11px 0 18px; }
 .railGroup { display: grid; gap: 2px; padding: 0 0 13px; }
-.railGroup > span { padding: 5px 9px 4px; color: #9b9fa3; font-size: 8px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
-.railRow { width: 100%; min-height: 43px; display: grid; grid-template-columns: 27px minmax(0, 1fr) auto 15px; align-items: center; gap: 7px; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; color: #4b5054; font: inherit; text-align: left; cursor: pointer; }
-.railRow:hover, .railRow:focus-visible { background: #ebebec; outline: none; }
-.railIcon { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; background: #ededee; color: #686d72; }
+.railGroup > span { padding: 5px 9px 4px; color: var(--muted-deep); font-size: 8px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
+.railRow { width: 100%; min-height: 43px; display: grid; grid-template-columns: 27px minmax(0, 1fr) auto 15px; align-items: center; gap: 7px; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--ink-soft); font: inherit; text-align: left; cursor: pointer; }
+.railRow:hover, .railRow:focus-visible { background: var(--paper-3); outline: none; }
+.railIcon { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; background: var(--paper-3); color: var(--muted-deep); }
 .railCopy { min-width: 0; display: grid; gap: 2px; }
 .railCopy strong, .railCopy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.railCopy strong { color: #3d4145; font-size: 11px; font-weight: 650; }
-.railCopy small { color: #92969a; font-size: 8px; }
-.railBadge { min-width: 19px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 999px; background: #e7e8e8; color: #555b5f; font-size: 8px; font-weight: 760; }
+.railCopy strong { color: var(--ink); font-size: 11px; font-weight: 650; }
+.railCopy small { color: var(--muted-deep); font-size: 8px; }
+.railBadge { min-width: 19px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 999px; background: var(--paper-3); color: var(--ink-soft); font-size: 8px; font-weight: 760; }
 .sheetBody { display: grid; gap: 18px; min-height: 120px; }
 .toolTabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; padding: 4px; border-radius: 11px; background: var(--one-sheet-card-muted); }
 .toolTabs button { min-height: 38px; border: 0; border-radius: 8px; background: transparent; color: var(--one-sheet-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
@@ -34,9 +34,9 @@
   align-items: center;
   gap: 11px;
   padding: 9px 12px;
-  border: 1px solid #e6ece8;
+  border: 1px solid var(--paper-3);
   border-radius: 10px;
-  background: #fff;
+  background: var(--paper);
 }
 .settingRow + .settingRow { margin-top: 7px; }
 /* 시트 본문 크기 — 사이드바용 .railCopy(11px/8px)를 시트에서 재사용하면 글씨가 너무 작다. */
@@ -45,27 +45,27 @@
 .settingCopy small { color: var(--one-sheet-muted); font-size: 10px; line-height: 1.45; }
 
 .toolRow { min-height: 62px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); }
-.toolMark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #f0f1f1; color: #51575b; font-size: 12px; font-weight: 780; }
+.toolMark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: var(--paper-3); color: var(--ink-soft); font-size: 12px; font-weight: 780; }
 .toolRow > div { min-width: 0; display: grid; gap: 4px; }
 .toolRow strong, .toolRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolRow strong { color: var(--one-sheet-ink); font-size: 13px; }
 .toolRow small { color: var(--one-sheet-muted); font-size: 10px; }
-.switch { width: 40px; height: 23px; position: relative; flex: none; padding: 0; border: 0; border-radius: 999px; background: #d8dadd; cursor: pointer; transition: background 140ms ease; }
-.switch > span { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform 140ms ease; }
+.switch { width: 40px; height: 23px; position: relative; flex: none; padding: 0; border: 0; border-radius: 999px; background: var(--paper-edge-strong); cursor: pointer; transition: background 140ms ease; }
+.switch > span { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform 140ms ease; }
 .switch[data-on="true"] { background: var(--one-sheet-primary); }
 .switch[data-on="true"] > span { transform: translateX(17px); }
 .switch:disabled { cursor: wait; opacity: .55; }
 .choiceList { display: grid; gap: 8px; }
 .choiceList > button { width: 100%; min-height: 66px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
-.choiceList > button:hover, .choiceList > button:focus-visible { border-color: #c8c4d5; outline: none; }
-.choiceList > button[data-active="true"] { border-color: var(--one-sheet-accent); background: color-mix(in srgb, var(--one-sheet-accent) 7%, #fff); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
+.choiceList > button:hover, .choiceList > button:focus-visible { border-color: var(--info-soft); outline: none; }
+.choiceList > button[data-active="true"] { border-color: var(--one-sheet-accent); background: color-mix(in srgb, var(--one-sheet-accent) 7%, var(--paper)); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
 .choiceList > button > span { min-width: 0; display: grid; gap: 5px; }
 .choiceList strong { color: var(--one-sheet-ink); font-size: 13px; }
 .choiceList small { color: var(--one-sheet-muted); font-size: 11px; line-height: 1.45; }
-.policyNote, .historyHero { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 13px 14px; border-radius: var(--one-sheet-card-radius); background: #f4f4f4; color: #5f6468; }
+.policyNote, .historyHero { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 13px 14px; border-radius: var(--one-sheet-card-radius); background: var(--paper-2); color: var(--ink-soft); }
 .policyNote > div, .historyHero > div { display: grid; gap: 5px; }
-.policyNote strong, .historyHero strong { color: #37323f; font-size: 12px; }
-.policyNote span, .historyHero span { color: #77717e; font-size: 10px; line-height: 1.5; }
+.policyNote strong, .historyHero strong { color: var(--ink); font-size: 12px; }
+.policyNote span, .historyHero span { color: var(--muted-deep); font-size: 10px; line-height: 1.5; }
 .multimodal { display: grid; gap: 17px; }
 .providerGroup { display: grid; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid var(--one-sheet-line); }
 .providerGroup:last-child { padding-bottom: 0; border-bottom: 0; }
@@ -73,20 +73,20 @@
 .providerGroup > header strong { font-size: 14px; }
 .providerGroup > header small { color: var(--one-sheet-muted); font-size: 10px; }
 .providerGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.providerGrid > button { min-height: 59px; display: grid; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--one-sheet-control-border); border-radius: 11px; background: #fff; color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
-.providerGrid > button[data-active="true"] { border-color: var(--one-sheet-accent); background: #f4f4f4; box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
+.providerGrid > button { min-height: 59px; display: grid; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--one-sheet-control-border); border-radius: 11px; background: var(--paper); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
+.providerGrid > button[data-active="true"] { border-color: var(--one-sheet-accent); background: var(--paper-2); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
 .providerGrid > button > span { min-width: 0; display: grid; gap: 4px; }
 .providerGrid strong, .providerGrid small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .providerGrid strong { color: var(--one-sheet-ink); font-size: 11px; }
 .providerGrid small { color: var(--one-sheet-muted); font-size: 9px; }
 .secretRow { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; color: var(--one-sheet-muted); }
 .secretRow input { min-height: var(--one-sheet-control-height); padding: 0 11px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 11px; }
-.secretRow button, .actionRow button { min-height: var(--one-sheet-control-height); padding: 0 14px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: #fff; color: var(--one-sheet-ink); font: inherit; font-size: 11px; font-weight: 690; cursor: pointer; }
+.secretRow button, .actionRow button { min-height: var(--one-sheet-control-height); padding: 0 14px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--paper); color: var(--one-sheet-ink); font: inherit; font-size: 11px; font-weight: 690; cursor: pointer; }
 .secretRow button:disabled, .actionRow button:disabled { cursor: not-allowed; opacity: .45; }
-.notice { margin: 0; padding: 9px 11px; border-radius: 9px; background: #f4f4f4; color: #62676b; font-size: 10px; line-height: 1.45; }
+.notice { margin: 0; padding: 9px 11px; border-radius: 9px; background: var(--paper-2); color: var(--ink-soft); font-size: 10px; line-height: 1.45; }
 .concurrency { display: grid; gap: 16px; }
 .slotAdjust { display: grid; grid-template-columns: 38px minmax(0, 1fr) 38px; align-items: center; gap: 9px; }
-.slotAdjust > button { width: 38px; height: 38px; padding: 0; border: 1px solid var(--one-sheet-control-border); border-radius: 10px; background: #fff; color: var(--one-sheet-ink); font: 18px/1 var(--font-body); cursor: pointer; }
+.slotAdjust > button { width: 38px; height: 38px; padding: 0; border: 1px solid var(--one-sheet-control-border); border-radius: 10px; background: var(--paper); color: var(--one-sheet-ink); font: 18px/1 var(--font-body); cursor: pointer; }
 .slotAdjust > button:disabled { cursor: not-allowed; opacity: .4; }
 .slotNumber { display: flex; align-items: baseline; justify-content: center; gap: 8px; padding: 22px; border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); }
 .slotNumber strong { color: var(--one-sheet-ink); font-size: 34px; line-height: 1; }
@@ -95,13 +95,13 @@
 .slotScale { display: flex; justify-content: space-between; color: var(--one-sheet-muted); font-size: 10px; }
 .concurrency p, .inlineNote { margin: 0; color: var(--one-sheet-muted); font-size: 11px; line-height: 1.55; }
 .actionRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding-top: 3px; }
-.actionRow .primary { border-color: var(--one-sheet-primary); background: var(--one-sheet-primary); color: #fff; }
+.actionRow .primary { border-color: var(--one-sheet-primary); background: var(--one-sheet-primary); color: var(--white); }
 .actionRow .primary:hover:not(:disabled) { border-color: var(--one-sheet-primary-hover); background: var(--one-sheet-primary-hover); }
 .historySettings { display: grid; gap: 15px; }
-.historyHero { background: #f4f5f5; color: #60666a; }
+.historyHero { background: var(--paper-2); color: var(--ink-soft); }
 .toggleRow { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); }
 .toggleRow > div { display: grid; gap: 5px; }
 .toggleRow strong { color: var(--one-sheet-ink); font-size: 13px; }
 .toggleRow small { color: var(--one-sheet-muted); font-size: 10px; line-height: 1.45; }
-.inlineNote { padding: 11px 13px; border-radius: 10px; background: #f6f6f7; }
+.inlineNote { padding: 11px 13px; border-radius: 10px; background: var(--paper-2); }
 @media (max-width: 620px) { .providerGrid { grid-template-columns: 1fr; } }

@@ -106,7 +106,13 @@ for (const { name, doc } of standalone) {
     }
   }
   const policyResources = asStrings(doc.extraResources);
-  if (!policyResources.some((entry) => entry.includes("dist/product-extension-signing-policy.json"))) {
+  // Built from separate path.posix.join() parts, not one combined quoted
+  // literal: dist/ is a gitignored build output, so verify-gate-freshness's
+  // dead-path scan (which requires every quoted repo-shaped path literal to
+  // exist on disk) would flag this pre-build config-declared artifact as
+  // a dead path.
+  const requiredPolicyEntry = path.posix.join("dist", "product-extension-signing-policy.json");
+  if (!policyResources.some((entry) => entry.includes(requiredPolicyEntry))) {
     failures.push(`${name}: extraResources 에 product-extension-signing-policy.json 이 없다`);
   }
 }

@@ -22,6 +22,8 @@ export type {
   GraphBuildFixKind,
   ToolApprovalRequestEvent,
   ToolApprovalDecision,
+  ToolApprovalConsentBinding,
+  ToolApprovalDurableConsentReceipt,
   ToolApprovalResolutionReceipt,
   AgentConcurrencyInfo,
   AgentEnvRequirement,

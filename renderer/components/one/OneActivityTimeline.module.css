@@ -1,9 +1,9 @@
 .activity {
-  --activity-ink: #5a6166;
-  --activity-muted: #878e93;
-  --activity-faint: #aeb4b8;
-  --activity-line: #eef0f1;
-  --activity-fill: #fafbfc;
+  --activity-ink: var(--ink-soft);
+  --activity-muted: var(--muted-deep);
+  --activity-faint: var(--muted);
+  --activity-line: var(--paper-edge);
+  --activity-fill: var(--paper-2);
   --activity-accent: var(--design-accent);
   width: min(720px, 100%);
   margin: 8px 0 26px;
@@ -74,7 +74,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #aeb3b0;
+  background: var(--muted);
 }
 
 .pulse[data-active="true"] {
@@ -124,9 +124,9 @@
 }
 
 .rowIcon[data-status="completed"] { color: var(--activity-accent); }
-.rowIcon[data-status="failed"] { color: #a15b52; }
-.rowIcon[data-status="cancelled"] { color: #7b746d; }
-.rowIcon[data-status="cancelling"] { color: #8b6f47; }
+.rowIcon[data-status="failed"] { color: var(--danger); }
+.rowIcon[data-status="cancelled"] { color: var(--muted-deep); }
+.rowIcon[data-status="cancelling"] { color: var(--warn); }
 
 /*
  * 글자 겹침의 자리 (오너 관측 2026-08-25 — "Agentlas One" 과 "실행함" 이 같은 자리에
@@ -184,10 +184,10 @@
   margin: 8px 0 14px;
   overflow: auto;
   padding: 14px 18px;
-  border: 1px solid #eef0f1;
+  border: 1px solid var(--paper-3);
   border-radius: 11px;
-  background: #fafbfc;
-  color: #747b80;
+  background: var(--paper-2);
+  color: var(--muted-deep);
   font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -202,9 +202,9 @@
   width: 324px;
   display: flex;
   flex-direction: column;
-  border: 1px solid #e4e6e7;
+  border: 1px solid var(--paper-3);
   border-radius: 28px;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 8px 24px rgba(24, 29, 32, .06);
   overflow: hidden;
 }
@@ -238,7 +238,7 @@
   height: 44px;
   transform: translateY(-50%);
   border-radius: 999px;
-  background: #d5d8db;
+  background: var(--paper-edge-strong);
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -249,8 +249,8 @@
 .artifactResizeHandle:focus-visible::after { box-shadow: 0 0 0 3px rgba(96, 122, 54, 0.22); }
 .artifactRail[data-resizing="true"] { user-select: none; }
 .artifactRail[data-collapse-ready="true"] {
-  border-left-color: #63696c;
-  box-shadow: inset 3px 0 0 #63696c;
+  border-left-color: var(--ink-soft);
+  box-shadow: inset 3px 0 0 var(--ink-soft);
 }
 
 .artifactTabs {
@@ -259,7 +259,7 @@
   align-items: stretch;
   gap: 8px;
   padding: 8px 12px 0;
-  border-bottom: 1px solid #f0f1f2;
+  border-bottom: 1px solid var(--paper-3);
 }
 .artifactTabList {
   min-width: 0;
@@ -294,11 +294,11 @@
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #a0a5a8;
+  color: var(--muted-deep);
   cursor: pointer;
 }
 .artifactHeaderActions button:hover,
-.artifactHeaderActions button:focus-visible { background: #f2f3f3; color: #555c60; outline: none; }
+.artifactHeaderActions button:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
 
 /*
  * 탭은 균등 분할이 아니라 제 글자 폭만큼만 차지한다. flex: 1 1 0 이던 동안
@@ -314,14 +314,14 @@
   padding: 0 4px 0 8px;
   border: 0;
   background: transparent;
-  color: #8a9195;
+  color: var(--muted-deep);
   font: inherit;
   font-size: 12.5px;
   white-space: nowrap;
   cursor: pointer;
 }
-.artifactTab[data-active="true"] button[role="tab"] { color: #1d2023; font-weight: 650; }
-.artifactTabs button:focus-visible { outline: 2px solid #cbd9c1; outline-offset: -2px; }
+.artifactTab[data-active="true"] button[role="tab"] { color: var(--ink); font-weight: 650; }
+.artifactTabs button:focus-visible { outline: 2px solid var(--ok-soft); outline-offset: -2px; }
 
 .artifactList {
   flex: 1 1 auto;
@@ -410,9 +410,9 @@
   position: relative;
   flex: 0 0 11px;
   cursor: row-resize;
-  border-top: 1px solid #eceeef;
-  border-bottom: 1px solid #eceeef;
-  background: #fff;
+  border-top: 1px solid var(--paper-3);
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--paper);
   touch-action: none;
 }
 .previewSplitHandle::after {
@@ -423,13 +423,13 @@
   height: 3px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: #d5d8db;
+  background: var(--paper-edge-strong);
   opacity: .55;
   content: "";
 }
 .previewSplitHandle:hover::after,
 .previewSplitHandle:focus-visible::after,
-.previewSplitHandle[data-resizing="true"]::after { opacity: 1; background: #9aa3a9; }
+.previewSplitHandle[data-resizing="true"]::after { opacity: 1; background: var(--muted-deep); }
 .previewSplitHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, .35); outline-offset: -2px; }
 
 .appPreviewView {
@@ -437,7 +437,7 @@
   min-height: 100%;
   height: 100%;
   overflow: auto;
-  background: var(--design-bg, #fff);
+  background: var(--design-bg, var(--paper));
 }
 
 .appPreviewView > section {
@@ -452,7 +452,7 @@
   min-width: 0;
   min-height: 100%;
   padding: 18px 22px 28px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .resultView > :first-child { margin-top: 0; }
@@ -463,15 +463,15 @@
   gap: 6px;
   margin: 0 0 12px;
   padding: 0 9px;
-  border: 1px solid #dfe3e1;
+  border: 1px solid var(--paper-edge);
   border-radius: 8px;
-  background: #fff;
-  color: #68706b;
+  background: var(--paper);
+  color: var(--muted-deep);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
 }
-.artifactBackButton:hover, .artifactBackButton:focus-visible { border-color: #b9c2bc; color: #3f4943; outline: none; }
+.artifactBackButton:hover, .artifactBackButton:focus-visible { border-color: var(--muted); color: var(--ink); outline: none; }
 
 .artifactContentStack {
   min-height: 0;
@@ -485,8 +485,8 @@
   position: relative;
   flex: 0 0 10px;
   cursor: row-resize;
-  border-top: 1px solid #eceeef;
-  background: #fff;
+  border-top: 1px solid var(--paper-3);
+  background: var(--paper);
   touch-action: none;
 }
 .artifactHistoryResizeHandle::after {
@@ -497,7 +497,7 @@
   height: 3px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: #d5d8db;
+  background: var(--paper-edge-strong);
   opacity: .55;
   content: "";
 }
@@ -505,7 +505,7 @@
 .artifactHistoryResizeHandle:focus-visible::after,
 .artifactHistoryResizeHandle[data-resizing="true"]::after { opacity: 1; }
 .artifactHistoryResizeHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, .35); outline-offset: -2px; }
-.artifactHistoryPane { min-height: 0; flex: 0 0 auto; overflow: hidden; background: #fff; }
+.artifactHistoryPane { min-height: 0; flex: 0 0 auto; overflow: hidden; background: var(--paper); }
 
 .artifactEmpty {
   min-height: 38px;
@@ -513,7 +513,7 @@
   display: flex;
   align-items: center;
   padding: 0 2px;
-  color: #b1b5b8;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -524,14 +524,14 @@ a.artifactRuntimeRow {
 
 a.artifactRuntimeRow:hover,
 a.artifactRuntimeRow:focus-visible {
-  color: #3f4549;
+  color: var(--ink);
   text-decoration: underline;
   outline: none;
 }
 
 .artifactSection {
   display: grid;
-  border-bottom: 1px solid #eceeef;
+  border-bottom: 1px solid var(--paper-3);
 }
 
 .artifactSection:last-child { border-bottom: 0; }
@@ -545,20 +545,20 @@ a.artifactRuntimeRow:focus-visible {
   padding: 0 2px;
   border: 0;
   background: transparent;
-  color: #777d81;
+  color: var(--muted-deep);
   font: inherit;
   font-size: 15px;
   text-align: left;
   cursor: pointer;
 }
 .artifactSectionToggle:hover,
-.artifactSectionToggle:focus-visible { color: #3f4549; outline: none; }
-.artifactSectionToggle:focus-visible { box-shadow: inset 0 0 0 2px #d9dddf; border-radius: 8px; }
-.artifactSectionToggle > strong { color: #9aa0a4; font-size: 13px; font-weight: 540; }
+.artifactSectionToggle:focus-visible { color: var(--ink); outline: none; }
+.artifactSectionToggle:focus-visible { box-shadow: inset 0 0 0 2px var(--paper-edge-strong); border-radius: 8px; }
+.artifactSectionToggle > strong { color: var(--muted-deep); font-size: 13px; font-weight: 540; }
 .artifactSectionChevron {
   display: grid;
   place-items: center;
-  color: #a0a5a8;
+  color: var(--muted-deep);
   transition: transform 140ms ease;
 }
 .artifactSectionToggle[aria-expanded="true"] .artifactSectionChevron { transform: rotate(180deg); }
@@ -569,30 +569,30 @@ a.artifactRuntimeRow:focus-visible {
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
-  color: #596065;
+  color: var(--ink-soft);
   font-size: 15px;
 }
 .artifactRuntimeRow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artifactRuntimeRow small { color: #7e9a55; font-size: 10px; }
+.artifactRuntimeRow small { color: var(--accent); font-size: 10px; }
 
 .artifactSubrail {
   display: grid;
   gap: 8px;
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid #eceeef;
+  border-top: 1px solid var(--paper-3);
 }
 .artifactSubrail > div { display: grid; gap: 2px; padding: 8px 2px; }
-.artifactSubrail strong { color: #596065; font-size: 12px; }
-.artifactSubrail span { color: #8a9195; font-size: 11px; }
+.artifactSubrail strong { color: var(--ink-soft); font-size: 12px; }
+.artifactSubrail span { color: var(--muted-deep); font-size: 11px; }
 
 .artifactPreviewCard {
   min-width: 0;
   display: grid;
   overflow: hidden;
-  border: 1px solid #e1e4e3;
+  border: 1px solid var(--paper-edge);
   border-radius: 13px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .artifactVisual {
@@ -603,23 +603,23 @@ a.artifactRuntimeRow:focus-visible {
   overflow: hidden;
   padding: 0;
   border: 0;
-  border-bottom: 1px solid #e8eae9;
-  background: #f4f5f4;
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--paper-2);
 }
 
 button.artifactVisual { cursor: pointer; }
-.artifactVisual img, .artifactVisual video { width: 100%; max-height: 230px; display: block; object-fit: contain; background: #f4f5f4; }
+.artifactVisual img, .artifactVisual video { width: 100%; max-height: 230px; display: block; object-fit: contain; background: var(--paper-2); }
 .artifactAudio { min-height: 72px; padding: 0 12px; }
 .artifactAudio audio { width: 100%; }
-.artifactFileFallback { min-height: 58px; display: grid; place-items: center; border-bottom: 1px solid #e8eae9; background: #f4f5f4; color: #747b77; }
-.artifactFileFallback[data-loading="true"] { color: #a0a5a2; animation: artifactPreviewPulse 1.1s ease-in-out infinite; }
+.artifactFileFallback { min-height: 58px; display: grid; place-items: center; border-bottom: 1px solid var(--paper-3); background: var(--paper-2); color: var(--muted-deep); }
+.artifactFileFallback[data-loading="true"] { color: var(--muted-deep); animation: artifactPreviewPulse 1.1s ease-in-out infinite; }
 .artifactPreviewCopy { min-width: 0; min-height: 56px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 10px 8px 12px; }
 .artifactPreviewCopy > span { min-width: 0; display: grid; gap: 3px; }
 .artifactPreviewCopy strong, .artifactPreviewCopy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artifactPreviewCopy strong { color: #353b38; font-size: 11px; }
-.artifactPreviewCopy small { color: #8b918e; font-size: 9px; }
-.artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid #d9dddb; border-radius: 8px; background: #fff; color: #505753; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
-.artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
+.artifactPreviewCopy strong { color: var(--ink); font-size: 11px; }
+.artifactPreviewCopy small { color: var(--muted-deep); font-size: 9px; }
+.artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid var(--paper-edge-strong); border-radius: 8px; background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
+.artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
 
 /*
  * 세로 flex 여야 툴바(탭·주소창·안내)가 제 높이를 갖고 화면 칸이 나머지를 전부 먹는다.
@@ -633,7 +633,7 @@ button.artifactVisual { cursor: pointer; }
   margin: 0;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 1px 2px rgba(20, 24, 28, .025);
 }
 .browserLive > .browserTabBar,
@@ -643,13 +643,13 @@ button.artifactVisual { cursor: pointer; }
 
 .browserActionNotice {
   padding: 7px 12px;
-  border-bottom: 1px solid #e6e8e9;
-  background: #f5f8f6;
-  color: #42604f;
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--paper-2);
+  color: var(--ok);
   font-size: 10px;
   line-height: 1.4;
 }
-.browserActionNotice[data-tone="error"] { background: #fff5f3; color: #8b3f34; }
+.browserActionNotice[data-tone="error"] { background: var(--danger-soft); color: var(--danger); }
 
 /*
  * "미리보기 임시 서버가 정리되었습니다" 안내.
@@ -661,8 +661,8 @@ button.artifactVisual { cursor: pointer; }
   align-items: flex-start;
   gap: 12px;
   padding: 10px 14px;
-  border-bottom: 1px solid #eceeef;
-  background: #fbfaf6;
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--warn-soft);
 }
 .browserGoneNotice > span {
   min-width: 0;
@@ -672,14 +672,14 @@ button.artifactVisual { cursor: pointer; }
   gap: 3px;
 }
 .browserGoneNotice strong {
-  color: #4a4034;
+  color: var(--warn);
   font-size: 11.5px;
   font-weight: 650;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .browserGoneNotice small {
-  color: #8a8272;
+  color: var(--muted-deep);
   font-size: 10.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -689,10 +689,10 @@ button.artifactVisual { cursor: pointer; }
   flex: 0 0 auto;
   max-width: 100%;
   padding: 0 10px;
-  border: 1px solid #ded8c8;
+  border: 1px solid var(--warn-soft);
   border-radius: 8px;
-  background: #fff;
-  color: #5c5344;
+  background: var(--paper);
+  color: var(--warn);
   font: inherit;
   font-size: 10.5px;
   font-weight: 600;
@@ -702,7 +702,7 @@ button.artifactVisual { cursor: pointer; }
   cursor: pointer;
 }
 .browserGoneNotice > button:hover,
-.browserGoneNotice > button:focus-visible { border-color: #c3b99f; background: #f7f4ec; outline: none; }
+.browserGoneNotice > button:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: none; }
 .browserTabBar {
   min-width: 0;
   min-height: 46px;
@@ -710,15 +710,15 @@ button.artifactVisual { cursor: pointer; }
   align-items: center;
   gap: 8px;
   padding: 6px 10px 5px;
-  border-bottom: 1px solid #eceeef;
-  background: #fafafa;
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--paper-2);
 }
 .browserContextLabel {
   min-width: 90px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #6f7478;
+  color: var(--muted-deep);
   font-size: 10px;
   white-space: nowrap;
 }
@@ -744,12 +744,12 @@ button.artifactVisual { cursor: pointer; }
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
-  color: #6f7478;
+  color: var(--muted-deep);
 }
 .browserTab[data-selected="true"] {
-  border-color: #e7e9eb;
-  background: #fff;
-  color: #34383b;
+  border-color: var(--paper-3);
+  background: var(--paper);
+  color: var(--ink);
   box-shadow: 0 1px 2px rgba(22, 27, 31, .04);
 }
 .browserTabSelect {
@@ -778,10 +778,10 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #92979a;
+  color: var(--muted-deep);
   cursor: pointer;
 }
-.browserTabClose:hover, .browserTabClose:focus-visible { background: #eff1f2; color: #4f5559; outline: none; }
+.browserTabClose:hover, .browserTabClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
 .browserNewTab,
 .browserNavigationBar > button,
 .browserMenuAnchor > button {
@@ -794,7 +794,7 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #707579;
+  color: var(--muted-deep);
   cursor: pointer;
 }
 .browserNewTab:hover,
@@ -802,8 +802,8 @@ button.artifactVisual { cursor: pointer; }
 .browserNavigationBar > button:hover,
 .browserNavigationBar > button:focus-visible,
 .browserMenuAnchor > button:hover,
-.browserMenuAnchor > button:focus-visible { background: #f1f2f3; color: #34383b; outline: none; }
-.browserNavigationBar > button:disabled { color: #c8cbcd; cursor: default; }
+.browserMenuAnchor > button:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
+.browserNavigationBar > button:disabled { color: var(--white-soft); cursor: default; }
 .browserNavigationBar > button:disabled:hover { background: transparent; }
 .browserLiveBadge {
   min-height: 21px;
@@ -812,15 +812,15 @@ button.artifactVisual { cursor: pointer; }
   align-items: center;
   gap: 4px;
   padding: 0 7px;
-  border: 1px solid #c9ded2;
+  border: 1px solid var(--ok-soft);
   border-radius: 999px;
-  background: #f3f8f5;
-  color: #397052;
+  background: var(--paper-2);
+  color: var(--ok);
   font-size: 8px;
   font-weight: 760;
   letter-spacing: .04em;
 }
-.browserLiveBadge i { width: 5px; height: 5px; border-radius: 50%; background: #2b9a5b; box-shadow: 0 0 0 3px rgba(43, 154, 91, .09); }
+.browserLiveBadge i { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(43, 154, 91, .09); }
 .browserNavigationBar {
   min-width: 0;
   min-height: 44px;
@@ -830,8 +830,8 @@ button.artifactVisual { cursor: pointer; }
   align-items: center;
   gap: 3px;
   padding: 6px 9px;
-  border-bottom: 1px solid #e8eaec;
-  background: #fff;
+  border-bottom: 1px solid var(--paper-3);
+  background: var(--paper);
 }
 
 .browserNavigationBar > button,
@@ -853,10 +853,10 @@ button.artifactVisual { cursor: pointer; }
   padding: 0 10px;
   border: 1px solid transparent;
   border-radius: 9px;
-  background: #f5f6f7;
-  color: #73787c;
+  background: var(--paper-2);
+  color: var(--muted-deep);
 }
-.browserAddressForm:focus-within { border-color: #d8dcdf; background: #fff; box-shadow: 0 0 0 2px rgba(50, 55, 59, .06); }
+.browserAddressForm:focus-within { border-color: var(--paper-edge-strong); background: var(--paper); box-shadow: 0 0 0 2px rgba(50, 55, 59, .06); }
 .browserAddressForm input {
   min-width: 0;
   width: 100%;
@@ -864,12 +864,12 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   outline: 0;
   background: transparent;
-  color: #34383b;
+  color: var(--ink);
   font: inherit;
   font-size: 10px;
   text-align: center;
 }
-.browserAddressForm input::placeholder { color: #a1a5a8; }
+.browserAddressForm input::placeholder { color: var(--muted-deep); }
 .browserMenuAnchor { position: relative; display: grid; place-items: center; }
 .browserMenuAnchor > button svg { transform: rotate(90deg); }
 .browserMenu {
@@ -881,12 +881,12 @@ button.artifactVisual { cursor: pointer; }
   display: grid;
   gap: 2px;
   padding: 6px;
-  border: 1px solid #e0e3e5;
+  border: 1px solid var(--paper-edge);
   border-radius: 12px;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 12px 32px rgba(20, 25, 29, .14);
 }
-.browserMenu > span { height: 1px; margin: 3px 4px; background: #eceeef; }
+.browserMenu > span { height: 1px; margin: 3px 4px; background: var(--paper-3); }
 .browserMenu button {
   min-height: 34px;
   display: grid;
@@ -897,48 +897,48 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #494e52;
+  color: var(--ink-soft);
   font: inherit;
   font-size: 10px;
   text-align: left;
   cursor: pointer;
 }
-.browserMenu button:hover, .browserMenu button:focus-visible, .browserMenu button[data-selected="true"] { background: #f1f2f3; outline: none; }
-.browserMenu button[data-selected="true"] { color: #202427; font-weight: 700; }
-.browserMenu button:disabled { color: #b2b6b9; cursor: default; }
-.browserMenu small { color: #92979a; font-size: 8px; font-weight: 500; }
+.browserMenu button:hover, .browserMenu button:focus-visible, .browserMenu button[data-selected="true"] { background: var(--paper-3); outline: none; }
+.browserMenu button[data-selected="true"] { color: var(--ink); font-weight: 700; }
+.browserMenu button:disabled { color: var(--muted); cursor: default; }
+.browserMenu small { color: var(--muted-deep); font-size: 8px; font-weight: 500; }
 /*
  * 화면 칸은 남는 높이를 전부 먹는다. 스트리밍 스크린샷은 naturalSize 1280×800 이라
  * 폭이 정해지면 높이가 종횡비로만 결정된다(547 ÷ 1.6 = 342px 실측) — 예전처럼 칸이
  * 콘텐츠 높이로 서면 그 아래가 통째로 빈 공간이 됐다. 칸을 채우고 화면을 가운데 두면
  * 남는 자리는 브라우저 배경(회색)이 되고, 높이는 분할선으로 사용자가 정한다.
  */
-.browserViewport { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; overflow: auto; background: #eef0f1; }
+.browserViewport { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; overflow: auto; background: var(--paper-3); }
 .browserStreamInput { width: 100%; max-height: none; position: relative; overflow: hidden; cursor: default; touch-action: none; outline: none; user-select: none; }
 .browserStreamInput:focus-within { box-shadow: inset 0 0 0 2px rgba(42, 105, 75, .45); }
 .browserStreamInput img { width: 100%; max-height: none; display: block; object-fit: contain; pointer-events: none; }
 .browserInputCapture { position: absolute; width: 1px; height: 1px; left: 50%; bottom: 0; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; }
-.browserViewport[data-mode="phone"] { padding: 14px; background: #e7e9e8; }
-.browserViewport[data-mode="phone"] .browserStreamInput { width: min(220px, 74%); max-height: none; border: 6px solid #303532; border-radius: 24px; background: #fff; box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
+.browserViewport[data-mode="phone"] { padding: 14px; background: var(--paper-3); }
+.browserViewport[data-mode="phone"] .browserStreamInput { width: min(220px, 74%); max-height: none; border: 6px solid var(--black); border-radius: 24px; background: var(--paper); box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
 .browserViewport[data-mode="phone"] .browserStreamInput img { width: 100%; max-height: none; aspect-ratio: 390 / 844; object-fit: cover; object-position: top; }
 /*
  * 정리된 서버 대신 디스크의 산출물을 여는 칸. 이 클래스도 정의가 없어서 iframe 이
  * 기본 크기(300×150)로 서 있었다 — browserGoneNotice 와 같은 계열의 미정의 클래스.
  */
-.browserFilePreview { min-height: 0; flex: 1 1 auto; display: grid; overflow: auto; background: #eef0f1; }
-.browserFilePreview > iframe { width: 100%; height: 100%; min-height: 0; border: 0; background: #fff; }
-.browserFilePreview[data-mode="phone"] { place-items: center; padding: 14px; background: #e7e9e8; }
-.browserFilePreview[data-mode="phone"] > iframe { width: min(220px, 74%); height: min(100%, 476px); border: 6px solid #303532; border-radius: 24px; }
+.browserFilePreview { min-height: 0; flex: 1 1 auto; display: grid; overflow: auto; background: var(--paper-3); }
+.browserFilePreview > iframe { width: 100%; height: 100%; min-height: 0; border: 0; background: var(--paper); }
+.browserFilePreview[data-mode="phone"] { place-items: center; padding: 14px; background: var(--paper-3); }
+.browserFilePreview[data-mode="phone"] > iframe { width: min(220px, 74%); height: min(100%, 476px); border: 6px solid var(--black); border-radius: 24px; }
 
-.browserEmpty { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; align-content: center; gap: 8px; padding: 28px; color: #8b918e; text-align: center; }
+.browserEmpty { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; align-content: center; gap: 8px; padding: 28px; color: var(--muted-deep); text-align: center; }
 .browserEmpty > button {
   min-height: 30px;
   margin-top: 2px;
   padding: 0 12px;
-  border: 1px solid #d9dddb;
+  border: 1px solid var(--paper-edge-strong);
   border-radius: 8px;
-  background: #fff;
-  color: #505753;
+  background: var(--paper);
+  color: var(--ink-soft);
   font: inherit;
   font-size: 10.5px;
   font-weight: 600;
@@ -948,9 +948,9 @@ button.artifactVisual { cursor: pointer; }
   white-space: nowrap;
   cursor: pointer;
 }
-.browserEmpty > button:hover, .browserEmpty > button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
-.browserEmpty strong { color: #41464a; font-size: 13px; }
-.browserEmpty small { max-width: 290px; color: #888e92; font-size: 10px; line-height: 1.55; }
+.browserEmpty > button:hover, .browserEmpty > button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
+.browserEmpty strong { color: var(--ink-soft); font-size: 13px; }
+.browserEmpty small { max-width: 290px; color: var(--muted-deep); font-size: 10px; line-height: 1.55; }
 
 @keyframes artifactPreviewPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 
@@ -965,28 +965,28 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 9px;
   background: transparent;
-  color: #4f5559;
+  color: var(--ink-soft);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .artifact:hover,
-.artifact:focus-visible { background: #f4f5f6; outline: 2px solid transparent; }
+.artifact:focus-visible { background: var(--paper-2); outline: 2px solid transparent; }
 
 .artifactPreview,
 .artifactFileIcon {
   width: 44px;
   height: 44px;
   border-radius: 7px;
-  background: #f3f4f4;
+  background: var(--paper-3);
 }
 
 .artifactPreview { object-fit: cover; }
-.artifactFileIcon { display: grid; place-items: center; color: #7c8388; }
+.artifactFileIcon { display: grid; place-items: center; color: var(--muted-deep); }
 .artifact > span:last-child { min-width: 0; display: grid; gap: 3px; }
 .artifact strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.artifact small { display: inline-flex; align-items: center; gap: 4px; color: #9a9fa3; font-size: 9px; }
+.artifact small { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-deep); font-size: 9px; }
 
 @keyframes activityPulse {
   70%, 100% { box-shadow: 0 0 0 7px transparent; }
@@ -1033,8 +1033,8 @@ button.artifactVisual { cursor: pointer; }
 }
 
 .artifactTab[data-active="true"] {
-  background: #f1f2f3;
-  box-shadow: inset 0 0 0 1px #e4e6e7;
+  background: var(--paper-3);
+  box-shadow: inset 0 0 0 1px var(--paper-3);
 }
 
 .artifactTabClose {
@@ -1046,7 +1046,7 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #9aa0aa;
+  color: var(--muted-deep);
   cursor: pointer;
   opacity: 0;
 }
@@ -1054,7 +1054,7 @@ button.artifactVisual { cursor: pointer; }
 .artifactTab:hover .artifactTabClose,
 .artifactTab[data-active="true"] .artifactTabClose { opacity: 1; }
 
-.artifactTabClose:hover { background: #e4e6e7; color: #1d2023; }
+.artifactTabClose:hover { background: var(--paper-3); color: var(--ink); }
 
 .artifactAddWrap { position: relative; display: inline-flex; flex: 0 0 auto; }
 
@@ -1068,11 +1068,11 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #8a9195;
+  color: var(--muted-deep);
   cursor: pointer;
 }
 
-.artifactAddWrap > button:hover { background: #f1f2f3; color: #1d2023; }
+.artifactAddWrap > button:hover { background: var(--paper-3); color: var(--ink); }
 
 .artifactAddMenu {
   position: absolute;
@@ -1083,9 +1083,9 @@ button.artifactVisual { cursor: pointer; }
   display: grid;
   gap: 1px;
   padding: 6px;
-  border: 1px solid #e2e4e5;
+  border: 1px solid var(--paper-edge);
   border-radius: 12px;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
 }
 
@@ -1095,15 +1095,15 @@ button.artifactVisual { cursor: pointer; }
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #1d2023;
+  color: var(--ink);
   font-size: 12.5px;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.artifactAddMenu > button:hover:not(:disabled) { background: #f4f5f5; }
-.artifactAddMenu > button:disabled { color: #b9bec4; cursor: default; }
+.artifactAddMenu > button:hover:not(:disabled) { background: var(--paper-2); }
+.artifactAddMenu > button:disabled { color: var(--muted); cursor: default; }
 
 /* 아무 탭도 없을 때 — 빈 채로 두지 않고 무엇을 열 수 있는지 보여준다. */
 .artifactEmptyStage {
@@ -1121,7 +1121,7 @@ button.artifactVisual { cursor: pointer; }
   margin: 0;
   font-size: 13.5px;
   font-weight: 650;
-  color: #4a5054;
+  color: var(--ink-soft);
 }
 
 .artifactEmptyNote {
@@ -1129,7 +1129,7 @@ button.artifactVisual { cursor: pointer; }
   max-width: 30ch;
   font-size: 12px;
   line-height: 1.5;
-  color: #8b9096;
+  color: var(--muted-deep);
 }
 
 .artifactEmptyList {
@@ -1141,16 +1141,16 @@ button.artifactVisual { cursor: pointer; }
 .artifactEmptyList > button {
   min-height: 32px;
   padding: 0 12px;
-  border: 1px solid #e2e4e5;
+  border: 1px solid var(--paper-edge);
   border-radius: 9px;
-  background: #fff;
-  color: #4a5054;
+  background: var(--paper);
+  color: var(--ink-soft);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.artifactEmptyList > button:hover { background: #f7f8f8; color: #1d2023; }
+.artifactEmptyList > button:hover { background: var(--paper-2); color: var(--ink); }
 
 /* ===========================================================================
  * 모션 — 결과 패널 폭 / 미리보기 분할선 / 기록 높이 / 손잡이
@@ -1194,7 +1194,7 @@ button.artifactVisual { cursor: pointer; }
 .artifactResizeHandle:focus-visible::after,
 .artifactRail[data-resizing="true"] .artifactResizeHandle::after {
   width: 4px;
-  background: #b9bec1;
+  background: var(--muted);
 }
 
 /* 가로 손잡이 둘(미리보기 분할선·기록 높이)은 전환이 아예 없어 딱 바뀌었다. */
@@ -1225,7 +1225,7 @@ button.artifactVisual { cursor: pointer; }
    and light rules; nested cards no longer read as picture frames. */
 .artifactRail {
   border: 0;
-  border-left: 1px solid #e4e6e7;
+  border-left: 1px solid var(--paper-3);
   border-radius: 0;
   box-shadow: none;
 }
@@ -1257,7 +1257,7 @@ button.artifactVisual { cursor: pointer; }
 .artifactPreviewCopy {
   padding-right: 0;
   padding-left: 0;
-  border-top: 1px solid #eceeef;
+  border-top: 1px solid var(--paper-3);
 }
 .appPreviewView,
 .appPreviewView > section,

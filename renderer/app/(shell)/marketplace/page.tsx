@@ -36,7 +36,7 @@ const C = {
   purple: "color-mix(in oklch, var(--rd-accent) 18%, var(--rd-surface))",
   peach: "var(--rd-accent-2)",
   green: "color-mix(in oklch, var(--rd-ok) 24%, var(--rd-surface))",
-  blue: "color-mix(in oklch, #0284c7 18%, var(--rd-surface))",
+  blue: "color-mix(in oklch, var(--info) 18%, var(--rd-surface))",
 };
 
 /**

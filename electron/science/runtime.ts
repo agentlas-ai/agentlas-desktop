@@ -28,7 +28,9 @@ import { ScienceJournalPublicationService } from "./journal-publication";
 import { ScienceManuscriptRenderService } from "./manuscript";
 import { ScienceArtifactPublicationValidator } from "./artifact-publication-validator";
 import { ScienceDomainAnalysisService } from "./domain-analysis";
+import { ScienceEarthAnalysisService } from "./earth-analysis";
 import { SciencePhysicsAnalysisService } from "./physics-analysis";
+import { ScienceAstronomyAnalysisService } from "./astronomy-analysis";
 import {
   resolveExactVerifiedScienceRenderer,
   resolveExactVerifiedScienceRendererExecutor,
@@ -46,6 +48,7 @@ let activeChemistryValidator: ScienceChemistryValidator | null = null;
 let activeAcademicSearchService: ScienceAcademicSearchService | null = null;
 let activeAcademicFullTextService: ScienceAcademicFullTextService | null = null;
 let activeAstronomyCatalogService: ScienceAstronomyCatalogService | null = null;
+let activeAstronomyAnalysisService: ScienceAstronomyAnalysisService | null = null;
 let activeBiodiversityCatalogService: ScienceBiodiversityCatalogService | null = null;
 let activePaleontologyCatalogService: SciencePaleontologyCatalogService | null = null;
 let activePaleontologyAnalysisService: SciencePaleontologyAnalysisService | null = null;
@@ -69,6 +72,7 @@ let activeJournalPublicationService: ScienceJournalPublicationService | null = n
 let activeManuscriptRenderService: ScienceManuscriptRenderService | null = null;
 let activeArtifactPublicationValidator: ScienceArtifactPublicationValidator | null = null;
 let activeDomainAnalysisService: ScienceDomainAnalysisService | null = null;
+let activeEarthAnalysisService: ScienceEarthAnalysisService | null = null;
 let activePhysicsAnalysisService: SciencePhysicsAnalysisService | null = null;
 let activeLongRunBridge: ScienceLongRunBridge | null = null;
 let activeEvidenceGraphService: ScienceEvidenceGraphService | null = null;
@@ -133,6 +137,11 @@ export function scienceAcademicFullTextService(): ScienceAcademicFullTextService
 export function scienceAstronomyCatalogService(): ScienceAstronomyCatalogService {
   if (!activeAstronomyCatalogService) activeAstronomyCatalogService = new ScienceAstronomyCatalogService(scienceStore());
   return activeAstronomyCatalogService;
+}
+
+export function scienceAstronomyAnalysisService(): ScienceAstronomyAnalysisService {
+  if (!activeAstronomyAnalysisService) activeAstronomyAnalysisService = new ScienceAstronomyAnalysisService(scienceStore());
+  return activeAstronomyAnalysisService;
 }
 
 export function scienceBiodiversityCatalogService(): ScienceBiodiversityCatalogService {
@@ -261,6 +270,11 @@ export function scienceDomainAnalysisService(): ScienceDomainAnalysisService {
   return activeDomainAnalysisService;
 }
 
+export function scienceEarthAnalysisService(): ScienceEarthAnalysisService {
+  if (!activeEarthAnalysisService) activeEarthAnalysisService = new ScienceEarthAnalysisService(scienceStore());
+  return activeEarthAnalysisService;
+}
+
 export function sciencePhysicsAnalysisService(): SciencePhysicsAnalysisService {
   if (!activePhysicsAnalysisService) activePhysicsAnalysisService = new SciencePhysicsAnalysisService(scienceStore());
   return activePhysicsAnalysisService;
@@ -349,6 +363,7 @@ export function closeScienceStore(): void {
   activeAcademicSearchService = null;
   activeAcademicFullTextService = null;
   activeAstronomyCatalogService = null;
+  activeAstronomyAnalysisService = null;
   activeBiodiversityCatalogService = null;
   activePaleontologyCatalogService = null;
   activePaleontologyAnalysisService = null;
@@ -357,7 +372,13 @@ export function closeScienceStore(): void {
   activeEarthquakeCatalogService = null;
   activeNoaaCoopsWaterLevelService = null;
   activeEconomicsCatalogService = null;
+  activeEconomicsAnalysisService = null;
   activeGenomicsCatalogService = null;
+  activeComparativeGenomicsService = null;
+  activeExtantReferenceAssemblyService = null;
+  activeComparativeGenomicsTableService = null;
+  activeHypotheticalAsrService = null;
+  activeExtantArchosaurLocusPanelService = null;
   activeMaterialsCatalogService = null;
   activePhysicsInspireLiveService = null;
   activePhysicsHepDataLiveService = null;
@@ -366,6 +387,7 @@ export function closeScienceStore(): void {
   activeManuscriptRenderService = null;
   activeArtifactPublicationValidator = null;
   activeDomainAnalysisService = null;
+  activeEarthAnalysisService = null;
   activePhysicsAnalysisService = null;
   activeEvidenceGraphService = null;
   activeStore?.close();

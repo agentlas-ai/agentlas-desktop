@@ -1058,6 +1058,7 @@ const dict = {
     "mcps.off": "끔",
     "mcps.status.ok": "툴 {n}개 사용 가능",
     "mcps.status.error": "연결 실패: {error}",
+    "mcps.status.deferred": "필요할 때 연결됩니다 · 지금 확인하려면 연결 테스트",
     "mcps.status.missing_env": "키 미설정: {keys}",
     "mcps.missing_env_cta": "환경변수에서 키 입력 →",
     "mcps.official": "공식",
@@ -3257,6 +3258,7 @@ const dict = {
     "mcps.off": "Off",
     "mcps.status.ok": "{n} tools available",
     "mcps.status.error": "Connection failed: {error}",
+    "mcps.status.deferred": "Connects when needed — use Test connection to check now",
     "mcps.status.missing_env": "Missing keys: {keys}",
     "mcps.missing_env_cta": "Add keys in Environment →",
     "mcps.official": "Official",
@@ -4549,7 +4551,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   // locale이 확정(_ready)되기 전에는 텍스트를 그리지 않는다 — OS 언어를 IPC로 받기 전에는
   // SSR 기본값 "ko"로 먼저 그려져, 영어 시스템에서 ko→en 깜빡임이 생기거나 텍스트 없는
-  // 순간이 (다크 테마에선 --paper=#131316이라) 검은 화면처럼 보이던 문제를 막는다.
+  // 순간이 (다크 테마에선 --paper 값이 짙어) 검은 화면처럼 보이던 문제를 막는다.
   // 빈 자리는 현재 테마색(var(--paper))으로 채워 라이트/다크 어느 쪽도 검게 보이지 않게 한다.
   // value 객체 리터럴이 렌더마다 새 참조면, 이 프로바이더에 상태가 하나라도 늘어나는
   // 순간 앱 전체의 useT() 소비자가 전부 리렌더된다. 지금 참조를 고정해 둔다.

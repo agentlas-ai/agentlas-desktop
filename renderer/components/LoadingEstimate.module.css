@@ -2,7 +2,7 @@
   display: inline-flex;
   align-items: center;
   min-width: 0;
-  color: var(--ink-soft, #62676d);
+  color: var(--ink-soft, var(--ink-soft));
   font-size: 11px;
   font-weight: 560;
   line-height: 1.45;

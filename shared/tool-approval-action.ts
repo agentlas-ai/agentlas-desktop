@@ -1,5 +1,6 @@
 import type {
   ToolApprovalDecision,
+  ToolApprovalDurableConsentReceipt,
   ToolApprovalRequestEvent,
   ToolApprovalResolutionReceipt,
 } from "./types";
@@ -30,7 +31,21 @@ export function isToolApprovalResolutionReceipt(
     && ["resolved", "replayed", "pending", "expired", "conflict", "not_found", "invalid_action"].includes(String(row.status))
     && typeof row.pending === "boolean"
     && (row.decidedAt === null || typeof row.decidedAt === "string")
+    && (row.durableConsent === undefined || isToolApprovalDurableConsentReceipt(row.durableConsent))
   );
+}
+
+function isToolApprovalDurableConsentReceipt(
+  value: unknown,
+): value is ToolApprovalDurableConsentReceipt {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Partial<ToolApprovalDurableConsentReceipt>;
+  return (row.status === "persisted" || row.status === "failed" || row.status === "unavailable")
+    && (row.code === undefined
+      || row.code === "missing-binding"
+      || row.code === "missing-persister"
+      || row.code === "storage-failure"
+      || row.code === "storage-receipt-missing");
 }
 
 function isToolApprovalDecision(value: unknown): value is ToolApprovalDecision {

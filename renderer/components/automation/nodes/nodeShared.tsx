@@ -10,8 +10,8 @@ export const NODE_WIDTH = 216;
 /** 노드 라이브 실행 상태별 테두리/글로우 색(설계 §5 P2 캔버스 오버레이). */
 export const RUN_STATE_COLOR: Record<string, string> = {
   running: "var(--accent)",
-  done: "var(--ok, #2e9e5b)",
-  failed: "var(--danger, #d64545)",
+  done: "var(--ok, var(--ok))",
+  failed: "var(--danger, var(--danger))",
   skipped: "var(--muted-deep)",
   pending: "var(--paper-edge)",
 };
@@ -32,23 +32,24 @@ export const NODE_ACCENT: Record<string, string> = {
 };
 
 /**
- * 우상단 종류 태그의 배경·글자색 — 오너 지정 팔레트(2026-08-05).
- * Navy #0C2C47 · Yellow #DA9B2B · Green #2E5749 · Orange #BF512C ·
- * Mint #ABCBCA · Mauve #D6C9C5 · White #FFFFFF.
+ * 우상단 종류 태그의 배경·글자색 — 오너 지정 팔레트(2026-08-05), 2026-09-05 토큰화.
+ * 원래 팔레트(Navy·Yellow·Green·Orange·Mint·Mauve·White)를 색상표 토큰에 1:1로 매핑해
+ * 7개 카테고리 그룹이 서로 다른 색으로 남도록 했다: Navy→info · Yellow→warn · Green→ok ·
+ * Orange→peach · Mint→teal · Mauve→purple-deep · White→paper.
  * 종류가 색으로 먼저 읽혀야 캔버스를 훑을 때 흐름이 보인다(실측 항목 7).
  */
 export const NODE_TAG_COLORS: Record<string, { bg: string; fg: string }> = {
-  trigger: { bg: "#0C2C47", fg: "#FFFFFF" },                 // Navy — 시작점
-  agent: { bg: "#DA9B2B", fg: "#0C2C47" },                   // Yellow — 일꾼
-  firm: { bg: "#DA9B2B", fg: "#0C2C47" },                    // 일꾼 무리도 같은 계열
-  code: { bg: "#2E5749", fg: "#FFFFFF" },                    // Green — 계산
-  transform: { bg: "#2E5749", fg: "#FFFFFF" },               // 값 가공도 계산 계열
-  action: { bg: "#BF512C", fg: "#FFFFFF" },                  // Orange — 바깥으로 나감
-  output: { bg: "#BF512C", fg: "#FFFFFF" },                  // 내보내기도 바깥 계열
-  eval: { bg: "#D6C9C5", fg: "#0C2C47" },                    // Mauve — 채점
-  condition: { bg: "#ABCBCA", fg: "#0C2C47" },               // Mint — 갈림길
-  tool: { bg: "#FFFFFF", fg: "#0C2C47" },                    // White — 도구
-  subgraph: { bg: "#FFFFFF", fg: "#0C2C47" },
+  trigger: { bg: "var(--node-trigger)", fg: "var(--white)" },        // Navy — 시작점
+  agent: { bg: "var(--node-worker)", fg: "var(--node-trigger)" },    // Yellow — 일꾼
+  firm: { bg: "var(--node-worker)", fg: "var(--node-trigger)" },     // 일꾼 무리도 같은 계열
+  code: { bg: "var(--node-compute)", fg: "var(--white)" },           // Green — 계산
+  transform: { bg: "var(--node-compute)", fg: "var(--white)" },      // 값 가공도 계산 계열
+  action: { bg: "var(--node-outbound)", fg: "var(--white)" },        // Orange — 바깥으로 나감
+  output: { bg: "var(--node-outbound)", fg: "var(--white)" },        // 내보내기도 바깥 계열
+  eval: { bg: "var(--node-eval)", fg: "var(--node-trigger)" },       // Mauve — 채점
+  condition: { bg: "var(--node-branch)", fg: "var(--node-trigger)" },// Mint — 갈림길
+  tool: { bg: "var(--node-tool)", fg: "var(--node-trigger)" },       // White — 도구
+  subgraph: { bg: "var(--node-tool)", fg: "var(--node-trigger)" },
 };
 
 /**
@@ -258,18 +259,18 @@ export function NodeCard(props: {
             id="true"
             type="source"
             position={Position.Bottom}
-            style={{ ...handleStyle, left: "30%", background: "var(--ok, #2e9e5b)" }}
+            style={{ ...handleStyle, left: "30%", background: "var(--ok, var(--ok))" }}
             isConnectable={connectable}
           />
-          <span style={branchLabelStyle("30%", "var(--ok, #2e9e5b)")}>T</span>
+          <span style={branchLabelStyle("30%", "var(--ok, var(--ok))")}>T</span>
           <Handle
             id="false"
             type="source"
             position={Position.Bottom}
-            style={{ ...handleStyle, left: "70%", background: "var(--danger, #d64545)" }}
+            style={{ ...handleStyle, left: "70%", background: "var(--danger, var(--danger))" }}
             isConnectable={connectable}
           />
-          <span style={branchLabelStyle("70%", "var(--danger, #d64545)")}>F</span>
+          <span style={branchLabelStyle("70%", "var(--danger, var(--danger))")}>F</span>
         </>
       ) : props.hasOut !== false ? SIDES.map((side) => (
         <Handle
@@ -290,13 +291,13 @@ export function NodeCard(props: {
             id="error"
             type="source"
             position={Position.Bottom}
-            style={{ ...handleStyle, left: "34%", background: "var(--danger, #d64545)" }}
+            style={{ ...handleStyle, left: "34%", background: "var(--danger, var(--danger))" }}
             isConnectable={connectable}
           />
           {/* ★이름표에 설명을 단다 — "실패, 정리가 뭐지"가 실측 첫 반응이었다(항목 2). */}
           <span
             title={props.outcomeStrings?.failHint ?? outcomeFallback.failHint}
-            style={{ ...outcomeLabelStyle("34%", "var(--danger, #d64545)"), pointerEvents: "auto", cursor: "help" }}
+            style={{ ...outcomeLabelStyle("34%", "var(--danger, var(--danger))"), pointerEvents: "auto", cursor: "help" }}
           >
             {props.outcomeStrings?.fail ?? outcomeFallback.fail}
           </span>

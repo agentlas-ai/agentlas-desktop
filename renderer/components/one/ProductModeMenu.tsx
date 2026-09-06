@@ -6,8 +6,8 @@ import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
 import { IconBrain } from "@/components/Icon";
-import { ipc, ipcEvents } from "@/lib/ipc";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
+import { useScienceSuiteStatus } from "@/lib/use-science-suite-status";
 import styles from "./ProductModeMenu.module.css";
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
@@ -33,8 +33,11 @@ export function ProductModeMenu({
   const activeLocale = localeOverride ?? locale;
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
-  const [scienceAvailable, setScienceAvailable] = useState(current === "science");
-  const [scienceInstalled, setScienceInstalled] = useState(current === "science");
+  const scienceSuite = useScienceSuiteStatus();
+  const scienceAvailable = current === "science" || Boolean(
+    scienceSuite?.installed && scienceSuite.enabled && scienceSuite.phase === "installed",
+  );
+  const scienceInstalled = current === "science" || Boolean(scienceSuite?.installed);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissibleLayer({
@@ -52,41 +55,6 @@ export function ProductModeMenu({
     }
     setOneHref(safeOneReturnRoute(window.sessionStorage.getItem(ONE_RETURN_ROUTE_KEY)));
   }, [current]);
-  useEffect(() => {
-    let disposed = false;
-    const api = ipc();
-    if (api?.productExtensions) {
-      void api.productExtensions.scienceSuiteStatus().then((status) => {
-        if (!disposed) {
-          setScienceInstalled(status.installed);
-          setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
-        }
-      }).catch(() => {
-        if (!disposed && current !== "science") {
-          setScienceInstalled(false);
-          setScienceAvailable(false);
-        }
-      });
-    }
-    const off = ipcEvents()?.onProductExtensionChanged?.(() => {
-      void api?.productExtensions?.scienceSuiteStatus?.().then((status) => {
-        if (!disposed) {
-          setScienceInstalled(status.installed);
-          setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
-        }
-      }).catch(() => {
-        if (!disposed && current !== "science") {
-          setScienceInstalled(false);
-          setScienceAvailable(false);
-        }
-      });
-    });
-    return () => {
-      disposed = true;
-      off?.();
-    };
-  }, [current]);
-
   const productName = current === "one" ? "Agentlas One" : current === "science" ? "Agentlas Science" : "Agentlas Work";
 
   const navigate = (href: string) => {
@@ -102,7 +70,7 @@ export function ProductModeMenu({
 
   const openScience = () => {
     setOpen(false);
-    if (scienceAvailable || current === "science") {
+    if (scienceAvailable) {
       router.push("/science");
       return;
     }
@@ -143,14 +111,14 @@ export function ProductModeMenu({
             </span>
             {current === "work" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </button>
-          {(scienceAvailable || current === "science" || SCIENCE_INSTALL_DISCOVERY_ENABLED) && <button className={styles.option} type="button" role="menuitem" onClick={openScience} onKeyDown={(event) => {
+          {(scienceAvailable || SCIENCE_INSTALL_DISCOVERY_ENABLED) && <button className={styles.option} type="button" role="menuitem" onClick={openScience} onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
             openScience();
           }}>
             <span className={styles.optionCopy}>
               <strong>Science</strong>
-              <small>{scienceAvailable || current === "science"
+              <small>{scienceAvailable
                 ? tFor(activeLocale, "one.mode.science_sub")
                 : scienceInstalled
                   ? (activeLocale === "ko" ? "켜기 필요" : "Enable required")

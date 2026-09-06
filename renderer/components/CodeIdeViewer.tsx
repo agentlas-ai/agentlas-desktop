@@ -29,14 +29,14 @@ function highlight(code: string): ReactNode[] {
   while ((match = TOKEN.exec(code)) !== null) {
     if (match.index > last) output.push(code.slice(last, match.index));
     let color: string | undefined;
-    if (match[1]) color = "#718078";
-    else if (match[2]) color = "#1f7a4d";
-    else if (match[3]) color = "#a15c00";
+    if (match[1]) color = "var(--muted-deep)";
+    else if (match[2]) color = "var(--ok)";
+    else if (match[3]) color = "var(--warn)";
     else if (match[4]) {
       const word = match[4];
-      if (KEYWORDS.has(word)) color = "#6f42c1";
-      else if (/^[A-Z]/.test(word)) color = "#116a8a";
-      else if (code[match.index + word.length] === "(") color = "#1f5fbd";
+      if (KEYWORDS.has(word)) color = "var(--info)";
+      else if (/^[A-Z]/.test(word)) color = "var(--info)";
+      else if (code[match.index + word.length] === "(") color = "var(--info)";
     }
     output.push(color ? <span key={key++} style={{ color }}>{match[0]}</span> : match[0]);
     last = match.index + match[0].length;

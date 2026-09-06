@@ -4,6 +4,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
+const { verifyStudioRuntime } = require("./studio-runtime-contract.cjs");
 const {
   verifyProductExtensionSigningPolicyFile,
 } = require("./product-extension-signing-policy.cjs");
@@ -923,6 +924,10 @@ function verifyBundledProductExtensionSigningPolicy(context) {
 exports.verifyBundledProductExtensionSigningPolicy = verifyBundledProductExtensionSigningPolicy;
 
 exports.default = async function afterPackClean(context) {
+  const studioResources = context.electronPlatformName === "darwin"
+    ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
+    : path.join(context.appOutDir, "resources");
+  await verifyStudioRuntime(path.join(studioResources, "studio-pack"));
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {
       await execFileAsync("/usr/bin/dot_clean", ["-m", context.appOutDir]);

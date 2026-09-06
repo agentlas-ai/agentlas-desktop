@@ -13,7 +13,7 @@
  * 승인 자체는 대화를 멈추는 경계지만, 화면을 차지하는 질문 시트가 아니다. Graph 칩은
  * 제목·런타임·네 선택지를 한 줄로 보여 주고, One은 기존 질문 카드를 그대로 쓴다.
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
@@ -51,7 +51,25 @@ export function ToolApprovalCard({
   const { actions } = useToolApprovals();
   const ko = locale === "ko";
   const action = actions.get(request.id);
-  const locked = action?.phase === "submitting" || action?.phase === "unknown" || action?.phase === "terminal";
+  const expiryMs = Date.parse(request.expiresAt ?? "");
+  const [clientExpired, setClientExpired] = useState(() => Number.isFinite(expiryMs) && expiryMs <= Date.now());
+  useEffect(() => {
+    if (!Number.isFinite(expiryMs)) return;
+    const remaining = expiryMs - Date.now();
+    if (remaining <= 0) {
+      setClientExpired(true);
+      return;
+    }
+    setClientExpired(false);
+    const timer = window.setTimeout(() => setClientExpired(true), Math.min(remaining, 2_147_000_000));
+    return () => window.clearTimeout(timer);
+  }, [expiryMs, request.id]);
+  const durableFailure = action?.durableConsent && action.durableConsent.status !== "persisted";
+  // A durable-save failure is a resolved call that must remain visible until
+  // dismissal; the original live request's wall-clock expiry must not hide
+  // that receipt after the user has already answered.
+  const expired = !durableFailure && (clientExpired || (action?.phase === "terminal" && action.terminalStatus === "expired"));
+  const locked = expired || action?.phase === "submitting" || action?.phase === "unknown" || action?.phase === "terminal";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
   const imageTool = /(?:image|dall|flux|midjourney|imagen)/i.test(request.tool);
   /*
@@ -133,6 +151,11 @@ export function ToolApprovalCard({
               ? `이 요청은${decisionLabel ? ` '${decisionLabel}' 선택으로` : ""} 이미 처리되었습니다.`
               : `This request was already resolved${decisionLabel ? ` as '${decisionLabel}'` : ""}.`)
             : null;
+  const durableNotice = action?.durableConsent && action.durableConsent.status !== "persisted"
+    ? (ko
+      ? "이번 호출은 선택대로 처리됐지만 ‘항상 허용’ 저장에 실패했습니다. 이 세션이 끝나면 다시 확인이 필요합니다."
+      : "This call followed your choice, but the Always allow rule was not saved. A later session will ask again.")
+    : null;
 
   const feedbackNode = feedback ? (
     <div
@@ -148,6 +171,7 @@ export function ToolApprovalCard({
       }}
     >
       <span>{feedback}</span>
+      {durableNotice && <span style={{ display: "block", marginTop: 4 }}>{durableNotice}</span>}
       {action?.phase === "unknown" && (
         <button
           type="button"
@@ -167,7 +191,60 @@ export function ToolApprovalCard({
         </button>
       )}
     </div>
+  ) : durableNotice ? (
+    <div
+      role="alert"
+      data-testid="tool-approval-durable-outcome"
+      style={{
+        marginTop: 8,
+        padding: "8px 10px",
+        borderRadius: 10,
+        border: "1px solid color-mix(in srgb, currentColor 18%, transparent)",
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      {durableNotice}
+    </div>
   ) : null;
+
+  if (expired) {
+    return (
+      <section
+        role="status"
+        aria-live="polite"
+        aria-label={ko ? "만료된 도구 승인" : "Expired tool approval"}
+        data-testid="tool-approval-card"
+        data-approval-state="expired"
+        style={{
+          padding: compact ? "12px 14px" : "16px 18px",
+          borderRadius: 14,
+          border: "1px solid color-mix(in srgb, currentColor 18%, transparent)",
+          background: "color-mix(in srgb, var(--surface, var(--paper)) 94%, currentColor 6%)",
+          opacity: 0.78,
+        }}
+      >
+        <small style={{ display: "block", marginBottom: 5, fontWeight: 800, letterSpacing: ".04em" }}>
+          {ko ? "승인 만료" : "Approval expired"}
+        </small>
+        <strong style={{ display: "block", lineHeight: 1.45 }}>{askTitle}</strong>
+        <div data-testid="tool-approval-outcome" style={{ marginTop: 7, fontSize: 12, lineHeight: 1.45 }}>
+          {ko
+            ? "승인 요청 시간이 만료되어 이 호출은 실행되지 않았습니다."
+            : "This approval expired, so the call was not run."}
+          {action?.phase === "terminal" && (
+            <button
+              type="button"
+              onClick={() => dismissToolApproval(request.id)}
+              style={{ marginInlineStart: 8 }}
+            >
+              {ko ? "확인" : "Dismiss"}
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   if (compact && chip) {
     return (

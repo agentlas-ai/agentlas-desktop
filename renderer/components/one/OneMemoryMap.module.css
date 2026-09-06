@@ -5,7 +5,7 @@
   overflow: hidden;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: var(--paper);
   box-shadow: none;
   isolation: isolate;
 }
@@ -29,7 +29,7 @@
   padding: 13px 14px;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: var(--paper);
   box-shadow: none;
   pointer-events: none;
 }
@@ -53,10 +53,10 @@
   line-height: 1.35;
 }
 
-.tooltip dt { color: #858a8e; }
+.tooltip dt { color: var(--muted-deep); }
 .tooltip dd {
   overflow-wrap: anywhere;
-  color: #303438;
+  color: var(--ink);
   font-weight: 610;
 }
 

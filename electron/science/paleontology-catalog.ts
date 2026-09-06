@@ -126,6 +126,13 @@ function nullableText(value: unknown, maximum = 4_000): string | null {
   if (value === undefined || value === null || value === "") return null;
   return text(String(value), maximum, "science-paleontology-response-schema-invalid");
 }
+function nullableProviderProse(value: unknown, maximum = 4_000): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  // PBDB bibliography prose can contain provider-authored line wrapping. The
+  // exact response bytes remain immutable in Source/Run storage; normalize
+  // display whitespace only, while text() continues to reject other controls.
+  return text(String(value).replace(/[\u0009-\u000d\u0020]+/gu, " "), maximum, "science-paleontology-response-schema-invalid");
+}
 function number(value: unknown, code = "science-paleontology-response-schema-invalid"): number {
   const result = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
   if (!Number.isFinite(result)) throw new Error(code);
@@ -237,7 +244,7 @@ function parseOccurrence(value: unknown, taxon: PaleontologyCatalogResult["taxon
     },
     coordinates: longitude === null ? null : { longitude, latitude: latitude!, basis: nullableText(raw.latlng_basis, 240), precision: nullableText(raw.latlng_precision, 240) },
     countryCode: nullableText(raw.cc, 8), state: nullableText(raw.state, 240),
-    primaryReference: nullableText(raw.primary_reference, 8_000),
+    primaryReference: nullableProviderProse(raw.primary_reference, 8_000),
     providerRecordSha256: sha256(canonicalJson(raw)),
   };
 }

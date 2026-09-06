@@ -73,6 +73,10 @@ interface AgentlasEvents {
 }
 
 interface AgentlasFilesBridge {
+  chatFiles?: {
+    snapshot: (input: unknown) => Promise<unknown>;
+    listGroup: (input: unknown) => Promise<unknown>;
+  };
   /** webUtils가 확인한 드롭 항목에 대해 main이 발급한 세션 권한. */
   grantForFile: (file: File) => Promise<FsPathGrant | null>;
   /** 클립보드에만 존재하는 허용 파일을 main-owned 스테이징 파일로 고정한다. */

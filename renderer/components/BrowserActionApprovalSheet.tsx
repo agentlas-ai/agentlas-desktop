@@ -86,16 +86,16 @@ export function BrowserActionApprovalSheet() {
             max-width: var(--popup-3-width);
             padding: 10px 14px;
             border-radius: 10px;
-            background: var(--rd-bg, #14151a);
-            color: var(--rd-ink, #f3f4f8);
+            background: var(--rd-bg);
+            color: var(--rd-ink);
             border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
             box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
             font-size: 12.5px;
           }
           .baa-expired.one {
             border-color: rgba(40, 48, 39, 0.12);
-            background: #fffdf9;
-            color: #20251f;
+            background: var(--one-toast-bg);
+            color: var(--one-toast-ink);
             box-shadow: 0 12px 36px rgba(28, 35, 27, 0.18);
           }
         `}</style>
@@ -182,8 +182,8 @@ export function BrowserActionApprovalSheet() {
         .baa {
           pointer-events: auto;
           width: var(--popup-3-width);
-          background: var(--rd-bg, #14151a);
-          color: var(--rd-ink, #f3f4f8);
+          background: var(--rd-bg);
+          color: var(--rd-ink);
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
           border-radius: 16px;
           padding: 16px 18px;
@@ -216,11 +216,11 @@ export function BrowserActionApprovalSheet() {
           font-weight: 800;
           padding: 2px 9px;
           border-radius: 999px;
-          background: var(--rd-accent, #7c7cff);
-          color: #fff;
+          background: var(--rd-accent);
+          color: var(--white);
         }
         .baa-tag.pay {
-          background: var(--rd-err, #e5484d);
+          background: var(--rd-err);
         }
         .baa-site {
           font-size: 12px;
@@ -252,15 +252,15 @@ export function BrowserActionApprovalSheet() {
           cursor: pointer;
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.14));
           background: none;
-          color: var(--rd-ink, #f3f4f8);
+          color: var(--rd-ink);
         }
         .baa-actions .deny {
-          color: var(--rd-err, #e5484d);
+          color: var(--rd-err);
           margin-right: auto;
         }
         .baa-actions .always {
-          background: var(--rd-accent, #7c7cff);
-          color: #fff;
+          background: var(--rd-accent);
+          color: var(--white);
           border-color: transparent;
         }
         .baa-one {
@@ -315,7 +315,7 @@ export function BrowserActionApprovalSheet() {
         .baa-one .baa-actions .always {
           border-color: var(--one-sheet-primary);
           background: var(--one-sheet-primary);
-          color: #fff;
+          color: var(--white);
         }
       `}</style>
     </>

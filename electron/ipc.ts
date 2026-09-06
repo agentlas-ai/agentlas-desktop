@@ -4,7 +4,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -69,11 +69,15 @@ import {
   hasApiKey,
   hasEnvVar,
   listEnvKeys,
+  listCredentialRecoveryFailures,
+  retryCredentialRecoveryFromUser,
   previewEnvVar,
   saveApiKey,
   setEnvVar,
 } from "./secrets/vault";
+import { collectEnvStatus } from "./secrets/env-status";
 import { userDataPath, userDataDir } from "./runtime-paths";
+import { configuredIdentity } from "./install-identity";
 import {
   installAgent,
   installMyAgent,
@@ -177,6 +181,7 @@ import {
 } from "./mcp/workforce-goal-continuity";
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
+import { queueAutomaticGoalResume } from "./invocation/automatic-goal";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
@@ -210,7 +215,7 @@ import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { assertChatRemovalAllowed } from "./chat/removal-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
-import { submitAskUserAnswer } from "./confirm/ask-user";
+import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import type {
   HephaestusBuildEvent,
   HephaestusBuildRequest,
@@ -275,6 +280,7 @@ import { unwatchFsPreviewFile, unwatchFsPreviewFilesForOwner, watchFsPreviewFile
 import { connectGithubProject } from "./project-sources/github";
 import {
   getAuthSession,
+  getAuthenticatedActorIds,
   getSessionCookieHeader,
   signInWithBrowser,
   signInWithGoogle,
@@ -408,6 +414,7 @@ import {
   setChatWorkingFolder,
   unarchiveChat,
 } from "./store/chats";
+import { listChatFileSnapshot, persistChatFileSnapshot, readChatFileSnapshotForExternalOpen } from "./store/chat-message-attachments";
 import {
   completeGoalLedgerGoal,
   deriveGoalAcceptanceCriteria,
@@ -813,6 +820,8 @@ import {
 } from "./runtime/tool-approval";
 import {
   getCapabilityDecision,
+  capabilityConsentScope,
+  capabilityResourceIdentity,
   grantChatAlwaysApproval,
   listAlwaysApprovedChatIds,
   listCapabilityGrants,
@@ -821,6 +830,7 @@ import {
   revokeChatAlwaysApproval,
 } from "./store/capability-grants";
 import type { ToolApprovalDecision } from "../shared/types";
+import type { ToolApprovalConsentBinding } from "../shared/types";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -2374,6 +2384,44 @@ export function registerIpcHandlers(): void {
   // This channel is intentionally absent from window.agentlas. Only the isolated
   // preload bridge can pair webUtils.getPathForFile(File) with this grant call.
   ipcMain.handle("fs:grantDroppedPath", (_e, droppedPath: string) => grantDroppedPath(droppedPath));
+  // Only preload can submit grants. Renderer text can never promote an
+  // arbitrary path into a durable chat file.
+  ipcMain.handle("chatFiles:snapshot", (_e, input: unknown) => persistChatFileSnapshot(input as Parameters<typeof persistChatFileSnapshot>[0]));
+  ipcMain.handle("chatFiles:listGroup", (_e, input: unknown) => listChatFileSnapshot(input as Parameters<typeof listChatFileSnapshot>[0]));
+  ipcMain.handle("chatFiles:openExternal", async (_e, input: unknown): Promise<{ ok: boolean; message?: string }> => {
+    let root = "";
+    try {
+      const file = readChatFileSnapshotForExternalOpen(input);
+      if (!file) return { ok: false, message: "The exact chat file binding or document type is unavailable." };
+      root = fs.realpathSync.native(fs.mkdtempSync(path.join(app.getPath("temp"), "agentlas-chat-open-")));
+      fs.chmodSync(root, 0o700);
+      const destination = path.join(root, path.basename(file.name));
+      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+        | (typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0);
+      const fd = fs.openSync(destination, flags, 0o600);
+      try {
+        fs.writeFileSync(fd, file.bytes);
+        fs.fsyncSync(fd);
+        fs.fchmodSync(fd, 0o400);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const written = fs.lstatSync(destination, { bigint: true });
+      const writtenDigest = createHash("sha256").update(fs.readFileSync(destination)).digest("hex");
+      if (!written.isFile() || written.isSymbolicLink() || written.nlink !== 1n || written.size !== BigInt(file.size) || writtenDigest !== file.sha256) {
+        throw new Error("The temporary file failed its integrity check.");
+      }
+      const message = await shell.openPath(destination);
+      if (message) throw new Error(message);
+      // The OS owns the temporary-directory lifetime after a successful open.
+      // Keeping the verified copy read-only avoids silently discarding edits on
+      // an arbitrary timer while still preventing it from becoming an export.
+      return { ok: true };
+    } catch (error) {
+      if (root) fs.rm(root, { recursive: true, force: true }, () => undefined);
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  });
   // 클립보드 이미지는 경로가 없다 — main이 내용을 비공개 파일로 고정하고 같은 등급의
   // capability를 돌려준다. 그래야 붙여넣기가 드롭·파일선택과 같은 첨부 경로를 탄다.
   ipcMain.handle("fs:grantPastedImage", (_e, input: unknown) =>
@@ -2695,12 +2743,50 @@ export function registerIpcHandlers(): void {
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
-  ipcMain.handle("confirm:commitAnswer", (_e, input: { chatId?: unknown; reply?: unknown; sourceMessageId?: unknown }) =>
-    commitPendingConfirmationAnswer(
-      typeof input?.chatId === "string" ? input.chatId : "",
-      typeof input?.reply === "string" ? input.reply : "",
+  ipcMain.handle("confirm:commitAnswer", (_e, input: {
+    chatId?: unknown;
+    reply?: unknown;
+    sourceMessageId?: unknown;
+    continuation?: unknown;
+  }) => {
+    const raw = input?.continuation && typeof input.continuation === "object" && !Array.isArray(input.continuation)
+      ? input.continuation as Record<string, unknown>
+      : undefined;
+    const chatId = typeof input?.chatId === "string" ? input.chatId : "";
+    const reply = typeof input?.reply === "string" ? input.reply : "";
+    const sealed = raw ? rendererInvocationRequest({
+      chatId,
+      userPrompt: reply,
+      ...(raw.locale === "ko" || raw.locale === "en" ? { locale: raw.locale } : {}),
+      ...(raw.permissions === "read" || raw.permissions === "write" || raw.permissions === "full"
+        ? { permissions: raw.permissions }
+        : {}),
+      ...(raw.sessionRouting === true ? { sessionRouting: true } : {}),
+      ...(raw.runtimeSelection && typeof raw.runtimeSelection === "object" && !Array.isArray(raw.runtimeSelection)
+        ? { runtimeSelection: raw.runtimeSelection as RuntimeSelection }
+        : {}),
+    }) : undefined;
+    return commitPendingConfirmationAnswer(
+      chatId,
+      reply,
       typeof input?.sourceMessageId === "string" ? input.sourceMessageId : undefined,
-    ));
+      sealed ? {
+        locale: sealed.locale,
+        permissions: sealed.permissions,
+        sessionRouting: sealed.sessionRouting,
+        runtimeSelection: sealed.runtimeSelection,
+      } : undefined,
+    );
+  });
+  ipcMain.handle("confirm:continueAnswer", (_e, input: {
+    chatId?: unknown;
+    sourceMessageId?: unknown;
+    reply?: unknown;
+  }) => invocationService.continueCommittedQuestion(
+    typeof input?.chatId === "string" ? input.chatId : "",
+    typeof input?.sourceMessageId === "string" ? input.sourceMessageId : "",
+    typeof input?.reply === "string" ? input.reply : "",
+  ));
   ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
     listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));
   ipcMain.handle("confirm:snooze", (_e, input: { chatId?: unknown; sourceMessageId?: unknown; resumeAt?: unknown }) =>
@@ -2869,10 +2955,17 @@ export function registerIpcHandlers(): void {
   });
 
   // ── env vault (글로벌 외부 API 키) ──────────────────────
+  ipcMain.handle("credentialRecovery:list", (event) => {
+    assertTrustedSitePublishIpcSender(event);
+    return listCredentialRecoveryFailures();
+  });
+  ipcMain.handle("credentialRecovery:retry", (event, retryToken: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    if (typeof retryToken !== "string" || retryToken.length > 128) return { status: "invalid-token" };
+    return retryCredentialRecoveryFromUser(retryToken);
+  });
   ipcMain.handle("env:list", async () => {
-    // 1) keychain에 저장된 env keys
-    const stored = await listEnvKeys();
-    // 2) 설치된 에이전트들의 envRequirements
+    // Gather known requirements before touching credential storage.
     const agents = listInstalledAgents();
     type Aggregated = {
       hasValue: boolean;
@@ -2934,22 +3027,10 @@ export function registerIpcHandlers(): void {
       });
       map.set(req.key, entry);
     }
-    // 사용자가 직접 추가한 키도 포함 (요구하는 에이전트 없음)
-    for (const k of stored) {
-      if (!map.has(k)) map.set(k, { hasValue: true, requiredBy: [] });
-    }
-    // hasValue + 마스킹 미리보기를 한 번에 체크 (병렬). 미리보기는 메인에서 생성 — 전체 값 X.
-    const keys = [...map.keys()];
-    const values = await Promise.all(keys.map((k) => hasEnvVar(k)));
-    const previews = await Promise.all(
-      keys.map((k, i) => (values[i] ? previewEnvVar(k) : Promise.resolve(null))),
+    return collectEnvStatus(
+      [...map].map(([key, entry]) => ({ key, requiredBy: entry.requiredBy })),
+      { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: previewEnvVar },
     );
-    return keys.map((key, i) => ({
-      key,
-      hasValue: values[i],
-      preview: previews[i] ?? null,
-      requiredBy: map.get(key)!.requiredBy,
-    }));
   });
   ipcMain.handle("env:set", (_e, key: string, value: string) => setEnvVar(key, value));
   ipcMain.handle("env:has", (_e, key: string) => hasEnvVar(key));
@@ -3505,6 +3586,12 @@ export function registerIpcHandlers(): void {
 
   // ── browser (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ─
   // 동기 질문의 답 — confirm/ask-user.ts 의 대기 중인 약속을 깨운다.
+  ipcMain.handle("confirm:listPendingAskUser", (event) => {
+    // Pending question text is private: only the trusted Desktop top frame
+    // may recover it after its event subscription (or renderer) restarts.
+    assertTrustedSitePublishIpcSender(event);
+    return listPendingAskUserRequests();
+  });
   ipcMain.handle("confirm:submitAskUserAnswer", (_e, requestId: string, answer: string | null) =>
     submitAskUserAnswer(String(requestId), typeof answer === "string" ? answer : null),
   );
@@ -3661,19 +3748,80 @@ export function registerIpcHandlers(): void {
   const recentUserDenials = new Map<string, number>();
   const USER_DENIAL_TTL_MS = 5 * 60_000;
   const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${ask.detail ?? ""}`;
+
+  const opaqueConsentIdentity = (label: string, value: string): string => {
+    // Account ids, workspace paths, and agent names are Main-only material.
+    // Approval events may cross into a renderer, so keep the binding exact but
+    // value-free at that boundary and in the capability ledger.
+    if (!value || value.length > 16 * 1024 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error(`invalid capability consent ${label}`);
+    }
+    return `consent-id:v1:${label}:${createHash("sha256")
+      .update(`agentlas-tool-consent-${label}-v1\u0000${value}`, "utf8")
+      .digest("hex")}`;
+  };
+
+  /**
+   * Main is the only authority that can mint a durable consent identity.  The
+   * account id comes from the authenticated session when available; unsigned
+   * local work is isolated to this install's user-data namespace.  Workspace
+   * includes the exact working folder (or chat fallback), while requester is
+   * stable across runtime restarts and excludes the ephemeral session key.
+   */
+  const consentBindingForAsk = (ask: {
+    runtime: string;
+    tool: string;
+    detail?: string;
+    cwd?: string;
+    chatId?: string;
+    agentId?: string;
+    permission: "read" | "write" | "full" | undefined;
+  }): ToolApprovalConsentBinding => {
+    const actor = getAuthenticatedActorIds();
+    const install = configuredIdentity();
+    // Keep the supplied path bytes intact before canonicalizing `.`/`..`.
+    // Unix permits leading/trailing spaces in a directory name; trimming here
+    // would let two distinct workspaces inherit the same durable consent.
+    const rawWorkspace = ask.cwd && ask.cwd.length > 0
+      ? path.resolve(ask.cwd)
+      : ask.chatId
+        ? `chat:${ask.chatId}`
+        : `desktop:${install?.userDataNamespace ?? "Agentlas"}`;
+    const rawUser = actor
+      ? `account:${actor.userId}`
+      : `install:${install?.channel ?? "official"}:${install?.userDataNamespace ?? "Agentlas"}`;
+    const rawWorkspaceIdentity = actor
+      ? `account-workspace:${actor.workspaceId}|${rawWorkspace}`
+      : rawWorkspace;
+    const rawRequester = `runtime:${ask.runtime}|agent:${ask.agentId?.trim() || "default"}`;
+    return {
+      userIdentity: opaqueConsentIdentity("user", rawUser),
+      workspaceIdentity: opaqueConsentIdentity("workspace", rawWorkspaceIdentity),
+      requesterIdentity: opaqueConsentIdentity("requester", rawRequester),
+      credentialResourceIdentity: capabilityResourceIdentity(ask.tool, ask.detail),
+      permissionScope: ask.permission ?? "read",
+    };
+  };
   // ★한 벌뿐이다 — ACP 의 session/request_permission 과 우리 in-process 도구 루프
   // (ollama/lmstudio/mlx)가 **같은** 이 함수를 지난다. 정책을 두 벌 쓰면 갈라지고,
   // 갈라진 쪽은 반드시 "묻지 않고 실행"으로 기운다(local-tool-loop 이 실제로 그랬다).
   // "항상 허용" 칩의 영구 기록(capability_grants) — tool-approval.ts 는 store 를 모르므로
   // 여기서 주입한다(오너 결정 2026-08-20: 항상 허용은 다시는 묻지 않는다).
   setCapabilityGrantPersister((grant) => {
-    recordCapabilityGrant({
+    if (!grant.consentBinding) return { ok: false, code: "missing-binding" };
+    const result = recordCapabilityGrant({
       capability: grant.capability,
       pattern: grant.pattern,
       decision: "allow",
-      scope: grant.scope,
+      // The store derives the full scope digest from all binding fields.  The
+      // marker supplied by the runtime is intentionally not trusted here.
+      scope: capabilityConsentScope(grant.consentBinding),
       source: "chip",
+      tool: grant.tool,
+      consentBinding: grant.consentBinding,
     });
+    if (!result.ok) return { ok: false, code: result.code };
+    return { ok: true, id: result.id };
   });
   setRuntimeToolPermissionArbiter(async (ask) => {
     /*
@@ -3682,12 +3830,20 @@ export function registerIpcHandlers(): void {
      * 영구 거부된 행동은 full 권한으로도 뚫리지 않는다.
      */
     const capability = capabilityClassFor(ask.kind, ask.tool);
+    let consentBinding: ToolApprovalConsentBinding;
+    try {
+      consentBinding = consentBindingForAsk(ask);
+    } catch {
+      // An invalid Main-owned identity must not turn into a broad legacy rule.
+      return "deny";
+    }
     const ruled = getCapabilityDecision({
       capability,
       tool: ask.tool,
       detail: ask.detail,
       agentId: ask.agentId,
       chatId: ask.chatId,
+      consentBinding,
     });
     if (ruled === "deny") return "deny";
     if (ruled === "allow") return "allow_session";
@@ -3711,6 +3867,7 @@ export function registerIpcHandlers(): void {
         detail: ask.detail,
         cwd: ask.cwd,
         deniedBy: "runtime-headless",
+        consentBinding,
       });
       return "deny";
     }
@@ -3723,6 +3880,7 @@ export function registerIpcHandlers(): void {
       chatId: ask.chatId,
       capability,
       agentId: ask.agentId,
+      consentBinding,
     });
     if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), Date.now());
     // allow_always 는 tool-approval 이 이미 영속했다 — 러너 계약에는 세션 허용으로 답한다.
@@ -4066,7 +4224,18 @@ export function registerIpcHandlers(): void {
       throw new Error("long_run_resume_version_conflict");
     }
     const continuation = findAutomationByGoalId(chat.goalId);
-    if (!continuation) throw new Error("long_run_resume_dispatch_unavailable");
+    if (!continuation) {
+      if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
+      const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);
+      try {
+        confirmDesktopLongRunResumeDispatched(queued.id);
+        invocationService.start(request);
+      } catch (error) {
+        failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+      return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    }
     const queued = resumeDesktopLongRunManually(context.runId, expectedVersion);
     try {
       if (!continuation.enabled) toggleAutomation(continuation.id, true);

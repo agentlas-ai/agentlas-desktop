@@ -18,6 +18,7 @@ import { probeOllama } from "./ollama";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { hasApiKey } from "../secrets/vault";
+import { isRuntimeCredentialUnavailable, probeRuntimeCredentialAccess, type RuntimeCredentialProbe } from "./credential-access";
 import {
   AGENTLAS_SERVING_DEFAULT_MODEL,
   AGENTLAS_SERVING_MODELS,
@@ -39,7 +40,6 @@ import type {
 import {
   byokModels,
   cliModels,
-  cliModelsAreDiscovered,
   defaultByokModel,
 } from "../../shared/models";
 import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
@@ -63,9 +63,18 @@ function runtimeDetectCacheMs(): number {
   return Number(process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS ?? 10_000);
 }
 
+function runtimeProbeDisabled(kind: RuntimeKind): boolean {
+  const disabled = (process.env.AGENTLAS_DISABLED_RUNTIME_KINDS ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return disabled.includes(kind);
+}
+
 function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   return list.map((runtime) => ({
     ...runtime,
+    credentialAccess: runtime.credentialAccess ? { ...runtime.credentialAccess } : undefined,
     availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
     allocationModels: runtime.allocationModels ? [...runtime.allocationModels] : runtime.allocationModels,
     allocationModelProfiles: runtime.allocationModelProfiles
@@ -126,6 +135,11 @@ export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
 export function clearDetectCache(): void {
   detectCache = null;
   detectGeneration += 1;
+  // A successful CLI replacement invalidates both the assembled runtime list
+  // and the lower-level `--version` probe. Keeping the latter would let a
+  // fresh resident process run the new binary while runtime.detect() still
+  // reports the previous generation until its probe TTL expires.
+  clearCliVersionProbeCache();
   // `codex.ts` keeps the executable path separately for invocation; clearing
   // only the dashboard snapshot would pin a moved binary until app restart.
   clearCodexBinCache();
@@ -149,18 +163,18 @@ function byokLongOf(backend: RuntimeBackend, active: ActiveRuntimeRow | null): b
   return recallRuntimeSelection("byok", backend)?.longContext ?? false;
 }
 
-/** CLI 런타임의 활성 모델 — 설치된 CLI가 실제 노출한 목록에 있으면 복원한다. */
+/** Preserve an explicit model across catalog updates; availability is a separate gate. */
 function cliModelOf(
   kind: RuntimeKind,
   active: ActiveRuntimeRow | null,
-  availableModels = cliModels(kind).map((model) => model.id),
+  _availableModels = cliModels(kind).map((model) => model.id),
   backend?: RuntimeBackend,
 ): string | undefined {
   const candidate =
     active?.kind === kind && (!backend || active.backend === backend)
       ? active.model
       : recallRuntimeSelection(kind, backend)?.model;
-  return candidate && availableModels.includes(candidate) ? candidate : undefined;
+  return candidate || undefined;
 }
 
 // 작업량(effort) 영속 — active_runtime 컬럼 추가(마이그레이션) 대신 meta(key/value) 테이블 사용.
@@ -335,6 +349,16 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
 
+  const claudeCodeDisabled = runtimeProbeDisabled("claude-code");
+  const codexDisabled = runtimeProbeDisabled("codex");
+  const antigravityDisabled = runtimeProbeDisabled("antigravity");
+  const kimiDisabled = runtimeProbeDisabled("kimi");
+  const grokDisabled = runtimeProbeDisabled("grok");
+  const cursorDisabled = runtimeProbeDisabled("cursor");
+  const ollamaDisabled = runtimeProbeDisabled("ollama");
+  const lmstudioDisabled = runtimeProbeDisabled("lmstudio");
+  const mlxDisabled = runtimeProbeDisabled("mlx");
+
   const [
     cc,
     cx,
@@ -359,28 +383,30 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     customByok,
     claudeEfforts,
   ] = await Promise.all([
-    probeClaudeCode(),
-    probeCodex(),
-    readCodexModelDiscovery(),
-    probeAntigravity(),
-    probeKimi(),
-    probeGrok(),
-    probeCursor(),
-    probeOllama(),
-    probeLMStudio(),
-    probeMLX(),
-    hasApiKey("anthropic"),
-    hasApiKey("openai"),
-    hasApiKey("google"),
-    hasApiKey("glm"),
-    hasApiKey("kimi"),
-    hasApiKey("deepseek"),
-    hasApiKey("minimax"),
-    hasApiKey("xai"),
-    hasApiKey("openrouter"),
-    hasApiKey("upstage"),
-    hasApiKey("custom"),
-    probeClaudeEfforts(),
+    claudeCodeDisabled ? Promise.resolve(null) : probeClaudeCode(),
+    codexDisabled ? Promise.resolve(null) : probeCodex(),
+    codexDisabled
+      ? Promise.resolve({ inventory: [], discovery: unsupportedDiscovery("runtime-disabled") })
+      : readCodexModelDiscovery(),
+    antigravityDisabled ? Promise.resolve(null) : probeAntigravity(),
+    kimiDisabled ? Promise.resolve(null) : probeKimi(),
+    grokDisabled ? Promise.resolve(null) : probeGrok(),
+    cursorDisabled ? Promise.resolve(null) : probeCursor(),
+    ollamaDisabled ? Promise.resolve(null) : probeOllama(),
+    lmstudioDisabled ? Promise.resolve(null) : probeLMStudio(),
+    mlxDisabled ? Promise.resolve(null) : probeMLX(),
+    probeRuntimeCredentialAccess(() => hasApiKey("anthropic")),
+    probeRuntimeCredentialAccess(() => hasApiKey("openai")),
+    probeRuntimeCredentialAccess(() => hasApiKey("google")),
+    probeRuntimeCredentialAccess(() => hasApiKey("glm")),
+    probeRuntimeCredentialAccess(() => hasApiKey("kimi")),
+    probeRuntimeCredentialAccess(() => hasApiKey("deepseek")),
+    probeRuntimeCredentialAccess(() => hasApiKey("minimax")),
+    probeRuntimeCredentialAccess(() => hasApiKey("xai")),
+    probeRuntimeCredentialAccess(() => hasApiKey("openrouter")),
+    probeRuntimeCredentialAccess(() => hasApiKey("upstage")),
+    probeRuntimeCredentialAccess(() => hasApiKey("custom")),
+    claudeCodeDisabled ? Promise.resolve([]) : probeClaudeEfforts(),
   ]);
 
   const list: RuntimeStatus[] = [];
@@ -638,7 +664,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
   // Detection is best-effort per spec: one broken agent never hides the others.
-  for (const spec of listAcpKindSpecs()) {
+  for (const spec of runtimeProbeDisabled("acp") ? [] : listAcpKindSpecs()) {
     try {
       const found = await resolveAcpCommand(spec);
       if (!found) continue;
@@ -704,10 +730,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
 
-  if (anthropicByok) {
+  if (anthropicByok.status === "available") {
     const selectedModel = byokModelOf("anthropic", active);
     list.push({
       kind: "byok",
+      credentialAccess: { status: "available" },
       backend: "anthropic",
       source: "byok:anthropic",
       version: null,
@@ -723,10 +750,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       longContextEnabled: byokLongOf("anthropic", active),
     });
   }
-  if (openaiByok) {
+  if (openaiByok.status === "available") {
     const selectedModel = byokModelOf("openai", active);
     list.push({
       kind: "byok",
+      credentialAccess: { status: "available" },
       backend: "openai",
       source: "byok:openai",
       version: null,
@@ -741,10 +769,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       longContextEnabled: byokLongOf("openai", active),
     });
   }
-  if (googleByok) {
+  if (googleByok.status === "available") {
     const selectedModel = byokModelOf("google", active);
     list.push({
       kind: "byok",
+      credentialAccess: { status: "available" },
       backend: "google",
       source: "byok:google",
       version: null,
@@ -763,7 +792,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   // Anthropic/OpenAI 호환 서드파티(GLM/Kimi/DeepSeek/Upstage) + custom(사용자 base URL) —
   // 키가 저장돼 있으면 엔진으로 노출한다. upstage/custom을 빠뜨리면 Settings에서 고를 수 있어도
   // detect가 목록에 안 넣어 선택이 조용히 되돌려진다(감사 P0 데드코드).
-  const compatFlags: Record<"glm" | "kimi" | "deepseek" | "minimax" | "xai" | "openrouter" | "upstage" | "custom", boolean> = {
+  const compatFlags: Record<"glm" | "kimi" | "deepseek" | "minimax" | "xai" | "openrouter" | "upstage" | "custom", RuntimeCredentialProbe> = {
     glm: glmByok,
     kimi: kimiByok,
     deepseek: deepseekByok,
@@ -774,10 +803,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     custom: customByok,
   };
   for (const backend of ["glm", "kimi", "deepseek", "minimax", "xai", "openrouter", "upstage", "custom"] as const) {
-    if (!compatFlags[backend]) continue;
+    if (compatFlags[backend].status !== "available") continue;
     const selectedModel = byokModelOf(backend, active);
     list.push({
       kind: "byok",
+      credentialAccess: { status: "available" },
       backend,
       source: `byok:${backend}`,
       version: null,
@@ -793,6 +823,24 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
 
+  const credentialProbes = {
+    anthropic: anthropicByok, openai: openaiByok, google: googleByok, ...compatFlags,
+  };
+  for (const backend of Object.keys(credentialProbes) as Array<keyof typeof credentialProbes>) {
+    const access = credentialProbes[backend];
+    if (access.status !== "unavailable") continue;
+    // Keep the selected provider visible without claiming the key is missing
+    // or granting its display catalog to automatic workload allocation.
+    list.push({
+      kind: "byok", backend, source: `byok:${backend}`, version: null, active: false,
+      credentialAccess: { ...access },
+      model: byokModelOf(backend, active),
+      availableModels: byokModels(backend).map((model) => model.id),
+      allocationModels: [], allocationModelProfiles: {},
+      longContextEnabled: byokLongOf(backend, active),
+    });
+  }
+
   let activeAssigned = false;
   for (const runtime of list) {
     const matchesActive = isActiveRuntime(runtime, active);
@@ -800,17 +848,21 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     if (runtime.active) activeAssigned = true;
   }
 
-  // 활성 백엔드 없으면 첫 후보를 자동 활성 — FRE 마찰 0
-  if (!list.some((runtime) => runtime.active) && list.length > 0) {
-    list[0].active = true;
-    saveActiveRuntime(list[0]);
+  // Initialize only a new store. A missing saved executable is not a new install.
+  const activeCredentialUnavailable = active?.kind === "byok" && isRuntimeCredentialUnavailable(
+    list.find((runtime) => runtime.kind === "byok" && runtime.backend === active.backend),
+  );
+  const firstAvailable = list.find((runtime) => !isRuntimeCredentialUnavailable(runtime));
+  if (!active && !list.some((runtime) => runtime.active) && !activeCredentialUnavailable && firstAvailable) {
+    firstAvailable.active = true;
+    saveActiveRuntime(firstAvailable);
     setModelRole({
-      kind: list[0].kind,
-      backend: list[0].backend,
-      source: list[0].source,
-      model: list[0].model ?? undefined,
-      longContext: list[0].longContextEnabled,
-      effort: list[0].effort ?? undefined,
+      kind: firstAvailable.kind,
+      backend: firstAvailable.backend,
+      source: firstAvailable.source,
+      model: firstAvailable.model ?? undefined,
+      longContext: firstAvailable.longContextEnabled,
+      effort: firstAvailable.effort ?? undefined,
       role: "orchestrator",
     });
   }
@@ -822,6 +874,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const gates = rolePoolGates(list);
   const roleAssignments = listResolvedModelRoles();
   for (const role of POOL_AUTOPICK_ROLES) {
+    if (credentialBlockedRolePick(role, list, roleAssignments)) continue;
     const pick = pickModelRoleFromPool(role, gates);
     if (pick) {
       roleAssignments[role] = {
@@ -861,16 +914,17 @@ function rolePoolGates(list: RuntimeStatus[]): {
   isQuotaExceeded: (selection: RuntimeSelection) => boolean;
 } {
   const runtimeFor = (selection: RuntimeSelection): RuntimeStatus | undefined =>
-    list.find(
-      (runtime) =>
-        runtime.kind === selection.kind &&
-        (selection.backend == null || runtime.backend === selection.backend),
-    );
+    list.find((runtime) => runtimeMatchesSelection(runtime, selection));
   return {
-    isRuntimeAvailable: (selection) => Boolean(runtimeFor(selection)),
+    isRuntimeAvailable: (selection) => {
+      const runtime = runtimeFor(selection);
+      return Boolean(runtime) && !isRuntimeCredentialUnavailable(runtime);
+    },
     /**
      * 이 런타임이 실제로 가진 모델인가. **런타임이 광고한 인벤토리가 있을 때만**
-     * 부재를 판정한다(CLI는 발견된 목록, BYOK/로컬은 provider 조회 결과).
+     * 부재를 판정한다(로컬 inference의 설치 모델 조회 결과).
+     * CLI 목록은 숨김 모델이나 별칭을 생략할 수 있고, BYOK는 정적 호스트
+     * 카탈로그다. 둘 다 명시 모델의 부재를 증명하지 못한다.
      * 하드코딩 폴백 카탈로그로는 판정하지 않는다 — 계정이 새 모델을 받으면
      * 폴백이 곧바로 낡아 유효 모델을 차단하게 된다(실측: claude-code 폴백에
      * 없는 `fable`이 실제로는 정상 실행됨). 증명 못 하면 통과시키고 실패는
@@ -881,10 +935,8 @@ function rolePoolGates(list: RuntimeStatus[]): {
       if (!model) return false;
       const runtime = runtimeFor(selection);
       if (!runtime) return false;
-      const authoritative =
-        runtime.kind === "byok" ||
-        LOCAL_MODEL_INVENTORY_KINDS.has(runtime.kind) ||
-        cliModelsAreDiscovered(runtime.kind);
+      if (runtime.modelDiscovery && (runtime.modelDiscovery.status !== "ok" || runtime.modelDiscovery.stale)) return false;
+      const authoritative = LOCAL_MODEL_INVENTORY_KINDS.has(runtime.kind);
       if (!authoritative) return false;
       const catalog = runtime.availableModels ?? [];
       if (catalog.length === 0) return false;
@@ -897,6 +949,23 @@ function rolePoolGates(list: RuntimeStatus[]): {
   };
 }
 
+/** Retain an explicit saved role; credential access failure is not permission to replace it. */
+function credentialBlockedRolePick(
+  role: RuntimeRole,
+  list: RuntimeStatus[],
+  assignments: ReturnType<typeof listResolvedModelRoles>,
+): ModelRolePoolPick | null {
+  const assignment = assignments[role];
+  if (!assignment) return null;
+  const selected = list.find((runtime) => runtime.kind === assignment.selection.kind
+    && (assignment.selection.backend == null || runtime.backend === assignment.selection.backend));
+  if (!isRuntimeCredentialUnavailable(selected)) return null;
+  return {
+    role, selection: { ...assignment.selection }, inherited: assignment.inherited,
+    position: null, skipped: [],
+  };
+}
+
 /** UI/영수증용 — 마지막 detect와 동일한 규칙으로 풀 선택과 스킵 사유를 계산한다. */
 export async function resolveRolePoolPicks(): Promise<
   Partial<Record<"orchestrator" | "worker", ModelRolePoolPick>>
@@ -904,8 +973,9 @@ export async function resolveRolePoolPicks(): Promise<
   const list = await detectRuntimes();
   const gates = rolePoolGates(list);
   const picks: Partial<Record<RuntimeRole, ModelRolePoolPick>> = {};
+  const assignments = listResolvedModelRoles();
   for (const role of POOL_AUTOPICK_ROLES) {
-    const pick = pickModelRoleFromPool(role, gates);
+    const pick = credentialBlockedRolePick(role, list, assignments) ?? pickModelRoleFromPool(role, gates);
     if (pick) picks[role] = pick;
   }
   return picks;

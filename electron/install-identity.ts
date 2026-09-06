@@ -7,7 +7,7 @@
  * a local/QA candidate.
  */
 export type PackagedInstallChannel = "official" | "local-candidate";
-export type InstallChannel = PackagedInstallChannel | "qa";
+export type InstallChannel = PackagedInstallChannel | "qa" | "dev";
 
 export type BuildInstallIdentityMarker = Readonly<{
   schemaVersion: 1;
@@ -25,7 +25,7 @@ export type InstallIdentity = Readonly<{
   userDataNamespace: string;
   keychainService: string;
   updatesEnabled: boolean;
-  /** Explicit QA-only path. Official and local candidates always use null. */
+  /** Explicit QA-only path. Official, local candidates and dev use null. */
   userDataOverride: string | null;
 }>;
 
@@ -62,6 +62,16 @@ export const OFFICIAL_INSTALL_IDENTITY: InstallIdentity = Object.freeze({
   userDataNamespace: OFFICIAL_BUILD_INSTALL_IDENTITY.userDataNamespace,
   keychainService: OFFICIAL_BUILD_INSTALL_IDENTITY.keychainService,
   updatesEnabled: true,
+  userDataOverride: null,
+});
+
+/** Source development has a stable namespace separate from every packaged app. */
+export const DEV_INSTALL_IDENTITY: InstallIdentity = Object.freeze({
+  channel: "dev",
+  appName: "Agentlas-Dev",
+  userDataNamespace: "Agentlas-Dev",
+  keychainService: "com.agentlas.desktop.dev",
+  updatesEnabled: false,
   userDataOverride: null,
 });
 
@@ -152,7 +162,7 @@ export function resolveInstallIdentity(input: ResolveInstallIdentityInput): Inst
     return resolvePackagedInstallIdentity(input.packageMetadata);
   }
 
-  if (!qaUserDataDir) return OFFICIAL_INSTALL_IDENTITY;
+  if (!qaUserDataDir) return DEV_INSTALL_IDENTITY;
   if (!input.allowQaOverride) {
     throw new InstallIdentityError("QA userData override is allowed only for an unpackaged run");
   }
@@ -160,6 +170,13 @@ export function resolveInstallIdentity(input: ResolveInstallIdentityInput): Inst
 }
 
 function isValidRuntimeIdentity(identity: InstallIdentity): boolean {
+  if (identity.channel === "dev") {
+    return identity.appName === DEV_INSTALL_IDENTITY.appName
+      && identity.userDataNamespace === DEV_INSTALL_IDENTITY.userDataNamespace
+      && identity.keychainService === DEV_INSTALL_IDENTITY.keychainService
+      && identity.updatesEnabled === false
+      && identity.userDataOverride === null;
+  }
   if (identity.channel === "official") {
     return identity.appName === OFFICIAL_INSTALL_IDENTITY.appName
       && identity.userDataNamespace === OFFICIAL_INSTALL_IDENTITY.userDataNamespace

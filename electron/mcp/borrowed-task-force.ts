@@ -87,9 +87,11 @@ import {
 } from "../invocation/workspace-binding";
 import {
   workforceExecutionContextDigest,
+  workforcePermissionPolicyDigest,
   type WorkforceExecutionContext,
   type WorkforcePermissionPolicy,
   type WorkforceSelectionReceipt,
+  isHostAuthorityPolicy,
 } from "./workforce-orchestrator";
 import {
   cleanupWorkforceRuntimeGrants,
@@ -597,19 +599,56 @@ function runtimesAssignedToRole(list: RuntimeStatus[], role: RuntimeRole): Runti
   return assigned.length > 0 ? assigned : list;
 }
 
+/**
+ * Codex may join a prepared Workforce only after Main has established that the
+ * entire roster is the exact host-authority preparation: each slot/release is
+ * present once and its policy digest still matches. The native adapter then
+ * supplies the observed host-authority receipt for worker tool calls.
+ *
+ * This deliberately does not relax Agent Apps, restricted-read runs, or any
+ * legacy/package-ceiling roster. Ordinary non-Workforce task forces retain
+ * their pre-existing runtime behavior.
+ */
+function taskForceCodexRuntimeAllowed(p: BorrowedTaskForceParams): boolean {
+  const inheritedBoundary = p.req as McpInvocationRequest & {
+    restrictedReadBoundary?: boolean;
+    untrustedNoTools?: boolean;
+  };
+  if (
+    p.req.agentAppMode ||
+    p.restrictedReadBoundary ||
+    inheritedBoundary.restrictedReadBoundary === true ||
+    inheritedBoundary.untrustedNoTools === true
+  ) return false;
+  if (!p.workforceSelectionReceipt) return true;
+  const specs = uniqSpecs(p.taskForceSpecs);
+  return specs.length > 0 && !taskForceControlPlaneNeedsZeroAuthority({
+    agentAppMode: p.req.agentAppMode,
+    restrictedReadBoundary: p.restrictedReadBoundary || inheritedBoundary.restrictedReadBoundary,
+    untrustedNoTools: inheritedBoundary.untrustedNoTools,
+    workforceSelectionReceipt: p.workforceSelectionReceipt,
+    specs,
+  });
+}
+
 function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[] {
+  // Do not let the historical active-runtime fallback re-admit a Codex model
+  // after it was excluded by an Agent App, restricted-read, no-tools, or
+  // non-host-authority Workforce boundary.
+  if (p.active.kind === "codex" && !taskForceCodexRuntimeAllowed(p)) {
+    throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
+  }
   // Architecture benchmarks compare the same pipeline under one selected
   // model. Letting workload allocation switch worker providers would confound
   // model quality with orchestration quality.
   const supplied = p.req.agentAppMode || p.benchmarkMode ? [p.active] : [...(p.runtimes ?? [p.active])];
   if (!supplied.some((runtime) => sameRuntimeModel(runtime, p.active))) supplied.unshift(p.active);
-  // Actual Codex 0.144.4 probing exposed collaboration authority after
-  // `--disable multi_agent`. Do not advertise a runtime that the Workforce
-  // worker boundary will necessarily reject; the host LLM must choose only
-  // executable inventory. Ordinary trusted task-force routing is unchanged.
-  const authorityEligible = p.workforceSelectionReceipt
-    ? supplied.filter((runtime) => runtime.kind !== "codex")
-    : supplied;
+  // The native Codex adapter is eligible only for the exact prepared
+  // host-authority roster above. It remains excluded for Agent Apps,
+  // restricted-read, and legacy/package-ceiling Workforce rows.
+  const authorityEligible = supplied.filter((runtime) => (
+    runtime.kind !== "codex" || taskForceCodexRuntimeAllowed(p)
+  ));
   const runnable = authorityEligible.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntimeModel(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
@@ -1268,19 +1307,37 @@ function taskForceRunnerBase(
 
 /** Planning and synthesis are control-plane turns. They already receive the
  * bounded request, roster, packets, and worker results, so they never receive
- * an MCP grant or workspace cwd. Third-party surfaces additionally require the
- * measured zero-authority boundary; only the owner's frozen local roster may
- * use a read-only runtime that cannot prove zero built-ins. */
+ * an MCP grant or workspace cwd. Restrictive prepared policies and Agent Apps
+ * require the measured zero-authority boundary; a fully host-authorized roster
+ * follows the host's read-mode control boundary without claiming zero tools. */
 export function taskForceControlPlaneNeedsZeroAuthority(input: {
   agentAppMode?: boolean;
+  restrictedReadBoundary?: boolean;
+  untrustedNoTools?: boolean;
   workforceSelectionReceipt?: WorkforceSelectionReceipt;
   specs: BorrowedAgentSpec[];
 }): boolean {
-  // Site Agent Apps and Core-prepared Workforce bundles cross an untrusted
-  // package boundary. Public/owner-Cloud directives do too. Those control
-  // turns must keep the release-verified zero-authority contract and fail
-  // closed on runtimes (currently Codex) that cannot enforce it.
-  if (input.agentAppMode || input.workforceSelectionReceipt) return true;
+  if (input.agentAppMode || input.restrictedReadBoundary || input.untrustedNoTools) return true;
+  if (input.workforceSelectionReceipt) {
+    const prepared = input.workforceSelectionReceipt.preparedReleases;
+    if (!input.specs.length || !Array.isArray(prepared) || prepared.length !== input.specs.length) return true;
+    const seen = new Set<string>();
+    // Every slot must independently carry the exact prepared host policy.
+    // A mixed/legacy roster or an unbound policy cannot relax this boundary.
+    return input.specs.some((spec) => {
+      const slotId = spec.routeLabel?.startsWith("workforce:") ? spec.routeLabel.slice("workforce:".length) : "";
+      const pair = `${slotId}\u0000${spec.agentReleaseId ?? ""}`;
+      if (!slotId || !spec.agentReleaseId || seen.has(pair) || !isHostAuthorityPolicy(spec.permissionPolicy)) return true;
+      seen.add(pair);
+      const matches = prepared.filter((row) => row.slotId === slotId && row.agentReleaseId === spec.agentReleaseId);
+      if (matches.length !== 1 || matches[0].permissionPolicyDigest !== spec.permissionPolicyDigest) return true;
+      try {
+        return workforcePermissionPolicyDigest(spec.permissionPolicy!) !== spec.permissionPolicyDigest;
+      } catch {
+        return true;
+      }
+    });
+  }
 
   // A saved One Taskforce made only from this owner's installed agents/teams
   // is a different trust class: its effective prompts were frozen by Main at
@@ -1311,8 +1368,14 @@ function taskForceOrchestratorBoundary(
   | "untrustedAllowedMcpTools"
   | "onAgentAppMcpRuntimeUnavailable"
 > {
+  const inheritedBoundary = p.req as McpInvocationRequest & {
+    restrictedReadBoundary?: boolean;
+    untrustedNoTools?: boolean;
+  };
   const untrustedNoTools = taskForceControlPlaneNeedsZeroAuthority({
     agentAppMode: p.req.agentAppMode,
+    restrictedReadBoundary: p.restrictedReadBoundary || inheritedBoundary.restrictedReadBoundary,
+    untrustedNoTools: inheritedBoundary.untrustedNoTools,
     workforceSelectionReceipt: p.workforceSelectionReceipt,
     specs,
   });
@@ -2976,7 +3039,7 @@ function buildPlannerPrompt(
  * any hard package deny deliberately removes every external authority. Unsupported runtimes reject
  * `untrustedNoTools`; Codex uses the measured ephemeral/read-only no-authority sandbox.
  */
-function packageToolBoundary(
+export function packageToolBoundary(
   spec: BorrowedAgentSpec,
   workforceGrant?: WorkforcePairRuntimeGrant,
 ): Partial<RunnerRequest> {
@@ -2985,42 +3048,42 @@ function packageToolBoundary(
   // strictly below that ceiling in the measured no-authority sandbox.
   if (spec.permissionPolicy) {
     if (!workforceGrant) throw new Error(`workforce_runtime_grant_missing:${spec.slug}`);
+    if (isHostAuthorityPolicy(spec.permissionPolicy)) {
+      // Owner decision 2026-08-20, applied here 2026-09-05: a package carries no tool
+      // authority. The row runs with the host's own permission mode; the digest-bound
+      // tool grant is kept for the execution receipt, and a planner-bound MCP subset
+      // (if any) still travels with it. Nothing forces read-only here any more —
+      // measured 2026-09-05: a staffed design agent could not edit a file the user had
+      // granted write access to, because this branch always returned `read`.
+      const { untrustedNoTools: _sandbox, untrustedAllowedMcpTools: _sandboxTools, ...runner } = workforceGrant.runner;
+      return { ...runner, untrustedNoTools: false };
+    }
+    // Legacy prepared rows (before 2026-09-05) still carry a package ceiling and the
+    // receipt contract for them still expects the no-authority sandbox.
     return { permission: "read", ...workforceGrant.runner };
   }
-  const toolPermissions = spec.toolPermissions;
-  if (!toolPermissions) return {};
-  const denyNetwork = toolPermissions.network === "deny";
-  const denyShell = toolPermissions.shell === "deny";
-  if (!denyNetwork && !denyShell) return {};
-  return {
-    permission: "read",
-    mcpConfigPath: undefined,
-    mcpAllowedTools: undefined,
-    mcpCodexConfigArgs: undefined,
-    untrustedNoTools: true,
-    untrustedAllowedMcpTools: undefined,
-  };
+  // Legacy toolPermissions (network/shell deny) no longer narrow the run: the host
+  // mode and capability grants are the boundary (owner decision 2026-08-20).
+  return {};
 }
 
 /** What the package itself declared, stated to the model. Prompt text is not enforcement —
  *  narrowToolsByPackagePermissions does the actual removal — but a runtime's built-in shell
  *  cannot be revoked through MCP config, so the model must also be told the ceiling. */
-function packagePermissionLine(spec: BorrowedAgentSpec): string | null {
+export function packagePermissionLine(spec: BorrowedAgentSpec): string | null {
   if (spec.permissionPolicy) {
+    if (isHostAuthorityPolicy(spec.permissionPolicy)) {
+      return "Tools and authority follow the host run mode for this turn; anything beyond it is approved at action time. The package declares no ceiling of its own.";
+    }
     return `Digest-bound package permission ceiling (host may execute more narrowly): ${JSON.stringify(spec.permissionPolicy)}. Unknown tools are denied.`;
   }
-  const p = spec.toolPermissions;
-  if (!p) return null;
-  const rules: string[] = [];
-  if (p.network === "deny") rules.push("no network access (no browsing, fetching, or calling external endpoints)");
-  else if (p.network === "ask") rules.push("network access only for what this packet explicitly requires");
-  if (p.shell === "deny") rules.push("no shell, terminal, or process execution");
-  else if (p.shell === "ask") rules.push("shell use only for what this packet explicitly requires");
-  if (rules.length === 0) return null;
-  return `This package declares its own tool ceiling, which applies on top of the host mode: ${rules.join("; ")}. Do not exceed it even if a tool appears available.`;
+  // Legacy toolPermissions are recorded in the manifest but are not a ceiling
+  // (owner decision 2026-08-20): say nothing that would make the model refuse a
+  // tool the host actually granted.
+  return null;
 }
 
-function buildBorrowedAgentSystemPrompt(spec: BorrowedAgentSpec, permission: RunnerRequest["permission"]): string {
+export function buildBorrowedAgentSystemPrompt(spec: BorrowedAgentSpec, permission: RunnerRequest["permission"]): string {
   // Fail closed on unknown provenance: only an explicitly local origin is treated as first-party.
   // This used to compute `isHub = hub || cloud || !spec.source`, which handed the reassuring
   // "Hub-Reviewed" framing to any spec whose source we could not establish.
@@ -5152,9 +5215,6 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   if (!p.req.runId) {
     p = { ...p, req: { ...p.req, runId: `task-force-direct-${randomUUID()}` } };
   }
-  if (p.workforceSelectionReceipt && p.active.kind === "codex") {
-    throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
-  }
   p = await prepareTaskForceMemoryBoundary(p);
   const observedOneArtifacts = new Map<string, NonNullable<McpInvocationEvent["oneArtifacts"]>[number]>();
   const upstreamArtifactBinder = p.bindOneRuntimeToolArtifacts;
@@ -5216,6 +5276,13 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         p.signal,
         p.req.borrowVersions,
       );
+  // Candidate selection runs after roster resolution, so Codex admission can
+  // verify the exact prepared slot/release/policy-digest pairing rather than
+  // treating the active runtime as a blanket Workforce exception.
+  p = { ...p, taskForceSpecs: specs };
+  if (p.active.kind === "codex" && !taskForceCodexRuntimeAllowed(p)) {
+    throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
+  }
   const plan = await runPlanner(p, specs, history);
   // If planner had to leave One's selected model, keep that successful
   // controller runtime for synthesis instead of retrying the failed model.
@@ -6325,9 +6392,10 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   // Main-only receipt so InvocationService verifies the same bytes instead of
   // incorrectly replacing a successful, reopenable team result with
   // result-not-durable.
-  const durableTextForVerification = emitFinal && !p.req.agentAppMode
-    ? appendChatMessage(p.chat.id, "assistant", displayText).text
+  const durableAssistantEntry = emitFinal && !p.req.agentAppMode
+    ? appendChatMessage(p.chat.id, "assistant", displayText)
     : undefined;
+  const durableTextForVerification = durableAssistantEntry?.text;
   p.sink({
     kind: "tool-use",
     done: true,
@@ -6348,6 +6416,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       kind: "final",
       text: displayText,
       ...(durableTextForVerification ? { durableTextForVerification } : {}),
+      ...(durableAssistantEntry
+        ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
+        : {}),
       tokens: final.tokens,
       model: modelLabel(synthesisActive),
       modelRole: "orchestrator",

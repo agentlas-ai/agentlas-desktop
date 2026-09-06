@@ -289,7 +289,7 @@ const shell: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   height: "100%",
-  background: "#07090f",
+  background: "var(--black)",
 };
 
 const header: CSSProperties = {
@@ -300,8 +300,8 @@ const header: CSSProperties = {
   borderBottom: "1px solid rgba(255,255,255,0.1)",
   minHeight: 58,
   flexShrink: 0,
-  background: "#0a0d14",
-  color: "#f7f8ff",
+  background: "var(--black)",
+  color: "var(--white)",
 };
 
 const backLink: CSSProperties = {
@@ -323,7 +323,7 @@ const title: CSSProperties = {
   margin: 0,
   fontFamily: "var(--font-head)",
   fontSize: 16,
-  color: "#ffffff",
+  color: "var(--white)",
   whiteSpace: "nowrap",
 };
 
@@ -339,7 +339,7 @@ const ghostButton: CSSProperties = {
   alignItems: "center",
   gap: 6,
   fontSize: 12,
-  color: "#f7f8ff",
+  color: "var(--white)",
   background: "rgba(255,255,255,0.08)",
   border: "1px solid rgba(255,255,255,0.14)",
   borderRadius: 7,
@@ -351,7 +351,7 @@ const stage: CSSProperties = {
   flex: 1,
   minHeight: 0,
   position: "relative",
-  background: "#07090f",
+  background: "var(--black)",
 };
 
 const iframe: CSSProperties = {
@@ -359,7 +359,7 @@ const iframe: CSSProperties = {
   height: "100%",
   border: "none",
   display: "block",
-  background: "#07090f",
+  background: "var(--black)",
 };
 
 const stateLayer: CSSProperties = {
@@ -401,14 +401,14 @@ const statePanel: CSSProperties = {
   background: "rgba(11,15,24,0.72)",
   boxShadow: "0 28px 90px rgba(0,0,0,0.36)",
   backdropFilter: "blur(18px)",
-  color: "#f7f8ff",
+  color: "var(--white)",
   textAlign: "center",
 };
 
 const stateName: CSSProperties = {
   fontSize: 18,
   fontWeight: 820,
-  color: "#ffffff",
+  color: "var(--white)",
 };
 
 const stateSlug: CSSProperties = {
@@ -423,7 +423,7 @@ const spinner: CSSProperties = {
   height: 28,
   borderRadius: "50%",
   border: "3px solid rgba(255,255,255,0.18)",
-  borderTopColor: "#83F7FF",
+  borderTopColor: "var(--info-soft)",
 };
 
 const stateText: CSSProperties = {
@@ -455,7 +455,7 @@ const ideaPanel: CSSProperties = {
 
 const ideaTitle: CSSProperties = {
   margin: 0,
-  color: "#ffffff",
+  color: "var(--white)",
   fontFamily: "var(--font-head)",
   fontSize: 22,
   lineHeight: 1.2,
@@ -473,7 +473,7 @@ const ideaInput: CSSProperties = {
   borderRadius: 9,
   border: "1px solid rgba(255,255,255,0.18)",
   background: "rgba(255,255,255,0.08)",
-  color: "#ffffff",
+  color: "var(--white)",
   outline: "none",
   padding: "0 13px",
   fontSize: 14,
@@ -501,8 +501,8 @@ const solidButton: CSSProperties = {
   height: 38,
   borderRadius: 8,
   border: "none",
-  background: "#6D91FF",
-  color: "#071122",
+  background: "var(--info-soft)",
+  color: "var(--info)",
   padding: "0 16px",
   fontSize: 13,
   fontWeight: 820,

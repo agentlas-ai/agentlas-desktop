@@ -39,10 +39,11 @@ function App() {
   const draftRevisionRef = useRef(0);
   const changeSubscriptionRef = useRef(null);
   const [phase, setPhase] = useState("launching");
-  const [message, setMessage] = useState("Loading the signed chemistry runtime…");
+  const [, setMessage] = useState("Loading the signed chemistry runtime…");
   const [receipt, setReceipt] = useState(null);
-  const [savedVersion, setSavedVersion] = useState(null);
+  const [, setSavedVersion] = useState(null);
   const [error, setError] = useState(null);
+  const [errorKind, setErrorKind] = useState(null);
 
   const report = useCallback(async (phaseName, summary, extra = {}) => {
     const request = requestRef.current;
@@ -64,6 +65,7 @@ function App() {
     setPhase("validating");
     setMessage("Exporting KET and validating it with a separate Indigo service…");
     setError(null);
+    setErrorKind(null);
     const ket = await editorRef.current.getKet();
     if (!ket.trim()) throw new Error("ketcher-ket-empty");
     if (!validatorRef.current) {
@@ -122,6 +124,7 @@ function App() {
     setPhase("saving");
     setMessage("Writing a new immutable artifact version…");
     setError(null);
+    setErrorKind(null);
     try {
       const request = requestRef.current;
       if (draftRevisionRef.current !== receipt.draftRevision) throw new Error("science-chemistry-validation-stale");
@@ -145,6 +148,7 @@ function App() {
     } catch (saveError) {
       setPhase("validation-failed");
       setError(String(saveError));
+      setErrorKind("save");
       setMessage("Save failed without changing the current artifact version.");
     }
   }, [receipt]);
@@ -180,6 +184,7 @@ function App() {
         setReceipt(null);
         setSavedVersion(null);
         setError(null);
+        setErrorKind(null);
         setPhase("edit-dirty");
         setMessage("Structure changed. Validate this exact draft before saving a new version.");
         void report("dirty", "Unsaved chemistry draft is active").catch(() => {});
@@ -205,10 +210,27 @@ function App() {
       const summary = launchError instanceof Error ? launchError.message : String(launchError);
       setPhase("failed");
       setError(summary);
+      setErrorKind("load");
       setMessage("The chemistry renderer failed closed.");
       try { await report("failed", summary, { code: summary.split(":", 1)[0] }); } catch {}
     }
   }, [report, validateCurrent]);
+
+  const errorNotice = errorKind === "save"
+    ? { title: "The new version could not be saved.", guidance: "Validate again to retry. If another version was saved, reopen the latest version first." }
+    : errorKind === "validation"
+      ? { title: "The structure could not be validated.", guidance: "Correct the structure, then validate it again." }
+      : { title: "This structure could not be loaded.", guidance: "Reopen the artifact. If it still fails, return to its source and replace the invalid structure." };
+  const phaseLabel = {
+    launching: "Loading",
+    probing: "Loading",
+    rendering: "Loading",
+    validating: "Validating",
+    saving: "Saving",
+    "edit-dirty": "Validation required",
+    "ready-to-save": "Ready to save",
+    "version-saved": "Version saved",
+  }[phase] || "";
 
   return (
     <main className="pack-shell">
@@ -219,8 +241,8 @@ function App() {
           <small>Ketcher 3.17.2 · Indigo 1.45.1 · offline signed pack</small>
         </div>
         <div className="actions">
-          <span className={`phase phase-${phase}`}>{phase}</span>
-          <button onClick={() => validateCurrent().catch((validationError) => { setPhase("validation-failed"); setError(String(validationError)); setMessage("Validation failed. No version can be saved."); })} disabled={["launching", "probing", "rendering", "validating", "saving", "version-saved", "failed"].includes(phase)}>Validate structure</button>
+          {phaseLabel && <span className={`phase phase-${phase}`}>{phaseLabel}</span>}
+          <button onClick={() => validateCurrent().catch((validationError) => { setPhase("validation-failed"); setError(String(validationError)); setErrorKind("validation"); setMessage("Validation failed. No version can be saved."); })} disabled={["launching", "probing", "rendering", "validating", "saving", "version-saved", "failed"].includes(phase)}>Validate structure</button>
           <button className="primary" onClick={saveVersion} disabled={phase !== "ready-to-save"}>Save new version</button>
         </div>
       </header>
@@ -230,19 +252,16 @@ function App() {
             staticResourcesUrl="./"
             structServiceProvider={editorProvider}
             disableMacromoleculesEditor
-            errorHandler={(value) => { setPhase("failed"); setError(String(value)); setMessage("Ketcher reported a runtime error."); }}
+            errorHandler={(value) => { setPhase("failed"); setError(String(value)); setErrorKind("load"); setMessage("Ketcher reported a runtime error."); }}
             onInit={onInit}
           />
         </div>
       </section>
-      <footer className="receipt-bar">
-        <div><span className={error ? "dot error" : "dot"}></span><strong>{message}</strong></div>
-        <div className="receipt-data">
-          {receipt && <><span>{receipt.validation.atomCount} atoms</span><span>{receipt.validation.bondCount} bonds</span><code>{receipt.document.ketSha256.slice(0, 16)}</code></>}
-          {savedVersion && <span className="saved">v{savedVersion} persisted</span>}
-        </div>
-        {error && <code className="error-copy">{error}</code>}
-      </footer>
+      {error && <footer className="receipt-bar error-notice" role="alert" aria-live="assertive">
+        <div><span className="dot error"></span><strong>{errorNotice.title}</strong></div>
+        <p>{errorNotice.guidance}</p>
+        <details><summary>Technical details</summary><code className="error-copy">{error}</code></details>
+      </footer>}
     </main>
   );
 }

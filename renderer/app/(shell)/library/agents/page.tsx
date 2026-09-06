@@ -318,7 +318,7 @@ function MemoryImportPanel({
         <button
           onClick={runPreview}
           disabled={busy}
-          style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+          style={{ padding: "6px 12px", background: "var(--accent)", color: "var(--white)", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
         >
           {ko ? "폴더 선택 & 미리보기" : "Choose folder & preview"}
         </button>
@@ -326,7 +326,7 @@ function MemoryImportPanel({
           <button
             onClick={runApply}
             disabled={busy}
-            style={{ padding: "6px 12px", background: "var(--green-deep)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+            style={{ padding: "6px 12px", background: "var(--green-deep)", color: "var(--white)", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
           >
             {ko ? `${preview.summary.newCount}건 가져오기` : `Import ${preview.summary.newCount}`}
           </button>
@@ -2073,7 +2073,7 @@ function LibraryAgentsView() {
                   borderRadius: 8,
                   border: "1px solid var(--accent)",
                   background: "var(--accent)",
-                  color: "#fff",
+                  color: "var(--white)",
                   fontSize: 12,
                   fontWeight: 750,
                   cursor: manageView !== "published" && importBusy ? "default" : "pointer",
@@ -2434,7 +2434,7 @@ function PublishedAgentsRoster({
             borderRadius: 8,
             border: "1px solid var(--accent)",
             background: "var(--accent)",
-            color: "#fff",
+            color: "var(--white)",
             fontSize: 12,
             fontWeight: 750,
             cursor: "pointer",
@@ -2511,7 +2511,7 @@ function PublishedAgentsRoster({
                 borderRadius: 7,
                 border: `1px solid ${isInstalled ? "var(--paper-edge)" : "var(--accent)"}`,
                 background: isInstalled ? "var(--paper-2)" : "var(--accent)",
-                color: isInstalled ? "var(--ink)" : "#fff",
+                color: isInstalled ? "var(--ink)" : "var(--white)",
                 fontSize: 11.5,
                 fontWeight: 750,
                 cursor: busy ? "default" : "pointer",
@@ -2677,7 +2677,7 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
           height: tier === 3 ? 20 : 26,
           borderRadius: 6,
           background: isCeo ? "linear-gradient(135deg, var(--accent), var(--blue))" : "var(--paper-2)",
-          color: isCeo ? "#fff" : "var(--ink-soft)",
+          color: isCeo ? "var(--white)" : "var(--ink-soft)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2796,7 +2796,7 @@ function OrgChart({
                 height: 24,
                 borderRadius: 6,
                 background: isCeo ? "linear-gradient(135deg, var(--accent), var(--blue))" : "var(--paper-2)",
-                color: isCeo ? "#fff" : "var(--ink-soft)",
+                color: isCeo ? "var(--white)" : "var(--ink-soft)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -3087,7 +3087,7 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
       <div style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)", display: "flex", alignItems: "center", gap: 8 }}>
         <span>{locale === "ko" ? "정보 흐름 연결 맵 (Information Flow Mapper)" : "Information Flow Mapper"}</span>
         {fromEngine && (
-          <span style={{ fontSize: 8.5, padding: "1px 6px", borderRadius: 999, background: "rgba(12,166,120,0.12)", color: "var(--green-deep, #0ca678)", letterSpacing: 0.3 }}>
+          <span style={{ fontSize: 8.5, padding: "1px 6px", borderRadius: 999, background: "rgba(12,166,120,0.12)", color: "var(--green-deep, var(--ok))", letterSpacing: 0.3 }}>
             AO GRAPH
           </span>
         )}
@@ -3542,7 +3542,7 @@ function RuntimeAssignmentPanel({
         <button onClick={clearOverride} disabled={saving || !selectedOverride} style={{ ...runtimeButtonStyle, opacity: selectedOverride ? 1 : 0.45 }}>
           {locale === "ko" ? "역할 기본 사용" : "Use role defaults"}
         </button>
-        <button onClick={saveOverride} disabled={saving || !selectedRuntime || missingRequiredModel} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
+        <button onClick={saveOverride} disabled={saving || !selectedRuntime || missingRequiredModel} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "var(--white)", border: "1px solid var(--accent)" }}>
           {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "저장" : "Save")}
         </button>
       </div>
@@ -5121,12 +5121,12 @@ function AgentDetailView({
   const letters = detailDisplayName.slice(0, 2).toUpperCase();
   const getGradient = (tone?: string) => {
     switch (tone) {
-      case "blue": return "linear-gradient(135deg, #5a56dc, #8a86e8)";
-      case "green": return "linear-gradient(135deg, #56a14a, #a8d99b)";
-      case "purple": return "linear-gradient(135deg, #7b4ed1, #c9a8ff)";
-      case "amber": return "linear-gradient(135deg, #c98c1a, #f5c97a)";
-      case "peach": return "linear-gradient(135deg, #c24a28, #ff7a55)";
-      default: return "linear-gradient(135deg, #5a56dc, #c9a8ff)";
+      case "blue": return "linear-gradient(135deg, var(--info), var(--info-soft))";
+      case "green": return "linear-gradient(135deg, var(--ok), var(--ok-soft))";
+      case "purple": return "linear-gradient(135deg, var(--purple-deep), var(--purple-soft))";
+      case "amber": return "linear-gradient(135deg, var(--warn), var(--warn-soft))";
+      case "peach": return "linear-gradient(135deg, var(--danger), var(--danger-soft))";
+      default: return "linear-gradient(135deg, var(--info), var(--info-soft))";
     }
   };
 
@@ -5214,7 +5214,7 @@ function AgentDetailView({
               height: 48,
               borderRadius: "var(--radius-md)",
               background: getGradient(agent?.tone),
-              color: "#ffffff",
+              color: "var(--white)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -5410,14 +5410,14 @@ function AgentDetailView({
                       <IconBrain size={14} />
                       {locale === "ko" ? "경험 인박스 (학습된 정보 추천)" : "Experience inbox (learned-info suggestions)"}
                     </div>
-                    <span style={{ fontSize: 10, background: "var(--accent)", color: "#fff", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
+                    <span style={{ fontSize: 10, background: "var(--accent)", color: "var(--white)", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
                   </div>
                   <div style={{ background: "var(--paper)", display: "flex", flexDirection: "column" }}>
                     {ontologyInbox.map((item) => (
                       <div key={item.id} style={{ padding: "12px 16px", display: "flex", alignItems: "flex-start", justifyItems: "space-between", gap: 12, borderBottom: "1px solid var(--paper-edge)" }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, background: item.source === "cloud" ? "var(--accent)" : "var(--fill-2)", color: item.source === "cloud" ? "#fff" : "var(--accent)" }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, background: item.source === "cloud" ? "var(--accent)" : "var(--fill-2)", color: item.source === "cloud" ? "var(--white)" : "var(--accent)" }}>
                               {item.source === "cloud" ? (locale === "ko" ? "허브 추천" : "Hub suggestion") : (locale === "ko" ? "로컬 학습" : "Local learning")}
                             </span>
                             <strong style={{ fontSize: 12.5, color: "var(--ink)" }}>{item.title}</strong>
@@ -5429,7 +5429,7 @@ function AgentDetailView({
                           style={{
                             padding: "6px 12px",
                             background: "var(--accent)",
-                            color: "#fff",
+                            color: "var(--white)",
                             border: "none",
                             borderRadius: 6,
                             fontSize: 11.5,
@@ -5992,7 +5992,7 @@ function AgentDetailView({
                         style={{
                           padding: "7px 12px",
                           background: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "var(--paper-2)" : "var(--accent)",
-                          color: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "var(--muted-deep)" : "#fff",
+                          color: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "var(--muted-deep)" : "var(--white)",
                           border: "1px solid var(--paper-edge)",
                           borderRadius: 6,
                           fontSize: 11.5,
@@ -6041,7 +6041,7 @@ function AgentDetailView({
                       style={{
                         padding: "8px 14px",
                         background: "var(--accent)",
-                        color: "#fff",
+                        color: "var(--white)",
                         border: "none",
                         borderRadius: 6,
                         fontSize: 12,
@@ -6075,7 +6075,7 @@ function AgentDetailView({
                           type="button"
                           onClick={() => void onApproveEvolution(pendingProposal.id)}
                           disabled={saving}
-                          style={{ padding: "8px 14px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 650, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}
+                          style={{ padding: "8px 14px", background: "var(--accent)", color: "var(--white)", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 650, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}
                         >
                           {locale === "ko" ? "확인하고 적용" : "Review and apply"}
                         </button>

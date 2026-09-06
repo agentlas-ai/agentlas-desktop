@@ -447,15 +447,16 @@ export interface WorkforceExecutionBundle {
 
 export interface WorkforcePermissionPolicy {
   schemaVersion: "agentlas.workforce-permission-policy.v1";
-  network: "allow" | "ask" | "deny";
-  shell: "allow" | "ask" | "deny";
+  /** `host` (2026-09-05): the package declares no ceiling; the host run mode + capability grants decide. */
+  network: "allow" | "ask" | "deny" | "host";
+  shell: "allow" | "ask" | "deny" | "host";
   fileRead: {
-    mode: "deny" | "manifest-allowlist";
+    mode: "deny" | "manifest-allowlist" | "host";
     allowPatterns: string[];
     denyPatterns: string[];
   };
   mcp: {
-    mode: "deny" | "allowlist";
+    mode: "deny" | "allowlist" | "host";
     allowedTools: string[];
   };
   unknownTools: "deny";
@@ -1081,16 +1082,16 @@ export function validateWorkforcePermissionPolicy(value: unknown): WorkforcePerm
   if (policy.schemaVersion !== WORKFORCE_PERMISSION_POLICY_SCHEMA) {
     throw new Error("Prepared permissionPolicy schema is invalid.");
   }
-  if (policy.network !== "allow" && policy.network !== "ask" && policy.network !== "deny") {
+  if (policy.network !== "allow" && policy.network !== "ask" && policy.network !== "deny" && policy.network !== "host") {
     throw new Error("Prepared permissionPolicy network decision is invalid.");
   }
-  if (policy.shell !== "allow" && policy.shell !== "ask" && policy.shell !== "deny") {
+  if (policy.shell !== "allow" && policy.shell !== "ask" && policy.shell !== "deny" && policy.shell !== "host") {
     throw new Error("Prepared permissionPolicy shell decision is invalid.");
   }
   if (policy.unknownTools !== "deny") throw new Error("Prepared permissionPolicy must deny unknown tools.");
   const fileRead = objectValue(policy.fileRead, "permissionPolicy.fileRead");
   assertExactHubKeys(fileRead, ["mode", "allowPatterns", "denyPatterns"], "permissionPolicy.fileRead");
-  if (fileRead.mode !== "deny" && fileRead.mode !== "manifest-allowlist") {
+  if (fileRead.mode !== "deny" && fileRead.mode !== "manifest-allowlist" && fileRead.mode !== "host") {
     throw new Error("Prepared permissionPolicy fileRead mode is invalid.");
   }
   const allowPatterns = requirePackagePatterns(
@@ -1103,12 +1104,12 @@ export function validateWorkforcePermissionPolicy(value: unknown): WorkforcePerm
     "permissionPolicy.fileRead.denyPatterns",
     fileRead.mode === "manifest-allowlist" ? 1 : 0,
   );
-  if (fileRead.mode === "deny" && (allowPatterns.length > 0 || denyPatterns.length > 0)) {
+  if (fileRead.mode !== "manifest-allowlist" && (allowPatterns.length > 0 || denyPatterns.length > 0)) {
     throw new Error("Prepared denied fileRead policy must have empty patterns.");
   }
   const mcp = objectValue(policy.mcp, "permissionPolicy.mcp");
   assertExactHubKeys(mcp, ["mode", "allowedTools"], "permissionPolicy.mcp");
-  if (mcp.mode !== "deny" && mcp.mode !== "allowlist") {
+  if (mcp.mode !== "deny" && mcp.mode !== "allowlist" && mcp.mode !== "host") {
     throw new Error("Prepared permissionPolicy MCP mode is invalid.");
   }
   const allowedTools = requireArray(
@@ -1125,7 +1126,7 @@ export function validateWorkforcePermissionPolicy(value: unknown): WorkforcePerm
   if (new Set(allowedTools).size !== allowedTools.length) {
     throw new Error("permissionPolicy.mcp.allowedTools contains duplicates.");
   }
-  if (mcp.mode === "deny" && allowedTools.length > 0) {
+  if (mcp.mode !== "allowlist" && allowedTools.length > 0) {
     throw new Error("Prepared denied MCP policy must have an empty allowlist.");
   }
   return {
@@ -1136,6 +1137,16 @@ export function validateWorkforcePermissionPolicy(value: unknown): WorkforcePerm
     mcp: { mode: mcp.mode, allowedTools },
     unknownTools: "deny",
   };
+}
+
+/**
+ * True when the prepared row carries no package ceiling — the host run mode and the
+ * durable capability grants decide what runs (owner decision 2026-08-20, applied to
+ * the Workforce path 2026-09-05). Such a row executes like any other run of the host:
+ * no forced read-only permission, no no-authority sandbox.
+ */
+export function isHostAuthorityPolicy(policy: WorkforcePermissionPolicy | null | undefined): boolean {
+  return Boolean(policy) && policy!.network === "host" && policy!.shell === "host" && policy!.mcp.mode === "host";
 }
 
 export function workforcePermissionPolicyDigest(policy: WorkforcePermissionPolicy): string {

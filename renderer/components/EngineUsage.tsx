@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
+import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type {
   CliRuntimeVersionStatus,
@@ -67,13 +68,15 @@ const ENGINES: EngineDef[] = [
 ];
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
+  const named = (label: string) => w.limitName ? `${w.limitName} · ${label}` : label;
   if (w.kind === "monthly") return ko ? "추가 크레딧" : "Extra credits";
   if (w.id.includes("-local-")) return ko ? (w.kind === "5h" ? "최근 5시간(로컬)" : "최근 7일(로컬)") : w.kind === "5h" ? "Last 5h (local)" : "Last 7d (local)";
-  if (w.kind === "5h") return ko ? "5시간" : "5-hour";
+  if (w.kind === "5h") return named(ko ? "5시간" : "5-hour");
   if (w.kind === "daily") return w.label || (ko ? "일일" : "Daily");
   if (w.model === "opus") return ko ? "Opus 7일" : "Opus 7d";
   if (w.model === "sonnet") return ko ? "Sonnet 7일" : "Sonnet 7d";
-  return ko ? "주간(7일)" : "Weekly (7d)";
+  if (w.kind === "7d") return named(ko ? "주간(7일)" : "Weekly (7d)");
+  return w.label || (ko ? "사용량 한도" : "Usage limit");
 }
 
 function formatReset(resetAt: number | null | undefined, ko: boolean): string {
@@ -130,7 +133,7 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
     );
   }
   const warn = pct >= WARN_PCT;
-  const fill = warn ? "var(--red-deep, #c0392b)" : "var(--accent)";
+  const fill = warn ? "var(--red-deep, var(--danger))" : "var(--accent)";
   // 월 크레딧(유료 초과분)엔 resets_at이 없어 마지막 칸이 늘 비어 있었다 —
   // %만 남으면 "얼마가 청구되는지"가 사라지므로, 어댑터가 계산해 둔
   // used/limit/통화를 그 칸에 그대로 보여준다.
@@ -592,7 +595,7 @@ export function EngineUsage() {
         )}
       </>
     ) : !connected ? (
-      <button onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
+      <button onClick={() => (e.id === "ollama" ? navigate("/settings#ollama") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
         {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
       </button>
     ) : null;

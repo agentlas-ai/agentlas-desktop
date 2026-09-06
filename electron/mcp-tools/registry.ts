@@ -1,7 +1,6 @@
 // 외부 MCP 서버 레지스트리 — SQLite 영구화. 전역 공유(모든 에이전트·팀이 함께 사용).
 // 값(시크릿)은 keychain의 글로벌 env vault에만; 여기엔 어떤 env 키를 쓰는지만 저장.
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import { getDb } from "../store/db";
 import { getCatalogEntry } from "./catalog";
 import {
@@ -198,35 +197,28 @@ export function installCustomServer(def: {
  * MCP form. Fail closed on startup: overwrite those SQLite cells with the safe
  * vault sentinel and disable the row until the user reconnects via Keychain.
  */
-function fileContainsOpenCrabCredential(file: string): boolean {
-  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
-  const fd = fs.openSync(file, "r");
-  const chunk = Buffer.allocUnsafe(64 * 1024);
-  let carry = "";
-  try {
-    while (true) {
-      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
-      if (bytesRead <= 0) return false;
-      const text = carry + chunk.subarray(0, bytesRead).toString("latin1");
-      OPENCRAB_CREDENTIAL_PATTERN.lastIndex = 0;
-      if (OPENCRAB_CREDENTIAL_PATTERN.test(text)) return true;
-      carry = text.slice(-8_192);
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
 export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
   const db = getDb();
-  const databasePath = db.name;
-  const artifacts = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`];
-  const residualBytesBefore = artifacts.some(fileContainsOpenCrabCredential);
+  // ★ Never fs.open() the live store or its -wal/-shm here (2026-09-05).
+  // Until this date the function byte-scanned those files in-process for
+  // residual credential bytes. On POSIX, closing *any* descriptor a process
+  // holds on a file releases every fcntl lock that process has on it — including
+  // SQLite's shared "dead-man switch" lock on -shm. The next peer connection
+  // (agentlasd, a headless wake, the terminal follower, a QA instance) then
+  // believed it was alone, truncated/unlinked the wal-index this process still
+  // had mapped, and the next wal-index access died with
+  // EXC_BAD_ACCESS/SIGBUS "FS pagein error" (crash reports 2026-08-28 ×4,
+  // 08-29, 08-30, 09-01, 09-04: walIndexAppend/walFindFrame). Reproduced with
+  // a scratch WAL store: in-process open/close of -shm → peer close → -shm gone;
+  // without the foreign open/close the sidecar stays. The residual-byte branch
+  // it fed only toggled secure_delete + a PASSIVE checkpoint, which cannot
+  // rewrite freelist pages of a live multi-process database anyway; inactive
+  // recovery copies keep their own exclusive scrub path (updater/continuity).
   const rows = db
     .prepare("SELECT id, catalog_id, url, enabled, installed_at FROM mcp_servers WHERE url IS NOT NULL ORDER BY installed_at DESC")
     .all() as Array<{ id: string; catalog_id: string | null; url: string; enabled: number; installed_at: string }>;
   const legacy = rows.filter((row) => row.url !== OPENCRAB_MCP_URL_SENTINEL && isOpenCrabCredentialUrl(row.url));
-  if (legacy.length === 0 && !residualBytesBefore) return { scrubbed: 0 };
+  if (legacy.length === 0) return { scrubbed: 0 };
 
   // This is a live, multi-process database: Desktop, agentlasd, and a headless
   // wake can all hold WAL read marks. Never VACUUM, truncate a checkpoint, or

@@ -13,19 +13,19 @@
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: #5f666b;
+  color: var(--ink-soft);
   font-size: 20px;
   cursor: pointer;
 }
 
 .trigger:hover,
 .trigger:focus-visible {
-  background: #f0f2f1;
+  background: var(--paper-3);
   outline: 3px solid rgba(96, 122, 54, 0.13);
 }
 
 .trigger:disabled {
-  color: #b8bdc0;
+  color: var(--muted);
   cursor: default;
 }
 
@@ -43,11 +43,11 @@
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
   padding: 16px;
-  border: 1px solid #dfe2e4;
+  border: 1px solid var(--paper-edge);
   border-radius: 16px;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 16px 48px rgba(25, 31, 36, 0.14);
-  color: #202326;
+  color: var(--ink);
 }
 
 .panel strong {
@@ -64,7 +64,7 @@
 
 .panel small {
   display: block;
-  color: #73797d;
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -74,15 +74,15 @@
   min-height: 44px;
   margin: 12px 0 0;
   padding: 0 14px;
-  border: 1px solid #d8ddda;
+  border: 1px solid var(--paper-edge-strong);
   border-radius: 12px;
-  background: #f8f9f8;
-  color: #202326;
+  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .panel button:hover,
 .panel button:focus-visible {
-  border-color: #aeb99f;
+  border-color: var(--ok-soft);
   outline: 3px solid rgba(96, 122, 54, 0.13);
 }
 

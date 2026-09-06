@@ -14,6 +14,7 @@ import type {
 import { computeExperienceClusters } from "./experience-map-core.cjs";
 import styles from "./OntologyAtlas.module.css";
 import type { OntologyCameraCommand, OntologySceneEdge, OntologySceneNode } from "./OntologyAtlasScene3D";
+import { resolveCssColour } from "@/lib/design-tokens";
 
 const OntologyScene3D = dynamic(
   () => import("./OntologyAtlasScene3D").then((module) => module.OntologyAtlasScene3D),
@@ -51,17 +52,17 @@ const MAX_RENDERED_NODES = 400;
 const MAX_RENDERED_EDGES = 800;
 
 const GRAPH_COLORS = {
-  agent: { color: "#f3f0e6", border: "#91b8a6" },
-  pack: { color: "#78b99c", border: "#d5f0e3" },
-  release: { color: "#6d8178", border: "#a8bbb2" },
-  item: { color: "#9bceba", border: "#d8eee4" },
-  task: { color: "#93aac5", border: "#cfd9e5" },
-  environment: { color: "#7d8984", border: "#adb7b3" },
-  mcp: { color: "#bf9d73", border: "#e7d3b8" },
-  evidence: { color: "#d4d8cd", border: "#ffffff" },
-  taste: { color: "#dcad68", border: "#f2d5a8" },
-  hub: { color: "#91b7cf", border: "#d2e4ed" },
-  candidate: { color: "#686f6c", border: "#a2aaa6" },
+  agent: { color: "var(--paper-3)", border: "var(--ok-soft)" },
+  pack: { color: "var(--ok)", border: "var(--ok-soft)" },
+  release: { color: "var(--muted-deep)", border: "var(--muted)" },
+  item: { color: "var(--ok-soft)", border: "var(--ok-soft)" },
+  task: { color: "var(--info-soft)", border: "var(--info-soft)" },
+  environment: { color: "var(--muted-deep)", border: "var(--muted)" },
+  mcp: { color: "var(--warn)", border: "var(--warn-soft)" },
+  evidence: { color: "var(--paper-edge-strong)", border: "var(--paper)" },
+  taste: { color: "var(--warn-soft)", border: "var(--warn-soft)" },
+  hub: { color: "var(--info-soft)", border: "var(--info-soft)" },
+  candidate: { color: "var(--muted-deep)", border: "var(--muted-deep)" },
 } as const;
 
 function shortRef(value: string | null | undefined): string {
@@ -406,7 +407,8 @@ export function OntologyAtlas({
   const sceneNodes = useMemo<OntologySceneNode[]>(() => visible.nodes.map((node) => ({
     id: node.id,
     label: node.label,
-    color: atlasTone(node).color,
+    // WebGL 은 CSS 변수를 해석하지 못하므로 같은 토큰을 값으로 풀어서 넘긴다.
+    color: resolveCssColour(atlasTone(node).color),
     size: nodeSize(node, degreeById.get(node.id) ?? 0),
     source: node.source,
     kind: node.kind,
@@ -606,7 +608,7 @@ export function OntologyAtlas({
               {visible.nodes.map((node) => (
                 <button key={node.id} type="button" className={styles.fallbackNode} onClick={() => selectNode(node.id, false)}>
                   <strong style={{ display: "block", fontSize: 10.5 }}>{node.label}</strong>
-                  <span style={{ color: "#82908b", fontSize: 8.5 }}>{node.kind} · {node.status}</span>
+                  <span style={{ color: "var(--muted-deep)", fontSize: 8.5 }}>{node.kind} · {node.status}</span>
                 </button>
               ))}
             </div>

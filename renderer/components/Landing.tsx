@@ -13,14 +13,14 @@ import type { AuthSession } from "@/lib/types";
 
 // 핸드오프 팔레트 (다크 — 테마와 무관하게 고정)
 const C = {
-  bg: "#06080B",
-  ink: "#EAF3F2",
+  bg: "var(--landing-bg)",
+  ink: "var(--landing-ink)",
   ink2: "rgba(234,243,242,0.62)",
   ink3: "rgba(234,243,242,0.40)",
   ink4: "rgba(234,243,242,0.26)",
-  teal: "#2DE6C8",
-  teal2: "#14B8A6",
-  cyan: "#22D3EE",
+  teal: "var(--landing-teal)",
+  teal2: "var(--landing-teal-2)",
+  cyan: "var(--landing-cyan)",
   hair2: "rgba(255,255,255,0.14)",
 };
 
@@ -67,6 +67,11 @@ function useGlobe(canvasRef: React.RefObject<HTMLCanvasElement>) {
     const sT = Math.sin(tilt);
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
     let a = 0;
+    // 캔버스는 CSS 변수를 해석하지 못하므로 같은 토큰을 한 번 읽어 쓴다.
+    const readToken = (name: string, fallback: string) =>
+      getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+    const canvasTeal = readToken("--landing-teal", "#2de6c8"); // colour-literal-allowed: canvas fallback for the landing token
+    const canvasCyan = readToken("--landing-cyan", "#22d3ee"); // colour-literal-allowed: canvas fallback for the landing token
     let raf = 0;
     const frame = () => {
       ctx.clearRect(0, 0, S, S);
@@ -112,7 +117,7 @@ function useGlobe(canvasRef: React.RefObject<HTMLCanvasElement>) {
         const alpha = front ? 0.22 + 0.78 * dn : 0.1 * dn;
         const size = (p.b ? 1.8 : 1.2) * (0.5 + 0.7 * dn);
         ctx.globalAlpha = alpha * (p.b ? 1 : 0.7);
-        ctx.fillStyle = p.b ? "#52F0D6" : "#22D3EE";
+        ctx.fillStyle = p.b ? canvasTeal : canvasCyan;
         ctx.beginPath();
         ctx.arc(p.x, p.y, size, 0, 7);
         ctx.fill();
@@ -138,7 +143,7 @@ function useGlobe(canvasRef: React.RefObject<HTMLCanvasElement>) {
       const ox = Math.cos(oa) * R * 1.34;
       const oy = Math.sin(oa) * R * 0.4;
       ctx.globalCompositeOperation = "lighter";
-      ctx.fillStyle = "#6FFCE4";
+      ctx.fillStyle = canvasTeal;
       ctx.globalAlpha = 0.95;
       ctx.beginPath();
       ctx.arc(ox, oy, 2.6, 0, 7);
@@ -390,7 +395,7 @@ export function Landing({
               fontFamily: "inherit",
               cursor: busy ? "default" : "pointer",
               whiteSpace: "nowrap",
-              color: "#04231F",
+              color: "var(--ok)",
               background: `linear-gradient(180deg, ${C.teal} 0%, ${C.teal2} 100%)`,
               border: "1px solid rgba(45,230,200,.5)",
               boxShadow: "0 10px 30px rgba(45,230,200,.28)",
@@ -419,7 +424,7 @@ export function Landing({
                   height: 14,
                   borderRadius: "50%",
                   border: "2px solid rgba(4,35,31,.25)",
-                  borderTopColor: "#04231F",
+                  borderTopColor: "var(--ok)",
                   animation: "agentlas-cta-spin .8s linear infinite",
                 }}
               />

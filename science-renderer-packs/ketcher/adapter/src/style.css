@@ -18,16 +18,25 @@ button { font: inherit; }
 .editor-frame { position: absolute; inset: 0; min-height: 0; padding: 0; background: #fff; }
 .ketcher-host { width: 100%; height: 100%; min-height: 240px; overflow: hidden; border: 0; border-radius: 0; background: #fff; box-shadow: none; }
 .ketcher-host > div { width: 100%; height: 100%; }
-.receipt-bar { position: absolute !important; width: 1px !important; height: 1px !important; min-height: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }
-.receipt-bar > div:first-child, .receipt-data { display: flex; align-items: center; gap: 8px; }
+.receipt-bar { position: absolute; z-index: 6; right: 12px; bottom: 62px; width: min(420px, calc(100% - 24px)); padding: 10px 12px; border: 1px solid #e2c9c6; border-radius: 10px; background: rgba(255,255,255,.97); color: #3d2927; box-shadow: 0 5px 16px rgba(70,36,32,.09); font-size: 12px; line-height: 1.4; }
+.receipt-bar > div:first-child { display: flex; align-items: center; gap: 8px; }
+.receipt-bar p { margin: 5px 0 0 15px; color: #6f4541; }
+.receipt-bar details { margin: 7px 0 0 15px; color: #79504c; }
+.receipt-bar summary { width: max-content; cursor: pointer; font-size: 11px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #2f8a53; box-shadow: 0 0 0 3px #e7f4eb; }
 .dot.error { background: #b8443c; box-shadow: 0 0 0 3px #f9e9e7; }
-.receipt-data code { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: #4f4b47; }
-.saved { color: #17633a; font-weight: 700; }
-.error-copy { width: 100%; padding-left: 15px; color: #8f302b; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.error-copy { display: block; max-height: 72px; margin-top: 5px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #8f302b; font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
 @media (max-width: 720px) {
   .artifact-bar { right: 7px; bottom: 7px; align-items: flex-start; }
   .artifact-bar small, .phase { display: none; }
   .actions button { padding: 0 8px; }
   .editor-frame { padding: 0; }
+  .receipt-bar { right: 7px; bottom: 55px; width: calc(100% - 14px); }
+}
+@media (max-width: 520px) {
+  .artifact-bar { bottom: 55px; }
+  .receipt-bar { right: 48px; bottom: 105px; width: calc(100% - 96px); }
+  .ketcher-host [data-testid="top-toolbar"] { position: relative; z-index: 10; justify-content: flex-start; align-content: center; flex-wrap: wrap; gap: 0 8px; height: auto; min-height: 36px; padding-inline: 8px; }
+  .ketcher-host [data-testid="top-toolbar"] > div { flex: 0 0 auto; height: 36px; }
+  .ketcher-host [data-testid="top-toolbar"] > div:last-child { margin-left: auto; }
 }

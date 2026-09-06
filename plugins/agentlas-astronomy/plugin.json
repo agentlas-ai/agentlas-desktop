@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-astronomy",
   "name": "Agentlas Astronomy",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -95,13 +95,13 @@
       },
       {
         "path": "capabilities.json",
-        "sha256": "f56f3210b9b12deccd6598409395f0f727af345acc23c3e250ffdf9e07eacdfc",
-        "bytes": 13540
+        "sha256": "e337058dec256978d6735172d5d48000ba8cc3b4c559711fe11c634230ea2b5f",
+        "bytes": 14198
       },
       {
         "path": "README.md",
-        "sha256": "91ff54e52fe63013c282fb55700772787223b945dfd680d18f017ebaaf850253",
-        "bytes": 6084
+        "sha256": "ec9d897023017a188205def657218d125e0f0514a9c120aafe61fbc7ee80509b",
+        "bytes": 6694
       },
       {
         "path": "runtime/analysis-common.cjs",
@@ -115,8 +115,8 @@
       },
       {
         "path": "runtime/astronomy.cjs",
-        "sha256": "9ec858d05f4cdb5b59474f7529ee90af5a16365a72853481aea45ec5470dee92",
-        "bytes": 83447
+        "sha256": "32544a4df873f46bc56f59cd1bf6acf22e2803162af8e386d2905354a07ab690",
+        "bytes": 89325
       },
       {
         "path": "runtime/colour-magnitude.cjs",
@@ -135,7 +135,7 @@
       },
       {
         "path": "runtime/mcp-server.cjs",
-        "sha256": "59c17bc0e7cbfb1329af2d3b65330ffe3ddd8b599bd605171e6728836a20c8d0",
+        "sha256": "713fb4daa0fe61ecd523a01cf305117c59bf4deef8ad0cef92c5b85e41859455",
         "bytes": 7181
       },
       {
@@ -195,8 +195,8 @@
       },
       {
         "path": "schemas/tools.json",
-        "sha256": "bf246cb456721cb6eedc1aebc0582361d6dbca85791e9d78cfaf7ab9d7b9bd8c",
-        "bytes": 8010
+        "sha256": "5c6ab19bcb3a1e56e6d99675c61b3812c70a48cf9167925a371a63dd669aabed",
+        "bytes": 8189
       },
       {
         "path": "schemas/transit-search-bls.json",
@@ -210,13 +210,13 @@
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "b4524b08cfe2be7cdd326dd61de802a6b5edc7705f1e403a3cd93b52c8e6a1d0",
-        "bytes": 1529
+        "sha256": "57b17d2d506d7a8f25bcc1a7483dfd4bc142cb6672eaaaa09f92bca405fad587",
+        "bytes": 1868
       },
       {
         "path": "skills/light-curve-periodicity/SKILL.md",
-        "sha256": "54dd9c5c2d83c43822708921b845211d79d5ac1818fbfa5bdc9f015cb9083c04",
-        "bytes": 2331
+        "sha256": "5ba6e99a939851836197df8e753d978ad9037fdf85c3ca2569424687f191099f",
+        "bytes": 2946
       },
       {
         "path": "skills/simbad-catalog/SKILL.md",

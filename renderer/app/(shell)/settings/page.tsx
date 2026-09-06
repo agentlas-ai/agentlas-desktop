@@ -654,7 +654,7 @@ export default function SettingsPage() {
                     borderRadius: 999,
                     border: "1px solid var(--paper-edge)",
                     background: concurrency.current === concurrency.recommended ? "var(--accent)" : "var(--paper-2)",
-                    color: concurrency.current === concurrency.recommended ? "#fff" : "var(--ink)",
+                    color: concurrency.current === concurrency.recommended ? "var(--white)" : "var(--ink)",
                     cursor: "pointer",
                     fontWeight: 600,
                   }}
@@ -663,14 +663,14 @@ export default function SettingsPage() {
                 </button>
               </div>
               {concurrency.current > concurrency.recommended && (
-                <p style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+                <p style={{ fontSize: 11, color: "var(--warn-deep, var(--warn))", margin: "8px 0 0" }}>
                   {locale === "ko"
                     ? "⚠️ 추천보다 높아요 — 이 컴에선 느려지거나 버벅일 수 있어요."
                     : "⚠️ Above recommended — this machine may slow down or stutter."}
                 </p>
               )}
               {concurrencyNotice && (
-                <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+                <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, var(--warn))", margin: "8px 0 0" }}>
                   {concurrencyNotice}
                 </p>
               )}
@@ -725,7 +725,7 @@ export default function SettingsPage() {
             {locale === "ko" ? "로그인할 때 자동으로 시작" : "Start automatically at login"}
           </label>
           {daemonAutostartNotice && (
-            <p style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>{daemonAutostartNotice}</p>
+            <p style={{ fontSize: 11, color: "var(--warn-deep, var(--warn))", margin: "8px 0 0" }}>{daemonAutostartNotice}</p>
           )}
         </div>
 
@@ -764,7 +764,7 @@ export default function SettingsPage() {
                   borderRadius: 999,
                   border: "1px solid var(--paper-edge)",
                   background: interviewMode === opt.id ? "var(--accent)" : "var(--paper-2)",
-                  color: interviewMode === opt.id ? "#fff" : "var(--ink)",
+                  color: interviewMode === opt.id ? "var(--white)" : "var(--ink)",
                   cursor: "pointer",
                   fontWeight: 600,
                 }}
@@ -774,7 +774,7 @@ export default function SettingsPage() {
             ))}
           </div>
           {interviewNotice && (
-            <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+            <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, var(--warn))", margin: "8px 0 0" }}>
               {interviewNotice}
             </p>
           )}
@@ -854,7 +854,7 @@ export default function SettingsPage() {
         <TerminalProfilesPanel />
 
         {/* 로컬 모델 (Ollama) */}
-        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
+        <h2 id="ollama" style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
           {t("settings.ollama.title")}
         </h2>
         <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
@@ -1140,7 +1140,8 @@ function MobileBridgePanel() {
           errorCorrectionLevel: "M",
           margin: 2,
           width: 336,
-          color: { dark: "#111210", light: "#FFFFFF" },
+          // QR 인코더는 CSS 변수를 모른다 — 스캐너 대비를 위해 값으로 고정한다.
+          color: { dark: "#111210", light: "#FFFFFF" }, // colour-literal-allowed: QR encoder cannot read CSS variables
         }),
       );
     } catch {
@@ -1168,7 +1169,8 @@ function MobileBridgePanel() {
         errorCorrectionLevel: "M",
         margin: 3,
         width: 512,
-        color: { dark: "#111210", light: "#FFFFFF" },
+        // QR 인코더는 CSS 변수를 모른다 — 스캐너 대비를 위해 값으로 고정한다.
+          color: { dark: "#111210", light: "#FFFFFF" }, // colour-literal-allowed: QR encoder cannot read CSS variables
       });
       setPairing(payload);
       setQrDataUrl(image);
@@ -1414,10 +1416,10 @@ function MobileBridgePanel() {
                       }}
                     >
                       <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
-                        <path fill="#34A853" d="M3.6 1.9a1 1 0 0 0-.5.9v18.4a1 1 0 0 0 .5.9l10-10.1z" />
-                        <path fill="#FBBC04" d="M17.3 8.3 14 6.4 3.6 1.9c-.1 0-.1 0-.1.1l10.1 10z" />
-                        <path fill="#EA4335" d="M13.6 12.1 3.5 22c0 .1 0 .1.1.1l10.4-4.5 3.3-1.9z" />
-                        <path fill="#4285F4" d="M20.7 10.9 17.3 9l-3.7 3.1 3.7 3.4 3.4-1.9c.8-.4.8-2.3 0-2.7z" />
+                        <path fill="var(--ok)" d="M3.6 1.9a1 1 0 0 0-.5.9v18.4a1 1 0 0 0 .5.9l10-10.1z" />
+                        <path fill="var(--warn)" d="M17.3 8.3 14 6.4 3.6 1.9c-.1 0-.1 0-.1.1l10.1 10z" />
+                        <path fill="var(--danger)" d="M13.6 12.1 3.5 22c0 .1 0 .1.1.1l10.4-4.5 3.3-1.9z" />
+                        <path fill="var(--info)" d="M20.7 10.9 17.3 9l-3.7 3.1 3.7 3.4 3.4-1.9c.8-.4.8-2.3 0-2.7z" />
                       </svg>
                       Google Play
                     </button>
@@ -1455,7 +1457,7 @@ function MobileBridgePanel() {
 
                   {storeChoice === "android" && storeQrDataUrl && (
                     <div data-testid="install-gate-android-qr" style={{ marginTop: 14, display: "grid", gap: 10, justifyItems: "center" }}>
-                      <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 14, background: "#fff", padding: 10 }}>
+                      <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 14, background: "var(--paper)", padding: 10 }}>
                         <img
                           src={storeQrDataUrl}
                           alt={locale === "ko" ? "Google Play 설치 QR" : "Google Play install QR"}
@@ -1500,7 +1502,7 @@ function MobileBridgePanel() {
 
         {pairing && qrDataUrl && (
           <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(240px, 288px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
-            <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "#fff", padding: 12 }}>
+            <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "var(--paper)", padding: 12 }}>
               {/* The data URL is produced locally; the QR contains a two-minute nonce and public certificate only. */}
               <img src={qrDataUrl} alt={locale === "ko" ? "Agentlas Mobile 연결 QR" : "Agentlas Mobile pairing QR"} style={{ display: "block", width: "100%", aspectRatio: "1" }} />
             </div>
@@ -1554,7 +1556,7 @@ function MobileBridgePanel() {
               <button
                 type="button"
                 onClick={() => void revoke(device)}
-                style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "5px 10px", background: "transparent", color: "var(--red-deep, #b4533a)", fontSize: 11, fontWeight: 700 }}
+                style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "5px 10px", background: "transparent", color: "var(--red-deep, var(--danger))", fontSize: 11, fontWeight: 700 }}
               >
                 {locale === "ko" ? "연결 해제" : "Revoke"}
               </button>
@@ -1702,7 +1704,7 @@ function MemoryDiagnosticsPanel() {
         {ko ? "메모리 & 진단" : "Memory & Diagnostics"}
       </h2>
       {toggleNotice && (
-        <p role="status" style={{ fontSize: 11.5, color: "var(--warn-deep, #b8860b)", margin: "0 0 10px" }}>
+        <p role="status" style={{ fontSize: 11.5, color: "var(--warn-deep, var(--warn))", margin: "0 0 10px" }}>
           {toggleNotice}
         </p>
       )}
@@ -1846,9 +1848,9 @@ function MultimodalFallbackPanel({
             gap: 12,
             padding: "10px 12px",
             marginBottom: 10,
-            border: "1px solid var(--peach-edge, #e8b99f)",
+            border: "1px solid var(--peach-edge, var(--warn-soft))",
             borderRadius: "var(--radius-md)",
-            background: "var(--peach-soft, #fff3ec)",
+            background: "var(--peach-soft, var(--warn-soft))",
             color: "var(--ink-soft)",
             fontSize: 12,
             lineHeight: 1.5,
@@ -2905,7 +2907,7 @@ function TerminalProfilesPanel() {
             <button type="button" onClick={() => { setErr(""); setEditing({ ...p }); }} style={chip("var(--paper-2)", "var(--ink)")}>
               {ko ? "편집" : "Edit"}
             </button>
-            <button type="button" onClick={() => void remove(p.id)} style={chip("var(--paper-2)", "var(--red-deep, #b4533a)")}>
+            <button type="button" onClick={() => void remove(p.id)} style={chip("var(--paper-2)", "var(--red-deep, var(--danger))")}>
               {ko ? "삭제" : "Delete"}
             </button>
           </div>
@@ -2977,13 +2979,13 @@ function TerminalProfilesPanel() {
                   </div>
                 </>
               )}
-              {err && <div style={{ fontSize: 11.5, color: "var(--red-deep, #b4533a)" }}>{err}</div>}
+              {err && <div style={{ fontSize: 11.5, color: "var(--red-deep, var(--danger))" }}>{err}</div>}
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                 <button type="button" onClick={() => { setEditing(null); setErr(""); }} style={chip("var(--paper)", "var(--muted-deep)")}>
                   {ko ? "취소" : "Cancel"}
                 </button>
                 <button type="button" onClick={() => void saveEditing()}
-                  style={{ ...chip("var(--accent)", "#fff"), padding: "6px 14px" }}>
+                  style={{ ...chip("var(--accent)", "var(--white)"), padding: "6px 14px" }}>
                   {ko ? "저장" : "Save"}
                 </button>
               </div>

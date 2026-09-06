@@ -547,7 +547,7 @@ function renderBlock(
         : <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ul>;
     }
     case "hr":
-      return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid #e0e2e3)", margin: "12px 0" }} />;
+      return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid var(--paper-3))", margin: "12px 0" }} />;
     case "table":
       return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />;
     case "quote":
@@ -697,14 +697,14 @@ function highlightCode(code: string): React.ReactNode[] {
   while ((m = CODE_TOKEN.exec(code)) !== null) {
     if (m.index > last) out.push(code.slice(last, m.index));
     let color: string | undefined;
-    if (m[1]) color = "#718078"; // 주석
-    else if (m[2]) color = "#1f7a4d"; // 문자열
-    else if (m[3]) color = "#a15c00"; // 숫자
+    if (m[1]) color = "var(--muted-deep)"; // 주석
+    else if (m[2]) color = "var(--ok)"; // 문자열
+    else if (m[3]) color = "var(--warn)"; // 숫자
     else if (m[4]) {
       const id = m[4];
-      if (CODE_KEYWORDS.has(id)) color = "#6f42c1"; // 키워드
-      else if (/^[A-Z]/.test(id)) color = "#116a8a"; // 타입/클래스
-      else if (code[m.index + id.length] === "(") color = "#1f5fbd"; // 함수 호출
+      if (CODE_KEYWORDS.has(id)) color = "var(--info)"; // 키워드
+      else if (/^[A-Z]/.test(id)) color = "var(--info)"; // 타입/클래스
+      else if (code[m.index + id.length] === "(") color = "var(--info)"; // 함수 호출
     }
     out.push(color ? <span key={k++} style={{ color }}>{m[0]}</span> : m[0]);
     last = m.index + m[0].length;
@@ -732,7 +732,7 @@ function CodeBlock({
         border: "none",
         borderRadius: 0,
         overflow: "hidden",
-        background: "#fbfcfb",
+        background: "var(--paper-2)",
       }}
     >
       <div
@@ -742,21 +742,21 @@ function CodeBlock({
           gap: 8,
           padding: "8px 0",
           background: "transparent",
-          borderBottom: "1px solid #edf1ee",
+          borderBottom: "1px solid var(--paper-3)",
         }}
       >
         <span
           style={{
             fontSize: 10,
             fontFamily: "var(--font-mono)",
-            color: "#60736a",
+            color: "var(--ink-soft)",
             textTransform: "uppercase",
             letterSpacing: 0.6,
           }}
         >
           {block.lang}
         </span>
-        <span style={{ fontSize: 10, color: "#8a968f" }}>· {label("chatstream.lines", { count: linesCount })}</span>
+        <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>· {label("chatstream.lines", { count: linesCount })}</span>
         <div style={{ flex: 1 }} />
         {onOpen && (
           <button
@@ -768,7 +768,7 @@ function CodeBlock({
               padding: "2px 8px",
               borderRadius: 5,
               background: "transparent",
-              color: "#53645a",
+              color: "var(--ink-soft)",
               border: "none",
               fontWeight: 600,
             }}
@@ -784,7 +784,7 @@ function CodeBlock({
             padding: "2px 8px",
             borderRadius: 5,
             background: "transparent",
-            color: "#53645a",
+            color: "var(--ink-soft)",
             border: "none",
             fontWeight: 600,
           }}
@@ -800,7 +800,7 @@ function CodeBlock({
             padding: "12px 12px 12px 14px",
             textAlign: "right",
             userSelect: "none",
-            color: "#9aa6a0",
+            color: "var(--muted-deep)",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,
@@ -813,7 +813,7 @@ function CodeBlock({
           style={{
             margin: 0,
             padding: "12px 14px 12px 4px",
-            color: "#243129",
+            color: "var(--ink)",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,

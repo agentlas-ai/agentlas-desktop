@@ -21,6 +21,14 @@ phases that precede this one. This skill covers the `manuscript`, `journal_profi
 - Every source to be cited is an exact `sourceId + sourceVersionId` from the committed evidence
   ledger (`list_project_evidence`).
 
+Manuscript drafting is one phase of a continuing study. Unless the researcher explicitly requested a
+bounded manuscript deliverable, a completed section, assembled manuscript version, page/word target,
+or first draft is not goal completion. After each material manuscript action, re-read the durable
+Research Loop and study state, preserve the exact claim and artifact receipts, and continue any
+unmet success criteria, robustness, conclusions, journal profiling, or validation. Close the study
+only through the canonical loop criterion receipts and lifecycle gates; never stop because one
+provider turn or manuscript pass ended.
+
 ## Build the manuscript blueprint before prose
 
 Do not start by filling an IMRaD skeleton. A heading-only document or one sentence under each

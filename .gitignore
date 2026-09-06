@@ -116,6 +116,8 @@ benchmarks/
 fixtures/
 **/fixtures/
 research/
+!/plugins/design/skills/research/
+!/plugins/design/skills/research/SKILL.md
 plans/
 reports/
 receipts/

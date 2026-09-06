@@ -179,7 +179,7 @@ export interface ContinuityVerification {
 
 export type RecoverySessionRefreshResult =
   | { status: "restored"; signedIn: true }
-  | { status: "missing" | "expired" | "invalid" | "temporarily-unavailable"; signedIn: false };
+  | { status: "missing" | "expired" | "invalid" | "native-unavailable" | "temporarily-unavailable"; signedIn: false };
 
 export interface InstallJournal {
   schemaVersion: 1;
@@ -1370,6 +1370,7 @@ export class DesktopUpdaterController {
       || lastSessionRefresh?.status === "expired"
       || lastSessionRefresh?.status === "invalid";
     for (let attempt = 0; attempt < retryAttempts; attempt += 1) {
+      if (lastSessionRefresh?.status === "native-unavailable") break;
       const onlyAuthRestoreIsPending =
         !verification.ok &&
         verification.violations.length === 1 &&
@@ -1390,20 +1391,22 @@ export class DesktopUpdaterController {
       }
       verification = await verifyOnce();
     }
-    const onlyTemporaryAuthRestoreIsPending =
+    const onlyUnavailableAuthRestoreIsPending =
       !verification.ok &&
       verification.violations.length === 1 &&
       verification.violations[0] === "account-session-not-restored" &&
-      lastSessionRefresh?.status === "temporarily-unavailable" &&
+      (lastSessionRefresh?.status === "temporarily-unavailable" || lastSessionRefresh?.status === "native-unavailable") &&
       !sawPermanentSessionRestoreFailure;
-    if (onlyTemporaryAuthRestoreIsPending) {
+    if (onlyUnavailableAuthRestoreIsPending) {
       // The encrypted cookie still exists and every durable local-state check
-      // passed. A background relaunch can temporarily lack Keychain access;
-      // that is an auth bootstrap delay, not a reason to send the user into
-      // data recovery. Missing/corrupt auth and every DB/agent/route violation
-      // remain fail-closed through the ordinary verification result.
-      this.logger.warn("[updater] deferred temporary account-session restore after local continuity passed");
-      this.deferredSessionRestoreRequested = true;
+      // passed. Complete only local update continuity; authentication remains
+      // unavailable and native storage recovery requires explicit user action.
+      // Missing/corrupt auth and every DB/agent/route violation stay fail-closed.
+      const mayRetryAutomatically = lastSessionRefresh?.status === "temporarily-unavailable";
+      this.logger.warn(mayRetryAutomatically
+        ? "[updater] local continuity passed; temporary account restoration deferred"
+        : "[updater] local continuity passed; account restoration awaits user action");
+      this.deferredSessionRestoreRequested = mayRetryAutomatically;
       return { ok: true, violations: [] };
     }
     return verification;

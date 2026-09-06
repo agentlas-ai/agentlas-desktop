@@ -109,7 +109,7 @@ async function handle(message) {
     return {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "agentlas-astronomy", version: "1.2.1" },
+      serverInfo: { name: "agentlas-astronomy", version: "1.2.2" },
     };
   }
   if (message.method === "tools/list") return { tools: TOOL_LIST };

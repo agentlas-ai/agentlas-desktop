@@ -220,7 +220,7 @@ export function ImportAgentsModal({
                 borderRadius: "var(--radius-md)",
                 border: `1px solid ${status.tone === "ok" ? "rgba(34, 139, 85, 0.24)" : "rgba(194, 65, 12, 0.24)"}`,
                 background: status.tone === "ok" ? "rgba(34, 139, 85, 0.08)" : "rgba(194, 65, 12, 0.08)",
-                color: status.tone === "ok" ? "var(--green-deep)" : "#9a3412",
+                color: status.tone === "ok" ? "var(--green-deep)" : "var(--danger)",
                 fontSize: 12,
                 lineHeight: 1.45,
               }}

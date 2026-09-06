@@ -26,6 +26,8 @@
 import type {
   ToolApprovalRequestEvent,
   ToolApprovalDecision,
+  ToolApprovalConsentBinding,
+  ToolApprovalDurableConsentReceipt,
   ToolApprovalResolutionReceipt,
 } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
@@ -66,6 +68,8 @@ export interface RuntimeToolPermissionAsk {
   chatId?: string;
   /** 실행 중인 에이전트 — 에이전트 스코프 능력 규칙(capability_grants)의 대상. */
   agentId?: string;
+  /** Main-computed exact durable-consent identity for this request. */
+  consentBinding?: ToolApprovalConsentBinding;
   /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
   unattended?: boolean;
 }
@@ -83,14 +87,12 @@ export function capabilityClassFor(kind: string, tool: string): string {
 }
 
 /**
- * "항상 허용"이 저장할 인자 패턴 — Claude Code 의 프리픽스 규칙과 같은 일반화.
- * 명령줄(detail)이 있으면 앞 두 토큰 + " *" ("git push *"), 없으면 도구 전체(null).
+ * Legacy helper retained for callers that imported it. Durable consent no
+ * longer generalizes command tokens: an exact detail is returned unchanged so
+ * callers cannot accidentally turn one approved resource into a wildcard.
  */
 export function generalizeDetailPattern(detail: string | undefined): string | null {
-  if (!detail) return null;
-  const tokens = detail.trim().split(/\s+/);
-  if (tokens.length <= 2) return detail.trim();
-  return `${tokens[0]} ${tokens[1]} *`;
+  return detail === undefined ? null : detail;
 }
 
 export type RuntimeToolPermissionDecision = "allow_once" | "allow_session" | "deny";
@@ -115,8 +117,12 @@ export interface AlwaysAllowGrant {
   pattern: string | null;
   scope: string;
   tool: string;
+  consentBinding?: ToolApprovalConsentBinding;
 }
-export type CapabilityGrantPersister = (grant: AlwaysAllowGrant) => void;
+export type CapabilityGrantPersistenceResult =
+  | { ok: true; id: number }
+  | { ok: false; code?: string };
+export type CapabilityGrantPersister = (grant: AlwaysAllowGrant) => CapabilityGrantPersistenceResult;
 
 let capabilityGrantPersister: CapabilityGrantPersister | null = null;
 
@@ -124,19 +130,33 @@ export function setCapabilityGrantPersister(persister: CapabilityGrantPersister 
   capabilityGrantPersister = persister;
 }
 
-function persistAlwaysGrant(request: ToolApprovalRequest): void {
-  if (!capabilityGrantPersister) return;
+function persistAlwaysGrant(request: ToolApprovalRequest): ToolApprovalDurableConsentReceipt {
+  if (!request.consentBinding) {
+    return { status: "unavailable", code: "missing-binding" };
+  }
+  if (!capabilityGrantPersister) {
+    return { status: "unavailable", code: "missing-persister" };
+  }
   try {
-    capabilityGrantPersister({
+    const result = capabilityGrantPersister({
       capability: `tool:${request.tool}`,
-      pattern: generalizeDetailPattern(request.detail),
-      // 규칙은 에이전트들이 공유한다(비전 + Claude Code parity). 에이전트 한정이
-      // 필요해지면 request.agentId 로 scope 를 좁히는 선택지를 카드에 더한다.
-      scope: "global",
+      // Exact resource identity is carried by the Main-owned binding.  Do not
+      // generalize the detail into a wildcard: a later command must match the
+      // same credential/resource digest and permission level.
+      pattern: request.consentBinding.credentialResourceIdentity,
+      scope: "consent:v1",
       tool: request.tool,
+      consentBinding: request.consentBinding,
     });
+    if (!result?.ok) return { status: "failed", code: "storage-failure" };
+    if (!Number.isInteger(result.id) || result.id <= 0) {
+      return { status: "failed", code: "storage-receipt-missing" };
+    }
+    return { status: "persisted" };
   } catch {
-    /* 영속 실패가 이번 호출의 허용을 깨지는 않는다 — 다음에 다시 묻게 될 뿐이다. */
+    // The current invocation may still proceed as the user's explicit choice,
+    // but the receipt keeps the durable failure visible to the UI and caller.
+    return { status: "failed", code: "storage-failure" };
   }
 }
 
@@ -161,15 +181,22 @@ export type { ToolApprovalDecision };
 export interface ToolApprovalOutcome {
   decision: ToolApprovalDecision;
   decidedAt: string;
+  durableConsent?: ToolApprovalDurableConsentReceipt;
 }
 
 type Pending = {
   request: ToolApprovalRequest;
-  resolve: (outcome: ToolApprovalOutcome) => void;
+  resolve: (outcome: ToolApprovalOutcome) => ToolApprovalOutcome;
   timer: NodeJS.Timeout;
+  promise: Promise<ToolApprovalOutcome>;
+  /** Every session that joined a deduplicated exact request receives the
+   * session grant once the shared decision settles. */
+  sessionKeys: Set<string>;
+  dedupeKey: string;
 };
 
 const pending = new Map<string, Pending>();
+const pendingByKey = new Map<string, string>();
 const sessionGrants = new Map<string, Set<string>>();
 const listeners = new Set<(request: ToolApprovalRequest) => void>();
 const resolvedListeners = new Set<(id: string, outcome: ToolApprovalOutcome) => void>();
@@ -179,6 +206,7 @@ type ResolutionRecord = {
   actionId: string | null;
   status: "resolved" | "expired";
   decidedAt: string;
+  durableConsent?: ToolApprovalDurableConsentReceipt;
 };
 const resolutions = new Map<string, ResolutionRecord>();
 const RESOLUTION_LIMIT = 500;
@@ -209,6 +237,7 @@ function resolutionReceipt(
     status,
     pending: false,
     decidedAt: record.decidedAt,
+    ...(record.durableConsent ? { durableConsent: record.durableConsent } : {}),
   };
 }
 
@@ -231,8 +260,49 @@ function unresolvedReceipt(
 }
 
 /** 같은 도구·대상을 한 세션에서 다시 묻지 않기 위한 키. */
-function grantKey(request: Pick<ToolApprovalRequest, "tool" | "detail">): string {
-  return request.detail ? `${request.tool}::${request.detail}` : request.tool;
+function grantKey(request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding">): string {
+  const resource = request.detail ? `${request.tool}::${request.detail}` : request.tool;
+  const binding = consentBindingKey(request.consentBinding);
+  return binding ? `${resource}::${binding}` : resource;
+}
+
+function consentBindingKey(binding: ToolApprovalConsentBinding | undefined): string | null {
+  if (!binding) return null;
+  return [
+    binding.userIdentity,
+    binding.workspaceIdentity,
+    binding.requesterIdentity,
+    binding.credentialResourceIdentity,
+    binding.permissionScope,
+  ].join("\u0000");
+}
+
+/**
+ * A pending request is a UI resource as well as a promise.  Requests with the
+ * same exact binding in one visible chat share one card; unrelated chats keep
+ * separate cards so the answer is shown where the user can see it.
+ */
+function approvalDedupeKey(
+  sessionKey: string,
+  request: Pick<ToolApprovalRequest, "tool" | "detail" | "chatId" | "consentBinding">,
+): string {
+  const binding = consentBindingKey(request.consentBinding);
+  if (binding) return `binding\u0000${request.chatId ?? ""}\u0000${binding}`;
+  return `session\u0000${sessionKey}\u0000${grantKey(request)}`;
+}
+
+function settleApproval(
+  request: ToolApprovalRequest,
+  sessionKeys: Iterable<string>,
+  outcome: ToolApprovalOutcome,
+): ToolApprovalOutcome {
+  for (const sessionKey of sessionKeys) {
+    if (outcome.decision === "allow_session" || outcome.decision === "allow_always") {
+      rememberSessionGrant(sessionKey, request);
+    }
+  }
+  if (outcome.decision !== "allow_always") return outcome;
+  return { ...outcome, durableConsent: persistAlwaysGrant(request) };
 }
 
 export function onToolApprovalRequested(fn: (request: ToolApprovalRequest) => void): () => void {
@@ -250,7 +320,10 @@ export function listPendingToolApprovals(): ToolApprovalRequest[] {
 }
 
 /** 세션 단위 허용이 이미 있는가. live 요청은 이걸 먼저 본다. */
-export function hasSessionGrant(sessionKey: string, request: Pick<ToolApprovalRequest, "tool" | "detail">): boolean {
+export function hasSessionGrant(
+  sessionKey: string,
+  request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding">,
+): boolean {
   return sessionGrants.get(sessionKey)?.has(grantKey(request)) === true;
 }
 
@@ -271,46 +344,65 @@ export function clearSessionGrants(sessionKey: string): void {
  * 이 제품에서 "끝나지 않는 실행"은 이미 한 번 비싼 대가를 치른 실패 모양이다.
  */
 export function requestToolApproval(
-  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "mode"> & { sessionKey: string; timeoutMs?: number },
+  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey: string; timeoutMs?: number },
 ): Promise<ToolApprovalOutcome> {
   const { sessionKey, timeoutMs = 5 * 60_000, ...rest } = input;
   if (hasSessionGrant(sessionKey, rest)) {
     return Promise.resolve({ decision: "allow_session", decidedAt: new Date().toISOString() });
   }
+  const dedupeKey = approvalDedupeKey(sessionKey, rest);
+  const existingId = pendingByKey.get(dedupeKey);
+  if (existingId) {
+    const existing = pending.get(existingId);
+    if (existing) {
+      existing.sessionKeys.add(sessionKey);
+      return existing.promise;
+    }
+    pendingByKey.delete(dedupeKey);
+  }
+  const requestedAt = new Date();
   const request: ToolApprovalRequest = {
     ...rest,
     id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
     mode: "live",
-    requestedAt: new Date().toISOString(),
+    requestedAt: requestedAt.toISOString(),
+    expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(),
   };
-  return new Promise<ToolApprovalOutcome>((resolve) => {
-    const timer = setTimeout(() => {
-      pending.delete(request.id);
-      const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
-      rememberResolution({
-        requestId: request.id,
-        decision: outcome.decision,
-        actionId: null,
-        status: "expired",
-        decidedAt: outcome.decidedAt,
-      });
-      for (const fn of resolvedListeners) { try { fn(request.id, outcome); } catch { /* 화면 하나가 실행을 깨지 못한다 */ } }
-      resolve(outcome);
-    }, timeoutMs);
-    timer.unref?.();
-    pending.set(request.id, {
-      request,
-      timer,
-      resolve: (outcome) => {
-        if (outcome.decision === "allow_session" || outcome.decision === "allow_always") {
-          rememberSessionGrant(sessionKey, request);
-        }
-        if (outcome.decision === "allow_always") persistAlwaysGrant(request);
-        resolve(outcome);
-      },
-    });
-    for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
+  const sessionKeys = new Set([sessionKey]);
+  let resolvePromise!: (outcome: ToolApprovalOutcome) => void;
+  const promise = new Promise<ToolApprovalOutcome>((resolve) => {
+    resolvePromise = resolve;
   });
+  const timer = setTimeout(() => {
+    pending.delete(request.id);
+    if (pendingByKey.get(dedupeKey) === request.id) pendingByKey.delete(dedupeKey);
+    const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
+    rememberResolution({
+      requestId: request.id,
+      decision: outcome.decision,
+      actionId: null,
+      status: "expired",
+      decidedAt: outcome.decidedAt,
+    });
+    for (const fn of resolvedListeners) { try { fn(request.id, outcome); } catch { /* 화면 하나가 실행을 깨지 못한다 */ } }
+    resolvePromise(outcome);
+  }, timeoutMs);
+  timer.unref?.();
+  pending.set(request.id, {
+    request,
+    timer,
+    promise,
+    sessionKeys,
+    dedupeKey,
+    resolve: (outcome) => {
+      const settled = settleApproval(request, sessionKeys, outcome);
+      resolvePromise(settled);
+      return settled;
+    },
+  });
+  pendingByKey.set(dedupeKey, request.id);
+  for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
+  return promise;
 }
 
 /*
@@ -323,6 +415,7 @@ export function requestToolApproval(
  *   효과가 없는 버튼은 선택이 아니라 거짓말이다.
  */
 const announced = new Map<string, { request: ToolApprovalRequest; sessionKey?: string }>();
+const announcedByKey = new Map<string, string>();
 const ANNOUNCED_LIMIT = 200;
 
 /**
@@ -330,9 +423,16 @@ const ANNOUNCED_LIMIT = 200;
  * 답을 기다리지 않는다(기다릴 대상이 없다). 선택은 다음 실행의 허용 범위에만 쓰인다.
  */
 export function announceToolDenied(
-  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "mode"> & { sessionKey?: string },
+  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey?: string },
 ): ToolApprovalRequest {
   const { sessionKey, ...rest } = input;
+  const dedupeKey = approvalDedupeKey(sessionKey ?? "", rest);
+  const existingId = announcedByKey.get(dedupeKey);
+  if (existingId) {
+    const existing = announced.get(existingId);
+    if (existing) return existing.request;
+    announcedByKey.delete(dedupeKey);
+  }
   const request: ToolApprovalRequest = {
     ...rest,
     id: `denied:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
@@ -340,11 +440,17 @@ export function announceToolDenied(
     requestedAt: new Date().toISOString(),
   };
   announced.set(request.id, { request, sessionKey });
+  announcedByKey.set(dedupeKey, request.id);
   // 오래된 고지부터 버린다 — 삽입 순서가 곧 시간 순서다.
   while (announced.size > ANNOUNCED_LIMIT) {
     const oldest = announced.keys().next();
     if (oldest.done) break;
+    const old = announced.get(oldest.value);
     announced.delete(oldest.value);
+    if (old) {
+      const oldKey = approvalDedupeKey(old.sessionKey ?? "", old.request);
+      if (announcedByKey.get(oldKey) === oldest.value) announcedByKey.delete(oldKey);
+    }
   }
   for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
   return request;
@@ -377,18 +483,20 @@ export function resolveToolApproval(
   }
 
   const entry = pending.get(id);
-  const outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
+  let outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
     clearTimeout(entry.timer);
     pending.delete(id);
+    if (pendingByKey.get(entry.dedupeKey) === id) pendingByKey.delete(entry.dedupeKey);
+    outcome = entry.resolve(outcome);
     rememberResolution({
       requestId: id,
-      decision,
+      decision: outcome.decision,
       actionId,
       status: "resolved",
       decidedAt: outcome.decidedAt,
+      ...(outcome.durableConsent ? { durableConsent: outcome.durableConsent } : {}),
     });
-    entry.resolve(outcome);
   } else if (announced.has(id)) {
     // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
     // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
@@ -396,13 +504,24 @@ export function resolveToolApproval(
     if ((decision === "allow_session" || decision === "allow_always") && known?.sessionKey) {
       rememberSessionGrant(known.sessionKey, known.request);
     }
-    if (known && decision === "allow_always") persistAlwaysGrant(known.request);
+    if (known && decision === "allow_always") {
+      outcome = {
+        ...outcome,
+        durableConsent: persistAlwaysGrant(known.request),
+      };
+    }
+    if (known) {
+      const knownKey = approvalDedupeKey(known.sessionKey ?? "", known.request);
+      if (announcedByKey.get(knownKey) === id) announcedByKey.delete(knownKey);
+      announced.delete(id);
+    }
     rememberResolution({
       requestId: id,
       decision,
       actionId,
       status: "resolved",
       decidedAt: outcome.decidedAt,
+      ...(outcome.durableConsent ? { durableConsent: outcome.durableConsent } : {}),
     });
   } else {
     return unresolvedReceipt(id, decision, "not_found");
@@ -444,8 +563,12 @@ export interface BuiltinApprovalContext {
   permission: RuntimeToolPermissionAsk["permission"];
   cwd?: string;
   chatId?: string;
+  consentBinding?: ToolApprovalConsentBinding;
   unattended: boolean;
   signal?: AbortSignal;
+  /** Main-owned broker ledger hook. It receives the actual arbiter decision,
+   * never a lossy allow/deny boolean. */
+  onApprovalDecision?: (decision: RuntimeToolPermissionDecision) => void;
 }
 
 export async function runApprovedBuiltinTool(
@@ -472,20 +595,22 @@ export async function runApprovedBuiltinTool(
     permission: ctx.permission,
     mutating: kind !== "read",
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
+    ...(ctx.consentBinding ? { consentBinding: ctx.consentBinding } : {}),
     ...(ctx.unattended ? { unattended: true as const } : {}),
   };
   const arbiter = getRuntimeToolPermissionArbiter();
-  let approved: boolean;
+  let decision: RuntimeToolPermissionDecision;
   if (!arbiter) {
-    approved = defaultRuntimeToolPermission(ask) !== "deny";
+    decision = defaultRuntimeToolPermission(ask);
   } else {
     try {
-      approved = (await arbiter(ask)) !== "deny";
+      decision = await arbiter(ask);
     } catch {
-      approved = false; // 중재자 실패는 거부다 — 실패가 허용이 되면 관문이 아니다.
+      decision = "deny"; // 중재자 실패는 거부다 — 실패가 허용이 되면 관문이 아니다.
     }
   }
-  if (!approved) {
+  ctx.onApprovalDecision?.(decision);
+  if (decision === "deny") {
     const denied = `tool call denied — "${toolName}" was not approved for this run.`;
     events.onTool?.(toolName, JSON.stringify(args), denied, callId, true);
     return { ok: false, content: denied };

@@ -26,6 +26,10 @@ export function LiveOutputViewer({
   fill = false,
   placement = "chat",
   imageActions = false,
+  onOpenExternal,
+  openExternalHint,
+  onExpand,
+  fileInfo,
 }: {
   source: string;
   name: string;
@@ -40,6 +44,14 @@ export function LiveOutputViewer({
   placement?: "chat" | "sidebar";
   /** Real image results expose the same copy/download contract in every chat surface. */
   imageActions?: boolean;
+  /** Present only when Main can really open the exact local file or URL. */
+  onOpenExternal?: () => void | Promise<void>;
+  /** Tells users whether Open targets an original path or a read-only copy. */
+  openExternalHint?: string;
+  /** Expands the owning rail; omitted when that surface has no width controller. */
+  onExpand?: () => void;
+  /** Optional exact binding metadata kept behind the toolbar's collapsed info control. */
+  fileInfo?: { sha256: string; binding: string; tabId: string };
 }) {
   const [observedMedia, setObservedMedia] = useState<{
     source: string;
@@ -161,7 +173,7 @@ export function LiveOutputViewer({
       <MediaStatus state={mediaState} locale={locale} />
     </div>;
   }
-  return <UniversalFileViewerEngine source={source} name={name} mimeType={mimeType} size={size} locale={locale} compact={compact} fill={fill} />;
+  return <UniversalFileViewerEngine source={source} name={name} mimeType={mimeType} size={size} locale={locale} compact={compact} fill={fill} onOpenExternal={onOpenExternal} openExternalHint={openExternalHint} onExpand={onExpand} fileInfo={fileInfo} />;
 }
 
 function MediaStatus({ state, locale }: { state: "loading" | "ready" | "error"; locale: "ko" | "en" }) {

@@ -304,6 +304,92 @@ export function acpMcpServersFromConfig(
   return out;
 }
 
+/**
+ * ACP select options are either a flat option list or a list of documented
+ * `{ group, name, options }` groups. Treat mixed and merely nested lookalikes
+ * as malformed instead of guessing a provider-specific shape.
+ */
+function sessionConfigSelectOptionEntries(options: unknown): any[] {
+  if (!Array.isArray(options)) return [];
+  const isOption = (value: unknown): value is { value: string } =>
+    Boolean(value)
+    && typeof value === "object"
+    && typeof (value as { value?: unknown }).value === "string"
+    && Boolean((value as { value: string }).value.trim());
+  if (options.every(isOption)) return options;
+
+  const isGroup = (value: unknown): value is { group: string; name: string; options: Array<{ value: string }> } => {
+    if (!value || typeof value !== "object") return false;
+    const group = value as { group?: unknown; name?: unknown; options?: unknown };
+    return typeof group.group === "string"
+      && typeof group.name === "string"
+      && Array.isArray(group.options) && group.options.every(isOption);
+  };
+  if (!options.every(isGroup)) return [];
+  return options.flatMap((group) => group.options);
+}
+
+/**
+ * A model selector the ACP agent explicitly advertised through session/new or
+ * session/load. `configId` is agent-owned: clients must send it back verbatim
+ * to session/set_config_option instead of guessing that every selector is
+ * named "model".
+ */
+export interface AcpModelConfigOption {
+  configId: string;
+  currentValue: string | null;
+  values: string[];
+}
+
+/**
+ * ACP v1's preferred model-selection contract. Categories are optional in the
+ * protocol, so preserve the established exact `id: "model"` fallback after a
+ * semantic category match. An acknowledgement is located by the exact config
+ * id originally selected: agents need not repeat category or option order.
+ */
+export function modelConfigOptionFromSession(response: any, expectedConfigId?: string): AcpModelConfigOption | null {
+  const options: any[] = Array.isArray(response?.configOptions) ? response.configOptions : [];
+  const picked = expectedConfigId !== undefined
+    ? options.find((option) => option && option.id === expectedConfigId)
+    : options.find((option) => option && option.category === "model")
+      ?? options.find((option) => option && option.id === "model");
+  const configId = typeof picked?.id === "string" && picked.id.trim() ? picked.id : "";
+  if (!configId) return null;
+  const values: string[] = [...new Set<string>(sessionConfigSelectOptionEntries(picked?.options)
+    .map((choice: any): string => typeof choice?.value === "string" ? choice.value : "")
+    .filter((value: string) => Boolean(value.trim())))];
+  if (values.length === 0) return null;
+  const currentValue = typeof picked.currentValue === "string" && picked.currentValue.trim()
+    ? picked.currentValue
+    : null;
+  return { configId, currentValue, values };
+}
+
+/**
+ * Older agents sometimes expose the pre-configOptions vendor model envelope.
+ * It has no config id or acknowledgement contract, so callers may use only
+ * the legacy session/set_model method when this exact envelope is present.
+ */
+export interface AcpLegacyModelSelection {
+  currentModelId: string | null;
+  modelIds: string[];
+}
+
+export function legacyModelSelectionFromSession(response: any): AcpLegacyModelSelection | null {
+  const models = response?.models;
+  if (!models || !Array.isArray(models.availableModels)) return null;
+  const modelIds: string[] = [...new Set<string>(models.availableModels
+    .map((choice: any): string => typeof (choice?.modelId ?? choice?.id) === "string"
+      ? String(choice.modelId ?? choice.id)
+      : "")
+    .filter((value: string) => Boolean(value.trim())))];
+  if (modelIds.length === 0) return null;
+  const currentModelId = typeof models.currentModelId === "string" && models.currentModelId.trim()
+    ? models.currentModelId
+    : null;
+  return { currentModelId, modelIds };
+}
+
 /** Model options from a session/new response — configOptions[category=model] first, vendor models[] second. */
 export function modelOptionsFromNewSession(response: any): Array<{ id: string; name: string; description?: string; current?: boolean }> {
   const rows: Array<{ id: string; name: string; description?: string; current?: boolean }> = [];
@@ -316,8 +402,10 @@ export function modelOptionsFromNewSession(response: any): Array<{ id: string; n
   };
   const options: any[] = Array.isArray(response?.configOptions) ? response.configOptions : [];
   const picked = options.find((o) => o && o.category === "model") ?? options.find((o) => o && o.id === "model");
-  if (picked && Array.isArray(picked.options)) {
-    for (const choice of picked.options) if (choice) push(choice.value, choice.name, choice.description, choice.value === picked.currentValue);
+  if (picked) {
+    for (const choice of sessionConfigSelectOptionEntries(picked.options)) {
+      push(choice.value, choice.name, choice.description, choice.value === picked.currentValue);
+    }
   }
   const vendor = response?.models;
   if (vendor && Array.isArray(vendor.availableModels)) {

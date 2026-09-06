@@ -19,7 +19,7 @@
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.97);
-  color: #181b20;
+  color: var(--ink);
   box-shadow: 0 34px 100px rgba(10, 14, 21, 0.28), 0 4px 16px rgba(10, 14, 21, 0.11);
   animation: dialogIn 210ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
 }
@@ -43,7 +43,7 @@
   border: 1px solid rgba(24, 27, 32, 0.12);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.76);
-  color: #1c2026;
+  color: var(--ink);
   cursor: pointer;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -51,7 +51,7 @@
 
 .close:hover,
 .close:focus-visible {
-  background: #ffffff;
+  background: var(--paper);
   border-color: rgba(24, 27, 32, 0.25);
 }
 
@@ -61,7 +61,7 @@
   overflow: hidden;
   border-radius: 21px 21px 0 0;
   border-bottom: 1px solid rgba(24, 27, 32, 0.08);
-  background: #eef1f2;
+  background: var(--paper-3);
 }
 
 .hero > img {
@@ -84,7 +84,7 @@
   border: 1px solid rgba(255, 255, 255, 0.78);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.7);
-  color: #14171b;
+  color: var(--ink);
   box-shadow: 0 8px 24px rgba(30, 39, 48, 0.1);
   backdrop-filter: blur(16px) saturate(0.85);
   -webkit-backdrop-filter: blur(16px) saturate(0.85);
@@ -110,7 +110,7 @@
 }
 
 .kicker {
-  color: #a93d32;
+  color: var(--danger);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10px;
   font-weight: 800;
@@ -120,7 +120,7 @@
 .promoBody h2,
 .heading h2 {
   margin: 0;
-  color: #171a1f;
+  color: var(--ink);
   font-family: var(--font-head, inherit);
   letter-spacing: -0.038em;
 }
@@ -134,7 +134,7 @@
 .promoBody > p,
 .heading p {
   margin: 0;
-  color: #60656d;
+  color: var(--ink-soft);
   font-size: 13.5px;
   line-height: 1.62;
   word-break: keep-all;
@@ -151,7 +151,7 @@
 .promoPoints li {
   position: relative;
   padding-left: 18px;
-  color: #3f444c;
+  color: var(--ink-soft);
   font-size: 12.5px;
   line-height: 1.45;
 }
@@ -163,7 +163,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #cf5548;
+  background: var(--danger);
   content: "";
 }
 
@@ -185,27 +185,27 @@
 }
 
 .primary {
-  border: 1px solid #17191d;
-  background: #17191d;
-  color: #ffffff;
+  border: 1px solid var(--black);
+  background: var(--black);
+  color: var(--white);
   box-shadow: 0 8px 22px rgba(15, 18, 22, 0.16);
 }
 
 .primary:hover,
 .primary:focus-visible {
-  background: #000000;
+  background: var(--black);
 }
 
 .secondary {
   border: 1px solid rgba(24, 27, 32, 0.12);
-  background: #f4f5f5;
-  color: #4f555d;
+  background: var(--paper-2);
+  color: var(--ink-soft);
 }
 
 .secondary:hover,
 .secondary:focus-visible {
-  background: #eceeed;
-  color: #1b1e23;
+  background: var(--paper-3);
+  color: var(--ink);
 }
 
 .promoActions {
@@ -218,21 +218,21 @@
   padding: 0 8px !important;
   border: 0;
   background: transparent;
-  color: #72777e;
+  color: var(--muted-deep);
   font-size: 11.5px !important;
   font-weight: 650 !important;
 }
 
 .never:hover,
 .never:focus-visible {
-  color: #24282e;
+  color: var(--ink);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 
 .preferenceError {
   margin: -4px 0 0;
-  color: #a2382f;
+  color: var(--danger);
   font-size: 11.5px;
   line-height: 1.45;
   text-align: center;
@@ -240,7 +240,7 @@
 
 .close:focus-visible,
 .actions button:focus-visible {
-  outline: 2px solid #be4b3f;
+  outline: 2px solid var(--danger);
   outline-offset: 2px;
 }
 
@@ -256,7 +256,7 @@
   gap: 10px;
   min-height: 54px;
   padding: 0 48px;
-  color: #22262b;
+  color: var(--ink);
 }
 
 .brandHeader span {
@@ -297,7 +297,7 @@
   overflow: hidden;
   border: 1px solid rgba(24, 27, 32, 0.1);
   border-radius: 15px;
-  background: #ffffff;
+  background: var(--paper);
 }
 
 .packageRow {
@@ -319,8 +319,8 @@
   place-items: center;
   flex-shrink: 0;
   border: 1px solid rgba(162, 59, 50, 0.15);
-  background: #fff6f3;
-  color: #26855c;
+  background: var(--danger-soft);
+  color: var(--ok);
 }
 
 .packageMark {
@@ -343,14 +343,14 @@
 }
 
 .packageCopy strong {
-  color: #23272d;
+  color: var(--ink);
   font-size: 12.5px;
   line-height: 1.35;
 }
 
 .packageCopy small {
   overflow: hidden;
-  color: #6c7179;
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -358,7 +358,7 @@
 }
 
 .packageSize {
-  color: #51565e;
+  color: var(--ink-soft);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -370,19 +370,19 @@
   justify-content: space-between;
   gap: 16px;
   margin-top: -8px;
-  color: #6b7078;
+  color: var(--muted-deep);
   font-size: 12px;
 }
 
 .totalRow strong {
-  color: #292d33;
+  color: var(--ink);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .installNote {
   margin: -10px 0 0;
-  color: #777c84;
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.5;
   text-align: center;
@@ -394,7 +394,7 @@
   padding: 18px;
   border: 1px solid rgba(24, 27, 32, 0.1);
   border-radius: 17px;
-  background: #ffffff;
+  background: var(--paper);
   box-shadow: 0 14px 36px rgba(26, 31, 38, 0.08);
 }
 
@@ -413,7 +413,7 @@
 
 .progressCard[data-complete="true"] .progressIcon {
   border-color: rgba(38, 133, 92, 0.18);
-  background: #effaf4;
+  background: var(--ok-soft);
 }
 
 .progressTitle {
@@ -423,20 +423,20 @@
 }
 
 .progressTitle strong {
-  color: #22262c;
+  color: var(--ink);
   font-size: 13px;
 }
 
 .progressTitle small {
   overflow: hidden;
-  color: #6d727a;
+  color: var(--muted-deep);
   font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .percent {
-  color: #4e545c;
+  color: var(--ink-soft);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -446,7 +446,7 @@
   height: 7px;
   overflow: hidden;
   border-radius: 999px;
-  background: #e7e9ea;
+  background: var(--paper-3);
 }
 
 .progressTrack span {
@@ -454,12 +454,12 @@
   min-width: 3px;
   height: 100%;
   border-radius: inherit;
-  background: #e35b49;
+  background: var(--danger);
   transition: width 240ms ease;
 }
 
 .progressCard[data-complete="true"] .progressTrack span {
-  background: #27a069;
+  background: var(--ok);
 }
 
 .progressMeta {
@@ -467,7 +467,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  color: #777c83;
+  color: var(--muted-deep);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
@@ -478,8 +478,8 @@
   padding: 14px 16px;
   border: 1px solid rgba(185, 56, 45, 0.18);
   border-radius: 13px;
-  background: #fff5f2;
-  color: #8f3028;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .errorCard strong {
@@ -488,7 +488,7 @@
 
 .errorCard code {
   overflow-wrap: anywhere;
-  color: #6f2923;
+  color: var(--danger);
   font-size: 11px;
 }
 

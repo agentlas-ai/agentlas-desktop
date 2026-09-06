@@ -29,6 +29,9 @@
 //   · 승인: tool-approval.ts 의 중재자 등록소(ACP answerPermission 과 같은 계약).
 import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { AcpConnection, AcpRpcError } from "./acp-protocol";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
@@ -40,6 +43,7 @@ import {
   type RuntimeToolPermissionAsk,
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
+import { CODEX_MCP_ELICITATION_METHOD } from "./codex-elicitation";
 
 export type { AcpSessionLease };
 
@@ -56,21 +60,28 @@ export const CODEX_APP_SERVER_ARGS = ["app-server", "--listen", "stdio://"] as c
  */
 export const CODEX_CLIENT_REQUESTS = [
   "initialize",
+  "model/list",
   "thread/resume",
   "thread/start",
   "turn/interrupt",
   "turn/start",
 ] as const;
 
-/** 서버가 우리에게 보내는 요청 — 승인 요청과 Main-owned dynamic tool call. */
-export const CODEX_SERVER_REQUESTS = [
+/** 실행 승인을 묻는 서버 요청. MCP form elicitation은 정보 입력이며 별도 경계다. */
+export const CODEX_APPROVAL_REQUESTS = [
   "applyPatchApproval",
   "execCommandApproval",
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "item/permissions/requestApproval",
-  "item/tool/call",
   "item/tool/requestUserInput",
+] as const;
+
+/** 서버가 우리에게 보내는 요청 — 승인, MCP elicitation, Main-owned dynamic tool call. */
+export const CODEX_SERVER_REQUESTS = [
+  ...CODEX_APPROVAL_REQUESTS,
+  CODEX_MCP_ELICITATION_METHOD,
+  "item/tool/call",
 ] as const;
 
 /** 우리가 실제로 소비하는 알림. 여기 없는 알림은 무시된다(모르는 것을 지어내지 않는다). */
@@ -79,6 +90,7 @@ export const CODEX_SERVER_NOTIFICATIONS = [
   "item/agentMessage/delta",
   "item/completed",
   "item/started",
+  "model/rerouted",
   "thread/started",
   "thread/tokenUsage/updated",
   "turn/completed",
@@ -106,6 +118,8 @@ export interface CodexResidentSession {
   closed: boolean;
   /** 이 프로세스가 들고 있는 thread — 다음 턴이 그대로 이어 쓴다. */
   threadId: string | null;
+  /** thread/start 또는 thread/resume 이 실제로 확인한 모델 선택. */
+  modelAcknowledgement: CodexModelAcknowledgement | null;
   /** `turn/completed` 까지 완주한 턴 수 — 구형 CLI(즉시 실패) 판별에 쓴다. */
   completedTurns: number;
   stopHeartbeat: () => void;
@@ -138,6 +152,7 @@ export async function openCodexResidentSession(opts: {
     active: null,
     closed: false,
     threadId: null,
+    modelAcknowledgement: null,
     completedTurns: 0,
     stopHeartbeat: () => {},
   };
@@ -209,6 +224,16 @@ export function codexResidentSessionAlive(session: CodexResidentSession): boolea
 
 /** 세션을 놓는 유일한 경로 — 생존 신호 정지 + 전송 close + 프로세스 트리 종료. */
 export function closeCodexResidentSession(session: CodexResidentSession): void {
+  if (session.threadId && !childExited(session.child)) {
+    const key = codexThreadOwnerKey(session, session.threadId);
+    const pending = pendingCodexWriterExits.get(key) ?? [];
+    if (!pending.includes(session.child)) {
+      pendingCodexWriterExits.set(key, [...pending, session.child]);
+      session.child.once("exit", () => {
+        if (pendingCodexWriterExits.get(key)?.every(childExited)) pendingCodexWriterExits.delete(key);
+      });
+    }
+  }
   session.closed = true;
   session.active = null;
   try { session.stopHeartbeat(); } catch { /* 이미 멈췄다 */ }
@@ -221,6 +246,122 @@ export function codexProtocolReceipt(init: any): string {
   const userAgent = String(init?.userAgent ?? "unknown").slice(0, 200);
   const platform = `${String(init?.platformOs ?? "?")}/${String(init?.platformFamily ?? "?")}`;
   return `[runtime-protocol] codex-app-server userAgent=${userAgent} platform=${platform}`;
+}
+
+/* ──────────────────────── 모델 선택 확인 ───────────────────────── */
+
+const CODEX_PROTOCOL_TOKEN = /^[^\x00-\x1f\x7f]{1,256}$/;
+
+export type CodexModelAcknowledgement = {
+  requestedModel: string | null;
+  model: string;
+  modelProvider: string;
+  mode: "provider-default" | "direct" | "canonical";
+};
+
+export class CodexModelSelectionError extends Error {
+  constructor(
+    public readonly code: "response_invalid" | "resolution_unverified" | "rerouted",
+    message: string,
+  ) {
+    super(message);
+    this.name = "CodexModelSelectionError";
+  }
+}
+
+type CodexProtocolRequest = (
+  method: string,
+  params: Record<string, unknown>,
+  options: { timeoutMs: number; signal?: AbortSignal },
+) => Promise<any>;
+
+function codexProtocolToken(value: unknown): value is string {
+  return typeof value === "string" && CODEX_PROTOCOL_TOKEN.test(value);
+}
+
+/**
+ * A thread response is the authority for the model the server selected. Exact
+ * equality needs no catalog call. A differing acknowledgement is accepted only
+ * when the server's complete, hidden-inclusive catalog explicitly maps the
+ * requested id to the acknowledged canonical model. Catalog failure or an
+ * incomplete/malformed page can prove nothing and therefore fails closed.
+ */
+export async function acknowledgeCodexThreadModel(input: {
+  request: CodexProtocolRequest;
+  response: any;
+  requestedModel?: string | null;
+  expectedThreadId?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<CodexModelAcknowledgement> {
+  const threadId = input.response?.thread?.id;
+  const model = input.response?.model;
+  const modelProvider = input.response?.modelProvider;
+  if (!codexProtocolToken(threadId)
+    || (input.expectedThreadId !== undefined && threadId !== input.expectedThreadId)
+    || !codexProtocolToken(model)
+    || !codexProtocolToken(modelProvider)) {
+    throw new CodexModelSelectionError("response_invalid", "Codex thread response did not acknowledge a valid thread, model, and provider.");
+  }
+  const requestedModel = input.requestedModel == null || input.requestedModel === ""
+    ? null
+    : input.requestedModel;
+  if (!requestedModel) return { requestedModel: null, model, modelProvider, mode: "provider-default" };
+  if (!codexProtocolToken(requestedModel)) {
+    throw new CodexModelSelectionError("response_invalid", "The requested Codex model is not a valid protocol value.");
+  }
+  if (requestedModel === model) return { requestedModel, model, modelProvider, mode: "direct" };
+
+  const deadline = Date.now() + Math.min(30_000, Math.max(1, input.timeoutMs ?? 30_000));
+  const cursors = new Set<string>();
+  const mappings = new Map<string, string>();
+  let cursor: string | undefined;
+  let rowCount = 0;
+  try {
+    do {
+      if (input.signal?.aborted) throw input.signal.reason ?? new Error("Codex model acknowledgement cancelled");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("model/list timed out");
+      const page = await input.request(
+        "model/list",
+        { limit: 100, includeHidden: true, ...(cursor ? { cursor } : {}) },
+        { timeoutMs: remaining, signal: input.signal },
+      );
+      if (!page || typeof page !== "object" || Array.isArray(page)
+        || !Array.isArray(page.data)
+        || !(page.nextCursor == null || codexProtocolToken(page.nextCursor))) {
+        throw new Error("model/list response is malformed");
+      }
+      for (const row of page.data) {
+        if (!row || typeof row !== "object" || Array.isArray(row)
+          || !codexProtocolToken(row.id) || !codexProtocolToken(row.model)
+          || mappings.has(row.id)) {
+          throw new Error("model/list row is malformed or duplicated");
+        }
+        mappings.set(row.id, row.model);
+        rowCount += 1;
+        if (rowCount > 512) throw new Error("model/list exceeded the supported bound");
+      }
+      cursor = page.nextCursor ?? undefined;
+      if (cursor !== undefined) {
+        if (cursors.has(cursor) || cursors.size >= 32) throw new Error("model/list cursor is invalid");
+        cursors.add(cursor);
+      }
+    } while (cursor);
+  } catch (error) {
+    if (error instanceof CodexModelSelectionError) throw error;
+    throw new CodexModelSelectionError(
+      "resolution_unverified",
+      `Codex acknowledged model ${model}, but the requested model ${requestedModel} could not be resolved from the complete server catalog: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (mappings.get(requestedModel) !== model) {
+    throw new CodexModelSelectionError(
+      "resolution_unverified",
+      `Codex acknowledged model ${model}, which was not an observed canonical mapping for requested model ${requestedModel}.`,
+    );
+  }
+  return { requestedModel, model, modelProvider, mode: "canonical" };
 }
 
 /* ────────────────────────────── 풀 ────────────────────────────── */
@@ -272,6 +413,75 @@ export function disposeCodexSessionPool(): void {
   appServerSupported = true;
 }
 
+export class CodexSessionContinuityError extends Error {
+  constructor(readonly code: "writer_busy" | "writer_close_timeout" | "resume_failed", message: string) {
+    super(message);
+    this.name = "CodexSessionContinuityError";
+  }
+}
+
+const codexResumeClaims = new Set<string>();
+const pendingCodexWriterExits = new Map<string, ChildProcess[]>();
+const childExited = (child: ChildProcess): boolean => child.exitCode !== null || child.signalCode !== null;
+const codexThreadOwnerKey = (session: CodexResidentSession, threadId: string): string =>
+  `${String(session.init?.codexHome ?? "")}\0${threadId}`;
+
+/** Transfer one persisted thread only after its previous idle writer has exited. */
+export async function prepareCodexThreadResume(
+  session: CodexResidentSession,
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<() => void> {
+  const key = codexThreadOwnerKey(session, threadId);
+  if (codexResumeClaims.has(key)) {
+    throw new CodexSessionContinuityError("writer_busy", "Codex thread resume is already in progress.");
+  }
+  codexResumeClaims.add(key);
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    codexResumeClaims.delete(key);
+  };
+  try {
+    if (signal?.aborted) throw signal.reason ?? new Error("Codex thread resume cancelled");
+    const ownership = codexSessionPool().retireIdleMatching((candidate) =>
+      candidate !== session && candidate.threadId === threadId
+      && candidate.init?.codexHome === session.init?.codexHome,
+    );
+    if (ownership.busy) {
+      throw new CodexSessionContinuityError("writer_busy", "Codex thread still belongs to an active turn.");
+    }
+    const children = [...new Set([...(pendingCodexWriterExits.get(key) ?? []), ...ownership.retired.map((item) => item.child)])]
+      .filter((child) => !childExited(child));
+    // Keep unfinished exits across cancellation/timeouts; a retry must not
+    // mistake removal from the pool for release of the CLI's writer lock.
+    if (children.length) pendingCodexWriterExits.set(key, children);
+    await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error): void => {
+        clearTimeout(timer);
+        child.removeListener("exit", onExit);
+        signal?.removeEventListener("abort", onAbort);
+        if (error) reject(error); else resolve();
+      };
+      const onExit = (): void => finish();
+      const onAbort = (): void => finish(signal?.reason instanceof Error ? signal.reason : new Error("Codex thread resume cancelled"));
+      const timer = setTimeout(() => finish(new CodexSessionContinuityError(
+        "writer_close_timeout", "Codex's previous thread writer did not exit; resume was stopped.",
+      )), 2_000);
+      child.once("exit", onExit);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (childExited(child)) finish();
+      else if (signal?.aborted) onAbort();
+    })));
+    pendingCodexWriterExits.delete(key);
+    return release;
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 /* ──────────────────────────── 강등(구형 CLI) ──────────────────────────── */
 
 /*
@@ -304,6 +514,88 @@ export function looksLikeMissingAppServer(stderr: string, err?: unknown): boolea
 
 /* ──────────────────────────── 재사용 키 ──────────────────────────── */
 
+const codexLaunchGenerations = new Map<string, { state: string; generation: string }>();
+
+/** Local launch inputs can change without a path/argv change (CLI updates,
+ * config edits). Hash config bytes, never log them. This is conservative source
+ * invalidation, not a reimplementation of Codex's effective TOML/MDM policy.
+ * Auth refresh files are deliberately excluded: credential lifecycle is separate.
+ */
+function localLaunchState(input: {
+  cwd: string; bin: string; args: string[]; env?: NodeJS.ProcessEnv;
+  mcpConfigPath?: string; toolBrokerSettingsPath?: string;
+}): string {
+  const digest = crypto.createHash("sha256");
+  const childEnv = input.env ?? process.env;
+  const cwd = path.resolve(input.cwd);
+  const home = path.resolve(cwd, childEnv.HOME || os.homedir());
+  const codexHome = path.resolve(cwd, childEnv.CODEX_HOME || path.join(home, ".codex"));
+  const files = new Set([
+    path.join(codexHome, "config.toml"),
+    path.join(codexHome, "managed_config.toml"),
+    "/etc/codex/config.toml",
+    "/etc/codex/requirements.toml",
+  ]);
+  for (let dir = path.resolve(input.cwd); ; dir = path.dirname(dir)) {
+    files.add(path.join(dir, ".codex", "config.toml"));
+    if (path.dirname(dir) === dir) break;
+  }
+  for (let i = 0; i < input.args.length; i += 1) {
+    const arg = input.args[i];
+    const profile = arg === "--profile" || arg === "-p"
+      ? input.args[++i]
+      : arg.startsWith("--profile=") ? arg.slice("--profile=".length) : undefined;
+    if (profile) files.add(path.join(codexHome, `${profile}.config.toml`));
+  }
+  if (input.mcpConfigPath) files.add(path.resolve(cwd, input.mcpConfigPath));
+  if (input.toolBrokerSettingsPath) files.add(path.resolve(cwd, input.toolBrokerSettingsPath));
+  for (const file of [...files].sort()) {
+    digest.update(file).update("\0");
+    try {
+      const bytes = fs.readFileSync(file);
+      digest.update("file\0").update(bytes);
+    } catch (error) {
+      // An unreadable source must not accidentally reuse an older readable
+      // generation. Let the new CLI report its own configuration error.
+      const code = (error as NodeJS.ErrnoException).code;
+      digest.update(code === "ENOENT" || code === "ENOTDIR" ? "missing" : crypto.randomUUID());
+    }
+    digest.update("\0");
+  }
+  try {
+    const executable = input.bin.includes(path.sep)
+      ? path.resolve(cwd, input.bin)
+      : (childEnv.PATH ?? "/usr/bin:/bin").split(path.delimiter)
+        .map((dir) => path.resolve(cwd, dir, input.bin))
+        .find((file) => { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } });
+    const resolved = fs.realpathSync(executable ?? path.resolve(cwd, input.bin));
+    const stat = fs.statSync(resolved, { bigint: true });
+    // Include the symlink target and replacement metadata without rereading a
+    // large executable on every turn. This detects normal in-place/atomic CLI
+    // updates; it is not an executable integrity or same-UID tamper guarantee.
+    digest.update(resolved).update("\0");
+    for (const value of [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs]) {
+      digest.update(String(value)).update("\0");
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    digest.update(code === "ENOENT" || code === "ENOTDIR" ? "missing-executable" : crypto.randomUUID());
+  }
+  const state = digest.digest("hex");
+  const scope = crypto.createHash("sha256").update(JSON.stringify([
+    cwd, input.bin, input.args, input.mcpConfigPath, input.toolBrokerSettingsPath,
+    Object.entries(childEnv).sort(([a], [b]) => a.localeCompare(b)),
+  ])).digest("hex");
+  const previous = codexLaunchGenerations.get(scope);
+  const generation = previous?.state === state ? previous.generation : crypto.randomUUID();
+  codexLaunchGenerations.delete(scope);
+  codexLaunchGenerations.set(scope, { state, generation });
+  if (codexLaunchGenerations.size > 128) codexLaunchGenerations.delete(codexLaunchGenerations.keys().next().value!);
+  // A -> B -> A is a new launch generation too. Old idle processes remain under
+  // the pool's existing eviction policy, but cannot regain reuse after rollback.
+  return generation;
+}
+
 /**
  * 재사용 키 — claude·ACP 와 **같은 축**이다: 세션 지문(모델·시스템프롬프트·권한 —
  * 기존 계약 그대로) 위에 프로세스 정체성(cwd · MCP 설정 · 실행 파일 · 도구 관문 · argv)을
@@ -324,7 +616,7 @@ export function codexPoolKey(input: {
   bin: string;
   mcpConfigPath?: string;
   toolBrokerSettingsPath?: string;
-  /** 스폰 argv(app-server 하위 명령 + `-c` 오버라이드들). 정렬해서 넣는다. */
+  /** 스폰 argv 그대로: 반복된 옵션은 순서에 따라 적용 값이 달라진다. */
   args: string[];
   env?: NodeJS.ProcessEnv;
 }): string {
@@ -333,10 +625,10 @@ export function codexPoolKey(input: {
     envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
   }
   const argvDigest = crypto.createHash("sha256");
-  for (const arg of [...input.args].sort()) argvDigest.update(arg).update("\0");
+  for (const arg of input.args) argvDigest.update(arg).update("\0");
   return crypto
     .createHash("sha256")
-    .update("codex-pool-v1\0")
+    .update("codex-pool-v2\0")
     .update(input.chatId).update("\0")
     .update(input.fingerprint).update("\0")
     .update(input.cwd).update("\0")
@@ -345,6 +637,7 @@ export function codexPoolKey(input: {
     .update(input.toolBrokerSettingsPath ?? "").update("\0")
     .update(argvDigest.digest("hex")).update("\0")
     .update(envDigest.digest("hex"))
+    .update("\0").update(localLaunchState(input))
     .digest("hex");
 }
 
@@ -362,7 +655,11 @@ export interface CodexApprovalContext {
 
 /** 이 요청이 승인 대상인가(우리가 답을 아는 6종). */
 export function isCodexApprovalRequest(method: string): boolean {
-  return (CODEX_SERVER_REQUESTS as readonly string[]).includes(method);
+  return (CODEX_APPROVAL_REQUESTS as readonly string[]).includes(method);
+}
+
+export function isCodexMcpElicitationRequest(method: string): boolean {
+  return method === CODEX_MCP_ELICITATION_METHOD;
 }
 
 const text = (value: unknown): string | undefined => {

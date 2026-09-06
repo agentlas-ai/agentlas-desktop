@@ -7,27 +7,46 @@
 }
 :root {
   color-scheme: light;
-  /* Pure white, with a neutral grey ramp. No paper cast, no warm tint: the rail and the
-     tabstrip used to run two different greys (warm vs cool) and the seam showed.
-     The app background and the card surface are now the same white, so separation comes from
-     the border and the shadow rather than from a tint -- a card is told apart by its edge. */
-  --app-bg: #ffffff;
-  --sidebar-bg: #ffffff;
-  --surface: #ffffff;
+  /* Science owns this namespace. These tokens never escape the extension document. */
+  --science-surface-0: #FFFFFF;
+  --science-surface-1: #F7F7F7;
+  --science-surface-2: #EFEFEF;
+  --science-border-subtle: #E8E8E8;
+  --science-border-default: #DDDDDD;
+  --science-border-strong: #CFCFCF;
+  --science-ink: #363535;
+  --science-radius-card: 16px;
+  --science-radius-control: 12px;
+  --science-radius-button-l: 24px;
+  --science-radius-button-m: 20px;
+  --science-radius-button-s: 16px;
+  --science-button-l-height: 56px;
+  --science-button-m-height: 40px;
+  --science-button-s-height: 36px;
+  --science-icon-button-size: 40px;
+  --science-space-from-44: 32px;
+  --science-space-from-56: 24px;
+  --science-space-from-72: 12px;
+  --science-shadow-standard: 0 20px 26px rgba(54, 53, 53, .16);
+  /* The shell and rail share the same neutral page grey so their join never becomes a second
+     visual divider. Cards stay on surface-0 and are separated from the page by their edge. */
+  --app-bg: #F7F7F7;
+  --sidebar-bg: #F7F7F7;
+  --surface: #FFFFFF;
   --surface-subtle: var(--grey-50);
-  --surface-muted: var(--grey-100);
-  --ink: #1a1a1c;
+  --surface-muted: var(--science-surface-2);
+  --ink: var(--science-ink);
   --muted: var(--grey-600);
   --muted-deep: var(--grey-700);
   --line: var(--grey-200);
-  --line-strong: var(--grey-300);
-  --soft: var(--grey-100);
-  --soft-strong: var(--grey-200);
+  --line-strong: var(--science-border-default);
+  --soft: var(--science-surface-1);
+  --soft-strong: var(--science-surface-2);
   /* Surface roles are named by where they live. The shell/rail is near-white,
      a panel or manuscript page is white, and only the preview stage behind that
      page is neutral grey. Keeping the roles separate prevents palette changes
      from leaking a paper colour into the app shell. */
-  --manuscript-stage-bg: #f3f3f3;
+  --manuscript-stage-bg: #f7f7f7;
   --manuscript-paper-bg: var(--surface);
   /* 280px: the wordmark lockup measures 212px at its approved size and the collapse
      control needs 38px more. The old 274px clipped it mid-word. */
@@ -36,6 +55,12 @@
   --science-chat-width: 388px;
   --science-chat-width-compact: 360px;
   --science-workspace-gutter: 12px;
+  --science-question-chat-width: var(--science-chat-width);
+  --science-question-rail-width: var(--rail-expanded);
+  --science-question-gap: 1cm;
+  --science-question-max-width: 460px;
+  --science-question-compact-width: 340px;
+  --science-question-width: min(var(--science-question-max-width), calc(100vw - var(--science-question-chat-width) - var(--science-question-rail-width) - var(--science-question-gap) - var(--science-workspace-gutter)));
   --danger: #b42318;
   /* Brand coral, measured from the approved wordmark: the one accent this product owns. */
   --brand-coral: #fd7258;
@@ -44,15 +69,15 @@
      Neutral grey ramp. Every ad-hoc grey in this file resolves here; warm/paper greys
      do not come back. The older aliases above stay so the 470-odd existing references
      keep working while rows are migrated one at a time. */
-  --grey-50: #f7f7f9;
-  --grey-100: #f0f0f3;
-  --grey-200: #e4e4e9;
-  --grey-300: #d4d4da;
-  --grey-400: #b0b0b8;
+  --grey-50: var(--science-surface-1);
+  --grey-100: var(--science-surface-2);
+  --grey-200: var(--science-border-subtle);
+  --grey-300: var(--science-border-default);
+  --grey-400: var(--science-border-strong);
   --grey-500: #8c8c95;
   --grey-600: #6a6a73;
   --grey-700: #4a4a52;
-  --grey-800: #2e2e34;
+  --grey-800: var(--science-ink);
 
   /* Alarm is spent in exactly one place: a verification chain that actually broke.
      Everything else that "looks bad" is a different state with a different shape. */
@@ -62,24 +87,24 @@
   --notice-bg: rgba(190, 150, 30, .08);
 
   /* Elevation ladder (REF-09). Ring first, drop second; no new shadow values. */
-  --elev-1: 0 0 0 1px rgba(0,0,0,.05), 0 1px 1px rgba(0,0,0,.05), 0 2px 2px rgba(0,0,0,.05);
+  --elev-1: 0 1px 2px rgba(54, 53, 53, .06);
   /* A card on a pure-white page. The background and the card are the same white now, so what
      separates them is the edge and the lift -- a hairline ring for the boundary and one soft,
      wide shadow for the height. Kept faint on purpose: a card should look placed, not cut out. */
-  --elev-card: 0 0 0 1px rgba(0,0,0,.045), 0 1px 2px rgba(0,0,0,.04), 0 6px 16px rgba(0,0,0,.06);
-  --elev-3: 0 0 0 1px rgba(0,0,0,.05), 0 1px 1px rgba(0,0,0,.05), 0 2px 2px rgba(0,0,0,.05), 0 4px 4px rgba(0,0,0,.05), 0 8px 8px rgba(0,0,0,.05);
-  --elev-5: 0 0 0 1px rgba(0,0,0,.06), 0 1px 1px -.5px rgba(0,0,0,.06), 0 3px 3px -1.5px rgba(0,0,0,.06), 0 6px 6px -3px rgba(0,0,0,.06), 0 12px 12px -6px rgba(0,0,0,.06), 0 24px 24px -12px rgba(0,0,0,.06);
+  --elev-card: var(--science-shadow-standard);
+  --elev-3: var(--science-shadow-standard);
+  --elev-5: var(--science-shadow-standard);
 
   /* Motion budget: the board carried exactly one motion reference, and it was data
      movement, not decoration. */
   --motion-state: 160ms cubic-bezier(.2,0,0,1);
   --motion-rail: 200ms cubic-bezier(.32,.72,0,1);
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: var(--app-bg); color: var(--ink); }
+body { background: var(--app-bg); color: var(--ink); word-break: keep-all; overflow-wrap: break-word; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; color: inherit; }
 .uiIcon { width: 16px; height: 16px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; }
@@ -93,7 +118,9 @@ button { cursor: pointer; color: inherit; }
 .rail { position: relative; z-index: 10; grid-column: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--sidebar-bg); border-right: 1px solid var(--line); opacity: 1; transform: translateX(0); transition: opacity 120ms linear, transform 200ms cubic-bezier(.32,.72,0,1); }
 .rail > *, .rail nav, .rail section, .rail button { min-width: 0; max-width: 100%; }
 .workspace[data-rail-collapsed="true"] .rail { opacity: 1; transform: none; pointer-events: auto; }
-.railBrand { min-height: 64px; display: flex; align-items: center; gap: 8px; padding: 10px 16px; }
+/* 좌우 여백 14px. 16px 이면 기본 사이드바 폭에서도 이름이 3px 모자라 끝의 별표가 잘렸다 --
+   가장 넓은 창에서조차 그랬다. 글자 크기는 정해진 값이므로 여백에서 자리를 낸다. */
+.railBrand { min-height: 64px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
 .railBrandLockup { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; overflow: hidden; }
 .railBrandMark { width: 32px; height: 35px; display: block; flex: 0 0 32px; object-fit: contain; }
 .railBrandWordmark { min-width: 0; flex: 0 1 auto; display: flex; align-items: center; overflow: hidden; }
@@ -109,8 +136,8 @@ button { cursor: pointer; color: inherit; }
 .railCollapseButton:hover, .workspaceSidebarReveal:hover { background: var(--grey-100); color: var(--ink); }
 .railCollapseButton:focus-visible, .workspaceSidebarReveal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .railCollapseButton .uiIcon, .workspaceSidebarReveal .uiIcon { width: 15px; height: 15px; }
-.workspaceSidebarReveal { display: none; align-self: center; border: 1px solid var(--line-strong); background: var(--surface); box-shadow: 0 1px 2px rgba(35,35,33,.04); }
-.workspace[data-rail-collapsed="true"] .workspaceSidebarReveal { display: grid; }
+.workspaceSidebarReveal { display: grid; align-self: center; border: 1px solid var(--line-strong); background: var(--surface); box-shadow: 0 1px 2px rgba(35,35,33,.04); }
+.workspace[data-rail-collapsed="true"] .workspaceSidebarReveal { display: grid !important; visibility: visible !important; }
 .railScrim { display: none; }
 .railBackButton { min-height: 38px; margin: 0 12px 8px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 10px; background: transparent; color: var(--muted-deep); padding: 8px 10px; text-align: left; }
 .railBackButton:hover, .railBackButton:focus-visible { background: var(--soft); color: var(--ink); }
@@ -124,6 +151,10 @@ button { cursor: pointer; color: inherit; }
 .newButton:hover { background: var(--grey-50); border-color: var(--grey-400); }
 .rail[data-rail-mode="session"] .newButton { border-color: var(--line-strong); background: var(--surface); color: var(--ink); }
 .rail[data-rail-mode="session"] .newButton:hover { background: var(--grey-50); border-color: var(--grey-400); }
+.railScrollable { min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: thin; }
+.railScrollable .projectWorkflowNav { max-height: none; overflow: visible; }
+.railScrollable .labSection { min-height: auto; flex: 0 0 auto; }
+.railScrollable .labList { overflow: visible; }
 .railLabel { padding: 24px 16px 8px; color: var(--grey-600); font-size: 12px; font-weight: 650; letter-spacing: 0; text-transform: none; }
 .railSection { min-height: 0; }
 .recentProjectsSection { flex: 0 0 auto; margin-bottom: 10px; }
@@ -167,6 +198,12 @@ button { cursor: pointer; color: inherit; }
 .projectTitle { display: block; font-size: 12px; font-weight: 680; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .projectMeta { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .labSection { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border-top: 0; }
+.railDisclosureRow { min-width: 0; display: flex; align-items: center; padding-right: 10px; }
+.railDisclosureRow .railDisclosure { min-width: 0; flex: 1 1 auto; padding-right: 8px; }
+.manageLabsButton { width: 28px; height: 28px; flex: 0 0 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted-deep); padding: 0; }
+.manageLabsButton:hover { border-color: var(--line-strong); background: var(--soft); color: var(--ink); }
+.manageLabsButton:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.manageLabsButton .uiIcon { width: 13px; height: 13px; }
 .railDisclosure { width: 100%; height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: space-between; border: 0; background: transparent; padding: 0 20px; color: var(--ink); font-size: 11px; font-weight: 750; letter-spacing: .01em; text-transform: none; }
 .railDisclosure > .uiIcon { width: 13px; height: 13px; color: var(--muted); }
 .labList { display: none; min-height: 0; overflow-y: auto; padding: 0 10px 18px; }
@@ -207,7 +244,7 @@ button { cursor: pointer; color: inherit; }
 .manuscriptRailButton em { margin-top: 3px; color: var(--muted); font-size: 11px; font-style: normal; }
 .manuscriptEmptyButton { width: 100%; height: 34px; border: 1px dashed var(--line-strong); border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; }
 .manuscriptEmptyButton:hover { background: var(--soft); color: var(--ink); }
-.researcherCard { min-height: 72px; display: flex; align-items: center; gap: 11px; margin-top: auto; border-top: 1px solid var(--line); padding: 12px 18px; }
+.researcherCard { min-height: 72px; flex: 0 0 auto; display: flex; align-items: center; gap: 11px; margin-top: 0; border-top: 1px solid var(--line); padding: 12px 18px; }
 .researcherAvatar { width: 39px; height: 39px; display: grid; place-items: center; flex: 0 0 39px; border-radius: 50%; background: #f1f1f1; font-size: 11px; font-weight: 720; }
 .researcherCard > span:nth-child(2) { min-width: 0; flex: 1; }
 .researcherCard strong, .researcherCard em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -232,6 +269,8 @@ button { cursor: pointer; color: inherit; }
 .workspace[data-rail-collapsed="true"] .researcherCard button { display: none; }
 .workspace[data-rail-collapsed="true"] .newButton { width: 44px; margin: 0 auto 18px; justify-content: center; padding: 0; }
 .workspace[data-rail-collapsed="true"] .newButton strong { display: none; }
+.workspace[data-rail-collapsed="true"] .projectLibraryBack { width: 44px; justify-content: center; margin-right: auto; margin-left: auto; padding: 0; }
+.workspace[data-rail-collapsed="true"] .projectLibraryBack span { display: none; }
 .workspace[data-rail-collapsed="true"] .labSection { border-top: 1px solid var(--line); }
 .workspace[data-rail-collapsed="true"] .labList,
 .workspace[data-rail-collapsed="true"] .labList.isOpen { display: block; padding: 10px 12px; }
@@ -317,10 +356,10 @@ button { cursor: pointer; color: inherit; }
 .workspaceCenter { min-width: 0; flex: 1; container: science-center / inline-size; }
 .workspaceSurface { min-height: 100%; height: 100%; }
 
-.chatDock { min-width: var(--science-chat-width); flex: 0 0 var(--science-chat-width); min-height: 0; padding: 16px 10px 16px 12px; background: var(--app-bg); }
+.chatDock { position: relative; z-index: 3; min-width: var(--science-chat-width); flex: 0 0 var(--science-chat-width); min-height: 0; padding: 0; background: var(--surface); border-left: 1px solid var(--line); }
 .workspace[data-workspace-mode="session"] .chatDock, .workspace[data-workspace-mode="manuscript"] .chatDock { min-width: var(--science-chat-width); flex-basis: var(--science-chat-width); }
-.workspace[data-workspace-mode="manuscript"] .chatDock { padding-top: 10px; }
-.chatDockFrame { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: 0 12px 30px rgba(32,32,28,.07), 0 1px 4px rgba(32,32,28,.035); }
+.workspace[data-workspace-mode="manuscript"] .chatDock { padding-top: 0; }
+.chatDockFrame { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 0; border-radius: 0; background: var(--surface); box-shadow: none; }
 .chatDockHeader { flex: 0 0 auto; min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .chatPartner { min-width: 0; display: flex; align-items: center; gap: 9px; }
 .chatPartnerMark { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 34px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); color: #252525; }
@@ -341,18 +380,32 @@ button { cursor: pointer; color: inherit; }
 .chatMessage.isUser { max-width: 100%; margin-left: 0; border: 0; border-left: 2px solid var(--grey-300); border-radius: 0; background: transparent; box-shadow: none; padding: 10px 0 10px 12px; }
 .chatMessageRole { margin-bottom: 6px; color: var(--grey-500); font-size: 11px; font-weight: 620; }
 .chatMessageContent { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chatMessageContent.scienceChatMarkdown { white-space: normal; min-width: 0; }
+.scienceChatMarkdown > :first-child { margin-top: 0; }
+.scienceChatMarkdown > :last-child { margin-bottom: 0; }
+.scienceChatMarkdown p, .scienceChatMarkdown ul, .scienceChatMarkdown ol, .scienceChatMarkdown blockquote { margin: 0 0 12px; }
+.scienceChatMarkdown ul, .scienceChatMarkdown ol { padding-left: 20px; }
+.scienceChatMarkdown li > ul, .scienceChatMarkdown li > ol { margin: 4px 0 0; }
+.scienceChatMarkdown li + li { margin-top: 4px; }
+.scienceChatMarkdown h1, .scienceChatMarkdown h2, .scienceChatMarkdown h3 { font-size: 14px; line-height: 1.5; margin: 16px 0 8px; }
+.scienceChatMarkdown code { font-size: .92em; overflow-wrap: anywhere; }
+.scienceChatMarkdown pre { max-width: 100%; overflow-x: auto; white-space: pre; padding: 10px; border: 1px solid #DDDDDD; border-radius: 12px; }
+.scienceChatMarkdown pre code { overflow-wrap: normal; }
+.scienceChatMarkdown blockquote { border-left: 2px solid #DDDDDD; padding-left: 12px; }
+.chatMessageInstructions { margin-top: 10px; min-width: 0; color: var(--grey-700); }
+.chatMessageInstructions > summary { cursor: pointer; font-size: 12px; line-height: 1.6; }
+.chatMessageInstructions > .chatMessageContent { margin-top: 8px; }
 .chatArtifactLink { width: 100%; margin-top: 9px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); padding: 9px 10px; text-align: left; font-size: 12px; }
 .chatArtifactLink:hover { border-color: var(--line-strong); background: var(--soft); }
 .chatArtifactLink strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chatArtifactLink span { display: block; margin-top: 3px; color: var(--muted); }
 .chatDockComposer { flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--surface); overflow: hidden; }
+.chatDockComposer { position: relative; overflow: visible; }
+.chatDockFrame:has(.scienceModelMenu) { overflow: visible; }
 .composer.dockedComposer { position: static; z-index: auto; left: auto; right: auto; bottom: auto; padding: 0; background: transparent; pointer-events: auto; }
 .composer.dockedComposer .composerBox { width: 100%; max-width: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
 .composer.dockedComposer textarea { min-height: 58px; height: 58px; padding: 14px 14px 6px; color: var(--ink); }
 .composer.dockedComposer .composerBar { min-height: 44px; padding: 4px 7px 7px; }
-.chatContextLine { min-height: 34px; display: flex; align-items: center; gap: 7px; margin: 9px 10px 7px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 0 10px; color: var(--muted); font-size: 12px; }
-.chatContextLine .uiIcon { width: 13px; height: 13px; flex: 0 0 13px; }
-.chatContextLine span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chatContextTokens { min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0 10px 8px; overflow: hidden; }
 .chatContextTokens > span { min-width: 0; height: 31px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); padding: 0 9px; color: var(--muted); font-size: 11px; }
 .chatContextTokens > span:first-child { flex: 1 1 auto; }
@@ -364,7 +417,7 @@ button { cursor: pointer; color: inherit; }
 .researchView { min-height: 100%; padding: 31px 28px 72px; }
 .answerColumn { max-width: 720px; margin: 0; }
 .researchKicker { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .04em; margin-bottom: 10px; }
-.answerColumn > h1 { margin: 0 0 24px; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: clamp(18px, 1.8vw, 23px); line-height: 1.3; letter-spacing: -.02em; font-weight: 680; }
+.answerColumn > h1 { margin: 0 0 24px; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: clamp(18px, 1.8vw, 23px); line-height: 1.3; letter-spacing: -.02em; font-weight: 680; }
 .researchContractNotice { width: 100%; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: -8px 0 18px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface-muted); padding: 10px 13px; text-align: left; }
 .researchContractNotice:hover { background: #f1f1f1; }
 .researchContractNotice > span { min-width: 0; display: flex; align-items: center; gap: 9px; }
@@ -377,23 +430,25 @@ button { cursor: pointer; color: inherit; }
 .answer { max-width: 690px; }
 .answer:focus-visible { outline: 2px solid var(--ink); outline-offset: 8px; border-radius: 5px; }
 .answerMeta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-.answer p, .answerBlock p { margin: 0; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; }
+.answer p, .answerBlock p { margin: 0; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; }
 .answerBlock { margin-bottom: 15px; }
-.inlineArtifacts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-top: 18px; }
-.inlineArtifact { min-width: 0; min-height: 120px; display: flex; flex-direction: column; align-items: flex-start; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 13px; text-align: left; box-shadow: 0 6px 18px rgba(36, 33, 29, .035); overflow: hidden; }
-.inlineArtifact:hover { border-color: var(--line-strong); background: #fdfcfc; }
-.artifactPreviewType { color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-.artifactConnection { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; color: var(--muted); font-size: 11px; }
-.artifactConnection span:first-child { color: var(--ink); font-weight: 700; }
-.artifactConnection span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.inlineArtifactPreview { width: 100%; min-height: 190px; max-height: 230px; display: grid; place-items: center; margin: 9px 0 2px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); overflow: hidden; background: var(--surface); }
+.inlineArtifacts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 18px; }
+.inlineArtifactItem { min-width: 0; display: grid; }
+.inlineArtifact { width: 100%; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; border: 1px solid transparent; border-radius: 10px; background: transparent; padding: 6px; text-align: left; box-shadow: none; overflow: hidden; transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease; }
+.inlineArtifact:hover { border-color: var(--line); background: var(--surface-subtle); transform: scale(1.012); }
+.inlineArtifact:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.inlineArtifactPreview { width: 100%; min-height: 118px; max-height: 230px; display: grid; place-items: center; margin: 0 0 10px; border: 0; border-radius: 8px; overflow: hidden; background: var(--surface-subtle); }
 .inlineArtifactPreview canvas, .inlineArtifactPreview svg { display: block; max-width: 100%; }
-.inlineArtifactPreview img { display: block; width: 100%; height: 220px; object-fit: contain; }
-.inlineArtifactPreview[data-render-failed="true"] { min-height: 80px; color: var(--danger); font-size: 11px; }
-.inlineArtifactPreview[data-preview-missing="true"] { min-height: 100px; padding: 18px; color: var(--muted); font-size: 11px; text-align: center; }
-.inlineArtifact strong { display: block; margin-top: 11px; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, sans-serif; font-size: 15px; line-height: 1.35; }
-.inlineArtifact > span:not(.artifactPreviewType) { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
-.inlineArtifact em { margin-top: auto; padding-top: 14px; color: var(--ink); font-size: 12px; font-style: normal; font-weight: 700; }
+.inlineArtifactPreview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.inlineArtifactPreview[data-render-failed="true"], .inlineArtifactPreview[data-preview-missing="true"] { min-height: 64px; aspect-ratio: auto; padding: 14px; color: var(--muted-deep); font-size: 11px; text-align: center; }
+.inlineArtifactPreviewStatus { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; }
+.inlineArtifact strong { display: block; margin: 0 4px; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, sans-serif; font-size: 15px; line-height: 1.35; }
+.inlineArtifact > span:not(.inlineArtifactPreview) { display: block; margin: 5px 4px 1px; color: var(--muted); font-size: 11px; }
+.inlineArtifactRetry { width: max-content; min-height: 28px; justify-self: end; margin: 3px 6px 0; border: 0; border-radius: 7px; background: transparent; padding: 0 8px; color: var(--muted-deep); font-size: 11px; font-weight: 650; }
+.inlineArtifactRetry:hover { background: var(--surface-subtle); color: var(--ink); }
+.inlineArtifactRetry:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.inlineArtifactRetry:disabled { cursor: progress; opacity: .62; }
+@media (prefers-reduced-motion: reduce) { .inlineArtifact { transition: none; } .inlineArtifact:hover { transform: none; } }
 .citationRow { display: inline-flex; gap: 4px; margin-top: 7px; }
 .citationChip { min-width: 30px; height: 25px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--muted); font-size: 12px; font-weight: 650; }
 /* With nothing to show, the empty block owns the pane and centres on both axes.
@@ -558,7 +613,7 @@ button { cursor: pointer; color: inherit; }
 .episodeResultReviewSheet > header { min-width: 0; min-height: 80px; flex: 0 0 auto; align-items: center; border-bottom: 1px solid var(--line); padding: 16px 20px 15px 24px; }
 .episodeResultReviewSheet > header > div { min-width: 0; }
 .episodeResultReviewSheet > header span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bottomSheet.episodeResultReviewSheet > header h2 { margin-top: 6px; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 18px; font-weight: 690; line-height: 1.3; overflow-wrap: anywhere; }
+.bottomSheet.episodeResultReviewSheet > header h2 { margin-top: 6px; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 18px; font-weight: 690; line-height: 1.3; overflow-wrap: anywhere; }
 .bottomSheet.episodeResultReviewSheet > header button { width: auto; height: 32px; flex: 0 0 auto; border: 0; border-radius: 8px; background: transparent; padding: 0 10px; color: var(--muted-deep); font-size: 11px; font-weight: 650; white-space: nowrap; }
 .bottomSheet.episodeResultReviewSheet > header button:hover { background: var(--soft); color: var(--ink); }
 .resultReviewBody { min-width: 0; min-height: 0; flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) 310px; align-items: start; gap: 16px; overflow-x: hidden; overflow-y: auto; padding: 18px 24px 22px; scrollbar-gutter: stable; }
@@ -629,11 +684,51 @@ button { cursor: pointer; color: inherit; }
 .composerBar button { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 34px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .composerBar button:disabled { cursor: not-allowed; opacity: .55; }
 .composerBar .sendButton { width: 38px; height: 38px; flex-basis: 38px; border-radius: 11px; background: var(--ink); color: white; border-color: var(--ink); font-size: 18px; }
-.composerAttachButton { order: 1; }
-.composerAttachButton .uiIcon { width: 15px; height: 15px; }
-.composerModePill { order: 2; height: 30px; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); padding: 0 9px; color: var(--ink); font-weight: 650; }
-.composerModePill .uiIcon { width: 13px; height: 13px; }
-.composerStatus { order: 3; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composerStatus { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scienceModelPicker { position: static; min-width: 0; flex: 0 1 auto; }
+.scienceModelTrigger { min-width: 0; max-width: 190px; height: 32px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); padding: 0 8px; color: var(--ink); text-align: left; }
+.scienceModelTrigger:hover:not(:disabled), .scienceModelTrigger:focus-visible { border-color: var(--line-strong); background: var(--soft); }
+.scienceModelTrigger.isRequired { border-color: var(--line-strong); }
+.scienceModelTrigger:disabled { cursor: not-allowed; opacity: .72; }
+.scienceModelTriggerMark { flex: 0 0 auto; color: var(--ink); font-size: 13px; line-height: 1; }
+.scienceModelTriggerCopy { min-width: 0; display: grid; gap: 1px; line-height: 1.15; }
+.scienceModelTriggerCopy strong { overflow: hidden; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.scienceModelTriggerCopy em { overflow: hidden; color: var(--muted); font-size: 9px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.scienceModelTriggerChevron { flex: 0 0 auto; color: var(--muted); font-size: 14px; line-height: 1; }
+.scienceModelMenu { position: absolute; z-index: 30; right: 0; bottom: calc(100% + 8px); width: min(320px, calc(100vw - 28px)); max-height: min(360px, calc(100vh - 180px)); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 8px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--science-radius-card); background: var(--surface); box-shadow: var(--science-shadow-standard); padding: 10px; }
+.scienceModelMenuHeader { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scienceModelMenuHeader strong { color: var(--ink); font-size: 12px; font-weight: 700; }
+.scienceModelClose { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 17px; line-height: 1; }
+.scienceModelClose:hover, .scienceModelClose:focus-visible { background: var(--soft); color: var(--ink); }
+.scienceModelSearch { min-width: 0; height: 34px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); padding: 0 9px; color: var(--muted); }
+.scienceModelSearch .uiIcon { width: 14px; height: 14px; flex: 0 0 14px; }
+.scienceModelSearch input { width: 100%; min-width: 0; height: 30px; border: 0; outline: none; background: transparent; color: var(--ink); font-size: 11px; }
+.scienceModelOptions { min-height: 0; display: grid; gap: 2px; overflow-y: auto; overscroll-behavior: contain; }
+.scienceModelOption { min-width: 0; min-height: 48px; display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 9px; background: transparent; padding: 7px 8px; color: var(--ink); text-align: left; }
+.scienceModelOption:hover:not(:disabled), .scienceModelOption:focus-visible { border-color: var(--line); background: var(--soft); }
+.scienceModelOption.isSelected { border-color: var(--line-strong); background: var(--soft); }
+.scienceModelOption:disabled { cursor: not-allowed; opacity: .68; }
+.scienceModelOptionCopy { min-width: 0; display: grid; flex: 1 1 auto; gap: 2px; }
+.scienceModelOptionCopy strong { overflow: hidden; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.scienceModelOptionCopy em { overflow: hidden; color: var(--muted); font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.scienceModelOptionCheck { width: 16px; flex: 0 0 16px; color: var(--ink); font-size: 13px; text-align: center; }
+.scienceModelEmpty, .scienceModelError { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.scienceModelEmpty { padding: 12px 8px; text-align: center; }
+.scienceModelError { border-top: 1px solid var(--line); padding: 8px 2px 0; color: var(--muted-deep); }
+.composerBar .scienceModelTrigger { width: auto; min-width: 112px; max-width: 190px; height: 32px; flex: 0 1 auto; display: inline-flex; border-radius: 9px; }
+.composerBar .scienceModelClose { width: 26px; height: 26px; flex: 0 0 26px; display: grid; border-radius: 7px; }
+.composerBar .scienceModelOption { width: 100%; min-height: 48px; height: auto; flex: 0 0 auto; display: flex; border-radius: 9px; }
+.scienceResearchLoopControls { min-width: 0; display: grid !important; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; flex: 1 1 100%; border-top: 1px solid var(--line); padding: 7px 0 0; }
+.composerBar .composerTools { min-width: 0; flex-wrap: wrap; }
+.scienceResearchLoopCopy { min-width: 0; display: grid; gap: 2px; }
+.scienceResearchLoopCopy strong { overflow: hidden; color: var(--ink); font-size: 10px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+.scienceResearchLoopCopy span { overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.scienceResearchLoopActions { display: flex; align-items: center; gap: 5px; }
+.composerBar .scienceResearchLoopActions button { width: auto; min-width: 0; height: 27px; flex: 0 0 auto; border-radius: 7px; padding: 0 8px; font-size: 10px; font-weight: 700; }
+.composerBar .scienceResearchLoopResume { border-color: var(--ink); background: var(--ink); color: #fff; }
+.composerBar .scienceResearchLoopCancel { border-color: var(--line-strong); background: var(--surface); color: var(--muted-deep); }
+.scienceResearchLoopActions button:disabled { cursor: wait; opacity: .55; }
+.scienceResearchLoopError { grid-column: 1 / -1; margin: 0; color: var(--danger); font-size: 10px; line-height: 1.4; }
 
 .manuscriptWorkspace { min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
 .journalToolbar { min-height: 54px; flex: 0 0 54px; display: flex; align-items: center; gap: 0; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: var(--surface); padding: 0 14px; scrollbar-width: none; }
@@ -751,7 +846,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .manuscriptStartGate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; margin: 14px 26px 0; padding: 10px 12px; }
 .manuscriptStartGate strong { color: var(--ink); white-space: nowrap; }
 .manuscriptStartModal .formError { margin-right: 26px; margin-left: 26px; }
-.manuscriptStartModal .modalActions { margin-top: 8px; border-top: 1px solid var(--line); padding: 14px 26px 16px; }
+.manuscriptStartModal .modalActions { margin-top: 8px; border-top: 1px solid var(--line); padding: 14px 32px 18px 26px; }
+.manuscriptStartModal .modalActions button { min-height: 40px; padding-right: 20px; padding-left: 20px; }
 .manuscriptDraftJobCard { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; margin: 0 0 14px; border: 1px solid var(--line); border-radius: 11px; background: #fafaf8; padding: 11px; }
 .manuscriptDraftJobCard > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #fff; border: 1px solid var(--line); }
 .manuscriptDraftJobCard .uiIcon { width: 16px; height: 16px; }
@@ -821,7 +917,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .submissionSheet > .sheetHandle { flex: 0 0 auto; }
 .submissionSheet > header { min-height: 65px; flex: 0 0 65px; align-items: center; padding: 0 24px 13px; }
 .submissionSheet > header span { font-size: 12px; }
-.submissionSheet > header h2 { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 23px; font-weight: 650; letter-spacing: -.02em; }
+.submissionSheet > header h2 { font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 23px; font-weight: 650; letter-spacing: -.02em; }
 .submissionSteps { min-height: 56px; flex: 0 0 56px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 0 24px; }
 .submissionSteps button { position: relative; display: flex; align-items: center; justify-content: center; gap: 9px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
 .submissionSteps button:not(:last-child)::after { content: ""; position: absolute; top: 50%; left: calc(50% + 52px); right: calc(-50% + 52px); height: 1px; background: var(--line); }
@@ -870,7 +966,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .researchDecisionSheet { width: min(980px, calc(100vw - 48px)); max-height: calc(100vh - 88px); display: flex; flex-direction: column; overflow: hidden; padding: 13px 0 0; border-radius: 22px 22px 0 0; }
 .researchDecisionSheet > .sheetHandle { flex: 0 0 auto; }
 .researchDecisionSheet > header { min-height: 65px; flex: 0 0 65px; align-items: center; border-bottom: 1px solid var(--line); padding: 0 24px 13px; }
-.researchDecisionSheet > header h2 { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 23px; font-weight: 660; letter-spacing: -.02em; }
+.researchDecisionSheet > header h2 { font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 23px; font-weight: 660; letter-spacing: -.02em; }
 .decisionSheetBody { min-width: 0; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 22px 24px 24px; scrollbar-gutter: stable; }
 .decisionQuestion > p { max-width: 760px; margin: 0; font-size: 16px; font-weight: 620; line-height: 1.55; }
 .decisionWhy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
@@ -910,13 +1006,50 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .researchDecisionSheet > footer > span { min-width: 0; margin-right: auto; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .researchDecisionSheet > footer button { min-height: 42px; padding-right: 18px; padding-left: 18px; font-size: 12px; }
 
+.analysisPlanReviewButton { margin-top: 10px; white-space: nowrap; }
+.analysisPlanReviewSheet { width: min(920px, calc(100vw - 48px)); max-height: calc(100vh - 72px); display: flex; flex-direction: column; overflow: hidden; padding: 13px 0 0; border-radius: 22px 22px 0 0; }
+.analysisPlanReviewSheet > header { min-height: 65px; flex: 0 0 65px; align-items: center; border-bottom: 1px solid var(--line); padding: 0 28px 13px; }
+.analysisPlanReviewSheet > header h2 { font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 23px; font-weight: 660; letter-spacing: -.02em; }
+.analysisPlanReviewBody { min-width: 0; min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 22px 28px 26px; }
+.analysisPlanReviewIdentity { border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-subtle); padding: 14px 16px; }
+.analysisPlanReviewIdentity > strong { display: block; margin-bottom: 10px; font-size: 14px; }
+.analysisPlanReviewIdentity dl { display: grid; grid-template-columns: minmax(0, 1.4fr) 80px minmax(0, 1.6fr) 58px; gap: 12px; margin: 0; }
+.analysisPlanReviewIdentity dl > div { min-width: 0; }
+.analysisPlanReviewIdentity dt { color: var(--muted); font-size: 10px; font-weight: 720; text-transform: uppercase; }
+.analysisPlanReviewIdentity dd { min-width: 0; margin: 4px 0 0; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.analysisPlanReviewIdentity code { font-size: 9px; }
+.analysisPlanReviewSummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.analysisPlanReviewSummary > div { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
+.analysisPlanReviewSummary span, .analysisPlanReviewInputs > span { display: block; color: var(--muted); font-size: 10px; font-weight: 730; letter-spacing: .05em; text-transform: uppercase; }
+.analysisPlanReviewSummary strong { display: block; margin-top: 6px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.analysisPlanReviewInputs { margin-top: 14px; }
+.analysisPlanReviewInputs ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.analysisPlanReviewInputs li { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.analysisPlanReviewInputs li strong { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.analysisPlanReviewInputs li code { flex: 0 0 auto; color: var(--muted); font-size: 8px; }
+.analysisPlanReviewInputs .analysisPlanReviewInputEmpty { display: grid; justify-content: stretch; gap: 4px; border-style: dashed; padding: 11px 12px; }
+.analysisPlanReviewInputs .analysisPlanReviewInputEmpty strong { overflow: visible; color: var(--ink); font-size: 11px; text-overflow: clip; white-space: normal; }
+.analysisPlanReviewInputEmpty span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.analysisPlanReviewInputs .analysisPlanReviewInputPlanned { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto; justify-content: stretch; gap: 4px 12px; align-items: baseline; }
+.analysisPlanReviewInputPlanned > span:last-of-type { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.analysisPlanReviewIncomplete { display: grid; gap: 4px; margin-bottom: 14px; border-left: 3px solid var(--notice-ink); background: var(--surface-subtle); padding: 10px 12px; }
+.analysisPlanReviewIncomplete strong { color: var(--notice-ink); font-size: 12px; }
+.analysisPlanReviewIncomplete span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.analysisPlanReviewSheet .decisionRationale { display: block; margin-top: 14px; }
+.analysisPlanReviewSheet .decisionRationale textarea { width: 100%; box-sizing: border-box; }
+.analysisPlanReviewBoundary { display: grid; gap: 4px; margin-top: 12px; border-left: 3px solid var(--ink); background: var(--surface-subtle); padding: 10px 12px; }
+.analysisPlanReviewBoundary strong { font-size: 11px; }
+.analysisPlanReviewBoundary span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.analysisPlanReviewSheet > footer { min-height: 66px; flex: 0 0 66px; align-items: center; margin: 0; border-top: 1px solid var(--line); padding: 11px 28px 14px; background: var(--surface); }
+.analysisPlanReviewSheet > footer button { min-height: 42px; padding-right: 20px; padding-left: 20px; font-size: 12px; }
+
 .researchContractSheet { width: min(900px, calc(100vw - 48px)); max-height: calc(100vh - 96px); display: flex; flex-direction: column; overflow: hidden; padding: 0; border-color: #dddddd; border-radius: 16px 16px 0 0; box-shadow: 0 -18px 54px rgba(28, 30, 28, .14); outline: none; }
 .researchContractSheet > .sheetHandle { display: none; }
 .researchContractSheet > header { min-height: 88px; flex: 0 0 auto; align-items: flex-start; border-bottom: 1px solid var(--line); padding: 18px 20px 16px 24px; }
 .contractHeaderCopy { min-width: 0; }
 .contractHeaderMeta { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 620; }
 .contractStatusPill { display: inline-flex; align-items: center; min-height: 22px; border: 1px solid #dcdcdc; border-radius: 999px; background: #f3f3f3; padding: 0 8px; color: #435047; font-size: 11px; font-weight: 720; }
-.researchContractSheet > header h2 { margin-top: 7px; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 20px; font-weight: 680; letter-spacing: -.02em; }
+.researchContractSheet > header h2 { margin-top: 7px; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 20px; font-weight: 680; letter-spacing: -.02em; }
 .researchContractSheet > header p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .researchContractSheet > header .contractCloseButton { width: auto; height: 32px; border: 0; border-radius: 7px; background: transparent; padding: 0 9px; color: #696969; font-size: 11px; font-weight: 620; }
 .researchContractSheet > header .contractCloseButton:hover { background: #f2f2f2; color: var(--ink); }
@@ -1013,7 +1146,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 
 .scienceDialog > header > div { min-width: 0; }
 .scienceDialog > header span { color: #7b8185; font-size: 12px; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
-.scienceDialog > header h2 { margin: 5px 0 0; color: #202326; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 18px; font-weight: 660; letter-spacing: -.015em; line-height: 1.28; }
+.scienceDialog > header h2 { margin: 5px 0 0; color: #202326; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 18px; font-weight: 660; letter-spacing: -.015em; line-height: 1.28; }
 .scienceDialog > header button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: #202326; font-size: 20px; line-height: 1; }
 .scienceDialog > header button:hover { background: #f3f4f4; }
 .scienceDialog > header button:focus-visible { outline: 0; box-shadow: 0 0 0 3px rgba(46, 52, 49, .16); }
@@ -1080,44 +1213,85 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 }
 .chatQuestionSheet {
   position: fixed;
-  right: 22px;
+  right: calc(var(--science-question-chat-width) - var(--science-workspace-gutter) + var(--science-question-gap));
   bottom: 124px;
-  width: min(360px, calc(100vw - 44px));
+  width: var(--science-question-width);
   max-height: min(640px, calc(100vh - 170px));
   display: flex;
   padding: 0;
-  border-radius: 14px;
+  border-radius: var(--science-radius-card);
   box-shadow: 0 16px 44px rgba(20, 25, 20, .18), 0 2px 8px rgba(20, 25, 20, .08);
   pointer-events: auto;
   animation: scienceChatQuestionEnter 180ms cubic-bezier(.32, .72, 0, 1) both;
 }
-.chatQuestionSheet > header { min-height: 62px; flex: 0 0 62px; gap: 12px; padding: 13px 16px 11px; }
-.chatQuestionSheet > header span { font-size: 11px; }
-.chatQuestionSheet > header h2 { margin-top: 4px; font-size: 15px; }
-.chatQuestionSheet > header button { width: 28px; height: 28px; font-size: 18px; }
-.chatQuestionSheet .decisionSheetBody { padding: 15px 16px 17px; }
-.chatQuestionSheet .decisionQuestion > p { font-size: 13px; line-height: 1.45; }
-.chatQuestionSheet .decisionWhy { grid-template-columns: 1fr; gap: 7px; margin-top: 12px; }
+.chatQuestionSheet > header { min-height: 56px; flex: 0 0 auto; gap: 10px; padding: 11px 14px 10px; }
+.chatQuestionSheet > header > div { min-width: 0; flex: 1 1 auto; }
+.chatQuestionSheet > header span { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.chatQuestionSheet > header h2 { min-width: 0; margin-top: 3px; font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; word-break: break-word; }
+.chatQuestionSheet > header button { width: var(--science-icon-button-size); height: var(--science-icon-button-size); font-size: 17px; }
+.chatQuestionSheet .decisionSheetBody { padding: 12px 14px 14px; }
+.chatQuestionSheet .decisionQuestion > p { font-size: 12px; line-height: 1.45; }
+.chatQuestionSheet .decisionWhy { display: none; }
 .chatQuestionSheet .decisionWhy > div { border-radius: 9px; padding: 9px 10px; }
 .chatQuestionSheet .decisionWhy strong { font-size: 11px; }
 .chatQuestionSheet .decisionWhy span { margin-top: 4px; font-size: 11px; line-height: 1.45; }
-.chatQuestionSheet .decisionOptions { grid-template-columns: 1fr; gap: 8px; margin-top: 16px; }
-.chatQuestionSheet .decisionOptions legend { margin-bottom: 0; font-size: 12px; }
-.chatQuestionSheet .decisionOptionCard { gap: 8px; border-radius: 10px; padding: 10px; }
-.chatQuestionSheet .decisionOptionTitle strong { font-size: 11px; }
-.chatQuestionSheet .decisionOptionTitle em { padding: 3px 6px; font-size: 11px; }
-.chatQuestionSheet .decisionOptionDescription { margin-top: 5px; font-size: 11px; line-height: 1.4; }
+.chatQuestionSheet .decisionOptions { grid-template-columns: 1fr; gap: 5px; margin-top: 12px; }
+.chatQuestionSheet .decisionOptions legend { margin-bottom: 1px; font-size: 11px; }
+.chatQuestionSheet .decisionOptionCard { gap: 8px; border-radius: 12px; padding: 8px 10px; }
+.chatQuestionSheet .decisionOptionTitle { align-items: flex-start; flex-wrap: wrap; }
+.chatQuestionSheet .decisionOptionTitle strong { flex: 1 1 200px; font-size: 12px; line-height: 1.35; }
+.chatQuestionSheet .decisionOptionTitle em { padding: 2px 6px; font-size: 10px; }
+.chatQuestionSheet .decisionOptionDescription { margin-top: 3px; font-size: 11px; line-height: 1.35; }
 .chatQuestionSheet .decisionOptionEvidence { display: none; }
-.chatQuestionSheet .decisionOptionImpact { margin-top: 8px; padding-top: 7px; font-size: 11px; }
-.chatQuestionSheet .decisionRationale { margin-top: 14px; }
-.chatQuestionSheet .decisionRationale > span { margin-bottom: 5px; font-size: 11px; }
-.chatQuestionSheet .decisionRationale textarea { min-height: 58px; border-radius: 9px; padding: 8px 9px; font-size: 11px; }
+.chatQuestionSheet .decisionOptionImpact { display: none; }
+.chatQuestionSheet .decisionRationale { margin-top: 11px; }
+.chatQuestionSheet .decisionRationale > span { margin-bottom: 4px; font-size: 10px; }
+.chatQuestionSheet .decisionRationale textarea { min-height: 44px; border-radius: var(--science-radius-control); padding: 7px 9px; font-size: 11px; }
 .chatQuestionSheet .decisionRecommendation { margin-top: 10px; border-radius: 9px; padding: 9px 10px; }
 .chatQuestionSheet .decisionRecommendation strong { font-size: 11px; }
 .chatQuestionSheet .decisionRecommendation span { font-size: 11px; }
-.chatQuestionSheet > footer { min-height: 58px; flex: 0 0 58px; padding: 9px 16px; }
+.chatQuestionSheet .decisionQuestion > p,
+.chatQuestionSheet .decisionWhy span,
+.chatQuestionSheet .decisionOptionTitle strong,
+.chatQuestionSheet .decisionOptionDescription,
+.chatQuestionSheet .decisionOptionImpact,
+.chatQuestionSheet .decisionRecommendation span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.chatQuestionSheet .decisionRecommendation { display: none; }
+.chatQuestionSheet > footer { min-height: 52px; flex: 0 0 52px; gap: 8px; padding: 8px 14px; }
 .chatQuestionSheet > footer > span { display: none; }
-.chatQuestionSheet > footer button { min-height: 34px; border-radius: 9px; padding: 0 12px; font-size: 12px; }
+.chatQuestionSheet > footer button { min-height: var(--science-button-s-height); border-radius: var(--science-radius-button-s); padding: 0 12px; font-size: 14px; }
+
+/* Runtime approval lives inside the Science WebContents so it can truly float
+   above the extension. A host-layer card cannot overlay WebContentsView without
+   shortening the workspace, which is what moved the entire left rail upward. */
+.runtimeQuestionLayer { position: fixed; z-index: 90; inset: 0; pointer-events: none; }
+.runtimeQuestionPopover { position: absolute; right: calc(var(--science-question-chat-width) - var(--science-workspace-gutter) + var(--science-question-gap)); bottom: 196px; width: var(--science-question-width); max-height: min(var(--science-question-max-width), calc(100vh - 232px)); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; border: 1px solid var(--science-border-default); border-radius: var(--science-radius-card); background: var(--science-surface-0); padding: 16px; box-shadow: var(--science-shadow-standard); animation: scienceChatQuestionEnter var(--motion-state) both; }
+.runtimeQuestionPopover > header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.runtimeQuestionPopover > header span { min-width: 0; overflow: hidden; color: var(--grey-600); font-size: 10px; font-weight: 700; letter-spacing: .045em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.runtimeQuestionPopover > header button { width: var(--science-icon-button-size); height: var(--science-icon-button-size); display: grid; flex: 0 0 var(--science-icon-button-size); place-items: center; border: 0; border-radius: var(--science-radius-control); background: transparent; color: var(--grey-600); font-size: 17px; line-height: 1; }
+.runtimeQuestionPopover > header button:hover { background: var(--science-surface-1); color: var(--science-ink); }
+.runtimeQuestionPopover > p { min-width: 0; margin: 9px 0 14px; color: var(--science-ink); font-size: 13px; font-weight: 640; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.runtimeQuestionOptions { display: grid; gap: 4px; }
+.runtimeQuestionPopover[data-compact="true"] .runtimeQuestionOptions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.runtimeQuestionOptions > button { min-width: 0; min-height: 48px; display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; column-gap: 9px; row-gap: 2px; border: 0; border-radius: 12px; background: var(--science-surface-1); padding: 8px 12px; color: var(--science-ink); text-align: left; }
+.runtimeQuestionPopover[data-compact="true"] .runtimeQuestionOptions > button { align-items: center; padding: 14px 18px; }
+.runtimeQuestionOptions > button:hover, .runtimeQuestionOptions > button:focus-visible { background: var(--science-surface-2); outline: 0; box-shadow: 0 0 0 2px rgba(54, 53, 53, .14); }
+.runtimeQuestionOptions > button:disabled, .runtimeQuestionPopover > header button:disabled, .runtimeQuestionFreeText button:disabled { opacity: .5; cursor: default; }
+.runtimeQuestionOptions > button > span { width: 24px; height: 24px; display: grid; grid-row: 1 / span 2; place-items: center; border-radius: 50%; background: var(--science-surface-0); color: var(--grey-600); font-size: 11px; font-weight: 700; }
+.runtimeQuestionPopover[data-compact="true"] .runtimeQuestionOptions > button > span { grid-row: 1; }
+.runtimeQuestionOptions > button > strong { min-width: 0; font-size: 13px; font-weight: 640; letter-spacing: 0; line-height: 18px; overflow-wrap: anywhere; word-break: break-word; }
+.runtimeQuestionOptions > button > em { min-width: 0; grid-column: 2; color: var(--grey-600); font-size: 11px; font-style: normal; line-height: 1.35; overflow-wrap: anywhere; word-break: break-word; }
+.runtimeQuestionFreeText { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 8px; }
+.runtimeQuestionFreeText input { min-width: 0; height: var(--science-button-s-height); border: 1px solid var(--science-border-default); border-radius: var(--science-radius-control); background: var(--science-surface-0); padding: 0 11px; color: var(--science-ink); font: inherit; font-size: 12px; outline: 0; }
+.runtimeQuestionFreeText input:focus { border-color: var(--science-ink); box-shadow: 0 0 0 2px rgba(54, 53, 53, .12); }
+.runtimeQuestionFreeText button { min-height: var(--science-button-s-height); border: 0; border-radius: var(--science-radius-button-s); background: var(--science-ink); padding: 0 14px; color: var(--science-surface-0); font-size: 14px; font-weight: 650; }
+.runtimeQuestionError { margin-top: 8px; color: var(--alarm); font-size: 12px; line-height: 1.45; }
+
+@media (max-width: 760px) {
+  :root { --science-question-width: min(var(--science-question-compact-width), calc(100vw - 24px)); }
+  .chatQuestionSheet, .runtimeQuestionPopover { right: 12px; }
+  .runtimeQuestionPopover { bottom: 12px; max-height: calc(100vh - 24px); }
+}
 
 /* Journal checklist: one quiet list grammar, no nested mini-cards. */
 .journalProfileSection { background: var(--surface); }
@@ -1248,6 +1422,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .scopedError button { border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); padding: 8px 11px; }
 
 .artifactWorkspace { min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.artifactWorkspace > .labDecisionPanel { max-height: 45%; overflow-y: auto; }
 .artifactWorkspace.compareOpen { height: auto; min-height: 100%; overflow: visible; }
 .artifactWorkspace.compareOpen .labWorkGrid { min-height: calc(100vh - 163px); flex: 0 0 auto; }
 .artifactWorkspace.compareOpen .figureColumn { height: auto; min-height: calc(100vh - 175px); }
@@ -1304,6 +1479,14 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .vegaEditorActions button { min-height: 30px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); padding: 0 9px; font-size: 11px; font-weight: 680; }
 .vegaEditorActions .saveVersionButton { border-color: var(--ink); background: var(--ink); color: #fff; }
 .vegaEditorActions button:disabled { cursor: not-allowed; opacity: .45; }
+.vegaEditorDisclosure { flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--surface-subtle); }
+.vegaEditorDisclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; cursor: pointer; list-style: none; padding: 0 14px; }
+.vegaEditorDisclosure > summary::-webkit-details-marker { display: none; }
+.vegaEditorDisclosure > summary span { color: var(--ink); font-size: 12px; font-weight: 720; }
+.vegaEditorDisclosure > summary small { color: var(--muted); font-size: 11px; line-height: 1.35; text-align: right; }
+.vegaEditorDisclosure > summary::after { content: "+"; flex: 0 0 auto; color: var(--muted); font-size: 16px; line-height: 1; }
+.vegaEditorDisclosure[open] > summary::after { content: "−"; }
+.vegaEditorDisclosure > .vegaEditor { border-top: 1px solid var(--line); border-bottom: 0; }
 .vegaViewNotice { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 12px; }
 .vegaViewNotice strong { font-size: 12px; }
 .vegaViewNotice span { color: var(--muted); font-size: 11px; line-height: 1.45; }
@@ -1330,6 +1513,40 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .numericSurfaceColorbar.palette-grayscale i { background: linear-gradient(to top, rgb(38,38,38), rgb(112,112,112), rgb(188,188,188), rgb(246,246,246)); }
 .numericSurface3d > button { align-self: center; min-height: 30px; margin: 7px 12px 7px 0; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); padding: 0 10px; color: var(--ink); font-size: 11px; }
 .numericSurface3d > button:disabled { opacity: .45; }
+.scientificArtifactShell { width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--surface); }
+.scientificViewToolbar { min-width: 0; min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 8px 12px; }
+.scientificViewToolbar > span { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scientificViewModes { min-width: 0; display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.scientificViewModes button { min-height: var(--science-button-s-height); border: 1px solid var(--line-strong); border-radius: var(--science-radius-button-s); background: var(--surface); color: var(--ink); padding: 0 14px; font-size: 14px; font-weight: 680; white-space: nowrap; }
+.scientificViewModes button[aria-pressed="true"] { border-color: var(--ink); background: var(--ink); color: #fff; }
+.scientificViewModes button:disabled { cursor: not-allowed; opacity: .45; }
+.scientificViewToolbar label { min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.scientificViewToolbar select { min-width: 0; max-width: min(340px, 44vw); height: var(--science-button-s-height); border: 1px solid var(--line-strong); border-radius: var(--science-radius-control); background: var(--surface); color: var(--ink); padding: 0 12px; font-size: 14px; text-overflow: ellipsis; }
+.scientificViewBody { min-width: 0; min-height: 0; overflow: hidden; }
+.artifactWorkspace.spatial3dOpen .labDecisionPanel { display: none; }
+.artifactCanvas:has(.scientific3dSurface) { display: block; overflow: hidden; padding: 0; }
+.scientific3dSurface { width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; background: var(--surface); }
+.scientific3dViewport { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: radial-gradient(circle at 48% 43%, #fff 0, #f7f8f6 56%, #eef0ec 100%); }
+.scientific3dCanvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; outline: 0; }
+.scientific3dCanvas:active { cursor: grabbing; }
+.scientific3dCanvas:focus-visible { box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ink) 22%, transparent); }
+.scientific3dOverlay { position: absolute; z-index: 2; top: 12px; left: 14px; max-width: min(560px, calc(100% - 28px)); display: grid; gap: 4px; border: 1px solid color-mix(in srgb, var(--line) 82%, transparent); border-radius: var(--science-radius-control); background: color-mix(in srgb, var(--surface) 94%, transparent); padding: 7px 9px; box-shadow: 0 2px 8px rgba(32, 32, 28, .04); backdrop-filter: blur(6px); pointer-events: none; }
+.scientific3dOverlay strong { overflow: hidden; color: var(--ink); font-size: 14px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.scientific3dOverlay span { color: var(--muted-deep); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scientific3dDetail { position: absolute; z-index: 2; right: 16px; bottom: 16px; width: min(340px, 38%); min-width: 180px; display: grid; gap: 4px; border: 1px solid rgba(44, 47, 43, .12); border-radius: var(--science-radius-card); background: rgba(255, 255, 255, .9); padding: 12px 14px; box-shadow: var(--science-shadow-standard); backdrop-filter: blur(10px); pointer-events: none; }
+.scientific3dDetail strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.scientific3dDetail span { min-width: 0; color: var(--muted-deep); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.scientific3dDetail[data-selected="false"] { display: none; }
+.scientific3dDetail[data-selected="true"] { border-color: color-mix(in srgb, var(--ink) 24%, var(--line)); }
+.scientific3dFallback { position: absolute; inset: 0; z-index: 3; place-content: center; justify-items: center; gap: 7px; background: var(--surface-subtle); padding: 24px; text-align: center; }
+.scientific3dFallback:not([hidden]) { display: grid; }
+.scientific3dFallback strong { color: var(--ink); font-size: 14px; }
+.scientific3dFallback span { max-width: 420px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.scientific3dFooter { min-width: 0; min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); background: var(--surface-subtle); padding: 7px 12px 7px 16px; }
+.scientific3dFooter span { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scientific3dFooter > div { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.scientific3dFooter button { flex: 0 0 auto; min-height: var(--science-button-s-height); border: 1px solid var(--line-strong); border-radius: var(--science-radius-button-s); background: var(--surface); color: var(--ink); padding: 0 14px; font-size: 14px; font-weight: 680; }
+.scientific3dFooter button:disabled { cursor: not-allowed; opacity: .45; }
 .dataTableCanvas { min-height: 0; height: auto; display: block; overflow: hidden; padding: 0; background: var(--surface); }
 .dataTableSurface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
 .dataTableSummary { min-height: 62px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 14px; }
@@ -1353,11 +1570,11 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .dataTableSurface > footer button:disabled { cursor: default; opacity: .4; }
 .statisticsAnalysisSurface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
 .statisticsAnalysisHeader { min-height: 70px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 14px; }
-.statisticsAnalysisHeader > div { min-width: 190px; }
+.visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader > div { min-width: 0; overflow: hidden; }
 .statisticsAnalysisHeader > div > span { display: block; color: var(--muted); font-size: 11px; font-weight: 760; letter-spacing: .08em; }
-.statisticsAnalysisHeader > div > strong { display: inline-block; margin-top: 4px; font-size: 13px; text-transform: capitalize; }
-.statisticsAnalysisHeader code { display: inline-block; margin-left: 9px; color: var(--muted); font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.statisticsAnalysisHeader nav { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; overflow-x: auto; }
+.visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader > div > strong { display: inline-block; max-width: 100%; margin-top: 4px; overflow: hidden; font-size: 13px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
+.visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader code { display: inline-block; max-width: 100%; margin-left: 9px; overflow: hidden; color: var(--muted); font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; }
+.visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader nav { min-width: 0; max-width: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px; overflow-x: auto; }
 .statisticsAnalysisHeader nav button { min-width: max-content; min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); padding: 0 9px; color: var(--muted-deep); font-size: 11px; }
 .statisticsAnalysisHeader nav button[aria-pressed="true"] { border-color: var(--brand-coral); background: color-mix(in srgb, var(--brand-coral) 10%, var(--surface)); color: var(--ink); font-weight: 680; }
 .statisticsAnalysisControls { min-width: 0; flex: 1 1 auto; display: grid; justify-items: end; gap: 7px; }
@@ -1525,7 +1742,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .jbrowseGenomeCanvas { min-height: 0; display: block; overflow: hidden; padding: 0; background: var(--surface); }
 .jbrowseCaptureSurface, .jbrowseMountTarget { width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .jbrowseCaptureSurface { overflow: hidden; background: var(--surface); padding: 10px; }
-.jbrowseMountTarget { overflow: auto; color: #242424; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.jbrowseMountTarget { overflow: auto; color: #242424; font-family: "Pretendard", Inter, ui-sans-serif, system-ui, sans-serif; }
 .jbrowseMountTarget > div { min-width: 0; }
 .artifactCanvas canvas, .artifactCanvas svg { display: block; max-width: 100%; }
 .historicalFrame { background: var(--surface); }
@@ -1613,6 +1830,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .analysisPlanView > header p { max-width: 680px; margin: 10px 0 0; color: var(--muted-deep); font-size: 12px; line-height: 1.6; }
 .analysisPlanIdentity { flex: 0 0 auto; display: grid; justify-items: end; gap: 5px; }
 .analysisPlanIdentity em { border: 1px solid var(--line-strong); border-radius: 999px; padding: 4px 8px; color: var(--muted-deep); font-size: 11px; font-style: normal; font-weight: 700; }
+.analysisPlanIdentity .analysisPlanExecutionBadge[data-status="blocked"] { border-color: #e2b6af; background: #fff3f1; color: var(--danger); }
 .analysisPlanIdentity strong { font-size: 12px; }
 .analysisPlanIdentity code { color: var(--muted); font-size: 11px; }
 .analysisPlanGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
@@ -1625,6 +1843,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .analysisPlanGrid dt { color: var(--muted); font-size: 11px; }
 .analysisPlanGrid dd { min-width: 0; margin: 0; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .analysisPlanGrid p { margin: 10px 0 0; color: var(--muted-deep); font-size: 12px; line-height: 1.5; }
+.analysisPlanGrid .analysisPlanExecutionBlock { border-left: 3px solid var(--danger); background: #fff7f6; color: #8e342a; padding: 10px 12px; }
 .analysisPlanGrid code { font-size: 11px; }
 .analysisPlanView > footer { display: grid; grid-template-columns: 150px minmax(0, 1fr) 190px; gap: 18px; padding: 16px 0; }
 .analysisPlanView > footer strong { display: block; margin-top: 5px; font-size: 12px; line-height: 1.45; }
@@ -1728,6 +1947,269 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .welcome p { max-width: 580px; color: var(--muted); font-size: 14px; line-height: 1.7; }
 .startButton { margin-top: 22px; border: 0; border-radius: 9px; background: var(--ink); color: #fff; padding: 11px 16px; font-weight: 680; }
 
+.projectLibrary { width: 100%; height: 100%; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
+.projectLibraryTopbar { height: 64px; flex: 0 0 64px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--line); padding: 0 24px; }
+.projectLibraryTopbar > button { min-height: var(--science-button-s-height); border: 0; border-radius: var(--science-radius-control); background: transparent; padding: 0 10px; color: var(--muted-deep); font-size: 12px; }
+.projectLibraryTopbar > button:hover { background: var(--soft); color: var(--ink); }
+.projectLibraryExit { width: max-content; display: inline-flex; align-items: center; gap: 7px; justify-self: start; }
+.projectLibraryExit .uiIcon { width: 14px; height: 14px; }
+.projectLibraryBrand { display: flex; align-items: center; gap: 9px; }
+.projectLibraryBrand img { width: 28px; height: 31px; object-fit: contain; }
+.projectLibraryBrand strong { font-size: 18px; letter-spacing: -.025em; }
+.projectLibraryBrand em { color: var(--brand-coral); font-style: normal; }
+.projectLibraryCount { justify-self: end; color: var(--grey-500); font-size: 11px; }
+.projectLibraryMain { width: min(1180px, 100%); min-height: 0; flex: 1 1 auto; align-self: center; overflow-y: auto; padding: 44px 36px 64px; scrollbar-width: thin; }
+.projectLibraryHeading { display: flex; align-items: end; justify-content: space-between; gap: 24px; }
+.projectLibraryHeading > div > span { color: var(--grey-500); font-size: 11px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.projectLibraryHeading h1 { margin: 6px 0 4px; font-size: clamp(30px, 4vw, 44px); line-height: 1.08; letter-spacing: -.045em; }
+.projectLibraryHeading p { margin: 0; color: var(--grey-600); font-size: 13px; line-height: 1.6; }
+.projectLibraryHeading > .primaryButton { min-height: 40px; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.projectLibraryHeading > .primaryButton .uiIcon { width: 15px; height: 15px; }
+.libraryProjects { margin-top: 38px; }
+.libraryProjects > header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; margin-bottom: 10px; }
+.libraryProjects h2 { margin: 0; font-size: 15px; font-weight: 680; }
+.libraryProjects > header > span { color: var(--grey-500); font-size: 11px; }
+.libraryProjectGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.libraryProjectGrid > .libraryProjectCard:only-child { grid-column: 1 / -1; }
+.libraryProjectCard { min-width: 0; min-height: 196px; display: grid; grid-template-columns: 108px minmax(0, 1fr) 16px; align-items: center; gap: 12px; margin: 0; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); padding: 14px; text-align: left; }
+.libraryProjectCard:hover { border-color: var(--grey-400); background: var(--grey-50); box-shadow: var(--elev-1); }
+.libraryProjectCard:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.libraryProjectFolder { width: 108px; height: 92px; display: grid; place-items: center; overflow: hidden; border-radius: var(--science-radius-card); background: var(--grey-50); }
+.libraryProjectFolder img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.libraryProjectCopy { min-width: 0; }
+.libraryProjectMeta { display: block; overflow: hidden; color: var(--grey-500); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.libraryProjectCopy > strong { display: -webkit-box; overflow: hidden; margin-top: 7px; font-size: 14px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: break-word; }
+.libraryProjectCopy > em { display: -webkit-box; overflow: hidden; margin-top: 7px; color: var(--grey-600); font-size: 11px; font-style: normal; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: break-word; }
+.libraryProjectMetrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; margin-top: 11px; }
+.libraryProjectMetrics > span { min-width: 0; display: grid; gap: 2px; }
+.libraryProjectMetrics strong { color: var(--ink); font-size: 11px; line-height: 1; }
+.libraryProjectMetrics em { overflow: hidden; color: var(--grey-500); font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.libraryMetricUnavailable { grid-column: 1 / -1; color: var(--grey-500); font-size: 10px; }
+.libraryProjectArrow { align-self: center; color: var(--grey-400); }
+.libraryProjectArrow .uiIcon { width: 15px; height: 15px; }
+.libraryEmpty { grid-column: 1 / -1; min-height: 180px; display: grid; place-items: center; align-content: center; gap: 7px; border: 1px dashed var(--grey-300); border-radius: 12px; color: var(--grey-600); text-align: center; }
+.libraryEmpty strong { color: var(--ink); font-size: 13px; }
+.libraryEmpty span { font-size: 11px; }
+.libraryEmpty button { margin-top: 7px; }
+
+.projectFolderMain { padding-top: 30px; }
+.projectFolderHero { display: grid; grid-template-columns: 156px minmax(0, 1fr) auto; align-items: center; gap: 24px; border-bottom: 1px solid var(--grey-200); padding: 0 0 28px; }
+.projectFolderHeroAsset { width: 156px; height: 122px; display: block; overflow: hidden; border-radius: var(--science-radius-card); background: var(--grey-50); }
+.projectFolderHeroAsset img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.projectFolderHeroCopy { min-width: 0; }
+.projectFolderHeroCopy > span, .projectFolderContents > header span { color: var(--grey-500); font-size: 10px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.projectFolderHeroCopy h1 { overflow-wrap: break-word; margin: 6px 0 6px; font-size: clamp(24px, 3.2vw, 38px); line-height: 1.12; letter-spacing: 0; word-spacing: .06em; }
+.projectFolderHeroCopy p { max-width: 720px; margin: 0; color: var(--grey-600); font-size: 12px; line-height: 1.55; overflow-wrap: break-word; }
+.projectFolderHero > .primaryButton { min-height: 40px; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.projectFolderHero > .primaryButton .uiIcon { width: 14px; height: 14px; }
+.projectFolderMetrics { max-width: 440px; margin-top: 14px; }
+.projectFolderContents { margin-top: 30px; }
+.projectFolderContents > header { min-height: 42px; display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.projectFolderContents > header h2 { margin: 4px 0 0; font-size: 15px; }
+.projectFolderContents > header > strong { color: var(--grey-500); font-size: 11px; font-weight: 620; }
+.projectFolderTable { overflow: hidden; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); }
+.projectFolderTableHead, .projectFolderRow { min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr) 94px 76px 104px 20px; align-items: center; gap: 10px; }
+.projectFolderTableHead { min-height: 34px; border-bottom: 1px solid var(--grey-200); background: var(--grey-50); padding: 0 14px; color: var(--grey-500); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.projectFolderRow { width: 100%; min-height: 64px; border: 0; border-bottom: 1px solid var(--grey-100); border-radius: 0; background: var(--surface); padding: 8px 14px; text-align: left; }
+.projectFolderRow:last-child { border-bottom: 0; }
+.projectFolderRow:hover { background: var(--grey-50); }
+.projectFolderRow:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: -2px; }
+.projectFolderRowIcon { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--grey-200); border-radius: 8px; color: var(--grey-600); background: var(--surface); }
+.projectFolderRowIcon .uiIcon { width: 16px; height: 16px; }
+.projectFolderRowCopy { min-width: 0; display: grid; gap: 4px; }
+.projectFolderRowCopy strong, .projectFolderRowCopy em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectFolderRowCopy strong { font-size: 12px; }
+.projectFolderRowCopy em { color: var(--grey-500); font-size: 10px; font-style: normal; }
+.projectFolderRowKind { width: max-content; max-width: 100%; overflow: hidden; border: 1px solid var(--grey-200); border-radius: 999px; padding: 3px 7px; color: var(--grey-600); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.projectFolderRowSize, .projectFolderRow time { overflow: hidden; color: var(--grey-500); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.projectFolderRowArrow { color: var(--grey-400); }
+.projectFolderRowArrow .uiIcon { width: 14px; height: 14px; }
+.projectFolderEmpty { min-height: 168px; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; color: var(--grey-500); text-align: center; }
+.projectFolderEmpty strong { color: var(--ink); font-size: 12px; }
+.projectFolderEmpty span { max-width: 480px; font-size: 10px; line-height: 1.55; }
+
+/* Project hub — keeps the existing Science palette and controls while following the
+   three-pane library geometry used by the provided reference. */
+.projectHub { width: 100%; height: 100%; min-width: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr) 248px; overflow: hidden; background: var(--surface); color: var(--ink); }
+.projectHubSidebar { min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--grey-200); background: var(--grey-50); padding: 14px 12px; }
+.projectHubSidebar > header { min-height: 34px; display: flex; align-items: center; padding: 0 2px; }
+.projectHubBack { width: 100%; min-height: 34px; flex: 0 0 auto; display: flex; align-items: center; border: 0; border-radius: var(--science-radius-control); background: transparent; color: var(--grey-600); margin-top: 4px; padding: 0 10px; text-align: left; }
+.projectHubBack:hover { background: var(--surface); color: var(--ink); }
+.projectHubBack:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.projectHubBack strong { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubBrand { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.projectHubBrand img { width: 28px; height: 31px; object-fit: contain; }
+.projectHubBrand strong { font-size: 14px; letter-spacing: -.025em; white-space: nowrap; }
+.projectHubBrand em { color: var(--brand-coral); font-style: normal; }
+.projectHubSideSearch, .projectHubMainSearch { display: flex; align-items: center; border: 1px solid var(--grey-200); border-radius: var(--science-radius-control); background: var(--surface); color: var(--grey-500); }
+.projectHubSideSearch { min-height: 34px; gap: 7px; margin-top: 16px; padding: 0 9px; }
+.projectHubSideSearch .uiIcon, .projectHubMainSearch .uiIcon { width: 14px; height: 14px; flex: 0 0 auto; }
+.projectHubSideSearch input, .projectHubMainSearch input { min-width: 0; flex: 1 1 auto; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
+.projectHubSideSearch input { font-size: 11px; }
+.projectHubPrimaryNav { display: grid; gap: 3px; margin-top: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--grey-200); }
+.projectHubPrimaryNav button { min-width: 0; min-height: 34px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: var(--science-radius-control); background: transparent; padding: 0 10px; color: var(--grey-600); text-align: left; }
+.projectHubPrimaryNav button:hover, .projectHubPrimaryNav button.isActive { background: var(--surface); color: var(--ink); }
+.projectHubPrimaryNav .uiIcon { width: 15px; height: 15px; }
+.projectHubPrimaryNav span { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubProjectList { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; margin-top: 15px; }
+.projectHubProjectList > header { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 7px; }
+.projectHubProjectList > header strong, .projectHubProjectList > header span { color: var(--grey-500); font-size: 10px; font-weight: 690; }
+.projectHubProjectList > div { min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.projectHubProjectList button { width: 100%; min-width: 0; min-height: 42px; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; border: 0; border-radius: var(--science-radius-control); background: transparent; padding: 5px 7px; color: var(--grey-600); text-align: left; }
+.projectHubProjectList button:hover, .projectHubProjectList button[aria-current="page"] { background: var(--surface); color: var(--ink); }
+.projectHubProjectList .projectFolderGlyph { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--grey-200); border-radius: 8px; background: var(--surface); color: var(--grey-600); }
+.projectHubProjectList .projectFolderGlyph .uiIcon { width: 16px; height: 16px; }
+.projectHubProjectList button > span:not(.projectFolderGlyph) { min-width: 0; overflow: hidden; font-size: 10px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubProjectList p { margin: 7px 8px; color: var(--grey-500); font-size: 10px; line-height: 1.45; }
+
+.projectHubMain { min-width: 0; overflow-y: auto; padding: 24px 20px 36px; background: var(--surface); scrollbar-width: thin; }
+.projectHubHeading { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+.projectHubHeading > div { min-width: 0; }
+.projectHubHeading > div > span { color: var(--grey-500); font-size: 10px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.projectHubHeading h1 { overflow-wrap: break-word; margin: 6px 0 4px; font-size: clamp(27px, 3vw, 36px); line-height: 1.08; letter-spacing: -.04em; }
+.projectHubHeading p { max-width: 620px; margin: 0; color: var(--grey-600); font-size: 11px; line-height: 1.5; }
+.projectHubHeading > .primaryButton { min-height: 36px; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.projectHubHeading > .primaryButton .uiIcon { width: 14px; height: 14px; }
+.projectHubMainSearch { min-height: 38px; gap: 8px; margin-top: 21px; padding: 0 11px; }
+.projectHubMainSearch:focus-within { border-color: var(--ink); box-shadow: 0 0 0 3px var(--soft); }
+.projectHubMainSearch input { font-size: 11px; }
+.projectHubMainSearch > span { flex: 0 0 auto; color: var(--grey-500); font-size: 10px; }
+.projectHubGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.projectHubCardWrap { min-width: 0; margin: 0; }
+.projectHubCard { width: 100%; min-width: 0; min-height: 216px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); padding: 0; color: var(--ink); text-align: left; }
+.projectHubCard:hover { border-color: var(--grey-400); box-shadow: var(--elev-1); transform: translateY(-1px); }
+.projectHubCard[aria-pressed="true"] { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.projectHubCard:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 3px; }
+.projectHubCard > .projectFolderGlyph { width: 100%; height: 110px; display: grid; place-items: center; border-bottom: 1px solid var(--grey-100); background: var(--grey-50); color: var(--grey-600); }
+.projectHubCard > .projectFolderGlyph .uiIcon { width: 46px; height: 46px; }
+.projectHubCardBody { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; padding: 10px; }
+.projectHubCardBody > small { overflow: hidden; color: var(--grey-500); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubCardBody > strong { display: -webkit-box; overflow: hidden; margin-top: 5px; font-size: 13px; line-height: 1.3; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: break-word; }
+.projectHubCardBody > em { display: -webkit-box; overflow: hidden; min-height: 28px; margin-top: 4px; color: var(--grey-600); font-size: 10px; font-style: normal; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: break-word; }
+.projectHubCardMetrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: auto; padding-top: 9px; }
+.projectHubCardMetrics span, .projectHubDetailMetrics span, .projectHubFolderMetrics span { min-width: 0; display: grid; gap: 2px; }
+.projectHubCardMetrics strong, .projectHubDetailMetrics strong, .projectHubFolderMetrics strong { font-size: 11px; font-weight: 700; line-height: 1; }
+.projectHubCardMetrics em, .projectHubDetailMetrics em, .projectHubFolderMetrics em { overflow: hidden; color: var(--grey-500); font-size: 8px; font-style: normal; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubCardMetrics .projectHubMetricUnavailable, .projectHubDetailMetrics .projectHubMetricUnavailable, .projectHubFolderMetrics .projectHubMetricUnavailable { grid-column: 1 / -1; color: var(--grey-500); font-size: 9px; font-weight: 620; }
+.projectHubCardMobileOpen { display: none; }
+.projectHubEmpty { grid-column: 1 / -1; min-height: 188px; display: grid; place-items: center; align-content: center; gap: 6px; border: 1px dashed var(--grey-300); border-radius: var(--science-radius-card); padding: 20px; color: var(--grey-500); text-align: center; }
+.projectHubEmpty strong { color: var(--ink); font-size: 12px; }
+.projectHubEmpty span { max-width: 420px; font-size: 10px; line-height: 1.45; }
+.projectHubEmpty button { margin-top: 6px; }
+.projectHubShortcuts { margin-top: 26px; }
+.projectHubShortcuts > header, .projectHubFiles > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 9px; }
+.projectHubShortcuts h2, .projectHubFiles h2 { margin: 0; font-size: 13px; }
+.projectHubShortcuts > header span, .projectHubFiles > header span { color: var(--grey-500); font-size: 10px; }
+.projectHubShortcuts > div { display: flex; gap: 11px; overflow-x: auto; padding: 1px 1px 9px; scrollbar-width: thin; scroll-snap-type: x proximity; }
+.projectHubShortcuts button { width: 98px; min-width: 98px; display: grid; gap: 6px; border: 0; background: transparent; padding: 0; color: var(--grey-600); text-align: left; scroll-snap-align: start; }
+.projectHubShortcuts button:hover { color: var(--ink); }
+.projectHubShortcuts img { width: 98px; height: 66px; display: block; border: 1px solid var(--grey-200); border-radius: var(--science-radius-control); background: #f8f4ed; object-fit: contain; }
+.projectHubShortcuts button:hover img { border-color: var(--grey-400); }
+.projectHubShortcuts button span { display: -webkit-box; overflow: hidden; min-height: 33px; font-size: 9px; font-weight: 620; line-height: 1.25; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: break-word; }
+
+.projectHubDetail { min-width: 0; overflow-y: auto; border-left: 1px solid var(--grey-200); background: #fbfbfa; padding: 18px 14px 24px; scrollbar-width: thin; }
+.projectHubDetail > header { padding-bottom: 10px; border-bottom: 1px solid var(--grey-200); }
+.projectHubDetail > header span { color: var(--grey-500); font-size: 10px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+.projectHubDetailHero { position: relative; overflow: hidden; margin-top: 14px; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); }
+.projectFolderDetailGlyph { width: 100%; aspect-ratio: 4 / 3; display: grid; place-items: center; background: var(--grey-50); color: var(--grey-600); }
+.projectFolderDetailGlyph .uiIcon { width: 52px; height: 52px; }
+.projectHubDetailLabel { position: absolute; right: 8px; bottom: 8px; max-width: calc(100% - 16px); overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.9); padding: 4px 7px; color: var(--grey-700); font-size: 8px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: blur(5px); }
+.projectHubDetail > h2 { overflow-wrap: break-word; margin: 15px 0 7px; font-size: 18px; line-height: 1.25; letter-spacing: -.025em; }
+.projectHubDetail > p { margin: 0; color: var(--grey-600); font-size: 10px; line-height: 1.55; overflow-wrap: break-word; }
+.projectHubFacts { display: grid; gap: 0; margin: 15px 0 0; }
+.projectHubFacts > div { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; border-top: 1px solid var(--grey-200); padding: 8px 0; font-size: 9px; }
+.projectHubFacts dt { color: var(--grey-500); }
+.projectHubFacts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.projectHubDetailMetrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 6px; margin-top: 14px; }
+.projectHubDetailActions { display: grid; gap: 8px; margin-top: 20px; }
+.projectHubDetailActions .primaryButton { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 8px; white-space: nowrap; }
+.projectHubDetailActions .secondaryButton { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
+.projectHubActionError { margin: 10px 0 0; color: var(--alarm); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.projectHubPathValue { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubDetailActions .uiIcon { width: 14px; height: 14px; }
+.projectHubDetailEmpty { min-height: 240px; display: grid; place-items: center; align-content: center; gap: 7px; color: var(--grey-500); text-align: center; }
+.projectHubDetailEmpty .uiIcon { width: 24px; height: 24px; }
+.projectHubDetailEmpty strong { color: var(--ink); font-size: 12px; font-weight: 680; }
+.projectHubDetailEmpty span { max-width: 180px; font-size: 9px; font-weight: 450; line-height: 1.5; overflow-wrap: break-word; }
+
+.projectHubFolderHeading { align-items: start; }
+.projectHubFolderHeading h1 { max-width: 720px; font-size: clamp(24px, 2.5vw, 32px); letter-spacing: -.025em; }
+.projectHubInlineBack { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; margin: 0 12px 8px -8px; border: 0; border-radius: var(--science-radius-control); background: transparent; padding: 0 8px; color: var(--grey-600); font-size: 10px; font-weight: 620; white-space: nowrap; }
+.projectHubInlineBack:hover { background: var(--grey-50); color: var(--ink); }
+.projectHubInlineBack .uiIcon { width: 12px; height: 12px; }
+.projectHubInlineBack + span { display: inline-flex; max-width: 100%; overflow: hidden; border-left: 1px solid var(--grey-200); padding-left: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubFolderMetrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 22px; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--grey-50); padding: 12px; }
+.projectHubFiles { margin-top: 26px; }
+.projectHubFileGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.projectHubFileCard { min-width: 0; min-height: 108px; display: grid; grid-template-columns: 34px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; gap: 8px 10px; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); padding: 11px; color: var(--ink); text-align: left; }
+.projectHubFileCard:hover { border-color: var(--grey-400); background: var(--grey-50); }
+.projectHubFileCard[aria-pressed="true"] { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.projectHubFileCard:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 2px; }
+.projectHubFileIcon { width: 34px; height: 34px; grid-row: 1 / -1; display: grid; place-items: center; border: 1px solid var(--grey-200); border-radius: 8px; background: var(--grey-50); color: var(--grey-600); }
+.projectHubFileIcon .uiIcon { width: 16px; height: 16px; }
+.projectHubFileCard > span:nth-child(2) { min-width: 0; display: block; }
+.projectHubFileCard small, .projectHubFileCard strong, .projectHubFileCard em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectHubFileCard small { color: var(--grey-500); font-size: 8px; font-weight: 700; }
+.projectHubFileCard strong { display: -webkit-box; margin-top: 4px; font-size: 11px; line-height: 1.35; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: break-word; }
+.projectHubFileCard em { margin-top: 4px; color: var(--grey-500); font-size: 9px; font-style: normal; }
+.projectHubFileCard time { grid-column: 2; color: var(--grey-500); font-size: 8px; }
+.projectHubDetailKind { display: inline-flex; margin-top: 16px; border: 1px solid var(--grey-200); border-radius: 999px; padding: 4px 7px; color: var(--grey-600); font-size: 8px; font-weight: 700; }
+
+@media (max-width: 1120px) {
+  .projectHub { grid-template-columns: 190px minmax(0, 1fr) 220px; }
+  .projectHubSidebar > header { min-height: 68px; align-items: flex-start; flex-direction: column; gap: 3px; }
+  .projectHubMain { padding-right: 18px; padding-left: 18px; }
+  .projectHubDetail { padding-right: 12px; padding-left: 12px; }
+}
+
+@media (max-width: 860px) {
+  .projectHub { grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: auto auto; overflow-y: auto; }
+  .projectHubSidebar { grid-row: 1 / -1; height: 100%; position: sticky; top: 0; }
+  .projectHubMain { grid-column: 2; overflow: visible; }
+  .projectHubDetail { grid-column: 2; overflow: visible; border-top: 1px solid var(--grey-200); border-left: 0; }
+  .projectHubDetailHero { max-width: 320px; }
+  .projectHubGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .projectHubCardBody > small { min-height: 24px; line-height: 1.3; text-overflow: clip; white-space: normal; }
+  .projectHubCardBody > em { min-height: 42px; -webkit-line-clamp: 3; }
+  .projectHubHeading { align-items: stretch; flex-direction: column; gap: 12px; }
+  .projectHubHeading > .primaryButton { width: max-content; }
+  .projectHubFileGrid { grid-template-columns: minmax(0, 1fr); }
+  .projectHubDetailMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 680px) {
+  .projectHub { display: block; overflow-y: auto; }
+  .projectHubSidebar { min-height: 146px; height: auto; position: static; overflow: visible; border-right: 0; border-bottom: 1px solid var(--grey-200); padding: 10px 12px 12px; }
+  .projectHubSideSearch { margin-top: 10px; }
+  .projectHubPrimaryNav { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 9px; padding-bottom: 0; border-bottom: 0; }
+  .projectHubProjectList { display: none; }
+  .projectHubMain { overflow: visible; padding: 20px 14px 28px; }
+  .projectHubDetail { overflow: visible; border-top: 1px solid var(--grey-200); border-left: 0; padding: 16px 14px 24px; }
+  .projectHubDetailHero { max-width: 280px; }
+  .projectHubFolderMetrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .projectHubCardWrap { overflow: hidden; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); }
+  .projectHubCardWrap .projectHubCard { border: 0; border-radius: 0; box-shadow: none; }
+  .projectHubCardWrap > .projectHubCardMobileOpen { width: 100% !important; min-width: 100%; max-width: none; min-height: 40px; display: grid !important; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; border: 0; border-top: 1px solid var(--grey-200); background: var(--grey-50); padding: 0 12px; color: var(--ink); font-size: 10px; font-weight: 700; text-align: left; white-space: nowrap; }
+  .projectHubCardMobileOpen .uiIcon { width: 13px; height: 13px; }
+}
+
+@media (max-width: 520px) {
+  .projectHubGrid { grid-template-columns: minmax(0, 1fr); }
+  .projectHubCard { min-height: 232px; }
+  .projectHubCard > .projectFolderGlyph { height: 126px; }
+  .projectHubHeading > .primaryButton { width: 100%; justify-content: center; }
+  .projectHubMainSearch > span { display: none; }
+  .projectHubFolderMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.projectLibraryBack { min-height: 34px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin: 0 12px 4px; border: 0; border-radius: 8px; background: transparent; padding: 0 10px; color: var(--grey-600); font-size: 11px; text-align: left; }
+.projectLibraryBack:hover { background: var(--soft); color: var(--ink); }
+.projectLibraryBack .uiIcon { width: 14px; height: 14px; }
+.railProjectIdentity { flex: 0 0 auto; margin: 0 14px 10px; border-left: 2px solid var(--brand-coral); padding: 5px 10px; }
+.railProjectIdentity strong, .railProjectIdentity span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.railProjectIdentity strong { font-size: 13px; line-height: 1.35; }
+.railProjectIdentity span { margin-top: 3px; color: var(--grey-500); font-size: 10px; }
+
 .modalBackdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(36,33,29,.26); backdrop-filter: blur(4px); }
 .modal { width: min(560px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: 0 24px 70px rgba(25, 32, 28, .16); padding: 23px; }
 .modal h2 { margin: 0; font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, sans-serif; font-size: 26px; font-weight: 520; letter-spacing: -.03em; }
@@ -1744,6 +2226,103 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .secondaryButton { border: 1px solid var(--line-strong); background: var(--surface); }
 .primaryButton { border: 1px solid var(--ink); background: var(--ink); color: #fff; }
 .primaryButton:disabled { cursor: wait; opacity: .55; }
+
+.modal.newProjectModal { width: min(760px, 100%); border-radius: var(--science-radius-card); padding: 0; overflow-y: auto; border: 1px solid #e5e7e5; background: #fff; box-shadow: 0 20px 26px rgba(54,53,53,.16); }
+.projectCreationBackdrop { background: rgba(34,38,35,.18); backdrop-filter: blur(2px); }
+.newProjectModal > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding: 22px 24px 0; }
+.newProjectModal > header > div > span { color: var(--grey-500); font-size: 10px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.newProjectModal > header h2 { margin-top: 5px; }
+.newProjectClose { width: var(--science-icon-button-size); height: var(--science-icon-button-size); border: 0; border-radius: var(--science-radius-control); background: transparent; color: var(--grey-600); font-size: 20px; }
+.newProjectClose:hover { background: var(--grey-100); color: var(--ink); }
+.newProjectModal > .modalLead, .newProjectModal > .field, .newProjectModal > .projectDomainPicker, .newProjectModal > .formError { margin-right: 24px; margin-left: 24px; }
+.newProjectModal > .modalLead { margin-bottom: 14px; }
+.projectDomainPicker { margin-top: 18px; }
+.projectDomainPicker > strong { display: block; margin-bottom: 8px; font-size: 11px; }
+.projectDomainGroup { margin: 0; border: 0; padding: 0; }
+.projectDomainGroup + .projectDomainGroup { margin-top: 13px; }
+.projectDomainGroup legend { margin-bottom: 6px; color: var(--grey-500); font-size: 10px; font-weight: 650; }
+.projectDomainGrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.projectDomainCard { min-width: 0; cursor: pointer; }
+.projectDomainCard input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.newProjectModal > .field input, .newProjectModal > .field textarea { border-radius: 12px; }
+.projectFolderPicker { width: 100%; min-width: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr) 18px; align-items: center; gap: 10px; border: 1px solid var(--grey-200); border-radius: 12px; background: var(--surface); padding: 10px 12px; color: var(--ink); text-align: left; }
+.projectFolderPicker:hover { border-color: var(--grey-400); background: var(--grey-50); }
+.projectFolderPicker:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.projectFolderPicker:disabled { cursor: wait; opacity: .62; }
+.projectFolderPickerIcon { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--grey-200); border-radius: 9px; background: var(--grey-50); color: var(--grey-600); }
+.projectFolderPickerIcon .uiIcon { width: 17px; height: 17px; }
+.projectFolderPickerCopy { min-width: 0; display: grid; gap: 3px; }
+.projectFolderPickerCopy strong, .projectFolderPickerPath { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectFolderPickerCopy strong { font-size: 12px; font-weight: 650; }
+.projectFolderPickerPath { display: block; color: var(--grey-600); font-size: 11px; line-height: 1.35; }
+.projectFolderPickerPath.isPlaceholder { color: var(--grey-500); }
+.projectFolderPickerArrow { display: grid; place-items: center; color: var(--grey-500); }
+.projectFolderPickerArrow .uiIcon { width: 14px; height: 14px; }
+.projectFolderError { display: block; margin-top: 6px; }
+.projectDomainCard > span { min-height: 50px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--grey-200); border-radius: 12px; background: var(--surface); padding: 0 9px; }
+.projectDomainCard:hover > span { background: var(--grey-50); }
+.projectDomainCard input:checked + span { border-color: var(--ink); background: var(--grey-100); box-shadow: inset 0 0 0 1px var(--ink); }
+.projectDomainCard input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
+.projectDomainCard .uiIcon { width: 15px; height: 15px; flex: 0 0 15px; color: var(--grey-600); }
+.projectDomainCard > span > span { min-width: 0; }
+.projectDomainCard strong, .projectDomainCard small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectDomainCard strong { font-size: 11px; }
+.projectDomainCard small { margin-top: 2px; color: var(--grey-500); font-size: 8px; font-weight: 500; }
+.newProjectModal > .modalActions { position: sticky; bottom: 0; margin-top: 4px; border-top: 1px solid var(--line); background: var(--surface); padding: 14px 24px 16px; }
+.researchTemplateModal { width: min(1080px, 100%) !important; }
+.researchTemplateModal > .modalLead { margin-bottom: 16px; }
+.researchTemplateGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 24px 24px; }
+.researchTemplateCard { position: relative; min-width: 0; min-height: 112px; display: grid; grid-template-columns: 104px minmax(0, 1fr); align-items: center; gap: 12px; overflow: hidden; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--surface); padding: 8px; text-align: left; }
+.researchTemplateCard:hover { border-color: var(--grey-400); background: var(--grey-50); box-shadow: var(--elev-1); }
+.researchTemplateCard[aria-pressed="true"] { border: 2px solid var(--ink); padding: 7px; }
+.researchTemplateCard:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 3px; }
+.researchTemplateCard > img { width: 104px; height: 78px; display: block; border-radius: var(--science-radius-control); object-fit: cover; }
+.researchTemplateCard > span { min-width: 0; }
+.researchTemplateCard strong, .researchTemplateCard em { display: block; }
+.researchTemplateCard strong { color: var(--ink); font-size: 15px; font-weight: 600; line-height: 20px; overflow-wrap: break-word; }
+.researchTemplateCard em { display: block; margin-top: 5px; color: var(--grey-600); font-size: 12px; font-style: normal; line-height: 16px; }
+.researchTemplateCard > i { position: absolute; top: 7px; right: 7px; width: 20px; height: 20px; display: none; place-items: center; border-radius: 50%; background: var(--ink); color: #fff; font-size: 11px; font-style: normal; }
+.researchTemplateCard[aria-pressed="true"] > i { display: grid; }
+.projectDetailsModal { width: min(680px, 100%) !important; }
+.projectClassificationHint { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 11px; margin: 0 24px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); padding: 8px 10px; }
+.projectClassificationHint img { width: 52px; height: 39px; display: block; border-radius: 7px; object-fit: cover; }
+.projectClassificationHint span { min-width: 0; }
+.projectClassificationHint small, .projectClassificationHint strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectClassificationHint small { color: var(--muted); font-size: 10px; }
+.projectClassificationHint strong { margin-top: 2px; font-size: 12px; }
+.projectClassificationHint button { min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); padding: 0 9px; color: var(--muted-deep); font-size: 11px; }
+.labManagerModal { width: min(760px, 100%); padding: 0; overflow: hidden; }
+.labManagerModal > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding: 20px 22px 16px; }
+.labManagerModal > header > div { min-width: 0; }
+.labManagerModal > header span { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.labManagerModal > header h2 { margin: 5px 0 0; }
+.labManagerModal > header p { max-width: 580px; margin: 7px 0 0; color: var(--muted-deep); font-size: 12px; line-height: 1.5; }
+.labManagerModal > header > button { width: 32px; height: 32px; flex: 0 0 32px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 18px; }
+.labManagerList { max-height: min(58vh, 560px); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; overflow-y: auto; padding: 16px 22px; }
+.labManagerRow { min-width: 0; min-height: 78px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px; text-align: left; }
+.labManagerRow:hover { border-color: var(--line-strong); background: var(--surface-subtle); }
+.labManagerRow[aria-pressed="true"] { border-color: var(--ink); }
+.labManagerRow:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.labManagerRow:disabled { cursor: progress; opacity: .62; }
+.labManagerCheck { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted-deep); font-size: 11px; font-weight: 800; }
+.labManagerRow[aria-pressed="true"] .labManagerCheck { border-color: var(--ink); background: var(--ink); color: #fff; }
+.labManagerRow > span:nth-child(2) { min-width: 0; }
+.labManagerRow strong, .labManagerRow em { display: block; }
+.labManagerRow strong { font-size: 12px; }
+.labManagerRow em { margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 10px; font-style: normal; line-height: 1.4; }
+.labManagerRow > small { color: var(--muted-deep); font-size: 10px; white-space: nowrap; }
+.labManagerModal > .formError { margin: 0 22px 12px; }
+.labManagerModal > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: 1px solid var(--line); padding: 12px 22px; }
+.labManagerModal > footer > span { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.selectedResearchTemplate { min-width: 0; min-height: var(--science-button-l-height); display: grid; grid-template-columns: 112px minmax(0, 1fr) auto; align-items: center; gap: 13px; margin: 18px 24px 8px; border: 1px solid var(--grey-200); border-radius: var(--science-radius-card); background: var(--grey-50); padding: 9px; text-align: left; }
+.selectedResearchTemplate:hover { border-color: var(--grey-400); }
+.selectedResearchTemplate:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.selectedResearchTemplate img { width: 112px; height: 84px; display: block; border-radius: var(--science-radius-control); object-fit: cover; }
+.selectedResearchTemplate > span { min-width: 0; }
+.selectedResearchTemplate strong, .selectedResearchTemplate em { display: block; }
+.selectedResearchTemplate strong { color: var(--ink); font-size: 15px; font-weight: 600; line-height: 20px; }
+.selectedResearchTemplate em { display: block; margin-top: 5px; color: var(--grey-600); font-size: 12px; font-style: normal; line-height: 16px; }
+.selectedResearchTemplate small { color: var(--grey-600); font-size: 10px; white-space: nowrap; }
 
 @media (max-width: 1280px) and (min-width: 1280px) {
   .workspace, .workspace.drawerOpen { grid-template-columns: var(--rail-expanded) minmax(0, 1fr); }
@@ -1771,12 +2350,13 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   .workspaceResearchTab { width: 112px; flex-basis: 112px; }
   .workspaceTabAdd { width: 30px; height: 30px !important; flex-basis: 30px; }
   .chatDock, .workspace[data-workspace-mode="session"] .chatDock, .workspace[data-workspace-mode="manuscript"] .chatDock { min-width: var(--science-chat-width-compact); flex-basis: var(--science-chat-width-compact); padding: 10px 10px 10px 12px; }
+  :root { --science-question-chat-width: var(--science-chat-width-compact); }
   .researchView { padding-top: 40px; }
   .labWorkGrid { width: calc(100% - 24px); grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .artifactWorkspace.historyOpen .labWorkGrid { grid-template-columns: minmax(0, 1fr) 220px; }
   .experimentLoop { grid-template-columns: 120px minmax(140px, 1fr) minmax(160px, 1fr) auto; gap: 10px; }
   .originStrip { padding-left: 14px; padding-right: 14px; }
-  .originStrip { align-items: flex-start; flex-wrap: wrap; }
+  .originStrip { align-items: flex-start; flex-wrap: wrap; flex-basis: auto; flex-shrink: 0; }
   .originStrip > div:last-child { margin-left: auto; }
   .vegaEditorFields { grid-template-columns: minmax(160px, 1fr) 108px; }
   .vegaEditor fieldset { grid-column: 1 / -1; }
@@ -1856,6 +2436,15 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 }
 
 @container science-center (max-width: 799px) {
+  .workspaceCenter .analysisPlanView { width: calc(100% - 32px); margin: 22px auto 40px; }
+  .workspaceCenter .analysisPlanView > header { flex-direction: column; gap: 14px; }
+  .workspaceCenter .analysisPlanIdentity { justify-items: start; }
+  .workspaceCenter .analysisPlanGrid { grid-template-columns: minmax(0, 1fr); }
+  .workspaceCenter .analysisPlanGrid > section { padding: 18px 0 20px; }
+  .workspaceCenter .analysisPlanGrid > section:nth-child(even) { border-left: 0; padding-right: 0; padding-left: 0; }
+  .workspaceCenter .analysisPlanGrid > section + section { border-top: 1px solid var(--line); }
+  .workspaceCenter .analysisPlanGrid dl > div { grid-template-columns: minmax(88px, .32fr) minmax(0, 1fr); gap: 10px; }
+  .workspaceCenter .analysisPlanView > footer { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .labDecisionPanel > header { align-items: flex-start; flex-direction: column; }
   .labDecisionHeaderActions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
   .evidenceGraphView { padding: 18px 16px 36px; }
@@ -1873,18 +2462,46 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   .experimentLoop > div:nth-child(2), .experimentLoop > div:nth-child(3) { display: block; border-left: 1px solid var(--line); padding-left: 11px; }
   .experimentActions { grid-column: 1 / -1; align-items: center; justify-content: flex-end; flex-wrap: nowrap; }
   .experimentLoop button { min-width: 88px; padding-right: 10px; padding-left: 10px; white-space: nowrap; }
-  .manuscriptWorkGrid { grid-template-columns: 132px minmax(0, 1fr); }
+  .manuscriptWorkGrid { grid-template-columns: minmax(0, 1fr); }
+  .manuscriptOutline { display: none; }
   .manuscriptInspector { display: none; }
   .manuscriptInspectorToggle { display: inline-flex; align-items: center; }
   .manuscriptWorkGrid[data-inspector-open="true"] .manuscriptInspector { position: absolute; z-index: 6; top: 0; right: 0; bottom: 0; width: min(286px, calc(100% - 44px)); display: block; border-left: 1px solid var(--line-strong); box-shadow: -18px 0 42px rgba(32,32,28,.14); }
   .manuscriptWorkGrid[data-inspector-open="true"] .manuscriptInspectorScrim { position: absolute; z-index: 5; inset: 0; display: block; border: 0; background: rgba(32,32,28,.09); padding: 0; }
-  .manuscriptCanvas { padding-left: 20px; padding-right: 20px; }
+  .manuscriptCanvas { padding-left: 18px; padding-right: 18px; }
   .journalToolbar { overflow: hidden; }
   .journalArticleType, .journalMetric { display: none !important; }
   .journalGuideline { flex: 1 1 auto !important; padding-left: 10px !important; padding-right: 10px !important; }
 }
 
 @container science-center (max-width: 559px) {
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader {
+    min-height: 0;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader > div { width: 100%; }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader nav {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader nav button { flex: 0 0 auto; }
+  .scientificViewToolbar { align-items: stretch; flex-direction: column; gap: 7px; padding: 8px 10px; }
+  .scientificViewModes { width: 100%; }
+  .scientificViewModes button { flex: 1 1 auto; padding-right: 8px; padding-left: 8px; }
+  .scientificViewToolbar label { width: 100%; justify-content: space-between; }
+  .scientificViewToolbar select { width: 100%; max-width: none; }
+  .scientific3dOverlay { top: 12px; right: 12px; left: 12px; max-width: none; }
+  .scientific3dOverlay strong { font-size: 12px; white-space: normal; }
+  .scientific3dOverlay span { font-size: 10px; }
+  .scientific3dDetail { right: 12px; bottom: 12px; left: 12px; width: auto; min-width: 0; padding: 8px 9px; }
+  .scientific3dFooter { padding: 6px 8px 6px 10px; }
+  .scientific3dFooter span { font-size: 9px; }
+  .scientific3dFooter button { padding-right: 10px; padding-left: 10px; }
   .evidenceGraphMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .evidenceGraphWorkspace { grid-template-columns: minmax(0, 1fr); }
   .evidenceGraphCanvasPane { min-height: 480px; }
@@ -1972,7 +2589,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   .answer p, .answerBlock p { font-size: 14px; line-height: 1.76; }
   .questionBubble { padding: 12px 16px 10px; }
   .inlineArtifacts { gap: var(--science-space-3); margin-top: 20px; }
-  .inlineArtifact { border-radius: var(--science-panel-radius); padding: var(--science-space-4); }
+  .inlineArtifact { border-radius: var(--science-panel-radius); padding: 6px; }
   .sourceResults { width: min(840px, calc(100% - 64px)); padding: 40px 0 64px; }
   .sourceResults > header { padding: 0 8px 16px; font-size: 11px; }
   .sourceList { gap: var(--science-space-2); }
@@ -2307,7 +2924,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   border-radius: 4px;
   padding: 6px 10px 5px;
   color: rgba(120,79,62,.46);
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: "Pretendard", Inter, ui-sans-serif, system-ui, sans-serif;
   font-size: 14px;
   font-weight: 780;
   letter-spacing: .16em;
@@ -2467,10 +3084,78 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   letter-spacing: -.018em;
   text-align: center;
 }
-.manuscriptBlockPaper .manuscriptDocumentTitle p { max-width: 520px; margin: 12px auto 0; color: #7b7b7b; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; line-height: 1.55; text-align: center; }
+.manuscriptBlockPaper .manuscriptDocumentTitle p { max-width: 520px; margin: 12px auto 0; color: #7b7b7b; font-family: "Pretendard", Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; line-height: 1.55; text-align: center; }
 .manuscriptBlocks { margin-top: 22px; }
-.manuscriptBlock { outline: none; user-select: text; }
-.manuscriptBlock:focus { border-radius: 5px; box-shadow: 0 0 0 3px rgba(52, 73, 60, .11); }
+/*
+ * A block is invisible at rest and lifts on hover.
+ *
+ * The reading view has to be the paper: at rest there is no border, no tint and no toolbar, so a
+ * block is indistinguishable from the prose around it. Hover is what separates it -- a small
+ * elevation and a paper-white ground, which reads as depth rather than as a card. The padding and
+ * negative margin are permanent so that gaining the hover ground never reflows the text; a block
+ * that shifts under the pointer is worse than one with no affordance at all.
+ */
+.manuscriptBlock {
+  position: relative;
+  outline: none;
+  user-select: text;
+  margin: 0 -14px;
+  border-radius: 7px;
+  padding: 6px 14px;
+  transition: box-shadow 120ms ease, background-color 120ms ease;
+}
+.manuscriptBlock:hover {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(24, 27, 22, .05), 0 6px 18px rgba(24, 27, 22, .09);
+}
+.manuscriptBlock:focus { box-shadow: 0 0 0 3px rgba(52, 73, 60, .11); }
+.manuscriptBlock:focus-within .manuscriptBlockAffordance,
+.manuscriptBlock:hover .manuscriptBlockAffordance { opacity: 1; pointer-events: auto; }
+
+/* Top-right, and only while the block is hovered or holds focus. */
+.manuscriptBlockAffordance {
+  position: absolute;
+  z-index: 4;
+  top: 2px;
+  right: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.manuscriptBlockAction {
+  display: grid;
+  place-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(24, 27, 22, .1);
+  border-radius: 7px;
+  background: #fff;
+  padding: 0;
+  color: #5a5f57;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(24, 27, 22, .1);
+}
+.manuscriptBlockAction:hover { border-color: rgba(24, 27, 22, .2); color: #23261f; }
+.manuscriptBlockAction .uiIcon { width: 15px; height: 15px; }
+@media (prefers-reduced-motion: reduce) {
+  .manuscriptBlock, .manuscriptBlockAffordance { transition: none; }
+}
+
+/*
+ * Caption typography, journal convention: the label and number are a bold run at the head of the
+ * caption sentence, tables caption above the rule, figures below the image.
+ */
+.manuscriptFloatCaption {
+  margin: 0;
+  color: #333;
+  font-family: "Times New Roman", "Nimbus Roman No9 L", "Liberation Serif", Georgia, serif;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+}
+.manuscriptFloatCaption strong { font-weight: 700; }
+.manuscriptFloatCaptionTop { margin-bottom: 7px; }
+.manuscriptEmbeddedFigure .manuscriptFloatCaption { margin-top: 8px; }
 .manuscriptHeadingBlock h2,
 .manuscriptHeadingBlock h3,
 .manuscriptHeadingBlock h4 {
@@ -2497,9 +3182,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .manuscriptEmbeddedFigure img { width: auto; max-width: 100%; max-height: 430px; display: block; margin: 0 auto; object-fit: contain; background: var(--surface); }
 .manuscriptEmbeddedFigure figcaption { margin-top: 8px; color: #333; font-family: "Times New Roman", "Nimbus Roman No9 L", "Liberation Serif", Georgia, serif; font-size: 11px; line-height: 1.35; text-align: left; }
 .manuscriptEmbeddedFigure figcaption strong { font-weight: 700; }
-.manuscriptEmbeddedFigureMeta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 5px; color: #858585; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 10px; }
-.manuscriptEmbeddedFigureMeta em { font-style: normal; white-space: nowrap; }
-.manuscriptEmbeddedFigureMissing { min-height: 170px; display: grid; place-content: center; gap: 7px; border: 1px dashed #d3d3d3; color: #838383; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; }
+.manuscriptEmbeddedFigureMissing { min-height: 170px; display: grid; place-content: center; gap: 7px; border: 1px dashed #d3d3d3; color: #838383; font-family: "Pretendard", Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; }
 .manuscriptEmbeddedFigureMissing .uiIcon { width: 22px; height: 22px; margin: 0 auto; }
 .manuscriptRuleBlock hr { border: 0; border-top: 1px solid #dedede; }
 
@@ -2613,11 +3296,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .manuscriptInsertPanel > footer button { min-height: 34px; font-size: 11px; }
 .manuscriptInsertError { margin: 7px 14px 0; color: #a73d35; font-size: 11px; line-height: 1.45; }
 
-.manuscriptEmbeddedTable { margin: 8px 0; background: var(--surface); padding: 4px 0; }
-.manuscriptEmbeddedTableHeader { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
-.manuscriptEmbeddedTableHeader span { color: #222; font-family: "Times New Roman", "Nimbus Roman No9 L", "Liberation Serif", Georgia, serif; font-size: 11px; font-weight: 700; }
-.manuscriptEmbeddedTableHeader strong { min-width: 0; overflow: hidden; font-family: "Times New Roman", "Nimbus Roman No9 L", "Liberation Serif", Georgia, serif; font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-.manuscriptEmbeddedTableHeader em { margin-left: auto; color: #477257; font-size: 11px; font-style: normal; white-space: nowrap; }
+.manuscriptEmbeddedTable { margin: 0; background: transparent; padding: 0; }
 .manuscriptSemanticTableViewport { overflow-x: auto; }
 .manuscriptSemanticTableViewport table { width: 100%; border-collapse: collapse; border-top: 1.5px solid #222; border-bottom: 1.5px solid #222; font-family: "Times New Roman", "Nimbus Roman No9 L", "Liberation Serif", Georgia, serif; font-size: 10px; font-variant-numeric: tabular-nums; }
 .manuscriptSemanticTableViewport th,
@@ -2634,6 +3313,40 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .manuscriptDepthIssues strong { font-size: 10px; text-transform: capitalize; }
 .manuscriptDepthIssues span, .manuscriptDepthBoundary { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .manuscriptDepthBoundary { margin: 11px 0 0; }
+
+/* The block menu, anchored under the hover control at the block's top-right corner. */
+.manuscriptBlockMenu {
+  position: absolute;
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  min-width: 168px;
+  border: 1px solid rgba(24, 27, 22, .1);
+  border-radius: 10px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 10px 30px rgba(24, 27, 22, .16);
+}
+.manuscriptBlockMenu button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 7px 9px;
+  color: #23261f;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.manuscriptBlockMenu button:hover { background: #f2f3f0; }
+.manuscriptBlockMenuDanger { color: #a3352b; }
+.manuscriptBlockMenuDanger:hover { background: #fbeeec; }
+.manuscriptBlockMenuMeta {
+  margin: 2px 9px 6px;
+  color: #7b7f76;
+  font-size: 10px;
+  line-height: 1.4;
+  word-break: break-word;
+}
 
 .manuscriptSelectionAction {
   position: absolute;
@@ -3152,26 +3865,60 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 
 /* ---- acquisition ---------------------------------------------------------- */
 .acquisitionRun { display: grid; gap: 8px; border: 1px solid var(--grey-200); border-radius: 10px; background: var(--surface); padding: 14px 16px; margin-bottom: 10px; }
-.acquisitionOutput { color: var(--grey-600); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; }
+.acquisitionOutput { min-width: 0; display: grid; gap: 6px; border: 1px solid var(--grey-200); border-radius: 8px; background: var(--grey-50); padding: 10px 12px; color: var(--grey-600); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; }
 /* Recorded as successful but with nothing to show is an audit fact, not a crash.
    It reads as inconclusive — the run happened, the claim about it does not hold. */
 .acquisitionRunFailure { border-left: 2px solid var(--grey-400); border-radius: 0 10px 10px 0; background: var(--grey-50); }
-.acquisitionRunFailure::before, .analysisRun[data-run-unbound="true"]::before {
+.acquisitionRunFailure::before, .analysisRun[data-run-outputless="true"]::before {
   content: ""; width: 12px; height: 12px; box-sizing: border-box; border: 2px dashed var(--grey-600); border-radius: 50%;
   background: linear-gradient(var(--grey-600), var(--grey-600)) center/5.6px 1.6px no-repeat;
 }
 .acquisitionBoundary, .analysisRunsSummary, .resultsSummary { color: var(--grey-600); font-size: 12px; line-height: 1.6; }
+.analysisRunsSummary { display: flex; flex-wrap: wrap; gap: 7px 18px; margin: 14px 0 18px; }
+.analysisRunsSummary > span { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.analysisRunsSummary strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.analysisRunsSummary [data-alert="true"] { color: var(--notice-ink); }
 .acquisitionBoundary { margin-top: 16px; border-left: 2px solid var(--grey-300); padding: 2px 0 2px 12px; font-size: 13px; color: var(--grey-700); }
 
 /* ---- analysis runs -------------------------------------------------------- */
 .analysisRun { display: grid; gap: 8px; border: 1px solid var(--grey-200); border-radius: 10px; background: var(--surface); padding: 14px 16px; margin-bottom: 10px; }
-.analysisRun[data-run-unbound="true"] { border-style: dashed; border-color: var(--grey-400); background: var(--grey-50); }
-.analysisRunOutput { color: var(--grey-600); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; }
+.analysisRun[data-run-outputless="true"] { border-style: dashed; border-color: var(--grey-400); background: var(--grey-50); }
+.analysisRunOutputs { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.analysisRunOutput { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center; border-radius: 8px; background: var(--grey-50); padding: 9px 11px; color: var(--grey-600); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; }
+.analysisRunOutput > strong, .analysisRunOutput > span, .analysisRunOutput > em { grid-column: 1; }
+.analysisRunOutput > em { color: var(--grey-600); font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 11px; font-style: normal; }
+.analysisRunArtifactOpen { grid-column: 2; grid-row: 1 / span 3; display: inline-flex; align-items: center; gap: 5px; min-height: 32px; border: 1px solid var(--grey-300); border-radius: var(--science-radius-button-s); background: var(--surface); padding: 0 11px; color: var(--ink); font-family: "Pretendard", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.analysisRunArtifactOpen:hover, .analysisRunArtifactOpen:focus-visible { border-color: var(--grey-500); }
+.analysisRunArtifactOpen:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 2px; }
+.analysisRunArtifactOpen .uiIcon { width: 12px; height: 12px; }
+.analysisRunManifest { display: grid; gap: 8px; border-left: 2px solid var(--grey-300); padding: 4px 0 4px 12px; }
+.analysisRunManifest > strong { color: var(--ink); font-size: 12px; font-weight: 650; }
+.analysisRunManifest > ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.analysisRunManifestOutput { min-width: 0; display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto auto; gap: 6px 12px; align-items: baseline; color: var(--grey-600); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.analysisRunManifestOutput strong { color: var(--ink); font-family: inherit; font-size: 11px; }
+.analysisRunManifestOutput span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.analysisRunManifest > p { margin: 0; color: var(--grey-600); font-size: 12px; line-height: 1.55; }
+.manuscriptLandingEmpty .primaryButton { min-height: 42px; margin-top: 16px; padding-right: 20px; padding-left: 20px; }
+
+@media (max-width: 640px) {
+  .acquisitionOutputMeta, .analysisRunManifestOutput { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .acquisitionOutputMime, .analysisRunManifestOutput span:first-of-type { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+}
 
 /* ---- results -------------------------------------------------------------- */
 .resultArtifact { display: grid; gap: 8px; border: 1px solid var(--grey-200); border-radius: 10px; background: var(--surface); padding: 14px 16px; margin-bottom: 10px; }
 .resultArtifact > strong { color: var(--ink); font-size: 14px; font-weight: 650; }
 .resultArtifact code { color: var(--grey-500); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.resultArtifactActions { display: flex; align-items: center; gap: 10px 14px; margin-top: 4px; }
+.resultArtifactActions > button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; }
+.resultArtifactActions > button .uiIcon { width: 13px; height: 13px; }
+.resultArtifactActions > span { max-width: 560px; color: var(--grey-600); font-size: 11px; line-height: 1.5; }
+
+@media (max-width: 640px) {
+  .analysisRunOutput { grid-template-columns: minmax(0, 1fr); }
+  .analysisRunArtifactOpen { grid-column: 1; grid-row: auto; justify-self: start; }
+  .resultArtifactActions { align-items: flex-start; flex-direction: column; }
+}
 
 /* --- merged from the parallel Science session (2026-09-03): rules this branch
    added and the other branch never had. Values shared with the other branch keep
@@ -3270,6 +4017,10 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .approvalScopeBadge { justify-self: start; margin-left: 36px; border-radius: 5px; background: var(--grey-100); padding: 1px 7px; color: var(--grey-600); font-size: 11px; font-weight: 600; }
 .acquisitionRunHeader, .literatureSourceHeader { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 6px 12px; }
 .acquisitionRunHeader > strong, .literatureSourceHeader > strong { grid-column: 1; color: var(--ink); font-size: 14px; font-weight: 660; line-height: 1.45; }
+.literatureSourceOpen { grid-column: 2; grid-row: 1; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--science-radius-button-s); background: transparent; padding: 5px 8px; color: var(--grey-600); font-size: 11px; font-weight: 650; }
+.literatureSourceOpen:hover, .literatureSourceOpen:focus-visible { background: var(--grey-100); color: var(--ink); }
+.literatureSourceOpen:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 2px; }
+.literatureSourceOpen .uiIcon { width: 12px; height: 12px; }
 .literatureSourceUri { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .acquisitionRunFacts, .analysisRunFacts, .literatureSourceFacts { display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .acquisitionRunSummary, .analysisRunSummary { color: var(--grey-700); font-size: 12px; line-height: 1.65; }
@@ -3524,6 +4275,10 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .acquisitionOutputMeta, .literatureSpanMeta, .acquisitionRunFacts, .analysisRunFacts, .literatureSourceFacts {
   color: var(--grey-600); font-size: 11px; line-height: 1.6; font-variant-numeric: tabular-nums;
 }
+.acquisitionOutputMeta { min-width: 0; display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto; gap: 6px 14px; align-items: baseline; }
+.acquisitionOutputMeta strong { color: var(--ink); font-size: 12px; }
+.acquisitionOutputMime { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acquisitionOutputSize { white-space: nowrap; }
 
 .acquisitionRunUnresolved, .analysisRunUnbound, .analysisRunNoOutput {
   display: flex; align-items: flex-start; gap: 8px; border-left: 2px solid var(--grey-400); background: var(--grey-50);
@@ -3751,16 +4506,873 @@ dl dd:empty::after {
    글이 아니다. 실측: 제목 13줄, 줄당 5.4자.
    본문이 먼저다. 좁아질수록 사이드바와 채팅을 줄이고, 그래도 모자라면 사이드바를
    아이콘 레일로 접는다. 채팅은 끝까지 남긴다 -- 연구를 진행시키는 곳이 거기다. */
+/* 제품 이름은 전부 보이거나 아예 빠진다.
+   사이드바가 좁아지자 "Agentlas Science*" 가 "Agentlas Scienc" 에서 끊겼다. 이름이 반만
+   보이는 것은 줄임표로 다듬어질 문제가 아니다.
+   먼저 글자를 줄여 보고(1280 이하), 줄여도 안 들어가는 폭에서는 이름을 빼고 발자국만
+   남긴다(1100 이하). 실측이 그 경계를 정했다: 1200 에서 3px, 960 에서는 17px 로 줄여도
+   여전히 18px 이 모자랐다. 안 들어가는 것을 계속 줄이면 로고가 초라해지기만 한다. */
+@media (max-width: 1280px) {
+  .railBrandWordmark strong { font-size: 18.4px; }
+}
 @media (max-width: 1180px) {
-  :root { --science-chat-width: 340px; --science-chat-width-compact: 320px; --rail-expanded: 244px; }
+  :root { --science-chat-width: 348px; --science-chat-width-compact: 348px; --rail-expanded: 244px; }
+}
+@media (max-width: 1100px) {
+  .railBrandWordmark { display: none; }
+  .railBrand { justify-content: center; gap: 0; padding-right: 12px; padding-left: 12px; }
 }
 @media (max-width: 1040px) {
   :root { --science-chat-width: 312px; --science-chat-width-compact: 300px; --rail-expanded: 224px; }
 }
-@media (max-width: 900px) {
+@media (max-width: 1480px) {
   /* 여기서부터는 줄여도 본문이 안 나온다. 사이드바를 아이콘만 남기고 접는다 --
-     목적지는 아이콘으로 계속 닿을 수 있고, 본문은 읽을 수 있는 폭을 되찾는다. */
-  .workspace, .workspace.drawerOpen { grid-template-columns: var(--rail-compact) minmax(0, 1fr); }
-  .workspace .railLabel, .workspace .projectNavLabel, .workspace .railBrandWordmark { display: none; }
+     목적지는 아이콘으로 계속 닿을 수 있고, 본문은 읽을 수 있는 폭을 되찾는다.
+     이 표현은 사용자가 실제로 접은 상태에만 적용한다. */
+  .workspace[data-rail-collapsed="true"],
+  .workspace.drawerOpen[data-rail-collapsed="true"] { grid-template-columns: var(--rail-compact) minmax(0, 1fr); }
+  .workspace[data-rail-collapsed="true"] .railLabel,
+  .workspace[data-rail-collapsed="true"] .projectNavLabel,
+  .workspace[data-rail-collapsed="true"] .railBrandWordmark,
+  .workspace[data-rail-collapsed="true"] .railCollapseButton,
+  .workspace[data-rail-collapsed="true"] .railBackButton,
+  .workspace[data-rail-collapsed="true"] .railProjectIdentity,
+  .workspace[data-rail-collapsed="true"] .recentProjectsSection,
+  .workspace[data-rail-collapsed="true"] .currentProjectSection,
+  .workspace[data-rail-collapsed="true"] .railDisclosure,
+  .workspace[data-rail-collapsed="true"] .labChevron,
+  .workspace[data-rail-collapsed="true"] .labGroupLabel,
+  .workspace[data-rail-collapsed="true"] .labGroupDisclosure em,
+  .workspace[data-rail-collapsed="true"] .labEndChevron,
+  .workspace[data-rail-collapsed="true"] .labGroupChildren,
+  .workspace[data-rail-collapsed="true"] .researcherCard > span:nth-child(2),
+  .workspace[data-rail-collapsed="true"] .researcherCard button,
+  .workspace[data-rail-collapsed="true"] .railEmpty,
+  .workspace[data-rail-collapsed="true"] .newButton strong,
+  .workspace[data-rail-collapsed="true"] .projectWorkflowNav button > span { display: none; }
+  .workspace[data-rail-collapsed="true"] .railBrand { justify-content: center; padding-right: 0; padding-left: 0; }
+  .workspace[data-rail-collapsed="true"] .railBrandLockup { flex: 0 0 auto; justify-content: center; gap: 0; overflow: visible; }
+  .workspace[data-rail-collapsed="true"] .railBrandMark { width: 30px; height: 33px; flex-basis: 30px; }
+  .workspace[data-rail-collapsed="true"] .projectLibraryBack { width: 40px; min-height: 40px; justify-content: center; margin: 0 auto 4px; padding: 0; }
+  .workspace[data-rail-collapsed="true"] .projectLibraryBack span { display: none; }
+  .workspace[data-rail-collapsed="true"] .newButton { width: 40px; height: 40px; margin: 0 auto 12px; padding: 0; }
+  .workspace[data-rail-collapsed="true"] .labSection { border-top: 1px solid var(--line); }
+  .workspace[data-rail-collapsed="true"] .labList,
+  .workspace[data-rail-collapsed="true"] .labList.isOpen { display: block; padding: 8px 0; }
+  .workspace[data-rail-collapsed="true"] .labGroupDisclosure { width: 40px; height: 40px; justify-content: center; margin: 3px auto; padding: 0; }
+  .workspace[data-rail-collapsed="true"] .labGroupIcon { width: 18px; flex-basis: 18px; }
+  .workspace[data-rail-collapsed="true"] .labGroupIcon .uiIcon { width: 18px; height: 18px; }
+  .workspace[data-rail-collapsed="true"] .projectContextCard { margin: 0; }
+  .workspace[data-rail-collapsed="true"] .projectContextCard .currentProject { display: none; }
+  .workspace[data-rail-collapsed="true"] .projectWorkflowNav { max-height: none; overflow: visible; padding: 6px 0; }
+  .workspace[data-rail-collapsed="true"] .projectWorkflowNav button { width: 40px; min-height: 40px; margin: 1px auto; padding: 0; justify-content: center; gap: 0; }
+  .workspace[data-rail-collapsed="true"] .projectWorkflowNav button > .uiIcon { display: block; width: 18px; height: 18px; flex-basis: 18px; }
+  .workspace[data-rail-collapsed="true"] .researcherCard { justify-content: center; padding-right: 0; padding-left: 0; }
+  .workspace[data-rail-collapsed="true"] { --science-question-rail-width: var(--rail-compact); }
+}
+@media (max-width: 900px) {
   :root { --science-chat-width: 288px; --science-chat-width-compact: 280px; }
 }
+
+/* Science-only owner token contract. Kept last so older component rules resolve to one
+   measurable geometry without exporting or overwriting any Desktop/One/Work token. */
+.modal,
+.scienceDialog,
+.bottomSheet,
+.chatDockFrame,
+.labStartView .labStartCard,
+.answerSkeletonCard,
+.scopeContract,
+.contractCriteriaCard,
+.decisionOptionCard,
+.evidenceCard,
+.resultArtifact,
+.hypothesisCard,
+.manuscriptDraftJobCard,
+.manuscriptProposalCard,
+.resultReviewActionCard,
+.skeletonCard,
+.submissionStatementCard,
+.publicationFigureStart {
+  border-color: var(--science-border-subtle);
+  border-radius: var(--science-radius-card);
+  background: var(--science-surface-0);
+  box-shadow: var(--science-shadow-standard);
+}
+
+.field input:not([type="radio"]):not([type="checkbox"]),
+.field textarea,
+.field select,
+input:not([type="radio"]):not([type="checkbox"]),
+textarea,
+select,
+.scienceDialog .field input,
+.scienceDialog .field textarea,
+.scienceDialog .field select,
+.statisticsLaunchGrid select,
+.statisticsMethodField input[type="search"],
+.statisticsMappingRowField select,
+.chatContextLine,
+.chatContextTokens > span,
+.citationChip,
+.composerModePill,
+.skeletonChip,
+.statusPill,
+.contractStatusPill,
+.originVersion {
+  border-radius: var(--science-radius-control);
+}
+
+.field > span:not(.fieldHint),
+.scienceDialog .field > span:not(.fieldHint),
+.bottomSheet .field > span:not(.fieldHint),
+.statisticsLaunchGrid .field > span:not(.fieldHint) {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.primaryButton,
+.secondaryButton,
+.newButton {
+  min-height: var(--science-button-m-height);
+  border-radius: var(--science-radius-button-m);
+  padding: 0 16px;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+.startButton {
+  min-height: var(--science-button-l-height);
+  border-radius: var(--science-radius-button-l);
+  padding: 0 20px;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+  letter-spacing: 0;
+}
+
+.topbar button.workspaceResearchTab {
+  width: auto;
+  height: 28px !important;
+  min-height: 28px;
+  flex-basis: auto;
+  border: 0 !important;
+  border-radius: 8px;
+  padding: 0 8px !important;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.primaryButton:has(.uiIcon),
+.secondaryButton:has(.uiIcon),
+.newButton:has(.uiIcon),
+.startButton:has(.uiIcon) {
+  padding-right: 20px;
+  padding-left: 12px;
+  gap: 4px;
+}
+
+.journalActions button,
+.topActions > button,
+.vegaEditorActions button,
+.statisticsFigureActions button,
+.statisticsFigureExport button,
+.dataTableSurface > footer button,
+.originStrip button,
+.evidenceGraphExactButton,
+.failClosed > button {
+  min-height: var(--science-button-s-height);
+  border-radius: var(--science-radius-button-s);
+  padding: 0 12px;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+.railCollapseButton,
+.workspaceSidebarReveal,
+.manuscriptSectionHeader button,
+.researcherCard button,
+.workspaceTabClose,
+.workspaceTabAdd,
+.workspaceTabOverflow,
+.chatHeaderAction,
+.composerBar button:not(.scienceModelTrigger):not(.scienceModelClose):not(.scienceModelOption):not(.scienceResearchLoopResume):not(.scienceResearchLoopCancel),
+.scienceDialog > header button,
+.bottomSheet > header button {
+  width: var(--science-icon-button-size);
+  height: var(--science-icon-button-size) !important;
+  min-width: var(--science-icon-button-size);
+  min-height: var(--science-icon-button-size);
+  flex-basis: var(--science-icon-button-size);
+  border-radius: var(--science-radius-control) !important;
+  padding: 0;
+}
+
+button:has(> .uiIcon:only-child):not(.primaryButton):not(.secondaryButton):not(.newButton):not(.projectLibraryBack):not(.projectHubInlineBack):not(.railBackButton),
+button:has(> span:only-child > .uiIcon:only-child):not(.projectHubInlineBack) {
+  width: var(--science-icon-button-size);
+  height: var(--science-icon-button-size) !important;
+  min-width: var(--science-icon-button-size);
+  min-height: var(--science-icon-button-size);
+  border-radius: var(--science-radius-control) !important;
+  padding: 0;
+}
+
+.modalActions,
+.scienceDialog > footer,
+.bottomSheet > footer {
+  gap: 32px;
+}
+
+.workspaceTabFrame,
+.decisionOptionCard,
+.resultReviewChoices fieldset label,
+.resultReviewActionCard,
+.evidenceGraphReviewOptions label {
+  border: 1px solid var(--science-border-default);
+}
+
+.workspaceTabFrame:hover,
+.decisionOptionCard:hover,
+.resultReviewChoices fieldset label:hover,
+.resultReviewActionCard:hover,
+.evidenceGraphReviewOptions label:hover,
+.secondaryButton:hover {
+  background-color: var(--science-surface-1);
+}
+
+.workspaceTabFrame[data-selected="true"],
+.decisionOptionCard:has(input:checked),
+.resultReviewChoices fieldset label:has(input:checked),
+.resultReviewActionCard:has(input:checked),
+.evidenceGraphReviewOptions label:has(input:checked) {
+  border: 2px solid var(--science-ink);
+  box-shadow: none;
+}
+
+.topbar button.workspaceResearchTab[aria-selected="true"] {
+  border: 0 !important;
+  background: #f1f2f3 !important;
+  color: #1d2023;
+  box-shadow: inset 0 0 0 1px #e4e6e7;
+  font-weight: 650;
+}
+
+/* Workspace tabs are navigation, not primary actions. Match One's compact right-rail
+   grammar: content-width labels, a quiet selected surface, and no pill/black outline. */
+.workspaceTabFrame {
+  min-width: 0;
+  max-width: 260px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 0;
+  border-radius: 8px;
+  padding-right: 2px;
+}
+
+.workspaceTabFrame:hover { background: #f5f6f6; }
+
+.workspaceTabFrame[data-selected="true"] {
+  border: 0;
+  background: #f1f2f3;
+  color: #1d2023;
+  box-shadow: inset 0 0 0 1px #e4e6e7;
+}
+
+.workspaceTabFrame[data-selected="true"]::after { content: none; }
+
+.topbar button.workspaceTab {
+  width: auto;
+  height: 28px !important;
+  flex: 0 1 auto;
+  gap: 5px;
+  padding: 0 4px 0 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.workspaceTabFrame[data-selected="true"] .workspaceTab { font-weight: 650; }
+.workspaceTabIcon { width: 14px; height: 14px; flex-basis: 14px; }
+.workspaceTabLabel { min-width: 68px; }
+.workspaceTabVersion { padding: 0; background: transparent; font-size: 11px; font-weight: 560; }
+.workspaceTabClose {
+  width: 18px;
+  height: 18px !important;
+  min-width: 18px;
+  min-height: 18px;
+  flex-basis: 18px;
+  margin-right: 0;
+  border-radius: 5px !important;
+}
+
+.decisionOptionCard:has(input:checked) .decisionOptionControl,
+.resultReviewChoices label:has(input:checked) input,
+.resultReviewActionCard:has(input:checked) input,
+.evidenceGraphReviewOptions label:has(input:checked) input {
+  border-color: var(--science-ink);
+  background: var(--science-ink);
+}
+
+.evidenceGraphState .primaryButton {
+  max-width: 100%;
+  white-space: normal;
+  font-size: 16px;
+}
+
+.researchView,
+.acquisitionView,
+.analysisRunsView,
+.resultsView,
+.submissionArchiveView {
+  padding-bottom: var(--science-space-from-72);
+}
+
+.evidenceGraphState { margin-top: var(--science-space-from-56); }
+.evidenceGraphView { padding-bottom: var(--science-space-from-56); }
+.manuscriptPaperHost { padding-bottom: var(--science-space-from-56); }
+.manuscriptPaperHost {
+  padding: 24px clamp(16px, 4vw, 40px) 64px;
+  background: var(--manuscript-stage-bg);
+}
+.manuscriptPaperHost .manuscriptPaper {
+  width: min(210mm, 100%);
+  max-width: 210mm;
+  min-height: auto;
+  aspect-ratio: 210 / 297;
+  margin: 0 auto;
+  border: 1px solid var(--science-border-default);
+  background: var(--manuscript-paper-bg);
+  padding: clamp(42px, 7vw, 84px) clamp(34px, 7vw, 76px) 84px;
+  box-shadow: 0 1px 2px rgba(54, 53, 53, .04), 0 16px 38px rgba(54, 53, 53, .08);
+}
+.manuscriptBlockPaper {
+  width: min(720px, 100%);
+  min-height: auto;
+  aspect-ratio: 210 / 297;
+  background: var(--manuscript-paper-bg);
+  padding: clamp(42px, 6vw, 58px) clamp(34px, 7vw, 64px) 92px;
+}
+.analysisPlanView { margin-bottom: var(--science-space-from-56); }
+.answerColumn > h1 { overflow-wrap: anywhere; word-break: break-word; }
+.analysisPlanView h1 { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.bottomSheet { max-height: calc(100vh - var(--science-space-from-44)); }
+.researchDecisionSheet {
+  width: var(--science-question-width);
+  max-height: min(640px, calc(100vh - 170px));
+}
+.manuscriptWorkGrid[data-inspector-open="true"] .manuscriptInspector {
+  width: min(286px, calc(100% - var(--science-space-from-44)));
+}
+
+.modal.manuscriptStartModal {
+  display: block;
+  overflow-y: auto;
+}
+.manuscriptStartModal .modalActions {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  padding: 12px 0;
+  background: var(--science-surface-0);
+}
+
+@media (max-width: 900px) {
+  .workspace .newButton { padding: 0; gap: 0; }
+  .workspace .projectLibraryBack,
+  .workspace .railProjectIdentity { display: none; }
+  .projectLibraryMain { padding-right: 24px; padding-left: 24px; }
+  .libraryProjectGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .projectFolderHero { grid-template-columns: 124px minmax(0, 1fr); gap: 18px; }
+  .projectFolderHeroAsset { width: 124px; height: 98px; }
+  .projectFolderHero > .primaryButton { grid-column: 2; width: max-content; }
+}
+
+@media (max-width: 900px) {
+  .researchTemplateGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 680px) {
+  .projectLibraryTopbar { padding: 0 16px; }
+  .projectLibraryBrand strong { font-size: 16px; }
+  .projectLibraryExit { width: 36px; height: 36px; justify-content: center; padding: 0 !important; }
+  .projectLibraryExit > span { display: none; }
+  .projectLibraryCount { font-size: 9px; }
+  .projectLibraryMain { padding: 28px 16px 48px; }
+  .projectLibraryHeading { align-items: stretch; flex-direction: column; }
+  .projectLibraryHeading p { max-width: none; }
+  .projectLibraryHeading > .primaryButton { width: 100%; justify-content: center; }
+  .libraryProjectGrid { grid-template-columns: minmax(0, 1fr); }
+  .libraryProjectMetrics { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 8px; }
+  .libraryProjectCard { min-height: 180px; grid-template-columns: 92px minmax(0, 1fr) 14px; gap: 10px; padding: 12px; }
+  .libraryProjectFolder { width: 92px; height: 78px; }
+  .libraryProjects { margin-top: 26px; }
+  .projectFolderMain { padding-top: 20px; }
+  .projectFolderHero { grid-template-columns: 88px minmax(0, 1fr); gap: 12px; padding-bottom: 20px; }
+  .projectFolderHeroAsset { width: 88px; height: 72px; }
+  .projectFolderHeroCopy h1 { margin-top: 4px; font-size: 21px; }
+  .projectFolderHeroCopy p { display: block; }
+  .projectFolderMetrics { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: none; }
+  .projectFolderHero > .primaryButton { grid-column: 1 / -1; width: 100%; justify-content: center; }
+  .projectFolderContents { margin-top: 22px; }
+  .projectFolderTableHead { display: none; }
+  .projectFolderRow { grid-template-columns: 34px minmax(0, 1fr) auto 14px; gap: 8px; padding: 9px 10px; }
+  .projectFolderRowSize, .projectFolderRow time { display: none; }
+  .projectFolderRowKind { justify-self: end; }
+  .projectFolderRowArrow .uiIcon { width: 12px; height: 12px; }
+  .modalBackdrop { padding: 8px; }
+  .newProjectModal > header { padding: 18px 16px 0; }
+  .newProjectModal > .modalLead, .newProjectModal > .field, .newProjectModal > .projectDomainPicker, .newProjectModal > .formError { margin-right: 16px; margin-left: 16px; }
+  .newProjectModal > .modalActions { padding-right: 16px; padding-left: 16px; }
+  .researchTemplateGrid { grid-template-columns: minmax(0, 1fr); padding: 0 16px 18px; }
+  .researchTemplateCard { min-height: 98px; grid-template-columns: 88px minmax(0, 1fr); }
+  .researchTemplateCard > img { width: 88px; height: 66px; }
+  .projectClassificationHint { grid-template-columns: 44px minmax(0, 1fr); margin-right: 16px; margin-left: 16px; }
+  .projectClassificationHint img { width: 44px; height: 33px; }
+  .projectClassificationHint button { grid-column: 2; width: max-content; }
+  .labManagerList { grid-template-columns: minmax(0, 1fr); padding-right: 16px; padding-left: 16px; }
+  .labManagerModal > header, .labManagerModal > footer { padding-right: 16px; padding-left: 16px; }
+  .labManagerModal > footer { align-items: stretch; flex-direction: column; }
+  .labManagerModal > footer .primaryButton { width: 100%; }
+  .selectedResearchTemplate { grid-template-columns: 78px minmax(0, 1fr); margin-right: 16px; margin-left: 16px; }
+  .selectedResearchTemplate img { width: 78px; height: 59px; }
+  .selectedResearchTemplate small { grid-column: 2; white-space: normal; }
+  .workspace,
+  .workspace.drawerOpen,
+  .workspace[data-rail-collapsed="true"],
+  .workspace.drawerOpen[data-rail-collapsed="true"] { grid-template-columns: minmax(0, 1fr); }
+  .workspace .rail {
+    position: fixed;
+    z-index: 15;
+    inset: 0 auto 0 0;
+    width: min(280px, calc(100vw - 44px));
+    opacity: 0;
+    transform: translateX(-100%);
+    pointer-events: none;
+    box-shadow: 16px 0 42px rgba(54,53,53,.16);
+  }
+  .workspace[data-rail-collapsed="false"] .rail { opacity: 1; transform: translateX(0); pointer-events: auto; }
+  .workspace[data-rail-collapsed="true"] .rail { opacity: 0; transform: translateX(-100%); pointer-events: none; }
+  .workspace .railBrandWordmark { display: flex; }
+  .workspace .railCollapseButton { display: grid; }
+  .workspace .railBackButton,
+  .workspace .projectLibraryBack { display: flex; }
+  .workspace .railProjectIdentity,
+  .workspace .projectNavLabel,
+  .workspace .labChevron,
+  .workspace .labGroupLabel,
+  .workspace .labEndChevron,
+  .workspace .researcherCard > span:nth-child(2),
+  .workspace .railEmpty,
+  .workspace .newButton strong,
+  .workspace .projectWorkflowNav button > span { display: block; }
+  .workspace .railDisclosure { display: flex; }
+  .workspace .labGroupChildren { display: none; }
+  .workspace .labGroupChildren.isOpen { display: block; }
+  .workspace .researcherCard button { display: grid; }
+  .workspace .railBrand { justify-content: initial; gap: 8px; padding-right: 14px; padding-left: 14px; }
+  .workspace .railBrandLockup { flex: 1; justify-content: initial; gap: 7px; overflow: hidden; }
+  .workspace .railBrandMark { width: 32px; height: 35px; flex-basis: 32px; }
+  .workspace .newButton { width: calc(100% - 32px); height: 40px; margin: 0 16px 12px; padding: 0 16px; }
+  .workspace .railScrollable { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
+  .workspace .railScrollable .projectWorkflowNav { max-height: none; overflow: visible; padding: 5px 7px 8px; }
+  .workspace .projectWorkflowNav button { width: 100%; min-height: 40px; margin: 0; justify-content: initial; gap: 10px; padding: 0 10px; }
+  .workspace .projectWorkflowNav button > .uiIcon { width: 16px; height: 16px; flex-basis: 16px; }
+  .workspace .labList, .workspace .labList.isOpen { padding: 0 10px 18px; }
+  .workspace .labGroupDisclosure { width: 100%; height: 42px; justify-content: initial; margin: 0; padding: 0 10px; }
+  .workspace .labGroupIcon { width: 16px; flex-basis: 16px; }
+  .workspace .labGroupIcon .uiIcon { width: 16px; height: 16px; }
+  .workspace .researcherCard { justify-content: initial; padding-right: 18px; padding-left: 18px; }
+  .workspace .railScrim { position: fixed; z-index: 14; inset: 0; display: block; border: 0; background: rgba(54,53,53,.16); opacity: 0; pointer-events: none; }
+  .workspace[data-rail-collapsed="false"] .railScrim { opacity: 1; pointer-events: auto; }
+  .workspace .workspaceSidebarReveal { display: grid; }
+  .workspace[data-rail-collapsed="false"] .workspaceSidebarReveal { visibility: hidden; }
+  .topActions { display: none; }
+  .workspaceBody {
+    min-height: 0;
+    flex-direction: column;
+    column-gap: 0;
+    padding-right: 0;
+  }
+  .workspaceBody:has(.artifactWorkspace.spatialArtifact) .workspaceCenter { flex-basis: 72%; }
+  .workspaceBody:has(.artifactWorkspace.spatialArtifact) .chatDock,
+  .workspace[data-workspace-mode="session"] .workspaceBody:has(.artifactWorkspace.spatialArtifact) .chatDock,
+  .workspace[data-workspace-mode="manuscript"] .workspaceBody:has(.artifactWorkspace.spatialArtifact) .chatDock { height: 28%; min-height: 110px; flex-basis: 28%; }
+  .artifactWorkspace.spatialArtifact .originStrip,
+  .artifactWorkspace.spatialArtifact .labDecisionPanel { display: none; }
+  .artifactWorkspace.spatialArtifact .labWorkGrid { width: calc(100% - 16px); padding-bottom: 8px; }
+  .workspaceCenter { min-height: 0; flex: 1 1 58%; }
+  .chatDock,
+  .workspace[data-workspace-mode="session"] .chatDock,
+  .workspace[data-workspace-mode="manuscript"] .chatDock {
+    width: 100%;
+    min-width: 0;
+    height: 42%;
+    min-height: 140px;
+    flex: 0 0 42%;
+    padding: 8px;
+  }
+  .topbar button.workspaceResearchTab {
+    width: var(--science-icon-button-size);
+    min-width: var(--science-icon-button-size);
+    flex-basis: var(--science-icon-button-size);
+    border-radius: var(--science-radius-control);
+    padding: 0 !important;
+  }
+  .workspaceResearchTab .workspaceTabLabel { display: none; }
+  .analysisPlanView { width: calc(100% - 24px); }
+  .analysisPlanView h1 { font-size: 20px; line-height: 1.25; }
+  .modal.manuscriptStartModal { width: 100%; }
+  .manuscriptStartModal > header { padding: 20px 16px 16px; }
+  .manuscriptStartModal > header h2 { font-size: 22px; }
+  .manuscriptStartGrid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    padding: 16px 16px 8px;
+  }
+  .manuscriptStartFields,
+  .manuscriptStartFields .field,
+  .manuscriptStartFields input,
+  .manuscriptStartFields textarea,
+  .manuscriptStartFields select { min-width: 0; max-width: 100%; }
+  .manuscriptStartGate { grid-template-columns: minmax(0, 1fr); margin: 12px 16px 0; }
+  .manuscriptStartGate strong { white-space: normal; }
+  .manuscriptStartModal .formError { margin-right: 16px; margin-left: 16px; }
+  .manuscriptStartModal .modalActions { gap: 12px; padding-right: 16px; padding-left: 16px; }
+  .modalActions,
+  .scienceDialog > footer,
+  .bottomSheet > footer { gap: 24px; }
+  .scienceDialog > footer > span,
+  .bottomSheet > footer > span,
+  .contractFooterContext { display: none; }
+}
+
+/* Compact question owner: the research decision keeps only the decision itself,
+   while global sheet/button tokens continue to own every other Science surface. */
+.chatQuestionSheet.researchDecisionSheet { border-radius: var(--science-radius-card); }
+.chatQuestionSheet.researchDecisionSheet > header button {
+  width: var(--science-icon-button-size);
+  height: var(--science-icon-button-size) !important;
+  min-width: var(--science-icon-button-size);
+  min-height: var(--science-icon-button-size);
+  flex-basis: var(--science-icon-button-size);
+  border-radius: var(--science-radius-control) !important;
+  font-size: 17px;
+}
+.chatQuestionSheet.researchDecisionSheet .decisionOptionCard {
+  border: 1px solid var(--science-border-default);
+  border-radius: 12px;
+  box-shadow: none;
+}
+.chatQuestionSheet.researchDecisionSheet .decisionOptionCard:has(input:checked) {
+  border: 2px solid var(--science-ink);
+  box-shadow: none;
+}
+.chatQuestionSheet.researchDecisionSheet .decisionOptionCard:has(input:checked) .decisionOptionControl {
+  border: 5px solid var(--science-ink);
+  background: var(--science-ink);
+}
+.chatQuestionSheet.researchDecisionSheet > footer { gap: 8px; }
+.chatQuestionSheet.researchDecisionSheet > footer button {
+  min-height: 36px;
+  border-radius: var(--science-radius-button-s);
+  padding: 0 12px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+@media (max-width: 760px) {
+  .researchDecisionSheet {
+    bottom: 12px;
+    max-height: calc(100vh - 24px);
+  }
+}
+
+/* Science visual artifacts are evidence surfaces, not paper cards. The manuscript keeps its
+   A4 treatment above; charts, rasters, and interactive figures stay flat and can be inspected at
+   their source dimensions without a second frame or decorative shadow. */
+.visualArtifactFrame {
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
+}
+.visualArtifactFrame.paleontologyVisualFrame {
+  height: fit-content;
+  max-height: 100%;
+  align-self: flex-start;
+}
+.visualArtifactFrame.paleontologyVisualFrame > .artifactVisualViewport {
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.visualArtifactFrame.paleontologyVisualFrame > .artifactVisualViewport > .statisticsAnalysisSurface,
+.visualArtifactFrame.paleontologyVisualFrame .statisticsChartHost {
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
+}
+.visualArtifactFrame.paleontologyVisualFrame .statisticsChartHost { scrollbar-gutter: stable; }
+.visualArtifactFrame > .artifactViewToolbar {
+  position: relative;
+  z-index: 2;
+}
+.artifactViewToolbar {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  padding: 8px 12px;
+}
+.artifactViewToolbarTitle {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.artifactViewToolbarTitle strong { font-size: 14px; font-weight: 720; }
+.artifactViewToolbarTitle span { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.artifactViewToolbarActions { min-width: 0; display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.artifactViewToolbarActions button {
+  min-width: 0;
+  min-height: var(--science-button-s-height);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--science-radius-button-s);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 680;
+  line-height: 20px;
+}
+.artifactViewToolbarActions button[data-artifact-view-action="zoom-out"],
+.artifactViewToolbarActions button[data-artifact-view-action="zoom-in"] {
+  width: var(--science-icon-button-size);
+  min-width: var(--science-icon-button-size);
+  height: var(--science-icon-button-size);
+  min-height: var(--science-icon-button-size);
+  padding: 0;
+  border-radius: var(--science-radius-button-s);
+  font-size: 18px;
+  line-height: 1;
+}
+.artifactViewToolbarActions button:hover { background: var(--surface-subtle); }
+.artifactViewToolbarActions button:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: 2px; }
+.artifactViewToolbarActions button[aria-pressed="true"] { border-color: var(--ink); background: var(--ink); color: #fff; }
+.artifactVisualViewport,
+.artifactVisualViewport.artifactCanvasExternal,
+.artifactVisualViewport.artifactCanvas {
+  display: block !important;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+  background: var(--surface);
+  scrollbar-width: thin;
+  scrollbar-gutter: stable both-edges;
+}
+.artifactVisualViewport .artifactVisualSurface {
+  display: block;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0;
+  background: transparent;
+  box-shadow: none !important;
+  border: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.artifactVisualViewport .artifactVisualSurface:active,
+.artifactVisualViewport .artifactVisualSurface[data-visual-panning="true"] { cursor: grabbing; }
+.artifactVisualViewport:focus-visible { outline: 2px solid var(--brand-coral); outline-offset: -3px; }
+.artifactVisualViewport .statisticsAnalysisSurface {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  background: var(--surface);
+}
+.artifactVisualViewport .statisticsChartHost {
+  display: block;
+  min-width: 0;
+  min-height: 100%;
+  overflow: auto;
+  place-items: start;
+  background: var(--surface);
+  padding: 16px;
+}
+.artifactVisualViewport .statisticsChartHost canvas { max-width: none !important; }
+.visualArtifactFrame .statisticsFigureToolbar,
+.visualArtifactFrame .statisticsRasterToolbar { box-shadow: none; }
+.visualArtifactFrame .statisticsRasterPreview { background: transparent; box-shadow: none; }
+.artifactWorkspace > .labWorkGrid { min-height: 0; }
+.artifactWorkspace > .labDecisionPanel { position: relative; z-index: 3; max-height: min(42%, 240px); overflow-y: auto; }
+.originStrip { flex-wrap: wrap; align-items: center; }
+.originStripMain { min-width: 0; flex: 1 1 auto; }
+.originStripMain strong { color: var(--ink); }
+.originStripMain span { color: var(--muted); }
+.originStripActions { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.originProvenance { flex: 1 0 100%; min-width: 0; border-top: 1px solid var(--line); padding-top: 6px; }
+.provenanceDisclosure > summary { min-height: 26px; display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; list-style: none; color: var(--muted-deep); font-size: 11px; }
+.provenanceDisclosure > summary::-webkit-details-marker { display: none; }
+.provenanceDisclosure > summary::after { content: "+"; flex: 0 0 auto; color: var(--muted); font-size: 15px; line-height: 1; }
+.provenanceDisclosure[open] > summary::after { content: "−"; }
+.provenanceDisclosure > summary strong { font-size: 11px; font-weight: 700; }
+.provenanceDisclosure > summary span { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.provenanceDisclosure > .provenanceTrail { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-x: auto; padding: 5px 0 2px; white-space: nowrap; }
+.statisticsLineage.provenanceDisclosure { min-height: 34px; display: block; overflow: hidden; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 0 20px; color: var(--muted-deep); }
+.statisticsLineage.provenanceDisclosure > summary { min-height: 34px; }
+.statisticsLineage.provenanceDisclosure > .provenanceTrail { padding: 0 0 8px; }
+
+@container science-center (max-width: 559px) {
+  .artifactViewToolbar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-items: start;
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .artifactViewToolbarActions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(5, max-content);
+    align-content: start;
+    justify-content: start;
+  }
+  .artifactVisualViewport,
+  .artifactVisualViewport.artifactCanvasExternal,
+  .artifactVisualViewport.artifactCanvas { padding: 10px; }
+  .originStripActions { width: 100%; }
+  .originStripActions button { flex: 1 1 auto; }
+  .provenanceDisclosure > summary { align-items: flex-start; flex-direction: column; gap: 2px; padding: 4px 0; }
+}
+
+@container science-center (max-width: 320px) {
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader > div > span {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader > div > strong { margin-top: 2px; font-size: 12px; }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader code { margin-left: 5px; font-size: 7px; }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader nav { gap: 4px; }
+  .visualArtifactFrame.paleontologyVisualFrame .statisticsAnalysisHeader nav button { min-height: 30px; padding: 0 5px; font-size: 10px; }
+  .artifactViewToolbar {
+    gap: 4px;
+    padding: 6px 8px;
+  }
+  .artifactViewToolbarTitle strong { font-size: 12px; }
+  .artifactViewToolbarTitle span { font-size: 10px; }
+  .artifactViewToolbarActions {
+    grid-template-columns: repeat(5, max-content);
+    gap: 4px;
+  }
+  .artifactViewToolbarActions button {
+    min-height: 32px;
+    height: 32px;
+    padding: 0 7px;
+    font-size: 12px;
+  }
+  .artifactViewToolbarActions button[data-artifact-view-action="zoom-out"],
+  .artifactViewToolbarActions button[data-artifact-view-action="zoom-in"] {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    min-height: 32px;
+    font-size: 16px;
+  }
+}
+
+/* Overview research responses borrow the public Updates article's reading
+   hierarchy without importing publication chrome or changing Science state. */
+.scienceArticleMarkdown { color: #292929; }
+.scienceArticleMarkdown > :first-child { margin-top: 0; }
+.scienceArticleMarkdown > :last-child { margin-bottom: 0; }
+.answer .scienceArticleMarkdown p,
+.answer .scienceArticleMarkdown ul,
+.answer .scienceArticleMarkdown ol,
+.answer .scienceArticleMarkdown blockquote {
+  margin: 0 0 20px;
+  color: #292929;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: 18px;
+  line-height: 1.68;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.answer .scienceArticleMarkdown p + p { margin-top: 20px; }
+.answer .scienceArticleMarkdown h2,
+.answer .scienceArticleMarkdown h3 {
+  margin: 34px 0 14px;
+  color: #222;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -.02em;
+}
+.answer .scienceArticleMarkdown h2 { font-size: 28px; }
+.answer .scienceArticleMarkdown h3 { font-size: 22px; }
+.answer .scienceArticleMarkdown ul,
+.answer .scienceArticleMarkdown ol { padding-left: 25px; }
+.answer .scienceArticleMarkdown li + li { margin-top: 7px; }
+.answer .scienceArticleMarkdown blockquote {
+  border-left: 3px solid #d8d4c9;
+  padding: 4px 0 4px 18px;
+  color: #595750;
+  font-style: italic;
+}
+.answer .scienceArticleMarkdown pre {
+  max-width: 100%;
+  margin: 24px 0;
+  overflow-x: auto;
+  border: 1px solid #e4e1d8;
+  border-radius: 10px;
+  padding: 16px;
+  background: #f8f7f3;
+  white-space: pre;
+}
+.answer .scienceArticleMarkdown code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: .84em;
+}
+.answer .scienceArticleMarkdown :not(pre) > code {
+  border-radius: 4px;
+  padding: .12em .32em;
+  background: #f2f0ea;
+}
+.answer .scienceInlineMath { white-space: pre-wrap; }
+.answer .scienceSourceLink {
+  color: #315f52;
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.answer .scienceSourceLink:focus-visible { outline: 2px solid #315f52; outline-offset: 3px; }
+.answer .scienceBlockedSourceLink { color: inherit; border-bottom: 1px dotted #aaa59a; }
+.answerBlock + .answerBlock { margin-top: 36px; }

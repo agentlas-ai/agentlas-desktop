@@ -93,7 +93,12 @@ export const MUTATING_BUILTIN_TOOLS = [
   "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "KillShell",
 ] as const;
 
-/** Built-ins that can bypass the Agentlas Browser session or expose its cookies. */
+/**
+ * Built-ins that can bypass the Agentlas Browser session or expose its cookies.
+ * judgment-exempt: this is not "did the tool change the outside world" (that lives in
+ * shared/tool-activity couldHaveChangedTheOutsideWorld). Read-only file tools belong here
+ * because reading a cookie/profile file leaks the session without changing anything.
+ */
 export const BROWSER_BYPASS_BUILTIN_TOOLS = [
   "Bash", "BashOutput", "Write", "Edit", "MultiEdit", "NotebookEdit", "KillShell",
   "run_command", "command_status", "send_command_input",

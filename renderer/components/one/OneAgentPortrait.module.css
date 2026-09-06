@@ -23,15 +23,15 @@
   bottom: 2px;
   width: 6px;
   height: 6px;
-  border: 1.5px solid #fff;
+  border: 1.5px solid var(--paper);
   border-radius: 50%;
-  background: #b4b9b7;
+  background: var(--muted);
 }
-.root[data-state="working"] .dot { background: #23a17c; }
+.root[data-state="working"] .dot { background: var(--ok); }
 .root[data-state="waiting"] .dot,
-.root[data-state="unconfirmed"] .dot { background: #e29b32; }
-.root[data-state="failed"] .dot { background: #d55353; }
-.root[data-state="locked"] .dot { background: #858b89; }
+.root[data-state="unconfirmed"] .dot { background: var(--warn); }
+.root[data-state="failed"] .dot { background: var(--danger); }
+.root[data-state="locked"] .dot { background: var(--muted-deep); }
 
 @media (prefers-reduced-motion: reduce) {
   .character { transform: none; }

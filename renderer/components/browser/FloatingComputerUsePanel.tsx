@@ -178,28 +178,28 @@ export default function FloatingComputerUsePanel() {
         .cua-title { min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; }
         .cua-title > span:nth-child(2) { min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .cua-title small { color: var(--accent); font-size: 9.5px; white-space: nowrap; }
-        .cua-live-dot { width: 7px; height: 7px; border-radius: 50%; background: #b68a35; flex-shrink: 0; }
-        .cua-live-dot.ready { background: #2aa978; box-shadow: 0 0 0 3px rgba(42,169,120,0.13); }
+        .cua-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); flex-shrink: 0; }
+        .cua-live-dot.ready { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 13%, transparent); }
         .cua-controls { display: flex; align-items: center; gap: 2px; }
         .cua-controls button { height: 27px; border: 0; border-radius: 7px; padding: 0 8px; background: transparent; color: var(--ink); font-size: 10.5px; font-weight: 650; cursor: pointer; }
-        .cua-controls button.selected { background: var(--ink); color: var(--paper); }
+        .cua-controls button.selected { background: var(--black); color: var(--white); }
         .cua-controls button.minimize, .cua-controls button.close { width: 25px; padding: 0; font-size: 14px; color: var(--muted-deep); }
         .cua-controls button.close { font-size: 17px; }
-        .cua-controls button.close:hover { background: rgba(181, 45, 45, 0.1); color: #ad3030; }
-        .cua-canvas { width: 100%; aspect-ratio: 16 / 10; display: grid; place-items: center; overflow: hidden; border: 0; padding: 0; background: #111416; cursor: pointer; }
+        .cua-controls button.close:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
+        .cua-canvas { width: 100%; aspect-ratio: 16 / 10; display: grid; place-items: center; overflow: hidden; border: 0; padding: 0; background: var(--black); cursor: pointer; }
         .cua-canvas:disabled { cursor: wait; opacity: 0.82; }
         .cua-canvas img { display: block; width: 100%; height: 100%; object-fit: contain; }
         .cua-canvas:hover img { filter: brightness(1.035); }
         .cua-focus-notice { min-height: 28px; display: flex; align-items: center; padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); color: var(--muted-deep); font-size: 10px; line-height: 1.35; }
-        .cua-empty { display: flex; flex-direction: column; align-items: center; gap: 5px; color: rgba(255,255,255,0.82); text-align: center; }
+        .cua-empty { display: flex; flex-direction: column; align-items: center; gap: 5px; color: var(--white-soft); text-align: center; }
         .cua-empty strong { font-size: 12px; }
         .cua-empty > span:last-child { max-width: 280px; font-size: 10.5px; line-height: 1.45; opacity: 0.5; }
-        .cua-empty-screen { width: 28px; height: 19px; border: 1.5px solid rgba(255,255,255,0.45); border-radius: 4px; position: relative; margin-bottom: 3px; }
-        .cua-empty-screen::after { content: ""; position: absolute; left: 9px; right: 9px; bottom: -5px; height: 1.5px; background: rgba(255,255,255,0.45); }
+        .cua-empty-screen { width: 28px; height: 19px; border: 1.5px solid var(--white-faint); border-radius: 4px; position: relative; margin-bottom: 3px; }
+        .cua-empty-screen::after { content: ""; position: absolute; left: 9px; right: 9px; bottom: -5px; height: 1.5px; background: var(--white-faint); }
         footer { min-height: 31px; display: flex; align-items: center; gap: 7px; padding: 5px 10px; font-size: 9.5px; color: var(--muted-deep); }
         footer select { max-width: 120px; border: 0; background: transparent; color: var(--ink); font-size: 9.5px; }
         footer .ok { color: var(--green-deep); font-weight: 700; }
-        footer .warn { color: #a77721; font-weight: 700; }
+        footer .warn { color: var(--warn); font-weight: 700; }
         footer .native { margin-left: auto; }
         @media (max-width: 720px) { .cua-float { width: calc(100vw - 24px); } .cua-title small { display: none; } }
       `}</style>
@@ -227,6 +227,6 @@ const triggerStyles = `
     cursor: pointer;
   }
   .cua-trigger-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-  .cua-trigger-dot.active { background: #2aa978; box-shadow: 0 0 0 3px rgba(42,169,120,0.12); }
+  .cua-trigger-dot.active { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent); }
   .cua-trigger-screen { width: 15px; height: 10px; border: 1.3px solid currentColor; border-radius: 2px; opacity: 0.68; }
 `;

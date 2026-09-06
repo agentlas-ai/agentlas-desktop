@@ -1,7 +1,7 @@
 {
   "schema": "agentlas.science-capabilities/v1",
   "domain": "astronomy",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "sourceAuthority": {
     "schema": "agentlas.astronomy.official-source/v1",
     "providerId": "simbad-tap",
@@ -55,6 +55,7 @@
     "agentlas.astronomy.lomb-scargle-peak-table/v1",
     "agentlas.astronomy.lomb-scargle-periodogram-table/v1",
     "agentlas.astronomy.light-curve-publication-figure/v1",
+    "agentlas.science.astronomy-light-curve-periodicity-depth-result/v1",
     "agentlas.astronomy.publication-table/v1",
     "agentlas.astronomy.publication-figure/v1",
     "agentlas.provenance-receipt/v1",
@@ -74,9 +75,9 @@
       "inputRows": "5-2000 strict irregular time-series rows with explicit astronomical time system, nullable values/errors, use flags, and exact source-content SHA-256",
       "method": "weighted floating-mean generalized Lomb-Scargle least-squares sinusoid over an inclusive linear frequency grid",
       "bounds": { "minimumFrequencyCount": 32, "maximumFrequencyCount": 5000, "maximumReportedPeaks": 20 },
-      "uncertainty": "inverse-variance weighting when explicitly resolved as weighted; missing errors are preserved and never imputed",
-      "outputs": ["full periodogram table", "sampling-window power", "local grid-peak table", "best-period folded observation/residual table", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
-      "notComputed": ["false-alarm probability", "period confidence interval", "red-noise model", "detrending", "multi-harmonic fit", "transit model"],
+      "uncertainty": "inverse-variance weighting when explicitly resolved as weighted; missing errors are preserved and never imputed; Baluev analytic FAP upper bound and Montgomery-O'Donoghue period standard error are reported when numerically resolvable",
+      "outputs": ["full periodogram table", "sampling-window power", "local grid-peak table", "best-period folded observation/residual table", "Baluev analytic FAP upper bound when resolvable", "Montgomery-O'Donoghue period standard-error estimate when resolvable", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["calibrated detection probability", "period confidence interval", "red-noise model", "detrending", "multi-harmonic fit", "transit model"],
       "network": "none"
     },
     {
@@ -173,8 +174,8 @@
     "Distance is the naive inverse of a positive parallax, not a Bayesian distance estimate. First-order delta uncertainties are withheld from inference when declared fractional-error thresholds are exceeded.",
     "The proper-motion error ellipse supplies component covariance, but parallax-proper-motion covariance is unavailable and is explicitly assumed to be zero.",
     "The publication figure is a deterministic Vega-Lite payload; this plugin does not bundle or claim a renderer/export runtime.",
-    "The period analysis is a single-sinusoid weighted floating-mean generalized Lomb-Scargle grid search. Reported peaks are local maxima on the declared finite grid, not detection probabilities.",
-    "No false-alarm probability, multiple-testing correction, period confidence interval, red-noise model, detrending, multi-harmonic fit, or transit model is computed. Sampling-window and cadence warnings must be reviewed independently.",
+    "The basic period analysis is a single-sinusoid weighted floating-mean generalized Lomb-Scargle grid search. It reports a Baluev analytic false-alarm upper bound and a Montgomery-O'Donoghue period standard-error estimate when numerically resolvable; these are model estimates, not calibrated detection probabilities or confidence intervals. A returned FAP of 0 is a numerical floor, not exact certainty.",
+    "The periodicity-depth extension adds seeded permutation FAP, local/analytic/bootstrap uncertainties, alias diagnostics, and a two-harmonic refinement. Those diagnostics remain bounded by their declared white-noise, sampling, time-system, and model assumptions; no red-noise correction, detrending, transit model, or more than two harmonics is applied.",
     "Astronomical time systems are preserved exactly as declared by the caller and are not converted. BJD, HJD, JD, MJD, UTC, and TDB must not be treated as interchangeable.",
     "No renderer is bundled. The host may render the normalized rows in its existing table or sky-coordinate surfaces without implying survey completeness."
   ]

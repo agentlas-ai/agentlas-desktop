@@ -93,6 +93,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "invoke.activeChats",
   "confirm.listPending",
   "browser.resolveApproval",
+  // 동기 런타임 질문 — 기존 chat Decision/도구 승인과 섞지 않는다.
+  "runtime.submitUserInput",
   // 런타임 도구 승인 — 데스크탑의 승인 칩과 같은 결정을 폰에서도 답한다.
   // 투영만 하고 답을 못 하게 두면 "보이는데 누를 수 없는" 반쪽 배선이 된다.
   "runtime.resolveToolApproval",
@@ -154,6 +156,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "invoke.steer",
   "invoke.cancel",
   "browser.resolveApproval",
+  "runtime.submitUserInput",
   "runtime.resolveToolApproval",
   "automations.toggle",
   "automations.runNow",
@@ -200,6 +203,8 @@ export interface MobileBridgeInvokeSteerParams {
   userPrompt: string;
   locale?: "ko" | "en";
   permissions?: "read" | "write" | "full";
+  /** Interactive One/Work steering settles the current one-shot run after the replacement is durable. */
+  steeringMode?: "queue" | "interrupt";
   planMode?: boolean;
   goalMode?: boolean;
   networkMode?: boolean;
@@ -668,6 +673,8 @@ export interface MobileBridgeRuntimeDto {
   backend: string;
   version: string | null;
   active: boolean;
+  /** Secret-free marker for a retained runtime whose credential cannot be read. */
+  credentialUnavailable?: boolean;
   model: string | null;
   effort: string | null;
   efforts: Array<{ id: string; label: string }>;
@@ -1123,6 +1130,20 @@ export interface MobileBridgeChatImageDto {
   attachmentId: string;
 }
 
+export interface MobileBridgeChatFileDto {
+  /** Opaque Main-owned chat-file identity. It is not a path or renderer URL. */
+  attachmentId: string;
+  /** Opaque group identity used only to associate files with this user turn. */
+  groupId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  sha256: string;
+  kind: "file" | "directory";
+  /** Directory entry count only; paths and the manifest never cross the bridge. */
+  entryCount?: number;
+}
+
 export interface MobileBridgeChatMessageDto {
   id: string;
   role: "user" | "assistant" | "system";
@@ -1130,6 +1151,8 @@ export interface MobileBridgeChatMessageDto {
   createdAt: string;
   /** Bounded references; bytes are fetched only for an exact chat/message binding. */
   images?: MobileBridgeChatImageDto[];
+  /** Bounded generic-file metadata; raw paths, URLs, bytes, and manifests stay on Desktop. */
+  files?: MobileBridgeChatFileDto[];
 }
 
 /**
@@ -1181,6 +1204,23 @@ export interface MobileBridgePendingConfirmationDto {
   agentId: string;
   firmId: string | null;
   createdAt: string;
+}
+
+/**
+ * One live Desktop `askUser` request. This is neither a chat Decision nor a
+ * permission approval: Mobile may submit exactly one answer (or decline) to
+ * the waiting runtime request id.
+ */
+export interface MobileBridgeUserInputDto {
+  requestId: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  allowFreeText: boolean;
+  askedBy?: string;
+  /** Only chat-bound One/Work questions cross the bridge. */
+  chatId: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 /**
@@ -1557,6 +1597,8 @@ export interface MobileBridgeToolApprovalDto {
   mode: "live" | "post-denial";
   deniedBy?: "runtime-headless" | "sandbox";
   requestedAt: string;
+  /** Main's exact automatic-denial deadline for live requests. */
+  expiresAt?: string;
   chatId?: string;
   /** 능력 클래스(execute|edit|delete|network|other) — "항상 허용"이 무엇을 여는지 카드가 말한다. */
   capability?: string;
@@ -1601,14 +1643,19 @@ export interface MobileBridgeAutomationDto {
     nodes: Array<{ id: string; type: string; label: string; x: number; y: number }>;
     edges: Array<{ id: string; source: string; target: string; label: string | null }>;
   } | null;
+  /** Exact Desktop-owned model pin; null follows the automation role default. */
+  runtimeSelection: MobileBridgeRuntimeSelectionDto | null;
 }
 
 export interface MobileBridgeUsageWindowDto {
   id: string;
   label: string;
-  kind: "5h" | "7d" | "monthly" | "daily";
+  kind: "5h" | "7d" | "monthly" | "daily" | "unknown";
   usedPercent: number;
   resetAt: number | null;
+  windowDurationMins: number | null;
+  limitId: string | null;
+  limitName: string | null;
   model: string | null;
   used: number | null;
   limit: number | null;
@@ -1901,6 +1948,8 @@ export interface MobileBridgeSnapshot {
    * 새 빌드는 대기가 없을 때 빈 배열을 보내 폰이 낡은 카드를 지울 수 있게 한다.
    */
   pendingToolApprovals?: MobileBridgeToolApprovalDto[];
+  /** Live synchronous runtime questions; [] clears cards resolved elsewhere. */
+  pendingUserInputs?: MobileBridgeUserInputDto[];
   automations: MobileBridgeAutomationDto[];
   usage: MobileBridgeUsageProviderDto[];
   activeChatIds: string[];
@@ -2176,6 +2225,7 @@ function validateInvokeOptions(
     optionalBoolean(params, "networkMode"),
     optionalBoolean(params, "appsGenerateMode"),
     optionalBoolean(params, "stormbreakerMode"),
+    validateEnum(params, "steeringMode", ["queue", "interrupt"]),
     params.runtimeSelection === undefined
       ? null
       : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
@@ -2602,7 +2652,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
@@ -2627,14 +2677,29 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             validateEnum(params, "decision", ["allow_once", "allow_session", "allow_always", "deny"], false),
           )
         : "runtime.resolveToolApproval accepts only id and decision";
+    case "runtime.submitUserInput":
+      return hasOnlyKeys(params, ["requestId", "answer"])
+        ? firstError(
+            requiredString(params, "requestId", 160),
+            params.answer === null
+              ? null
+              : requiredString(params, "answer", 4_000),
+          )
+        : "runtime.submitUserInput accepts only requestId and answer";
     case "automations.get":
     case "automations.runNow":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
     case "automations.setRuntime":
       // runtimeSelection은 null(기본 복귀) 또는 {kind,...} 객체. 세부 형태는
-      // 메인의 updateAutomation이 검증하므로 여기서는 키 경계만 지킨다.
+      // 메인의 런타임 카탈로그 확인과 함께 검증해, 잘못된 핀이 저장소에 닿지
+      // 않게 한다.
       return hasOnlyKeys(params, ["id", "runtimeSelection"])
-        ? requiredString(params, "id")
+        ? firstError(
+            requiredString(params, "id"),
+            params.runtimeSelection === null
+              ? null
+              : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
+          )
         : "automations.setRuntime accepts only id and runtimeSelection";
     case "automations.toggle":
       return hasOnlyKeys(params, ["id", "enabled"])

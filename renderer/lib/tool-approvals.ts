@@ -16,7 +16,11 @@
  */
 import { useSyncExternalStore } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "@/lib/types";
+import type {
+  ToolApprovalRequestEvent,
+  ToolApprovalDecision,
+  ToolApprovalDurableConsentReceipt,
+} from "@/lib/types";
 import {
   commitToolApprovalDecision,
   isToolApprovalResolutionReceipt,
@@ -36,6 +40,7 @@ export type ToolApprovalActionState = {
   decision: ToolApprovalDecision;
   terminalStatus?: "expired" | "conflict";
   resolvedDecision?: ToolApprovalDecision | null;
+  durableConsent?: ToolApprovalDurableConsentReceipt;
 };
 const actions = new Map<string, ToolApprovalActionState>();
 
@@ -90,17 +95,38 @@ function ensureSubscribed(): void {
     if (!isToolApprovalResolutionReceipt(receipt)) return;
     if (receipt.pending) return;
     const currentAction = actions.get(receipt.requestId);
+    // This renderer already settled and dismissed the same receipt. A late
+    // broadcast must not resurrect an orphan terminal action after the user
+    // explicitly closed it.
+    if (decided.has(receipt.requestId) && !currentAction && !queue.some((item) => item.id === receipt.requestId)) return;
     const exactOwnAction = currentAction?.phase === "submitting"
       && receipt.ok
       && receipt.resolvedDecision === currentAction.decision
       && receipt.actionId === toolApprovalActionId(receipt.requestId, currentAction.decision)
       && (receipt.status === "resolved" || receipt.status === "replayed");
-    if (exactOwnAction || !queue.some((item) => item.id === receipt.requestId)) {
+    const exactSettledAction = currentAction?.phase === "terminal"
+      && receipt.ok
+      && receipt.resolvedDecision === (currentAction.resolvedDecision ?? currentAction.decision)
+      && receipt.actionId === toolApprovalActionId(receipt.requestId, currentAction.resolvedDecision ?? currentAction.decision)
+      && (receipt.status === "resolved" || receipt.status === "replayed");
+    if (exactOwnAction || exactSettledAction || !queue.some((item) => item.id === receipt.requestId)) {
       // Main emitted this only after recording the exact runtime result. Our
       // own click may therefore finish from the event before the invoke reply.
       decided.add(receipt.requestId);
-      actions.delete(receipt.requestId);
-      queue = queue.filter((item) => item.id !== receipt.requestId);
+      const durableConsent = receipt.durableConsent ?? currentAction?.durableConsent;
+      if (durableConsent && durableConsent.status !== "persisted") {
+        actions.set(receipt.requestId, {
+          phase: "terminal",
+          decision: currentAction?.decision ?? receipt.resolvedDecision ?? "deny",
+          resolvedDecision: receipt.resolvedDecision,
+          durableConsent,
+        });
+        // Keep the request mounted so the user can see and dismiss a durable
+        // save failure. A successful receipt can disappear immediately.
+      } else {
+        actions.delete(receipt.requestId);
+        queue = queue.filter((item) => item.id !== receipt.requestId);
+      }
       emit();
       return;
     }
@@ -112,6 +138,7 @@ function ensureSubscribed(): void {
       decision: currentAction?.decision ?? receipt.resolvedDecision ?? "deny",
       terminalStatus: receipt.status === "expired" ? "expired" : "conflict",
       resolvedDecision: receipt.resolvedDecision,
+      durableConsent: receipt.durableConsent,
     });
     emit();
   });
@@ -145,15 +172,38 @@ function applyDecisionResult(
   // The exact Main event can arrive before the invoke promise. Do not replace
   // that already-confirmed outcome with a later transport/readback error.
   if (decided.has(id)) {
-    actions.delete(id);
+    const previous = actions.get(id);
+    const durableConsent = result.receipt?.durableConsent ?? previous?.durableConsent;
+    if (durableConsent && durableConsent.status !== "persisted") {
+      actions.set(id, {
+        phase: "terminal",
+        decision: previous?.decision ?? decision,
+        resolvedDecision: result.receipt?.resolvedDecision ?? previous?.resolvedDecision,
+        durableConsent,
+      });
+    } else {
+      actions.delete(id);
+    }
     queue = queue.filter((item) => item.id !== id);
     emit();
     return;
   }
   if (result.state === "resolved") {
     decided.add(id);
-    queue = queue.filter((item) => item.id !== id);
-    actions.delete(id);
+    const durableConsent = result.receipt.durableConsent;
+    if (durableConsent && durableConsent.status !== "persisted") {
+      actions.set(id, {
+        phase: "terminal",
+        decision,
+        resolvedDecision: result.receipt.resolvedDecision,
+        durableConsent,
+      });
+      // Retain the card until the user acknowledges that the current choice
+      // ran but the durable rule was not committed.
+    } else {
+      queue = queue.filter((item) => item.id !== id);
+      actions.delete(id);
+    }
     emit();
     return;
   }
@@ -168,6 +218,7 @@ function applyDecisionResult(
       decision,
       terminalStatus: result.receipt.status === "expired" ? "expired" : "conflict",
       resolvedDecision: result.receipt.resolvedDecision,
+      durableConsent: result.receipt.durableConsent,
     });
     emit();
     return;

@@ -172,15 +172,18 @@ import { userDataPath } from "../runtime-paths";
 import {
   normalizeRemoteInvocationPermission,
   revalidateInvocationWorkspaceBinding,
+  assertInvocationWorkspaceSourceContext,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 import {
   runnerFailureFromError,
   type Runner,
   type RunnerFailure,
+  type RunnerEvents,
   type RunnerRequest,
   SURFACE_INTENT_MARKER,
   UNATTENDED_NO_ASK_DIRECTIVE,
+  ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
 import {
@@ -478,6 +481,49 @@ export function naturalLanguageRequiresImageGeneration(prompt: unknown): boolean
   const visual = /(?:이미지|사진|그림|포스터|일러스트(?:레이션)?|도표|다이어그램|아이콘|로고|배너|삽화|작품|image|photo|picture|poster|illustration|drawing|diagram|icon|logo|banner|artwork|graphic|visual)/iu;
   const generation = /(?:만들|생성|그리|그려|제작|디자인|create|generate|draw|illustrate|design|make|render|compose|produce|generation|creation|production)/iu;
   return clauses.some((clause) => visual.test(clause) && generation.test(clause));
+}
+
+/**
+ * 사용자가 **화면을 찍어 보여 달라**고 했는가.
+ *
+ * `naturalLanguageRequiresImageGeneration` 과 일부러 나눠 둔다. 그쪽 깃발은 멀티모달
+ * 엔진으로 그림을 **생성**까지 하므로, 스크린샷 요청에 그 깃발을 켜면 python.org 를
+ * 찍는 대신 python.org 를 그려 버린다. 여기서 필요한 것은 생성이 아니라 **증거 요구**다.
+ *
+ * 배경(2026-09-04 실측): "파이썬 공식 사이트 화면 한 장 찍어서 보여줘" 에 모델이
+ * "캡처해 위에 표시했습니다" 라고 답했는데 채팅에 이미지가 없고 새 파일도 없었다.
+ * 그리기 요청에는 이미 증거 관문이 있었지만 어휘가 이미지·사진·그림뿐이라
+ * 화면·스크린샷·캡처는 통과했다.
+ */
+export function naturalLanguageRequiresScreenCapture(prompt: unknown): boolean {
+  if (typeof prompt !== "string") return false;
+  const text = prompt
+    .normalize("NFKC")
+    .replace(/\b(?:do\s+not|don't|never)\s+(?:capture|screenshot|screengrab)\b/giu, " ")
+    .replace(/(?:찍|캡처|캡쳐)(?:지\s*(?:마|말|않)|하지\s*(?:마|말|않))/gu, " ")
+    .toLowerCase();
+  const clauses = text
+    .split(/(?:[.!?\n;:。！？；：]+|\s+(?:그리고|하지만|또는|및|and|but|or|then)\s+)/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const surface = /(?:화면|스크린샷|스크린\s*샷|캡처|캡쳐|screenshot|screen\s*shot|screen\s*capture|screengrab)/iu;
+  /*
+   * 명사를 지운 **뒤에** 동사가 남아야 한다.
+   *
+   * 캡처·screenshot 은 명사이자 동사라, 둘을 각각 찾으면 한 단어가 두 조건을 혼자
+   * 만족시킨다. 그래서 "캡처가 안 된 이유를 알려줘" 같은 **질문**이 캡처 요청으로
+   * 읽혔다(2026-09-04 게이트가 잡음). 오탐은 정상 대화를 오류로 끝내므로 값이 크다.
+   */
+  const capture = /(?:찍|담아|떠\s*(?:줘|주|서)|take|grab|get|make)/iu;
+  // 명사에 곧바로 붙은 동사형(캡처해줘 · 스크린샷 찍어)은 위 규칙으로는 명사만 남으므로
+  // 따로 받는다. 일반 "해줘" 를 동사 목록에 넣으면 "설명해줘" 까지 잡힌다.
+  const attached = /(?:캡처|캡쳐)\s*(?:해|하)|스크린샷\s*(?:떠|찍|해)/iu;
+  return clauses.some((clause) => {
+    if (!surface.test(clause)) return false;
+    if (attached.test(clause)) return true;
+    const withoutNoun = clause.replace(surface, " ");
+    return capture.test(withoutNoun);
+  });
 }
 
 function wrapOneRecoveryProposal(text: string, locale: "ko" | "en"): string {
@@ -1468,7 +1514,10 @@ export async function runMcpInvocation(
   signal?: AbortSignal,
   workspaceBinding?: InvocationWorkspaceBinding,
   executionContext?: InvocationExecutionContext,
+  /** Main-only hook after this invocation's user message is durably stored. */
+  onDurableUserMessage?: (messageId: string) => Promise<void>,
 ): Promise<McpInvocationResult> {
+  assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
   // Keep usage and replay attribution aligned with the runtime that actually
@@ -1537,11 +1586,14 @@ export async function runMcpInvocation(
       // earlyResult 20여 곳)가 예외 없이 지나는 단 한 자리다. 갈래마다 정리를
       // 복붙하지 않고 이 지점에서 한 번만 판단한다(멱등 — 이미 정리된 텍스트는
       // 여는 울타리가 없어 그대로 통과).
-      const hygiene = applyFinalDisplayBackstop(ev.text, {
+      const hygiene = applyFinalDisplayBackstop(
+        ev.durableTextForVerification ?? ev.text,
+        {
         locale: pickLocale(req),
         // 미신뢰(Agent App) 실행은 모델이 쓴 매니페스트를 렌더하지 않는다.
         allowSurfaceRender: !req.agentAppMode,
-      });
+        },
+      );
       if (hygiene.changed) {
         // 값은 버리지 않는다: 유효 매니페스트는 원래 보여야 했던 화면으로 승격.
         for (const surface of hygiene.surfaces) {
@@ -1552,8 +1604,20 @@ export async function runMcpInvocation(
             surface,
           });
         }
-        ev = { ...ev, text: hygiene.text };
       }
+      ev = {
+        ...ev,
+        text: hygiene.text,
+        durableTextForVerification: ev.durableTextForVerification ?? hygiene.durableText,
+        userDecisionRequest: hygiene.userDecisionRequest
+          ? {
+              ...hygiene.userDecisionRequest,
+              ...(ev.durableAssistantMessageIdForVerification
+                ? { sourceMessageId: ev.durableAssistantMessageIdForVerification }
+                : {}),
+            }
+          : undefined,
+      };
     }
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
@@ -1660,6 +1724,7 @@ export async function runMcpInvocation(
   // the ordinary single-run persistence point. Keep the visible request durable
   // exactly once regardless of which executable orchestrator owns it.
   let userMessagePersisted = false;
+  let persistedUserMessageId: string | null = null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
   // replaying the conversation must never attribute our wording to the user,
@@ -1676,7 +1741,7 @@ export async function runMcpInvocation(
        * 데스크탑 경로에서 이 인자를 넘기지 않아, 실제로 그것을 쓰는 곳은 모바일
        * 브리지 하나뿐이었다.
        */
-      appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined);
+      persistedUserMessageId = appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined).id;
       if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
     }
     userMessagePersisted = true;
@@ -1686,6 +1751,15 @@ export async function runMcpInvocation(
   // Persist it at the first safe point after the exact local chat is resolved;
   // later orchestration branches keep calling this idempotent helper.
   persistUserMessage();
+  if (persistedUserMessageId && onDurableUserMessage && !signal?.aborted) {
+    try {
+      await onDurableUserMessage(persistedUserMessageId);
+      chat.goalId = getChatGoalId(chat.id);
+    } catch {
+      tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "durable_user_message_hook_failed", payload: { messageId: persistedUserMessageId } });
+    }
+  }
+  if (signal?.aborted) return earlyResult();
   // A paired phone and a direct scheduled run use the normal Desktop runtime
   // contract. Multi-hop unattended orchestration has a narrower Main-authored
   // boundary below so planner/worker/synthesis output cannot smuggle memory
@@ -1698,8 +1772,11 @@ export async function runMcpInvocation(
   // ontology, or project-scoped Experience. This is deliberately narrower than
   // `restrictedReadBoundary`: the selected runtime and its read tools remain
   // available, preserving Desktop/Mobile execution parity.
-  const suppressMutableProjectContext =
-    executionContext?.source === "automation" && !canWrite;
+  // Science owns its research state in its private store. Selecting a runtime
+  // directory must not seed/activate Work memory or write evolution proposals there.
+  const scienceWorkspaceBound = executionContext?.source === "science" && workspaceBinding?.source === "science";
+  const suppressMutableProjectContext = scienceWorkspaceBound
+    || (executionContext?.source === "automation" && !canWrite);
   // Permission still controls normal Desktop write authority. It is unrelated
   // to whether the request originated from a paired phone.
   const projectReadOnlyBoundary = !canWrite || restrictedReadBoundary;
@@ -2205,6 +2282,16 @@ ${effectiveUserPrompt}`;
   // turn a Gemini failure into a Codex answer; show the actual failure so the
   // user can repair the selected runtime or graph.
   const automationRuntimePinned = Boolean(req.automationId && req.runtimeSelection);
+  if (executionContext?.source === "science" && !req.runtimeSelection?.model) {
+    sink({ kind: "error", error: {
+      code: "science-runtime-selection-required",
+      message: locale === "ko" ? "Science에서 연구 모델을 선택한 뒤 다시 시작하세요." : "Select a Science research model before starting this study.",
+    } });
+    return earlyResult();
+  }
+  // Science owns the model for the whole research session, independently of
+  // Library assignments and the Work/One role pools, including error recovery.
+  const scienceRuntimePinned = executionContext?.source === "science" && Boolean(req.runtimeSelection);
   // One's composer selection is the controller's first runtime for both One
   // chat and One Work/graph runs. A normal Library assignment remains the
   // default for other surfaces; One only leaves its pin after a typed runtime
@@ -2212,10 +2299,19 @@ ${effectiveUserPrompt}`;
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     pinIsAuthoritative:
-      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned,
+      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned,
     agentAppMode: req.agentAppMode === true,
   });
   let runtimeChoice = runtimeResolution.choice;
+  if (scienceRuntimePinned && runtimeChoice) {
+    const selected = runtimeChoice.active;
+    const modelListIsAuthoritative = ["ollama", "lmstudio", "mlx"].includes(selected.kind)
+      || selected.modelDiscovery?.status === "ok";
+    if (selected.credentialAccess?.status === "unavailable" || selected.modelDiscovery?.stale
+      || (modelListIsAuthoritative && req.runtimeSelection?.model && !selected.availableModels?.includes(req.runtimeSelection.model))) {
+      runtimeChoice = null;
+    }
+  }
   let controllerFallbackBeforeRun: RuntimeStatus | null = null;
   // A One composer pin is a preference with an ordered recovery chain, not a
   // reason to stop before a runner starts. If the selected executable vanished
@@ -2250,13 +2346,13 @@ ${effectiveUserPrompt}`;
     sink({
       kind: "error",
       error: {
-        code: req.oneMode
+        code: scienceRuntimePinned ? "science-runtime-unavailable" : req.oneMode
           ? "one-runtime-unavailable"
           : runtimeResolution.pinHonored
             ? "pinned-runtime-unavailable"
             : "no-runtime",
         message: runtimeResolution.pinHonored && req.runtimeSelection
-          ? `Pinned automation runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
+          ? `Pinned ${scienceRuntimePinned ? "Science" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
           : tStatus(locale, "errNoRuntime"),
       },
     });
@@ -2316,7 +2412,7 @@ ${effectiveUserPrompt}`;
     sink({
       kind: "error",
       error: {
-        code: "no-runner",
+        code: scienceRuntimePinned ? "science-runtime-unavailable" : "no-runner",
         message: tStatus(locale, "errNoRunner", {
           kind: active.kind,
           backend: active.backend,
@@ -2650,6 +2746,18 @@ ${effectiveUserPrompt}`;
         reselect: () => autoSelectMcpTools({ ...autoSelectInput, bypassSelectionMemo: true }),
       });
       selectedContext = keyGate.context;
+      if (!selectedContext.needsDecided) {
+        sink({
+          kind: "notice",
+          notice: {
+            level: "warning",
+            code: "mcp-selection-undecided",
+            message: locale === "ko"
+              ? "필요한 도구를 고를 판단 모델에 연결되지 않아 판단 모델이 고른 선택형 도구 없이 계속합니다. 브라우저나 컴퓨터 제어가 필요한 결과는 완료로 간주하지 말고, 런타임 연결을 확인한 뒤 같은 요청을 다시 보내 주세요."
+              : "No judgment model was connected to choose the tools this task needs, so the run is continuing without any optional tool chosen by that model. Do not treat browser or computer-control work as complete; check the runtime connection and send the same request again.",
+          },
+        });
+      }
       isolatedMcpConfig = selectedContext.effectiveToolMode === "browser";
       if (keyGate.outcome !== "skipped") {
         sink({
@@ -2823,7 +2931,7 @@ ${effectiveUserPrompt}`;
     mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
     mcpRuntimeEnv = scienceGrant.runtimeEnv;
     mcpIncludedServers = [scienceGrant.includedServer];
-    mcpAutoSelectionPrompt = `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report its false-alarm-probability, period-uncertainty, single-sinusoid, cadence, and sampling-window warnings without upgrading a grid peak into a confirmed physical period; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix.`.trim();
+    mcpAutoSelectionPrompt = `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report the returned analytic false-alarm upper bound, model period standard error, assumptions, and warnings without upgrading a grid peak into a confirmed physical period or a standard error into a confidence interval. Call analyze_light_curve_periodicity_depth with explicit inputs when the frozen plan requires sampling-window, alias, bootstrap, or robustness analysis; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix. The turn's sandbox is read-only for FILES and SHELL, and that is deliberate: this work is not done by writing files. Recording research state through the Agentlas Science tools above -- proposing a research contract, recording hypotheses, freezing an analysis plan, running a Lab, appending a lifecycle revision, composing a manuscript version -- is the sanctioned way to do this work, and every one of those writes is validated by the host, not by the sandbox. Call them. Do not treat them as forbidden external state, and do not ask to escalate to full access in order to use them: a study that stops for that never leaves intake. Escalate only if you genuinely need to write a file or run a command outside these tools.`.trim();
   }
 
   /*
@@ -2892,6 +3000,15 @@ ${effectiveUserPrompt}`;
     && !req.oneMode
     && chat.kind !== "division"
     && naturalLanguageRequiresImageGeneration(req.userPrompt);
+  /*
+   * ★찍어 달라고 했으면 찍은 것이 있어야 한다 — 그리라고는 하지 않았으므로 생성은 하지 않고
+   * 결과만 요구한다(위 판정기 주석의 실측 참고).
+   */
+  const screenCaptureRequired = !req.agentAppMode
+    && !req.oneMode
+    && chat.kind !== "division"
+    && !naturalLanguageRequiresImageGeneration(req.userPrompt)
+    && naturalLanguageRequiresScreenCapture(req.userPrompt);
   let observedImageArtifactEvidence = false;
   const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
   const generatedImageSourcePaths = new Set<string>();
@@ -3916,7 +4033,7 @@ ${effectiveUserPrompt}`;
   // project-memory injection, so it stays gated on write permission: a read run
   // gets a map, never someone else's memory.
   let activePath: string | null = null;
-  if (!req.agentAppMode && workingFolder) {
+  if (!req.agentAppMode && workingFolder && !scienceWorkspaceBound) {
     try {
       if (canWrite) {
         const visit = await recordFolderVisit(workingFolder, undefined, {
@@ -3967,7 +4084,7 @@ ${effectiveUserPrompt}`;
       if (memoryContext) turnContextParts.push(memoryContext);
       // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
       // 읽게), 고위험 대기분이 있으면 세션 컨텍스트에 한 줄 주입. 실패-무해.
-      if (workingFolder && canWrite && !projectReadOnlyBoundary) {
+      if (workingFolder && canWrite && !projectReadOnlyBoundary && !scienceWorkspaceBound) {
         try {
           const growth = writeEvolutionProposalsForProject(workingFolder);
           const line = evolutionSessionContextLine(growth.pending, locale === "ko" ? "ko" : "en");
@@ -4153,6 +4270,11 @@ ${effectiveUserPrompt}`;
     systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
   } else if (usesMobileDurableDecision(executionContext)) {
     systemPrompt = `${systemPrompt}\n\n${MOBILE_DURABLE_ASK_DIRECTIVE}`;
+  } else if (!req.agentAppMode && chat.kind !== "division") {
+    // 사람이 보고 있는 실행에는 **묻는 방법**을 알려 준다. 질문 시트 UI 와 렌더러 파서는
+    // 이미 있는데 그 형식을 아는 프롬프트가 태스크포스 합성뿐이라, 기본 경로인 CLI 실행은
+    // 구조화해서 물을 수단이 없어 산문으로 되물었다(2026-09-04 실측).
+    systemPrompt = `${systemPrompt}\n\n${ATTENDED_ASK_DIRECTIVE}`;
   }
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
@@ -4507,39 +4629,184 @@ ${effectiveUserPrompt}`;
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
     };
+    // Direct interactive fallback is a recovery chain, not an unbounded retry
+    // loop. The set lives for the whole invocation so a later Stormbreaker or
+    // One recovery pass cannot resurrect a runtime that already failed here.
+    const DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS = 4;
+    const DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS = 30_000;
+    const DIRECT_RUNTIME_RECOVERY_MAX_RETRY_EVENTS = 3;
+    const attemptedRuntimeKeys = new Set<string>();
+    const attemptedRuntimeReceipts = new Map<string, {
+      kind: RuntimeStatus["kind"];
+      backend: RuntimeStatus["backend"];
+      source: string;
+      acpAgentId: string | null;
+      model: string | null;
+      attempt: number;
+    }>();
+    let runnerEventGeneration = 0;
+    const runtimeAttemptKey = (runtime: RuntimeStatus): string => JSON.stringify([
+      runtime.kind,
+      runtime.backend,
+      runtime.source,
+      runtime.acpAgentId ?? null,
+      runtime.model ?? null,
+    ]);
+    const runtimeAttemptReceipt = (runtime: RuntimeStatus, attempt: number) => ({
+      kind: runtime.kind,
+      backend: runtime.backend,
+      source: runtime.source,
+      acpAgentId: runtime.acpAgentId ?? null,
+      model: runtime.model ?? null,
+      attempt,
+    });
+    // A CLI can resolve its promise before a buffered stream callback arrives.
+    // Seal each runner's callbacks to its own generation so a late callback
+    // cannot mutate the next runtime's counters, artifacts, or transcript.
+    const createAttemptRunnerEvents = (): { events: RunnerEvents; settle: () => void } => {
+      const generation = ++runnerEventGeneration;
+      let settled = false;
+      const forward = <T extends unknown[]>(handler: (...args: T) => void) => (...args: T): void => {
+        if (settled || generation !== runnerEventGeneration || signal?.aborted) return;
+        handler(...args);
+      };
+      return {
+        events: {
+          onPartial: forward(runnerEvents.onPartial),
+          onStatus: forward(runnerEvents.onStatus),
+          onTool: forward(runnerEvents.onTool),
+          onUsage: forward(runnerEvents.onUsage),
+          onThinking: forward(runnerEvents.onThinking),
+          onNotice: forward(runnerEvents.onNotice),
+        },
+        settle: () => {
+          settled = true;
+        },
+      };
+    };
     const directRuntimeFallbackAllowed =
       !req.agentAppMode
       && !isUnattendedExecution(executionContext)
-      && !automationRuntimePinned;
+      && !automationRuntimePinned
+      && !scienceRuntimePinned;
     const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
+      const recoveryStartedAt = Date.now();
+      let recoveryRetryEvents = 0;
+      let attemptCount = 0;
+      let originalFailure: RunnerFailure | null = null;
+      let terminalNoticeEmitted = false;
       let requestForRuntime: RunnerRequest = {
         ...runnerRequestForRuntime(active, currentPicked, request.userPrompt),
         images: request.images,
       };
-      while (true) {
+      const emitTerminalRecoveryFailure = (
+        result: Awaited<ReturnType<Runner>>,
+        reason: "candidate-exhausted" | "attempt-limit" | "time-limit" | "event-limit",
+      ): Awaited<ReturnType<Runner>> => {
+        const failure = result.failure;
+        if (!failure || terminalNoticeEmitted) return result;
+        terminalNoticeEmitted = true;
+        const elapsedMs = Math.max(0, Date.now() - recoveryStartedAt);
+        const details = JSON.stringify({
+          schema: "agentlas.runtime-recovery-terminal/v1",
+          code: "runtime-recovery-exhausted",
+          reason,
+          elapsedMs,
+          attempts: attemptCount,
+          retryEvents: recoveryRetryEvents,
+          attemptedRuntimeCount: attemptedRuntimeKeys.size,
+          runtimes: [...attemptedRuntimeReceipts.values()],
+          originalFailure: originalFailure ?? failure,
+          lastFailure: failure,
+        });
+        const koMessage = "실행 환경 복구 후보를 모두 확인했지만 실행을 끝내지 못했습니다. 원래 실패 원인은 자세히에서 확인하세요.";
+        const enMessage = "All bounded runtime recovery candidates were checked, but the run could not complete. See details for the original failure.";
+        sink({
+          kind: "notice",
+          model: failure.runtime,
+          modelRole: invocationModelRole,
+          notice: {
+            level: "error",
+            code: "runtime-recovery-exhausted",
+            message: locale === "ko" ? koMessage : enMessage,
+            i18n: { ko: koMessage, en: enMessage },
+            details,
+          },
+        });
+        return result;
+      };
+      while (attemptCount < DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS) {
+        if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
+        if (Date.now() - recoveryStartedAt >= DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
+          if (!originalFailure) throw new Error("runtime recovery time budget exhausted");
+          return emitTerminalRecoveryFailure({ text: "", failure: originalFailure }, "time-limit");
+        }
+        attemptCount += 1;
+        const selectedRuntime = active;
+        const selectedRuntimeKey = runtimeAttemptKey(selectedRuntime);
+        attemptedRuntimeKeys.add(selectedRuntimeKey);
+        attemptedRuntimeReceipts.set(
+          selectedRuntimeKey,
+          runtimeAttemptReceipt(selectedRuntime, attemptCount),
+        );
+        const attemptEvents = createAttemptRunnerEvents();
         let result: Awaited<ReturnType<Runner>>;
         try {
           const selected = picked;
           if (!selected) throw new Error("no-runner");
-          result = await selected.runner(requestForRuntime, runnerEvents);
+          result = await selected.runner(requestForRuntime, attemptEvents.events);
         } catch (error) {
           if (!directRuntimeFallbackAllowed || signal?.aborted) throw error;
           result = {
             text: "",
             failure: runnerFailureFromError(error, active.kind),
           };
+        } finally {
+          attemptEvents.settle();
         }
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
+        originalFailure = originalFailure ?? failed;
         const fallback = rolePriorityRuntimes(runtimes, "orchestrator", {
           failedRuntime: active,
           failure: failed,
-        })[0];
+        }).find((candidate) => {
+          const candidateKey = runtimeAttemptKey(candidate);
+          return candidateKey !== selectedRuntimeKey && !attemptedRuntimeKeys.has(candidateKey);
+        });
         const fallbackPicked = fallback ? pickRunner(fallback) : null;
-        if (!fallback || !fallbackPicked) return result;
-        if (oneControllerFallbackEligible) emitControllerRuntimeFallback(fallback, failed);
+        if (!fallback || !fallbackPicked) return emitTerminalRecoveryFailure(result, "candidate-exhausted");
+        if (attemptCount >= DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS) {
+          return emitTerminalRecoveryFailure(result, "attempt-limit");
+        }
+        if (Date.now() - recoveryStartedAt >= DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
+          return emitTerminalRecoveryFailure(result, "time-limit");
+        }
+        if (recoveryRetryEvents >= DIRECT_RUNTIME_RECOVERY_MAX_RETRY_EVENTS) {
+          return emitTerminalRecoveryFailure(result, "event-limit");
+        }
+        recoveryRetryEvents += 1;
+        if (oneControllerFallbackEligible) {
+          emitControllerRuntimeFallback(fallback, failed);
+        } else {
+          const fromLabel = `${active.kind}${active.model ? ` · ${active.model}` : ""}`;
+          const toLabel = `${fallback.kind}${fallback.model ? ` · ${fallback.model}` : ""}`;
+          const koMessage = `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
+          const enMessage = `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
+          runnerEvents.onNotice({
+            level: "warning",
+            code: "runtime-fallback-attempt",
+            message: locale === "ko" ? koMessage : enMessage,
+            i18n: { ko: koMessage, en: enMessage },
+            details: JSON.stringify({
+              from: { kind: active.kind, backend: active.backend, model: active.model ?? null },
+              to: { kind: fallback.kind, backend: fallback.backend, model: fallback.model ?? null },
+              reason: failed.kind,
+            }),
+          });
+        }
         sink({
           kind: "tool-use",
           status: locale === "ko"
@@ -4554,6 +4821,7 @@ ${effectiveUserPrompt}`;
           images: request.images,
         };
       }
+      throw new Error("runtime recovery loop exited without a terminal result");
     };
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;
@@ -4685,9 +4953,9 @@ ${effectiveUserPrompt}`;
           projectDir: workforceProjectDir,
         }) ?? latestGoalDecision;
         if (latestGoalDecision) {
-          if (passShouldContinue && !latestGoalDecision.continue && GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) {
+          if (!latestGoalDecision.continue) {
             passShouldContinue = false;
-            goalHardStop = latestGoalDecision;
+            if (GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) goalHardStop = latestGoalDecision;
           } else if (!passShouldContinue && latestGoalDecision.continue) {
             // Codex 동형: 모델이 마커를 안 붙여도 goal이 미달이면 계속한다.
             passShouldContinue = true;
@@ -4868,11 +5136,10 @@ ${effectiveUserPrompt}`;
           stormbreakerContinueRequested = true;
         } else if (
           stormbreakerContinueRequested &&
-          !latestGoalDecision.continue &&
-          GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)
+          !latestGoalDecision.continue
         ) {
           stormbreakerContinueRequested = false;
-          goalHardStop = latestGoalDecision;
+          if (GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) goalHardStop = latestGoalDecision;
         }
       }
       /*
@@ -5546,12 +5813,16 @@ ${effectiveUserPrompt}`;
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
     });
-    const persistedDisplay = stripPermissionEscalationMarker(finalDisplay.text);
+    const persistedDisplay = stripPermissionEscalationMarker(finalDisplay.durableText);
     const finalWorkImages = (!req.agentAppMode && !req.oneMode)
       ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
       : [];
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
       throw new Error("image_tool_unavailable: the generated image was not durably bound");
+    }
+    // 찍어 달라고 한 실행이 이미지 하나 없이 끝나면, 답이 무슨 말을 했든 사실이 아니다.
+    if (screenCaptureRequired && finalWorkImages.length === 0 && !signal?.aborted) {
+      throw new Error("screen_capture_unavailable: the requested screen capture was never produced");
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
     let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;
@@ -5634,7 +5905,13 @@ ${effectiveUserPrompt}`;
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
     sink({
       kind: "final",
+      // The universal sink wrapper below is the single trust boundary that
+      // derives the typed request and strips the wire markers before delivery.
       text: displayWithFloor,
+      durableTextForVerification: persistedDisplay,
+      ...(durableAssistantEntry
+        ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
+        : {}),
       tokens: finalObservedTokens || undefined,
       model: active.model ?? active.kind,
       modelRole: invocationModelRole,

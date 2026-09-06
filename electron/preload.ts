@@ -261,8 +261,20 @@ const api: AgentlasIpc = {
   },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
-    commitAnswer: (input: { chatId: string; reply: string; sourceMessageId?: string }) =>
+    commitAnswer: (input: {
+      chatId: string;
+      reply: string;
+      sourceMessageId?: string;
+      continuation?: {
+        locale?: "ko" | "en";
+        permissions?: "read" | "write" | "full";
+        sessionRouting?: boolean;
+        runtimeSelection?: unknown;
+      };
+    }) =>
       ipcRenderer.invoke("confirm:commitAnswer", input),
+    continueAnswer: (input: { chatId: string; sourceMessageId: string; reply: string }) =>
+      ipcRenderer.invoke("confirm:continueAnswer", input),
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
       ipcRenderer.invoke("confirm:snooze", input),
     committedAnswers: (chatId: string) => ipcRenderer.invoke("confirm:committedAnswers", chatId),
@@ -325,6 +337,10 @@ const api: AgentlasIpc = {
     has: (key: string) => ipcRenderer.invoke("env:has", key),
     preview: (key: string) => ipcRenderer.invoke("env:preview", key),
     remove: (key: string) => ipcRenderer.invoke("env:remove", key),
+  },
+  credentialRecovery: {
+    list: () => ipcRenderer.invoke("credentialRecovery:list"),
+    retry: (retryToken: string) => ipcRenderer.invoke("credentialRecovery:retry", retryToken),
   },
   multimodal: {
     listProviders: () => ipcRenderer.invoke("multimodal:listProviders"),
@@ -1038,6 +1054,11 @@ contextBridge.exposeInMainWorld("agentlas", api);
 // 드래그&드롭으로 들어온 File/폴더의 실제 경로는 preload 안에서만 얻는다.
 // renderer에는 raw-path grant API 대신 main이 발급한 제한된 capability만 돌려준다.
 contextBridge.exposeInMainWorld("agentlasFiles", {
+  chatFiles: {
+    snapshot: (input: unknown) => ipcRenderer.invoke("chatFiles:snapshot", input),
+    listGroup: (input: unknown) => ipcRenderer.invoke("chatFiles:listGroup", input),
+    openExternal: (input: unknown) => ipcRenderer.invoke("chatFiles:openExternal", input),
+  },
   grantForFile: async (file: File): Promise<FsPathGrant | null> => {
     try {
       const droppedPath = webUtils.getPathForFile(file);
@@ -1137,9 +1158,36 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
    * 메시지로 오므로 도구는 결과를 못 받는다. 이 채널은 답이 올 때까지 실행이 기다린다.
    */
   onAskUser: (handler: (req: AskUserRequestEvent) => void) => {
-    const wrapped = (_evt: Electron.IpcRendererEvent, req: AskUserRequestEvent) => handler(req);
+    let active = true;
+    let snapshotPending = true;
+    const observed = new Set<string>();
+    const wrapped = (_evt: Electron.IpcRendererEvent, req: AskUserRequestEvent) => {
+      if (!active) return;
+      // Both active events and expiry tombstones supersede an older snapshot.
+      if (snapshotPending) observed.add(req.requestId);
+      handler(req);
+    };
     ipcRenderer.on("agentlas:ask-user", wrapped);
-    return () => ipcRenderer.removeListener("agentlas:ask-user", wrapped);
+    // Subscribe first: a reply arriving during this read must not resurrect a
+    // finished card. Replay through the same event contract, not a new answer.
+    void ipcRenderer.invoke("confirm:listPendingAskUser").then((rows: AskUserRequestEvent[]) => {
+      if (!active) return;
+      for (const req of rows) {
+        if (!active) break;
+        if (observed.has(req.requestId) || req.expiresAt <= Date.now()) continue;
+        observed.add(req.requestId);
+        handler(req);
+      }
+    }).catch(() => {
+      // Older/unavailable Main: keep the live subscription usable.
+    }).finally(() => {
+      snapshotPending = false;
+      observed.clear();
+    });
+    return () => {
+      active = false;
+      ipcRenderer.removeListener("agentlas:ask-user", wrapped);
+    };
   },
   // Site Copilot의 사용자용 상태/피드백 스트림. 내부 모델 추론이나 원문 HTML은 보내지 않는다.
   onSiteActivity: (handler: (event: SiteActivityEvent) => void) => {

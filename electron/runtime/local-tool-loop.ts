@@ -12,35 +12,30 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import {
+  MainWorkforceBroker,
+  workforceBrokerDigest,
+  type WorkforceBrokerInventoryEntry,
+  type WorkforceBrokerProviderCallLocation,
+} from "./workforce-broker";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { listInstalledServers } from "../mcp-tools/registry";
-import { mcpConfigKey } from "../mcp-tools/mcp-config";
-import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
-import { saveBrowserCaptureArtifact } from "../media/capture-artifacts";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
   type RuntimeToolPermissionAsk,
+  type RuntimeToolPermissionDecision,
 } from "./tool-approval";
-import {
-  builtinToolByName,
-  builtinToolsAsOpenAi,
-  runBuiltinTool,
-  type ToolPermission,
-} from "../../shared/builtin-tools";
-import { askUser } from "../confirm/ask-user";
-import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
-import { generateImage } from "../multimodal/image";
+import type { ToolPermission } from "../../shared/builtin-tools";
 
 export type LocalChatContent =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
 
-interface OpenAiToolDef {
+export interface OpenAiToolDef {
   type: "function";
   function: { name: string; description?: string; parameters: unknown };
 }
@@ -49,6 +44,22 @@ interface OpenAiToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
+}
+
+/** Provider-neutral tool invocation data. No caller may synthesize a provider
+ * correlation ID: protocols without one carry their measured response part
+ * location into the Main broker instead. */
+export interface MainToolDispatchCall {
+  providerCallId: string | null;
+  providerCallLocation?: WorkforceBrokerProviderCallLocation | null;
+  toolName: string;
+  arguments: string;
+}
+
+export interface MainToolDispatchResult {
+  content: string;
+  visionMessage: ChatMessage | null;
+  isError: boolean;
 }
 
 export type ChatMessage =
@@ -66,9 +77,18 @@ export type ChatMessage =
  * 도구를 빌려올 곳이 없으므로 우리가 줘야 한다. 승인 관문·이벤트·결과 처리는
  * 두 출처가 **같은 경로**를 탄다 — 갈래를 나누면 한쪽만 관문을 빠뜨린다.
  */
-type ResolvedTool =
-  | { kind: "mcp"; server: InstalledMcpServer; serverToolName: string }
-  | { kind: "builtin"; builtinName: string };
+export type ResolvedTool =
+  | {
+      kind: "mcp";
+      server: InstalledMcpServer;
+      serverToolName: string;
+      serverConfigKey: string;
+      /** Digest of the resolved Main dispatch record; its contents never leave Main. */
+      serverConfigDigest: string;
+      /** Canonical Main inventory ID; provider function names may be sanitized. */
+      brokerToolId: string;
+    }
+  | { kind: "builtin"; builtinName: string; brokerToolId: string };
 
 const MAX_TOOL_LOOP_TURNS = 8;
 const MAX_TOOL_RESULT_CHARS = 20_000;
@@ -109,7 +129,7 @@ function scopeServerToWorkspace(server: InstalledMcpServer, workspaceRoot: strin
   return { ...server, args: server.args.map((arg) => (arg === "~" ? workspaceRoot : arg)) };
 }
 
-async function loadOpenAiTools(
+export async function loadMainToolInventory(
   mcpConfigPath: string | undefined,
   workspaceRoot: string | undefined,
   permission: ToolPermission,
@@ -120,13 +140,26 @@ async function loadOpenAiTools(
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
+  // These imports deliberately live inside the tool-admission path. An
+  // untrusted no-tools run must not initialize the MCP registry/catalog or
+  // builtin tool implementations merely by importing this runner module.
+  const [{ builtinToolsAsOpenAi }, { listInstalledServers }, { mcpConfigKey }, { testServerConnection }] = await Promise.all([
+    import("../../shared/builtin-tools"),
+    import("../mcp-tools/registry"),
+    import("../mcp-tools/mcp-config"),
+    import("../mcp-tools/client"),
+  ]);
 
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
   if (workspaceRoot) {
     for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage })) {
       tools.push(def);
-      byName.set(def.function.name, { kind: "builtin", builtinName: def.function.name });
+      byName.set(def.function.name, {
+        kind: "builtin",
+        builtinName: def.function.name,
+        brokerToolId: def.function.name,
+      });
     }
   }
 
@@ -169,10 +202,43 @@ async function loadOpenAiTools(
               : { type: "object", properties: {} },
         },
       });
-      byName.set(name, { kind: "mcp", server, serverToolName: tool.name });
+      byName.set(name, {
+        kind: "mcp",
+        server,
+        serverToolName: tool.name,
+        serverConfigKey: key,
+        serverConfigDigest: workforceBrokerDigest(server),
+        brokerToolId: `mcp__${key}__${tool.name}`,
+      });
     }
   }
   return { tools, byName };
+}
+
+export function mainToolBrokerInventory(
+  tools: readonly OpenAiToolDef[],
+  byName: ReadonlyMap<string, ResolvedTool>,
+): WorkforceBrokerInventoryEntry[] {
+  return tools.map((tool) => {
+    const resolved = byName.get(tool.function.name);
+    if (!resolved) throw new Error("workforce_broker_tool_inventory_missing");
+    if (resolved.kind === "builtin") {
+      return {
+        toolId: resolved.brokerToolId,
+        kind: "builtin",
+        descriptorDigest: workforceBrokerDigest(tool),
+        serverConfigKey: null,
+        serverConfigDigest: null,
+      };
+    }
+    return {
+      toolId: resolved.brokerToolId,
+      kind: "mcp",
+      descriptorDigest: workforceBrokerDigest(tool),
+      serverConfigKey: resolved.serverConfigKey,
+      serverConfigDigest: resolved.serverConfigDigest,
+    };
+  });
 }
 
 /**
@@ -192,7 +258,7 @@ async function loadOpenAiTools(
  * 중재자가 던지면 거부다. 실패가 허용으로 바뀌는 순간 이 관문은 없느니만 못하다
  * (acp.ts answerPermission 과 같은 규칙).
  */
-interface LocalToolApprovalContext {
+export interface LocalToolApprovalContext {
   runtimeKind: string;
   sessionKey: string;
   permission: RunnerRequest["permission"];
@@ -203,14 +269,67 @@ interface LocalToolApprovalContext {
   unattended: boolean;
   /** 내장 bash 도구가 취소를 따르도록 — 실행 중단이 도구까지 닿아야 한다. */
   signal?: AbortSignal;
+  /** Main-owned broker ledger hook. It records the exact approval decision. */
+  onApprovalDecision?: (decision: RuntimeToolPermissionDecision) => void;
+}
+
+/**
+ * One Main-owned admission and approval context for every in-process provider
+ * protocol. Anthropic and Gemini use different wire envelopes, but they must
+ * not get a different MCP discovery, approval, dispatch, or broker ledger.
+ */
+export interface MainToolLoopContext {
+  tools: OpenAiToolDef[];
+  byName: Map<string, ResolvedTool>;
+  broker?: MainWorkforceBroker;
+  approval: LocalToolApprovalContext;
+}
+
+export async function prepareMainToolLoop(
+  req: RunnerRequest,
+  runtimeKind: string,
+): Promise<MainToolLoopContext> {
+  const { tools, byName } = req.untrustedNoTools
+    ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
+    : await (async () => {
+        // Tool-surface discovery lives inside this branch so the Main-authored
+        // untrusted boundary cannot initialize tool implementations or MCP.
+        const { multimodalImageSlotDiagnosis } = await import("../multimodal/slot");
+        const imageSlotDiagnosis = await multimodalImageSlotDiagnosis();
+        return loadMainToolInventory(
+          req.mcpConfigPath,
+          req.cwd,
+          (req.permission ?? "read") as ToolPermission,
+          req.unattended !== true && req.noSynchronousAsk !== true,
+          imageSlotDiagnosis.state === "ready",
+        );
+      })();
+  return {
+    tools,
+    byName,
+    ...(req.workforceRuntimeToolGrant && !req.untrustedNoTools
+      ? { broker: new MainWorkforceBroker(req, runtimeKind, mainToolBrokerInventory(tools, byName)) }
+      : {}),
+    approval: {
+      runtimeKind,
+      sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
+      permission: req.permission,
+      ...(req.cwd ? { cwd: req.cwd } : {}),
+      ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
+      ...(req.agentId ? { agentId: req.agentId } : {}),
+      unattended: req.unattended === true,
+      ...(req.signal ? { signal: req.signal } : {}),
+    },
+  };
 }
 
 async function approveLocalToolCall(
   ctx: LocalToolApprovalContext,
   toolName: string,
-): Promise<boolean> {
+): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
   // MCP 도구는 정의에 종류 칸이 없으므로 "other"에 머문다.
+  const { builtinToolByName } = await import("../../shared/builtin-tools");
   const builtin = builtinToolByName(toolName);
   const builtinKind = builtin
     ? builtin.minPerm === "read"
@@ -237,49 +356,93 @@ async function approveLocalToolCall(
     ...(ctx.unattended ? { unattended: true as const } : {}),
   };
   const arbiter = getRuntimeToolPermissionArbiter();
-  if (!arbiter) return defaultRuntimeToolPermission(ask) !== "deny";
-  try {
-    return (await arbiter(ask)) !== "deny";
-  } catch {
-    return false;
+  let decision: RuntimeToolPermissionDecision;
+  if (!arbiter) {
+    decision = defaultRuntimeToolPermission(ask);
+  } else {
+    try {
+      decision = await arbiter(ask);
+    } catch {
+      decision = "deny";
+    }
   }
+  ctx.onApprovalDecision?.(decision);
+  return decision;
 }
 
-/** 테스트 이음새 — 승인 관문이 **호출 직전에** 실제로 걸리는지 재기 위해 열어 둔다. */
-export async function runOneToolCall(
+/** Protocol-neutral Main dispatch. Provider wire adapters own only their
+ * request/response envelopes; admission, approval, execution and ledger
+ * outcomes are all recorded here. */
+export async function runMainToolDispatch(
   byName: Map<string, ResolvedTool>,
-  call: OpenAiToolCall,
+  call: MainToolDispatchCall,
   events: RunnerEvents,
   approval: LocalToolApprovalContext,
-): Promise<{ toolMessage: ChatMessage; visionMessage: ChatMessage | null }> {
-  const resolved = byName.get(call.function.name);
+  broker?: MainWorkforceBroker,
+): Promise<MainToolDispatchResult> {
+  const eventCallId = call.providerCallId ?? undefined;
+  const resolved = byName.get(call.toolName);
+  // Main assigns this opaque action ID before parsing/approval/dispatch. The
+  // provider call ID stays only as an input correlation value in the ledger.
+  const brokerToolId = resolved?.brokerToolId ?? call.toolName;
+  if (broker && !/^[A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127}$/.test(brokerToolId)) {
+    // Do not mint a replacement ID for malformed provider protocol. The run
+    // fails before dispatch and therefore cannot carry a success receipt.
+    throw new Error("workforce_broker_provider_tool_id_invalid");
+  }
+  const actionId = broker
+    ? broker.beginAction(call.providerCallId, brokerToolId, call.providerCallLocation ?? null)
+    : undefined;
   if (!resolved) {
-    events.onTool?.(call.function.name, call.function.arguments, "unknown tool", call.id, true);
+    if (actionId) broker?.finishAction(actionId, "not_dispatched");
+    events.onTool?.(call.toolName, call.arguments, "unknown tool", eventCallId, true);
     return {
-      toolMessage: { role: "tool", tool_call_id: call.id, content: `Error: unknown tool "${call.function.name}"` },
+      content: `Error: unknown tool "${call.toolName}"`,
       visionMessage: null,
+      isError: true,
     };
   }
   let args: Record<string, unknown> = {};
   try {
-    args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+    args = call.arguments ? JSON.parse(call.arguments) : {};
   } catch {
-    events.onTool?.(call.function.name, call.function.arguments, "invalid JSON arguments", call.id, true);
+    if (actionId) broker?.finishAction(actionId, "not_dispatched");
+    events.onTool?.(call.toolName, call.arguments, "invalid JSON arguments", eventCallId, true);
     return {
-      toolMessage: { role: "tool", tool_call_id: call.id, content: "Error: invalid JSON arguments" },
+      content: "Error: invalid JSON arguments",
       visionMessage: null,
+      isError: true,
     };
   }
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
-  if (!(await approveLocalToolCall(approval, call.function.name))) {
-    const denied = `Error: tool call denied — "${call.function.name}" was not approved for this run.`;
-    events.onTool?.(call.function.name, call.function.arguments, denied, call.id, true);
+  let approvalDecision: RuntimeToolPermissionDecision | null = null;
+  const actionApproval: LocalToolApprovalContext = actionId
+    ? {
+        ...approval,
+        onApprovalDecision: (decision) => {
+          approval.onApprovalDecision?.(decision);
+          approvalDecision = decision;
+          broker?.recordDecision(actionId, decision);
+        },
+      }
+    : approval;
+  if ((await approveLocalToolCall(actionApproval, call.toolName)) === "deny") {
+    if (actionId) broker?.finishAction(actionId, "denied");
+    const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
+    events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);
     return {
-      toolMessage: { role: "tool", tool_call_id: call.id, content: denied },
+      content: denied,
       visionMessage: null,
+      isError: true,
     };
   }
   if (resolved.kind === "builtin") {
+    const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
+      import("../../shared/builtin-tools"),
+      import("../confirm/ask-user"),
+      import("../multimodal/slot"),
+      import("../multimodal/image"),
+    ]);
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: approval.cwd ?? process.cwd(),
       permission: (approval.permission ?? "read") as ToolPermission,
@@ -302,20 +465,20 @@ export async function runOneToolCall(
         : {}),
     });
     events.onTool?.(
-      call.function.name,
-      call.function.arguments,
+      call.toolName,
+      call.arguments,
       outcome.content,
-      call.id,
+      eventCallId,
       !outcome.ok,
       outcome.artifactPaths,
       outcome.imageDataUrl,
     );
+    if (actionId) {
+      if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
+      broker?.finishAction(actionId, outcome.ok ? "succeeded" : "failed");
+    }
     return {
-      toolMessage: {
-        role: "tool",
-        tool_call_id: call.id,
-        content: (outcome.ok ? outcome.content : `Error: ${outcome.content}`).slice(0, MAX_TOOL_RESULT_CHARS),
-      },
+      content: (outcome.ok ? outcome.content : `Error: ${outcome.content}`).slice(0, MAX_TOOL_RESULT_CHARS),
       visionMessage: outcome.ok && outcome.imageDataUrl
         ? {
             role: "user",
@@ -325,9 +488,14 @@ export async function runOneToolCall(
             ],
           }
         : null,
+      isError: !outcome.ok,
     };
   }
   try {
+    const [{ callServerToolContent }, { saveBrowserCaptureArtifact }] = await Promise.all([
+      import("../mcp-tools/client"),
+      import("../media/capture-artifacts"),
+    ]);
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000 });
     const text = result?.text ?? "";
     const images = result?.images ?? [];
@@ -338,15 +506,19 @@ export async function runOneToolCall(
       .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
       .filter((filePath): filePath is string => filePath !== null);
     events.onTool?.(
-      call.function.name,
-      call.function.arguments,
+      call.toolName,
+      call.arguments,
       text,
-      call.id,
+      eventCallId,
       false,
       capturePaths.length > 0 ? capturePaths : undefined,
     );
+    if (actionId) {
+      if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
+      broker?.finishAction(actionId, "succeeded");
+    }
     return {
-      toolMessage: { role: "tool", tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT_CHARS) },
+      content: text.slice(0, MAX_TOOL_RESULT_CHARS),
       visionMessage: images.length > 0
         ? {
             role: "user",
@@ -359,15 +531,44 @@ export async function runOneToolCall(
             ],
           }
         : null,
+      isError: false,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    events.onTool?.(call.function.name, call.function.arguments, message, call.id, true);
+    events.onTool?.(call.toolName, call.arguments, message, eventCallId, true);
+    if (actionId) {
+      if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
+      broker?.finishAction(actionId, "failed");
+    }
     return {
-      toolMessage: { role: "tool", tool_call_id: call.id, content: `Error: ${message}` },
+      content: `Error: ${message}`,
       visionMessage: null,
+      isError: true,
     };
   }
+}
+
+/** OpenAI Chat Completions still needs the actual provider tool-call ID in its
+ * `role: tool` message. It is a wire wrapper over the neutral Main dispatch. */
+export async function runOneToolCall(
+  byName: Map<string, ResolvedTool>,
+  call: OpenAiToolCall,
+  events: RunnerEvents,
+  approval: LocalToolApprovalContext,
+  broker?: MainWorkforceBroker,
+): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean }> {
+  const outcome = await runMainToolDispatch(
+    byName,
+    { providerCallId: call.id, toolName: call.function.name, arguments: call.function.arguments },
+    events,
+    approval,
+    broker,
+  );
+  return {
+    toolMessage: { role: "tool", tool_call_id: call.id, content: outcome.content },
+    visionMessage: outcome.visionMessage,
+    isError: outcome.isError,
+  };
 }
 
 async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unknown> {
@@ -479,6 +680,12 @@ export interface RunLocalOpenAiChatOptions {
   model: string;
   /** 연결 실패 시 메시지(로케일 이미 반영된 문자열) */
   unreachableMessage: string;
+  /** Provider-owned authentication and compatibility headers for the same Chat Completions wire loop. */
+  headers?: Record<string, string>;
+  /** Exact provider Chat Completions endpoint when it is not `${host}/v1/chat/completions`. */
+  chatEndpoint?: string;
+  /** Provider display name for truthful HTTP error attribution. */
+  providerLabel?: string;
   /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
   keepAlive?: string;
 }
@@ -494,6 +701,8 @@ export async function runLocalOpenAiChat(
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
+  const chatEndpoint = opts.chatEndpoint ?? `${host}/v1/chat/completions`;
+  const providerLabel = opts.providerLabel ?? host;
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const sessionFingerprint = req.chatId
@@ -519,29 +728,12 @@ export async function runLocalOpenAiChat(
       events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
     }
   }
-  // 승인 세션 키 — ACP 러너와 같은 규칙(런타임 + 세션 정체성). 같은 대화의 후속 턴이
-  // "이 세션 동안 허용"을 물려받게 하는 유일한 값이다.
-  const approvalContext: LocalToolApprovalContext = {
-    runtimeKind,
-    sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
-    permission: req.permission,
-    ...(req.cwd ? { cwd: req.cwd } : {}),
-    ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
-    ...(req.agentId ? { agentId: req.agentId } : {}),
-    unattended: req.unattended === true,
-    ...(req.signal ? { signal: req.signal } : {}),
-  };
-  // A stored assignment is not enough: after its CLI is removed, advertising
-  // generate_image leaves the model a tool that can only fail. Diagnosis uses
-  // the same detected-runtime authority as the dashboard and is cached there.
-  const imageSlotDiagnosis = await multimodalImageSlotDiagnosis();
-  const { tools, byName } = await loadOpenAiTools(
-    req.mcpConfigPath,
-    req.cwd,
-    (req.permission ?? "read") as ToolPermission,
-    req.unattended !== true && req.noSynchronousAsk !== true,
-    imageSlotDiagnosis.state === "ready",
-  );
+  // `untrustedNoTools` is a Main-authored hard boundary. Do not even inspect
+  // the image slot, parse MCP config, probe servers, or construct builtin
+  // descriptors: those are all tool-surface admission work. An empty request
+  // payload alone is insufficient because it still leaves host-side tool
+  // discovery and a later tool-call dispatch path alive.
+  const { tools, byName, broker, approval: approvalContext } = await prepareMainToolLoop(req, runtimeKind);
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
     if (req.cwd) {
@@ -553,7 +745,6 @@ export async function runLocalOpenAiChat(
       });
     }
   }
-
   let finalText = "";
   let sawAnyToolCall = false;
   let sawUnsupportedToolCallAttempt = false;
@@ -563,9 +754,9 @@ export async function runLocalOpenAiChat(
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     let resp: Response;
     try {
-      resp = await fetch(`${host}/v1/chat/completions`, {
+      resp = await fetch(chatEndpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
           body: JSON.stringify({
             model,
@@ -610,28 +801,35 @@ export async function runLocalOpenAiChat(
       const errText = await resp.text().catch(() => "");
       // 도구 스키마를 이해 못 하는 서버/모델은 종종 400을 낸다 — tools 없이 한 번 더 시도.
       if (tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
+        // A host-broker receipt must describe the inventory admitted to the
+        // provider invocation. Retrying this Workforce turn without that
+        // inventory would make a later success receipt false.
+        if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
         sawUnsupportedToolCallAttempt = true;
         events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
-        const fallback = await fetch(`${host}/v1/chat/completions`, {
+        const fallback = await fetch(chatEndpoint, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...opts.headers },
           signal: req.signal,
             body: JSON.stringify({ model, stream: true, messages, ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}) }),
         });
         if (!fallback.ok) {
           const fallbackErrText = await fallback.text().catch(() => "");
-          throw new Error(`${host} ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
+          throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
         }
         const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
         finalText = result.text;
         reachedAnswer = true;
         break;
       }
-      throw new Error(`${host} ${resp.status}: ${errText.slice(0, 300)}`);
+      throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
-    if (result.toolCalls.length === 0) {
+    // A provider is allowed to hallucinate a tool_calls block even though it
+    // received no tools. In the untrusted boundary, treat that response as a
+    // terminal text response; never hand it to the local dispatcher.
+    if (result.toolCalls.length === 0 || req.untrustedNoTools) {
       finalText = result.text;
       reachedAnswer = true;
       break;
@@ -640,7 +838,7 @@ export async function runLocalOpenAiChat(
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
-      const outcome = await runOneToolCall(byName, call, events, approvalContext);
+      const outcome = await runOneToolCall(byName, call, events, approvalContext, broker);
       messages.push(outcome.toolMessage);
       if (outcome.visionMessage) visionMessages.push(outcome.visionMessage);
     }
@@ -650,23 +848,6 @@ export async function runLocalOpenAiChat(
     finalText = result.text;
     // 다음 루프에서 도구 결과를 포함해 다시 요청한다.
   }
-
-  const grantedToolIds = sawAnyToolCall && !sawUnsupportedToolCallAttempt ? [...byName.keys()] : [];
-  const zeroToolsCapabilities = ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"];
-  // 이 런의 실제 도구 사용 여부와 Main이 발급한 workforceRuntimeToolGrant는 서로 다른
-  // 출처다 — 흔치 않은 Workforce 경로에서 grant.grantedToolIds가 비어 있는데 이 런이
-  // 실제로 도구를 썼다면(예: 사용자 승인 MCP), workforceNativeToolEnforcement가
-  // 계약 위반으로 throw할 수 있다. 그 경우 zero-tools 영수증으로 안전하게 낮춘다.
-  const enforcement =
-    grantedToolIds.length > 0
-      ? (() => {
-          try {
-            return workforceNativeToolEnforcement(req, runtimeKind, []);
-          } catch {
-            return workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
-          }
-        })()
-      : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
   // ★여기서부터가 실패 판정 — 텍스트 "모양"이 아니라 이 런의 사실로만 판단한다.
   const answer = finalText.trim();
@@ -686,6 +867,21 @@ export async function runLocalOpenAiChat(
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = localFailure(refusal.kind, refusal.message, runtimeKind, "heuristic");
   }
+
+  // A permission receipt is a completion claim. Do not mint it until this
+  // invocation has passed the final empty/stuck/refusal classification, and
+  // never attach it to an aborted or failed result. If a tool-bearing
+  // enforcement cannot be proven, propagate that failure; downgrading it to
+  // a zero-tools receipt would describe the opposite of the exposed surface.
+  const grantedToolIds = sawAnyToolCall && !sawUnsupportedToolCallAttempt ? [...byName.keys()] : [];
+  const zeroToolsCapabilities = ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"];
+  const enforcement = failure
+    ? broker?.finish(false)
+    : broker
+      ? broker.finish(true)
+      : grantedToolIds.length > 0
+        ? workforceNativeToolEnforcement(req, runtimeKind, [])
+        : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
   return {
     // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을

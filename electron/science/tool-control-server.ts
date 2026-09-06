@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { userDataPath } from "../runtime-paths";
@@ -27,7 +28,8 @@ import {
 import { isScienceResidueInteraction, type ScienceProteinColorTheme, type ScienceProteinRepresentation } from "../../shared/science-renderer-runtime";
 import { commitScienceChemistrySmilesEdit, commitScienceMolstarViewEdit } from "./lab-editors";
 import type { ExecuteStatisticsAnalysisInput } from "./tool-gateway";
-import { scienceAcademicFullTextService, scienceAcademicSearchService, scienceArtifactPublicationValidator, scienceAstronomyCatalogService, scienceBiodiversityCatalogService, scienceChemistryValidator, scienceComparativeGenomicsService, scienceComparativeGenomicsTableService, scienceDeextinctionFeasibilityService, scienceDomainAnalysisService, scienceEarthquakeCatalogService, scienceEconomicsAnalysisService, scienceEconomicsCatalogService, scienceEvidenceGraphService, scienceExtantArchosaurLocusPanelService, scienceExtantReferenceAssemblyService, scienceGenomicsCatalogService, scienceHypotheticalAsrService, scienceJournalPublicationService, scienceManuscriptRenderService, scienceMaterialsCatalogService, scienceNoaaCoopsWaterLevelService, sciencePaleontologyAnalysisService, sciencePaleontologyCandidateComparisonService, sciencePaleontologyCatalogService, sciencePhysicsAnalysisService, sciencePhysicsHepDataLiveService, sciencePhysicsInspireLiveService, scienceScientificDataService, scienceStore, scienceToolGateway } from "./runtime";
+import { scienceAcademicFullTextService, scienceAcademicSearchService, scienceAstronomyAnalysisService, scienceArtifactPublicationValidator, scienceAstronomyCatalogService, scienceBiodiversityCatalogService, scienceChemistryValidator, scienceComparativeGenomicsService, scienceComparativeGenomicsTableService, scienceDeextinctionFeasibilityService, scienceDomainAnalysisService, scienceEarthAnalysisService, scienceEarthquakeCatalogService, scienceEconomicsAnalysisService, scienceEconomicsCatalogService, scienceEvidenceGraphService, scienceExtantArchosaurLocusPanelService, scienceExtantReferenceAssemblyService, scienceGenomicsCatalogService, scienceHypotheticalAsrService, scienceJournalPublicationService, scienceManuscriptRenderService, scienceMaterialsCatalogService, scienceNoaaCoopsWaterLevelService, sciencePaleontologyAnalysisService, sciencePaleontologyCandidateComparisonService, sciencePaleontologyCatalogService, sciencePhysicsAnalysisService, sciencePhysicsHepDataLiveService, sciencePhysicsInspireLiveService, scienceScientificDataService, scienceStore, scienceToolGateway } from "./runtime";
+import { earthAnalysisToolSummary, isEarthAnalysisToolId } from "./earth-analysis";
 import { deextinctionFeasibilityToolSummary } from "./deextinction-feasibility";
 import { paleontologyCandidateComparisonToolSummary } from "./paleontology-candidate-comparison";
 import { physicsAnalysisKindForToolId } from "./physics-analysis";
@@ -48,6 +50,7 @@ import type {
   ScienceManuscriptBlueprintJournalBindingInput,
   ScienceManuscriptBlueprintSectionInput,
   ScienceSubmissionMetadata,
+  ScienceResearchCompletionScope,
 } from "../../shared/science-contract";
 import type {
   ScienceResearchBlockingDecision,
@@ -71,21 +74,30 @@ import type { ScienceEvidenceGraphConditioningContext, ScienceEvidenceGraphEdgeK
 import { SCIENCE_EVIDENCE_GRAPH_EDGE_KINDS } from "../../shared/science-evidence-graph";
 import { scienceResearchIntentCatalog } from "../../shared/science-research-intent";
 import { scienceStudyProgress } from "./study-progress";
+import { SCIENCE_PAIRED_TABLE_METHODS, SCIENCE_TABLE_LIMITS } from "../../shared/science-table";
 import { scienceNextResearchPhaseGate } from "./store";
 import { scienceLabDecisionProjectionsForProject } from "./lab-decision-projection-service";
 import { loadSciencePluginRuntime, readSciencePluginFile } from "./plugin-runtime";
 import { inspectScienceManuscriptDepth } from "./manuscript/depth-preflight";
 import { assertScienceAgentManuscriptDraft } from "./manuscript/agent-draft-gate";
+import { ScienceExtantReferenceAssemblyHttpError } from "./extant-reference-assemblies";
+import { ScienceComparativeGenomicsProviderValidationError } from "./comparative-genomics";
+import {
+  SCIENCE_MCP_SERVER_KEY,
+  installedCodexSupportsExactMcpToolApproval,
+  scienceCodexExactToolApprovalConfigArgs,
+} from "./codex-tool-approval";
 
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_AI_VISUAL_BYTES = 8 * 1024 * 1024;
 const TOKEN_ENV = "AGENTLAS_SCIENCE_MCP_TOKEN";
 const ENDPOINT_ENV = "AGENTLAS_SCIENCE_MCP_ENDPOINT";
 const CATALOG_ENV = "AGENTLAS_SCIENCE_MCP_CATALOG";
-const SERVER_KEY = "agentlas-science";
+const SERVER_KEY = SCIENCE_MCP_SERVER_KEY;
 
 type ScienceContext = NonNullable<InvocationExecutionContext["science"]>;
 type McpTool = { name: string; route: string; description: string; inputSchema: Record<string, unknown> };
+const TOOL_UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
 type Grant = {
   tokenHash: string;
   context: ScienceContext;
@@ -103,6 +115,71 @@ const MANUSCRIPT_UUID_SCHEMA = {
 } as const;
 
 const MANUSCRIPT_SHA256_SCHEMA = { type: "string", pattern: "^[a-f0-9]{64}$" } as const;
+const SCIENCE_RESEARCH_MAIN_PHASE_SCHEMA = {
+  type: "string",
+  enum: ["intake", "literature", "hypothesis", "analysis_plan_draft", "analysis_plan_frozen", "execution", "evidence_reconciliation", "conclusions", "manuscript", "journal_profile", "submission_validation", "ready_to_submit"],
+} as const;
+const exactLifecyclePreconditionSchema = (properties: Record<string, unknown>) => ({
+  type: "object",
+  properties,
+  required: Object.keys(properties),
+  additionalProperties: false,
+});
+const phaseGatePreconditionSchema = (fromPhase: string, toPhase: string, gateCode: string, extra: Record<string, unknown> = {}) => exactLifecyclePreconditionSchema({
+  kind: { const: "phase_gate" },
+  fromPhase: { const: fromPhase },
+  toPhase: { const: toPhase },
+  gateCode: { const: gateCode },
+  evidenceSha256: MANUSCRIPT_SHA256_SCHEMA,
+  ...extra,
+});
+export const SCIENCE_RESEARCH_LIFECYCLE_PRECONDITIONS_SCHEMA = {
+  oneOf: [
+    exactLifecyclePreconditionSchema({ kind: { const: "state_update" }, reason: { type: "string", enum: ["progress", "decision_opened", "decision_resolved", "blocker_changed"] }, evidenceSha256: MANUSCRIPT_SHA256_SCHEMA }),
+    phaseGatePreconditionSchema("intake", "literature", "intake.complete"),
+    phaseGatePreconditionSchema("literature", "hypothesis", "literature.complete"),
+    phaseGatePreconditionSchema("hypothesis", "analysis_plan_draft", "hypothesis.complete"),
+    phaseGatePreconditionSchema("analysis_plan_draft", "analysis_plan_frozen", "analysis_plan.frozen"),
+    phaseGatePreconditionSchema("analysis_plan_frozen", "execution", "analysis_plan.execution_authorized"),
+    phaseGatePreconditionSchema("execution", "evidence_reconciliation", "execution.receipts_verified"),
+    phaseGatePreconditionSchema("evidence_reconciliation", "conclusions", "evidence.reconciled", {
+      claimLedgerId: MANUSCRIPT_UUID_SCHEMA,
+      claimLedgerRevision: { type: "integer", minimum: 1 },
+      claimLedgerManifestSha256: MANUSCRIPT_SHA256_SCHEMA,
+      claimGateReportSha256: MANUSCRIPT_SHA256_SCHEMA,
+      claimPolicyContentSha256: MANUSCRIPT_SHA256_SCHEMA,
+    }),
+    phaseGatePreconditionSchema("conclusions", "manuscript", "conclusions.bounded"),
+    phaseGatePreconditionSchema("manuscript", "journal_profile", "manuscript.version_bound"),
+    phaseGatePreconditionSchema("journal_profile", "submission_validation", "journal_profile.verified"),
+    phaseGatePreconditionSchema("submission_validation", "ready_to_submit", "submission.package_verified"),
+    exactLifecyclePreconditionSchema({ kind: { const: "block" }, fromPhase: SCIENCE_RESEARCH_MAIN_PHASE_SCHEMA, evidenceSha256: MANUSCRIPT_SHA256_SCHEMA }),
+    exactLifecyclePreconditionSchema({ kind: { const: "resume" }, resumePhase: SCIENCE_RESEARCH_MAIN_PHASE_SCHEMA, resolutionSha256: MANUSCRIPT_SHA256_SCHEMA }),
+    exactLifecyclePreconditionSchema({ kind: { const: "stop" }, fromPhase: { type: "string", enum: [...SCIENCE_RESEARCH_MAIN_PHASE_SCHEMA.enum, "blocked"] }, evidenceSha256: MANUSCRIPT_SHA256_SCHEMA }),
+    exactLifecyclePreconditionSchema({ kind: { const: "fail" }, fromPhase: { type: "string", enum: [...SCIENCE_RESEARCH_MAIN_PHASE_SCHEMA.enum, "blocked"] }, evidenceSha256: MANUSCRIPT_SHA256_SCHEMA }),
+  ],
+} as const;
+export const SCIENCE_RESEARCH_FROZEN_PLAN_SCHEMA = {
+  type: ["object", "null"],
+  description: "Exact frozen analysis-plan binding from list_analysis_plans. Use null before a plan is frozen; otherwise send only analysisSpecId, version, and contentSha256.",
+  properties: {
+    analysisSpecId: {
+      ...MANUSCRIPT_UUID_SCHEMA,
+      description: "The frozen analysis plan's id from list_analysis_plans (not id or analysisSpecVersion).",
+    },
+    version: {
+      type: "integer",
+      minimum: 1,
+      description: "The frozen analysis plan's currentVersion from list_analysis_plans.",
+    },
+    contentSha256: {
+      ...MANUSCRIPT_SHA256_SCHEMA,
+      description: "The frozen analysis plan's currentDocumentSha256 from list_analysis_plans.",
+    },
+  },
+  required: ["analysisSpecId", "version", "contentSha256"],
+  additionalProperties: false,
+} as const;
 const SCIENCE_DOMAIN_SCHEMA = {
   type: "string",
   enum: ["general", "life-science", "chemistry", "physics", "materials-science", "genomics", "astronomy", "earth-ecology", "statistics", "economics", "finance"],
@@ -546,6 +623,29 @@ const ANALYSIS_ARTIFACT_REF_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const ANALYSIS_ACQUISITION_SCHEMA = {
+  type: "object",
+  properties: {
+    strategy: { const: "acquire-before-execution" },
+    sources: {
+      type: "array", minItems: 1, maxItems: 100,
+      items: {
+        type: "object",
+        properties: {
+          provider: { type: "string", minLength: 1, maxLength: 500 },
+          sourceRefs: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 4_000 } },
+          retrievalPlan: { type: "string", minLength: 1, maxLength: 8_000 },
+          expectedArtifactKind: { type: "string", minLength: 1, maxLength: 500 },
+        },
+        required: ["provider", "sourceRefs", "retrievalPlan", "expectedArtifactKind"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["strategy", "sources"],
+  additionalProperties: false,
+} as const;
+
 const ANALYSIS_ESTIMAND_SCHEMA = {
   type: "object",
   properties: {
@@ -621,13 +721,19 @@ const ANALYSIS_DOCUMENT_SCHEMA = {
     data: {
       type: "object",
       properties: {
-        inputs: { type: "array", minItems: 1, maxItems: 100, items: ANALYSIS_ARTIFACT_REF_SCHEMA },
+        inputs: { type: "array", maxItems: 100, items: ANALYSIS_ARTIFACT_REF_SCHEMA },
+        acquisition: { oneOf: [{ type: "null" }, ANALYSIS_ACQUISITION_SCHEMA] },
         outcomeVariables: { type: "array", minItems: 1, maxItems: 200, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 500 } },
         predictorVariables: { type: "array", maxItems: 500, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 500 } },
         transformations: { type: "array", maxItems: 500, items: { type: "string", minLength: 1, maxLength: 8_000 } },
         exclusions: { type: "array", maxItems: 500, items: { type: "string", minLength: 1, maxLength: 8_000 } },
       },
-      required: ["inputs", "outcomeVariables", "predictorVariables", "transformations", "exclusions"], additionalProperties: false,
+      required: ["inputs", "acquisition", "outcomeVariables", "predictorVariables", "transformations", "exclusions"],
+      anyOf: [
+        { properties: { inputs: { type: "array", minItems: 1 } }, required: ["inputs"] },
+        { properties: { acquisition: ANALYSIS_ACQUISITION_SCHEMA }, required: ["acquisition"] },
+      ],
+      additionalProperties: false,
     },
     model: { oneOf: [{ type: "null" }, ANALYSIS_MODEL_SCHEMA] },
     missingData: {
@@ -846,7 +952,7 @@ const PLATFORM_TOOLS: McpTool[] = [
   {
     name: "propose_research_contract",
     route: "/v1/platform/research-contracts/propose",
-    description: "Create a versioned draft research contract for the granted project, including objective, success and failure criteria, operating constraints, and bounded loop budgets. This tool cannot approve its own draft. After proposing, stop the intake phase and ask the human to approve or revise the exact draft through the Science decision surface.",
+    description: "Create a versioned research contract for the granted project, including objective, evidence-verifiable success and failure criteria, operating constraints, and loop budgets sized for the research objective. Main applies the project's existing standing research-contract approval when authorized and returns the exact approval receipt. If the returned contract is approved, continue the research and start its loop; do not stop for another confirmation. A draft result requires the human decision surface. Neither a short answer nor a manuscript alone proves the research objective complete.",
     inputSchema: {
       type: "object",
       properties: {
@@ -856,10 +962,11 @@ const PLATFORM_TOOLS: McpTool[] = [
         success_criteria: { type: "array", minItems: 1, maxItems: 30, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2000 } },
         failure_criteria: { type: "array", minItems: 1, maxItems: 30, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2000 } },
         constraints: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2000 } },
+        completion_scope: { type: "string", enum: ["full-study", "bounded-deliverable"], description: "Whether the authoritative loop ends at the contract criteria or remains active through the lifecycle ready_to_submit gate." },
         max_episodes: { type: "integer", minimum: 1, maximum: 1000 },
         max_wall_time_minutes: { type: "integer", minimum: 1, maximum: 10080 },
       },
-      required: ["tool_call_id", "expected_project_version", "objective", "success_criteria", "failure_criteria", "constraints", "max_episodes", "max_wall_time_minutes"],
+      required: ["tool_call_id", "expected_project_version", "objective", "success_criteria", "failure_criteria", "constraints", "completion_scope", "max_episodes", "max_wall_time_minutes"],
       additionalProperties: false,
     },
   },
@@ -1033,10 +1140,10 @@ const PLATFORM_TOOLS: McpTool[] = [
         expected_state_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         phase: { type: "string", enum: ["intake", "literature", "hypothesis", "analysis_plan_draft", "analysis_plan_frozen", "execution", "evidence_reconciliation", "conclusions", "manuscript", "journal_profile", "submission_validation", "ready_to_submit", "blocked", "stopped", "failed"] },
         question: { type: "string", minLength: 1, maxLength: 20000 },
-        preconditions: { type: "object" },
+        preconditions: SCIENCE_RESEARCH_LIFECYCLE_PRECONDITIONS_SCHEMA,
         open_blocking_decisions: { type: "array", maxItems: 100, items: { type: "object" } },
         blockers: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 8000 } },
-        frozen_analysis_plan: { type: ["object", "null"] },
+        frozen_analysis_plan: SCIENCE_RESEARCH_FROZEN_PLAN_SCHEMA,
         submission_export: { type: ["object", "null"] },
         stop: { type: ["object", "null"] },
       },
@@ -1720,6 +1827,41 @@ const PLATFORM_TOOLS: McpTool[] = [
     },
   },
   {
+    name: "prepare_paired_statistics_table",
+    route: "/v1/platform/statistics/prepare-paired-table",
+    description: "Before proposing an artifact-bound confirmatory plan, deterministically full-outer-align exactly two immutable World Bank indicator artifacts by their exact string key. The output is one run-backed Data Table with both measured columns, preserved nulls, explicit per-series missing flags, a paired_eligible flag, exact parent-run/artifact lineage, a compatible reviewed model hash, method tokens, and ready-to-use declared-column source_table bindings. Pass the plan's prespecified minimum complete-pair count. The table remains visible when that threshold is not met, but readyForStatistics is false and a successor statistics plan is rejected. This tool prepares evidence and execution bindings only; it does not approve, freeze, or run an analysis plan.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+        output_key_column: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_]{0,119}$" },
+        sources: {
+          type: "array", minItems: 2, maxItems: 2,
+          items: {
+            type: "object",
+            properties: {
+              artifact_id: { type: "string", format: "uuid" },
+              artifact_version: { type: "integer", minimum: 1 },
+              content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+              key_column: { type: "string", minLength: 1, maxLength: 240 },
+              value_column: { type: "string", minLength: 1, maxLength: 240 },
+              output_column: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_]{0,119}$" },
+              label: { type: "string", minLength: 1, maxLength: 240 },
+            },
+            required: ["artifact_id", "artifact_version", "content_sha256", "key_column", "value_column", "output_column", "label"],
+            additionalProperties: false,
+          },
+        },
+        methods: { type: "array", minItems: 1, maxItems: SCIENCE_PAIRED_TABLE_METHODS.length, uniqueItems: true, items: { type: "string", enum: [...SCIENCE_PAIRED_TABLE_METHODS] } },
+        model: ANALYSIS_MODEL_SCHEMA,
+        minimum_complete_pairs: { type: "integer", minimum: 3, maximum: SCIENCE_TABLE_LIMITS.maxRows },
+      },
+      required: ["tool_call_id", "title", "output_key_column", "sources", "methods", "model", "minimum_complete_pairs"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "list_analysis_plans",
     route: "/v1/platform/analysis-plans/list",
     description: "List the project's immutable confirmatory analysis plans, including draft/frozen status, exact version, content hash, and lock version. A draft is not authorization to run confirmatory analysis.",
@@ -1733,7 +1875,7 @@ const PLATFORM_TOOLS: McpTool[] = [
   {
     name: "propose_analysis_plan",
     route: "/v1/platform/analysis-plans/propose",
-    description: "Create the first immutable version of a confirmatory analysis plan bound to exact project artifact versions. If the estimand or dependence structure is unresolved, include exactly one matching human decision draft; otherwise decisions must be empty. This does not freeze or authorize execution.",
+    description: "Create the first immutable version of a confirmatory analysis plan. `document` is never arbitrary JSON: it requires exactly schemaVersion,purpose,researchQuestion,population,estimand,design,data,model,missingData,multiplicity,requiredDiagnostics,sensitivityAnalyses,seed,runtimePolicy,expectedArtifacts. estimand is null or exactly {population,treatmentOrExposure,comparator,outcome,summaryMeasure,timeHorizon}. design is exactly {studyType,experimentalUnit,observationUnit,dependence}; dependence is exactly one of {kind:'unresolved'}, {kind:'independent'}, {kind:'repeated',subjectIdVariable,timeVariable}, {kind:'clustered',clusterVariables}, or {kind:'repeated-and-clustered',subjectIdVariable,timeVariable,clusterVariables}. data is exactly {inputs,acquisition,outcomeVariables,predictorVariables,transformations,exclusions}. When immutable project artifacts already exist, inputs must contain their exact camelCase {artifactId,artifactVersion,contentSha256} bindings and acquisition may be null. Before collection, inputs may be empty only when acquisition is exactly {strategy:'acquire-before-execution',sources:[{provider,sourceRefs,retrievalPlan,expectedArtifactKind}]}; sourceRefs identify the planned authoritative sources. An acquisition-only frozen plan authorizes collection, not analysis execution: after collection, propose a successor plan with exact input artifact bindings and obtain human approval again. model is null for domain-specific tools, otherwise exactly {family,formula,distribution,link,groupingVariables,randomEffects,rationale}, family lm|glm|mixed-effects|gee. expectedArtifacts items are exactly {role,title}, role result-table|figure|diagnostics|methods. If estimand or dependence is unresolved, include exactly one matching human decision draft; otherwise decisions must be empty. This creates a draft only and never records human approval or authorizes execution.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1779,7 +1921,7 @@ const PLATFORM_TOOLS: McpTool[] = [
   {
     name: "freeze_analysis_plan",
     route: "/v1/platform/analysis-plans/freeze",
-    description: "Freeze a complete confirmatory analysis plan using exact optimistic-concurrency fields. Freezing is rejected while a typed human decision is open, a required design field is unresolved, or an artifact reference is stale.",
+    description: "Verify and bind an exact analysis plan. Under the project's existing standing analysis-plan authorization, the host validates a complete draft with no unresolved decisions, records the exact policy and plan version, and freezes it without another human checkpoint. This is a policy approval, not a human review. Without that scope, a draft requires the Science UI review. Pass the current version, content hash, and lock version; use the returned frozen receipt for subsequent work. Acquisition-only plans authorize collection only: after collection, propose and freeze a successor plan with exact immutable input artifact bindings before analysis execution.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2430,6 +2572,7 @@ export function scienceDesktopHostCompatibilitySnapshot(): ScienceDesktopHostCom
 }
 
 const IMPLEMENTED_TOOL_IDS = new Set([
+  "agentlas.earth-aftershock-table-study",
   "agentlas.earth-gutenberg-richter-analysis",
   "agentlas.physics-hepdata-chi-square-analysis",
   "agentlas.physics-spectrum-fit-analysis",
@@ -2449,6 +2592,7 @@ const IMPLEMENTED_TOOL_IDS = new Set([
   "agentlas.academic-to-citation-network",
   "agentlas.astronomy-to-sky-map",
   "agentlas.astronomy-light-curve-periodicity",
+  "agentlas.astronomy-light-curve-periodicity-depth",
   "agentlas.biodiversity-to-map",
   "agentlas.earthquake-to-map",
   "agentlas.physics-dataset",
@@ -2519,15 +2663,42 @@ function respond(response: http.ServerResponse, status: number, value: unknown):
 /** Column names and types for a Data Table artifact version, or null when it is not one. */
 export function dataTableShape(payload: unknown): { columns: Array<{ name: string; logicalType: string; nullable: boolean }>; rowCount: number } | null {
   const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
-  if (!record || record.schema !== "agentlas.science-table/v1" || !Array.isArray(record.columns)) return null;
+  if (!record || record.schema !== "agentlas.science-table/v1" || !Array.isArray(record.columns)
+    || record.columns.length < 1 || record.columns.length > 512 || !Array.isArray(record.rows)) return null;
+  const columns = record.columns as Array<Record<string, unknown>>;
+  const rows = record.rows as unknown[];
+  if (columns.some((column) => !column || typeof column !== "object" || Array.isArray(column))) return null;
+  const domainShape = columns.some((column) => column?.id !== undefined) || rows.some(Array.isArray);
+  if (domainShape) {
+    const normalized = columns.map((column, index) => {
+      const name = typeof column?.id === "string" ? column.id.trim() : "";
+      const logicalType = String(column?.type ?? "").toLowerCase();
+      if (!name || !["integer", "number", "boolean", "string"].includes(logicalType)) return null;
+      const nullable = rows.some((row) => Array.isArray(row) && (row[index] === null || row[index] === undefined));
+      return { name, logicalType, nullable };
+    });
+    if (normalized.some((column) => !column)
+      || new Set(normalized.map((column) => column!.name.toLocaleLowerCase("en-US"))).size !== normalized.length
+      || rows.some((row) => !Array.isArray(row) || row.length !== normalized.length
+        || row.some((value, index) => value !== null && value !== undefined
+          && ((normalized[index]!.logicalType === "integer" && (typeof value !== "number" || !Number.isSafeInteger(value)))
+            || (normalized[index]!.logicalType === "number" && (typeof value !== "number" || !Number.isFinite(value)))
+            || (normalized[index]!.logicalType === "boolean" && typeof value !== "boolean")
+            || (normalized[index]!.logicalType === "string" && typeof value !== "string"))))) return null;
+    return { columns: normalized as Array<{ name: string; logicalType: string; nullable: boolean }>, rowCount: rows.length };
+  }
   const profile = record.profile && typeof record.profile === "object" ? record.profile as Record<string, unknown> : null;
+  const normalized = columns.map((column) => ({
+    name: String(column.name ?? "").trim(),
+    logicalType: String(column.logicalType ?? "").toLowerCase(),
+    nullable: Boolean(column.nullable),
+  }));
+  if (!profile || !Number.isSafeInteger(profile.rowCount) || profile.rowCount !== rows.length
+    || normalized.some((column) => !column.name || !["integer", "number", "boolean", "string"].includes(column.logicalType))
+    || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) return null;
   return {
-    columns: (record.columns as Array<Record<string, unknown>>).slice(0, 512).map((column) => ({
-      name: String(column.name ?? ""),
-      logicalType: String(column.logicalType ?? ""),
-      nullable: Boolean(column.nullable),
-    })),
-    rowCount: Number(profile?.rowCount ?? (Array.isArray(record.rows) ? record.rows.length : 0)),
+    columns: normalized,
+    rowCount: Number(profile.rowCount ?? rows.length),
   };
 }
 
@@ -2548,12 +2719,41 @@ function normalizeTablePreparation(value: unknown): unknown {
   return { ...record, ...(derive ? { derive } : {}) };
 }
 
-function pendingResearcherDecisionFor(store: ReturnType<typeof scienceStore>, projectId: string, phase: string | null) {
-  if (phase !== "hypothesis") return null;
+/**
+ * The decision this phase is waiting on a person for, or null when the director may proceed alone.
+ *
+ * Four decisions in this product are reserved for a human: approving the research contract,
+ * deciding a hypothesis, confirming the journal's identity, and signing the submission
+ * attestation. The contract one is answered upstream by the contract's own state; the other three
+ * belong here. Only `hypothesis` was covered, so a study that got as far as choosing a journal
+ * fell into the same hole the hypothesis gate used to have -- the gate refuses, the refusal names
+ * no remedy, and the director retries it instead of stopping to ask. Measured before: two turns
+ * burned against a locked door. One entry per phase removes that wall for the whole back half of
+ * the lifecycle.
+ */
+export function pendingResearcherDecisionFor(store: ReturnType<typeof scienceStore>, projectId: string, phase: string | null) {
   try {
-    const manifest = store.currentHypothesisManifest(projectId);
-    const unapproved = manifest.hypotheses.filter((item) => item.status !== "approved").length;
-    return unapproved > 0 ? { what: "hypotheses", count: unapproved } : null;
+    if (phase === "hypothesis") {
+      const manifest = store.currentHypothesisManifest(projectId);
+      const unapproved = manifest.hypotheses.filter((item) => item.status !== "approved").length;
+      return unapproved > 0 ? { what: "hypotheses", count: unapproved } : null;
+    }
+    if (phase === "journal_profile") {
+      // A profile becomes verified only once a person has confirmed the journal is the real one.
+      // Profiles the director drafted but nobody vouched for are exactly the waiting state; no
+      // profile at all is the director's own work, not the researcher's, so it is not reported here.
+      const profiles = store.listJournalProfiles(projectId, 100);
+      const unconfirmed = profiles.filter((profile) => !profile.version.identityReceiptId).length;
+      return unconfirmed > 0 ? { what: "journal identity confirmations", count: unconfirmed } : null;
+    }
+    if (phase === "submission_validation") {
+      // The attestation is made in the researcher's name to a publisher, so the export refuses
+      // without one. Zero unconsumed receipts means the signature has not been given yet.
+      return store.countUnconsumedJournalHumanAttestations(projectId) === 0
+        ? { what: "submission attestations", count: 1 }
+        : null;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -2633,27 +2833,74 @@ function localJsonSchemaRef(rootSchemaValue: unknown, ref: string): unknown {
   return current;
 }
 
-function assertNoUndeclaredToolProperties(
+function schemaTypeMatches(value: unknown, type: unknown): boolean {
+  if (Array.isArray(type)) return type.some((candidate) => schemaTypeMatches(value, candidate));
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (type === "integer") return typeof value === "number" && Number.isSafeInteger(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  if (type === "string") return typeof value === "string";
+  if (type === "boolean") return typeof value === "boolean";
+  return true;
+}
+
+function schemaValueEquals(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assertExactToolInputSchema(
   value: unknown,
   schemaValue: unknown,
   code: string,
   rootSchemaValue: unknown = schemaValue,
+  path = "$",
 ): void {
   if (!schemaValue || typeof schemaValue !== "object" || Array.isArray(schemaValue)) return;
   const schema = schemaValue as Record<string, unknown>;
   if (typeof schema.$ref === "string") {
     const resolved = localJsonSchemaRef(rootSchemaValue, schema.$ref);
     if (!resolved) throw new Error(code);
-    assertNoUndeclaredToolProperties(value, resolved, code, rootSchemaValue);
+    assertExactToolInputSchema(value, resolved, code, rootSchemaValue, path);
     return;
   }
-  const alternatives = [
-    ...(Array.isArray(schema.oneOf) ? schema.oneOf : []),
-    ...(Array.isArray(schema.anyOf) ? schema.anyOf : []),
-  ];
+  if (schema.type !== undefined && !schemaTypeMatches(value, schema.type)) throw new Error(code);
+  if (Object.prototype.hasOwnProperty.call(schema, "const") && !schemaValueEquals(value, schema.const)) throw new Error(code);
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => schemaValueEquals(value, candidate))) throw new Error(code);
+
+  const alternativesMatch = (candidate: unknown): boolean => {
+    try {
+      assertExactToolInputSchema(value, candidate, code, rootSchemaValue, path);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message === code) return false;
+      throw error;
+    }
+  };
+  if (Array.isArray(schema.oneOf) && schema.oneOf.filter(alternativesMatch).length !== 1) throw new Error(code);
+  if (Array.isArray(schema.anyOf) && !schema.anyOf.some(alternativesMatch)) throw new Error(code);
+  if (Array.isArray(schema.allOf)) {
+    for (const candidate of schema.allOf) assertExactToolInputSchema(value, candidate, code, rootSchemaValue, path);
+  }
+
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) throw new Error(code);
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) throw new Error(code);
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(value)) throw new Error(code);
+    if (schema.format === "uuid" && !TOOL_UUID_RE.test(value)) throw new Error(code);
+  }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) throw new Error(code);
+    if (typeof schema.maximum === "number" && value > schema.maximum) throw new Error(code);
+    if (typeof schema.exclusiveMinimum === "number" && value <= schema.exclusiveMinimum) throw new Error(code);
+    if (typeof schema.exclusiveMaximum === "number" && value >= schema.exclusiveMaximum) throw new Error(code);
+  }
   if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) throw new Error(code);
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) throw new Error(code);
+    if (schema.uniqueItems === true && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) throw new Error(code);
     if (schema.items !== undefined) {
-      for (const item of value) assertNoUndeclaredToolProperties(item, schema.items, code, rootSchemaValue);
+      for (const [index, item] of value.entries()) assertExactToolInputSchema(item, schema.items, code, rootSchemaValue, `${path}[${index}]`);
     }
     return;
   }
@@ -2661,29 +2908,84 @@ function assertNoUndeclaredToolProperties(
   const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
     ? schema.properties as Record<string, unknown>
     : null;
-  if (schema.additionalProperties === false
-    && Object.keys(value).some((key) => !properties || !Object.prototype.hasOwnProperty.call(properties, key))) {
+  const recordValue = value as Record<string, unknown>;
+  if (Array.isArray(schema.required) && schema.required.some((key) => typeof key !== "string" || !Object.prototype.hasOwnProperty.call(recordValue, key))) {
     throw new Error(code);
+  }
+  if (schema.additionalProperties === false) {
+    const unexpectedProperty = Object.keys(value).find((key) => !properties || !Object.prototype.hasOwnProperty.call(properties, key));
+    if (unexpectedProperty) throw new ToolInputSchemaError(code, path, unexpectedProperty, properties ? Object.keys(properties) : []);
   }
   if (properties) {
-    const recordValue = value as Record<string, unknown>;
     for (const [key, propertySchema] of Object.entries(properties)) {
       if (Object.prototype.hasOwnProperty.call(recordValue, key)) {
-        assertNoUndeclaredToolProperties(recordValue[key], propertySchema, code, rootSchemaValue);
+        assertExactToolInputSchema(recordValue[key], propertySchema, code, rootSchemaValue, `${path}.${key}`);
       }
     }
   }
-  if (!properties && alternatives.length > 0) {
-    for (const alternative of alternatives) {
-      try {
-        assertNoUndeclaredToolProperties(value, alternative, code, rootSchemaValue);
-        return;
-      } catch (error) {
-        if (!(error instanceof Error) || error.message !== code) throw error;
+  if (schema.additionalProperties && typeof schema.additionalProperties === "object" && properties) {
+    for (const [key, nested] of Object.entries(recordValue)) {
+      if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+        assertExactToolInputSchema(nested, schema.additionalProperties, code, rootSchemaValue, `${path}.${key}`);
       }
     }
-    throw new Error(code);
   }
+}
+
+class ToolInputSchemaError extends Error {
+  constructor(
+    code: string,
+    readonly path: string,
+    readonly unexpectedProperty: string,
+    readonly allowedProperties: string[],
+  ) {
+    super(code);
+    this.name = "ToolInputSchemaError";
+  }
+}
+
+function scienceToolErrorPayload(route: string, error: unknown): Record<string, unknown> {
+  const code = error instanceof Error ? error.message.slice(0, 240) : "science-tool-control-failed";
+  if (route === "/v1/platform/genomics/extant-reference-assemblies" && error instanceof ScienceExtantReferenceAssemblyHttpError) {
+    return { ok: false, code, failureReceipt: error.failureReceipt };
+  }
+  if (route === "/v1/platform/genomics/comparative-gene-tree" && error instanceof ScienceComparativeGenomicsProviderValidationError) {
+    return { ok: false, code, failureReceipt: error.failureReceipt };
+  }
+  if (route === "/v1/platform/analysis-plans/propose") {
+    if (code === "science-analysis-dependence-invalid"
+      || (error instanceof ToolInputSchemaError && error.path === "$.document.design.dependence")) {
+      return {
+        ok: false, code, path: "$.document.design.dependence",
+        unexpectedProperty: error instanceof ToolInputSchemaError ? error.unexpectedProperty : null,
+        allowedProperties: ["kind", "subjectIdVariable", "timeVariable", "clusterVariables"],
+        allowedValues: ["unresolved", "independent", "repeated", "clustered", "repeated-and-clustered"],
+      };
+    }
+    if (code === "science-analysis-model-invalid"
+      || (error instanceof ToolInputSchemaError && error.path === "$.document.model")) {
+      return {
+        ok: false, code, path: "$.document.model",
+        unexpectedProperty: error instanceof ToolInputSchemaError ? error.unexpectedProperty : null,
+        allowedProperties: ["family", "formula", "distribution", "link", "groupingVariables", "randomEffects", "rationale"],
+        allowedValues: ["lm", "glm", "mixed-effects", "gee", null],
+        guidance: "Use null for a domain-specific analysis tool.",
+      };
+    }
+    if (code === "science-analysis-expected-artifact-invalid"
+      || (error instanceof ToolInputSchemaError && error.path.startsWith("$.document.expectedArtifacts["))) {
+      return {
+        ok: false, code, path: "$.document.expectedArtifacts[*]",
+        unexpectedProperty: error instanceof ToolInputSchemaError ? error.unexpectedProperty : null,
+        allowedProperties: ["role", "title"],
+        allowedValues: ["result-table", "figure", "diagnostics", "methods"],
+      };
+    }
+  }
+  if (error instanceof ToolInputSchemaError) {
+    return { ok: false, code, path: error.path, unexpectedProperty: error.unexpectedProperty, allowedProperties: error.allowedProperties };
+  }
+  return { ok: false, code };
 }
 
 function exactPatternText(value: unknown, maximum: number, pattern: RegExp, code: string): string {
@@ -3045,6 +3347,27 @@ async function dispatchDescriptorTool(
       parentRunId: result.parentRunId,
     };
   }
+  if (isEarthAnalysisToolId(tool.id)) {
+    const lifecycle = scienceStore().getResearchLifecycleForProject(common.projectId);
+    const analysisPlan = tool.id === "agentlas.earth-aftershock-table-study" && lifecycle?.phase === "execution"
+      ? lifecycle.frozenAnalysisPlan
+      : null;
+    const result = scienceEarthAnalysisService().execute(tool.id, {
+      requestId: common.requestId,
+      projectId: common.projectId,
+      conversationId: common.conversationId,
+      originMessageId: common.originMessageId,
+      analysisPlan,
+    }, body);
+    return {
+      ...artifactResult(tool, result.artifact, result.replayed, { id: result.runId, status: "succeeded" }),
+      parentRunId: result.parentRunId,
+      analysis: earthAnalysisToolSummary(result),
+    };
+  }
+  if (tool.id === "agentlas.astronomy-light-curve-periodicity-depth") {
+    return scienceAstronomyAnalysisService().dispatch(tool.id, body, common, tool);
+  }
   if (tool.id === "agentlas.astronomy-light-curve-periodicity") {
     const sourceTable = body.source_table as Record<string, unknown>;
     const columns = body.columns as Record<string, unknown>;
@@ -3061,7 +3384,9 @@ async function dispatchDescriptorTool(
         timeColumn: columns.time_column as string,
         valueColumn: columns.value_column as string,
         standardErrorColumn: columns.standard_error_column as string,
-        useColumn: columns.use_column as string,
+        // Optional: photometry rarely carries an inclusion mask, and demanding one refused every
+        // real light curve. Absent here means "use every measurement", recorded as such downstream.
+        useColumn: (columns.use_column as string | undefined) ?? null,
       },
       analysis: {
         targetId: body.target_id as string,
@@ -3090,13 +3415,18 @@ async function dispatchDescriptorTool(
       summary: analysis.summary,
       bestFit: analysis.bestFit,
       warnings: analysis.warnings,
+      boundaries: analysis.boundaries,
       publicationTables: [
         { schema: observations.schema, rowCount: observations.rows.length, contentSha256: provenance.observationsTableSha256 },
         { schema: peaks.schema, rowCount: peaks.rows.length, contentSha256: provenance.peaksTableSha256 },
         { schema: periodogram.schema, rowCount: periodogram.rows.length, contentSha256: provenance.periodogramTableSha256 },
       ],
       figure: { schema: "agentlas.astronomy.light-curve-publication-figure/v1", contentSha256: provenance.figureSha256 },
-      scientificLimits: ["false-alarm-probability-not-computed", "period-uncertainty-not-computed", "single-sinusoid-model-only"],
+      scientificLimits: [
+        ...(Array.isArray(analysis.warnings) ? analysis.warnings.filter((warning) =>
+          warning === "false-alarm-probability-not-computed" || warning === "period-uncertainty-not-computed") : []),
+        "analytic-fap-white-noise-model", "period-standard-error-not-confidence-interval", "single-sinusoid-model-only",
+      ],
     };
   }
   if (tool.id === "agentlas.physics-hepdata-chi-square-analysis") {
@@ -3566,7 +3896,11 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     };
   }
   if (route === "/v1/platform/research-contracts/propose") {
-    const result = store.saveResearchContract({
+    const completionScope = body.completion_scope;
+    if (completionScope !== "full-study" && completionScope !== "bounded-deliverable") {
+      throw new Error("science-research-completion-scope-invalid");
+    }
+    let result = store.saveResearchContract({
       requestId: stableUuid(`science-research-contract-propose:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId,
       expectedProjectVersion: positiveInteger(body.expected_project_version, "science-project-version-invalid"),
@@ -3574,10 +3908,50 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       successCriteria: body.success_criteria as string[],
       failureCriteria: body.failure_criteria as string[],
       constraints: body.constraints as string[],
+      completionScope: completionScope as ScienceResearchCompletionScope,
       maxEpisodes: positiveInteger(body.max_episodes, "science-contract-max-episodes-invalid"),
       maxWallTimeMinutes: positiveInteger(body.max_wall_time_minutes, "science-contract-max-wall-time-invalid"),
     });
-    return { ok: true, schema: "agentlas.science.research-contract-proposal/v1", ...result };
+    const policy = store.approvalPolicy(grant.context.projectId);
+    if (store.approvalIsStanding(grant.context.projectId, "research-contract")) {
+      result = store.approveResearchContract({
+        requestId: stableUuid(`science-contract-standing-approval:v1:${result.contract.id}:${result.contract.version}:${policy.id}:${policy.revision}`),
+        projectId: result.project.id,
+        contractId: result.contract.id,
+        expectedProjectVersion: result.project.version,
+        expectedContractVersion: result.contract.version,
+      });
+      // Admission belongs to Main. A model ending its response after intake
+      // must not strand an authorized study outside the continuation loop.
+      let session = store.getActiveLoopSession(grant.context.projectId);
+      if (!session && !store.listLoopSessions(grant.context.projectId).some((item) => item.contractId === result.contract.id)) {
+        session = store.startLoopSession({
+          requestId: stableUuid(`science-contract-loop-admission:v1:${result.contract.id}:${result.contract.version}`),
+          projectId: grant.context.projectId,
+          conversationId: grant.context.conversationId,
+          contractId: result.contract.id,
+          expectedProjectVersion: result.project.version,
+          expectedContractVersion: result.contract.version,
+          runtimeSelection: store.getTurnByInvocationRunId(grant.context.invocationRunId)?.runtimeSelection ?? null,
+        }).session;
+      }
+      if (session?.status === "queued" && session.contractId === result.contract.id
+        && session.runtimeChatId === store.getTurnByInvocationRunId(grant.context.invocationRunId)?.runtimeChatId) {
+        session = store.confirmLoopResumeDispatch({
+          projectId: session.projectId,
+          loopSessionId: session.id,
+          expectedLoopVersion: session.version,
+          expectedLoopStateSha256: session.stateSha256,
+          invocationRunId: grant.context.invocationRunId,
+        });
+      }
+      return {
+        ok: true, schema: "agentlas.science.research-contract-proposal/v1", ...result,
+        approval: { mode: "standing", policyId: policy.id, policyRevision: policy.revision, scope: "research-contract" },
+        researchLoop: session,
+      };
+    }
+    return { ok: true, schema: "agentlas.science.research-contract-proposal/v1", ...result, approval: { mode: "checkpoint" } };
   }
   if (route === "/v1/platform/research-loop/inspect") {
     const active = store.getActiveLoopSession(grant.context.projectId);
@@ -3609,6 +3983,7 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       projectId: grant.context.projectId,
       conversationId: grant.context.conversationId,
       contractId: exactText(body.contract_id, 80, "science-loop-contract-id-invalid"),
+      runtimeSelection: store.getTurnByInvocationRunId(grant.context.invocationRunId)?.runtimeSelection ?? null,
       expectedProjectVersion: positiveInteger(body.expected_project_version, "science-project-version-invalid"),
       expectedContractVersion: positiveInteger(body.expected_contract_version, "science-contract-version-invalid"),
     });
@@ -3854,6 +4229,31 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
   if (route === "/v1/platform/capabilities") {
     return { ok: true, ...grant.catalog };
   }
+  if (route === "/v1/platform/statistics/prepare-paired-table") {
+    const sources = (body.sources as Array<Record<string, unknown>>).map((source) => ({
+      artifactId: exactText(source.artifact_id, 80, "science-paired-table-source-id-invalid"),
+      artifactVersion: positiveInteger(source.artifact_version, "science-paired-table-source-version-invalid"),
+      contentSha256: exactSha256(source.content_sha256, "science-paired-table-source-content-invalid"),
+      keyColumn: exactText(source.key_column, 240, "science-paired-table-key-column-invalid"),
+      valueColumn: exactText(source.value_column, 240, "science-paired-table-value-column-invalid"),
+      outputColumn: exactText(source.output_column, 120, "science-paired-table-output-column-invalid"),
+      label: exactText(source.label, 240, "science-paired-table-label-invalid"),
+    }));
+    if (sources.length !== 2) throw new Error("science-paired-table-sources-invalid");
+    const result = store.preparePairedStatisticsTable({
+      requestId: stableUuid(`science-paired-table-align:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      conversationId: grant.context.conversationId,
+      originMessageId: grant.context.originUserMessageId,
+      title: exactText(body.title, 240, "science-paired-table-title-invalid"),
+      outputKeyColumn: exactText(body.output_key_column, 120, "science-paired-table-output-column-invalid"),
+      sources: sources as [typeof sources[number], typeof sources[number]],
+      methods: body.methods as typeof SCIENCE_PAIRED_TABLE_METHODS[number][],
+      model: body.model as NonNullable<ScienceAnalysisSpecDocument["model"]>,
+      minimumCompletePairs: positiveInteger(body.minimum_complete_pairs, "science-paired-table-minimum-complete-pairs-invalid"),
+    });
+    return { ok: true, schema: "agentlas.science.paired-table-preparation-result/v1", ...result };
+  }
   if (route === "/v1/platform/analysis-plans/list") {
     return { ok: true, schema: "agentlas.science-analysis-plan-list/v1", analysisPlans: store.listAnalysisSpecs(grant.context.projectId) };
   }
@@ -3889,7 +4289,7 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       expectedVersion: positiveInteger(body.expected_version, "science-analysis-version-invalid"),
       expectedContentSha256: exactSha256(body.expected_content_sha256, "science-analysis-content-invalid"),
       expectedLockVersion: positiveInteger(body.expected_lock_version, "science-analysis-lock-version-invalid"),
-    });
+    }, { allowStandingApproval: true });
     return { ok: true, schema: "agentlas.science-analysis-plan-freeze-result/v1", ...result };
   }
   if (route === "/v1/platform/journals/list") {
@@ -5098,6 +5498,8 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
   }
   const grant = authorize(request.headers.authorization);
   if (!grant) {
+    // A stale grant looks identical to a missing one from the model's side; say which route asked.
+    console.error(`[science-tool] refused route=${String(request.url ?? "")} code=science-tool-control-unauthorized`);
     respond(response, 401, { ok: false, code: "science-tool-control-unauthorized" });
     return;
   }
@@ -5122,12 +5524,22 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
   }
   try {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-    const toolCallId = typeof body.tool_call_id === "string" ? body.tool_call_id.trim() : "";
-    if (!toolCallId || toolCallId.length > 160) throw new Error("science-tool-call-id-invalid");
+    // The call id exists to make a repeated call idempotent, not to prove the caller is polite.
+    //
+    // Requiring the model to invent one made every runtime that bridges MCP generically fail here:
+    // measured on a live study under the Antigravity runtime, which calls through a single
+    // `call_mcp_tool` and forwards no id, so the very first workspace inspection was refused with
+    // `science-tool-call-id-invalid` and the study could not start. Derive it instead, from the
+    // grant and the exact request, which is deterministic for the same call and different for a
+    // different one -- the property idempotency actually needs.
+    const declaredCallId = typeof body.tool_call_id === "string" ? body.tool_call_id.trim() : "";
+    if (declaredCallId.length > 160) throw new Error("science-tool-call-id-invalid");
+    const toolCallId = declaredCallId
+      || `derived-${createHash("sha256").update(`${grant.context.invocationRunId}\u0000${route}\u0000${JSON.stringify(body)}`).digest("hex").slice(0, 32)}`;
     if (route === "/v1/platform/astronomy/catalog-search") {
       exactToolBody(body, ["tool_call_id", "center_ra_deg", "center_dec_deg", "radius_deg", "limit", "title"], "science-astronomy-catalog-input-invalid");
     }
-    assertNoUndeclaredToolProperties(
+    assertExactToolInputSchema(
       body,
       platformTool?.inputSchema ?? descriptorTool?.mcp.inputSchema,
       "science-tool-input-schema-invalid",
@@ -5382,7 +5794,14 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
     respond(response, 200, withStudyProgress(result, grant.context.projectId));
   } catch (error) {
     const code = error instanceof Error ? error.message.slice(0, 240) : "science-tool-control-failed";
-    respond(response, 400, { ok: false, code });
+    // A refused tool call left no trace anywhere an operator could reach: the turn event records
+    // only isError, and the code lived solely in the model's own tool result. So a study that could
+    // not call a single Science tool looked, from every log and every screen, exactly like a study
+    // whose model chose not to. Measured: six live runs, every Science call refused, and the only
+    // report of it was the model saying "the Science host declined". Route and code only -- never
+    // the body, which carries project content.
+    console.error(`[science-tool] refused route=${route} code=${code}`);
+    respond(response, 400, scienceToolErrorPayload(route, error));
   }
 }
 
@@ -5410,7 +5829,7 @@ if(!catalog||catalog.schema!=="agentlas.science-mcp-catalog/v1"||!Array.isArray(
 const tools=[];const byName=new Map();
 for(const item of catalog.tools){if(!item||typeof item.name!=="string"||!/^[a-z][a-z0-9_]{0,79}$/.test(item.name)||typeof item.route!=="string"||!/^\/v1\/[a-z0-9/._-]+$/.test(item.route)||typeof item.description!=="string"||!item.inputSchema||typeof item.inputSchema!=="object"||byName.has(item.name))process.exit(78);const tool={name:item.name,description:item.description,inputSchema:item.inputSchema};tools.push(tool);byName.set(item.name,item.route)}
 const result=(value,error=false)=>{const visual=value&&(value.schema==="agentlas.science-artifact-visual-inspection/v1"||value.schema==="agentlas.science.statistics-figure-png-export/v1")&&value.visual&&value.visual.mimeType==="image/png"&&typeof value.visual.dataBase64==="string"&&/^[A-Za-z0-9+/]+={0,2}$/.test(value.visual.dataBase64)?value.visual:null;const textValue=visual?JSON.parse(JSON.stringify(value)):value;if(visual)delete textValue.visual.dataBase64;return{content:[{type:"text",text:JSON.stringify(textValue)},...(visual?[{type:"image",data:visual.dataBase64,mimeType:"image/png"}]:[])],...(error?{isError:true}:{})}};
-async function handle(req){if(req.method==="initialize")return{protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"agentlas-science",version:"2.1.0"}};if(req.method==="notifications/initialized")return;if(req.method==="ping")return{};if(req.method==="tools/list")return{tools};if(req.method!=="tools/call")throw Object.assign(new Error("Method not found"),{code:-32601});const route=req.params&&byName.get(req.params.name);if(!route)return result({ok:false,code:"science-tool-unknown"},true);const response=await fetch(endpoint+route,{method:"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify(req.params.arguments||{})});const text=await response.text();let value;try{value=JSON.parse(text)}catch{value={ok:false,code:"science-tool-invalid-response"}}return result(value,!response.ok||value.ok!==true)}
+async function handle(req){if(req.method==="initialize")return{protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"agentlas-science",version:"2.1.0"}};if(req.method==="notifications/initialized")return;if(req.method==="ping")return{};if(req.method==="tools/list")return{tools};if(req.method!=="tools/call")throw Object.assign(new Error("Method not found"),{code:-32601});const route=req.params&&byName.get(req.params.name);if(!route)return result({ok:false,code:"science-tool-unknown"},true);let response;try{response=await fetch(endpoint+route,{method:"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify(req.params.arguments||{})})}catch(error){return result({ok:false,code:"science-tool-transport-failed",detail:String(error&&error.message?error.message:error).slice(0,200),endpoint},true)}const text=await response.text();let value;try{value=JSON.parse(text)}catch{value={ok:false,code:"science-tool-invalid-response",status:response.status,body:text.slice(0,200)}}return result(value,!response.ok||value.ok!==true)}
 function emit(req,payload){if(req.id===undefined||payload===undefined)return;process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:req.id,result:payload})+"\n")}
 let input="";process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{input+=chunk;let i;while((i=input.indexOf("\n"))>=0){const line=input.slice(0,i).replace(/\r$/,"");input=input.slice(i+1);if(!line)continue;let req;try{req=JSON.parse(line);Promise.resolve(handle(req)).then(value=>emit(req,value)).catch(error=>{if(req.id!==undefined)process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:req.id,error:{code:Number(error&&error.code)||-32603,message:"Agentlas Science tool failed."}})+"\n")})}catch{} }if(Buffer.byteLength(input,"utf8")>MAX)process.exit(78)});`;
 
@@ -5420,6 +5839,69 @@ function writePrivate(target: string, value: unknown): void {
   fs.writeFileSync(temp, JSON.stringify(value, null, 2), { encoding: "utf8", mode: 0o600, flag: "wx" });
   fs.renameSync(temp, target);
   if (process.platform !== "win32") fs.chmodSync(target, 0o600);
+}
+
+/**
+ * A Codex home that carries this turn's Science boundary and nothing the machine happens to have.
+ *
+ * Codex reads `$CODEX_HOME` for both its MCP server table and its global AGENTS.md. Inheriting the
+ * user's home meant a Science turn silently ran with every server that machine had installed and a
+ * 13 KB global router persona on top of the Research Director's own contract -- measured on a live
+ * astronomy study: 58 bash calls, 8 repl calls, and calls into an unrelated network server, against
+ * ZERO Science tools, while the turn's own prompt said "Agentlas Science is the only MCP server
+ * enabled for this turn". The sentence was true of the config we wrote and false of the process we
+ * launched, which is the worst combination: the boundary reads as enforced and is not.
+ *
+ * Only `auth.json` is carried over, by symlink so a token refresh still lands in the real home.
+ * Everything else is left behind on purpose; a file this directory does not have is a capability
+ * this turn does not get.
+ */
+function materializeScienceCodexHome(invocationRunId: string, serverKey: string, command: string, args: string[], env: Record<string, string>): string {
+  const home = userDataPath("science-codex-home", invocationRunId);
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const config = [
+    "# Generated per Science turn. Not user configuration -- edits here are discarded.",
+    // Codex asks for approval before each MCP tool call. A Science turn runs non-interactively, so
+    // there is nobody to answer, and Codex records every call as "user rejected MCP tool call" --
+    // a user who was never asked. Measured: every Science tool call in six live runs failed this
+    // way, before reaching this process, which is why no refusal ever appeared in our own logs.
+    //
+    // This is not a widening. The isolated home declares exactly ONE server, whose tools are all
+    // host-owned and revalidated by ScienceStore; shell and files stay bounded by the --sandbox
+    // flag the runner passes, which this does not touch.
+    'approval_policy = "never"',
+    "",
+    `[mcp_servers.${serverKey}]`,
+    `command = ${toml(command)}`,
+    `args = ${tomlArray(args)}`,
+    // The inline server is a single -e program; a slow first launch must not read as "no tools".
+    "startup_timeout_sec = 120",
+    "",
+    // `env` carries VALUES. An earlier version wrote `env_vars` with names, which Codex does not
+    // recognise at all: the child started with none of the three variables it requires, exited 78
+    // immediately, and the turn ran with no Science tools while still claiming to have them. The
+    // model said so out loud -- "the Agentlas Science analysis tools are not accessible" -- which is
+    // the only reason this was ever visible.
+    `[mcp_servers.${serverKey}.env]`,
+    ...Object.entries(env).map(([key, value]) => `${key} = ${toml(value)}`),
+    "",
+  ].join("\n");
+  const temp = `${path.join(home, "config.toml")}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temp, config, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temp, path.join(home, "config.toml"));
+
+  // Sign-in state is the one thing the isolated home cannot invent. A symlink keeps the refresh
+  // write landing in the real home, so isolating a turn never costs the user their session.
+  const realHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const auth = path.join(realHome, "auth.json");
+  const link = path.join(home, "auth.json");
+  try {
+    if (fs.existsSync(auth) && !fs.existsSync(link)) fs.symlinkSync(auth, link);
+  } catch {
+    // No sign-in file to carry, or the link already exists. Codex reports its own auth failure,
+    // which is a better message than anything this function could invent.
+  }
+  return home;
 }
 
 function toml(value: string): string { return JSON.stringify(value); }
@@ -5491,6 +5973,9 @@ export async function materializeScienceMcpGrant(context: ScienceContext, baseCo
   includedServer: { serverId: string; catalogId: string; configKey: string };
 }> {
   const catalog = await assertScienceServiceAuthority(testDescriptor);
+  const exactToolApprovalConfigArgs = scienceCodexExactToolApprovalConfigArgs(
+    await installedCodexSupportsExactMcpToolApproval(),
+  );
   const controlEndpoint = await ensureServer();
   const token = randomBytes(32).toString("base64url");
   grants.set(context.invocationRunId, {
@@ -5536,9 +6021,29 @@ export async function materializeScienceMcpGrant(context: ScienceContext, baseCo
     codexConfigArgs: [
       "-c", `mcp_servers.${SERVER_KEY}.command=${toml(process.execPath)}`,
       "-c", `mcp_servers.${SERVER_KEY}.args=${tomlArray(args)}`,
-      "-c", `mcp_servers.${SERVER_KEY}.env_vars=${tomlArray([TOKEN_ENV, ENDPOINT_ENV, CATALOG_ENV])}`,
+      "-c", `mcp_servers.${SERVER_KEY}.startup_timeout_sec=120`,
+      // Values, not names. `env_vars` is not a key Codex knows, so the server it declared could
+      // never start: the child exits 78 without these three, and the turn silently had no tools.
+      "-c", `mcp_servers.${SERVER_KEY}.env.ELECTRON_RUN_AS_NODE=${toml("1")}`,
+      "-c", `mcp_servers.${SERVER_KEY}.env.${TOKEN_ENV}=${toml(token)}`,
+      "-c", `mcp_servers.${SERVER_KEY}.env.${ENDPOINT_ENV}=${toml(controlEndpoint)}`,
+      "-c", `mcp_servers.${SERVER_KEY}.env.${CATALOG_ENV}=${toml(encodedCatalog)}`,
+      ...exactToolApprovalConfigArgs,
     ],
-    runtimeEnv: { [TOKEN_ENV]: token, [ENDPOINT_ENV]: controlEndpoint, [CATALOG_ENV]: encodedCatalog },
+    runtimeEnv: {
+      [TOKEN_ENV]: token, [ENDPOINT_ENV]: controlEndpoint, [CATALOG_ENV]: encodedCatalog,
+      // The config args above only ADD our server to whatever Codex already had. The isolated home
+      // is what makes "only this server" true of the launched process rather than of our file.
+      CODEX_HOME: materializeScienceCodexHome(context.invocationRunId, SERVER_KEY, process.execPath, args, {
+        // Without this the command is Electron, and Codex launches it as a GUI application instead
+        // of a Node process: no stdio, no MCP handshake, no tools -- and the window never exits.
+        // Measured: ten orphaned Electron processes, one per turn, while every turn reported that
+        // the Science tools were unavailable. The JSON config for the other runtime always had it;
+        // the Codex declaration never did.
+        ELECTRON_RUN_AS_NODE: "1",
+        [TOKEN_ENV]: token, [ENDPOINT_ENV]: controlEndpoint, [CATALOG_ENV]: encodedCatalog,
+      }),
+    },
     includedServer: { serverId: SERVER_KEY, catalogId: SERVER_KEY, configKey: SERVER_KEY },
   };
 }

@@ -3,10 +3,10 @@
   gap: 20px;
   margin: 28px 0 20px;
   padding: clamp(20px, 4vw, 30px);
-  border: 1px solid #e2e6df;
+  border: 1px solid var(--paper-edge);
   border-radius: 20px;
-  background: #fcfdfb;
-  color: #222622;
+  background: var(--paper);
+  color: var(--ink);
 }
 
 .header,
@@ -21,7 +21,7 @@
 
 .eyebrow {
   margin: 0 0 7px;
-  color: #607a36;
+  color: var(--ok);
   font-size: 10px;
   font-weight: 760;
   letter-spacing: .08em;
@@ -38,14 +38,14 @@
 
 .period,
 .outcomeHeader time {
-  color: #777e77;
+  color: var(--muted-deep);
   font-size: 11px;
 }
 
 .lead {
   max-width: 720px;
   margin: 0;
-  color: #303630;
+  color: var(--ink);
   font-size: 16px;
   line-height: 1.7;
 }
@@ -54,7 +54,7 @@
 .corrections,
 .error {
   margin: -8px 0 0;
-  color: #727972;
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.6;
 }
@@ -67,9 +67,9 @@
 .outcome {
   min-width: 0;
   padding: 17px;
-  border: 1px solid #e6e9e4;
+  border: 1px solid var(--paper-3);
   border-radius: 14px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .outcomeHeader strong {
@@ -82,12 +82,12 @@
   gap: 7px;
   margin: 14px 0 0;
   padding-left: 19px;
-  color: #3d433d;
+  color: var(--ink);
   font-size: 12px;
   line-height: 1.65;
 }
 
-.facts li::marker { color: #6c853e; }
+.facts li::marker { color: var(--ok); }
 
 .estimate {
   display: grid;
@@ -96,15 +96,15 @@
   margin-top: 14px;
   padding: 13px;
   border-radius: 11px;
-  background: #f5f7f2;
+  background: var(--paper-2);
 }
 
 .estimate > span {
   align-self: center;
   padding: 3px 6px;
   border-radius: 999px;
-  background: #e7eddf;
-  color: #536b2f;
+  background: var(--paper-3);
+  color: var(--ok);
   font-size: 9px;
   font-weight: 750;
   text-transform: uppercase;
@@ -113,11 +113,11 @@
 .estimate strong { align-self: center; font-size: 12px; }
 .estimate p,
 .estimate dl { grid-column: 1 / -1; }
-.estimate p { margin: 4px 0 0; color: #535a53; font-size: 11px; line-height: 1.55; }
+.estimate p { margin: 4px 0 0; color: var(--ink-soft); font-size: 11px; line-height: 1.55; }
 .estimate dl { display: grid; gap: 5px; margin: 4px 0 0; }
 .estimate dl > div { display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 8px; }
-.estimate dt { color: #7b827b; font-size: 10px; }
-.estimate dd { margin: 0; color: #545b54; font-size: 10px; line-height: 1.5; }
+.estimate dt { color: var(--muted-deep); font-size: 10px; }
+.estimate dd { margin: 0; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
 
 .checks {
   display: grid;
@@ -129,11 +129,11 @@
 .checks > div {
   min-width: 0;
   padding-top: 12px;
-  border-top: 1px solid #eceeea;
+  border-top: 1px solid var(--paper-3);
 }
 
 .checks span {
-  color: #727972;
+  color: var(--muted-deep);
   font-size: 9px;
   font-weight: 740;
   letter-spacing: .06em;
@@ -142,7 +142,7 @@
 
 .checks p,
 .checks ul { margin-top: 6px; }
-.checks p { margin-bottom: 0; color: #535a53; font-size: 11px; line-height: 1.55; }
+.checks p { margin-bottom: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.55; }
 .checks ul { padding-left: 17px; font-size: 11px; }
 
 .evidence { margin-top: 10px; }
@@ -150,7 +150,7 @@
   min-height: 44px;
   display: inline-flex;
   align-items: center;
-  color: #697069;
+  color: var(--muted-deep);
   font-size: 10px;
   cursor: pointer;
 }
@@ -158,31 +158,31 @@
 .primary:focus-visible,
 .secondary:focus-visible { outline: 3px solid rgba(96, 122, 54, .22); outline-offset: 2px; }
 .evidence > div { display: flex; flex-wrap: wrap; gap: 5px; padding-bottom: 4px; }
-.evidence code { max-width: 100%; overflow-wrap: anywhere; color: #7b827b; font-size: 9px; }
+.evidence code { max-width: 100%; overflow-wrap: anywhere; color: var(--muted-deep); font-size: 9px; }
 
 .corrections {
   margin: 0;
   padding-top: 13px;
-  border-top: 1px solid #e6e9e4;
+  border-top: 1px solid var(--paper-3);
 }
 
-.error { margin: 0; color: #984d43; }
+.error { margin: 0; color: var(--danger); }
 
 .actions { justify-content: flex-start; }
 .primary,
 .secondary {
   min-height: 44px;
   padding: 0 16px;
-  border: 1px solid #dbe0d7;
+  border: 1px solid var(--paper-edge-strong);
   border-radius: 10px;
-  background: #fff;
-  color: #2b302b;
+  background: var(--paper);
+  color: var(--ink);
   font: inherit;
   font-size: 12px;
   font-weight: 650;
   cursor: pointer;
 }
-.primary { border-color: #607a36; background: #607a36; color: #fff; }
+.primary { border-color: var(--ok); background: var(--ok); color: var(--white); }
 .primary:disabled,
 .secondary:disabled { cursor: default; opacity: .58; }
 

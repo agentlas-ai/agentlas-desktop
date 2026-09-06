@@ -77,6 +77,7 @@ export interface AuthSessionInvalidationEvent {
 }
 
 const sessionInvalidationListeners = new Set<(event: AuthSessionInvalidationEvent) => void>();
+const sessionRestorationListeners = new Set<(session: AuthSession) => void>();
 
 function queueCookieMutation<T>(mutation: () => Promise<T>): Promise<T> {
   const next = _cookieMutationChain.then(mutation, mutation);
@@ -96,6 +97,26 @@ export function onAuthSessionInvalidated(
   return () => sessionInvalidationListeners.delete(listener);
 }
 
+/** Main observes explicit restoration/login success without receiving cookies. */
+export function onAuthSessionRestored(listener: (session: AuthSession) => void): () => void {
+  sessionRestorationListeners.add(listener);
+  return () => sessionRestorationListeners.delete(listener);
+}
+
+function emitAuthSessionRestored(generation: number): void {
+  if (generation !== _sessionGeneration) return;
+  const snapshot = getAuthSession();
+  if (!snapshot.signedIn) return;
+  for (const listener of sessionRestorationListeners) {
+    if (generation !== _sessionGeneration) break;
+    try {
+      listener({ ...snapshot });
+    } catch {
+      console.warn("[auth] session restoration listener failed");
+    }
+  }
+}
+
 interface StoredAuthCookie {
   version: 1;
   encoding: "safeStorage/base64";
@@ -105,11 +126,11 @@ interface StoredAuthCookie {
 
 export type AuthRestoreResult =
   | { status: "restored"; signedIn: true }
-  | { status: "missing" | "expired" | "invalid" | "temporarily-unavailable"; signedIn: false };
+  | { status: "missing" | "expired" | "invalid" | "native-unavailable" | "temporarily-unavailable"; signedIn: false };
 
 type StoredSessionCookieReadResult =
   | { status: "restored"; value: string; durableIdentity: string }
-  | { status: "missing" | "invalid" | "temporarily-unavailable" };
+  | { status: "missing" | "invalid" | "native-unavailable" | "temporarily-unavailable" };
 
 const TEMPORARY_AUTH_FILE_ERROR_CODES = new Set([
   "EAGAIN",
@@ -135,9 +156,18 @@ const SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS = 5_000;
 // it settles; the caller can still time out and let the customer window load.
 let safeStorageAvailabilityConfirmed = false;
 let safeStorageAvailabilityInFlight: Promise<boolean> | null = null;
+let safeStorageAvailabilitySuppressed = false;
+let safeStorageRecoveryGeneration = 0;
+const failedAuthCiphertexts = new Set<string>();
+let userAuthRestoreInFlight: Promise<AuthRestoreResult> | null = null;
+
+function authCiphertextFingerprint(durableIdentity: string): string {
+  return createHash("sha256").update(durableIdentity).digest("hex");
+}
 
 interface SafeStorageDecryptAttempt {
   durableIdentity: string;
+  recoveryGeneration: number;
   promise: ReturnType<ElectronApi["safeStorage"]["decryptStringAsync"]>;
   settled: boolean;
 }
@@ -145,15 +175,25 @@ interface SafeStorageDecryptAttempt {
 let safeStorageDecryptInFlight: SafeStorageDecryptAttempt | null = null;
 
 function sharedSafeStorageAvailabilityAttempt(): Promise<boolean> {
+  if (safeStorageAvailabilitySuppressed) return Promise.resolve(false);
   if (safeStorageAvailabilityConfirmed) return Promise.resolve(true);
   if (safeStorageAvailabilityInFlight) return safeStorageAvailabilityInFlight;
+  const generation = safeStorageRecoveryGeneration;
   const started = Promise.resolve().then(() => electronApi().safeStorage.isAsyncEncryptionAvailable());
   safeStorageAvailabilityInFlight = started;
   void started.then(
     (available) => {
-      if (available) safeStorageAvailabilityConfirmed = true;
+      if (generation !== safeStorageRecoveryGeneration) return;
+      safeStorageAvailabilityConfirmed = available;
+      // False can mean lazy initialization, not OS denial. Keep the outcome
+      // unavailable until the user requests another potentially prompting hop.
+      safeStorageAvailabilitySuppressed = !available;
     },
-    () => undefined,
+    () => {
+      // A native rejection may be a denial or cancellation even when Electron
+      // exposes no error code. Never classify it as transient from its prose.
+      if (generation === safeStorageRecoveryGeneration) safeStorageAvailabilitySuppressed = true;
+    },
   ).finally(() => {
     if (safeStorageAvailabilityInFlight === started) safeStorageAvailabilityInFlight = null;
   });
@@ -164,9 +204,10 @@ function sharedSafeStorageDecryptAttempt(
   ciphertext: Buffer,
   durableIdentity: string,
 ): SafeStorageDecryptAttempt | null {
+  if (failedAuthCiphertexts.has(authCiphertextFingerprint(durableIdentity))) return null;
   const current = safeStorageDecryptInFlight;
   if (current) {
-    if (current.durableIdentity === durableIdentity) return current;
+    if (current.durableIdentity === durableIdentity && current.recoveryGeneration === safeStorageRecoveryGeneration) return current;
     // A newer login may replace the durable envelope while an old decrypt is
     // parked. Do not occupy another worker until the old native call settles.
     if (!current.settled) return null;
@@ -174,13 +215,22 @@ function sharedSafeStorageDecryptAttempt(
 
   const entry: SafeStorageDecryptAttempt = {
     durableIdentity,
-    promise: electronApi().safeStorage.decryptStringAsync(ciphertext),
+    recoveryGeneration: safeStorageRecoveryGeneration,
+    // Synchronous native throws follow the same terminal path as rejections.
+    promise: Promise.resolve().then(() => electronApi().safeStorage.decryptStringAsync(ciphertext)),
     settled: false,
   };
   safeStorageDecryptInFlight = entry;
   void entry.promise.then(
-    () => { entry.settled = true; },
-    () => { entry.settled = true; },
+    (value) => {
+      entry.settled = true;
+      if (typeof value?.result !== "string") failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
+    },
+    () => {
+      entry.settled = true;
+      // Remember late failures too: a timed-out caller may already have left.
+      failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
+    },
   );
   return entry;
 }
@@ -237,7 +287,7 @@ function parseStoredAuthCookie(raw: string): { ciphertext: Buffer; durableIdenti
   return { ciphertext, durableIdentity: parsed.value };
 }
 
-async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult> {
+async function readStoredSessionCookie(restoreGeneration: number): Promise<StoredSessionCookieReadResult> {
   if (USE_MEMORY_AUTH) {
     return memoryAuthCookie
       ? { status: "restored", value: memoryAuthCookie, durableIdentity: memoryAuthCookie }
@@ -258,23 +308,34 @@ async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult>
   }
   const envelope = parseStoredAuthCookie(raw);
   if (!envelope) return { status: "invalid" };
+  // A newer login/logout owns restoration. Do not start a native hop for an
+  // obsolete file read; boot will return the current generation's state.
+  if (restoreGeneration !== _sessionGeneration) return { status: "missing" };
+  if (safeStorageAvailabilitySuppressed || failedAuthCiphertexts.has(authCiphertextFingerprint(envelope.durableIdentity))) {
+    return { status: "native-unavailable" };
+  }
   // Electron 43 initializes its asynchronous safeStorage backend lazily.
   // The synchronous availability/decrypt pair can report a signed-in user's
   // Keychain as unavailable during Squirrel's background relaunch. Async
   // decrypt reads the exact same v1/base64 ciphertext and waits for that
   // initialization without changing the durable file.
   const availability = await settleAuthRestoreAttempt(sharedSafeStorageAvailabilityAttempt);
+  if (restoreGeneration !== _sessionGeneration) return { status: "missing" };
+  if (safeStorageAvailabilitySuppressed) return { status: "native-unavailable" };
   if (availability.status === "timed-out") {
     console.warn("[auth] async local session encryption availability timed out");
     return { status: "temporarily-unavailable" };
   }
   if (availability.status === "rejected") {
-    console.warn("[auth] async local session encryption backend temporarily unavailable", availability.error);
-    return { status: "temporarily-unavailable" };
+    console.warn("[auth] native session storage rejected restoration; automatic retries suppressed", availability.error);
+    return { status: "native-unavailable" };
   }
-  if (!availability.value) return { status: "temporarily-unavailable" };
+  if (!availability.value) return { status: "native-unavailable" };
   const decryptAttempt = sharedSafeStorageDecryptAttempt(envelope.ciphertext, envelope.durableIdentity);
   if (!decryptAttempt) {
+    if (failedAuthCiphertexts.has(authCiphertextFingerprint(envelope.durableIdentity))) {
+      return { status: "native-unavailable" };
+    }
     console.warn("[auth] a previous local session decryption is still pending");
     return { status: "temporarily-unavailable" };
   }
@@ -284,9 +345,10 @@ async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult>
     return { status: "temporarily-unavailable" };
   }
   consumeSafeStorageDecryptAttempt(decryptAttempt);
-  if (decrypted.status === "rejected" || typeof decrypted.value.result !== "string") {
-    console.warn("[auth] local session ciphertext is invalid", decrypted.status === "rejected" ? decrypted.error : undefined);
-    return { status: "invalid" };
+  if (decrypted.status === "rejected" || typeof decrypted.value?.result !== "string") {
+    failedAuthCiphertexts.add(authCiphertextFingerprint(envelope.durableIdentity));
+    console.warn("[auth] native session decryption unavailable; automatic retries suppressed", decrypted.status === "rejected" ? decrypted.error : undefined);
+    return { status: "native-unavailable" };
   }
   return { status: "restored", value: decrypted.value.result, durableIdentity: envelope.durableIdentity };
 }
@@ -297,10 +359,20 @@ async function writeStoredSessionCookie(value: string): Promise<void> {
     return;
   }
   const { safeStorage } = electronApi();
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("safeStorage encryption is not available");
+  let encrypted: string;
+  try {
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error("safeStorage encryption is not available");
+    }
+    encrypted = safeStorage.encryptString(value).toString("base64");
+  } catch (error) {
+    // An explicit save can be denied too. Keep the old ciphertext and stop
+    // automatic restoration from immediately opening another native prompt.
+    safeStorageRecoveryGeneration += 1;
+    safeStorageAvailabilityConfirmed = false;
+    safeStorageAvailabilitySuppressed = true;
+    throw error;
   }
-  const encrypted = safeStorage.encryptString(value).toString("base64");
   const file = authCookiePath();
   await fs.mkdir(path.dirname(file), { recursive: true });
   const payload: StoredAuthCookie = {
@@ -310,6 +382,12 @@ async function writeStoredSessionCookie(value: string): Promise<void> {
     updatedAt: new Date().toISOString(),
   };
   await fs.writeFile(file, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+  // Only a successfully persisted explicit login reopens native restoration.
+  // Preserve every other failed ciphertext and never rewrite it on failure.
+  safeStorageRecoveryGeneration += 1;
+  safeStorageAvailabilityConfirmed = true;
+  safeStorageAvailabilitySuppressed = false;
+  failedAuthCiphertexts.delete(authCiphertextFingerprint(encrypted));
 }
 
 async function deleteStoredSessionCookie(): Promise<void> {
@@ -528,7 +606,7 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
       : { status: "missing", signedIn: false }
   );
   try {
-    const stored = await readStoredSessionCookie();
+    const stored = await readStoredSessionCookie(restoreGeneration);
     if (restoreGeneration !== _sessionGeneration) return currentGenerationResult();
     if (stored.status !== "restored") return { status: stored.status, signedIn: false };
     const decoded = decodeSessionCookie(stored.value);
@@ -552,11 +630,65 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
     return { status: "restored", signedIn: true };
   } catch (err) {
     console.warn("[auth] boot from keychain failed", err);
-    return { status: "temporarily-unavailable", signedIn: false };
+    // Only the file-read allowlist or an existing native operation in flight
+    // may request recovery. An unclassified failure must not re-prompt users.
+    return { status: "invalid", signedIn: false };
   }
 }
 
 const DEFERRED_AUTH_RESTORE_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000] as const;
+
+/** Explicit user action only; never call from polling or startup retry loops. */
+export function retryAuthRestoreFromUser(): Promise<AuthRestoreResult> {
+  if (userAuthRestoreInFlight) return userAuthRestoreInFlight;
+  const started = (async (): Promise<AuthRestoreResult> => {
+    const generation = _sessionGeneration;
+    if (USE_MEMORY_AUTH) {
+      const result = await bootAuthFromKeychain();
+      if (result.status === "restored") emitAuthSessionRestored(generation);
+      return result;
+    }
+    let raw: string;
+    try {
+      raw = await fs.readFile(authCookiePath(), "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return { status: "missing", signedIn: false };
+      return {
+        status: typeof code === "string" && TEMPORARY_AUTH_FILE_ERROR_CODES.has(code)
+          ? "temporarily-unavailable" : "invalid",
+        signedIn: false,
+      };
+    }
+    if (generation !== _sessionGeneration) {
+      return getAuthSession().signedIn
+        ? { status: "restored", signedIn: true }
+        : { status: "missing", signedIn: false };
+    }
+    const envelope = parseStoredAuthCookie(raw);
+    if (!envelope) return { status: "invalid", signedIn: false };
+    failedAuthCiphertexts.delete(authCiphertextFingerprint(envelope.durableIdentity));
+    if (safeStorageAvailabilitySuppressed) {
+      safeStorageAvailabilitySuppressed = false;
+      safeStorageAvailabilityConfirmed = false;
+    }
+    const prior = safeStorageDecryptInFlight;
+    if (prior?.settled && prior.durableIdentity === envelope.durableIdentity) {
+      consumeSafeStorageDecryptAttempt(prior);
+    }
+    // Pending native calls remain shared. This is one attempt, with no backoff
+    // or automatic retry; a late refusal will suppress this ciphertext again.
+    const result = await bootAuthFromKeychain();
+    if (result.status === "restored") emitAuthSessionRestored(generation);
+    return result;
+  })();
+  userAuthRestoreInFlight = started;
+  void started.then(
+    () => { if (userAuthRestoreInFlight === started) userAuthRestoreInFlight = null; },
+    () => { if (userAuthRestoreInFlight === started) userAuthRestoreInFlight = null; },
+  );
+  return started;
+}
 
 /**
  * Bounded, non-blocking caller-owned recovery for a temporary startup miss.
@@ -644,6 +776,7 @@ async function persistSession(value: string): Promise<AuthSession> {
   if (meta) {
     _cache = { ..._cache, email: meta.email, name: meta.name };
   }
+  emitAuthSessionRestored(generation);
   return getAuthSession();
 }
 

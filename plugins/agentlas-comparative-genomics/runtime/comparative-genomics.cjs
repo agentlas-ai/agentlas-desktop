@@ -53,7 +53,6 @@ function buildReferenceAssemblyManifestRequest(input) {
     const genomeUrl = new URL(`/info/genomes/${encodeURIComponent(speciesName)}`, ENSEMBL_ORIGIN);
     genomeUrl.searchParams.set("content-type", "application/json");
     const assemblyUrl = new URL(`/info/assembly/${encodeURIComponent(speciesName)}`, ENSEMBL_ORIGIN);
-    assemblyUrl.searchParams.set("synonyms", "1");
     assemblyUrl.searchParams.set("content-type", "application/json");
     const fastaBase = `/pub/current_fasta/${encodeURIComponent(speciesName)}/dna/`;
     return {
@@ -255,7 +254,8 @@ function normalizeGeneTree(input) {
   visit(root, null, 0);
   if (leaves.length < 3 || alignmentLength === null || alignmentLength < 3) throw new Error("comparative-genomics-insufficient-alignment");
   const rootNode = nodes[0];
-  if (rootNode.taxonomyId !== request.pruneTaxon) throw new Error("comparative-genomics-pruned-root-mismatch");
+  const requestedTaxonNode = nodes.find((node) => node.taxonomyId === request.pruneTaxon);
+  if (!requestedTaxonNode) throw new Error("comparative-genomics-pruned-taxon-unwitnessed");
   const duplicationNodeCount = nodes.filter((node) => node.event === "duplication" || node.event === "gene_split").length;
   const lowSupportNodeCount = nodes.filter((node) => node.bootstrap !== null && node.bootstrap < 70).length;
   const alignmentSha256 = sha256(leaves.map((leaf) => `${leaf.geneId}\t${leaf.alignedSequence}\n`).join(""));
@@ -305,7 +305,7 @@ function normalizeGeneTree(input) {
     title,
     geneTreeId,
     rooted: true,
-    targetNode: { nodeId: rootNode.nodeId, taxonomyId: rootNode.taxonomyId, scientificName: rootNode.scientificName, meaning: "most-recent-common-ancestor-of-returned-extant-lineages" },
+    targetNode: { nodeId: requestedTaxonNode.nodeId, taxonomyId: requestedTaxonNode.taxonomyId, scientificName: requestedTaxonNode.scientificName, meaning: "provider-returned-node-for-requested-prune-taxon" },
     nodes,
     leaves,
     alignment: { sequenceType: request.sequenceType, length: alignmentLength, sha256: alignmentSha256, leafCount: leaves.length },

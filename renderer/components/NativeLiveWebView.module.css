@@ -3,7 +3,7 @@
   overflow: hidden;
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  background: #10110f;
+  background: var(--black);
   box-shadow: 0 14px 38px rgb(12 14 12 / 12%);
 }
 
@@ -30,8 +30,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  color: #f8fafc;
-  background: #171916;
+  color: var(--white);
+  background: var(--black);
   border-bottom: 1px solid rgb(255 255 255 / 10%);
 }
 
@@ -56,18 +56,18 @@
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #fbbf24;
+  background: var(--warn);
   box-shadow: 0 0 0 3px rgb(251 191 36 / 13%);
 }
 
 .statusDot.ready {
-  background: #34d399;
+  background: var(--ok);
   box-shadow: 0 0 0 3px rgb(52 211 153 / 15%), 0 0 12px rgb(52 211 153 / 28%);
 }
 
 .statusDot.error,
 .statusDot.closed {
-  background: #fb7185;
+  background: var(--danger);
   box-shadow: 0 0 0 3px rgb(251 113 133 / 14%);
 }
 
@@ -76,11 +76,11 @@
   font-size: 9px;
   font-weight: 800;
   letter-spacing: .08em;
-  color: #a7f3d0;
+  color: var(--ok);
 }
 
 .runtimeLabel {
-  color: #94a3b8;
+  color: var(--info);
   letter-spacing: 0;
   font-weight: 600;
 }
@@ -89,7 +89,7 @@
 .message button {
   border: 1px solid rgb(255 255 255 / 13%);
   border-radius: 6px;
-  color: #e5e7eb;
+  color: var(--white-soft);
   background: rgb(255 255 255 / 6%);
   font: inherit;
   font-size: 10px;
@@ -117,8 +117,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #94a3b8;
-  background: #111310;
+  color: var(--white-faint);
+  background: var(--black);
   border-bottom: 1px solid rgb(255 255 255 / 8%);
   font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -130,16 +130,16 @@
   isolation: isolate;
   background:
     radial-gradient(circle at 35% 25%, rgb(52 211 153 / 8%), transparent 34%),
-    #0e100e;
+    var(--black);
 }
 
 /* @design output-surface.v1 — only the host toolbar/status chrome is themed;
    the live external document inside the native webview is left untouched. */
 .shell { border-color: var(--design-line); }
-.toolbar { color: var(--design-contrast-ink, #fff); background: color-mix(in srgb, var(--design-ink) 92%, var(--design-accent) 8%); }
+.toolbar { color: var(--design-contrast-ink, var(--white)); background: color-mix(in srgb, var(--design-ink) 92%, var(--design-accent) 8%); }
 .address { color: var(--design-muted); background: color-mix(in srgb, var(--design-ink) 96%, var(--design-bg)); }
 .actions button,
-.message button { border-color: color-mix(in srgb, var(--design-contrast-ink, #fff) 16%, transparent); color: var(--design-contrast-ink, #fff); }
+.message button { border-color: color-mix(in srgb, var(--design-contrast-ink, var(--paper)) 16%, transparent); color: var(--design-contrast-ink, var(--white)); }
 .actions button:hover,
 .actions button:focus-visible,
 .message button:hover,
@@ -156,12 +156,12 @@
   justify-content: center;
   gap: 10px;
   text-align: center;
-  color: #cbd5e1;
+  color: var(--white-soft);
   font-size: 12px;
 }
 
 .message strong {
-  color: #f8fafc;
+  color: var(--white);
   font-size: 13px;
 }
 
@@ -174,7 +174,7 @@
   width: 18px;
   height: 18px;
   border: 2px solid rgb(255 255 255 / 15%);
-  border-top-color: #6ee7b7;
+  border-top-color: var(--ok-soft);
   border-radius: 999px;
   animation: live-view-spin .75s linear infinite;
 }

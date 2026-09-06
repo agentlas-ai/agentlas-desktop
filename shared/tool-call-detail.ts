@@ -595,3 +595,49 @@ export function formatToolRunSummary(summary: ToolRunSummary, locale: "ko" | "en
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
   return `${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}`;
 }
+
+/**
+ * 산문에 적힌 파일 이름은 폴더를 모른다. 렌더러는 그것을 후보 실행 폴더(기본 실행 폴더 →
+ * 승인된 작업 폴더 순)로 찍어 절대경로로 만든다 — 첫 후보가 틀리면 그 경로의 파일은
+ * **존재하지 않는다.**
+ *
+ * 같은 이름을 도구 기록이 절대경로로 갖고 있으면 그 기록이 정본이다. 찍어 만든 경로를
+ * 산출물로 함께 올리면 결과 레일이 "만든 적 없는 파일"을 한 줄 더 보여준다.
+ *
+ * 답변 본문과 도구 기록이 같은 파일을 가리키면 도구가 기록한 절대경로만 유지해
+ * 추정 경로로 인한 중복 산출물과 존재하지 않는 파일 링크를 방지한다.
+ */
+export function shadowsToolRecordedPath(
+  candidatePath: string | undefined | null,
+  toolPaths: readonly string[],
+  sourceReference?: string | undefined | null,
+): boolean {
+  if (!candidatePath) return false;
+  const canonical = (value: string) => {
+    const normalized = value.replaceAll("\\", "/");
+    // macOS exposes only these root paths through their shorter aliases. Do not
+    // collapse arbitrary `/private/*` paths (for example `/private/Users`).
+    if (["/private/tmp", "/private/var", "/private/etc"].some((root) => (
+      normalized === root || normalized.startsWith(`${root}/`)
+    ))) return normalized.slice("/private".length);
+    return normalized;
+  };
+  const baseName = (value: string) => canonical(value).split("/").pop() ?? "";
+  const candidate = canonical(candidatePath);
+  const candidateName = baseName(candidatePath);
+  if (!candidateName) return false;
+  for (const toolPath of toolPaths) {
+    if (canonical(toolPath) === candidate) return false;
+  }
+
+  // Once prose names a directory, absolute path, or file URL, that reference
+  // is an independent claim. Basename equality cannot erase it. Only a bare
+  // filename loses its folder and is guessed against the renderer's base-path
+  // candidates, which is the duplicate this guard is allowed to suppress.
+  if (sourceReference !== undefined) {
+    const reference = sourceReference?.trim().replace(/^<|>$/g, "") ?? "";
+    if (!reference || /[\\/]/.test(reference) || /^[a-z][a-z0-9+.-]*:/i.test(reference)) return false;
+  }
+
+  return toolPaths.some((toolPath) => baseName(toolPath) === candidateName);
+}

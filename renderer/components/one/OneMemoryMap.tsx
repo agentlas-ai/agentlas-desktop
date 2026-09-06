@@ -138,7 +138,7 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     if (!context) return;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.clearRect(0, 0, size.width, size.height);
-    context.fillStyle = "#ffffff";
+    context.fillStyle = "var(--paper)";
     context.fillRect(0, 0, size.width, size.height);
 
     const centers = clusterCenters(layout.nodes);
@@ -196,7 +196,7 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     }
 
     for (const node of layout.nodes) {
-      drawRoundedCell(context, node, node.id === activeId ? "#202224" : memoryGray(node.density));
+      drawRoundedCell(context, node, node.id === activeId ? "var(--black)" : memoryGray(node.density));
     }
   }, [activeId, activeNode, layout, nodesById, size.height, size.width, snapshot.edges]);
 

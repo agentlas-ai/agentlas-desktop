@@ -16,90 +16,25 @@
 // 본문에서 fence는 통째로 제거하고, 추출한 질문은 메시지 메타데이터로 옮긴다.
 // 질문이 여러 개 필요하면 fence를 여러 개 연속으로 emit할 수 있다.
 // 스트리밍 중 부분적으로 도착할 수 있어, 닫는 fence가 없으면 추출하지 않고 그대로 둔다.
+import { extractAskFences } from "@shared/ask-fence-flatten";
 import { isUnfilledQuestionTemplate } from "@shared/types";
 import type { ChatQuestion } from "@/components/ChatStream";
-
-const OPEN_FENCE = "<<agentlas-ask>>";
-const CLOSE_FENCE = "<</agentlas-ask>>";
 
 /** 메시지 본문에서 모든 ask fence를 추출. closed인 fence만 가져가고, 본문에서는 제거. */
 export function extractQuestions(
   text: string,
   messageId: string,
 ): { text: string; questions: ChatQuestion[] } {
-  if (!text.includes(OPEN_FENCE)) return { text, questions: [] };
-  const out: ChatQuestion[] = [];
-  let remaining = text;
-  let buf = "";
-  let idx = 0;
-  while (true) {
-    const open = remaining.indexOf(OPEN_FENCE);
-    if (open < 0) {
-      buf += remaining;
-      break;
-    }
-    // open 앞까지는 본문에 그대로
-    buf += remaining.slice(0, open);
-    const afterOpen = remaining.slice(open + OPEN_FENCE.length);
-    const close = afterOpen.indexOf(CLOSE_FENCE);
-    if (close < 0) {
-      // 닫는 fence가 아직 안 옴 — 스트리밍 중일 수 있음. 그대로 두고 끝.
-      buf += remaining.slice(open);
-      break;
-    }
-    const body = afterOpen.slice(0, close).trim();
-    const parsed = tryParse(body, `${messageId}-q${idx++}`);
-    if (parsed) out.push(parsed);
-    // parsed에 실패해도 본문에서는 제거 — LLM이 malformed JSON 보낼 때 raw fence를 사용자가 보지 않게.
-    remaining = afterOpen.slice(close + CLOSE_FENCE.length);
-  }
-  return { text: buf, questions: out };
-}
-
-function tryParse(body: string, id: string): ChatQuestion | null {
-  // body가 json fence(```json ... ```)로 감싸진 경우도 허용
-  const stripped = body
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-  let obj: unknown;
-  try {
-    obj = JSON.parse(stripped);
-  } catch {
-    return null;
-  }
-  if (!obj || typeof obj !== "object") return null;
-  const o = obj as Record<string, unknown>;
-  const question = typeof o.question === "string" ? o.question : null;
-  if (!question) return null;
-  const optionsRaw = Array.isArray(o.options) ? o.options : [];
-  const options: ChatQuestion["options"] = [];
-  for (const opt of optionsRaw) {
-    if (!opt || typeof opt !== "object") continue;
-    const ob = opt as Record<string, unknown>;
-    const label = typeof ob.label === "string" ? ob.label : null;
-    if (!label) continue;
-    const description = typeof ob.description === "string" ? ob.description : undefined;
-    options.push({ label, description });
-  }
-  if (options.length < 2) return null;
-  // 오너 규칙: 답할 수 없는 것은 보여주지 않는다. 봇이 질문 서식을 채우지 않고 그대로
-  // 낸 블록은 사용자가 고를 수 있는 질문이 아니다. 여기서 버리면 대화창에도 뜨지 않고,
-  // 승인함도 같은 판정을 쓰므로 목록에도 오르지 않는다.
-  if (isUnfilledQuestionTemplate({
-    question,
-    header: typeof o.header === "string" ? o.header : undefined,
-    options,
-  })) return null;
+  const extracted = extractAskFences(text);
   return {
-    // IDs are always message-scoped. Model-authored JSON can never claim a
-    // reserved product-consent identity; main-owned supplemental questions use
-    // a separate typed event field instead of this parser.
-    id,
-    question,
-    header: typeof o.header === "string" ? o.header : undefined,
-    multiSelect: o.multiSelect === true,
-    options,
+    text: extracted.text,
+    questions: extracted.questions.filter((question) => !isUnfilledQuestionTemplate(question)).map((question, index) => ({
+      // IDs are always message-scoped. Model-authored JSON can never claim a
+      // reserved product-consent identity; main-owned supplemental questions use
+      // a separate typed event field instead of this parser.
+      id: `${messageId}-q${index}`,
+      ...question,
+    })),
   };
 }
 

@@ -246,7 +246,7 @@ const subtitle: CSSProperties = {
   margin: "4px 0 0",
   fontSize: 13,
   fontWeight: 700,
-  color: "var(--accent, #111)",
+  color: "var(--accent, var(--black))",
 };
 
 const flowRulesGrid: CSSProperties = {
@@ -329,8 +329,8 @@ const primary: CSSProperties = {
   padding: "0 16px",
   borderRadius: 9,
   border: "1px solid transparent",
-  background: "var(--accent, #111)",
-  color: "#fff",
+  background: "var(--accent, var(--black))",
+  color: "var(--white)",
   font: "inherit",
   fontSize: 13,
   fontWeight: 600,

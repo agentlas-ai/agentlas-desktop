@@ -16,7 +16,7 @@
 // 이 모듈은 의도적으로 electron 을 import 하지 않는다 — 버전·경로를 인자로 받아
 // 게이트(scripts/test-daemon-autospawn.cjs)가 순수 Node(ELECTRON_RUN_AS_NODE)에서
 // 실제 스폰/스큐 시나리오를 잴 수 있다.
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -143,7 +143,12 @@ export async function releaseDaemonMobileBridge(
   }
 }
 
-function spawnDaemonForDesktop(opts: EnsureDaemonOptions): number | null {
+interface SpawnedDaemon {
+  child: ChildProcess;
+  pid: number | null;
+}
+
+function spawnDaemonForDesktop(opts: EnsureDaemonOptions): SpawnedDaemon {
   const entry = opts.daemonEntry ?? defaultDaemonEntry();
   if (!fs.existsSync(entry)) {
     throw new Error(`daemon entry not found: ${entry}`);
@@ -169,7 +174,45 @@ function spawnDaemonForDesktop(opts: EnsureDaemonOptions): number | null {
   // The control socket is the graceful owner channel. unref keeps startup from
   // blocking, while the helper's parent watchdog enforces the crash path.
   child.unref();
-  return child.pid ?? null;
+  return { child, pid: child.pid ?? null };
+}
+
+/**
+ * A spawn acknowledgement is not a readiness acknowledgement. In a packaged
+ * app the helper can fail before it creates the control socket (for example a
+ * stale bundle missing a runtime dependency). Waiting for the Mobile Bridge
+ * lease in that case makes Desktop look frozen for the full lease timeout.
+ * Observe the child during the normal socket probe so an early exit becomes a
+ * failed startup immediately; a healthy helper still follows the existing
+ * asynchronous handoff path.
+ */
+async function waitForSpawnedDaemonReadiness(
+  spawned: SpawnedDaemon,
+  socketPath: string,
+  timeoutMs = 30_000,
+): Promise<"ready" | "exited" | "timeout"> {
+  let exited = spawned.child.exitCode !== null || spawned.child.signalCode !== null;
+  const markExited = () => { exited = true; };
+  spawned.child.once("exit", markExited);
+  spawned.child.once("error", markExited);
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  try {
+    while (Date.now() < deadline) {
+      if (exited || spawned.child.exitCode !== null || spawned.child.signalCode !== null) {
+        return "exited";
+      }
+      const ping = await pingDaemon(socketPath, Math.min(800, Math.max(250, deadline - Date.now())));
+      if (ping?.ok) return "ready";
+      if (exited || spawned.child.exitCode !== null || spawned.child.signalCode !== null) {
+        return "exited";
+      }
+      await sleep(100);
+    }
+    return "timeout";
+  } finally {
+    spawned.child.removeListener("exit", markExited);
+    spawned.child.removeListener("error", markExited);
+  }
 }
 
 /**
@@ -215,12 +258,30 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       if (!gone) {
         return { status: "failed", reason: `old daemon (v${daemonVersion}) did not shut down` };
       }
-      const pid = spawnDaemonForDesktop(opts);
-      log(`[daemon] respawned v${opts.appVersion} (pid ${pid ?? "?"})`);
-      return { status: "respawned", pid, previousVersion: daemonVersion };
+      const spawned = spawnDaemonForDesktop(opts);
+      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath);
+      if (readiness === "exited") {
+        return {
+          status: "failed",
+          reason: `daemon exited before control socket became ready (pid ${spawned.pid ?? "?"})`,
+        };
+      }
+      log(`[daemon] respawned v${opts.appVersion} (pid ${spawned.pid ?? "?"})`);
+      return { status: "respawned", pid: spawned.pid, previousVersion: daemonVersion };
     }
 
-    const pid = spawnDaemonForDesktop(opts);
+    const spawned = spawnDaemonForDesktop(opts);
+    const pid = spawned.pid;
+    const readiness = await waitForSpawnedDaemonReadiness(
+      spawned,
+      socketPath,
+    );
+    if (readiness === "exited") {
+      return {
+        status: "failed",
+        reason: `daemon exited before control socket became ready (pid ${pid ?? "?"})`,
+      };
+    }
     log(`[daemon] spawned v${opts.appVersion} (pid ${pid ?? "?"})`);
     return { status: "spawned", pid, version: opts.appVersion };
   } catch (error) {

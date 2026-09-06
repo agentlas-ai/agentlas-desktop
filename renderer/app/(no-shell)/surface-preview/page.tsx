@@ -421,7 +421,7 @@ const page = {
 const processPreviewPage = {
   minHeight: "100vh",
   padding: "36px clamp(24px, 5vw, 72px) 56px",
-  background: "#fafaf9",
+  background: "var(--paper-2)",
   color: "var(--ink)",
   overflow: "auto",
 } satisfies CSSProperties;
@@ -446,9 +446,9 @@ const processPreviewCard = {
   minWidth: 0,
   minHeight: 430,
   padding: "24px 26px",
-  border: "1px solid #e4e6e4",
+  border: "1px solid var(--paper-edge)",
   borderRadius: 14,
-  background: "#fff",
+  background: "var(--paper)",
   boxShadow: "0 8px 24px rgba(32, 36, 33, .035)",
   overflow: "hidden",
 } satisfies CSSProperties;
@@ -456,7 +456,7 @@ const processPreviewCard = {
 const processPreviewEyebrow = {
   display: "block",
   marginBottom: 20,
-  color: "#8a8f8b",
+  color: "var(--muted-deep)",
   font: "650 10px/1.2 var(--font-mono)",
   letterSpacing: ".08em",
 } satisfies CSSProperties;
@@ -467,15 +467,15 @@ const processPreviewPrompt = {
   margin: "0 0 20px auto",
   padding: "9px 13px",
   borderRadius: 12,
-  background: "#f0f1ef",
-  color: "#343834",
+  background: "var(--paper-3)",
+  color: "var(--ink)",
   fontSize: 13.5,
   lineHeight: 1.55,
 } satisfies CSSProperties;
 
 const processPreviewAnswer = {
   margin: "14px 0 0",
-  color: "#343834",
+  color: "var(--ink)",
   fontSize: 13.5,
   lineHeight: 1.65,
 } satisfies CSSProperties;

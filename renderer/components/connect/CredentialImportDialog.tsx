@@ -335,7 +335,7 @@ export function CredentialImportDialog({
           font-size: 12px;
         }
         .cid-profiles button.on {
-          border-color: var(--accent, #6b7cff);
+          border-color: var(--accent);
         }
         .cid-profiles button:disabled {
           opacity: 0.45;
@@ -416,7 +416,7 @@ export function CredentialImportDialog({
         .cid-error {
           font-size: 12px;
           line-height: 1.5;
-          color: var(--danger, #c0392b);
+          color: var(--danger);
         }
         .cid-login-required {
           display: flex;
@@ -460,9 +460,9 @@ export function CredentialImportDialog({
           cursor: pointer;
         }
         .cid-actions button.accent {
-          background: var(--accent, #6b7cff);
+          background: var(--accent);
           border-color: transparent;
-          color: #fff;
+          color: var(--white);
         }
         .cid-actions button:disabled {
           opacity: 0.5;

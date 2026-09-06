@@ -65,7 +65,7 @@
     },
     {
       "name": "analyze_light_curve_periodicity",
-      "description": "Run a deterministic weighted floating-mean generalized Lomb-Scargle analysis over an explicitly bounded irregular light curve. Preserves every nullable observation, resolves the declared weighting policy without imputation, emits the full finite frequency grid, sampling-window power, local peaks, best-fit folded residuals, publication tables, and a Vega-Lite FigureSpec with exact content hashes. It performs no network or arbitrary code execution and does not claim a false-alarm probability or period confidence interval.",
+      "description": "Run a deterministic weighted floating-mean generalized Lomb-Scargle analysis over an explicitly bounded irregular light curve. Preserves every nullable observation, resolves the declared weighting policy without imputation, emits the full finite frequency grid, sampling-window power, local peaks, best-fit folded residuals, publication tables, and a Vega-Lite FigureSpec with exact content hashes. It reports a Baluev analytic false-alarm upper bound and a Montgomery-O'Donoghue period standard-error estimate when numerically resolvable; these are model estimates rather than calibrated detection probabilities or confidence intervals, and a returned 0 is a numerical floor rather than exact certainty.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

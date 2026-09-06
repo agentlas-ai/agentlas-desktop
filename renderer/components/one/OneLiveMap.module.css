@@ -1,24 +1,24 @@
 .layout { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(180px, .75fr); gap: 12px; }
-.stage { min-height: 320px; position: relative; overflow: hidden; border: 1px solid #dfe6e1; border-radius: 16px; background: #eef2ef; }
+.stage { min-height: 320px; position: relative; overflow: hidden; border: 1px solid var(--paper-edge); border-radius: 16px; background: var(--paper-3); }
 .map { width: 100%; height: 100%; min-height: 320px; }
-.overlay { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; align-content: center; gap: 9px; padding: 24px; background: rgba(246, 249, 247, .92); color: #66716b; font-size: 12px; text-align: center; backdrop-filter: blur(4px); }
-.overlay > span { width: 24px; height: 24px; border: 3px solid #cfdbd3; border-top-color: #176b46; border-radius: 50%; animation: map-spin .8s linear infinite; }
-.overlay strong { color: #33453b; font-size: 13px; }
-.overlay small { max-width: 320px; color: #708078; line-height: 1.55; }
-.overlay button { min-height: 32px; padding: 0 13px; border: 1px solid #176b46; border-radius: 9px; background: #176b46; color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
-.liveBadge { position: absolute; top: 10px; left: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid rgba(21, 93, 60, .18); border-radius: 999px; background: rgba(255, 255, 255, .9); color: #176b46; font-size: 10px; font-weight: 750; box-shadow: 0 3px 12px rgba(32, 61, 45, .12); backdrop-filter: blur(8px); }
-.liveBadge i { width: 6px; height: 6px; border-radius: 50%; background: #21a461; box-shadow: 0 0 0 3px rgba(33, 164, 97, .14); }
+.overlay { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; align-content: center; gap: 9px; padding: 24px; background: rgba(246, 249, 247, .92); color: var(--muted-deep); font-size: 12px; text-align: center; backdrop-filter: blur(4px); }
+.overlay > span { width: 24px; height: 24px; border: 3px solid var(--ok-soft); border-top-color: var(--ok); border-radius: 50%; animation: map-spin .8s linear infinite; }
+.overlay strong { color: var(--ink); font-size: 13px; }
+.overlay small { max-width: 320px; color: var(--muted-deep); line-height: 1.55; }
+.overlay button { min-height: 32px; padding: 0 13px; border: 1px solid var(--ok); border-radius: 9px; background: var(--ok); color: var(--white); font: inherit; font-weight: 700; cursor: pointer; }
+.liveBadge { position: absolute; top: 10px; left: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid rgba(21, 93, 60, .18); border-radius: 999px; background: rgba(255, 255, 255, .9); color: var(--ok); font-size: 10px; font-weight: 750; box-shadow: 0 3px 12px rgba(32, 61, 45, .12); backdrop-filter: blur(8px); }
+.liveBadge i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(33, 164, 97, .14); }
 .locations { min-width: 0; max-height: 320px; display: grid; align-content: start; gap: 6px; overflow: auto; padding: 0; margin: 0; list-style: none; }
-.locations button { width: 100%; min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 9px; border: 1px solid #e3e7e4; border-radius: 11px; background: #fff; color: #46524b; font: inherit; text-align: left; cursor: pointer; transition: border-color 140ms ease, background 140ms ease, transform 140ms ease; }
-.locations button:hover, .locations button:focus-visible { border-color: #a9c4b4; background: #f5faf7; outline: none; transform: translateY(-1px); }
-.locations b { width: 28px; height: 28px; display: grid; place-items: center; border: 2px solid #2a7955; border-radius: 50%; color: #176b46; font-size: 11px; }
+.locations button { width: 100%; min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--paper-edge); border-radius: 11px; background: var(--paper); color: var(--ink-soft); font: inherit; text-align: left; cursor: pointer; transition: border-color 140ms ease, background 140ms ease, transform 140ms ease; }
+.locations button:hover, .locations button:focus-visible { border-color: var(--ok-soft); background: var(--paper-2); outline: none; transform: translateY(-1px); }
+.locations b { width: 28px; height: 28px; display: grid; place-items: center; border: 2px solid var(--ok); border-radius: 50%; color: var(--ok); font-size: 11px; }
 .locations span { min-width: 0; display: grid; gap: 3px; }
-.locations strong { overflow: hidden; color: #34433a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.locations small { color: #87918b; font-size: 9px; font-variant-numeric: tabular-nums; }
+.locations strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.locations small { color: var(--muted-deep); font-size: 9px; font-variant-numeric: tabular-nums; }
 .layout[data-compact="true"] { grid-template-columns: 1fr; }
 .layout[data-compact="true"] .stage, .layout[data-compact="true"] .map { min-height: 280px; }
 .layout[data-compact="true"] .locations { max-height: 180px; }
-.layout[data-fill="true"] { width: 100%; height: 100%; padding: 14px; grid-template-columns: minmax(0, 1fr) minmax(210px, .28fr); background: #f7f8f7; }
+.layout[data-fill="true"] { width: 100%; height: 100%; padding: 14px; grid-template-columns: minmax(0, 1fr) minmax(210px, .28fr); background: var(--paper-2); }
 .layout[data-fill="true"] .stage, .layout[data-fill="true"] .map { height: 100%; min-height: 0; }
 .layout[data-fill="true"] .locations { max-height: none; }
 @keyframes map-spin { to { transform: rotate(360deg); } }

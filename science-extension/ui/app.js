@@ -1,5 +1,377 @@
 import * as THREE from "../vendor/three.module.min.js";
 import { formatScienceCell } from "./format-cell.js";
+// Generated presentation-only snapshot of shared/agent-control-blocks.ts and
+// the marker constants/stripper in electron/hephaestus/loop-engineering.ts.
+// Regenerate from those canonical sources; never change raw receipts or hashes.
+const scienceChatPresentation = (() => {
+  const exports = {};
+  "use strict";
+  Object.defineProperty(exports, "__esModule", { value: true });
+  exports.STORMBREAKER_LONG_RUN_MARKER = exports.STORMBREAKER_CONTINUE_MARKER = exports.AGENT_GOAL_COMPLETE_PREFIX = exports.AGENT_SURFACE_INTENT_MARKER = exports.AGENT_MULTIMODAL_MARKER = exports.AGENT_SURFACE_CLOSE = exports.AGENT_SURFACE_OPEN = exports.AGENT_FOLLOWUPS_CLOSE = exports.AGENT_FOLLOWUPS_OPEN = exports.AGENT_ASK_CLOSE = exports.AGENT_ASK_OPEN = exports.AGENT_CONTROL_HEADINGS = void 0;
+  exports.stripAgentIdentityBadges = stripAgentIdentityBadges;
+  exports.stripAgentControlBlocks = stripAgentControlBlocks;
+  exports.stripOrphanCodeFences = stripOrphanCodeFences;
+  exports.trimIncompleteControlTail = trimIncompleteControlTail;
+  exports.trimIncompleteMarkerTail = trimIncompleteMarkerTail;
+  exports.stripStormbreakerContinueMarker = stripStormbreakerContinueMarker;
+  exports.AGENT_CONTROL_HEADINGS = [
+      "## Memory Events",
+      "## Delegate",
+      "## Automation",
+  ];
+  exports.AGENT_ASK_OPEN = "<<agentlas-ask>>";
+  exports.AGENT_ASK_CLOSE = "<</agentlas-ask>>";
+  exports.AGENT_FOLLOWUPS_OPEN = "<<agentlas-one-followups>>";
+  exports.AGENT_FOLLOWUPS_CLOSE = "<</agentlas-one-followups>>";
+  exports.AGENT_SURFACE_OPEN = "<<agentlas-surface>>";
+  exports.AGENT_SURFACE_CLOSE = "<</agentlas-surface>>";
+  exports.AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
+  exports.AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
+  exports.AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
+  const IDENTITY_BADGE = /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu;
+  function stripAgentIdentityBadges(value) {
+      return value.replace(IDENTITY_BADGE, (match, prefix, offset, source) => {
+          const after = source.charAt(offset + match.length);
+          return (prefix === " " || prefix === "\t") && (after === " " || after === "\t") ? "" : prefix;
+      }).trim();
+  }
+  const PAIRED_BLOCKS = [
+      { probe: "<<agentlas-one-followups", open: exports.AGENT_FOLLOWUPS_OPEN, close: exports.AGENT_FOLLOWUPS_CLOSE },
+      { probe: "<<agentlas-ask", open: exports.AGENT_ASK_OPEN, close: exports.AGENT_ASK_CLOSE },
+      { probe: "<<agentlas-surface", open: exports.AGENT_SURFACE_OPEN, close: exports.AGENT_SURFACE_CLOSE },
+  ];
+  const GOAL_COMPLETE_RE = /<<agentlas-goal-complete(?::[\s\S]*?)?>>/g;
+  const FENCE_RE = /```(?:json)?\s*[\s\S]*?```/;
+  const TAIL_TOKENS = [
+      ...exports.AGENT_CONTROL_HEADINGS,
+      exports.AGENT_ASK_OPEN,
+      exports.AGENT_FOLLOWUPS_OPEN,
+      exports.AGENT_SURFACE_OPEN,
+      exports.AGENT_MULTIMODAL_MARKER,
+      exports.AGENT_SURFACE_INTENT_MARKER,
+      exports.AGENT_GOAL_COMPLETE_PREFIX,
+  ];
+  const BARE_MARKERS = [exports.AGENT_MULTIMODAL_MARKER, exports.AGENT_SURFACE_INTENT_MARKER];
+  const MIN_PARTIAL_TAIL = 4;
+  const DANGLING_HEADING_DROPS_TAIL = new Set([
+      "## Memory Events",
+  ]);
+  function headingHit(value, heading) {
+      const start = value.indexOf(heading);
+      if (start < 0)
+          return null;
+      const after = value.slice(start + heading.length);
+      const fence = after.match(FENCE_RE);
+      if (fence && fence.index != null) {
+          return { index: start, cutTo: start + heading.length + fence.index + fence[0].length };
+      }
+      return {
+          index: start,
+          cutTo: DANGLING_HEADING_DROPS_TAIL.has(heading) ? value.length : start + heading.length,
+      };
+  }
+  function pairedHit(value, block) {
+      const start = value.indexOf(block.probe);
+      if (start < 0)
+          return null;
+      if (!value.startsWith(block.open, start))
+          return { index: start, cutTo: value.length };
+      const end = value.indexOf(block.close, start + block.open.length);
+      return end < 0
+          ? { index: start, cutTo: value.length }
+          : { index: start, cutTo: end + block.close.length };
+  }
+  function stripAgentControlBlocks(value, options) {
+      let visible = value.replace(GOAL_COMPLETE_RE, "");
+      for (const marker of BARE_MARKERS)
+          visible = visible.split(marker).join("");
+      for (let guard = 0; guard < 64; guard += 1) {
+          let best = null;
+          for (const heading of exports.AGENT_CONTROL_HEADINGS) {
+              const hit = headingHit(visible, heading);
+              if (hit && (best === null || hit.index < best.index))
+                  best = hit;
+          }
+          for (const block of PAIRED_BLOCKS) {
+              const hit = pairedHit(visible, block);
+              if (hit && (best === null || hit.index < best.index))
+                  best = hit;
+          }
+          if (best === null)
+              break;
+          const next = visible.slice(0, best.index) + visible.slice(best.cutTo);
+          if (next === visible)
+              break;
+          visible = next;
+      }
+      visible = visible
+          .split(exports.AGENT_ASK_CLOSE)
+          .join("")
+          .split(exports.AGENT_FOLLOWUPS_CLOSE)
+          .join("")
+          .split(exports.AGENT_SURFACE_CLOSE)
+          .join("");
+      visible = failClosedOnRemainingControlToken(visible);
+      visible = stripTrailingMemoryTicketEnvelope(visible);
+      visible = options?.streaming ? trimIncompleteControlTail(visible) : trimIncompleteMarkerTail(visible);
+      visible = stripOrphanCodeFences(visible);
+      return visible.replace(/\n{3,}/g, "\n\n").trim();
+  }
+  const FENCE_LINE_RE = /^[ \t]*```[A-Za-z0-9_+.-]*[ \t]*$/;
+  const CLOSING_FENCE_LINE_RE = /^[ \t]*```[ \t]*$/;
+  function stripOrphanCodeFences(value) {
+      const lines = value.split("\n");
+      const out = [];
+      let index = 0;
+      while (index < lines.length) {
+          const line = lines[index];
+          if (!FENCE_LINE_RE.test(line)) {
+              out.push(line);
+              index += 1;
+              continue;
+          }
+          let close = index + 1;
+          while (close < lines.length && !CLOSING_FENCE_LINE_RE.test(lines[close]))
+              close += 1;
+          const bodyIsBlank = lines.slice(index + 1, close).every((body) => body.trim() === "");
+          if (close >= lines.length) {
+              if (!bodyIsBlank)
+                  out.push(...lines.slice(index));
+              break;
+          }
+          if (!bodyIsBlank)
+              out.push(...lines.slice(index, close + 1));
+          index = close + 1;
+      }
+      return out.join("\n");
+  }
+  function failClosedOnRemainingControlToken(value) {
+      let cut = value.length;
+      for (const token of TAIL_TOKENS) {
+          const index = value.indexOf(token);
+          if (index >= 0 && index < cut)
+              cut = index;
+      }
+      return cut === value.length ? value : value.slice(0, cut);
+  }
+  const TAIL_JSON_FENCE_RE = /(?:^|\n)```json\s*([\s\S]*?)```\s*$/i;
+  function stripTrailingMemoryTicketEnvelope(value) {
+      const match = value.match(TAIL_JSON_FENCE_RE);
+      if (!match || match.index == null)
+          return value;
+      try {
+          const data = JSON.parse(match[1].trim());
+          if (data?.schema_version === "agentlas.memory-ticket.v1" && Array.isArray(data.candidates)) {
+              return value.slice(0, match.index);
+          }
+      }
+      catch {
+      }
+      return value;
+  }
+  function trimIncompleteControlTail(value) {
+      return trimIncompleteTail(value, TAIL_TOKENS);
+  }
+  function trimIncompleteMarkerTail(value) {
+      return trimIncompleteTail(value, TAIL_TOKENS.filter((token) => token.startsWith("<<")));
+  }
+  function trimIncompleteTail(value, tokens) {
+      let cut = value.length;
+      for (const token of tokens) {
+          for (let length = Math.min(token.length - 1, value.length); length >= MIN_PARTIAL_TAIL; length -= 1) {
+              if (value.endsWith(token.slice(0, length))) {
+                  cut = Math.min(cut, value.length - length);
+                  break;
+              }
+          }
+      }
+      return cut === value.length ? value : value.slice(0, cut);
+  }
+  exports.STORMBREAKER_CONTINUE_MARKER = "<<stormbreaker-continue>>";
+  exports.STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
+  function stripStormbreakerContinueMarker(text) {
+      const escaped = exports.STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const trimmed = text.trimEnd();
+      const tail = trimmed.split("\n").slice(-3).join("\n");
+      const shouldContinue = new RegExp(escaped).test(tail);
+      const cleaned = trimmed
+          .replace(new RegExp(`[ \\t]*${escaped}[ \\t]*`, "g"), "")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      return { text: cleaned, shouldContinue };
+  }
+  return exports;
+})();
+const { stripAgentControlBlocks, stripStormbreakerContinueMarker, STORMBREAKER_CONTINUE_MARKER, STORMBREAKER_LONG_RUN_MARKER } = scienceChatPresentation;
+
+// COMPOSER_EVENT_SYNC_BEGIN
+const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+function composerEventKey(event) {
+  return `${event.projectId}:${event.conversationId}:${event.turnId}`;
+}
+
+function sameComposerTurn(left, right) {
+  return left?.projectId === right?.projectId
+    && left?.conversationId === right?.conversationId
+    && left?.turnId === right?.turnId;
+}
+
+function isNewerComposerEvent(candidate, current) {
+  if (!current) return true;
+  if (!sameComposerTurn(candidate, current)) return true;
+  return Number(candidate.sequence) > Number(current.sequence);
+}
+
+/**
+ * Coalesce the high-frequency persisted composer event stream into receipt reads.
+ * The store remains the source of truth; this only prevents every tiny runtime-usage
+ * event from starting its own IPC read and terminal project hydration.
+ */
+function createComposerEventSync({
+  getCurrentScope,
+  getCurrentConversationScope,
+  readReceipt,
+  readAttach,
+  onAttach,
+  onProgress,
+  onTerminal,
+  onError,
+}) {
+  let disposed = false;
+  let draining = false;
+  let pendingEvent = null;
+  const receiptFailures = new Map();
+  const terminalFailures = new Map();
+  const hydratedTerminalTurns = new Set();
+
+  const currentConversationScope = () => {
+    const scope = typeof getCurrentConversationScope === "function" ? getCurrentConversationScope() : getCurrentScope();
+    return scope && scope.projectId && scope.conversationId ? scope : null;
+  };
+
+  const isCurrentConversationEvent = (event) => {
+    const scope = currentConversationScope();
+    return Boolean(scope
+      && event?.projectId === scope.projectId
+      && event.conversationId === scope.conversationId);
+  };
+
+  const queueLatest = (event) => {
+    if (!pendingEvent || isNewerComposerEvent(event, pendingEvent)) pendingEvent = event;
+  };
+
+  const trimTerminalHistory = () => {
+    if (hydratedTerminalTurns.size <= 128) return;
+    hydratedTerminalTurns.delete(hydratedTerminalTurns.values().next().value);
+  };
+
+  const drain = async () => {
+    if (disposed || draining) return;
+    draining = true;
+    try {
+      while (!disposed && pendingEvent) {
+        const event = pendingEvent;
+        pendingEvent = null;
+        if (!isCurrentConversationEvent(event)) continue;
+
+        const key = composerEventKey(event);
+        let turn;
+        try {
+          const current = getCurrentScope();
+          if (!current || current.turnId !== event.turnId) {
+            if (typeof readAttach !== "function") continue;
+            const attached = await readAttach({
+              projectId: event.projectId,
+              conversationId: event.conversationId,
+            });
+            if (disposed || !isCurrentConversationEvent(event)) continue;
+            const attachedTurn = attached?.turn;
+            if (!attachedTurn
+              || attachedTurn.projectId !== event.projectId
+              || attachedTurn.conversationId !== event.conversationId) continue;
+            onAttach?.(attachedTurn, event);
+            if (attachedTurn.id !== event.turnId) continue;
+          }
+          turn = await readReceipt({
+            projectId: event.projectId,
+            conversationId: event.conversationId,
+            turnId: event.turnId,
+          });
+          receiptFailures.delete(key);
+        } catch (error) {
+          if (disposed || !isCurrentConversationEvent(event)) continue;
+          const failures = (receiptFailures.get(key) || 0) + 1;
+          receiptFailures.set(key, failures);
+          if (failures === 1) {
+            queueLatest(event);
+          } else {
+            receiptFailures.delete(key);
+            onError(error, event);
+          }
+          continue;
+        }
+
+        if (disposed) continue;
+        const scope = getCurrentScope();
+        if (!scope || !turn
+          || turn.projectId !== scope.projectId
+          || turn.conversationId !== scope.conversationId
+          || turn.id !== scope.turnId
+          || turn.lastSequence < scope.lastSequence) continue;
+
+        if (pendingEvent && sameComposerTurn(pendingEvent, event)) {
+          if (Number(pendingEvent.sequence) > Number(turn.lastSequence)) continue;
+          pendingEvent = null;
+        }
+
+        if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
+          onProgress(turn, event);
+          continue;
+        }
+
+        if (hydratedTerminalTurns.has(key)) continue;
+        hydratedTerminalTurns.add(key);
+        trimTerminalHistory();
+          try {
+            await onTerminal(turn, event);
+            terminalFailures.delete(key);
+          } catch (error) {
+            hydratedTerminalTurns.delete(key);
+            if (disposed || !isCurrentConversationEvent(event)) continue;
+          const failures = (terminalFailures.get(key) || 0) + 1;
+          terminalFailures.set(key, failures);
+          if (failures === 1) queueLatest(event);
+          else {
+            terminalFailures.delete(key);
+            onError(error, event);
+          }
+        }
+      }
+    } finally {
+      draining = false;
+      if (!disposed && pendingEvent) void drain();
+    }
+  };
+
+  return {
+    push(event) {
+      if (disposed || !isCurrentConversationEvent(event)) return false;
+      if (hydratedTerminalTurns.has(composerEventKey(event))) return false;
+      queueLatest(event);
+      void drain();
+      return true;
+    },
+    dispose() {
+      disposed = true;
+      pendingEvent = null;
+      receiptFailures.clear();
+      terminalFailures.clear();
+      hydratedTerminalTurns.clear();
+    },
+  };
+}
+// COMPOSER_EVENT_SYNC_END
 
 (() => {
   "use strict";
@@ -11,19 +383,21 @@ import { formatScienceCell } from "./format-cell.js";
   const readRailCollapsed = () => {
     try { return window.localStorage.getItem(RAIL_COLLAPSED_STORAGE_KEY) === "true"; } catch { return false; }
   };
+  const blankNewProjectDraft = () => ({ title: "", question: "", folderSelectionId: null, folderPath: "" });
   const state = {
     locale: "en",
-    projects: [], selectedId: null, lifecycle: null, conversations: [], selectedConversationId: null, messages: [], sources: [], sourceFigures: [], runs: [], artifacts: [], labs: [], workspaceLabBindings: [], labCatalog: [], labDecisionProjections: [], rendererPacks: [], manuscripts: [], claimLedger: null, journalProfiles: [], submissionExports: [], analysisSpecs: [], decisions: [],
-    artifactContextsByMessage: new Map(), labContextsById: new Map(), artifactHistoryById: new Map(), selectedLabId: null, selectedArtifactOriginVersion: null, inspectedArtifactVersion: null, inspectedArtifactContext: null, artifactComparison: null, draftHistoryGuard: null, labsExpanded: true, expandedLabGroups: new Set(["chemistry"]), expandedLabDecisions: new Set(), projectMenuOpen: false, historyOpen: false, railCollapsed: readRailCollapsed(),
+    projects: [], selectedId: null, lifecycle: null, researchLoopInspection: null, researchLoopActionBusy: false, researchLoopActionError: "", conversations: [], selectedConversationId: null, messages: [], sources: [], sourceFigures: [], runs: [], artifacts: [], labs: [], workspaceLabBindings: [], labCatalog: [], labDecisionProjections: [], rendererPacks: [], manuscripts: [], claimLedger: null, journalProfiles: [], submissionExports: [], analysisSpecs: [], decisions: [],
+    artifactContextsByMessage: new Map(), labContextsById: new Map(), artifactHistoryById: new Map(), selectedLabId: null, selectedArtifactOriginVersion: null, inspectedArtifactVersion: null, inspectedArtifactContext: null, artifactComparison: null, draftHistoryGuard: null, labsExpanded: true, expandedLabGroups: new Set(["chemistry"]), expandedLabDecisions: new Set(), projectMenuOpen: false, projectFolderOpen: false, projectLibrarySummaries: new Map(), projectLibrarySummaryState: "loading", librarySearch: "", librarySelectedProjectId: null, projectFolderSelectedKey: null, newProjectStep: "details", selectedResearchTemplateId: null, newProjectDraft: blankNewProjectDraft(), newProjectFolderError: "", newProjectFolderBusy: false, newProjectGeneration: 0, newProjectRequestId: null, newProjectRequestSignature: "", labManagerOpen: false, labManagerBusyId: null, labManagerGeneration: 0, labManagerError: "", historyOpen: false, railCollapsed: readRailCollapsed(),
     blocksByMessage: new Map(), citationsByMessage: new Map(), evidenceById: new Map(), selectedSourceId: null, selectedArtifactId: null,
     evidenceGraph: null, evidenceGraphReviews: [], evidenceGraphLoading: false, evidenceGraphError: "", selectedEvidenceGraphNodeId: null, selectedEvidenceGraphCandidateId: null, evidenceGraphReviewSheet: false, evidenceGraphReviewDecision: "accepted", evidenceGraphReviewBusy: false, evidenceGraphReviewError: "", evidenceGraphPathAnchorId: null, evidenceGraphPath: null,
-    mode: "session", drawer: null, modal: false, manuscriptModal: false, saving: false, loadingProject: false, projectError: "", activeVegaView: null, activeCytoscape: null, activeNumericSurface: null, activeJBrowseTarget: null, scrollByMode: { session: 0, lab: 0, manuscript: 0 }, returnMessageId: null,
+    mode: "session", drawer: null, modal: false, manuscriptModal: false, saving: false, loadingProject: false, projectError: "", projectFolderOpenBusy: false, projectFolderOpenError: "", activeVegaView: null, activeCytoscape: null, activeNumericSurface: null, activeJBrowseTarget: null, scrollByMode: { session: 0, lab: 0, manuscript: 0 }, returnMessageId: null,
     workspaceTabs: [{ id: "research", kind: "research", dirty: false }], activeWorkspaceTabId: "research", currentDestination: "overview", hypotheses: [], hypothesesError: "", approvalPolicy: null, approvalPolicyError: "", workspaceSyncError: "",
     analysisRuns: [], analysisRunArtifacts: [], analysisRunsError: "", analysisRunsProjectId: null,
     resultArtifacts: [], resultFigureIds: new Set(), resultValidations: new Map(), resultsError: "", resultsProjectId: null,
     literatureSources: [], literatureUnresolvedIds: [], literatureLoading: false, literatureError: "",
     acquisitionRuns: [], acquisitionUnresolvedIds: [], acquisitionLoading: false, acquisitionError: "",
-    activeTurn: null, composerSending: false, composerDraft: "", composerError: "", composerEventDispose: null, lifecycleChangeDispose: null,
+    activeTurn: null, composerSending: false, composerDraft: "", composerError: "", composerEventDispose: null, lifecycleChangeDispose: null, runtimeQuestions: [], runtimeQuestionDispose: null, runtimeQuestionBusy: false, runtimeQuestionError: "", runtimeQuestionDraft: "", runtimeQuestionDraftRequestId: null,
+    runtimeSelection: null, runtimeOptions: [], runtimeUnavailable: false, runtimeSelectionLoading: false, runtimeSelectionBusy: false, runtimeSelectionError: "", runtimeSelectionScope: null, runtimePickerOpen: false, runtimePickerQuery: "",
     vegaDraft: null, vegaSaving: false, vegaSaveError: "", pendingDraftNavigation: null,
     selectedManuscriptId: null, selectedAnalysisPlanId: null, manuscriptDraft: null, manuscriptSaving: false, manuscriptSaveError: "", manuscriptView: "paper", manuscriptInspectorOpen: false, selectedJournalProfileId: null, journalValidation: null, journalSheet: false, submissionSheet: false, submissionDraft: null, journalActionBusy: false, journalActionError: "",
     manuscriptEditorModel: null, manuscriptArtifactContexts: new Map(), manuscriptArtifactLineages: new Map(), manuscriptArtifactPreviewUrls: new Map(), manuscriptEditProposals: [], manuscriptSelectionContexts: [], manuscriptSelectionContext: null, manuscriptSelectionBusy: false, manuscriptSelectionError: "", manuscriptInsertion: null, manuscriptInsertBusy: false, manuscriptInsertError: "", manuscriptTransactionBusy: false, manuscriptProposalBusy: null, manuscriptNotice: "",
@@ -32,30 +406,80 @@ import { formatScienceCell } from "./format-cell.js";
     // preview state so the typeset proof and the source it was compiled from cannot drift apart.
     manuscriptPreviewLatex: "", manuscriptPreviewBibtex: "", manuscriptPreviewCapabilities: null,
     artifactBindingBusy: false, artifactBindingError: "", pendingManuscriptBinding: null, manuscriptDraftJob: null,
-    decisionBusy: false, decisionError: "", labDecisionActionBusy: false, labDecisionActionError: "",
+    decisionBusy: false, decisionError: "", analysisPlanReviewSheet: false, analysisPlanReviewBusy: false, analysisPlanReviewError: "", analysisPlanReviewDismissedKey: null, labDecisionActionBusy: false, labDecisionActionError: "",
     resultReviewSheet: false, resultReviewInspection: null, resultReviewBusy: false, resultReviewError: "", resultReviewStale: false, resultReviewOpener: null, resultReviewDraft: { verdict: "", trigger: "", rationale: "" },
     researchContract: null, researchContractSheet: false, researchContractBusy: false, researchContractError: "", researchContractDismissedKey: null,
-    scopeProject: null, scopeContract: null, scopeLoading: false, scopeError: "",
+    scopeLoading: false, scopeError: "",
     logbookRevisions: [], logbookLoading: false, logbookError: "",
     submissionArchiveProfiles: [], submissionArchiveExports: [], submissionArchiveLoading: false, submissionArchiveError: "",
-    datasetImportBusy: false, datasetImportError: "", tablePageByArtifact: new Map(), statisticsViewByArtifact: new Map(), paleontologyViewByArtifact: new Map(),
+    datasetImportBusy: false, datasetImportError: "", tablePageByArtifact: new Map(), statisticsViewByArtifact: new Map(), paleontologyViewByArtifact: new Map(), visualViewportByArtifact: new Map(),
+    spatialViewByArtifact: new Map(), materialsStructureIndexByArtifact: new Map(),
     statisticsLaunchSourceArtifactId: null, statisticsLaunchTimeColumn: "", statisticsLaunchEventColumn: "", statisticsLaunchBusy: false, statisticsLaunchError: "", statisticsLaunchOpen: false,
     // The launch screen used to offer one analysis, because one analysis was written into it. These
     // hold the engine's own catalogue and the column mapping the chosen method declares it needs.
     statisticsMethodCatalogue: [], statisticsMethodQuery: "", statisticsLaunchMethod: "kaplan_meier", statisticsLaunchMapping: {},
     figureActionBusy: false, figureActionError: "", figureActionNotice: "",
-    activeRendererIdentity: null, activeRendererInstance: null, activeRendererPhase: null, activeRendererVisible: null, rendererObserver: null, rendererAbort: null, rendererStatusDispose: null, artifactChangeDispose: null, inlineVegaViews: [], inlinePreviewUrls: [], compareVegaViews: [], comparePreviewUrls: [],
+    activeRendererIdentity: null, activeRendererInstance: null, activeRendererPhase: null, activeRendererVisible: null, rendererObserver: null, rendererAbort: null, rendererStatusDispose: null, artifactChangeDispose: null, inlineVegaViews: [], inlinePreviewUrls: [], compareVegaViews: [], comparePreviewUrls: [], activeSpatialScene: null,
   };
   let selectionEpoch = 0;
+  let scopeLoadEpoch = 0;
+  let composerRequestEpoch = 0;
   let compareEpoch = 0;
   let workspacePersistChain = Promise.resolve();
   let workspacePersistError = null;
   let jbrowseRuntimePromise = null;
+  let runtimeQuestionTimer = null;
+  let librarySearchTimer = null;
+  let librarySearchComposing = false;
+  let scienceModelSearchComposing = false;
+  let scienceModelSearchTimer = null;
+  let runtimeSelectionRequestEpoch = 0;
+  let projectLibrarySummaryRequestEpoch = 0;
+  let manuscriptEditorRequestEpoch = 0;
+  let manuscriptSaveRequestEpoch = 0;
+  let conversationRefreshInFlight = null;
+  let conversationRefreshPending = false;
+  let conversationRefreshPendingRuntime = false;
+  const uiCopy = (ko, en) => state.locale === "ko" ? ko : en;
+  const pendingHypothesisCopy = (pending) => uiCopy(
+    `${pending}건이 당신의 결정을 기다립니다.`,
+    `${pending} ${pending === 1 ? "hypothesis awaits" : "hypotheses await"} your decision.`,
+  );
+  const earthquakeProjectionCopy = () => uiCopy(
+    "USGS 원본 경도°·위도°·깊이 km · 화면은 축별 정규화",
+    "USGS source longitude° · latitude° · depth km · axes normalized for display",
+  );
   const domainLabels = {
-    general: "일반 과학", "life-science": "생명과학", chemistry: "화학", physics: "물리학",
-    "materials-science": "재료과학", genomics: "유전체학", astronomy: "천문학", "earth-ecology": "지구·생태",
-    statistics: "통계학", economics: "경제학", finance: "금융 연구",
+    general: "인문·사회·융합", "life-science": "생명과학", chemistry: "화학", physics: "물리학",
+    "materials-science": "재료과학", genomics: "유전체학", astronomy: "천문학", "earth-ecology": "지구·생태·고생물",
+    statistics: "통계학", economics: "경제·경영", finance: "금융 연구",
   };
+  const domainLabelsEn = {
+    general: "Humanities, social & interdisciplinary", "life-science": "Life science", chemistry: "Chemistry", physics: "Physics",
+    "materials-science": "Materials science", genomics: "Genomics", astronomy: "Astronomy", "earth-ecology": "Earth, ecology & paleontology",
+    statistics: "Statistics", economics: "Economics & management", finance: "Finance",
+  };
+  const domainLabel = (domain) => (state.locale === "ko" ? domainLabels : domainLabelsEn)[domain] || domain;
+  const researchTemplates = [
+    { id: "data-table", domain: "statistics", label: "표 데이터 정리", labelEn: "Data tables", description: "CSV와 표 데이터를 검증 가능한 형태로 정리합니다.", descriptionEn: "Organize CSV and tabular data into a verifiable dataset." },
+    { id: "statistics-analysis", domain: "statistics", label: "통계 분석", labelEn: "Statistical analysis", description: "가설과 데이터에 맞는 통계 방법을 선택해 분석합니다.", descriptionEn: "Choose and run statistical methods suited to your hypothesis and data." },
+    { id: "data-visualization", domain: "statistics", label: "데이터 시각화", labelEn: "Data visualization", description: "정확한 데이터를 설명하는 차트와 3D 시각화를 만듭니다.", descriptionEn: "Create charts and 3D views grounded in exact data." },
+    { id: "economic-indicators", domain: "economics", label: "경제·경영 지표", labelEn: "Economic & management indicators", description: "공식 경제 지표로 경제·경영의 변화와 관계를 분석합니다.", descriptionEn: "Analyze economics and management questions with official indicators." },
+    { id: "literature-network", domain: "general", label: "문헌·인문사회", labelEn: "Literature & humanities", description: "인문사회 선행 문헌과 논문 인용 관계를 근거 중심으로 탐색합니다.", descriptionEn: "Explore humanities and social-science literature through evidence-backed citation relationships." },
+    { id: "astronomy-sky", domain: "astronomy", label: "천체·우주 관측", labelEn: "Astronomy & sky", description: "천체 목록, 좌표와 관측값을 분석합니다.", descriptionEn: "Analyze astronomical catalogs, coordinates, and observations." },
+    { id: "biodiversity-map", domain: "earth-ecology", label: "생물다양성 지도", labelEn: "Biodiversity maps", description: "종 관측 기록과 공간 분포를 지도에서 비교합니다.", descriptionEn: "Compare species observations and spatial distributions on a map." },
+    { id: "paleontology-evidence", domain: "earth-ecology", label: "화석·고생물 근거", labelEn: "Paleontology evidence", description: "화석 산출과 지층 기록에서 검증 가능한 근거를 찾습니다.", descriptionEn: "Find verifiable evidence in fossil occurrences and strata." },
+    { id: "earthquake-observations", domain: "earth-ecology", label: "지진 관측", labelEn: "Earthquake observations", description: "지진의 위치, 깊이, 규모와 시간 패턴을 분석합니다.", descriptionEn: "Analyze earthquake location, depth, magnitude, and timing." },
+    { id: "physics-data", domain: "physics", label: "물리 측정", labelEn: "Physics measurements", description: "물리 실험과 공개 측정 데이터를 비교·분석합니다.", descriptionEn: "Compare and analyze experimental and public physics measurements." },
+    { id: "materials-structures", domain: "materials-science", label: "소재·결정 구조", labelEn: "Materials & structures", description: "재료의 결정 구조와 물성 데이터를 살펴봅니다.", descriptionEn: "Inspect crystal structures and material properties." },
+    { id: "genomics-variants", domain: "genomics", label: "유전체 변이", labelEn: "Genomic variants", description: "유전체 좌표와 변이 기록을 정확한 참조 위에서 탐색합니다.", descriptionEn: "Explore genomic coordinates and variants against exact references." },
+    { id: "comparative-genomics", domain: "genomics", label: "비교 유전체", labelEn: "Comparative genomics", description: "종과 유전체 사이의 보존·차이를 비교합니다.", descriptionEn: "Compare conservation and differences across species and genomes." },
+    { id: "molecular-structure", domain: "life-science", label: "분자·단백질 구조", labelEn: "Molecular structures", description: "분자와 단백질 구조를 3D로 조사합니다.", descriptionEn: "Investigate molecular and protein structures in 3D." },
+    { id: "chemistry", domain: "chemistry", label: "화학 연구", labelEn: "Chemistry", description: "분자, 반응과 화학적 성질을 근거와 함께 연구합니다.", descriptionEn: "Study molecules, reactions, and chemical properties with evidence." },
+  ];
+  const researchTemplateById = (id) => researchTemplates.find((template) => template.id === id) || null;
+  const researchTemplateLabel = (template) => template ? (state.locale === "ko" ? template.label : template.labelEn) : "";
+  const researchTemplateDescription = (template) => template ? (state.locale === "ko" ? template.description : template.descriptionEn) : "";
   const labLabels = { chemistry: "Ketcher", "molecular-structure": "Mol* Structure Viewer", "literature-network": "Citation Network", "data-visualization": "Figure Lab", "data-table": "Data Table", "statistics-analysis": "Statistical Analysis", "economic-indicators": "Economic Indicators", "physics-data": "Physics Measurements", "materials-structures": "OQMD Structures", imaging: "Imaging", "astronomy-sky": "Sky Catalog", "biodiversity-map": "Biodiversity Map", "earthquake-observations": "Earthquake Observations", "paleontology-evidence": "Paleontology Evidence", "genomics-variants": "JBrowse Variants", "comparative-genomics": "Comparative Genomics" };
   const labLabel = (labId) => labLabels[labId] || String(labId || "Lab").split(/[._-]/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : "").join(" ");
   const labCapabilityLabel = (labId) => state.labCatalog.find((lab) => lab.id === labId)?.label || `${labLabel(labId)} Lab`;
@@ -115,7 +539,60 @@ import { formatScienceCell } from "./format-cell.js";
     if (!compiled || typeof compiled !== "object" || Array.isArray(compiled)) throw new Error("science-vega-lite-compile-failed");
     return compiled;
   }
-  function fitArtifactVegaCanvas(host, { capture = false, gutter = 10 } = {}) {
+  function paleontologyInteractiveSpec(spec, availableWidth) {
+    if (!spec || typeof spec !== "object" || Array.isArray(spec) || !(availableWidth > 0)) return spec;
+    const responsive = JSON.parse(JSON.stringify(spec));
+    const measuredWidth = Math.max(1, Number(availableWidth) || 1);
+    const narrow = measuredWidth < 260;
+    const medium = measuredWidth < 480;
+    const leftPadding = narrow ? Math.min(88, Math.max(60, Math.floor(measuredWidth * 0.46))) : medium ? 112 : 150;
+    const rightPadding = narrow ? 8 : medium ? 12 : 24;
+    const rowCount = Number(responsive.data?.find?.((entry) => entry?.name === "occurrences")?.values?.length) || 1;
+    const plotWidth = Math.max(1, Math.floor(measuredWidth - leftPadding - rightPadding));
+    const plotHeight = Math.max(narrow ? 120 : 160, rowCount * (narrow ? 14 : medium ? 17 : 18));
+    const sourceTitle = String(responsive.title?.text || "PBDB fossil-occurrence intervals");
+    const taxonName = sourceTitle.replace(/\s+fossil-occurrence age intervals$/iu, "").trim() || "PBDB";
+    const titleSuffix = " intervals";
+    const titleCharacterLimit = narrow ? Math.max(16, Math.floor(measuredWidth / 7)) : medium ? Math.max(34, Math.floor(measuredWidth / 7)) : Infinity;
+    const taxonCharacterLimit = Number.isFinite(titleCharacterLimit) ? Math.max(4, titleCharacterLimit - titleSuffix.length - 1) : Infinity;
+    const compactTaxonName = taxonName.length > taxonCharacterLimit
+      ? `${taxonName.slice(0, taxonCharacterLimit).trimEnd()}…`
+      : taxonName;
+    responsive.autosize = { type: "none" };
+    responsive.width = plotWidth;
+    responsive.height = plotHeight;
+    responsive.padding = { left: leftPadding, right: rightPadding, top: narrow ? 26 : medium ? 34 : 44, bottom: narrow || medium ? 96 : 82 };
+    responsive.title = {
+      ...responsive.title,
+      text: narrow ? "Age intervals" : medium ? `${compactTaxonName}${titleSuffix}` : sourceTitle,
+      subtitle: narrow ? "PBDB age bounds (Ma)" : medium ? "PBDB bounds in Ma" : responsive.title?.subtitle,
+      fontSize: narrow ? 13 : medium ? 14 : responsive.title?.fontSize,
+      subtitleFontSize: narrow ? 9 : medium ? 10 : responsive.title?.subtitleFontSize,
+      align: narrow || medium ? "left" : responsive.title?.align,
+      limit: narrow || medium ? Math.max(80, measuredWidth - 8) : responsive.title?.limit,
+    };
+    responsive.axes = (Array.isArray(responsive.axes) ? responsive.axes : []).map((axis) => {
+      if (axis.orient === "left") return { ...axis, labelLimit: Math.max(60, leftPadding - 6), labelFontSize: narrow ? 9 : medium ? 10 : axis.labelFontSize };
+      if (axis.orient === "bottom") return {
+        ...axis,
+        title: narrow ? "Age (Ma)" : medium ? "Age before present (Ma)" : axis.title,
+        tickCount: narrow ? 4 : medium ? 6 : axis.tickCount,
+        labelFontSize: narrow ? 9 : medium ? 10 : axis.labelFontSize,
+      };
+      return axis;
+    });
+    const legendColumns = narrow || medium ? 1 : 2;
+    responsive.legends = (Array.isArray(responsive.legends) ? responsive.legends : []).map((legend) => ({
+      ...legend,
+      orient: "bottom",
+      columns: legendColumns,
+      labelLimit: narrow || medium ? Math.min(180, Math.max(40, plotWidth - 8)) : Math.max(40, Math.floor(plotWidth / 2)),
+      labelFontSize: narrow ? 9 : medium ? 10 : legend.labelFontSize,
+      titleFontSize: narrow ? 9 : medium ? 10 : legend.titleFontSize,
+    }));
+    return responsive;
+  }
+  function fitArtifactVegaCanvas(host, { capture = false, gutter = 10, maxHeight = Infinity } = {}) {
     const canvas = host?.querySelector?.("canvas");
     if (!canvas) throw new Error("science-vega-canvas-missing");
     const initial = canvas.getBoundingClientRect();
@@ -128,10 +605,15 @@ import { formatScienceCell } from "./format-cell.js";
     canvas.style.height = `${naturalHeight}px`;
     const naturalRect = canvas.getBoundingClientRect();
     const hostRect = host.getBoundingClientRect();
-    const rightEdge = Math.min(window.innerWidth - gutter, hostRect.right - gutter);
-    const bottomEdge = window.innerHeight - gutter;
-    const availableWidth = Math.max(1, rightEdge - naturalRect.left);
-    const availableHeight = Math.max(1, bottomEdge - naturalRect.top);
+    // Inline previews live in scrollable articles: being outside the viewport
+    // is normal and must not turn a valid chart into a permanent render error.
+    // Only an actual viewport capture requires viewport containment.
+    const availableWidth = capture
+      ? Math.max(1, Math.min(window.innerWidth - gutter, hostRect.right - gutter) - naturalRect.left)
+      : Math.max(1, hostRect.width - gutter * 2);
+    const availableHeight = capture
+      ? Math.max(1, window.innerHeight - gutter - naturalRect.top)
+      : Math.min(naturalHeight, maxHeight);
     const scale = Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight);
     const fittedWidth = Math.max(1, Math.floor(naturalWidth * scale));
     const fittedHeight = Math.max(1, Math.floor(naturalHeight * scale));
@@ -144,17 +626,443 @@ import { formatScienceCell } from "./format-cell.js";
     host.dataset.vegaCaptureScale = scale.toFixed(6);
     host.dataset.vegaCaptureFits = String(fits);
     host.dataset.vegaCaptureRect = JSON.stringify({ x: fitted.x, y: fitted.y, width: fitted.width, height: fitted.height, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight });
-    if (!fits) throw new Error("science-vega-capture-layout-out-of-bounds");
+    if (capture && !fits) throw new Error("science-vega-capture-layout-out-of-bounds");
     return { canvas, scale, rect: fitted, availableWidth, availableHeight };
   }
   const formatDate = (value) => {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat(state.locale === "ko" ? "ko-KR" : "en-US", { year: "numeric", month: "short", day: "numeric" }).format(date);
   };
+  function restoreArtifactVegaCanvas(host) {
+    const canvas = host?.querySelector?.("canvas");
+    if (!canvas) return null;
+    const width = Number(canvas.dataset.vegaNaturalCssWidth) || canvas.width;
+    const height = Number(canvas.dataset.vegaNaturalCssHeight) || canvas.height;
+    if (!(width > 0) || !(height > 0)) return null;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    canvas.style.maxWidth = "none";
+    canvas.style.maxHeight = "none";
+    canvas.style.marginInline = "0";
+    return { canvas, width, height };
+  }
+  function artifactViewToolbarMarkup() {
+    const fitLabel = uiCopy("맞춤", "Fit to view");
+    const zoomOutLabel = uiCopy("축소", "Zoom out");
+    const zoomInLabel = uiCopy("확대", "Zoom in");
+    const resetLabel = uiCopy("확대 배율 초기화", "Reset zoom");
+    const panLabel = uiCopy("그림 이동 모드", "Pan figure");
+    return `<section class="artifactViewToolbar" data-artifact-view-toolbar aria-label="${escapeHtml(uiCopy("그림 보기 도구", "Figure view controls"))}"><div class="artifactViewToolbarTitle"><strong>${escapeHtml(uiCopy("그림 보기", "Figure view"))}</strong><span data-artifact-view-status aria-live="polite">100%</span></div><div class="artifactViewToolbarActions"><button type="button" data-artifact-view-action="fit" aria-label="${escapeHtml(fitLabel)}" title="${escapeHtml(fitLabel)}">${escapeHtml(uiCopy("맞춤", "Fit"))}</button><button type="button" data-artifact-view-action="zoom-out" aria-label="${escapeHtml(zoomOutLabel)}" title="${escapeHtml(zoomOutLabel)}">−</button><button type="button" data-artifact-view-action="zoom-in" aria-label="${escapeHtml(zoomInLabel)}" title="${escapeHtml(zoomInLabel)}">+</button><button type="button" data-artifact-view-action="reset" aria-label="${escapeHtml(resetLabel)}" title="${escapeHtml(resetLabel)}">${escapeHtml(uiCopy("초기화", "Reset"))}</button><button type="button" data-artifact-view-action="toggle-pan" aria-pressed="false" aria-label="${escapeHtml(panLabel)}" title="${escapeHtml(panLabel)}">${escapeHtml(uiCopy("이동", "Pan"))}</button></div></section>`;
+  }
+  function bindArtifactVisualViewport(host, { kind = "chart", initialFit = true } = {}) {
+    if (!host) return;
+    if (typeof host.__scienceVisualViewerCleanup === "function") host.__scienceVisualViewerCleanup();
+    if (host.dataset.visualViewerBound === "true") return;
+    const viewport = host.querySelector(".statisticsChartHost") || host;
+    const surface = viewport.querySelector("img, canvas");
+    if (!surface) return;
+    const baseWidth = Number(surface.dataset.vegaNaturalCssWidth) || Number(surface.naturalWidth) || Number(surface.width) || surface.getBoundingClientRect().width;
+    const baseHeight = Number(surface.dataset.vegaNaturalCssHeight) || Number(surface.naturalHeight) || Number(surface.height) || surface.getBoundingClientRect().height;
+    if (!(baseWidth > 0) || !(baseHeight > 0)) return;
+    host.dataset.visualViewerBound = "true";
+    viewport.classList.add("artifactVisualViewport");
+    surface.classList.add("artifactVisualSurface");
+    surface.draggable = false;
+    const frame = host.closest(".artifactCanvasFrame");
+    const toolbar = frame?.querySelector("[data-artifact-view-toolbar]");
+    const status = toolbar?.querySelector("[data-artifact-view-status]");
+    const visualViewportKey = [
+      state.selectedId || "unknown-project",
+      host.dataset.artifactHost || "unknown-artifact",
+      host.dataset.artifactVersion || "unknown-version",
+      host.dataset.contentSha256 || "unknown-content",
+    ].join(":");
+    const rememberedViewport = state.visualViewportByArtifact.get(visualViewportKey) || null;
+    let scale = 1;
+    let fitLocked = false;
+    let persistentPan = kind === "image";
+    let temporarySpacePan = false;
+    let panMode = persistentPan;
+    let pointer = null;
+    const buttonListeners = [];
+    const rememberViewport = () => {
+      const memory = state.visualViewportByArtifact;
+      memory.delete(visualViewportKey);
+      memory.set(visualViewportKey, {
+        scale,
+        fitLocked,
+        scrollLeft: viewport.scrollLeft,
+        scrollTop: viewport.scrollTop,
+        persistentPan,
+      });
+      while (memory.size > 64) {
+        const oldestKey = memory.keys().next().value;
+        if (oldestKey === undefined) break;
+        memory.delete(oldestKey);
+      }
+    };
+    const clampScale = (value, minimum = 0.05) => Math.max(minimum, Math.min(4, value));
+    const fitScale = () => {
+      const styles = getComputedStyle(viewport);
+      const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+      const verticalPadding = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0);
+      return Math.max(0.001, Math.min(1, (viewport.clientWidth - horizontalPadding) / baseWidth, (viewport.clientHeight - verticalPadding) / baseHeight));
+    };
+    const visualMinimumScale = () => Math.min(0.05, fitScale());
+    const updateStatus = () => {
+      if (status) status.textContent = `${Math.round(scale * 100)}%`;
+      if (toolbar) toolbar.querySelector('[data-artifact-view-action="toggle-pan"]')?.setAttribute("aria-pressed", String(panMode));
+      viewport.dataset.visualScale = scale.toFixed(4);
+      viewport.dataset.visualFit = String(fitLocked);
+    };
+    const applyScale = (nextScale, anchor = null, minimumScale = visualMinimumScale()) => {
+      const next = clampScale(nextScale, minimumScale);
+      const previousScale = scale;
+      const rect = viewport.getBoundingClientRect();
+      const styles = getComputedStyle(viewport);
+      const originX = viewport.clientLeft + (parseFloat(styles.paddingLeft) || 0);
+      const originY = viewport.clientTop + (parseFloat(styles.paddingTop) || 0);
+      const anchorX = anchor ? anchor.clientX - rect.left - originX : viewport.clientWidth / 2 - originX;
+      const anchorY = anchor ? anchor.clientY - rect.top - originY : viewport.clientHeight / 2 - originY;
+      const contentX = viewport.scrollLeft + anchorX;
+      const contentY = viewport.scrollTop + anchorY;
+      scale = next;
+      surface.style.width = `${Math.max(1, Math.round(baseWidth * scale))}px`;
+      surface.style.height = `${Math.max(1, Math.round(baseHeight * scale))}px`;
+      surface.style.maxWidth = "none";
+      surface.style.maxHeight = "none";
+      surface.style.marginInline = "0";
+      viewport.scrollLeft = Math.max(0, contentX * (scale / previousScale) - anchorX);
+      viewport.scrollTop = Math.max(0, contentY * (scale / previousScale) - anchorY);
+      updateStatus();
+      rememberViewport();
+    };
+    const applyFit = () => {
+      fitLocked = true;
+      const next = fitScale();
+      const rect = viewport.getBoundingClientRect();
+      const center = { clientX: rect.left + viewport.clientWidth / 2, clientY: rect.top + viewport.clientHeight / 2 };
+      applyScale(next, center, 0.001);
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+      rememberViewport();
+    };
+    const applyReset = () => { fitLocked = false; applyScale(1); };
+    const action = (name) => {
+      if (name === "fit") { applyFit(); return; }
+      if (name === "reset") { applyReset(); return; }
+      if (name === "zoom-in") { fitLocked = false; applyScale(scale * 1.2); return; }
+      if (name === "zoom-out") { fitLocked = false; applyScale(scale / 1.2); return; }
+      if (name === "toggle-pan") { persistentPan = !persistentPan; panMode = persistentPan || temporarySpacePan; updateStatus(); rememberViewport(); }
+    };
+    toolbar?.querySelectorAll("[data-artifact-view-action]").forEach((button) => {
+      const listener = () => action(button.dataset.artifactViewAction);
+      button.addEventListener("click", listener);
+      buttonListeners.push([button, listener]);
+    });
+    const onWheel = (event) => {
+      if (!surface.contains(event.target)) return;
+      const rawDeltaY = Number(event.deltaY);
+      if (!Number.isFinite(rawDeltaY) || rawDeltaY === 0) return;
+      const rawDeltaX = Number(event.deltaX) || 0;
+      if (Math.abs(rawDeltaY) < 0.5 || Math.abs(rawDeltaX) > Math.abs(rawDeltaY) * 1.2) return;
+      event.preventDefault();
+      event.stopPropagation();
+      fitLocked = false;
+      const deltaModeScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? Math.max(1, viewport.clientHeight) : 1;
+      const normalizedDeltaY = Math.max(-120, Math.min(120, rawDeltaY * deltaModeScale));
+      const direction = Math.exp(-normalizedDeltaY * 0.0012);
+      applyScale(scale * direction, event);
+    };
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    const onScroll = () => { if (!fitLocked) rememberViewport(); };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    const onPointerDown = (event) => {
+      if (!surface.contains(event.target) || !(panMode || event.button === 1 || event.shiftKey || event.altKey)) return;
+      event.preventDefault();
+      fitLocked = false;
+      rememberViewport();
+      pointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      try { surface.setPointerCapture(event.pointerId); } catch {}
+      surface.dataset.visualPanning = "true";
+    };
+    const onPointerMove = (event) => {
+      if (!pointer || pointer.id !== event.pointerId) return;
+      event.preventDefault();
+      viewport.scrollLeft -= event.clientX - pointer.x;
+      viewport.scrollTop -= event.clientY - pointer.y;
+      pointer.x = event.clientX; pointer.y = event.clientY;
+      rememberViewport();
+    };
+    const clearPointer = () => {
+      const pointerId = pointer?.id;
+      pointer = null;
+      delete surface.dataset.visualPanning;
+      if (pointerId !== undefined) {
+        try { surface.releasePointerCapture(pointerId); } catch {}
+      }
+    };
+    const onPointerUp = (event) => { if (pointer?.id === event.pointerId) clearPointer(); };
+    const onLostPointerCapture = (event) => { if (pointer?.id === event.pointerId) clearPointer(); };
+    const resetTemporaryPan = () => {
+      if (!temporarySpacePan) return;
+      temporarySpacePan = false;
+      panMode = persistentPan;
+      updateStatus();
+    };
+    const onWindowBlur = () => { clearPointer(); resetTemporaryPan(); };
+    const onVisibilityChange = () => { if (document.hidden) { clearPointer(); resetTemporaryPan(); } };
+    surface.addEventListener("pointerdown", onPointerDown);
+    surface.addEventListener("pointermove", onPointerMove);
+    surface.addEventListener("pointerup", onPointerUp);
+    surface.addEventListener("pointercancel", onPointerUp);
+    surface.addEventListener("lostpointercapture", onLostPointerCapture);
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const isEditingTarget = (target) => {
+      if (!target || typeof target.closest !== "function") return false;
+      return Boolean(target.isContentEditable || target.closest("input, textarea, select, button, a, [contenteditable=\"true\"], [contenteditable=\"\"], [role=\"textbox\"]"));
+    };
+    const canHandleKey = (event) => !event.defaultPrevented && !event.isComposing && event.keyCode !== 229 && !event.ctrlKey && !event.metaKey && !event.altKey && !isEditingTarget(event.target);
+    host.tabIndex = 0;
+    const onKeyDown = (event) => {
+      if (!canHandleKey(event)) return;
+      if (event.key === "+" || event.key === "=") { event.preventDefault(); action("zoom-in"); return; }
+      if (event.key === "-") { event.preventDefault(); action("zoom-out"); return; }
+      if (event.key === "0") { event.preventDefault(); action("fit"); return; }
+      if (event.key === "Home" || event.key.toLowerCase() === "r") { event.preventDefault(); action("reset"); return; }
+      const delta = event.shiftKey ? 96 : 48;
+      const scrollsViewport = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key);
+      if (scrollsViewport) fitLocked = false;
+      if (event.key === "ArrowLeft") { event.preventDefault(); viewport.scrollLeft -= delta; }
+      if (event.key === "ArrowRight") { event.preventDefault(); viewport.scrollLeft += delta; }
+      if (event.key === "ArrowUp") { event.preventDefault(); viewport.scrollTop -= delta; }
+      if (event.key === "ArrowDown") { event.preventDefault(); viewport.scrollTop += delta; }
+      if (scrollsViewport) rememberViewport();
+      if (event.key === " ") { event.preventDefault(); temporarySpacePan = true; panMode = true; updateStatus(); }
+    };
+    const onKeyUp = (event) => {
+      if (event.key === " " && !event.isComposing && !isEditingTarget(event.target)) { temporarySpacePan = false; panMode = persistentPan; updateStatus(); }
+    };
+    host.addEventListener("keydown", onKeyDown);
+    host.addEventListener("keyup", onKeyUp);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => { if (fitLocked) applyFit(); }) : null;
+    observer?.observe(viewport);
+    const cleanup = () => {
+      observer?.disconnect();
+      buttonListeners.forEach(([button, listener]) => button.removeEventListener("click", listener));
+      viewport.removeEventListener("wheel", onWheel);
+      viewport.removeEventListener("scroll", onScroll);
+      surface.removeEventListener("pointerdown", onPointerDown);
+      surface.removeEventListener("pointermove", onPointerMove);
+      surface.removeEventListener("pointerup", onPointerUp);
+      surface.removeEventListener("pointercancel", onPointerUp);
+      surface.removeEventListener("lostpointercapture", onLostPointerCapture);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      host.removeEventListener("keydown", onKeyDown);
+      host.removeEventListener("keyup", onKeyUp);
+      clearPointer();
+      delete host.dataset.visualViewerBound;
+      if (host.__scienceVisualViewerCleanup === cleanup) delete host.__scienceVisualViewerCleanup;
+    };
+    host.__scienceVisualViewerCleanup = cleanup;
+    const restoreRememberedViewport = () => {
+      if (!rememberedViewport || !Number.isFinite(Number(rememberedViewport.scale))) return false;
+      persistentPan = rememberedViewport.persistentPan === true;
+      panMode = persistentPan;
+      if (rememberedViewport.fitLocked === true) {
+        applyFit();
+        return true;
+      }
+      fitLocked = false;
+      applyScale(Number(rememberedViewport.scale), null, 0.001);
+      const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollLeft = Math.max(0, Math.min(maxScrollLeft, Number(rememberedViewport.scrollLeft) || 0));
+      viewport.scrollTop = Math.max(0, Math.min(maxScrollTop, Number(rememberedViewport.scrollTop) || 0));
+      rememberViewport();
+      return true;
+    };
+    const restoredRememberedViewport = restoreRememberedViewport();
+    if (!restoredRememberedViewport && initialFit) applyFit();
+    updateStatus();
+  }
+  const formatByteSize = (value) => {
+    if (value === null || value === undefined || value === "") return "—";
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "—";
+    if (bytes < 1_000) return `${Math.round(bytes)} B`;
+    if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(bytes < 10_000 ? 1 : 0)} KB`;
+    return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)} MB`;
+  };
   const sourceById = (id) => state.sources.find((source) => source.id === id) || null;
   const citationById = (id) => [...state.citationsByMessage.values()].flat().find((citation) => citation.id === id) || null;
-  const selectedProject = () => state.projects.find((item) => item.id === state.selectedId) || state.projects[0] || null;
+  const selectedProject = () => state.projects.find((item) => item.id === state.selectedId) || null;
+  const setProjectLibrarySummaries = (rows) => {
+    state.projectLibrarySummaries = new Map((Array.isArray(rows) ? rows : []).filter((row) => row?.projectId).map((row) => [row.projectId, row]));
+    state.projectLibrarySummaryState = "ready";
+  };
+  async function refreshProjectLibrarySummaries() {
+    const requestEpoch = ++projectLibrarySummaryRequestEpoch;
+    state.projectLibrarySummaryState = "loading";
+    try {
+      const rows = await science.projects.library();
+      // A project switch can leave the previous library request in flight. The library
+      // endpoint returns a whole-project snapshot, so accepting that late response can put
+      // an older manuscript count back on the landing page after the user has moved on.
+      if (requestEpoch !== projectLibrarySummaryRequestEpoch) return false;
+      setProjectLibrarySummaries(rows);
+      return true;
+    } catch (error) {
+      // A superseded request must not turn a newer successful snapshot into an error state.
+      if (requestEpoch !== projectLibrarySummaryRequestEpoch) return false;
+      throw error;
+    }
+  }
   const selectedConversation = () => state.conversations.find((item) => item.id === state.selectedConversationId) || state.conversations[0] || null;
+  const SCIENCE_RUNTIME_RUNNING_STATUSES = new Set(["queued", "running", "cancelling"]);
+  const scienceRuntimeScope = (projectId = state.selectedId, conversationId = selectedConversation()?.id) => ({
+    projectId: projectId || null,
+    conversationId: conversationId || null,
+  });
+  const scienceRuntimeScopeKey = (scope) => scope?.projectId && scope?.conversationId
+    ? JSON.stringify([scope.projectId, scope.conversationId])
+    : null;
+  const scienceRuntimeSelectionKey = (selection) => {
+    if (!selection || typeof selection !== "object") return "";
+    return ["kind", "backend", "source", "model", "role", "inherit", "longContext", "effort"]
+      .map((key) => `${key}=${selection[key] === undefined || selection[key] === null ? "" : String(selection[key])}`)
+      .join("|");
+  };
+  const scienceRuntimeSelectionForDisplay = () => {
+    const activeTurn = state.activeTurn;
+    if (activeTurn && SCIENCE_RUNTIME_RUNNING_STATUSES.has(activeTurn.status) && activeTurn.runtimeSelection) return activeTurn.runtimeSelection;
+    const loopSelection = state.researchLoopInspection?.session?.runtimeSelection || state.researchLoopInspection?.runtimeSelection;
+    if (state.researchLoopInspection?.active === true && loopSelection) return loopSelection;
+    return state.runtimeSelection;
+  };
+  const scienceRuntimePickerLocked = () => Boolean(
+    (state.activeTurn && SCIENCE_RUNTIME_RUNNING_STATUSES.has(state.activeTurn.status))
+      || state.researchLoopInspection?.active === true
+      || ["queued", "running", "pausing"].includes(state.researchLoopInspection?.session?.status),
+  );
+  const scienceRuntimeOptionLabel = (option) => String(option?.label || option?.selection?.model || "").trim();
+  const scienceRuntimeOptionProvider = (option) => String(option?.provider || option?.selection?.backend || option?.selection?.kind || "").trim();
+  const scienceRuntimeDisplayLabel = () => {
+    const selection = scienceRuntimeSelectionForDisplay();
+    const selectedKey = scienceRuntimeSelectionKey(selection);
+    const option = state.runtimeOptions.find((item) => scienceRuntimeSelectionKey(item?.selection) === selectedKey);
+    return scienceRuntimeOptionLabel(option) || String(selection?.model || "").trim();
+  };
+  const scienceRuntimeDisplayProvider = () => {
+    const selection = scienceRuntimeSelectionForDisplay();
+    const selectedKey = scienceRuntimeSelectionKey(selection);
+    const option = state.runtimeOptions.find((item) => scienceRuntimeSelectionKey(item?.selection) === selectedKey);
+    return scienceRuntimeOptionProvider(option) || String(selection?.backend || selection?.kind || "").trim();
+  };
+  const scienceRuntimeErrorText = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/selection-locked|runtime-selection-locked|research.*running|loop.*running/i.test(text)) return uiCopy("현재 연구가 실행 중이라 모델을 바꿀 수 없습니다.", "The current research is running, so its model is locked.");
+    if (/receipt-mismatch/i.test(text)) return uiCopy("모델 선택을 확인하지 못했습니다. 다시 선택해 주세요.", "The model selection could not be confirmed. Choose it again.");
+    if (/unavailable|no-runtime|runtime/i.test(text)) return uiCopy("연결된 모델을 사용할 수 없습니다.", "No connected model is available.");
+    return uiCopy("모델을 불러오지 못했습니다. 다시 시도해 주세요.", "The model list could not be loaded. Try again.");
+  };
+  const scienceRuntimeSelectionMatchesScope = (scope) => scienceRuntimeScopeKey(scope) === scienceRuntimeScopeKey(state.runtimeSelectionScope)
+    && scope?.projectId === state.selectedId
+    && scope?.conversationId === selectedConversation()?.id;
+  const scienceRuntimeInspectionResult = (result) => ({
+    selection: result?.selection && typeof result.selection === "object" ? result.selection : null,
+    options: Array.isArray(result?.options)
+      ? result.options.filter((option) => option?.selection && typeof option.selection === "object" && scienceRuntimeOptionLabel(option))
+      : [],
+    unavailable: result?.unavailable === true,
+  });
+
+  async function refreshScienceRuntimeSelection(projectId, conversationId, { renderDock = true } = {}) {
+    const scope = scienceRuntimeScope(projectId, conversationId);
+    const epoch = ++runtimeSelectionRequestEpoch;
+    state.runtimeSelectionScope = scope;
+    state.runtimeSelectionLoading = true;
+    state.runtimeSelectionBusy = false;
+    state.runtimeSelectionError = "";
+    state.runtimePickerOpen = false;
+    state.runtimePickerQuery = "";
+    if (renderDock) renderChatDock();
+    try {
+      if (!scope.projectId || !scope.conversationId || typeof science?.runtime?.inspect !== "function") {
+        throw new Error("science-runtime-inspection-unavailable");
+      }
+      const inspected = scienceRuntimeInspectionResult(await science.runtime.inspect({
+        projectId: scope.projectId,
+        conversationId: scope.conversationId,
+      }));
+      if (epoch !== runtimeSelectionRequestEpoch || !scienceRuntimeSelectionMatchesScope(scope)) return;
+      state.runtimeSelection = inspected.selection;
+      state.runtimeOptions = inspected.options;
+      state.runtimeUnavailable = inspected.unavailable;
+      state.runtimeSelectionLoading = false;
+      state.runtimeSelectionError = "";
+    } catch (error) {
+      if (epoch !== runtimeSelectionRequestEpoch || !scienceRuntimeSelectionMatchesScope(scope)) return;
+      state.runtimeSelection = null;
+      state.runtimeOptions = [];
+      state.runtimeUnavailable = true;
+      state.runtimeSelectionLoading = false;
+      state.runtimeSelectionError = error instanceof Error ? error.message : String(error);
+    }
+    if (renderDock && epoch === runtimeSelectionRequestEpoch && scienceRuntimeSelectionMatchesScope(scope)) renderChatDock();
+  }
+
+  async function selectScienceRuntimeOption(optionIndex) {
+    const projectId = state.selectedId;
+    const conversationId = selectedConversation()?.id;
+    const scope = scienceRuntimeScope(projectId, conversationId);
+    const requestEpoch = runtimeSelectionRequestEpoch;
+    const isCurrent = () => requestEpoch === runtimeSelectionRequestEpoch && scienceRuntimeSelectionMatchesScope(scope);
+    const option = Number.isSafeInteger(optionIndex) ? state.runtimeOptions[optionIndex] : null;
+    if (!option?.selection || !scope.projectId || !scope.conversationId || scienceRuntimePickerLocked() || state.runtimeSelectionBusy) return;
+    if (!scienceRuntimeSelectionMatchesScope(scope) || typeof science?.runtime?.select !== "function") {
+      state.runtimeSelectionError = "science-runtime-selection-unavailable";
+      state.runtimeUnavailable = true;
+      renderChatDock();
+      return;
+    }
+    const previousSelection = state.runtimeSelection;
+    state.runtimeSelectionBusy = true;
+    state.runtimeSelectionError = "";
+    renderChatDock();
+    try {
+      const selected = await science.runtime.select({
+        projectId: scope.projectId,
+        conversationId: scope.conversationId,
+        selection: option.selection,
+      });
+      if (!isCurrent()) return;
+      const receipt = selected?.selection;
+      if (scienceRuntimeSelectionKey(receipt) !== scienceRuntimeSelectionKey(option.selection)) {
+        throw new Error("science-runtime-selection-receipt-mismatch");
+      }
+      state.runtimeSelection = receipt;
+      state.runtimeUnavailable = false;
+      state.runtimeSelectionError = "";
+      state.runtimePickerOpen = false;
+      state.runtimePickerQuery = "";
+    } catch (error) {
+      if (!isCurrent()) return;
+      state.runtimeSelection = previousSelection;
+      state.runtimeSelectionError = error instanceof Error ? error.message : String(error);
+      state.runtimeUnavailable = !previousSelection;
+      state.runtimePickerOpen = true;
+    } finally {
+      if (isCurrent()) {
+        state.runtimeSelectionBusy = false;
+        renderChatDock();
+      }
+    }
+  }
+
   const evidenceGraphNodeById = (id) => state.evidenceGraph?.nodes?.find((node) => node.id === id) || null;
   const evidenceGraphCandidateById = (id) => state.evidenceGraph?.inferenceCandidates?.find((candidate) => candidate.id === id) || null;
   const evidenceGraphReviewForCandidate = (candidate) => {
@@ -171,6 +1079,22 @@ import { formatScienceCell } from "./format-cell.js";
   const evidenceGraphKindLabel = (kind) => String(kind || "node").split("-").map((part) => part ? part[0].toUpperCase() + part.slice(1) : "").join(" ");
   const researchContractKey = (contract) => contract?.id && Number.isSafeInteger(contract?.version) ? `${contract.id}:v${contract.version}` : null;
   function applyResearchContractSnapshot(project, contract, { openDraft = true } = {}) {
+    if ((project?.id && project.id !== state.selectedId) || (contract?.projectId && contract.projectId !== state.selectedId)) return;
+    const currentProject = state.projects.find((item) => item.id === state.selectedId);
+    const currentContract = state.researchContract;
+    // A read started before approval may finish after its authoritative receipt.
+    // It must not roll the project back or turn that same approved version into a draft.
+    if (project && currentProject && project.version < currentProject.version) return;
+    if (contract && currentContract?.projectId === state.selectedId) {
+      if (contract.version < currentContract.version) return;
+      if (contract.id === currentContract.id && contract.version === currentContract.version
+        && currentContract.status === "approved" && contract.status === "draft") return;
+    }
+    // Accepting a fresher receipt also invalidates older pending Scope reads,
+    // including their error/loading callbacks, not just their successful payloads.
+    scopeLoadEpoch += 1;
+    state.scopeLoading = false;
+    state.scopeError = "";
     if (project?.id) state.projects = [project, ...state.projects.filter((item) => item.id !== project.id)];
     state.researchContract = contract || null;
     const isDraft = contract?.projectId === state.selectedId && contract?.status === "draft";
@@ -191,16 +1115,85 @@ import { formatScienceCell } from "./format-cell.js";
   const lifecycleLabel = () => state.lifecycle
     ? `${lifecyclePhaseLabels[state.lifecycle.phase] || state.lifecycle.phase} · ${state.lifecycle.status} · r${state.lifecycle.revision}`
     : "Lifecycle unavailable";
-  const lifecycleCompactLabel = () => state.lifecycle
+  const researchLoopPresentation = () => {
+    const inspection = state.researchLoopInspection;
+    const session = inspection?.session;
+    if (!session || inspection?.active !== true) return null;
+    const episode = Array.isArray(inspection.episodes)
+      ? inspection.episodes.find((item) => ["planned", "running", "waiting-for-decision"].includes(item.status)) || null
+      : null;
+    const turnRunning = state.activeTurn && ["queued", "running", "cancelling"].includes(state.activeTurn.status);
+    const attention = ["paused", "pausing"].includes(session.status) || Boolean(episode && !turnRunning);
+    return {
+      attention,
+      label: attention
+        ? uiCopy(`Episode ${episode?.ordinal || session.currentEpisode} · 조치 필요`, `Episode ${episode?.ordinal || session.currentEpisode} · action required`)
+        : uiCopy(`Episode ${episode?.ordinal || session.currentEpisode} · ${session.status}`, `Episode ${episode?.ordinal || session.currentEpisode} · ${session.status}`),
+      detail: `${session.status} · ${session.stage}${episode ? ` · episode ${episode.ordinal} ${episode.status}` : ""}`,
+    };
+  };
+  const scienceResearchLoopActionErrorText = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/version-conflict|state.*conflict/i.test(text)) return uiCopy("연구 상태가 바뀌었습니다. 최신 상태를 다시 확인해 주세요.", "The research changed. Refresh its latest state and try again.");
+    if (/terminal|not-paused|not-running/i.test(text)) return uiCopy("연구 상태가 바뀌어 이 동작을 적용하지 못했습니다.", "The research state changed before this action was applied.");
+    return uiCopy("연구 상태를 갱신하지 못했습니다. 다시 시도해 주세요.", "The research state could not be updated. Try again.");
+  };
+  async function transitionScienceResearchLoop(action) {
+    const inspection = state.researchLoopInspection;
+    const session = inspection?.session;
+    const projectId = state.selectedId;
+    if (!projectId || !session || session.projectId !== projectId || session.status !== "paused" || state.researchLoopActionBusy
+      || !["resume", "cancel"].includes(action) || typeof science?.researchLoops?.transition !== "function") return;
+    const requestId = crypto.randomUUID();
+    const expectedSessionId = session.id;
+    const expectedVersion = session.version;
+    const expectedStateSha256 = session.stateSha256;
+    state.researchLoopActionBusy = true;
+    state.researchLoopActionError = "";
+    renderChatDock();
+    try {
+      const result = await science.researchLoops.transition({
+        requestId,
+        projectId,
+        loopSessionId: expectedSessionId,
+        expectedLoopVersion: expectedVersion,
+        expectedLoopStateSha256: expectedStateSha256,
+        action,
+        reason: action === "resume" ? "researcher-requested-resume" : "researcher-requested-stop",
+      });
+      if (!result?.session || result.session.id !== expectedSessionId) throw new Error("science-loop-transition-receipt-invalid");
+      const refreshed = await science.researchLoops.inspect(projectId);
+      if (projectId !== state.selectedId) return;
+      state.researchLoopInspection = refreshed;
+    } catch (error) {
+      if (projectId === state.selectedId && state.researchLoopInspection?.session?.id === expectedSessionId) {
+        state.researchLoopActionError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (projectId === state.selectedId && state.researchLoopInspection?.session?.id === expectedSessionId) {
+        state.researchLoopActionBusy = false;
+        renderChatDock();
+      }
+    }
+  }
+  const lifecycleCompactLabel = () => researchLoopPresentation()?.label || (state.lifecycle
     ? `${lifecyclePhaseLabels[state.lifecycle.phase] || state.lifecycle.phase} · r${state.lifecycle.revision}`
-    : "Lifecycle";
+    : "Lifecycle");
   const labDecisionStateLabels = {
     "input-needed": "입력 확인 필요",
     "human-decision-needed": "연구자 결정 필요",
     ready: "실행 준비됨",
     "review-needed": "결과 검토 필요",
   };
+  const labDecisionStateLabelsEn = {
+    "input-needed": "Input required",
+    "human-decision-needed": "Researcher decision required",
+    ready: "Ready to run",
+    "review-needed": "Result review required",
+  };
   const labDecisionFreshnessLabels = { current: "현재 근거", stale: "근거 변경됨", superseded: "새 실험으로 대체됨" };
+  const labDecisionFreshnessLabelsEn = { current: "Current evidence", stale: "Evidence changed", superseded: "Superseded by a new experiment" };
   const labDecisionActionLabels = {
     "open-required-input": "필요 입력 준비",
     "answer-human-decision": "연구 방향 결정",
@@ -210,13 +1203,28 @@ import { formatScienceCell } from "./format-cell.js";
     "refresh-stale-projection": "현재 근거 다시 확인",
     "open-superseding-context": "최신 실험 열기",
   };
+  const labDecisionActionLabelsEn = {
+    "open-required-input": "Prepare required inputs",
+    "answer-human-decision": "Choose research direction",
+    "inspect-approved-plan": "Open approved plan",
+    "review-result": "Review result and choose next action",
+    "follow-intent-next-action": "Next research action",
+    "refresh-stale-projection": "Refresh current evidence",
+    "open-superseding-context": "Open latest experiment",
+  };
 
   function labDecisionPanelMarkup(projection = labDecisionProjection(), { showAction = true } = {}) {
     if (!projection) return "";
     const mustSee = Array.isArray(projection.mustSee) ? projection.mustSee.slice(0, 3) : [];
     const actionEnabled = projection.action?.enabled === true && !state.labDecisionActionBusy;
     const expanded = state.expandedLabDecisions.has(projection.labId);
-    return `<section class="labDecisionPanel" data-lab-decision-projection="${escapeHtml(projection.projectionSha256)}" data-lab-decision-state="${escapeHtml(projection.state)}" data-lab-decision-freshness="${escapeHtml(projection.freshness?.status)}" data-expanded="${expanded}"><header><div><span>WHY THIS LAB NOW</span><strong>${escapeHtml(projection.currentDecision)}</strong></div><div class="labDecisionHeaderActions"><div class="labDecisionStatus"><span class="progressGlyph" data-fill="${{"input-needed":"0","human-decision-needed":"33","ready":"66","result-review-needed":"100"}[projection.state] || "0"}" aria-hidden="true"></span><em>${escapeHtml(labDecisionStateLabels[projection.state] || projection.state)}</em><span>${escapeHtml(labDecisionFreshnessLabels[projection.freshness?.status] || projection.freshness?.status)}</span></div><button type="button" data-action="toggle-lab-decision-details" data-lab-id="${escapeHtml(projection.labId)}" aria-expanded="${expanded}">${expanded ? "판단 기준 접기" : "판단 기준 보기"}</button></div></header><div class="labDecisionBody"><section><span>이 분석이 필요한 때</span><p>${escapeHtml(projection.researchIntent?.neededWhen || projection.action?.reason || "현재 프로젝트 결정을 위해 이 Lab의 근거가 필요합니다.")}</p><span class="labDecisionSubquestion">연구자가 이걸로 하려는 일</span><p>${escapeHtml(projection.researchIntent?.userGoal || projection.currentDecision)}</p></section><section><span>반드시 확인할 것</span><ol>${mustSee.map((item) => `<li>${escapeHtml(item.requirement)}</li>`).join("")}</ol></section><section class="labDecisionBoundary boundaryNote"><span>이 분석을 쓰면 안 되는 때</span><p>${escapeHtml(projection.researchIntent?.notWhen || projection.boundary)}</p><span class="labDecisionSubquestion">이 화면만으로 말할 수 없는 것</span><p>${escapeHtml(projection.boundary)}</p></section></div><footer><span>${escapeHtml(projection.action?.reason || "")} · Project v${escapeHtml(projection.basis?.project?.version || "-")} · <code title="${escapeHtml(projection.basis?.basisSha256 || "")}">${escapeHtml(String(projection.basis?.basisSha256 || "").slice(0, 12))}…</code></span>${showAction ? `<button type="button" data-action="lab-decision-primary" data-lab-decision-sha256="${escapeHtml(projection.projectionSha256)}" ${actionEnabled ? "" : "disabled"}>${escapeHtml(state.labDecisionActionBusy ? "현재 근거 확인 중…" : labDecisionActionLabels[projection.action?.kind] || projection.action?.action || "다음 동작")}</button>` : `<span class="labDecisionActionHint">아래의 한 동작으로 이어집니다.</span>`}</footer>${state.labDecisionActionError ? `<p class="labDecisionError" role="alert">${escapeHtml(state.labDecisionActionError)}</p>` : ""}</section>`;
+    const detailsId = `lab-decision-details-${projection.labId}`;
+    const compactDecision = uiCopy(
+      `${labLabel(projection.labId)}의 다음 연구 판단`,
+      `${labLabel(projection.labId)}: next research decision`,
+    );
+    const fullQuestion = projection.researchIntent?.userGoal || projection.currentDecision;
+    return `<section class="labDecisionPanel" data-lab-decision-projection="${escapeHtml(projection.projectionSha256)}" data-lab-decision-state="${escapeHtml(projection.state)}" data-lab-decision-freshness="${escapeHtml(projection.freshness?.status)}" data-expanded="${expanded}"><header><div><span>WHY THIS LAB NOW</span><strong>${escapeHtml(compactDecision)}</strong></div><div class="labDecisionHeaderActions"><div class="labDecisionStatus"><span class="progressGlyph" data-fill="${{"input-needed":"0","human-decision-needed":"33","ready":"66","result-review-needed":"100"}[projection.state] || "0"}" aria-hidden="true"></span><em>${escapeHtml(uiCopy(labDecisionStateLabels[projection.state], labDecisionStateLabelsEn[projection.state]) || projection.state)}</em><span>${escapeHtml(uiCopy(labDecisionFreshnessLabels[projection.freshness?.status], labDecisionFreshnessLabelsEn[projection.freshness?.status]) || projection.freshness?.status)}</span></div><button type="button" data-action="toggle-lab-decision-details" data-lab-id="${escapeHtml(projection.labId)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(detailsId)}">${expanded ? uiCopy("전체 연구 질문 숨기기", "Hide full research question") : uiCopy("전체 연구 질문 보기", "View full research question")}</button></div></header><div class="labDecisionBody" id="${escapeHtml(detailsId)}"><section><span>${uiCopy("전체 연구 질문", "FULL RESEARCH QUESTION")}</span><p>${escapeHtml(fullQuestion)}</p>${projection.currentDecision !== fullQuestion ? `<span class="labDecisionSubquestion">${uiCopy("현재 판단 질문", "CURRENT DECISION")}</span><p>${escapeHtml(projection.currentDecision)}</p>` : ""}<span class="labDecisionSubquestion">${uiCopy("이 분석이 필요한 때", "WHEN THIS ANALYSIS IS NEEDED")}</span><p>${escapeHtml(projection.researchIntent?.neededWhen || projection.action?.reason || uiCopy("현재 프로젝트 결정을 위해 이 Lab의 근거가 필요합니다.", "This Lab's evidence is needed for the current project decision."))}</p></section><section><span>${uiCopy("반드시 확인할 것", "MUST VERIFY")}</span><ol>${mustSee.map((item) => `<li>${escapeHtml(item.requirement)}</li>`).join("")}</ol></section><section class="labDecisionBoundary boundaryNote"><span>${uiCopy("이 분석을 쓰면 안 되는 때", "DO NOT USE THIS ANALYSIS WHEN")}</span><p>${escapeHtml(projection.researchIntent?.notWhen || projection.boundary)}</p><span class="labDecisionSubquestion">${uiCopy("이 화면만으로 말할 수 없는 것", "WHAT THIS VIEW CANNOT ESTABLISH")}</span><p>${escapeHtml(projection.boundary)}</p></section></div><footer><span>${escapeHtml(projection.action?.reason || "")} · Project v${escapeHtml(projection.basis?.project?.version || "-")} · <code title="${escapeHtml(projection.basis?.basisSha256 || "")}">${escapeHtml(String(projection.basis?.basisSha256 || "").slice(0, 12))}…</code></span>${showAction ? `<button type="button" data-action="lab-decision-primary" data-lab-decision-sha256="${escapeHtml(projection.projectionSha256)}" ${actionEnabled ? "" : "disabled"}>${escapeHtml(state.labDecisionActionBusy ? uiCopy("현재 근거 확인 중…", "Checking current evidence…") : uiCopy(labDecisionActionLabels[projection.action?.kind], labDecisionActionLabelsEn[projection.action?.kind]) || projection.action?.action || uiCopy("다음 동작", "Next action"))}</button>` : `<span class="labDecisionActionHint">${uiCopy("아래의 한 동작으로 이어집니다.", "Continue with one of the actions below.")}</span>`}</footer>${state.labDecisionActionError ? `<p class="labDecisionError" role="alert">${escapeHtml(state.labDecisionActionError)}</p>` : ""}</section>`;
   }
   const labDecisionEmptyMarkup = (content) => {
     const projection = labDecisionProjection();
@@ -276,10 +1284,18 @@ import { formatScienceCell } from "./format-cell.js";
     const presented = state.decisions.filter((decision) => decision?.status === "presented" && typeof decision?.proposalSha256 === "string");
     if (presented.length !== 1) return null;
     const decision = presented[0];
+    const analysisSpec = analysisSpecById(decision.analysisSpecId);
+    if (!analysisSpec || analysisSpec.status !== "draft"
+      || decision.basisVersion !== analysisSpec.currentVersion
+      || decision.basisContentSha256 !== analysisSpec.currentDocumentSha256) return null;
     const bindings = lifecycle.openBlockingDecisions.filter((candidate) => candidate.id === decision.id && candidate.contentSha256 === decision.proposalSha256);
     return bindings.length === 1 ? decision : null;
   };
   const manuscriptById = (id) => state.manuscripts.find((manuscript) => manuscript.id === id) || null;
+  const invalidateManuscriptRequests = () => {
+    manuscriptEditorRequestEpoch += 1;
+    manuscriptSaveRequestEpoch += 1;
+  };
   const journalProfileById = (id) => state.journalProfiles.find((profile) => profile.id === id) || null;
   const analysisSpecById = (id) => state.analysisSpecs.find((analysisSpec) => analysisSpec.id === id) || null;
   const statisticsMethodLabels = {
@@ -314,7 +1330,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (!isStatisticsProjectionReceipt(receipt)) return "";
     const method = receipt.schema.endsWith("/v2") ? statisticsMethodLabel(receipt.method) : "Kaplan–Meier survival";
     const mapping = statisticsProjectionMappingLabel(receipt);
-    return `<section class="statisticsLineage" data-statistics-lineage data-projection-schema="${escapeHtml(receipt.schema)}" data-source-artifact-id="${escapeHtml(receipt.sourceArtifact.artifactId)}" data-source-artifact-version="${escapeHtml(receipt.sourceArtifact.artifactVersion)}" data-source-artifact-sha256="${escapeHtml(receipt.sourceArtifact.contentSha256)}" data-projection-receipt-sha256="${escapeHtml(receipt.receiptSha256)}" data-run-id="${escapeHtml(runId)}" data-output-artifact-id="${escapeHtml(artifactId)}" data-output-artifact-version="${escapeHtml(artifactVersion)}" data-output-artifact-sha256="${escapeHtml(artifactSha256)}"><span>Source table <code title="${escapeHtml(receipt.sourceArtifact.artifactId)}">${escapeHtml(statisticsShortHash(receipt.sourceArtifact.artifactId))}</code> · v${escapeHtml(receipt.sourceArtifact.artifactVersion)}</span><i aria-hidden="true">→</i><span>${escapeHtml(method)} · ${escapeHtml(mapping)} · ${escapeHtml(receipt.includedRowCount)} rows</span><i aria-hidden="true">→</i><span>Projection <code title="${escapeHtml(receipt.receiptSha256)}">${escapeHtml(statisticsShortHash(receipt.receiptSha256))}</code></span><i aria-hidden="true">→</i><span>Run <code title="${escapeHtml(runId)}">${escapeHtml(statisticsShortHash(runId))}</code></span></section>`;
+    return `<details class="statisticsLineage provenanceDisclosure" data-statistics-lineage data-projection-schema="${escapeHtml(receipt.schema)}" data-source-artifact-id="${escapeHtml(receipt.sourceArtifact.artifactId)}" data-source-artifact-version="${escapeHtml(receipt.sourceArtifact.artifactVersion)}" data-source-artifact-sha256="${escapeHtml(receipt.sourceArtifact.contentSha256)}" data-projection-receipt-sha256="${escapeHtml(receipt.receiptSha256)}" data-run-id="${escapeHtml(runId)}" data-output-artifact-id="${escapeHtml(artifactId)}" data-output-artifact-version="${escapeHtml(artifactVersion)}" data-output-artifact-sha256="${escapeHtml(artifactSha256)}"><summary><strong>${escapeHtml(uiCopy("근거 연결", "Evidence chain"))}</strong><span>${escapeHtml(method)} · ${escapeHtml(mapping)} · ${escapeHtml(receipt.includedRowCount)} rows</span></summary><div class="provenanceTrail"><span>Source table <code title="${escapeHtml(receipt.sourceArtifact.artifactId)}">${escapeHtml(statisticsShortHash(receipt.sourceArtifact.artifactId))}</code> · v${escapeHtml(receipt.sourceArtifact.artifactVersion)}</span><i aria-hidden="true">→</i><span>${escapeHtml(method)} · ${escapeHtml(mapping)} · ${escapeHtml(receipt.includedRowCount)} rows</span><i aria-hidden="true">→</i><span>Projection <code title="${escapeHtml(receipt.receiptSha256)}">${escapeHtml(statisticsShortHash(receipt.receiptSha256))}</code></span><i aria-hidden="true">→</i><span>Run <code title="${escapeHtml(runId)}">${escapeHtml(statisticsShortHash(runId))}</code></span></div></details>`;
   }
   const labIdForArtifact = (artifactId) => {
     for (const [labId, contexts] of state.labContextsById) {
@@ -324,6 +1340,20 @@ import { formatScienceCell } from "./format-cell.js";
   };
   const artifactForLab = (labId, artifactId) => (state.labContextsById.get(labId) || []).map((context) => context.artifact).find((artifact) => artifact.id === artifactId) || null;
   const labForArtifact = (artifactId) => [...state.labContextsById.entries()].find(([, contexts]) => contexts.some((context) => context.artifact.id === artifactId))?.[0] || null;
+
+  // RESULT_ARTIFACT_ROUTE_HELPER_START
+  function mergePreferredLabContext(latestContexts, preferredContext, projectId, labId) {
+    const latest = Array.isArray(latestContexts) ? latestContexts : [];
+    if (!preferredContext
+      || preferredContext.artifact?.projectId !== projectId
+      || preferredContext.linkage?.labId !== labId
+      || !preferredContext.artifact?.id) {
+      return latest;
+    }
+    return [preferredContext, ...latest.filter((item) => item?.artifact?.id !== preferredContext.artifact.id)];
+  }
+  // RESULT_ARTIFACT_ROUTE_HELPER_END
+
   const statisticsSourceTables = () => (state.labContextsById.get("data-table") || [])
     .map((context) => context.artifact)
     .filter((artifact) => artifact?.kind === "table" && artifact.version?.payload?.schema === "agentlas.science-table/v1");
@@ -673,56 +1703,119 @@ import { formatScienceCell } from "./format-cell.js";
     };
   }
 
-  async function refreshConversationOnly(projectId) {
-    const conversation = selectedConversation();
-    if (!conversation || projectId !== state.selectedId) return;
-    const messages = await science.conversations.messages(projectId, conversation.id);
-    const safeMessages = Array.isArray(messages) ? messages : [];
-    const [messageEvidence, messageArtifactRows, attached, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot, labDecisionProjections, runs] = await Promise.all([
-      loadMessageEvidence(projectId, safeMessages),
-      Promise.all(safeMessages.map(async (message) => [message.id, await science.artifacts.forMessage(projectId, message.conversationId, message.id)])),
-      science.composer.attach({ projectId, conversationId: conversation.id }),
-      science.manuscripts.list(projectId),
-      science.journals.list(projectId),
-      science.analysisSpecs.list(projectId),
-      science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]),
-      science.researchLifecycle.get(projectId),
-      science.projects.get(projectId),
-      science.researchContracts.get(projectId),
-      science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })),
-      science.labs.decisionProjections(projectId),
-      science.runs.list(projectId),
-    ]);
-    if (projectId !== state.selectedId || conversation.id !== selectedConversation()?.id) return;
-    state.messages = safeMessages;
-    state.artifactContextsByMessage = new Map(messageArtifactRows.map(([messageId, contexts]) => [messageId, Array.isArray(contexts) ? contexts : []]));
-    state.blocksByMessage = messageEvidence.blocks;
-    state.citationsByMessage = messageEvidence.citations;
-    state.evidenceById = messageEvidence.spans;
-    state.activeTurn = attached?.turn || state.activeTurn;
-    state.manuscripts = Array.isArray(manuscripts) ? manuscripts : state.manuscripts;
-    state.journalProfiles = Array.isArray(journalProfiles) ? journalProfiles : state.journalProfiles;
-    state.analysisSpecs = Array.isArray(analysisSpecs) ? analysisSpecs : state.analysisSpecs;
-    state.decisions = Array.isArray(decisions) ? decisions : state.decisions;
-    state.labDecisionProjections = Array.isArray(labDecisionProjections) ? labDecisionProjections : [];
-    state.runs = Array.isArray(runs) ? runs : [];
-    state.lifecycle = lifecycle;
-    state.evidenceGraph = graphSnapshot?.graph || null;
-    state.evidenceGraphReviews = Array.isArray(graphSnapshot?.reviews) ? graphSnapshot.reviews : [];
-    state.evidenceGraphError = graphSnapshot?.error || "";
-    applyResearchContractSnapshot(project, researchContract);
-    if (!journalProfileById(state.selectedJournalProfileId)) state.selectedJournalProfileId = state.journalProfiles[0]?.id || null;
-    for (const tab of state.workspaceTabs.filter((item) => item.kind === "manuscript")) {
-      const manuscript = manuscriptById(tab.manuscriptId);
-      if (manuscript) { tab.title = manuscript.title; tab.exactVersion = manuscript.currentVersion; tab.exactContentSha256 = manuscript.version?.contentSha256 || null; }
+  async function refreshConversationOnly(projectId, { refreshRuntimeSelection = false } = {}) {
+    if (conversationRefreshInFlight) {
+      conversationRefreshPending = true;
+      conversationRefreshPendingRuntime = conversationRefreshPendingRuntime || refreshRuntimeSelection;
+      return conversationRefreshInFlight;
     }
-    if (await maybeOpenDraftJobManuscript(projectId, { terminal: ["completed", "failed", "cancelled", "interrupted"].includes(state.activeTurn?.status) })) return;
-    if (state.researchContractSheet) { render(); return; }
-    renderWorkspaceTabs();
-    renderChatDock();
+    const performRefresh = async (shouldRefreshRuntime) => {
+      const conversation = selectedConversation();
+      if (!conversation || projectId !== state.selectedId) return;
+      const activeTurnSnapshot = state.activeTurn ? {
+        id: state.activeTurn.id,
+        lastSequence: state.activeTurn.lastSequence,
+      } : null;
+      const messages = await science.conversations.messages(projectId, conversation.id);
+      const safeMessages = Array.isArray(messages) ? messages : [];
+      const [messageEvidence, messageArtifactRows, attached, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot, labDecisionProjections, loopInspection, runs] = await Promise.all([
+        loadMessageEvidence(projectId, safeMessages),
+        Promise.all(safeMessages.map(async (message) => [message.id, await science.artifacts.forMessage(projectId, message.conversationId, message.id)])),
+        science.composer.attach({ projectId, conversationId: conversation.id }),
+        science.manuscripts.list(projectId),
+        science.journals.list(projectId),
+        science.analysisSpecs.list(projectId),
+        science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]),
+        science.researchLifecycle.get(projectId),
+        science.projects.get(projectId),
+        science.researchContracts.get(projectId),
+        science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })),
+        science.labs.decisionProjections(projectId),
+        science.researchLoops.inspect(projectId).catch(() => null),
+        science.runs.list(projectId),
+      ]);
+      if (projectId !== state.selectedId || conversation.id !== selectedConversation()?.id) return;
+      const attachedTurn = attached?.turn || null;
+      const currentTurn = state.activeTurn;
+      const activeTurnAdvanced = currentTurn?.id !== activeTurnSnapshot?.id
+        || Number(currentTurn?.lastSequence) !== Number(activeTurnSnapshot?.lastSequence);
+      if (activeTurnAdvanced && currentTurn && attachedTurn?.id !== currentTurn.id) {
+        conversationRefreshPending = true;
+        conversationRefreshPendingRuntime = conversationRefreshPendingRuntime || shouldRefreshRuntime;
+        return;
+      }
+      if (attachedTurn && currentTurn && attachedTurn.id === currentTurn.id && Number(attachedTurn.lastSequence) < Number(currentTurn.lastSequence)) {
+        conversationRefreshPending = true;
+        conversationRefreshPendingRuntime = conversationRefreshPendingRuntime || shouldRefreshRuntime;
+        return;
+      }
+      state.messages = safeMessages;
+      state.chatMessagesScope = JSON.stringify([projectId, conversation.id]);
+      state.artifactContextsByMessage = new Map(messageArtifactRows.map(([messageId, contexts]) => [messageId, Array.isArray(contexts) ? contexts : []]));
+      state.blocksByMessage = messageEvidence.blocks;
+      state.citationsByMessage = messageEvidence.citations;
+      state.evidenceById = messageEvidence.spans;
+      state.activeTurn = attachedTurn || null;
+      state.composerError = composerTurnError(state.activeTurn);
+      if (shouldRefreshRuntime) {
+        await refreshScienceRuntimeSelection(projectId, conversation.id, { renderDock: false });
+        if (projectId !== state.selectedId || conversation.id !== selectedConversation()?.id) return;
+      }
+      state.manuscripts = Array.isArray(manuscripts) ? manuscripts : state.manuscripts;
+      try {
+        await refreshProjectLibrarySummaries();
+      } catch {
+        if (projectId === state.selectedId && conversation.id === selectedConversation()?.id) {
+          state.projectLibrarySummaryState = "unavailable";
+        }
+      }
+      if (projectId !== state.selectedId || conversation.id !== selectedConversation()?.id) return;
+      state.journalProfiles = Array.isArray(journalProfiles) ? journalProfiles : state.journalProfiles;
+      state.analysisSpecs = Array.isArray(analysisSpecs) ? analysisSpecs : state.analysisSpecs;
+      state.decisions = Array.isArray(decisions) ? decisions : [];
+      state.labDecisionProjections = Array.isArray(labDecisionProjections) ? labDecisionProjections : [];
+      state.runs = Array.isArray(runs) ? runs : [];
+      state.lifecycle = lifecycle;
+      state.researchLoopInspection = loopInspection;
+      state.evidenceGraph = graphSnapshot?.graph || null;
+      state.evidenceGraphReviews = Array.isArray(graphSnapshot?.reviews) ? graphSnapshot.reviews : [];
+      state.evidenceGraphError = graphSnapshot?.error || "";
+      applyResearchContractSnapshot(project, researchContract);
+      if (!journalProfileById(state.selectedJournalProfileId)) state.selectedJournalProfileId = state.journalProfiles[0]?.id || null;
+      for (const tab of state.workspaceTabs.filter((item) => item.kind === "manuscript")) {
+        const manuscript = manuscriptById(tab.manuscriptId);
+        if (manuscript) { tab.title = manuscript.title; tab.exactVersion = manuscript.currentVersion; tab.exactContentSha256 = manuscript.version?.contentSha256 || null; }
+      }
+      if (!state.projectFolderOpen && await maybeOpenDraftJobManuscript(projectId, { terminalStatus: state.activeTurn?.status })) return;
+      maybePresentAnalysisPlanReview();
+      if (state.researchContractSheet || state.analysisPlanReviewSheet) { render(); return; }
+      renderWorkspaceTabs();
+      renderChatDock();
+    };
+    let nextRuntimeRefresh = refreshRuntimeSelection;
+    const run = (async () => {
+      while (true) {
+        conversationRefreshPending = false;
+        conversationRefreshPendingRuntime = false;
+        await performRefresh(nextRuntimeRefresh);
+        if (!conversationRefreshPending || projectId !== state.selectedId) break;
+        nextRuntimeRefresh = conversationRefreshPendingRuntime;
+      }
+    })();
+    conversationRefreshInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (conversationRefreshInFlight === run) conversationRefreshInFlight = null;
+    }
   }
 
   async function selectProject(projectId, options = {}) {
+    state.librarySelectedProjectId = projectId;
+    // Invalidate any whole-library snapshot that was started for the project we are leaving.
+    // The next successful project load will publish a fresh canonical projection.
+    projectLibrarySummaryRequestEpoch += 1;
+    invalidateManuscriptRequests();
     const switchingProject = state.selectedId !== projectId;
     const priorProjectId = state.selectedId;
     if (switchingProject && priorProjectId) {
@@ -755,7 +1848,10 @@ import { formatScienceCell } from "./format-cell.js";
       manuscriptView: state.manuscriptView,
       selectedJournalProfileId: state.selectedJournalProfileId,
     } : null;
+    const preserveRuntimeSelection = Boolean(preservedWorkspace && !switchingProject);
     state.selectedId = projectId;
+    state.projectFolderOpen = Boolean(options.openFolder);
+    if (window.matchMedia("(max-width: 680px)").matches) state.railCollapsed = true;
     if (switchingProject && state.manuscriptDraftJob?.projectId !== projectId) state.manuscriptDraftJob = null;
     state.lifecycle = null;
     state.mode = "session";
@@ -763,6 +1859,7 @@ import { formatScienceCell } from "./format-cell.js";
     state.conversations = [];
     state.selectedConversationId = null;
     state.messages = [];
+    state.chatMessagesScope = null;
     state.sources = [];
     state.sourceFigures = [];
     state.runs = [];
@@ -774,8 +1871,6 @@ import { formatScienceCell } from "./format-cell.js";
     state.claimLedger = null;
     state.journalProfiles = [];
     state.submissionExports = [];
-    state.scopeProject = null;
-    state.scopeContract = null;
     state.scopeLoading = false;
     state.scopeError = "";
     state.logbookRevisions = [];
@@ -787,6 +1882,13 @@ import { formatScienceCell } from "./format-cell.js";
     state.submissionArchiveError = "";
     state.analysisSpecs = [];
     state.decisions = [];
+    state.analysisPlanReviewSheet = false;
+    state.analysisPlanReviewBusy = false;
+    state.analysisPlanReviewError = "";
+    // Dismissal is scoped to the exact plan id/version/hash/lock key. Preserve it across a
+    // same-project refresh or artifact-tab move; a new plan revision naturally has a new key and
+    // will be presented again. Switching projects must never carry the dismissal across scope.
+    if (switchingProject) state.analysisPlanReviewDismissedKey = null;
     state.artifactContextsByMessage = new Map();
     state.labContextsById = new Map();
     state.artifactHistoryById = new Map();
@@ -801,6 +1903,7 @@ import { formatScienceCell } from "./format-cell.js";
     state.vegaSaveError = "";
     state.pendingDraftNavigation = null;
     state.paleontologyViewByArtifact = new Map();
+    if (switchingProject) state.visualViewportByArtifact = new Map();
     state.blocksByMessage = new Map();
     state.citationsByMessage = new Map();
     state.evidenceById = new Map();
@@ -822,9 +1925,27 @@ import { formatScienceCell } from "./format-cell.js";
     state.drawer = null;
     state.projectError = "";
     state.workspaceSyncError = "";
+    state.labManagerOpen = false;
+    state.labManagerBusyId = null;
+    state.labManagerError = "";
     state.activeTurn = null;
+    state.researchLoopInspection = null;
+    state.researchLoopActionBusy = false;
+    state.researchLoopActionError = "";
     state.composerSending = false;
     state.composerError = "";
+    if (!preserveRuntimeSelection) {
+      runtimeSelectionRequestEpoch += 1;
+      state.runtimeSelection = null;
+      state.runtimeOptions = [];
+      state.runtimeUnavailable = false;
+      state.runtimeSelectionLoading = false;
+      state.runtimeSelectionBusy = false;
+      state.runtimeSelectionError = "";
+      state.runtimeSelectionScope = null;
+    }
+    state.runtimePickerOpen = false;
+    state.runtimePickerQuery = "";
     state.selectedManuscriptId = null;
     state.selectedAnalysisPlanId = null;
     state.manuscriptDraft = null;
@@ -874,8 +1995,8 @@ import { formatScienceCell } from "./format-cell.js";
     state.loadingProject = true;
     if (!preservedWorkspace) render();
     try {
-      const [workspaceState, conversations, sources, sourceFigures, artifacts, labs, capabilityCatalog, labDecisionProjections, rendererPacks, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot, runs] = await Promise.all([
-        science.workspace.get(projectId), science.conversations.list(projectId), science.sources.list(projectId), science.sourceFigures?.list ? science.sourceFigures.list(projectId).catch(() => []) : [], science.artifacts.list(projectId), science.labs.list(projectId), science.labs.catalog(), science.labs.decisionProjections(projectId), science.rendererPacks.list(), science.manuscripts.list(projectId), science.journals.list(projectId), science.analysisSpecs.list(projectId), science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]), science.researchLifecycle.get(projectId), science.projects.get(projectId), science.researchContracts.get(projectId), science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })), science.runs.list(projectId),
+      const [workspaceState, conversations, sources, sourceFigures, artifacts, labs, capabilityCatalog, labDecisionProjections, rendererPacks, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot, loopInspection, runs] = await Promise.all([
+        science.workspace.get(projectId), science.conversations.list(projectId), science.sources.list(projectId), science.sourceFigures?.list ? science.sourceFigures.list(projectId).catch(() => []) : [], science.artifacts.list(projectId), science.labs.list(projectId), science.labs.catalog(), science.labs.decisionProjections(projectId), science.rendererPacks.list(), science.manuscripts.list(projectId), science.journals.list(projectId), science.analysisSpecs.list(projectId), science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]), science.researchLifecycle.get(projectId), science.projects.get(projectId), science.researchContracts.get(projectId), science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })), science.researchLoops.inspect(projectId).catch(() => null), science.runs.list(projectId),
       ]);
       if (epoch !== selectionEpoch) return;
       const safeConversations = Array.isArray(conversations) ? conversations : [];
@@ -905,10 +2026,19 @@ import { formatScienceCell } from "./format-cell.js";
       state.labs = safeLabs;
       state.workspaceLabBindings = Array.isArray(workspaceState?.labs) ? workspaceState.labs.filter((binding) => binding?.projectId === projectId) : [];
       state.manuscripts = safeManuscripts;
+      try {
+        await refreshProjectLibrarySummaries();
+      } catch {
+        // A library summary is a landing/folder projection. Do not make a successfully loaded
+        // project unusable when that secondary projection is temporarily unavailable.
+        state.projectLibrarySummaryState = "unavailable";
+      }
+      if (epoch !== selectionEpoch) return;
       state.journalProfiles = safeJournalProfiles;
       state.analysisSpecs = Array.isArray(analysisSpecs) ? analysisSpecs : [];
       state.decisions = Array.isArray(decisions) ? decisions : [];
       state.lifecycle = lifecycle;
+      state.researchLoopInspection = loopInspection;
       state.evidenceGraph = graphSnapshot?.graph || null;
       state.evidenceGraphReviews = Array.isArray(graphSnapshot?.reviews) ? graphSnapshot.reviews : [];
       state.evidenceGraphError = graphSnapshot?.error || "";
@@ -923,10 +2053,17 @@ import { formatScienceCell } from "./format-cell.js";
       state.selectedSourceId = safeSources[0]?.id || null;
       state.selectedArtifactId = (labRows[0]?.[1]?.[0]?.artifact?.id) || safeArtifacts[0]?.id || null;
       state.messages = safeMessages;
+      state.chatMessagesScope = conversation ? JSON.stringify([projectId, conversation.id]) : null;
       state.activeTurn = attached?.turn || null;
+      state.composerError = composerTurnError(state.activeTurn);
       state.blocksByMessage = messageEvidence.blocks;
       state.citationsByMessage = messageEvidence.citations;
       state.evidenceById = messageEvidence.spans;
+      if (state.projectFolderOpen && safeManuscripts.length) {
+        const exportRows = await Promise.all(safeManuscripts.map((manuscript) => science.submissions.list(projectId, manuscript.id)));
+        if (epoch !== selectionEpoch) return;
+        state.submissionExports = exportRows.flatMap((rows) => Array.isArray(rows) ? rows : []);
+      }
       state.loadingProject = false;
       if (preservedWorkspace) {
         state.currentDestination = projectDestinationIds.has(preservedWorkspace.currentDestination) ? preservedWorkspace.currentDestination : workspaceState?.navigation?.destination || "overview";
@@ -1009,7 +2146,24 @@ import { formatScienceCell } from "./format-cell.js";
       state.acquisitionRuns = [];
       state.acquisitionUnresolvedIds = [];
       state.acquisitionError = "";
-      if (await maybeOpenDraftJobManuscript(projectId, { terminal: ["completed", "failed", "cancelled", "interrupted"].includes(state.activeTurn?.status) })) return;
+      const runtimeConversation = selectedConversation();
+      if (runtimeConversation && !preserveRuntimeSelection) {
+        await refreshScienceRuntimeSelection(projectId, runtimeConversation.id, { renderDock: false });
+      }
+      else if (!runtimeConversation) {
+        runtimeSelectionRequestEpoch += 1;
+        state.runtimeSelection = null;
+        state.runtimeOptions = [];
+        state.runtimeUnavailable = false;
+        state.runtimeSelectionLoading = false;
+        state.runtimeSelectionError = "";
+        state.runtimeSelectionScope = null;
+        state.runtimePickerOpen = false;
+        state.runtimePickerQuery = "";
+      }
+      if (epoch !== selectionEpoch) return;
+      if (!state.projectFolderOpen && await maybeOpenDraftJobManuscript(projectId, { terminalStatus: state.activeTurn?.status })) return;
+      maybePresentAnalysisPlanReview();
       render();
       // Read the hypotheses on opening the project, not only on arriving at their screen: the rail
       // badge tells the researcher that something is waiting on them, and a badge that only appears
@@ -1031,9 +2185,6 @@ import { formatScienceCell } from "./format-cell.js";
   }
 
   function projectRail(project) {
-    const projects = state.projects.map((item) => `<button class="projectButton" data-project-id="${escapeHtml(item.id)}" data-initial="${escapeHtml(item.title.slice(0, 1).toUpperCase())}" aria-current="${item.id === project.id}">
-      <span class="projectTitle">${escapeHtml(item.title)}</span><span class="projectMeta">${escapeHtml(domainLabels[item.domain] || item.domain)} · ${escapeHtml(formatDate(item.updatedAt))}</span>
-    </button>`).join("");
     const summaryByLabId = new Map(state.labs.map((lab) => [lab.labId, lab]));
     const enabledLabIds = new Set(state.workspaceLabBindings.filter((binding) => binding.enabled).map((binding) => binding.labId));
     const groups = labGroups.map((group) => ({
@@ -1059,23 +2210,15 @@ import { formatScienceCell } from "./format-cell.js";
     const destinationBadge = (id) => (id === "hypotheses" && pendingHypotheses
       ? `<em class="destinationPending" title="${escapeHtml(String(pendingHypotheses))}건이 연구자의 결정을 기다립니다">${escapeHtml(String(pendingHypotheses))}</em>`
       : "");
-    const destinations = projectDestinationGroups.map((group) => `<section class="projectNavGroup"><div class="projectNavLabel">${escapeHtml(group.label)}</div>${group.items.map((item) => `<button data-project-destination="${escapeHtml(item.id)}" aria-current="${state.currentDestination === item.id}" ${item.id === "hypotheses" && pendingHypotheses ? `data-pending-decisions="${escapeHtml(String(pendingHypotheses))}"` : ""}>${heroIcon(item.icon)}<span>${escapeHtml(item.label)}</span>${destinationBadge(item.id)}</button>`).join("")}</section>`).join("");
-    const currentProjectButton = `<button class="currentProject" data-action="toggle-projects" data-project-id="${escapeHtml(project.id)}" aria-expanded="${state.projectMenuOpen}"><span>${escapeHtml(project.title)}</span>${heroIcon("chevron-down")}</button>`;
-    const projectMenu = `<nav class="projectList projectMenu ${state.projectMenuOpen ? "isOpen" : ""}" aria-label="연구 프로젝트">${projects}</nav>`;
-    const projectSection = `<div class="railSection currentProjectSection stableProjectSection">
-      <div class="railLabel">현재 프로젝트</div>
-      <section class="projectContextCard">
-        ${currentProjectButton}
-        <nav class="projectDestinations projectWorkflowNav" aria-label="현재 프로젝트 연구 흐름">${destinations}</nav>
-      </section>
-      ${projectMenu}
-    </div>`;
+    const destinations = projectDestinationGroups.map((group) => `<section class="projectNavGroup"><div class="projectNavLabel">${escapeHtml(group.label)}</div>${group.items.map((item) => `<button data-project-destination="${escapeHtml(item.id)}" aria-current="${state.currentDestination === item.id}" aria-label="${escapeHtml(item.label)}" title="${escapeHtml(item.label)}" ${item.id === "hypotheses" && pendingHypotheses ? `data-pending-decisions="${escapeHtml(String(pendingHypotheses))}"` : ""}>${heroIcon(item.icon)}<span>${escapeHtml(item.label)}</span>${destinationBadge(item.id)}</button>`).join("")}</section>`).join("");
     return `<aside class="rail" data-rail-mode="${escapeHtml(state.mode)}">
-      <div class="railBrand"><span class="railBrandLockup"><img class="railBrandMark" src="./assets/agentlas-mark.png" alt="" aria-hidden="true"><span class="railBrandWordmark"><strong><span class="brandAgentlas">Agentlas</span><span class="brandScience">Science<span class="brandStar">*</span></span></strong></span></span><button class="railCollapseButton" data-action="collapse-rail" aria-label="사이드바 접기" title="사이드바 접기">${heroIcon("chevron-right", "uiIcon isReverse")}</button></div>
-      <button class="railBackButton" data-action="back-to-work" aria-label="Agentlas Work로 돌아가기" title="Agentlas Work로 돌아가기">${heroIcon("chevron-right", "uiIcon isReverse")}<strong>Agentlas Work</strong></button>
+      <div class="railBrand"><span class="railBrandLockup"><img class="railBrandMark" src="./assets/agentlas-mark.png" alt="" aria-hidden="true"><span class="railBrandWordmark"><strong><span class="brandAgentlas">Agentlas</span><span class="brandScience">Science<span class="brandStar">*</span></span></strong></span></span></div>
+      <button class="railBackButton" data-action="back-to-work" aria-label="${uiCopy("Agentlas Work로 돌아가기", "Back to Agentlas Work")}" title="${uiCopy("Agentlas Work로 돌아가기", "Back to Agentlas Work")}">${heroIcon("chevron-right", "uiIcon isReverse")}<strong>${uiCopy("Agentlas Work로 돌아가기", "Back to Agentlas Work")}</strong></button>
+      <button class="projectLibraryBack" data-action="back-to-projects" aria-label="${uiCopy("프로젝트로 돌아가기", "Back to projects")}" title="${uiCopy("프로젝트로 돌아가기", "Back to projects")}">${heroIcon("chevron-right", "uiIcon isReverse")}<span>${uiCopy("프로젝트로 돌아가기", "Back to projects")}</span></button>
+      <section class="railProjectIdentity"><strong title="${escapeHtml(project.title)}">${escapeHtml(project.title)}</strong><span>${escapeHtml(domainLabel(project.domain))}</span></section>
       <button class="newButton" data-action="new" aria-label="새 연구 시작" title="새 연구">${heroIcon("plus")}<strong>새 연구</strong></button>
-      ${projectSection}
-      <div class="railSection labSection"><button class="railDisclosure" data-action="toggle-labs" aria-expanded="${state.labsExpanded}"><span>Labs</span>${heroIcon("chevron-down", state.labsExpanded ? "uiIcon isReverse" : "uiIcon")}</button><nav class="labList ${state.labsExpanded ? "isOpen" : ""}" aria-label="현재 프로젝트에 활성화된 Lab 도구와 아티팩트 보관소">${labs || `<span class="railEmpty">이 프로젝트에는 아직 Lab이 없습니다.<em>연구 채팅에서 필요한 분석을 말하면 그 Lab이 여기에 열립니다. 예: “이 표로 생존곡선을 그려줘”</em></span>`}</nav></div>
+      <div class="railScrollable"><nav class="projectDestinations projectWorkflowNav" aria-label="현재 프로젝트 연구 흐름">${destinations}</nav>
+      <div class="railSection labSection"><div class="railDisclosureRow"><button class="railDisclosure" data-action="toggle-labs" aria-expanded="${state.labsExpanded}"><span>Labs</span>${heroIcon("chevron-down", state.labsExpanded ? "uiIcon isReverse" : "uiIcon")}</button><button class="manageLabsButton" data-action="manage-project-labs" aria-label="${uiCopy("프로젝트 Lab 편집", "Edit project Labs")}" title="${uiCopy("프로젝트 Lab 편집", "Edit project Labs")}">${heroIcon("plus")}</button></div><nav class="labList ${state.labsExpanded ? "isOpen" : ""}" aria-label="현재 프로젝트에 활성화된 Lab 도구와 아티팩트 보관소">${labs || `<span class="railEmpty">${uiCopy("이 프로젝트에는 아직 Lab 북마크가 없습니다.", "This project has no Lab bookmarks yet.")}<em>${uiCopy("필요한 Lab을 추가해 두거나 연구 채팅에서 분석을 요청하세요.", "Add the Labs you want available, or request an analysis in Research chat.")}</em></span>`}</nav></div></div>
       <footer class="researcherCard"><span class="researcherAvatar" aria-hidden="true">MJ</span><span><strong>Researcher</strong><em>Local workspace</em></span><button data-action="toggle-drawer" aria-label="설정과 세부 정보">${heroIcon("ellipsis")}</button></footer>
     </aside>`;
   }
@@ -1089,13 +2232,80 @@ import { formatScienceCell } from "./format-cell.js";
     }).join("")}</span>`;
   }
 
+  function safeScienceSourceHref(value) {
+    const raw = String(value || "").trim();
+    if (!raw || raw.length > 2048 || !/^https?:\/\//i.test(raw)) return "";
+    try {
+      const url = new URL(raw);
+      return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function scienceInlineMarkdown(value) {
+    // Private-use sentinels keep already escaped code, math, and links out of
+    // later emphasis replacements. Escape matching input first so model text
+    // can never manufacture a renderer token.
+    const tokens = [];
+    const stash = (html) => `\uE000${tokens.push(html) - 1}\uE001`;
+    let source = String(value || "")
+      .replace(/\uE000/g, "&#57344;")
+      .replace(/\uE001/g, "&#57345;");
+
+    source = source.replace(/(`+)([^`\n]+?)\1/g, (_match, _ticks, code) => (
+      stash(`<code>${escapeHtml(code)}</code>`)
+    ));
+    source = source.replace(/\\\([^\n]+?\\\)|\\\[[^\n]+?\\\]|\$\$[^$\n]+?\$\$|\$[^$\n]+?\$/g, (math) => (
+      stash(`<code class="scienceInlineMath">${escapeHtml(math)}</code>`)
+    ));
+    source = source.replace(/\[([^\]\n]+)\]\(((?:[^()\s]+|\([^()\s]*\))+)\)/g, (_syntax, label, rawHref) => {
+      const href = safeScienceSourceHref(rawHref);
+      if (!href) return stash(`<span class="scienceBlockedSourceLink">${escapeHtml(label)}</span>`);
+      return stash(`<a class="scienceSourceLink" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(label)}</a>`);
+    });
+    source = source.replace(/<(https?:\/\/[^<>\s]+)>/gi, (syntax, rawHref) => {
+      const href = safeScienceSourceHref(rawHref);
+      return href ? stash(`<a class="scienceSourceLink" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(rawHref)}</a>`) : escapeHtml(syntax);
+    });
+
+    return escapeHtml(source)
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+      .replace(/\uE000(\d+)\uE001/g, (_match, index) => tokens[Number(index)] || "");
+  }
+
+  function scienceArticleMarkdown(text) {
+    // Overview owns the page-level heading. Shift model headings below it,
+    // but preserve every byte inside fenced code.
+    let fenced = false;
+    const landmarkSafe = String(text || "").split(/\r?\n/).map((row) => {
+      if (row.trim().startsWith("```")) {
+        fenced = !fenced;
+        return row;
+      }
+      if (fenced) return row;
+      return row.replace(/^(#{1,3})(?=\s)/, (_match, marks) => "#".repeat(Math.min(3, marks.length + 1)));
+    }).join("\n");
+    return scienceChatMarkdown(landmarkSafe);
+  }
+
   function messageMarkup(message) {
     const blocks = state.blocksByMessage.get(message.id) || [];
     const artifactContexts = state.artifactContextsByMessage.get(message.id) || [];
-    const artifactCards = artifactContexts.length ? `<div class="inlineArtifacts" aria-label="이 응답에서 Lab 도구로 생성된 아티팩트">${artifactContexts.map((context) => `<button class="inlineArtifact" data-inline-artifact-id="${escapeHtml(context.artifact.id)}" data-inline-artifact-version="${escapeHtml(context.selectedVersion.version)}" data-inline-conversation-id="${escapeHtml(message.conversationId)}" data-inline-message-id="${escapeHtml(message.id)}"><span class="artifactPreviewType">LAB ARTIFACT · ${escapeHtml(context.artifact.kind)}</span><div class="artifactConnection"><span>${escapeHtml(labLabel(context.linkage.labId))} Lab</span><span>이 응답에서 생성 · 보관소에 저장됨</span></div>${context.selectedVersion.rendererId === "agentlas.vega" ? `<span class="inlineArtifactPreview" data-inline-vega-artifact="${escapeHtml(context.artifact.id)}" data-inline-vega-version="${escapeHtml(context.selectedVersion.version)}" aria-label="${escapeHtml(context.artifact.title)} 미리보기"></span>` : `<span class="inlineArtifactPreview" data-inline-capture-artifact="${escapeHtml(context.artifact.id)}" data-inline-capture-version="${escapeHtml(context.selectedVersion.version)}" aria-label="${escapeHtml(context.artifact.title)} 검증 캡처"></span>`}<strong>${escapeHtml(context.artifact.title)}</strong><span>아티팩트 v${escapeHtml(context.selectedVersion.version)}${context.isCurrent ? " · 현재 버전" : ` · 현재 v${escapeHtml(context.artifact.currentVersion)}`}</span><em>${escapeHtml(labLabel(context.linkage.labId))} 보관소에서 열고 조작하기 →</em></button>`).join("")}</div>` : "";
+    const artifactCards = artifactContexts.length ? `<div class="inlineArtifacts" aria-label="${uiCopy("이 응답에서 생성된 Lab 아티팩트", "Lab artifacts created in this response")}">${artifactContexts.map((context) => {
+      const title = context.artifact.title;
+      const version = context.selectedVersion.version;
+      const versionLabel = `${uiCopy("아티팩트", "Artifact")} v${version}${context.isCurrent ? uiCopy(" · 현재 버전", " · Current version") : uiCopy(` · 현재 v${context.artifact.currentVersion}`, ` · Current v${context.artifact.currentVersion}`)}`;
+      const previewLabel = uiCopy(`${title} 미리보기`, `${title} preview`);
+      const preview = context.selectedVersion.rendererId === "agentlas.vega"
+        ? `<span class="inlineArtifactPreview" data-inline-vega-artifact="${escapeHtml(context.artifact.id)}" data-inline-vega-version="${escapeHtml(version)}" aria-label="${escapeHtml(previewLabel)}"></span>`
+        : `<span class="inlineArtifactPreview" data-inline-capture-artifact="${escapeHtml(context.artifact.id)}" data-inline-capture-version="${escapeHtml(version)}" aria-label="${escapeHtml(previewLabel)}"></span>`;
+      return `<div class="inlineArtifactItem"><button class="inlineArtifact" data-inline-artifact-id="${escapeHtml(context.artifact.id)}" data-inline-artifact-version="${escapeHtml(version)}" data-inline-conversation-id="${escapeHtml(message.conversationId)}" data-inline-message-id="${escapeHtml(message.id)}" aria-label="${escapeHtml(uiCopy(`${title} 아티팩트 v${version} 열기`, `Open ${title}, artifact version ${version}`))}">${preview}<strong>${escapeHtml(title)}</strong><span>${escapeHtml(versionLabel)}</span></button><button class="inlineArtifactRetry" type="button" data-action="retry-inline-preview" hidden>${uiCopy("미리보기 다시 시도", "Retry preview")}</button></div>`;
+    }).join("")}</div>` : "";
     if (message.role === "user") return `<article class="questionBubble"><div>${escapeHtml(message.content)}</div><span>${escapeHtml(formatDate(message.createdAt))}</span></article>`;
-    if (!blocks.length) return `<article class="answer" id="message-${escapeHtml(message.id)}" data-message-id="${escapeHtml(message.id)}" tabindex="-1"><div class="answerMeta">${message.role === "assistant" ? "Agentlas Science" : escapeHtml(message.role)}</div><p>${escapeHtml(message.content)}</p>${artifactCards}</article>`;
-    return `<article class="answer" id="message-${escapeHtml(message.id)}" data-message-id="${escapeHtml(message.id)}" tabindex="-1"><div class="answerMeta">Agentlas Science · evidence-linked response</div>${blocks.map((block) => `<div class="answerBlock" data-block-kind="${escapeHtml(block.kind)}"><p>${escapeHtml(block.content)}</p>${citationButtons(message.id, block.id)}</div>`).join("")}${artifactCards}</article>`;
+    if (!blocks.length) return `<article class="answer" id="message-${escapeHtml(message.id)}" data-message-id="${escapeHtml(message.id)}" tabindex="-1"><div class="answerMeta">${message.role === "assistant" ? "Agentlas Science" : escapeHtml(message.role)}</div><div class="scienceArticleMarkdown">${scienceArticleMarkdown(message.content)}</div>${artifactCards}</article>`;
+    return `<article class="answer" id="message-${escapeHtml(message.id)}" data-message-id="${escapeHtml(message.id)}" tabindex="-1"><div class="answerMeta">Agentlas Science · evidence-linked response</div>${blocks.map((block) => `<section class="answerBlock" data-block-kind="${escapeHtml(block.kind)}"><div class="scienceArticleMarkdown">${scienceArticleMarkdown(block.content)}</div>${citationButtons(message.id, block.id)}</section>`).join("")}${artifactCards}</article>`;
   }
 
   function evidenceGraphContextMarkup(context) {
@@ -1181,8 +2391,31 @@ import { formatScienceCell } from "./format-cell.js";
     const estimand = document.estimand;
     const model = document.model;
     const decisions = state.decisions.filter((decision) => decision.analysisSpecId === plan.id && ["queued", "presented", "deferred"].includes(decision.status));
+    const reviewState = plan.status === "frozen" ? uiCopy("사람 승인 완료", "Approved by researcher")
+      : decisions.length ? uiCopy(`${decisions.length}개 설계 질문 응답 필요`, `${decisions.length} design question${decisions.length === 1 ? "" : "s"} awaiting response`)
+        : plan.latestReview?.decision === "revise" ? uiCopy("수정 요청 전달됨", "Changes requested") : uiCopy("계획 승인 필요", "Plan approval required");
+    const reviewAction = plan.status === "draft" && decisions.length === 0
+      ? `<button class="primaryButton analysisPlanReviewButton" data-action="open-analysis-plan-review">${uiCopy("계획 검토", "Review plan")}</button>` : "";
     const values = (items, empty = "정의되지 않음") => Array.isArray(items) && items.length ? items.join(", ") : empty;
-    return `<section class="analysisPlanView" data-analysis-plan-id="${escapeHtml(plan.id)}" data-analysis-plan-version="${escapeHtml(plan.currentVersion)}" data-analysis-plan-sha256="${escapeHtml(plan.currentDocumentSha256)}"><header><div><span>PLAN & PROTOCOLS · EXACT VERSION</span><h1>${escapeHtml(plan.title)}</h1><p>${escapeHtml(document.researchQuestion || project.question)}</p></div><div class="analysisPlanIdentity"><em data-status="${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</em><strong>v${escapeHtml(plan.currentVersion)}</strong><code title="${escapeHtml(plan.currentDocumentSha256)}">${escapeHtml(plan.currentDocumentSha256.slice(0, 12))}…</code></div></header><div class="analysisPlanGrid"><section><span>Estimand</span>${estimand ? `<dl><div><dt>Population</dt><dd>${escapeHtml(estimand.population)}</dd></div><div><dt>Exposure</dt><dd>${escapeHtml(estimand.treatmentOrExposure)}</dd></div><div><dt>Comparator</dt><dd>${escapeHtml(estimand.comparator || "없음")}</dd></div><div><dt>Outcome</dt><dd>${escapeHtml(estimand.outcome)}</dd></div><div><dt>Measure</dt><dd>${escapeHtml(estimand.summaryMeasure)}</dd></div></dl>` : `<p>연구자가 estimand를 아직 확정하지 않았습니다.</p>`}</section><section><span>Design & dependence</span><dl><div><dt>Study</dt><dd>${escapeHtml(document.design?.studyType || "미정")}</dd></div><div><dt>Observation unit</dt><dd>${escapeHtml(document.design?.observationUnit || "미정")}</dd></div><div><dt>Dependence</dt><dd>${escapeHtml(document.design?.dependence?.kind || "unresolved")}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(document.data?.inputs?.length || 0)} exact artifact version(s)</dd></div></dl></section><section><span>Model</span>${model ? `<dl><div><dt>Family</dt><dd>${escapeHtml(model.family)}</dd></div><div><dt>Formula</dt><dd><code>${escapeHtml(model.formula)}</code></dd></div><div><dt>Distribution / link</dt><dd>${escapeHtml(`${model.distribution || "—"} / ${model.link || "—"}`)}</dd></div><div><dt>Rationale</dt><dd>${escapeHtml(model.rationale)}</dd></div></dl>` : `<p>모델이 아직 확정되지 않았습니다.</p>`}</section><section><span>Validity checks</span><dl><div><dt>Diagnostics</dt><dd>${escapeHtml(values(document.requiredDiagnostics))}</dd></div><div><dt>Sensitivity</dt><dd>${escapeHtml(values(document.sensitivityAnalyses))}</dd></div><div><dt>Missing data</dt><dd>${escapeHtml(document.missingData?.strategy || "unresolved")}</dd></div><div><dt>Multiplicity</dt><dd>${escapeHtml(document.multiplicity?.strategy || "unresolved")}</dd></div></dl></section></div><footer><div><span>Human decisions</span><strong>${escapeHtml(decisions.length ? `${decisions.length}개 미해결` : "미해결 결정 없음")}</strong></div><div><span>Expected outputs</span><strong>${escapeHtml(values(document.expectedArtifacts?.map((item) => item.title), "등록 없음"))}</strong></div><div><span>Runtime boundary</span><strong>${escapeHtml(`${document.runtimePolicy?.network || "deny"} network · ${document.runtimePolicy?.maxWallTimeMinutes || "-"} min`)}</strong></div></footer></section>`;
+    const exactInputCount = Array.isArray(document.data?.inputs) ? document.data.inputs.length : 0;
+    const acquisitionSourceCount = Array.isArray(document.data?.acquisition?.sources) ? document.data.acquisition.sources.length : 0;
+    const plannedStatisticsMethods = Array.isArray(document.requiredDiagnostics)
+      ? document.requiredDiagnostics.filter((entry) => typeof entry === "string" && entry.startsWith("agentlas.statistics.method:"))
+      : [];
+    const executionBlocked = plan.status === "frozen" && plannedStatisticsMethods.length > 0
+      && (exactInputCount !== 1 || !model);
+    const inputBindingSummary = exactInputCount
+      ? uiCopy(`정확한 아티팩트 버전 ${exactInputCount}개`, `${exactInputCount} exact artifact version${exactInputCount === 1 ? "" : "s"}`)
+      : acquisitionSourceCount
+        ? uiCopy(`사전 수집 출처 ${acquisitionSourceCount}개 · 분석 전 정확한 입력 재승인 필요`, `${acquisitionSourceCount} preregistered source${acquisitionSourceCount === 1 ? "" : "s"} · exact inputs require approval before analysis`)
+        : uiCopy("입력 데이터 또는 수집 계획 없음", "No input data or acquisition plan");
+    const modelBoundary = executionBlocked
+      ? uiCopy("실행 차단 — 통계 분석을 시작하려면 정확히 하나의 정렬된 Data Table과 구체적인 호환 모형을 묶은 후속 계획이 필요합니다.", "Execution blocked — statistics require a successor plan binding exactly one aligned Data Table and a concrete compatible model.")
+      : uiCopy("분석 실행 전에 구체적인 호환 모형을 묶어야 합니다.", "A concrete compatible model must be bound before analysis can run.");
+    const blockedBadge = executionBlocked
+      ? `<em class="analysisPlanExecutionBadge" data-status="blocked">${uiCopy("실행 차단", "Execution blocked")}</em>`
+      : "";
+    return `<section class="analysisPlanView" data-analysis-plan-id="${escapeHtml(plan.id)}" data-analysis-plan-version="${escapeHtml(plan.currentVersion)}" data-analysis-plan-sha256="${escapeHtml(plan.currentDocumentSha256)}" data-execution-ready="${executionBlocked ? "false" : "true"}"><header><div><span>PLAN & PROTOCOLS · EXACT VERSION</span><h1>${escapeHtml(plan.title)}</h1><p>${escapeHtml(document.researchQuestion || project.question)}</p></div><div class="analysisPlanIdentity"><em data-status="${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</em>${blockedBadge}<strong>v${escapeHtml(plan.currentVersion)}</strong><code title="${escapeHtml(plan.currentDocumentSha256)}">${escapeHtml(plan.currentDocumentSha256.slice(0, 12))}…</code>${reviewAction}</div></header><div class="analysisPlanGrid"><section><span>Estimand</span>${estimand ? `<dl><div><dt>Population</dt><dd>${escapeHtml(estimand.population)}</dd></div><div><dt>Exposure</dt><dd>${escapeHtml(estimand.treatmentOrExposure)}</dd></div><div><dt>Comparator</dt><dd>${escapeHtml(estimand.comparator || "없음")}</dd></div><div><dt>Outcome</dt><dd>${escapeHtml(estimand.outcome)}</dd></div><div><dt>Measure</dt><dd>${escapeHtml(estimand.summaryMeasure)}</dd></div></dl>` : `<p>연구자가 estimand를 아직 확정하지 않았습니다.</p>`}</section><section><span>Design & dependence</span><dl><div><dt>Study</dt><dd>${escapeHtml(document.design?.studyType || "미정")}</dd></div><div><dt>Observation unit</dt><dd>${escapeHtml(document.design?.observationUnit || "미정")}</dd></div><div><dt>Dependence</dt><dd>${escapeHtml(document.design?.dependence?.kind || "unresolved")}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(inputBindingSummary)}</dd></div></dl></section><section><span>Model</span>${model ? `<dl><div><dt>Family</dt><dd>${escapeHtml(model.family)}</dd></div><div><dt>Formula</dt><dd><code>${escapeHtml(model.formula)}</code></dd></div><div><dt>Distribution / link</dt><dd>${escapeHtml(`${model.distribution || "—"} / ${model.link || "—"}`)}</dd></div><div><dt>Rationale</dt><dd>${escapeHtml(model.rationale)}</dd></div></dl>` : `<p class="${executionBlocked ? "analysisPlanExecutionBlock" : ""}">${escapeHtml(modelBoundary)}</p>`}</section><section><span>Validity checks</span><dl><div><dt>Diagnostics</dt><dd>${escapeHtml(values(document.requiredDiagnostics))}</dd></div><div><dt>Sensitivity</dt><dd>${escapeHtml(values(document.sensitivityAnalyses))}</dd></div><div><dt>Missing data</dt><dd>${escapeHtml(document.missingData?.strategy || "unresolved")}</dd></div><div><dt>Multiplicity</dt><dd>${escapeHtml(document.multiplicity?.strategy || "unresolved")}</dd></div></dl></section></div><footer><div><span>Human review</span><strong>${escapeHtml(reviewState)}</strong></div><div><span>Expected outputs</span><strong>${escapeHtml(values(document.expectedArtifacts?.map((item) => item.title), "등록 없음"))}</strong></div><div><span>Runtime boundary</span><strong>${escapeHtml(`${document.runtimePolicy?.network || "deny"} network · ${document.runtimePolicy?.maxWallTimeMinutes || "-"} min`)}</strong></div></footer></section>`;
   }
 
   // Approving or rejecting a hypothesis is reserved for a person: the agent-visible tool refuses
@@ -1254,11 +2487,12 @@ import { formatScienceCell } from "./format-cell.js";
     // human-only, so a study stops here until someone acts -- and "three cards, some already
     // decided" is not something a reader should have to work out by counting.
     const pending = rows.filter((item) => item && item.status !== "approved" && item.status !== "rejected").length;
+    const waitingLabel = pendingHypothesisCopy(pending);
     const waitingNotice = pending
-      ? `<div class="researcherWaiting" role="status" data-pending-decisions="${escapeHtml(String(pending))}"><span class="stateGlyph" data-state="awaiting-human" aria-hidden="true"></span><strong>${escapeHtml(String(pending))}건이 당신의 결정을 기다립니다.</strong><p>연구는 이 결정 없이 다음 단계로 가지 않습니다. 승인하거나 기각해 주세요.</p></div>`
+      ? `<div class="researcherWaiting" role="status" data-pending-decisions="${escapeHtml(String(pending))}"><span class="stateGlyph" data-state="awaiting-human" aria-hidden="true"></span><strong>${escapeHtml(waitingLabel)}</strong><p>${escapeHtml(uiCopy("연구는 이 결정 없이 다음 단계로 가지 않습니다. 승인하거나 기각해 주세요.", "Research cannot advance without this decision. Approve or reject it."))}</p></div>`
       : "";
     return `<section class="researchView hypothesesView" data-research-destination="hypotheses" data-waiting-on="${pending ? "researcher" : "none"}"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>가설</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>가설</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       ${state.hypothesesError ? `<div class="errorCopy">${escapeHtml(state.hypothesesError)}</div>` : ""}
       ${waitingNotice}
@@ -1297,7 +2531,7 @@ import { formatScienceCell } from "./format-cell.js";
     "full-text": "본문에서 잘라낸 구간", abstract: "초록에서 잘라낸 구간", metadata: "서지정보에서 잘라낸 구간",
     computed: "계산 결과에서 나온 구간", human: "연구자가 직접 넣은 구간", system: "시스템이 기록한 구간",
   };
-  const literatureShortHash = (value) => (value ? `${String(value).slice(0, 12)}…` : "기록된 내용 해시 없음");
+  const literatureShortHash = (value) => (value ? `${String(value).slice(0, 12)}…` : uiCopy("기록된 내용 해시 없음", "No content hash recorded"));
   // Evidence spans live in the stored Evidence Graph revision, which the project load already
   // fetched. An evidence-span node is bound to the exact source version it was cut from by a
   // `derived-from` edge, so a span is never shown under a source it did not come from.
@@ -1361,8 +2595,11 @@ import { formatScienceCell } from "./format-cell.js";
     const scope = literatureTextScope(version);
     const spans = version?.id ? spansBySourceVersion.get(version.id) || [] : [];
     const retracted = source.verificationStatus === "retracted";
+    const emptySpanGuidance = state.evidenceGraph
+      ? uiCopy("이 출처의 문장이 주장을 받치려면 먼저 근거 구간으로 인용되어 Evidence Graph에 기록되어야 합니다. 연구 채팅에서 이 출처를 인용하면 여기에 나타납니다.", "A passage from this source must first be cited as an evidence span and recorded in the Evidence Graph before it can support a claim. Cite this source in the research chat and it will appear here.")
+      : uiCopy("이 출처의 문장이 주장을 받치려면 먼저 근거 구간으로 인용되어 Evidence Graph에 기록되어야 합니다. 해석·결정 화면에서 Evidence Graph를 먼저 만들면 이미 인용된 구간도 여기에 나타납니다.", "A passage from this source must first be cited as an evidence span and recorded in the Evidence Graph before it can support a claim. Build the Evidence Graph in Interpretation & Decisions and previously cited spans will appear here.");
     const spanBody = spans.length === 0
-      ? `<div class="literatureSpanEmpty"><strong>승격된 근거 구간이 없습니다.</strong><p>이 출처의 문장이 주장을 받치려면 먼저 근거 구간으로 인용되어 Evidence Graph에 기록되어야 합니다. ${state.evidenceGraph ? "연구 채팅에서 이 출처를 인용하면 여기에 나타납니다." : "해석·결정 화면에서 Evidence Graph를 먼저 만들면 이미 인용된 구간도 여기에 나타납니다."}</p></div>`
+      ? `<div class="literatureSpanEmpty"><strong>${escapeHtml(uiCopy("승격된 근거 구간이 없습니다.", "No evidence span has been promoted yet."))}</strong><p>${escapeHtml(emptySpanGuidance)}</p></div>`
       : `<ul class="literatureSpanList">${spans.map((span) => `<li class="literatureSpan" data-evidence-span-id="${escapeHtml(span.id)}" data-evidence-scope="${escapeHtml(span.scope)}" data-evidence-status="${escapeHtml(span.status)}">
           <div class="literatureSpanMeta"><code>${escapeHtml(span.locator || "위치 표기 없음")}</code><span>${escapeHtml(literatureSpanScopeLabels[span.scope] || "구간 범위가 기록되지 않음")}</span>${span.status === "invalidated" ? `<em>무효화됨</em>` : ""}<code title="${escapeHtml(span.contentSha256)}">${escapeHtml(literatureShortHash(span.contentSha256))}</code></div>
           <blockquote class="literatureSpanExcerpt">${escapeHtml(span.excerpt || "발췌 본문이 기록되지 않았습니다.")}</blockquote>
@@ -1370,6 +2607,7 @@ import { formatScienceCell } from "./format-cell.js";
     return `<article class="literatureSource" data-source-id="${escapeHtml(source.id)}" data-access-state="${escapeHtml(version?.accessState || "unknown")}" data-text-scope="${escapeHtml(scope)}" data-verification-status="${escapeHtml(source.verificationStatus || "unverified")}">
       <header class="literatureSourceHeader">
         <strong>${escapeHtml(source.title || "제목이 기록되지 않은 출처")}</strong>
+        <button class="literatureSourceOpen" type="button" data-source-id="${escapeHtml(source.id)}">${uiCopy("파일 열기", "Open file")} ${heroIcon("chevron-right")}</button>
         <span class="literatureSourceKind">${escapeHtml(source.kind || "kind 미기록")}${source.publicationYear ? ` · ${escapeHtml(source.publicationYear)}` : ""}${source.containerTitle ? ` · ${escapeHtml(source.containerTitle)}` : ""}</span>
       </header>
       <p class="literatureSourceUri"><code>${escapeHtml(source.canonicalUri || "정규 URI가 기록되지 않았습니다.")}</code></p>
@@ -1400,7 +2638,7 @@ import { formatScienceCell } from "./format-cell.js";
         ? `<div class="emptyCopy pageEmpty"><strong>아직 이 연구에 등록된 출처가 없습니다.</strong><p>연구 채팅에서 문헌 검색을 실행하거나 DOI·URL을 알려주면, 정규화된 출처와 확보된 원문 바이트가 여기에 쌓입니다.</p></div>`
         : sources.map((source) => literatureSourceCard(source, spansBySourceVersion, unresolved.has(source.id))).join("");
     return `<section class="researchView literatureView" data-research-destination="literature"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>문헌·선행근거</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>문헌·선행근거</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       <p class="literatureBoundary">출처가 목록에 있다는 것과 그 출처로 인용할 수 있다는 것은 다릅니다. 확보 범위와 근거 구간을 확인한 뒤 인용하세요.</p>
       ${state.literatureError ? `<div class="errorCopy" role="alert">${escapeHtml(state.literatureError)}</div>` : ""}
@@ -1458,7 +2696,7 @@ import { formatScienceCell } from "./format-cell.js";
             ? "실행이 끝나기 전에 중단되어 검증할 바이트가 남지 않았습니다."
             : "이 실행은 성공으로 기록됐지만 바이트를 하나도 남기지 않았습니다. 산출물이 있어야 할 실행이라면 도구 쪽을 확인하세요."}</p></div>`
       : `<ul class="acquisitionOutputList">${outputs.map((output) => `<li class="acquisitionOutput" data-output-role="${escapeHtml(output.role || "")}">
-          <div class="acquisitionOutputMeta"><strong>${escapeHtml(output.role || "역할 미기록")}</strong><span>${escapeHtml(output.mimeType || "형식 미기록")}</span><span>${escapeHtml(acquisitionBytes(output.byteSize))}</span></div>
+          <div class="acquisitionOutputMeta"><strong>${escapeHtml(output.role || "역할 미기록")}</strong><span class="acquisitionOutputMime" title="${escapeHtml(output.mimeType || "형식 미기록")}">${escapeHtml(output.mimeType || "형식 미기록")}</span><span class="acquisitionOutputSize">${escapeHtml(acquisitionBytes(output.byteSize))}</span></div>
           <code title="${escapeHtml(output.sha256 || "")}">${escapeHtml(acquisitionShortHash(output.sha256))}</code>
           ${output.artifactId ? `<span class="acquisitionOutputArtifact">아티팩트 ${escapeHtml(output.artifactId)} v${escapeHtml(output.artifactVersion)}</span>` : ""}
         </li>`).join("")}</ul>`;
@@ -1493,7 +2731,7 @@ import { formatScienceCell } from "./format-cell.js";
         ? `<div class="emptyCopy pageEmpty"><strong>아직 이 연구가 가져온 데이터가 없습니다.</strong><p>연구 채팅에서 검색·수집 도구를 실행하면, 어떤 도구가 어디에서 무엇을 가져왔는지와 그 바이트의 크기·해시가 실행 단위로 여기에 기록됩니다.</p></div>`
         : runs.map((run) => acquisitionRunCard(run, unresolved.has(run.id))).join("");
     return `<section class="researchView acquisitionView" data-research-destination="acquisition"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>데이터 수집</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>데이터 수집</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       <p class="acquisitionBoundary">${runs.length ? `실행 ${escapeHtml(runs.length)}건${failedCount ? ` · 실패 ${escapeHtml(failedCount)}건` : ""} · 실패한 수집은 조용히 넘어가지 않습니다.` : "실행 기록만 표시합니다. 기록되지 않은 수집은 일어나지 않은 것으로 취급합니다."}</p>
       ${state.acquisitionError ? `<div class="errorCopy" role="alert">${escapeHtml(state.acquisitionError)}</div>` : ""}
@@ -1512,26 +2750,26 @@ import { formatScienceCell } from "./format-cell.js";
 
   async function loadScope(projectId) {
     if (!projectId) return;
+    const loadEpoch = ++scopeLoadEpoch;
+    const projectEpoch = selectionEpoch;
+    const isCurrent = () => projectId === state.selectedId && projectEpoch === selectionEpoch && loadEpoch === scopeLoadEpoch;
     state.scopeLoading = true;
     try {
       const [scopeProject, contract] = await Promise.all([
         science.projects.get(projectId),
         science.researchContracts.get(projectId),
       ]);
-      if (projectId !== state.selectedId) return;
-      state.scopeProject = scopeProject || null;
-      state.scopeContract = contract || null;
+      if (!isCurrent()) return;
+      state.scopeLoading = false;
       state.scopeError = "";
       // Keep the approval sheet reading the same contract Scope shows, but never pop it open on
       // arrival: the researcher opens it from the button below.
       applyResearchContractSnapshot(scopeProject, contract, { openDraft: false });
+      render();
     } catch (error) {
-      if (projectId !== state.selectedId) return;
-      state.scopeProject = null;
-      state.scopeContract = null;
+      if (!isCurrent()) return;
+      state.scopeLoading = false;
       state.scopeError = `연구 계약을 불러오지 못했습니다. (${String(error?.message ?? error)})`;
-    } finally {
-      if (projectId === state.selectedId) state.scopeLoading = false;
       render();
     }
   }
@@ -1539,8 +2777,10 @@ import { formatScienceCell } from "./format-cell.js";
   function scopeView(project) {
     if (state.loadingProject) return `<div class="loadingState" aria-live="polite">프로젝트 기록을 불러오는 중…</div>`;
     if (state.projectError) return errorState();
-    const contract = state.scopeContract && state.scopeContract.projectId === state.selectedId ? state.scopeContract : null;
-    const scopeProject = state.scopeProject && state.scopeProject.id === state.selectedId ? state.scopeProject : project;
+    // Scope and the approval sheet must render the same accepted snapshot.
+    // A second Scope-only copy stayed at "draft" after a successful approval.
+    const contract = state.researchContract?.projectId === state.selectedId ? state.researchContract : null;
+    const scopeProject = state.projects.find((item) => item.id === state.selectedId) || project;
     const criteria = (items, empty) => Array.isArray(items) && items.length
       ? `<ul class="scopeList">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
       : `<p class="scopeEmpty">${escapeHtml(empty)}</p>`;
@@ -1561,12 +2801,12 @@ import { formatScienceCell } from "./format-cell.js";
           <div><dt>승인 시각</dt><dd>${escapeHtml(contract.approvedAt ? studyRecordStamp(contract.approvedAt) : "아직 승인되지 않았습니다")}</dd></div>
         </dl></section>
         ${contract.status === "draft"
-          ? `<div class="scopeApproval"><p>이 계약은 아직 사람의 승인을 기다리는 초안입니다. 승인하면 이 목표와 중단 기준으로 연구가 시작됩니다.</p><button class="primaryButton" data-action="open-research-contract-sheet">계약 v${escapeHtml(contract.version)} 검토·승인</button></div>`
-          : ""}
+          ? `<div class="scopeApproval"><p>${uiCopy("이 계약은 아직 사람의 승인을 기다리는 초안입니다. 승인 후 연구 채팅에서 이 목표와 중단 기준에 맞춰 다음 작업을 요청할 수 있습니다.", "This contract awaits your approval. After approval, you can request the next step in the research chat under this objective and these stop criteria.")}</p><button class="primaryButton" data-action="open-research-contract-sheet">계약 v${escapeHtml(contract.version)} 검토·승인</button></div>`
+          : contract.status === "approved" ? `<div class="scopeApproval"><p>${uiCopy("계약이 승인되었습니다. 연구를 계속하려면 연구 채팅에 다음 작업을 요청하세요. 승인만으로 중단한 실행을 다시 시작하지는 않습니다.", "Contract approved. To continue, request the next step in the research chat. Approval alone does not restart a stopped run.")}</p></div>` : ""}
       </div>`
       : `<div class="emptyCopy"><strong>아직 연구 계약이 없습니다.</strong><p>연구 채팅에서 첫 질문을 보내면 목표와 중단 기준을 담은 계약 초안이 만들어지고, 여기에서 승인할 수 있습니다.</p></div>`;
     return `<section class="researchView scopeView" data-research-destination="scope"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>범위</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>범위</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       ${(() => { const q = scopeProject?.question ?? project.question ?? ""; return q && q.trim() !== String(project.title || "").trim() ? `<p class="scopeQuestion">${escapeHtml(q)}</p>` : ""; })()}
       ${state.scopeError ? `<div class="errorCopy" role="alert">${escapeHtml(state.scopeError)}</div>` : ""}
@@ -1586,6 +2826,7 @@ import { formatScienceCell } from "./format-cell.js";
       "research-contract": "연구 계약 승인",
       hypothesis: "가설 승인·기각",
       "journal-identity": "저널 신원 확인",
+      "analysis-plan": "분석 계획 검증·확정",
       "submission-attestation": "제출 최종 확인 (연구자 이름으로 출판사에 나가는 진술)",
     };
     // Each row delegates a different decision. One shared sentence made four
@@ -1594,12 +2835,14 @@ import { formatScienceCell } from "./format-cell.js";
       "research-contract": "목표와 중단 기준을 연구자 확인 없이 확정합니다",
       hypothesis: "제안된 가설을 스스로 채택하거나 기각합니다",
       "journal-identity": "투고할 저널의 요건을 스스로 확정합니다",
+      "analysis-plan": "허용된 범위에서 완전한 계획 버전을 고정합니다",
       "submission-attestation": "제출 진술을 연구자 확인 없이 확정합니다",
     };
     const scopeAsked = {
       "research-contract": "계약을 확정하기 전에 묻습니다",
       hypothesis: "가설을 채택·기각하기 전에 묻습니다",
       "journal-identity": "저널 요건을 확정하기 전에 묻습니다",
+      "analysis-plan": "계획 버전을 확정하기 전에 검토를 요청합니다",
       "submission-attestation": "제출 진술을 확정하기 전에 묻습니다",
     };
     const rows = Object.entries(scopeLabels).map(([scope, label]) => {
@@ -1611,14 +2854,18 @@ import { formatScienceCell } from "./format-cell.js";
         <span class="approvalScopeState">${escapeHtml(standing ? scopeGranted[scope] : scopeAsked[scope])}</span>
       </li>`;
     }).join("");
-    return `<section class="approvalPolicyPanel">
+    return `<section class="approvalPolicyPanel" aria-busy="${approvalPolicyWrites.has(state.selectedId)}">
       <h2>승인 방식</h2>
       <p class="approvalPolicyNote">체크한 항목은 연구가 멈추지 않고 진행하며, 누가 언제 허용했는지는 그대로 기록됩니다. 해제하면 그 지점에서 묻습니다.</p>
       ${state.approvalPolicyError ? `<div class="errorCopy" role="alert">${escapeHtml(state.approvalPolicyError)}</div>` : ""}
       <ul class="approvalScopes">${rows}</ul>
+      <p data-approval-save-status role="status">${approvalPolicyWrites.has(state.selectedId) ? uiCopy("승인 설정 저장 중…", "Saving approval settings…") : ""}</p>
       <p class="approvalPolicyProvenance">현재 정책 r${escapeHtml(String(policy.revision))} · ${escapeHtml(policy.grantedBy)}</p>
     </section>`;
   }
+
+  const approvalPolicyWrites = new Map();
+  const approvalPolicyWriteErrors = new Map();
 
   async function loadApprovalPolicy(projectId) {
     if (!projectId) return;
@@ -1626,7 +2873,7 @@ import { formatScienceCell } from "./format-cell.js";
       const policy = await science.approvalPolicy.get(projectId);
       if (projectId !== state.selectedId) return;
       state.approvalPolicy = policy;
-      state.approvalPolicyError = "";
+      state.approvalPolicyError = approvalPolicyWriteErrors.get(projectId) || "";
     } catch (error) {
       if (projectId !== state.selectedId) return;
       state.approvalPolicy = null;
@@ -1635,13 +2882,17 @@ import { formatScienceCell } from "./format-cell.js";
     render();
   }
 
-  async function toggleApprovalScope(scope) {
+  async function toggleApprovalScope(scope, enabled) {
     const projectId = state.selectedId;
-    const policy = state.approvalPolicy;
-    if (!projectId || !policy || !scope) return;
-    const standing = policy.mode === "autonomous" && policy.scopes.includes(scope);
-    const next = standing ? policy.scopes.filter((item) => item !== scope) : [...new Set([...policy.scopes, scope])];
-    try {
+    if (!projectId || !scope || typeof enabled !== "boolean") return;
+    const previous = approvalPolicyWrites.get(projectId);
+    if (!previous) approvalPolicyWriteErrors.delete(projectId);
+    // Capture the requested checked state, not a toggle against a stale snapshot.
+    // Serialize within this project and merge each intent with the latest receipt.
+    const write = (previous || Promise.resolve()).then(async () => {
+      const policy = await science.approvalPolicy.get(projectId);
+      const scopes = policy.mode === "autonomous" ? policy.scopes : [];
+      const next = enabled ? [...new Set([...scopes, scope])] : scopes.filter((item) => item !== scope);
       // Turning everything off is `checkpoint`: a mode, not an empty list, so the intent survives
       // a later scope being added to the product.
       await science.approvalPolicy.set({
@@ -1651,11 +2902,21 @@ import { formatScienceCell } from "./format-cell.js";
         scopes: next,
         grantedBy: "researcher",
       });
-      state.approvalPolicyError = "";
-    } catch (error) {
-      state.approvalPolicyError = `승인 방식을 저장하지 못했습니다. (${String(error?.message ?? error)})`;
-    }
-    await loadApprovalPolicy(projectId);
+      const saved = await science.approvalPolicy.get(projectId);
+      if (projectId === state.selectedId) state.approvalPolicy = saved;
+    }).catch((error) => {
+      approvalPolicyWriteErrors.set(projectId, `승인 방식을 저장하지 못했습니다. (${String(error?.message ?? error)})`);
+    });
+    approvalPolicyWrites.set(projectId, write);
+    root.querySelector(".approvalPolicyPanel")?.setAttribute("aria-busy", "true");
+    const status = root.querySelector("[data-approval-save-status]");
+    if (status) status.textContent = uiCopy("승인 설정 저장 중…", "Saving approval settings…");
+    await write;
+    if (approvalPolicyWrites.get(projectId) !== write) return;
+    approvalPolicyWrites.delete(projectId);
+    if (projectId !== state.selectedId) return;
+    state.approvalPolicyError = approvalPolicyWriteErrors.get(projectId) || "";
+    render();
   }
 
   async function loadLogbook(projectId) {
@@ -1712,7 +2973,7 @@ import { formatScienceCell } from "./format-cell.js";
         </li>`;
       }).join("")}</ol>`;
     return `<section class="researchView logbookView" data-research-destination="logbook"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>기록</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>기록</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       <p class="logbookIntro">이 연구가 지나온 모든 단계를, 각 단계를 허가한 규칙과 그 근거 해시와 함께 순서대로 보여줍니다.</p>
       ${state.logbookError ? `<div class="errorCopy" role="alert">${escapeHtml(state.logbookError)}</div>` : ""}
@@ -1777,7 +3038,7 @@ import { formatScienceCell } from "./format-cell.js";
         ${item.status === "ready" && item.packageRef ? `<button class="secondaryButton" data-action="download-submission" data-export-id="${escapeHtml(item.id)}">내려받기</button>` : `<em class="submissionExportBlocked">이 제출본은 아직 완성되지 않았습니다. 검증 결과를 확인하세요.</em>`}
       </li>`).join("")}</ul>`;
     return `<section class="researchView submissionArchiveView" data-research-destination="submission-archive"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>제출·보관</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>제출·보관</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       ${state.submissionArchiveError ? `<div class="errorCopy" role="alert">${escapeHtml(state.submissionArchiveError)}</div>` : ""}
       ${blockedCount ? `<div class="submissionArchiveWarning" role="status"><strong>완성되지 않은 제출본 ${escapeHtml(blockedCount)}건</strong><span>아래 목록 맨 위에 있습니다.</span></div>` : ""}
@@ -1788,14 +3049,19 @@ import { formatScienceCell } from "./format-cell.js";
 
   // Analysis & Runs answers what a reviewer asks first: which analyses actually ran, under which
   // frozen plan, and whether the result on screen is still the exact thing that run computed. A run
-  // recorded as succeeded that bound no artifact is the failure worth showing, because nothing else
-  // in the product ever says it out loud. Unstyled on purpose; the Science UI session owns styling.
+  // recorded as succeeded that produced no output is the failure worth showing. A valid output can
+  // remain a run manifest without being projected into a scientific artifact; that boundary is
+  // shown explicitly instead of turning a successful search into a false rerun warning.
   const ANALYSIS_RUN_EXACT_RECHECK_LIMIT = 20;
   const RESULTS_VALIDATION_LOOKUP_LIMIT = 60;
   const runResultShortHash = (value) => (value ? `${String(value).slice(0, 12)}…` : "—");
-  const analysisRunStatusLabels = { running: "실행 중", succeeded: "성공", failed: "실패", cancelled: "취소됨" };
+  const analysisRunStatusLabels = {
+    running: ["실행 중", "Running"], succeeded: ["성공", "Succeeded"],
+    failed: ["실패", "Failed"], cancelled: ["취소됨", "Cancelled"],
+  };
+  const analysisRunOutputs = (run) => (Array.isArray(run?.outputs) ? run.outputs : []);
   const analysisRunBoundOutputs = (run) => (Array.isArray(run?.outputs) ? run.outputs : []).filter((output) => output?.artifactId);
-  const analysisRunSucceededWithoutArtifact = (run) => run?.status === "succeeded" && analysisRunBoundOutputs(run).length === 0;
+  const analysisRunSucceededWithoutOutput = (run) => run?.status === "succeeded" && analysisRunOutputs(run).length === 0;
 
   async function loadAnalysisRuns(projectId) {
     if (!projectId) return;
@@ -1805,7 +3071,7 @@ import { formatScienceCell } from "./format-cell.js";
       const rows = Array.isArray(runs) ? runs : [];
       // The "succeeded but produced nothing" claim is re-read from the exact run record rather than
       // trusted from a list snapshot, so the accusation is against the store's current truth.
-      const suspect = rows.filter(analysisRunSucceededWithoutArtifact).slice(0, ANALYSIS_RUN_EXACT_RECHECK_LIMIT);
+      const suspect = rows.filter(analysisRunSucceededWithoutOutput).slice(0, ANALYSIS_RUN_EXACT_RECHECK_LIMIT);
       const exact = await Promise.all(suspect.map(async (run) => {
         try { return await science.runs.get(projectId, run.id); } catch { return null; }
       }));
@@ -1831,63 +3097,86 @@ import { formatScienceCell } from "./format-cell.js";
     const planSpec = plan ? analysisSpecById(plan.analysisSpecId) : null;
     const planLine = plan
       ? `${planSpec?.title || plan.analysisSpecId} · v${plan.version} · ${runResultShortHash(plan.contentSha256)}`
-      : "고정된 분석계획 없음 — 이 실행은 사전 등록된 계획 아래에서 돌지 않았습니다.";
+      : uiCopy("고정된 분석계획 없음 — 이 실행은 사전 등록된 계획 아래에서 돌지 않았습니다.", "No pinned analysis plan — this run was not executed under a preregistered plan.");
     const inputCount = (Array.isArray(run?.inputs) ? run.inputs : []).length;
-    const outputs = analysisRunBoundOutputs(run);
-    const outputRows = outputs.map((output) => {
+    const outputs = analysisRunOutputs(run);
+    const boundOutputs = analysisRunBoundOutputs(run);
+    const boundArtifactIds = new Set(boundOutputs.map((output) => output.artifactId));
+    // Some acquisition tools keep the output manifest immutable and record the later artifact
+    // projection separately. The artifact read model still carries the exact sourceRunId, so show
+    // that durable result instead of leaving the researcher with byte/hash rows only.
+    const projectedArtifacts = [...artifactsById.values()].filter((artifact) => artifact?.sourceRunId === run.id && !boundArtifactIds.has(artifact.id));
+    const outputRows = boundOutputs.map((output) => {
       const artifact = artifactsById.get(output.artifactId) || null;
       const boundVersion = Number(output.artifactVersion);
       const binding = !artifact
-        ? "이 프로젝트의 아티팩트 목록에 없습니다. 결과를 열 수 없습니다."
+        ? uiCopy("이 프로젝트의 아티팩트 목록에 없습니다. 결과를 열 수 없습니다.", "This result is not in the project's artifact list and cannot be opened.")
         : Number(artifact.currentVersion) === boundVersion
-          ? "현재 버전이 이 실행이 계산한 그 버전입니다."
-          : `아티팩트가 v${artifact.currentVersion}로 갱신됐습니다. 지금 열리는 결과는 이 실행이 계산한 버전이 아닙니다.`;
-      return `<li class="analysisRunOutput" data-artifact-id="${escapeHtml(output.artifactId)}" data-artifact-version="${escapeHtml(boundVersion)}" data-output-current="${Boolean(artifact && Number(artifact.currentVersion) === boundVersion)}">
+          ? uiCopy("현재 버전이 이 실행이 계산한 그 버전입니다.", "The current artifact version is the exact version produced by this run.")
+          : uiCopy(`아티팩트가 v${artifact.currentVersion}로 갱신됐습니다. 지금 열리는 결과는 이 실행이 계산한 버전이 아닙니다.`, `The artifact is now v${artifact.currentVersion}. The version currently opened is not the version produced by this run.`);
+      return `<li class="analysisRunOutput" data-output-current="${Boolean(artifact && Number(artifact.currentVersion) === boundVersion)}">
         <strong>${escapeHtml(artifact?.title || output.artifactId)}</strong>
         <span>${escapeHtml(artifact?.kind || output.mimeType || "unknown")} · v${escapeHtml(boundVersion)} · <code title="${escapeHtml(output.sha256)}">${escapeHtml(runResultShortHash(output.sha256))}</code></span>
         <em>${escapeHtml(binding)}</em>
+        ${artifact ? `<button class="analysisRunArtifactOpen" type="button" data-action="open-result-artifact" data-result-artifact-id="${escapeHtml(artifact.id)}" data-result-artifact-version="${escapeHtml(boundVersion)}">${uiCopy("정확한 아티팩트 열기", "Open exact artifact")}${heroIcon("chevron-right")}</button>` : ""}
       </li>`;
     }).join("");
-    const unbound = analysisRunSucceededWithoutArtifact(run);
-    return `<article class="analysisRun" data-run-id="${escapeHtml(run.id)}" data-run-status="${escapeHtml(status)}" data-run-unbound="${Boolean(unbound)}">
+    const projectedRows = projectedArtifacts.map((artifact) => {
+      const artifactVersion = Number(artifact.currentVersion);
+      return `<li class="analysisRunOutput analysisRunProjectedArtifact" data-output-current="true">
+        <strong>${escapeHtml(artifact.title)}</strong>
+        <span>${escapeHtml(artifact.kind || "artifact")} · v${escapeHtml(artifactVersion)} · <code title="${escapeHtml(artifact.version?.contentSha256 || "")}">${escapeHtml(runResultShortHash(artifact.version?.contentSha256))}</code></span>
+        <em>${uiCopy("이 실행에서 생성되어 프로젝트 아티팩트로 연결된 정확한 결과입니다.", "This exact result was created by this run and linked as a project artifact.")}</em>
+        <button class="analysisRunArtifactOpen" type="button" data-action="open-result-artifact" data-result-artifact-id="${escapeHtml(artifact.id)}" data-result-artifact-version="${escapeHtml(artifactVersion)}">${uiCopy("정확한 아티팩트 열기", "Open exact artifact")}${heroIcon("chevron-right")}</button>
+      </li>`;
+    }).join("");
+    const manifestRows = outputs.filter((output) => !output?.artifactId).map((output) => `<li class="analysisRunManifestOutput" data-output-role="${escapeHtml(output?.role || "")}">
+      <strong>${escapeHtml(output?.role || uiCopy("저장 결과", "Stored result"))}</strong>
+      <span title="${escapeHtml(output?.mimeType || uiCopy("형식 미기록", "Format not recorded"))}">${escapeHtml(output?.mimeType || uiCopy("형식 미기록", "Format not recorded"))}</span>
+      <span>${escapeHtml(acquisitionBytes(output?.byteSize))}</span>
+      <code title="${escapeHtml(output?.sha256 || "")}">${escapeHtml(runResultShortHash(output?.sha256))}</code>
+    </li>`).join("");
+    const outputless = analysisRunSucceededWithoutOutput(run);
+    return `<article class="analysisRun" data-run-id="${escapeHtml(run.id)}" data-run-status="${escapeHtml(status)}" data-run-outputless="${Boolean(outputless)}">
       <header>
         <strong>${escapeHtml(`${run.toolId ?? "unknown"} ${run.toolVersion ?? ""}`.trim())}</strong>
-        <span>${escapeHtml(analysisRunStatusLabels[status] || status)} · ${escapeHtml(run.runtime ?? "unknown")}</span>
+        <span>${escapeHtml(analysisRunStatusLabels[status] ? uiCopy(...analysisRunStatusLabels[status]) : status)} · ${escapeHtml(run.runtime ?? "unknown")}</span>
         <code title="${escapeHtml(run.id)}">${escapeHtml(runResultShortHash(run.id))}</code>
       </header>
       <dl class="analysisRunFacts">
-        <div><dt>분석계획</dt><dd>${escapeHtml(planLine)}</dd></div>
-        <div><dt>입력</dt><dd>${escapeHtml(`${inputCount}개 · 매니페스트 ${runResultShortHash(run.inputManifestSha256)}`)}</dd></div>
-        <div><dt>출력 매니페스트</dt><dd>${escapeHtml(run.outputManifestSha256 ? runResultShortHash(run.outputManifestSha256) : "없음")}</dd></div>
-        <div><dt>시작 · 종료</dt><dd>${escapeHtml(`${run.startedAt ?? "—"} · ${run.finishedAt || "진행 중"}`)}</dd></div>
+        <div><dt>${uiCopy("분석계획", "Analysis plan")}</dt><dd>${escapeHtml(planLine)}</dd></div>
+        <div><dt>${uiCopy("입력", "Inputs")}</dt><dd>${escapeHtml(uiCopy(`${inputCount}개 · 매니페스트 ${runResultShortHash(run.inputManifestSha256)}`, `${inputCount} · manifest ${runResultShortHash(run.inputManifestSha256)}`))}</dd></div>
+        <div><dt>${uiCopy("출력 매니페스트", "Output manifest")}</dt><dd>${escapeHtml(run.outputManifestSha256 ? runResultShortHash(run.outputManifestSha256) : uiCopy("없음", "None"))}</dd></div>
+        <div><dt>${uiCopy("시작 · 종료", "Started · finished")}</dt><dd>${escapeHtml(`${run.startedAt ?? "—"} · ${run.finishedAt || uiCopy("진행 중", "In progress")}`)}</dd></div>
       </dl>
       ${run.summary ? `<p class="analysisRunSummary">${escapeHtml(run.summary)}</p>` : ""}
-      ${outputs.length
-        ? `<ul class="analysisRunOutputs">${outputRows}</ul>`
-        : `<p class="analysisRunNoOutput">이 실행에 묶인 아티팩트가 없습니다.</p>`}
-      ${unbound ? `<p class="analysisRunUnbound" role="alert"><strong>성공으로 기록됐지만 결과물을 남기지 않았습니다.</strong><span>정확한 실행 기록을 다시 읽어 확인했습니다. 묶인 아티팩트가 없으므로 이 실행은 그림·표·해석 어디에도 연결할 수 없고, 성공으로 세어서도 안 됩니다. 다시 실행해야 합니다.</span></p>` : ""}
+      ${boundOutputs.length || projectedArtifacts.length
+        ? `<ul class="analysisRunOutputs">${outputRows}${projectedRows}</ul>`
+        : ""}
+      ${manifestRows ? `<div class="analysisRunManifest"><strong>${uiCopy(`저장된 결과 매니페스트 ${outputs.length - boundOutputs.length}개`, `Stored result manifests: ${outputs.length - boundOutputs.length}`)}</strong><ul>${manifestRows}</ul><p>${projectedArtifacts.length ? uiCopy("원시 출력은 매니페스트로 보존되며, 이 실행에서 생성된 정확한 아티팩트는 위 링크에서 열 수 있습니다.", "Raw outputs remain preserved as manifests; open the exact artifact created by this run from the link above.") : uiCopy("실행 결과는 보존됐지만 과학 아티팩트로 투영되지는 않았습니다. 그림·표·원고에는 아직 연결할 수 없습니다.", "The run result is preserved, but it has not been projected into a scientific artifact. It cannot yet be linked to a figure, table, or manuscript.")}</p></div>` : ""}
+      ${outputless ? `<p class="analysisRunUnbound" role="alert"><strong>${uiCopy("성공으로 기록됐지만 출력이 없습니다.", "The run is marked as succeeded, but it has no output.")}</strong><span>${uiCopy("정확한 실행 기록을 다시 읽어 확인했습니다. 출력 매니페스트 항목이 하나도 없어 이 실행은 결과로 셀 수 없습니다. 출력이 필요한 실행이었다면 다시 실행해야 합니다.", "The exact run record was checked again. With no output-manifest entries, this run cannot count as a result. If output was expected, run it again.")}</span></p>` : ""}
     </article>`;
   }
 
   function analysisRunsView(project) {
-    if (state.loadingProject) return `<div class="loadingState" aria-live="polite">프로젝트 기록을 불러오는 중…</div>`;
+    if (state.loadingProject) return `<div class="loadingState" aria-live="polite">${uiCopy("프로젝트 기록을 불러오는 중…", "Loading project records…")}</div>`;
     if (state.projectError) return errorState();
     const loaded = state.analysisRunsProjectId === state.selectedId;
     const runs = loaded && Array.isArray(state.analysisRuns) ? state.analysisRuns : [];
     const artifactsById = new Map((Array.isArray(state.analysisRunArtifacts) ? state.analysisRunArtifacts : []).map((artifact) => [artifact.id, artifact]));
-    const unboundCount = runs.filter(analysisRunSucceededWithoutArtifact).length;
+    const outputlessCount = runs.filter(analysisRunSucceededWithoutOutput).length;
     const body = !loaded
-      ? `<div class="loadingState" aria-live="polite">실행 기록을 불러오는 중…</div>`
+      ? `<div class="loadingState" aria-live="polite">${uiCopy("실행 기록을 불러오는 중…", "Loading run records…")}</div>`
       : state.analysisRunsError
         ? ""
         : runs.length === 0
-          ? `<div class="emptyCopy pageEmpty"><strong>아직 실행된 분석이 없습니다.</strong><p>Plan &amp; Protocols 에서 분석계획을 고정한 뒤 연구 채팅에서 실행을 요청하면, 어떤 계획 아래 무엇이 돌았고 무엇을 만들었는지가 여기에 기록됩니다.</p></div>`
+          ? `<div class="emptyCopy pageEmpty"><strong>${uiCopy("아직 실행된 분석이 없습니다.", "No analyses have run yet.")}</strong><p>${uiCopy("분석계획 화면에서 계획을 고정한 뒤 연구 채팅에서 실행을 요청하면, 어떤 계획 아래 무엇이 돌았고 무엇을 만들었는지가 여기에 기록됩니다.", "Pin a plan in Analysis Plans, then request a run in Research Chat. This page will record which plan ran, what it used, and what it produced.")}</p></div>`
           : runs.map((run) => analysisRunRow(run, artifactsById)).join("");
     return `<section class="researchView analysisRunsView" data-research-destination="analysis-runs"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>분석 실행</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>${uiCopy("분석 실행", "Analysis runs")}</span></div>
       <h1>${escapeHtml(project.title)}</h1>
-      ${state.analysisRunsError ? `<div class="errorCopy" role="alert">${escapeHtml(`실행 기록을 불러오지 못했습니다. ${state.analysisRunsError}`)}</div>` : ""}
-      ${loaded && runs.length ? `<div class="analysisRunsSummary"><span>총 ${escapeHtml(runs.length)}회</span><span>성공 ${escapeHtml(runs.filter((run) => run.status === "succeeded").length)}</span><span>실패·취소 ${escapeHtml(runs.filter((run) => run.status === "failed" || run.status === "cancelled").length)}</span><span data-alert="${unboundCount > 0}">결과 없는 성공 ${escapeHtml(unboundCount)}</span></div>` : ""}
+      ${state.analysisRunsError ? `<div class="errorCopy" role="alert">${escapeHtml(uiCopy(`실행 기록을 불러오지 못했습니다. ${state.analysisRunsError}`, `Could not load run records. ${state.analysisRunsError}`))}</div>` : ""}
+      ${loaded && runs.length ? `<div class="analysisRunsSummary"><span>${uiCopy("전체", "Total")} <strong>${escapeHtml(runs.length)}</strong></span><span>${uiCopy("성공", "Succeeded")} <strong>${escapeHtml(runs.filter((run) => run.status === "succeeded").length)}</strong></span><span>${uiCopy("실패·취소", "Failed or cancelled")} <strong>${escapeHtml(runs.filter((run) => run.status === "failed" || run.status === "cancelled").length)}</strong></span><span data-alert="${outputlessCount > 0}">${uiCopy("출력 없는 성공", "Succeeded without output")} <strong>${escapeHtml(outputlessCount)}</strong></span></div>` : ""}
       ${body}
     </div></section>`;
   }
@@ -1897,10 +3186,11 @@ import { formatScienceCell } from "./format-cell.js";
   // ready result. Previews reuse the existing capture host, which calls science.artifacts.preview
   // and prints its own boundary when no capture exists -- never a stand-in image.
   const resultArtifactKindLabels = {
-    "chart.vega": "차트", "chart.numeric-3d": "3D 수치 표면", "literature.citation-network": "인용 네트워크",
-    "astronomy.sky-catalog": "천체 카탈로그", "genomics.variant-track": "변이 트랙", "phylogeny.radial": "계통수",
-    "protein.structure": "단백질 구조", "chemistry.document": "화학 구조", table: "표", image: "게재용 래스터",
+    "chart.vega": ["차트", "Chart"], "chart.numeric-3d": ["3D 수치 표면", "3D numeric surface"], "literature.citation-network": ["인용 네트워크", "Citation network"],
+    "astronomy.sky-catalog": ["천체 카탈로그", "Sky catalog"], "genomics.variant-track": ["변이 트랙", "Variant track"], "phylogeny.radial": ["계통수", "Phylogeny"],
+    "protein.structure": ["단백질 구조", "Protein structure"], "chemistry.document": ["화학 구조", "Chemical structure"], table: ["표", "Table"], image: ["게재용 래스터", "Publication raster"],
   };
+  const resultArtifactKindLabel = (kind) => resultArtifactKindLabels[kind] ? uiCopy(...resultArtifactKindLabels[kind]) : kind;
   const resultReceiptWithStatus = (receipts, status) => (Array.isArray(receipts) ? receipts : []).find((receipt) => receipt?.status === status) || null;
   const resultIsPublicationReady = (artifactId) => Boolean(resultReceiptWithStatus(state.resultValidations.get(artifactId)?.receipts, "verified"));
 
@@ -1945,12 +3235,16 @@ import { formatScienceCell } from "./format-cell.js";
     const version = Number(artifact.currentVersion);
     const contentSha256 = artifact.version?.contentSha256 || "";
     const warningLine = (receipt) => [...(Array.isArray(receipt?.warnings) ? receipt.warnings : [])].join(" · ");
+    const verifiedProvenance = verified ? uiCopy(
+      `${verified.validatorId} ${verified.validatorVersion} · 정책 ${verified.policyId} ${verified.policyVersion} · 캡처 ${runResultShortHash(verified.visualAssetSha256)}`,
+      `${verified.validatorId} ${verified.validatorVersion} · policy ${verified.policyId} ${verified.policyVersion} · capture ${runResultShortHash(verified.visualAssetSha256)}`,
+    ) : "";
     const validation = !lookup
       ? `<p class="resultArtifactValidation" data-result-validation="unchecked"><strong>검증 상태를 확인하지 않았습니다.</strong><span>${escapeHtml(`한 번에 조회하는 상한 ${RESULTS_VALIDATION_LOOKUP_LIMIT}개를 넘은 아티팩트입니다. 검증이 없다는 뜻이 아니라 묻지 않았다는 뜻입니다.`)}</span></p>`
       : lookup.error
         ? `<p class="resultArtifactValidation" data-result-validation="error" role="alert"><strong>검증 기록을 읽지 못했습니다.</strong><span>${escapeHtml(lookup.error)}</span></p>`
         : verified
-          ? `<p class="resultArtifactValidation" data-result-validation="verified"><strong>게재 검증됨 — 원고에 연결할 수 있습니다.</strong><span>${escapeHtml(`${verified.validatorId} ${verified.validatorVersion} · 정책 ${verified.policyId} ${verified.policyVersion} · 캡처 ${runResultShortHash(verified.visualAssetSha256)}`)}</span><code title="${escapeHtml(verified.receiptSha256)}">${escapeHtml(runResultShortHash(verified.receiptSha256))}</code></p>`
+          ? `<p class="resultArtifactValidation" data-result-validation="verified"><strong>게재 검증됨 — 원고에 연결할 수 있습니다.</strong><span>${escapeHtml(verifiedProvenance)}</span><code title="${escapeHtml(verified.receiptSha256)}">${escapeHtml(runResultShortHash(verified.receiptSha256))}</code></p>`
           : rejected
             ? `<p class="resultArtifactValidation" data-result-validation="rejected" role="alert"><strong>검증이 거부됐습니다 — 원고에 연결할 수 없습니다.</strong><span>${escapeHtml(warningLine(rejected) || "거부 사유가 영수증에 기록되지 않았습니다.")}</span></p>`
             : warned
@@ -1959,15 +3253,17 @@ import { formatScienceCell } from "./format-cell.js";
     const preview = verified
       ? `<figure class="resultArtifactPreview" data-inline-capture-artifact="${escapeHtml(artifact.id)}" data-inline-capture-version="${escapeHtml(version)}" aria-label="${escapeHtml(`${artifact.title} v${version} 검증 캡처`)}">검증 캡처를 불러오는 중…</figure>`
       : `<p class="resultArtifactNoPreview">검증된 캡처가 없어 미리보기를 만들지 않았습니다.</p>`;
+    const openAction = `<div class="resultArtifactActions"><button class="${verified ? "secondaryButton" : "primaryButton"}" type="button" data-action="open-result-artifact" data-result-artifact-id="${escapeHtml(artifact.id)}" data-result-artifact-version="${escapeHtml(version)}">${verified ? uiCopy("검증된 아티팩트 열기", "Open verified artifact") : uiCopy("아티팩트 열고 시각 검증 실행", "Open artifact and run visual verification")}${heroIcon("chevron-right")}</button>${verified ? "" : `<span>${uiCopy("실제 데이터 렌더러를 열어 캡처와 검증 영수증 생성을 시도합니다. 영수증이 남기 전에는 게재 검증됨으로 표시하지 않습니다.", "Opens the real-data renderer and attempts capture-based validation. It remains unverified until a receipt is recorded.")}</span>`}</div>`;
     return `<article class="resultArtifact" data-artifact-id="${escapeHtml(artifact.id)}" data-artifact-kind="${escapeHtml(artifact.kind)}" data-artifact-version="${escapeHtml(version)}" data-result-ready="${Boolean(verified)}">
       <header>
         <strong>${escapeHtml(artifact.title)}</strong>
-        <span>${escapeHtml(`${resultArtifactKindLabels[artifact.kind] || artifact.kind}${state.resultFigureIds.has(artifact.id) ? " · 통계 Figure" : ""}`)} · v${escapeHtml(version)}</span>
+        <span>${escapeHtml(`${resultArtifactKindLabel(artifact.kind)}${state.resultFigureIds.has(artifact.id) ? uiCopy(" · 통계 Figure", " · Statistical figure") : ""}`)} · v${escapeHtml(version)}</span>
         <code title="${escapeHtml(contentSha256)}">${escapeHtml(runResultShortHash(contentSha256))}</code>
       </header>
       ${artifact.status === "failed" ? `<p class="resultArtifactFailed" role="alert">이 아티팩트는 failed 상태로 저장돼 있습니다. 내용을 신뢰할 수 없습니다.</p>` : ""}
       ${validation}
       ${preview}
+      ${openAction}
     </article>`;
   }
 
@@ -1985,7 +3281,7 @@ import { formatScienceCell } from "./format-cell.js";
           ? `<div class="emptyCopy pageEmpty"><strong>아직 논문에 넣을 그림·표가 없습니다.</strong><p>Analysis &amp; Runs 에서 분석을 실행하고 그 결과를 Figure Lab 에 저장하면, 각 그림·표가 게재 검증을 통과했는지와 함께 여기에 모입니다.</p></div>`
           : artifacts.map((artifact) => resultArtifactRow(artifact)).join("");
     return `<section class="researchView resultsView" data-research-destination="results"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · <span>결과와 그림</span></div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>결과와 그림</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       ${state.resultsError ? `<div class="errorCopy" role="alert">${escapeHtml(`결과 목록을 불러오지 못했습니다. ${state.resultsError}`)}</div>` : ""}
       ${loaded && artifacts.length ? `<div class="resultsSummary"><span>총 ${escapeHtml(artifacts.length)}개</span><span>게재 검증됨 ${escapeHtml(readyCount)}</span><span data-alert="${artifacts.length - readyCount > 0}">원고 연결 불가 ${escapeHtml(artifacts.length - readyCount)}</span></div>` : ""}
@@ -2031,6 +3327,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (state.currentDestination === "scope") return scopeView(project);
     if (state.currentDestination === "logbook") return logbookView(project);
     if (state.currentDestination === "submission-archive") return submissionArchiveView(project);
+    if (state.currentDestination === "manuscript") return manuscriptLandingView(project);
     if (state.currentDestination === "interpretation") return evidenceGraphView(project);
     if (state.currentDestination === "plan-protocols") return analysisPlanView(project);
     if (state.currentDestination === "hypotheses") return hypothesesView(project);
@@ -2045,7 +3342,7 @@ import { formatScienceCell } from "./format-cell.js";
       : "";
     const destination = projectDestinationById(state.currentDestination);
     return `<section class="researchView" data-empty="${assistantCount === 0 && !messages ? "true" : "false"}" data-research-destination="${escapeHtml(destination.id)}"><div class="answerColumn">
-      <div class="researchKicker"><span>${escapeHtml(domainLabels[project.domain] || project.domain)}</span> · ${escapeHtml(destination.label)} · ${escapeHtml(lifecycleLabel())}</div>
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · ${escapeHtml(destination.label)} · ${escapeHtml(lifecycleLabel())}</div>
       <h1>${escapeHtml(project.title)}</h1>
       ${contractNotice}
       ${runFailureNotice()}
@@ -2060,14 +3357,29 @@ import { formatScienceCell } from "./format-cell.js";
         if (String(state.composerError || "").trim()) {
           return `<strong>아직 결과가 없습니다.</strong><p>이 실행은 시작되지 않았습니다. 위의 안내에 이유가 적혀 있습니다.</p>`;
         }
+        if (state.activeTurn?.status === "cancelled") {
+          return `<strong>${uiCopy("이번 실행에서 완성된 연구 응답은 없습니다.", "This run produced no completed research response.")}</strong>${state.researchContract?.status === "draft" ? `<p>${uiCopy("연구 계약은 아직 승인 대기 중입니다. 위의 초안에서 목표와 중단 기준을 확인하세요.", "The research contract still awaits approval. Review its objective and stop criteria in the draft above.")}</p>` : ""}`;
+        }
         if (state.researchContract?.status === "draft") {
-          return `<strong><span class="stateGlyph" data-state="awaiting-human" aria-hidden="true"></span>이 연구는 아직 시작되지 않았습니다.</strong><p>연구 계약을 승인하면 시작됩니다. 위의 초안에서 목표와 중단 기준을 확인해 주세요.</p>`;
+          return `<strong><span class="stateGlyph" data-state="awaiting-human" aria-hidden="true"></span>이 연구는 아직 시작되지 않았습니다.</strong><p>${uiCopy("위의 초안에서 목표와 중단 기준을 확인하고 승인하세요. 이후 연구 채팅에 다음 작업을 요청할 수 있습니다.", "Review and approve the objective and stop criteria in the draft above. Then request the next step in the research chat.")}</p>`;
         }
         if (state.activeTurn && ["queued", "running", "cancelling"].includes(state.activeTurn.status)) {
           return `<strong><span class="stateGlyph" data-state="progress" aria-hidden="true"></span>연구 에이전트가 실행 중입니다.</strong><p>결과가 나오는 대로 답변 블록, 주장, 정확한 출처 인용이 이 기록에 추가됩니다.</p>`;
         }
         return `<strong>아직 생성된 연구 응답이 없습니다.</strong><p>첫 질문은 저장되었습니다. 연구 계약 승인과 Agent runtime 실행이 연결되면 답변 블록, 주장, 정확한 출처 인용이 이 기록에 추가됩니다.</p>`;
       })()}</div><div class="principledRefusal"><p>고정 답변이나 가짜 인용은 표시하지 않습니다.</p></div>` : ""}
+    </div></section>`;
+  }
+
+  function manuscriptLandingView(project) {
+    return `<section class="researchView manuscriptLandingView" data-research-destination="manuscript"><div class="answerColumn">
+      <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>${uiCopy("원고", "Manuscript")}</span></div>
+      <h1>${escapeHtml(project.title)}</h1>
+      <div class="emptyCopy pageEmpty manuscriptLandingEmpty">
+        <strong>${uiCopy("아직 작성된 원고가 없습니다.", "No manuscript has been created yet.")}</strong>
+        <p>${uiCopy("연구 결과와 검증된 그림·표가 준비되면 새 원고를 시작할 수 있습니다. 이 화면을 여는 것만으로 원고를 만들거나 연구 대화를 복사하지 않습니다.", "Start a manuscript when the research results and verified figures are ready. Opening this page does not create a draft or copy the research conversation.")}</p>
+        <button class="primaryButton" data-action="new-manuscript">${uiCopy("새 원고 시작", "Start a new manuscript")}</button>
+      </div>
     </div></section>`;
   }
 
@@ -2081,7 +3393,17 @@ import { formatScienceCell } from "./format-cell.js";
    */
   function runFailureNotice() {
     const raw = String(state.composerError || "").trim();
+    if (!raw && state.activeTurn?.status === "cancelled") {
+      const retryFirst = state.messages.length === 1 && state.messages[0].role === "user";
+      const nextAction = retryFirst
+        ? uiCopy("화살표 버튼으로 저장된 첫 질문을 다시 실행할 수 있습니다.", "Use the arrow button to run your saved first question again.")
+        : uiCopy("후속 질문을 보내면 새 실행을 시작할 수 있습니다.", "Send a follow-up to start a new run.");
+      return `<div class="failClosed" data-run-state="cancelled" role="status"><strong>${uiCopy("연구 실행이 중단되었습니다", "Research run stopped")}</strong><p>${nextAction}</p></div>`;
+    }
     if (!raw) return "";
+    if (raw === "no-runtime") {
+      return `<div class="failClosed" role="status"><strong>${uiCopy("연결된 AI 런타임이 없습니다", "No AI runtime is connected")}</strong><p>${uiCopy("질문은 저장됐지만 연구는 실행되지 않았습니다. Agentlas Work에서 AI 런타임을 연결한 뒤 이 프로젝트로 돌아와 다시 요청하세요.", "Your question is saved, but the research did not run. Connect an AI runtime in Agentlas Work, then return to this project and try again.")}</p><button class="secondaryButton" data-action="back-to-work">${uiCopy("Agentlas Work로 이동", "Open Agentlas Work")}</button></div>`;
+    }
     const mismatch = /science-research-director-package-version-mismatch:installed=([^\s:]+):expected=([^\s:]+)/.exec(raw);
     if (mismatch) {
       return `<div class="failClosed" role="status"><strong>${heroIcon("book")}연구를 시작하지 못했습니다</strong><p>이 연구는 연구 총괄 <code>${escapeHtml(mismatch[2])}</code>을 요구하는데 이 컴퓨터에 설치된 판은 <code>${escapeHtml(mismatch[1])}</code>입니다. 판이 맞지 않으면 같은 입력에서 같은 결과가 나온다고 보장할 수 없어 실행을 시작하지 않았습니다.</p></div>`;
@@ -2188,12 +3510,23 @@ import { formatScienceCell } from "./format-cell.js";
     if (!state.selectedId || !state.selectedManuscriptId) return;
     const projectId = state.selectedId;
     const manuscriptId = state.selectedManuscriptId;
+    const requestEpoch = ++manuscriptEditorRequestEpoch;
+    const isCurrent = () => requestEpoch === manuscriptEditorRequestEpoch
+      && state.selectedId === projectId
+      && state.selectedManuscriptId === manuscriptId;
     const snapshot = await loadManuscriptEditorWorkspace(projectId, manuscriptId);
-    if (state.selectedId !== projectId || state.selectedManuscriptId !== manuscriptId) {
+    if (!isCurrent()) {
       disposeManuscriptArtifactPreviews(snapshot.artifactPreviewUrls);
       return;
     }
     applyManuscriptEditorWorkspace(snapshot);
+    try {
+      await refreshProjectLibrarySummaries();
+    } catch {
+      if (!isCurrent()) return;
+      state.projectLibrarySummaryState = "unavailable";
+    }
+    if (!isCurrent()) return;
     state.manuscriptNotice = notice;
     state.manuscriptInsertError = "";
     disposeManuscriptInsertion();
@@ -2202,19 +3535,35 @@ import { formatScienceCell } from "./format-cell.js";
 
   async function openManuscript(manuscriptId) {
     if (!state.selectedId || !manuscriptId) return;
+    const projectId = state.selectedId;
+    const requestEpoch = ++manuscriptEditorRequestEpoch;
+    manuscriptSaveRequestEpoch += 1;
+    state.manuscriptSaving = false;
+    const isCurrentProject = () => requestEpoch === manuscriptEditorRequestEpoch && state.selectedId === projectId;
+    const isCurrent = () => isCurrentProject() && state.selectedManuscriptId === manuscriptId;
     rememberScroll();
     try {
       const [manuscript, claimLedger, editorWorkspace] = await Promise.all([
-        science.manuscripts.get(state.selectedId, manuscriptId),
-        science.claimLedgers.getForManuscript(state.selectedId, manuscriptId),
-        loadManuscriptEditorWorkspace(state.selectedId, manuscriptId),
+        science.manuscripts.get(projectId, manuscriptId),
+        science.claimLedgers.getForManuscript(projectId, manuscriptId),
+        loadManuscriptEditorWorkspace(projectId, manuscriptId),
       ]);
-      if (!manuscript || manuscript.projectId !== state.selectedId) throw new Error("science-manuscript-not-found");
+      if (!isCurrentProject()) return;
+      if (!manuscript || manuscript.projectId !== projectId) throw new Error("science-manuscript-not-found");
       ensureManuscriptWorkspaceTab(manuscript);
       state.selectedManuscriptId = manuscript.id;
       applyManuscriptEditorWorkspace(editorWorkspace);
       state.claimLedger = claimLedger;
-      restoreSubmissionExportState(manuscript, claimLedger, await science.submissions.list(state.selectedId, manuscript.id));
+      const submissionExports = await science.submissions.list(projectId, manuscript.id);
+      if (!isCurrent()) return;
+      restoreSubmissionExportState(manuscript, claimLedger, submissionExports);
+      try {
+        await refreshProjectLibrarySummaries();
+      } catch {
+        if (!isCurrent()) return;
+        state.projectLibrarySummaryState = "unavailable";
+      }
+      if (!isCurrent()) return;
       state.journalValidation = null;
       state.manuscriptSaveError = "";
       state.manuscriptSelectionError = "";
@@ -2227,6 +3576,7 @@ import { formatScienceCell } from "./format-cell.js";
       render();
       void queueWorkspacePersistence();
     } catch (error) {
+      if (!isCurrentProject()) return;
       state.projectError = error instanceof Error ? error.message : String(error);
       render();
     }
@@ -2322,7 +3672,7 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
-  function manuscriptPreview(markdown) {
+  function manuscriptPreview(markdown, inline = inlineManuscriptMarkdown) {
     const rows = String(markdown || "").split(/\r?\n/);
     const output = [];
     let paragraph = [];
@@ -2331,12 +3681,12 @@ import { formatScienceCell } from "./format-cell.js";
     let inCode = false;
     const flushParagraph = () => {
       if (!paragraph.length) return;
-      output.push(`<p>${inlineManuscriptMarkdown(paragraph.join(" "))}</p>`);
+      output.push(`<p>${inline(paragraph.join(" "))}</p>`);
       paragraph = [];
     };
     const flushList = () => {
       if (!list.length) return;
-      output.push(`<ul>${list.map((item) => `<li>${inlineManuscriptMarkdown(item)}</li>`).join("")}</ul>`);
+      output.push(`<ul>${list.map((item) => `<li>${inline(item)}</li>`).join("")}</ul>`);
       list = [];
     };
     const flushCode = () => {
@@ -2358,7 +3708,7 @@ import { formatScienceCell } from "./format-cell.js";
         flushParagraph();
         flushList();
         const level = heading[1].length;
-        output.push(`<h${level}>${inlineManuscriptMarkdown(heading[2])}</h${level}>`);
+        output.push(`<h${level}>${inline(heading[2])}</h${level}>`);
         continue;
       }
       const item = /^[-*]\s+(.+)$/.exec(row);
@@ -2375,7 +3725,7 @@ import { formatScienceCell } from "./format-cell.js";
       if (row.trim().startsWith("> ")) {
         flushParagraph();
         flushList();
-        output.push(`<blockquote>${inlineManuscriptMarkdown(row.trim().slice(2))}</blockquote>`);
+        output.push(`<blockquote>${inline(row.trim().slice(2))}</blockquote>`);
         continue;
       }
       paragraph.push(row.trim());
@@ -2611,13 +3961,103 @@ import { formatScienceCell } from "./format-cell.js";
     return state.manuscriptEditorModel?.manuscript?.version?.bindings?.find((binding) => binding.locator === locator && binding.target?.kind === "artifact") || null;
   }
 
-  function manuscriptTablePreviewMarkup(payload, { compact = false } = {}) {
-    if (payload?.schema !== "agentlas.science-table/v1" || !Array.isArray(payload.columns) || !Array.isArray(payload.rows)) {
-      return `<div class="manuscriptTableUnavailable">Validated table data is unavailable.</div>`;
+  // TABLE_PAYLOAD_ADAPTER_START
+  function actualTablePayload(versionOrPayload) {
+    const version = versionOrPayload?.payload ? versionOrPayload : null;
+    const payload = version ? version.payload : versionOrPayload;
+    const failure = (cause) => ({ payload: null, cause, sourceShape: null, contentSha256: "" });
+    if (!payload || payload.schema !== "agentlas.science-table/v1") return failure("science-data-table-schema-invalid");
+    if (!Array.isArray(payload.columns) || !payload.columns.length || !Array.isArray(payload.rows)) return failure("science-data-table-shape-invalid");
+
+    const domainShape = payload.columns.some((column) => column?.id !== undefined) || payload.rows.some(Array.isArray);
+    if (domainShape) {
+      if (!payload.rows.length || payload.columns.length > 64 || payload.rows.length > 1_000 || payload.columns.length * payload.rows.length > 20_000) {
+        return failure("science-data-table-domain-limit-invalid");
+      }
+      const columns = [];
+      const ids = new Set();
+      for (const declared of payload.columns) {
+        const name = typeof declared?.id === "string" ? declared.id.trim() : "";
+        const label = typeof declared?.label === "string" ? declared.label.trim() : name;
+        const logicalType = String(declared?.type ?? "string").toLowerCase();
+        const unit = declared?.unit === null || declared?.unit === undefined || declared?.unit === "" ? null
+          : typeof declared.unit === "string" ? declared.unit.trim() : null;
+        const key = name.toLocaleLowerCase("en-US");
+        if (!name || !label || /[\u0000-\u001f\u007f]/u.test(name + label) || ids.has(key)
+          || !["integer", "number", "boolean", "string"].includes(logicalType)
+          || (declared?.unit !== null && declared?.unit !== undefined && declared?.unit !== "" && !unit)) {
+          return failure("science-data-table-domain-column-invalid");
+        }
+        ids.add(key);
+        columns.push({ name, label, logicalType, nullable: false, unit });
+      }
+      const rows = [];
+      let nullCount = 0;
+      let formulaLikeCellCount = 0;
+      for (const sourceRow of payload.rows) {
+        if (!Array.isArray(sourceRow) || sourceRow.length !== columns.length) return failure("science-data-table-domain-row-invalid");
+        const row = {};
+        for (let index = 0; index < columns.length; index += 1) {
+          const column = columns[index];
+          const value = sourceRow[index];
+          if (value === null || value === undefined) {
+            column.nullable = true;
+            row[column.name] = null;
+            nullCount += 1;
+          } else if ((column.logicalType === "integer" && (typeof value !== "number" || !Number.isSafeInteger(value)))
+            || (column.logicalType === "number" && (typeof value !== "number" || !Number.isFinite(value)))
+            || (column.logicalType === "boolean" && typeof value !== "boolean")
+            || (column.logicalType === "string" && (typeof value !== "string" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)))) {
+            return failure("science-data-table-domain-cell-invalid");
+          } else {
+            row[column.name] = value;
+            if (typeof value === "string" && /^[\s]*[=+@-]/u.test(value)) formulaLikeCellCount += 1;
+          }
+        }
+        rows.push(row);
+      }
+      return {
+        payload: {
+          schema: payload.schema,
+          title: typeof payload.title === "string" ? payload.title : "",
+          columns,
+          rows,
+          notes: Array.isArray(payload.notes) ? payload.notes.filter((note) => typeof note === "string") : [],
+          profile: { rowCount: rows.length, columnCount: columns.length, nullCount, formulaLikeCellCount },
+          receipts: null,
+        },
+        cause: null,
+        sourceShape: "domain-publication-table",
+        contentSha256: typeof version?.contentSha256 === "string" ? version.contentSha256 : "",
+      };
     }
+
+    if (!payload.profile || payload.profile.rowCount !== payload.rows.length || payload.profile.columnCount !== payload.columns.length
+      || !Number.isSafeInteger(payload.profile.nullCount) || payload.profile.nullCount < 0
+      || !Number.isSafeInteger(payload.profile.formulaLikeCellCount) || payload.profile.formulaLikeCellCount < 0
+      || payload.columns.some((column) => !column || typeof column.name !== "string" || !column.name
+        || !["integer", "number", "boolean", "string"].includes(column.logicalType))
+      || payload.rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+      return failure("science-data-table-dataset-shape-invalid");
+    }
+    return {
+      payload,
+      cause: null,
+      sourceShape: "dataset-table",
+      contentSha256: typeof version?.contentSha256 === "string" ? version.contentSha256 : "",
+    };
+  }
+  // TABLE_PAYLOAD_ADAPTER_END
+
+  function manuscriptTablePreviewMarkup(payload, { compact = false } = {}) {
+    const actual = actualTablePayload(payload);
+    if (!actual.payload) {
+      return `<div class="manuscriptTableUnavailable" data-table-payload-cause="${escapeHtml(actual.cause)}">Validated table data is unavailable.</div>`;
+    }
+    payload = actual.payload;
     const columns = payload.columns.slice(0, compact ? 4 : 6);
     const rows = payload.rows.slice(0, compact ? 3 : 5);
-    const header = columns.map((column) => `<th>${escapeHtml(column.name || column.label || column.key || "Column")}</th>`).join("");
+    const header = columns.map((column) => `<th>${escapeHtml(column.label || column.name || column.key || "Column")}</th>`).join("");
     const body = rows.map((row) => `<tr>${columns.map((column) => {
       const key = column.name || column.key;
       const value = row?.[key];
@@ -2781,50 +4221,113 @@ import { formatScienceCell } from "./format-cell.js";
     state.manuscriptInsertion = null;
   }
 
-  function manuscriptArtifactTableMarkup(node) {
+  /**
+   * Table and figure numbers, in document order.
+   *
+   * A manuscript refers to "Table 2" in its text, so the float has to carry the same number the
+   * prose does, and the number depends on everything before it. Tables and figures are counted
+   * separately, the way every journal does it.
+   */
+  /**
+   * The one control a block shows, and only while the pointer is on it.
+   *
+   * The reading view has to look like a paper, so a block carries no border, no badge and no
+   * toolbar at rest -- it is indistinguishable from the prose around it. On hover the block lifts
+   * slightly and this button appears in its top-right corner. Provenance that used to sit in the
+   * printed flow (the source artifact and its exact version) moves into the button's title, where
+   * the person editing can still reach it and the reader never sees it.
+   */
+  function manuscriptBlockAffordanceMarkup(node) {
+    if (state.manuscriptView === "preview") return "";
+    const provenance = manuscriptBlockProvenanceText(node);
+    return `<div class="manuscriptBlockAffordance" contenteditable="false" aria-hidden="false">
+      <button type="button" class="manuscriptBlockAction" data-action="open-manuscript-block-menu"
+        data-node-id="${escapeHtml(node.id)}"
+        title="${escapeHtml(provenance || "블록 동작")}"
+        aria-label="블록 동작">${heroIcon("ellipsis")}</button>
+    </div>`;
+  }
+
+  /** Source artifact and exact version for a bound float, or null for ordinary prose. */
+  function manuscriptBlockProvenanceText(node) {
+    if (!node || !node.locator) return null;
+    const binding = manuscriptBindingForLocator(node.locator);
+    const context = binding ? state.manuscriptArtifactContexts.get(binding.target.artifactId) : null;
+    if (!context) return null;
+    const version = context.selectedVersion;
+    return version
+      ? `${context.artifact?.title || node.locator} · exact v${version.version}`
+      : `${context.artifact?.title || node.locator} · binding unavailable`;
+  }
+
+  function manuscriptFloatOrdinals(nodes) {
+    const ordinals = new Map();
+    let tables = 0;
+    let figures = 0;
+    for (const node of nodes || []) {
+      if (node.kind === "table") ordinals.set(node.id, { label: "Table", number: (tables += 1) });
+      else if (node.kind === "figure") ordinals.set(node.id, { label: "Figure", number: (figures += 1) });
+    }
+    return ordinals;
+  }
+
+  /**
+   * A table as a journal prints one: numbered caption above the rule, then the table. No card, no
+   * header bar, no badge.
+   *
+   * The provenance the header bar used to show (source artifact and exact version) still matters,
+   * but it is apparatus, not manuscript: it belongs to the person editing, not to the page a
+   * reviewer reads. It moves to the block's hover affordance, so the reading view is the paper.
+   */
+  function manuscriptArtifactTableMarkup(node, ordinal) {
     const binding = manuscriptBindingForLocator(node.locator);
     const context = binding ? state.manuscriptArtifactContexts.get(binding.target.artifactId) : null;
     const version = context?.selectedVersion;
+    const caption = node.caption || context?.artifact?.version?.semantic?.summary || "Validated project table";
     return `<figure class="manuscriptEmbeddedTable" data-manuscript-artifact-table data-locator="${escapeHtml(node.locator)}">
-      <div class="manuscriptEmbeddedTableHeader"><span>Table</span><strong>${escapeHtml(context?.artifact?.title || node.locator)}</strong>${version ? `<em>validated · exact v${escapeHtml(version.version)}</em>` : `<em>binding unavailable</em>`}</div>
+      <figcaption class="manuscriptFloatCaption manuscriptFloatCaptionTop">${manuscriptFloatLabelMarkup(ordinal, "Table")}${escapeHtml(caption)}</figcaption>
       ${manuscriptTablePreviewMarkup(paleontologyPublicationTablePayload(version) || statisticsAnalysisTablePublicationPayload(version, node.locator) || version?.payload)}
-      <figcaption>${escapeHtml(node.caption || context?.artifact?.version?.semantic?.summary || "Validated project table")}</figcaption>
     </figure>`;
   }
 
-  function manuscriptArtifactFigureMarkup(node) {
+  /** `Table 2.` in the caption's own run, bold, exactly as a journal sets it. */
+  function manuscriptFloatLabelMarkup(ordinal, fallbackLabel) {
+    const label = ordinal?.label || fallbackLabel;
+    return `<strong>${escapeHtml(label)}${ordinal ? ` ${escapeHtml(ordinal.number)}` : ""}.</strong> `;
+  }
+
+  /** A figure as a journal prints one: the image, then a numbered caption below it. */
+  function manuscriptArtifactFigureMarkup(node, ordinal) {
     const binding = manuscriptBindingForLocator(node.locator);
     const context = binding ? state.manuscriptArtifactContexts.get(binding.target.artifactId) : null;
-    const version = context?.selectedVersion;
     const previewUrl = binding ? state.manuscriptArtifactPreviewUrls.get(binding.target.artifactId) : null;
-    const caption = node.caption || version?.semantic?.summary || context?.artifact?.title || node.locator;
+    const caption = node.caption || context?.selectedVersion?.semantic?.summary || context?.artifact?.title || node.locator;
     return `<figure class="manuscriptEmbeddedFigure" data-manuscript-artifact-figure data-locator="${escapeHtml(node.locator)}">
       ${previewUrl ? `<img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(context?.artifact?.title || node.locator)}">` : `<div class="manuscriptEmbeddedFigureMissing">${heroIcon("photo")}<span>Verified figure preview unavailable</span></div>`}
-      <figcaption><strong>Figure.</strong> ${escapeHtml(caption)}</figcaption>
-      <div class="manuscriptEmbeddedFigureMeta"><span>${escapeHtml(context?.artifact?.title || node.locator)}</span>${version ? `<em>publication verified · exact v${escapeHtml(version.version)}</em>` : `<em>binding unavailable</em>`}</div>
+      <figcaption class="manuscriptFloatCaption">${manuscriptFloatLabelMarkup(ordinal, "Figure")}${escapeHtml(caption)}</figcaption>
     </figure>`;
   }
 
-  function manuscriptNodeMarkup(node) {
+  function manuscriptNodeMarkup(node, ordinal) {
     const identity = `data-manuscript-node-id="${escapeHtml(node.id)}" data-node-kind="${escapeHtml(node.kind)}" data-node-revision="${escapeHtml(node.revision)}" data-node-content-sha256="${escapeHtml(node.contentSha256)}"`;
     if (node.kind === "heading") {
       const level = Math.max(2, Math.min(4, Number(node.level) + 1));
-      return `<section class="manuscriptBlock manuscriptHeadingBlock" ${identity}><h${level}>${escapeHtml(node.text)}</h${level}></section>`;
+      return `<section class="manuscriptBlock manuscriptHeadingBlock" ${identity}><h${level}>${escapeHtml(node.text)}</h${level}>${manuscriptBlockAffordanceMarkup(node)}</section>`;
     }
-    if (node.kind === "paragraph") return `<section class="manuscriptBlock manuscriptParagraphBlock" ${identity}><p>${escapeHtml(node.markdown)}</p></section>`;
-    if (node.kind === "equation") return `<section class="manuscriptBlock manuscriptEquationBlock" ${identity}><pre>${escapeHtml(node.tex)}</pre>${node.label ? `<span>${escapeHtml(node.label)}</span>` : ""}</section>`;
-    if (node.kind === "figure") return `<section class="manuscriptBlock manuscriptFigureBlock" ${identity}>${manuscriptArtifactFigureMarkup(node)}</section>`;
-    if (node.kind === "table" && node.mode === "artifact") return `<section class="manuscriptBlock manuscriptTableBlock" ${identity}>${manuscriptArtifactTableMarkup(node)}</section>`;
+    if (node.kind === "paragraph") return `<section class="manuscriptBlock manuscriptParagraphBlock" ${identity}><p>${escapeHtml(node.markdown)}</p>${manuscriptBlockAffordanceMarkup(node)}</section>`;
+    if (node.kind === "equation") return `<section class="manuscriptBlock manuscriptEquationBlock" ${identity}><pre>${escapeHtml(node.tex)}</pre>${node.label ? `<span>${escapeHtml(node.label)}</span>` : ""}${manuscriptBlockAffordanceMarkup(node)}</section>`;
+    if (node.kind === "figure") return `<section class="manuscriptBlock manuscriptFigureBlock" ${identity}>${manuscriptArtifactFigureMarkup(node, ordinal)}${manuscriptBlockAffordanceMarkup(node)}</section>`;
+    if (node.kind === "table" && node.mode === "artifact") return `<section class="manuscriptBlock manuscriptTableBlock" ${identity}>${manuscriptArtifactTableMarkup(node, ordinal)}${manuscriptBlockAffordanceMarkup(node)}</section>`;
     if (node.kind === "table") {
       const payload = { schema: "agentlas.science-table/v1", columns: node.header.map((name) => ({ name })), rows: node.rows.map((row) => Object.fromEntries(node.header.map((name, index) => [name, row[index]]))), profile: { rowCount: node.rows.length, columnCount: node.header.length } };
-      return `<section class="manuscriptBlock manuscriptTableBlock" ${identity}><figure class="manuscriptEmbeddedTable">${manuscriptTablePreviewMarkup(payload)}<figcaption>${escapeHtml(node.caption || "Inline table")}</figcaption></figure></section>`;
+      return `<section class="manuscriptBlock manuscriptTableBlock" ${identity}><figure class="manuscriptEmbeddedTable"><figcaption class="manuscriptFloatCaption manuscriptFloatCaptionTop">${manuscriptFloatLabelMarkup(ordinal, "Table")}${escapeHtml(node.caption || "Inline table")}</figcaption>${manuscriptTablePreviewMarkup(payload)}</figure>${manuscriptBlockAffordanceMarkup(node)}</section>`;
     }
     if (node.kind === "list") {
       const tag = node.ordered ? "ol" : "ul";
-      return `<section class="manuscriptBlock manuscriptListBlock" ${identity}><${tag}>${node.items.map((item) => `<li>${escapeHtml(item.nodes.map(manuscriptNodeSelectionText).join(" "))}</li>`).join("")}</${tag}></section>`;
+      return `<section class="manuscriptBlock manuscriptListBlock" ${identity}><${tag}>${node.items.map((item) => `<li>${escapeHtml(item.nodes.map(manuscriptNodeSelectionText).join(" "))}</li>`).join("")}</${tag}>${manuscriptBlockAffordanceMarkup(node)}</section>`;
     }
-    if (node.kind === "blockquote") return `<section class="manuscriptBlock manuscriptQuoteBlock" ${identity}><blockquote>${escapeHtml(manuscriptNodeSelectionText(node))}</blockquote></section>`;
-    if (node.kind === "code") return `<section class="manuscriptBlock manuscriptCodeBlock" ${identity}><pre><code>${escapeHtml(node.text)}</code></pre></section>`;
+    if (node.kind === "blockquote") return `<section class="manuscriptBlock manuscriptQuoteBlock" ${identity}><blockquote>${escapeHtml(manuscriptNodeSelectionText(node))}</blockquote>${manuscriptBlockAffordanceMarkup(node)}</section>`;
+    if (node.kind === "code") return `<section class="manuscriptBlock manuscriptCodeBlock" ${identity}><pre><code>${escapeHtml(node.text)}</code></pre>${manuscriptBlockAffordanceMarkup(node)}</section>`;
     if (node.kind === "rule") return `<section class="manuscriptBlock manuscriptRuleBlock" ${identity}><hr></section>`;
     return "";
   }
@@ -2886,8 +4389,13 @@ import { formatScienceCell } from "./format-cell.js";
   function manuscriptBlockPaperMarkup(manuscript, document) {
     if (!document) return `<article class="manuscriptBlockPaper manuscriptDocumentLoading" aria-busy="true">Loading the versioned manuscript…</article>`;
     return `<article class="manuscriptBlockPaper" data-manuscript-document-id="${escapeHtml(document.documentId)}" data-manuscript-document-sha256="${escapeHtml(document.documentSha256)}">
-      <header class="manuscriptDocumentTitle"><span>Research article · versioned blocks</span><h1>${escapeHtml(manuscript.title)}</h1><p>Every block has stable identity. Select text to ask Science, or use the margin to insert validated project output.</p></header>
-      <div class="manuscriptBlocks">${manuscriptInsertSlotMarkup(null)}${document.nodes.map((node) => `${manuscriptNodeMarkup(node)}${manuscriptInsertSlotMarkup(node)}`).join("")}</div>
+      <header class="manuscriptDocumentTitle"><span>Research article · draft v${escapeHtml(manuscript.currentVersion)}</span><h1>${escapeHtml(manuscript.title)}</h1></header>
+      <div class="manuscriptBlocks">${manuscriptInsertSlotMarkup(null)}${(() => {
+        // Journals number tables and figures in the order they appear, and the caption carries
+        // that number. Computed here, once per render, because a node cannot know its own ordinal.
+        const ordinals = manuscriptFloatOrdinals(document.nodes);
+        return document.nodes.map((node) => `${manuscriptNodeMarkup(node, ordinals.get(node.id) || null)}${manuscriptInsertSlotMarkup(node)}`).join("");
+      })()}</div>
     </article>`;
   }
 
@@ -3226,6 +4734,85 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
+  /**
+   * The block menu. Opened from the hover control, closed by the next click anywhere else.
+   *
+   * Deliberately a plain DOM popover rather than a rendered state branch: the manuscript re-renders
+   * on every editor refresh, and a menu that lives in that state would blink shut under the pointer
+   * whenever a background refresh landed.
+   */
+  function openManuscriptBlockMenu(button) {
+    closeManuscriptBlockMenu();
+    const nodeId = button?.dataset?.nodeId;
+    const block = button?.closest?.("[data-manuscript-node-id]");
+    const canvas = document.querySelector(".manuscriptCanvas");
+    if (!nodeId || !block || !canvas) return;
+    const node = state.manuscriptEditorModel?.document?.nodes?.find((item) => item.id === nodeId);
+    if (!node) return;
+    const provenance = manuscriptBlockProvenanceText(node);
+    const menu = document.createElement("div");
+    menu.className = "manuscriptBlockMenu";
+    menu.dataset.manuscriptBlockMenu = "";
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `${provenance ? `<p class="manuscriptBlockMenuMeta">${escapeHtml(provenance)}</p>` : ""}
+      ${node.locator ? `<button type="button" role="menuitem" data-action="preview-manuscript-artifact" data-locator="${escapeHtml(node.locator)}">출처 아티팩트 열기</button>` : ""}
+      <button type="button" role="menuitem" class="manuscriptBlockMenuDanger" data-action="delete-manuscript-block" data-node-id="${escapeHtml(nodeId)}">이 블록 삭제</button>`;
+    const blockRect = block.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    menu.style.top = `${blockRect.top - canvasRect.top + canvas.scrollTop + 30}px`;
+    menu.style.right = `${Math.max(8, canvasRect.right - blockRect.right + 6)}px`;
+    canvas.append(menu);
+    menu.querySelector("button")?.focus();
+  }
+
+  function closeManuscriptBlockMenu() {
+    document.querySelector("[data-manuscript-block-menu]")?.remove();
+  }
+
+  /**
+   * Deletes one block as an immutable transaction.
+   *
+   * Every expectation the store checks is sent from what is on screen right now -- manuscript
+   * version, content hash, document hash, and the node's own revision and hash. A delete that
+   * guessed any of them could remove a block the person never saw.
+   */
+  async function deleteManuscriptBlock(nodeId) {
+    const editorModel = state.manuscriptEditorModel;
+    const manuscript = editorModel?.manuscript;
+    const document_ = editorModel?.document;
+    const node = document_?.nodes?.find((item) => item.id === nodeId);
+    if (!nodeId || !node || !state.selectedId || !manuscript || !document_ || state.manuscriptTransactionBusy) return;
+    closeManuscriptBlockMenu();
+    state.manuscriptTransactionBusy = true;
+    render();
+    try {
+      const result = await science.manuscripts.applyTransaction({
+        requestId: crypto.randomUUID(),
+        projectId: state.selectedId,
+        manuscriptId: manuscript.id,
+        expectedVersion: manuscript.currentVersion,
+        expectedContentSha256: manuscript.version.contentSha256,
+        expectedDocumentSha256: document_.documentSha256,
+        actor: "user",
+        reason: "Delete one manuscript block from the block menu",
+        operations: [{
+          kind: "delete-node",
+          nodeId,
+          expectedRevision: node.revision,
+          expectedContentSha256: node.contentSha256,
+        }],
+      });
+      state.claimLedger = await science.claimLedgers.getForManuscript(state.selectedId, manuscript.id);
+      await refreshManuscriptEditorWorkspace(`Block deleted as immutable v${result.manuscript.currentVersion}`);
+    } catch (error) {
+      state.manuscriptNotice = error instanceof Error ? error.message : String(error);
+      render();
+    } finally {
+      state.manuscriptTransactionBusy = false;
+      render();
+    }
+  }
+
   async function undoManuscriptTransaction(transactionId) {
     const editorModel = state.manuscriptEditorModel;
     const manuscript = editorModel?.manuscript;
@@ -3330,9 +4917,16 @@ import { formatScienceCell } from "./format-cell.js";
   }
 
   async function saveManuscriptDraft() {
-    const manuscript = manuscriptById(state.selectedManuscriptId);
+    const projectId = state.selectedId;
+    const manuscriptId = state.selectedManuscriptId;
+    const manuscript = manuscriptById(manuscriptId);
     const draft = state.manuscriptDraft;
-    if (!manuscript || !draft || !draft.dirty || state.manuscriptSaving) return;
+    if (!projectId || !manuscript || !draft || !draft.dirty || state.manuscriptSaving) return;
+    const requestEpoch = ++manuscriptSaveRequestEpoch;
+    const isCurrent = () => requestEpoch === manuscriptSaveRequestEpoch
+      && state.selectedId === projectId
+      && state.selectedManuscriptId === manuscriptId
+      && state.mode === "manuscript";
     state.manuscriptSaving = true;
     state.manuscriptSaveError = "";
     render();
@@ -3340,7 +4934,7 @@ import { formatScienceCell } from "./format-cell.js";
     try {
       const result = await science.manuscripts.appendVersion({
         requestId: crypto.randomUUID(),
-        projectId: state.selectedId,
+        projectId,
         manuscriptId: manuscript.id,
         expectedVersion: draft.baseVersion,
         expectedContentSha256: draft.baseContentSha256,
@@ -3349,16 +4943,21 @@ import { formatScienceCell } from "./format-cell.js";
       });
       saved = result.manuscript;
     } catch (error) {
+      if (!isCurrent()) return;
       state.manuscriptSaving = false;
       state.manuscriptSaveError = error instanceof Error ? error.message : String(error);
       render();
       return;
     }
+    if (!isCurrent()) return;
     state.manuscripts = [saved, ...state.manuscripts.filter((item) => item.id !== saved.id)];
     state.manuscriptDraft = manuscriptDraftFrom(saved);
     state.claimLedger = null;
-    try { state.claimLedger = await science.claimLedgers.getForManuscript(state.selectedId, saved.id); }
-    catch { state.claimLedger = null; }
+    let claimLedger = null;
+    try { claimLedger = await science.claimLedgers.getForManuscript(projectId, saved.id); }
+    catch { claimLedger = null; }
+    if (!isCurrent()) return;
+    state.claimLedger = claimLedger;
     state.manuscriptSaving = false;
     ensureManuscriptWorkspaceTab(saved);
     // Reload the immutable document model after a source save. The block
@@ -3367,10 +4966,16 @@ import { formatScienceCell } from "./format-cell.js";
     try {
       await refreshManuscriptEditorWorkspace(`Saved as immutable v${saved.currentVersion}`);
     } catch (error) {
+      if (!isCurrent()) return;
       state.manuscriptSaveError = `Saved immutable v${saved.currentVersion}, but the editor could not refresh: ${error instanceof Error ? error.message : String(error)}`;
+      try {
+        await refreshProjectLibrarySummaries();
+      } catch {
+        if (state.selectedId === projectId) state.projectLibrarySummaryState = "unavailable";
+      }
       render();
     }
-    void queueWorkspacePersistence();
+    if (isCurrent()) void queueWorkspacePersistence();
   }
 
   async function connectActiveArtifactToManuscript() {
@@ -3471,9 +5076,27 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
-  async function openLab(labId, artifactId, originVersion = null, returnMessageId = null, exactVersion = null) {
+  async function openLab(labId, artifactId, originVersion = null, returnMessageId = null, exactVersion = null, preferredContext = null) {
     rememberScroll();
     state.labDecisionActionError = "";
+    // Lab context is a snapshot. Acquisition can materialize an artifact after that snapshot was
+    // loaded, so refresh before deciding the Lab is empty or an explicit result is missing.
+    const projectId = state.selectedId;
+    if (projectId) {
+      try {
+        const latestContexts = await science.artifacts.forLab(projectId, labId);
+        if (projectId !== state.selectedId) return;
+        if (Array.isArray(latestContexts)) {
+          // A result card resolves an exact artifact version before opening its Lab. forLab can
+          // legitimately omit that artifact when the Lab repository has not indexed it yet; do
+          // not discard the exact context we just verified while refreshing the surrounding list.
+          state.labContextsById.set(labId, mergePreferredLabContext(latestContexts, preferredContext, projectId, labId));
+        }
+      } catch {
+        // Keep the last verified snapshot. An explicit result open still resolves its exact
+        // project/Lab context first and fails closed rather than inventing a route.
+      }
+    }
     // The analysis catalogue is what the statistics launch screen offers. Fetch it when that Lab is
     // opened rather than on every render, and once per session: it changes only when the plugin does.
     if (labId === "statistics-analysis") void loadStatisticsMethodCatalogue();
@@ -3519,6 +5142,25 @@ import { formatScienceCell } from "./format-cell.js";
     } catch (error) {
       state.artifactHistoryById.set(nextArtifactId, { error: error instanceof Error ? error.message : String(error), entries: [] });
       if (state.mode === "lab" && state.selectedArtifactId === nextArtifactId) render();
+    }
+  }
+
+  async function openResultArtifact(artifactId, artifactVersion) {
+    const projectId = state.selectedId;
+    if (!projectId || !artifactId || !Number.isSafeInteger(artifactVersion) || artifactVersion < 1) return;
+    try {
+      const context = await science.artifacts.context(projectId, artifactId, artifactVersion);
+      if (projectId !== state.selectedId) return;
+      if (!context || context.artifact?.id !== artifactId || context.selectedVersion?.version !== artifactVersion
+        || context.artifact?.projectId !== projectId || !context.linkage?.labId) {
+        throw new Error("science-result-artifact-context-invalid");
+      }
+      const known = state.labContextsById.get(context.linkage.labId) || [];
+      state.labContextsById.set(context.linkage.labId, [context, ...known.filter((item) => item?.artifact?.id !== artifactId)]);
+      await openLab(context.linkage.labId, artifactId, null, null, artifactVersion, context);
+    } catch (error) {
+      state.resultsError = error instanceof Error ? error.message : String(error);
+      render();
     }
   }
 
@@ -4370,6 +6012,7 @@ import { formatScienceCell } from "./format-cell.js";
 
   function returnToSession(destination = state.currentDestination) {
     const returnMessageId = state.returnMessageId;
+    invalidateManuscriptRequests();
     rememberScroll();
     state.mode = "session";
     state.currentDestination = projectDestinationIds.has(destination) && !["manuscript", "submission-archive"].includes(destination) ? destination : "overview";
@@ -4380,6 +6023,7 @@ import { formatScienceCell } from "./format-cell.js";
     state.inspectedArtifactContext = null;
     state.artifactComparison = null;
     state.historyOpen = false;
+    state.manuscriptSaving = false;
     state.returnMessageId = null;
     compareEpoch += 1;
     render();
@@ -4396,8 +6040,27 @@ import { formatScienceCell } from "./format-cell.js";
   async function openConversation(conversationId) {
     const conversation = state.conversations.find((item) => item.id === conversationId);
     if (!conversation || !state.selectedId) return;
+    invalidateManuscriptRequests();
+    composerRequestEpoch += 1;
+    state.composerSending = false;
     state.selectedConversationId = conversation.id;
+    state.chatMessagesScope = null;
+    state.activeTurn = null;
+    state.composerError = "";
+    state.researchLoopActionBusy = false;
+    state.researchLoopActionError = "";
+    runtimeSelectionRequestEpoch += 1;
+    state.runtimeSelection = null;
+    state.runtimeOptions = [];
+    state.runtimeUnavailable = false;
+    state.runtimeSelectionLoading = false;
+    state.runtimeSelectionBusy = false;
+    state.runtimeSelectionError = "";
+    state.runtimeSelectionScope = null;
+    state.runtimePickerOpen = false;
+    state.runtimePickerQuery = "";
     state.mode = "session";
+    state.manuscriptSaving = false;
     state.currentDestination = "overview";
     const tab = state.workspaceTabs.find((item) => item.kind === "conversation" && item.conversationId === conversation.id);
     state.activeWorkspaceTabId = tab?.id || RESEARCH_TAB_ID;
@@ -4405,7 +6068,7 @@ import { formatScienceCell } from "./format-cell.js";
     state.projectError = "";
     render();
     try {
-      await refreshConversationOnly(state.selectedId);
+      await refreshConversationOnly(state.selectedId, { refreshRuntimeSelection: true });
       void queueWorkspacePersistence();
     } catch (error) {
       state.projectError = error instanceof Error ? error.message : String(error);
@@ -4481,8 +6144,13 @@ import { formatScienceCell } from "./format-cell.js";
       const manuscript = manuscriptById(state.selectedManuscriptId) || state.manuscripts[0] || null;
       if (destination === "submission-archive") void loadSubmissionArchive(state.selectedId);
       if (!manuscript) {
+        rememberScroll();
+        state.mode = "session";
         state.currentDestination = destination;
-        state.manuscriptModal = true;
+        state.activeWorkspaceTabId = RESEARCH_TAB_ID;
+        state.drawer = null;
+        state.manuscriptModal = false;
+        state.manuscriptInspectorOpen = false;
         render();
         void queueWorkspacePersistence({ navigation: true, tabs: false });
         return;
@@ -4504,16 +6172,18 @@ import { formatScienceCell } from "./format-cell.js";
     return state.workspaceTabs.filter((tab) => tab.kind !== "research").map((tab) => {
       const selected = tab.id === state.activeWorkspaceTabId;
       const tabA11y = `id="${escapeHtml(workspaceTabDomId(tab.id))}" aria-controls="science-workspace-panel" aria-selected="${selected}" tabindex="${selected ? "0" : "-1"}"`;
-      if (tab.kind === "manuscript") return `<span class="workspaceTabFrame workspaceManuscriptTab" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" data-manuscript-id="${escapeHtml(tab.manuscriptId)}" title="${escapeHtml(`${tab.title} · manuscript v${tab.exactVersion}`)}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span><span class="workspaceTabVersion">v${escapeHtml(tab.exactVersion)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(`${tab.title} 원고 탭 닫기`)}" title="탭 닫기">×</button></span>`;
-      if (tab.kind === "conversation") return `<span class="workspaceTabFrame workspaceConversationTab" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(`${tab.title} 대화 탭 닫기`)}" title="탭 닫기">×</button></span>`;
-      if (tab.kind === "lab") return `<span class="workspaceTabFrame" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(`${tab.title} Lab 시작 화면`)}">${heroIcon(labIcons[tab.labId] || "grid", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(`${tab.title} Lab 탭 닫기`)}" title="탭 닫기">×</button></span>`;
-      return `<span class="workspaceTabFrame" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(`${labLabel(tab.labId)} · ${tab.title} · exact v${tab.exactVersion}`)}">${heroIcon(labIcons[tab.labId] || "grid", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span><span class="workspaceTabVersion">v${escapeHtml(tab.exactVersion)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(`${tab.title} v${tab.exactVersion} 탭 닫기`)}" title="탭 닫기">×</button></span>`;
+      const closeTitle = uiCopy("탭 닫기", "Close tab");
+      if (tab.kind === "manuscript") return `<span class="workspaceTabFrame workspaceManuscriptTab" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" data-manuscript-id="${escapeHtml(tab.manuscriptId)}" title="${escapeHtml(`${tab.title} · manuscript v${tab.exactVersion}`)}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span><span class="workspaceTabVersion">v${escapeHtml(tab.exactVersion)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(uiCopy(`${tab.title} 원고 탭 닫기`, `Close ${tab.title} manuscript tab`))}" title="${closeTitle}">×</button></span>`;
+      if (tab.kind === "conversation") return `<span class="workspaceTabFrame workspaceConversationTab" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(uiCopy(`${tab.title} 대화 탭 닫기`, `Close ${tab.title} conversation tab`))}" title="${closeTitle}">×</button></span>`;
+      if (tab.kind === "lab") return `<span class="workspaceTabFrame" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(uiCopy(`${tab.title} Lab 시작 화면`, `${tab.title} Lab start screen`))}">${heroIcon(labIcons[tab.labId] || "grid", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(uiCopy(`${tab.title} Lab 탭 닫기`, `Close ${tab.title} Lab tab`))}" title="${closeTitle}">×</button></span>`;
+      return `<span class="workspaceTabFrame" role="presentation" data-selected="${selected}"><button class="workspaceTab" role="tab" ${tabA11y} data-workspace-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(`${labLabel(tab.labId)} · ${tab.title} · exact v${tab.exactVersion}`)}">${heroIcon(labIcons[tab.labId] || "grid", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(tab.title)}</span><span class="workspaceTabVersion">v${escapeHtml(tab.exactVersion)}</span></button><button class="workspaceTabClose" data-close-workspace-tab="${escapeHtml(tab.id)}" aria-label="${escapeHtml(uiCopy(`${tab.title} v${tab.exactVersion} 탭 닫기`, `Close ${tab.title} v${tab.exactVersion} tab`))}" title="${closeTitle}">×</button></span>`;
     }).join("");
   }
 
   function researchWorkspaceTabButton() {
     const selected = state.activeWorkspaceTabId === RESEARCH_TAB_ID;
-    return `<button class="workspaceTab workspaceResearchTab" role="tab" id="${workspaceTabDomId(RESEARCH_TAB_ID)}" aria-controls="science-workspace-panel" data-workspace-tab-id="${RESEARCH_TAB_ID}" aria-selected="${selected}" tabindex="${selected ? "0" : "-1"}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">Research</span></button>`;
+    const label = state.mode === "session" ? projectDestinationById(state.currentDestination)?.label || "Research" : "Research";
+    return `<button class="workspaceTab workspaceResearchTab" role="tab" id="${workspaceTabDomId(RESEARCH_TAB_ID)}" aria-controls="science-workspace-panel" data-workspace-tab-id="${RESEARCH_TAB_ID}" aria-selected="${selected}" tabindex="${selected ? "0" : "-1"}">${heroIcon("book", "workspaceTabIcon")}<span class="workspaceTabLabel">${escapeHtml(label)}</span></button>`;
   }
 
   function syncWorkspaceTabOverflow() {
@@ -5005,7 +6675,17 @@ import { formatScienceCell } from "./format-cell.js";
       : "";
     const semanticObservations = Array.isArray(activeVersion?.semantic?.observations) ? activeVersion.semantic.observations : [];
     const observations = semanticObservations.map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${escapeHtml(item.value)}${item.unit ? ` <span>${escapeHtml(item.unit)}</span>` : ""}</dd></div>`).join("");
-    const capability = inspectingHistory ? `기록 v${escapeHtml(state.inspectedArtifactVersion)} · 읽기 전용` : artifact.version.rendererId === "agentlas.ketcher" ? `현재 v${escapeHtml(artifact.currentVersion)} · 편집 가능` : artifact.version.rendererId === "agentlas.molstar" ? `현재 v${escapeHtml(artifact.currentVersion)} · 표현 편집 가능` : artifact.version.rendererId === "agentlas.vega" && vegaDraft ? (vegaDraft.dirty ? `현재 v${escapeHtml(artifact.currentVersion)} 기반 · 초안` : `현재 v${escapeHtml(artifact.currentVersion)} · 편집 가능`) : `현재 v${escapeHtml(artifact.currentVersion)} · 대화형 보기`;
+    const capability = inspectingHistory
+      ? uiCopy(`기록 v${escapeHtml(state.inspectedArtifactVersion)} · 읽기 전용`, `History v${escapeHtml(state.inspectedArtifactVersion)} · read only`)
+      : artifact.version.rendererId === "agentlas.ketcher"
+        ? uiCopy(`현재 v${escapeHtml(artifact.currentVersion)} · 편집 가능`, `Current v${escapeHtml(artifact.currentVersion)} · editable`)
+        : artifact.version.rendererId === "agentlas.molstar"
+          ? uiCopy(`현재 v${escapeHtml(artifact.currentVersion)} · 표현 편집 가능`, `Current v${escapeHtml(artifact.currentVersion)} · representation editable`)
+          : artifact.version.rendererId === "agentlas.vega" && vegaDraft
+            ? (vegaDraft.dirty
+              ? uiCopy(`현재 v${escapeHtml(artifact.currentVersion)} 기반 · 초안`, `Draft based on current v${escapeHtml(artifact.currentVersion)}`)
+              : uiCopy(`현재 v${escapeHtml(artifact.currentVersion)} · 편집 가능`, `Current v${escapeHtml(artifact.currentVersion)} · editable`))
+            : uiCopy(`현재 v${escapeHtml(artifact.currentVersion)} · 대화형 보기`, `Current v${escapeHtml(artifact.currentVersion)} · interactive view`);
     const validator = artifact.version.payload?.validation?.validator;
     const selectedLabLabel = labLabel(state.selectedLabId);
     const selectedLabTitle = selectedLabLabel.endsWith("Lab") ? selectedLabLabel : `${selectedLabLabel} Lab`;
@@ -5035,8 +6715,8 @@ import { formatScienceCell } from "./format-cell.js";
       validator ? `${validator} validation` : artifact.version.rendererId,
       `artifact v${artifact.currentVersion}`,
     ];
-    const originStrip = `<section class="originStrip"><div class="provenanceTrail">${provenanceSteps.map((step) => `<span>${escapeHtml(step)}</span>`).join('<i aria-hidden="true">→</i>')}<em>${escapeHtml(capability)}</em></div><div><button data-action="toggle-history" aria-expanded="${state.historyOpen}">버전 ${escapeHtml(artifact.currentVersion)}</button>${originVersion ? `<button data-artifact-history-version="${escapeHtml(originVersion)}">응답 원본 v${escapeHtml(originVersion)}</button>` : ""}<button data-action="toggle-drawer">세부 정보</button>${state.selectedLabId === "statistics-analysis" ? `<button data-action="open-statistics-launch">새 분석</button>` : ""}</div></section>`;
-    const paleontologyLineage = paleontologyPayload ? `<section class="statisticsLineage" data-paleontology-lineage data-catalog-run-id="${escapeHtml(paleontologyPayload.source.parentRunId)}" data-analysis-run-id="${escapeHtml(paleontologyPayload.source.analysisRunId)}" data-analysis-sha256="${escapeHtml(paleontologyPayload.analysis.analysisSha256)}"><span>${escapeHtml(PALEONTOLOGY_BOUNDARY)}</span><i aria-hidden="true">→</i><span>${escapeHtml(paleontologyPayload.analysis.estimates.occurrenceCount)} exact rows · ${escapeHtml(paleontologyPayload.analysis.estimates.oldestBoundMa)}–${escapeHtml(paleontologyPayload.analysis.estimates.youngestBoundMa)} Ma</span><i aria-hidden="true">→</i><span>${paleontologyPayload.analysis.source.parentTruncated ? "Bounded retrieval · descriptive counts" : "Complete retrieved set"}</span></section>` : "";
+    const originStrip = `<section class="originStrip"><div class="originStripMain"><strong>${escapeHtml(selectedLabTitle)}</strong><span>${escapeHtml(capability)}</span></div><div class="originStripActions"><button data-action="toggle-history" aria-expanded="${state.historyOpen}">${escapeHtml(uiCopy(`버전 ${artifact.currentVersion}`, `Version ${artifact.currentVersion}`))}</button>${originVersion ? `<button data-artifact-history-version="${escapeHtml(originVersion)}">${escapeHtml(uiCopy(`응답 원본 v${originVersion}`, `Response source v${originVersion}`))}</button>` : ""}<button data-action="toggle-drawer">${escapeHtml(uiCopy("세부 정보", "Details"))}</button>${state.selectedLabId === "statistics-analysis" ? `<button data-action="open-statistics-launch">${escapeHtml(uiCopy("새 분석", "New analysis"))}</button>` : ""}</div><details class="provenanceDisclosure originProvenance"><summary>${escapeHtml(uiCopy("출처와 버전", "Source and version"))}</summary><div class="provenanceTrail">${provenanceSteps.map((step) => `<span>${escapeHtml(step)}</span>`).join('<i aria-hidden="true">→</i>')}<em>${escapeHtml(capability)}</em></div></details></section>`;
+    const paleontologyLineage = paleontologyPayload ? `<details class="statisticsLineage provenanceDisclosure" data-paleontology-lineage data-catalog-run-id="${escapeHtml(paleontologyPayload.source.parentRunId)}" data-analysis-run-id="${escapeHtml(paleontologyPayload.source.analysisRunId)}" data-analysis-sha256="${escapeHtml(paleontologyPayload.analysis.analysisSha256)}"><summary><strong>${escapeHtml(uiCopy("근거 연결", "Evidence chain"))}</strong><span>${escapeHtml(paleontologyPayload.analysis.source.taxonName)} · ${escapeHtml(paleontologyPayload.analysis.estimates.occurrenceCount)} exact rows</span></summary><div class="provenanceTrail"><span>${escapeHtml(PALEONTOLOGY_BOUNDARY)}</span><i aria-hidden="true">→</i><span>${escapeHtml(paleontologyPayload.analysis.estimates.occurrenceCount)} exact rows · ${escapeHtml(paleontologyPayload.analysis.estimates.oldestBoundMa)}–${escapeHtml(paleontologyPayload.analysis.estimates.youngestBoundMa)} Ma</span><i aria-hidden="true">→</i><span>${paleontologyPayload.analysis.source.parentTruncated ? "Bounded retrieval · descriptive counts" : "Complete retrieved set"}</span></div></details>` : "";
     const statisticsLineage = statisticsProjectionLineageMarkup(statisticsProjectionReceipt, statisticsRunId, artifact.id, activeVersion?.version || artifact.currentVersion, activeVersion?.contentSha256 || "");
     const timeline = historyEntries.length ? historyEntries.map((entry) => {
       const selected = inspectingHistory ? entry.version === state.inspectedArtifactVersion : entry.isCurrent;
@@ -5050,13 +6730,31 @@ import { formatScienceCell } from "./format-cell.js";
     const skyCatalog = artifact.version.payload?.catalog;
     const skyTypes = Array.isArray(skyCatalog?.objectTypeCounts) ? skyCatalog.objectTypeCounts : [];
     const skyTypeOptions = skyTypes.map((entry) => `<option value="${escapeHtml(entry.type)}">${escapeHtml(entry.type)} · ${escapeHtml(entry.count)}</option>`).join("");
-    const skyToolbar = artifact.version.rendererId === "agentlas.d3-sky" ? `<div class="skyCatalogToolbar"><div><button data-sky-action="reset">시야 초기화</button><label><span>천체 유형</span><select data-sky-type-filter><option value="">모든 유형 · ${escapeHtml(Array.isArray(skyCatalog?.objects) ? skyCatalog.objects.length : 0)}</option>${skyTypeOptions}</select></label><span class="skyCoordinateConvention">ICRS · RA는 천구 관례에 따라 반전</span></div><div class="skyObjectDetail" data-sky-object-detail><strong>천체를 선택하세요</strong><span>SIMBAD 식별자·좌표·관측값을 원본 필드 그대로 표시합니다.</span></div></div>` : "";
+    const skyDistanceCount = Array.isArray(skyCatalog?.objects) ? skyCatalog.objects.filter((object) => typeof object.parallaxMas === "number" && Number.isFinite(object.parallaxMas) && object.parallaxMas > 0).length : 0;
+    const skyView = state.spatialViewByArtifact.get(artifact.id) === "astronomy-distance" && skyDistanceCount ? "astronomy-distance" : "astronomy-sky";
+    const skyToolbar = artifact.version.rendererId === "agentlas.d3-sky" ? `<div class="skyCatalogToolbar"><div><span class="scientificViewModes" role="group" aria-label="천체 보기"><button data-spatial-view="astronomy-sky" aria-pressed="${skyView === "astronomy-sky"}">Sky 2D</button><button data-spatial-view="astronomy-distance" aria-pressed="${skyView === "astronomy-distance"}" ${skyDistanceCount ? "" : "disabled"}>Distance 3D · ${escapeHtml(skyDistanceCount)}</button></span>${skyView === "astronomy-distance" ? "" : `<button data-sky-action="reset">시야 초기화</button><label><span>천체 유형</span><select data-sky-type-filter><option value="">모든 유형 · ${escapeHtml(Array.isArray(skyCatalog?.objects) ? skyCatalog.objects.length : 0)}</option>${skyTypeOptions}</select></label>`}<span class="skyCoordinateConvention">${skyView === "astronomy-distance" ? "양의 parallax만 1000/parallax로 변환 · 오차모형 미적용" : "ICRS · RA는 천구 관례에 따라 반전"}</span></div>${skyView === "astronomy-distance" ? "" : `<div class="skyObjectDetail" data-sky-object-detail><strong>천체를 선택하세요</strong><span>SIMBAD 식별자·좌표·관측값을 원본 필드 그대로 표시합니다.</span></div>`}</div>` : "";
+    const earthquakeCatalog = artifact.version.payload?.catalog?.provider === "usgs-fdsn-event" ? artifact.version.payload.catalog : null;
+    const earthquake3dCount = Array.isArray(earthquakeCatalog?.events) ? earthquakeCatalog.events.filter((event) =>
+      typeof event.longitude === "number" && Number.isFinite(event.longitude)
+      && typeof event.latitude === "number" && Number.isFinite(event.latitude)
+      && typeof event.depthKm === "number" && Number.isFinite(event.depthKm)).length : 0;
+    const earthquakeView = state.spatialViewByArtifact.get(artifact.id) === "earthquake-depth" && earthquake3dCount ? "earthquake-depth" : "earthquake-map";
+    const earthquakeToolbar = earthquakeCatalog ? `<div class="scientificViewToolbar earthquakeViewToolbar"><div class="scientificViewModes" role="group" aria-label="${escapeHtml(uiCopy("지진 보기", "Earthquake view"))}"><button data-spatial-view="earthquake-map" aria-pressed="${earthquakeView === "earthquake-map"}">Map 2D</button><button data-spatial-view="earthquake-depth" aria-pressed="${earthquakeView === "earthquake-depth"}" ${earthquake3dCount ? "" : "disabled"}>Depth 3D · ${escapeHtml(earthquake3dCount)}</button></div><span>${escapeHtml(earthquakeProjectionCopy())}</span></div>` : "";
     const genomicsPayload = artifact.version.payload;
-    const genomicsToolbar = artifact.version.rendererId === "agentlas.jbrowse" ? `<div class="genomicsToolbar"><div><span>ASSEMBLY</span><strong>${escapeHtml(genomicsPayload?.assembly?.name || "")}</strong></div><div><span>REGION</span><strong>${escapeHtml(genomicsPayload?.region?.refName || "")}:${escapeHtml(genomicsPayload?.region?.start || "")}–${escapeHtml(genomicsPayload?.region?.end || "")}</strong></div><div><span>VARIANTS</span><strong>${escapeHtml(Array.isArray(genomicsPayload?.variants) ? genomicsPayload.variants.length : 0)} · ClinVar</strong></div><p>Pan · zoom · feature click은 JBrowse 2 세션에서 직접 조작됩니다.</p></div>` : "";
-    const statisticsFigureToolbar = statisticsFigurePayload ? `<section class="statisticsFigureToolbar" data-statistics-figure-toolbar><div class="statisticsFigureIdentity"><span>PUBLICATION FIGURE · EXACT BINDING</span><strong>${escapeHtml(statisticsFigurePayload.visualization.title)}</strong><code title="${escapeHtml(statisticsFigurePayload.statisticsArtifact.contentSha256)}">analysis v${escapeHtml(statisticsFigurePayload.statisticsArtifact.artifactVersion)} · ${escapeHtml(String(statisticsFigurePayload.statisticsArtifact.contentSha256).slice(0, 12))}…</code></div><dl class="statisticsFigureSpecs"><div><dt>단 폭</dt><dd>1단 89 mm · 2단 183 mm</dd></div><div><dt>글자</dt><dd>최종 크기에서 8–12 pt</dd></div><div><dt>색</dt><dd>sRGB · 흑백 확인됨</dd></div></dl><div class="statisticsFigureExport"><div><button type="button" data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>버전 비교</button><button type="button" data-action="export-statistics-figure-svg" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? "생성 중…" : "SVG"}</button><button type="button" data-action="export-statistics-figure-png" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? "생성 중…" : "PNG 600dpi"}</button><button type="button" data-action="export-statistics-figure-pdf" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? "생성 중…" : "PDF 600dpi"}</button><button type="button" data-action="export-statistics-figure-tiff" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? "생성 중…" : "TIFF 600dpi"}</button></div><span class="supportBoundary">SVG · PNG/PDF/TIFF 300/600dpi · sRGB ICC. CMYK와 vector PDF는 아직 미지원. 저널별 정확한 한도는 제출 시 검사합니다.</span></div>${state.figureActionError ? `<p role="alert">${escapeHtml(state.figureActionError)}</p>` : state.figureActionNotice ? `<p role="status">${escapeHtml(state.figureActionNotice)}</p>` : ""}</section>` : "";
+    const genomicsToolbar = artifact.version.rendererId === "agentlas.jbrowse" ? `<div class="genomicsToolbar"><div><span>ASSEMBLY</span><strong>${escapeHtml(genomicsPayload?.assembly?.name || "")}</strong></div><div><span>REGION</span><strong>${escapeHtml(genomicsPayload?.region?.refName || "")}:${escapeHtml(genomicsPayload?.region?.start || "")}–${escapeHtml(genomicsPayload?.region?.end || "")}</strong></div><div><span>VARIANTS</span><strong>${escapeHtml(Array.isArray(genomicsPayload?.variants) ? genomicsPayload.variants.length : 0)} · ClinVar</strong></div><p>${escapeHtml(uiCopy("Pan · zoom · feature click은 JBrowse 2 세션에서 직접 조작됩니다.", "Pan, zoom, and feature click are driven directly in the JBrowse 2 session."))}</p></div>` : "";
+    const statisticsFigureToolbar = statisticsFigurePayload ? `<section class="statisticsFigureToolbar" data-statistics-figure-toolbar><div class="statisticsFigureIdentity"><span>PUBLICATION FIGURE · EXACT BINDING</span><strong>${escapeHtml(statisticsFigurePayload.visualization.title)}</strong><code title="${escapeHtml(statisticsFigurePayload.statisticsArtifact.contentSha256)}">analysis v${escapeHtml(statisticsFigurePayload.statisticsArtifact.artifactVersion)} · ${escapeHtml(String(statisticsFigurePayload.statisticsArtifact.contentSha256).slice(0, 12))}…</code></div><dl class="statisticsFigureSpecs"><div><dt>${escapeHtml(uiCopy("단 폭", "Column"))}</dt><dd>${escapeHtml(uiCopy("1단 89 mm · 2단 183 mm", "1 column 89 mm · 2 columns 183 mm"))}</dd></div><div><dt>${escapeHtml(uiCopy("글자", "Type"))}</dt><dd>${escapeHtml(uiCopy("최종 크기에서 8–12 pt", "8–12 pt at final size"))}</dd></div><div><dt>${escapeHtml(uiCopy("색", "Color"))}</dt><dd>${escapeHtml(uiCopy("sRGB · 흑백 확인됨", "sRGB · grayscale checked"))}</dd></div></dl><div class="statisticsFigureExport"><div><button type="button" data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>${escapeHtml(uiCopy("버전 비교", "Compare versions"))}</button><button type="button" data-action="export-statistics-figure-svg" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? escapeHtml(uiCopy("생성 중…", "Generating…")) : "SVG"}</button><button type="button" data-action="export-statistics-figure-png" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? escapeHtml(uiCopy("생성 중…", "Generating…")) : "PNG 600dpi"}</button><button type="button" data-action="export-statistics-figure-pdf" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? escapeHtml(uiCopy("생성 중…", "Generating…")) : "PDF 600dpi"}</button><button type="button" data-action="export-statistics-figure-tiff" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? escapeHtml(uiCopy("생성 중…", "Generating…")) : "TIFF 600dpi"}</button></div><span class="supportBoundary">${escapeHtml(uiCopy("SVG · PNG/PDF/TIFF 300/600dpi · sRGB ICC. CMYK와 vector PDF는 아직 미지원. 저널별 정확한 한도는 제출 시 검사합니다.", "SVG · PNG/PDF/TIFF at 300/600 dpi · sRGB ICC. CMYK and vector PDF are not supported yet. Exact per-journal limits are checked at submission."))}</span></div>${state.figureActionError ? `<p role="alert">${escapeHtml(state.figureActionError)}</p>` : state.figureActionNotice ? `<p role="status">${escapeHtml(state.figureActionNotice)}</p>` : ""}</section>` : "";
     const statisticsRasterToolbar = statisticsRasterPayload ? `<section class="statisticsRasterToolbar" data-statistics-raster-toolbar data-export-receipt-sha256="${escapeHtml(statisticsRasterPayload.exportSha256)}"><div><span>PUBLICATION RASTER · EXACT EXPORT</span><strong>${escapeHtml(`${statisticsRasterPayload.export.dpi} DPI · ${statisticsRasterPayload.export.colorSpace.toUpperCase()} · ${statisticsRasterPayload.export.widthMm}×${statisticsRasterPayload.export.heightMm} mm`)}</strong><code title="${escapeHtml(statisticsRasterPayload.figureArtifact.contentSha256)}">Figure v${escapeHtml(statisticsRasterPayload.figureArtifact.artifactVersion)} · ${escapeHtml(statisticsShortHash(statisticsRasterPayload.figureArtifact.contentSha256))}</code></div><div><em>원고 연결 가능</em><span>이 image 아티팩트가 journal raster 검증 대상입니다.</span></div></section>` : "";
     const numericSurfaceToolbar = numericSurfacePayload ? `<section class="statisticsFigureToolbar" data-numeric-surface-export-toolbar><div><span>3D RESPONSE SURFACE · EXACT VIEW</span><strong>${escapeHtml(numericSurfacePayload.title)}</strong><code title="${escapeHtml(activeVersion.contentSha256)}">surface v${escapeHtml(activeVersion.version)} · ${escapeHtml(statisticsShortHash(activeVersion.contentSha256))} · view는 SQLite 저장 상태 사용</code></div><div class="statisticsFigureExport"><div><button type="button" data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>버전 비교</button><button type="button" data-action="export-numeric-surface-png" ${state.figureActionBusy ? "disabled" : ""}>${state.figureActionBusy ? "생성 중…" : "PNG 2008×1506 · 600dpi"}</button></div><span class="supportBoundary">Three.js offscreen WebGL 재렌더 · sRGB · white background · vector/PDF/EPS/TIFF/CMYK 미지원.</span></div>${state.figureActionError ? `<p role="alert">${escapeHtml(state.figureActionError)}</p>` : state.figureActionNotice ? `<p role="status">${escapeHtml(state.figureActionNotice)}</p>` : ""}</section>` : "";
     const numericSurfaceRasterToolbar = numericSurfaceRasterPayload ? `<section class="statisticsRasterToolbar" data-numeric-surface-raster-toolbar data-export-receipt-sha256="${escapeHtml(numericSurfaceRasterPayload.exportSha256)}"><div><span>3D PUBLICATION RASTER · EXACT EXPORT</span><strong>${escapeHtml(`${numericSurfaceRasterPayload.export.width}×${numericSurfaceRasterPayload.export.height}px · ${numericSurfaceRasterPayload.export.dpi} DPI · ${numericSurfaceRasterPayload.export.colorSpace.toUpperCase()}`)}</strong><code title="${escapeHtml(numericSurfaceRasterPayload.surfaceArtifact.contentSha256)}">Surface v${escapeHtml(numericSurfaceRasterPayload.surfaceArtifact.artifactVersion)} · ${escapeHtml(statisticsShortHash(numericSurfaceRasterPayload.surfaceArtifact.contentSha256))} · camera ${escapeHtml(statisticsShortHash(numericSurfaceRasterPayload.viewStateReceipt.viewStateSha256))}</code></div><div><em>원고 연결 가능</em><span>PNG pixels · persisted camera · renderer · parent lineage가 하나의 receipt에 고정됩니다.</span></div></section>` : "";
+    const imageArtifact = activeVersion?.rendererId === "agentlas.image";
+    const statisticsAnalysisPayload = activeVersion?.payload?.schema === "agentlas.science.statistics-analysis-artifact/v1" ? activeVersion.payload : null;
+    const statisticsAnalysisRequestedView = statisticsAnalysisPayload ? state.statisticsViewByArtifact.get(artifact.id) || `table:${statisticsAnalysisPayload.selectedTableIndex}` : "";
+    const statisticsAnalysisVisual = Boolean(statisticsAnalysisPayload && String(statisticsAnalysisRequestedView).startsWith("chart:"));
+    const paleontologyVisual = Boolean(paleontologyPayload && state.paleontologyViewByArtifact.get(artifact.id) !== "table");
+    const visualViewerKind = !inspectingHistory && (imageArtifact || paleontologyVisual || activeVersion?.rendererId === "agentlas.vega" && earthquakeView !== "earthquake-depth" || statisticsAnalysisVisual)
+      ? (imageArtifact ? "image" : "chart") : null;
+    const visualFrameClass = [visualViewerKind ? "visualArtifactFrame" : "", paleontologyVisual ? "paleontologyVisualFrame" : ""].filter(Boolean).join(" ");
+    const artifactViewToolbar = visualViewerKind ? artifactViewToolbarMarkup() : "";
     const canvasClass = artifact.version.rendererId === "agentlas.cytoscape"
       ? "artifactCanvas citationNetworkCanvas"
       : artifact.version.rendererId === NUMERIC_SURFACE_RENDERER
@@ -5068,16 +6766,33 @@ import { formatScienceCell } from "./format-cell.js";
           : artifact.version.rendererId === "agentlas.table"
             ? "artifactCanvas dataTableCanvas"
         : artifact.version.rendererId !== "agentlas.vega" ? "artifactCanvas artifactCanvasExternal" : "artifactCanvas";
+    const activeToolbar = artifact.version.rendererId === "agentlas.vega"
+      ? statisticsFigureToolbar || (paleontologyPayload ? "" : `${earthquakeToolbar}${earthquakeView === "earthquake-depth" ? "" : vegaEditorMarkup(artifact, vegaDraft)}`)
+      : numericSurfaceToolbar || numericSurfaceRasterToolbar || statisticsRasterToolbar || citationToolbar || skyToolbar || genomicsToolbar;
+    // Economic charts are the primary result. Keep the chart above its editable presentation
+    // controls so a 1162x768 window shows the evidence before optional authoring settings.
+    const economicChartSettings = !inspectingHistory && economicPayload && activeToolbar
+      ? `<details class="vegaEditorDisclosure"><summary><span>${uiCopy("차트 설정", "Chart settings")}</span><small>${uiCopy("제목·크기·표시 옵션과 게재용 그림 준비", "Title, sizing, display options, and publication-figure preparation")}</small></summary>${activeToolbar}</details>`
+      : "";
+    const toolbarBeforeCanvas = economicChartSettings ? artifactViewToolbar : `${artifactViewToolbar}${activeToolbar}`;
     const canvas = inspectingHistory
       ? `<div class="artifactCanvasFrame historicalFrame"><div class="historicalStatus"><span>기록 보기 · v${escapeHtml(state.inspectedArtifactVersion)} · 읽기 전용</span><button data-artifact-history-version="${escapeHtml(artifact.currentVersion)}">현재 v${escapeHtml(artifact.currentVersion)}으로 돌아가기</button></div><div class="artifactCanvas historicalArtifactCanvas"><div class="historicalCaptureNotice"><strong>검증된 캡처</strong><span>이 화면은 기록 보존용이며 조작할 수 없습니다.</span></div><div class="historicalPreviewSurface" data-historical-artifact-host="${escapeHtml(artifact.id)}" data-historical-artifact-version="${escapeHtml(state.inspectedArtifactVersion)}" aria-label="${escapeHtml(artifact.title)} v${escapeHtml(state.inspectedArtifactVersion)} 기록">${historyError ? `<span class="historicalError">${escapeHtml(historyError)}</span>` : inspectedContext ? "" : `<span class="historicalLoading">검증된 과거 버전을 불러오는 중…</span>`}</div></div></div>`
-      : `<div class="artifactCanvasFrame"><div class="rendererStatus"><span>${escapeHtml(artifact.kind)}</span><span>${escapeHtml(artifact.version.rendererId)} · ${escapeHtml(artifact.version.rendererVersion)} <em data-runtime-status></em></span></div>${artifact.version.rendererId === "agentlas.vega" ? statisticsFigureToolbar || (paleontologyPayload ? "" : vegaEditorMarkup(artifact, vegaDraft)) : numericSurfaceToolbar || numericSurfaceRasterToolbar || statisticsRasterToolbar || citationToolbar || skyToolbar || genomicsToolbar}<div class="${canvasClass}" data-artifact-host="${escapeHtml(artifact.id)}" data-artifact-version="${escapeHtml(artifact.version.version)}" data-content-sha256="${escapeHtml(artifact.version.contentSha256)}" aria-label="${escapeHtml(artifact.title)}"></div><div class="renderError" data-render-error role="alert"></div></div>`;
+      : `<div class="artifactCanvasFrame ${visualFrameClass}"><div class="rendererStatus"><span>${escapeHtml(artifact.kind)}</span><span>${escapeHtml(artifact.version.rendererId)} · ${escapeHtml(artifact.version.rendererVersion)}${earthquakeView === "earthquake-depth" || skyView === "astronomy-distance" ? " + Three.js 0.173.0" : ""} <em data-runtime-status></em></span></div>${toolbarBeforeCanvas}<div class="${canvasClass}${visualViewerKind ? " artifactVisualViewport" : ""}" data-artifact-host="${escapeHtml(artifact.id)}" data-artifact-version="${escapeHtml(artifact.version.version)}" data-content-sha256="${escapeHtml(artifact.version.contentSha256)}" tabindex="${visualViewerKind ? "0" : "-1"}" aria-label="${escapeHtml(artifact.title)}"></div><div class="renderError" data-render-error role="alert"></div>${economicChartSettings}</div>`;
     const loopObservation = semanticObservations[0] || null;
     const loopEvidence = loopObservation ? `${loopObservation.label}: ${loopObservation.value}${loopObservation.unit ? ` ${loopObservation.unit}` : ""}` : (activeVersion?.semantic?.summary || "현재 아티팩트의 다음 검증 단계를 연구 채팅에서 함께 결정합니다.");
-    return `<section class="artifactWorkspace ${state.historyOpen ? "historyOpen" : ""} ${state.artifactComparison ? "compareOpen" : ""}"><header class="labWorkspaceHeader visuallyHidden"><span>${escapeHtml(labCapabilityLabel(state.selectedLabId))}</span><strong>아티팩트 보관소 · 작업공간</strong><span class="originVersion">${capability}</span><button data-action="back-session">${state.returnMessageId ? "대화의 아티팩트로" : "세션으로 돌아가기"}</button></header>${tabs ? `<nav class="artifactTabs" data-count="${escapeHtml(labArtifacts.length)}" aria-label="Lab 아티팩트">${tabs}</nav>` : ""}${originStrip}${statisticsLineage}${paleontologyLineage}${labDecisionPanelMarkup()}<div class="labWorkGrid"><div class="figureColumn">
+    const spatialArtifact = (artifact.version.rendererId === "agentlas.table" && artifact.version.payload?.schema === "agentlas.science.materials-catalog-artifact/v1")
+      || (artifact.version.rendererId === "agentlas.vega" && Boolean(earthquakeCatalog))
+      || artifact.version.rendererId === "agentlas.d3-sky";
+    const spatial3dOpen = (artifact.version.rendererId === "agentlas.table" && artifact.version.payload?.schema === "agentlas.science.materials-catalog-artifact/v1" && state.spatialViewByArtifact.get(artifact.id) !== "materials-table")
+      || (artifact.version.rendererId === "agentlas.vega" && earthquakeView === "earthquake-depth")
+      || (artifact.version.rendererId === "agentlas.d3-sky" && skyView === "astronomy-distance");
+    const decisionPanel = labDecisionPanelMarkup();
+    const chartPriority = Boolean(economicPayload && !inspectingHistory);
+    return `<section class="artifactWorkspace ${state.historyOpen ? "historyOpen" : ""} ${state.artifactComparison ? "compareOpen" : ""} ${spatialArtifact ? "spatialArtifact" : ""} ${spatial3dOpen ? "spatial3dOpen" : ""}" data-chart-priority="${chartPriority}"><header class="labWorkspaceHeader visuallyHidden"><span>${escapeHtml(labCapabilityLabel(state.selectedLabId))}</span><strong>아티팩트 보관소 · 작업공간</strong><span class="originVersion">${capability}</span><button data-action="back-session">${state.returnMessageId ? "대화의 아티팩트로" : "세션으로 돌아가기"}</button></header>${tabs ? `<nav class="artifactTabs" data-count="${escapeHtml(labArtifacts.length)}" aria-label="Lab 아티팩트">${tabs}</nav>` : ""}${originStrip}${statisticsLineage}${paleontologyLineage}<div class="labWorkGrid"><div class="figureColumn">
       ${canvas}
       <section class="artifactInterpretation"><div><div class="researchKicker">${inspectingHistory ? "과거 버전 의미 기록" : "Semantic layer"}</div><h2>${escapeHtml(activeVersion?.semantic?.title || (inspectingHistory ? `v${state.inspectedArtifactVersion} 기록을 불러오는 중…` : artifact.title))}</h2><p>${escapeHtml(activeVersion?.semantic?.summary || (inspectingHistory ? "현재 버전 정보로 대체하지 않고, 선택한 과거 버전의 검증이 끝날 때까지 기다립니다." : ""))}</p></div>${observations ? `<dl class="observationGrid">${observations}</dl>` : ""}</section>
       <div data-artifact-compare-host>${artifactCompareMarkup(artifact, history)}</div>
-    </div><aside class="versionRail" data-version-timeline aria-label="아티팩트 버전 기록"><header><span>버전 기록</span><div><strong>${escapeHtml(artifact.currentVersion)}개</strong><button data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>비교</button></div></header><div class="versionRows">${timeline}</div><footer>저장된 버전만 기록됩니다. 과거 버전은 읽기 전용입니다.</footer></aside></div></section>`;
+    </div><aside class="versionRail" data-version-timeline aria-label="아티팩트 버전 기록"><header><span>버전 기록</span><div><strong>${escapeHtml(artifact.currentVersion)}개</strong><button data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>비교</button></div></header><div class="versionRows">${timeline}</div><footer>저장된 버전만 기록됩니다. 과거 버전은 읽기 전용입니다.</footer></aside></div>${decisionPanel}</section>`;
   }
 
   function errorState() {
@@ -5143,16 +6858,128 @@ import { formatScienceCell } from "./format-cell.js";
     void startComposerTurn({ forceAppend: true });
   }
 
+  function manuscriptRequestSummary(message, rawText) {
+    if (message.role !== "user") return null;
+    const raw = String(rawText || "");
+    const marker = /\n\n<<agentlas-manuscript-draft-job:v1 (\{[^\n]*\})>>$/.exec(raw);
+    if (!marker) return null;
+    try {
+      const job = JSON.parse(marker[1]);
+      if (job.projectId !== message.projectId || job.conversationId !== message.conversationId) return null;
+      const families = { empirical: "Empirical study", "theoretical-proof": "Theoretical / proof", "review-synthesis": "Review / synthesis", "methods-model": "Methods / model", "data-resource": "Data resource" };
+      if (!Object.hasOwn(families, job.articleFamily) || typeof job.requestId !== "string" || (job.journalTarget !== null && typeof job.journalTarget !== "string")) return null;
+      const prefix = "Start a publication-grade manuscript workflow for this project.\n\nResearch objective: ";
+      const end = raw.lastIndexOf(`\nArticle family: ${job.articleFamily}\nTarget journal: `, marker.index);
+      if (!raw.startsWith(prefix) || end < prefix.length) return null;
+      job.objective = raw.slice(prefix.length, end);
+      // Summarize only our exact generated request. Edited/ordinary messages
+      // remain verbatim, and the original instructions remain inspectable.
+      if (manuscriptDraftJobPrompt(job) !== raw) return null;
+      return `${uiCopy("원고 작성 요청", "Manuscript drafting request")}\n\n${job.objective}\n\n${uiCopy("논문 유형", "Article family")}: ${families[job.articleFamily]}\n${uiCopy("대상 학술지", "Target journal")}: ${job.journalTarget || uiCopy("미선택", "Not selected")}`;
+    } catch { return null; }
+  }
+
+  function analysisPlanReviewContinuationPrompt(review) {
+    const exact = `analysis_spec_id=${review.analysisSpecId}, version=${review.analysisSpecVersion}, content_sha256=${review.analysisSpecContentSha256}`;
+    const instructions = review.decision === "approve"
+      ? review.acquisitionOnly
+        ? `사람이 화면에서 ${exact}의 사전 수집 계획을 승인했고 immutable approval receipt ${review.receiptId}가 저장되었습니다. 이 승인은 data.acquisition에 적힌 출처와 수집 방법만 허용합니다. 분석은 실행하지 마세요. 수집 후 실제 아티팩트 ID, 버전, content hash를 data.inputs에 묶은 후속 계획을 제안하고 다시 사람 승인을 요청하세요.`
+        : `사람이 화면에서 ${exact}를 승인했고 immutable approval receipt ${review.receiptId}가 저장되었습니다. 최신 research lifecycle을 다시 읽고 이 frozen exact plan만 결합해 허용된 다음 단계로 진행하세요. 계획을 다시 쓰거나 채팅 문구를 승인으로 추론하지 마세요.`
+      : `사람이 화면에서 ${exact}의 수정을 요청했습니다. 수정 의견: ${review.rationale}\n\n현재 draft를 승인 또는 freeze하지 마세요. 아직 입력 아티팩트가 없다면 data.inputs=[]와 함께 data.acquisition={strategy:"acquire-before-execution",sources:[{provider,sourceRefs,retrievalPlan,expectedArtifactKind}]}를 작성하세요. 수집이 끝난 뒤에는 실제 아티팩트 ID, 버전, content hash를 data.inputs에 묶은 후속 계획이 다시 사람 승인을 받아야 합니다. 이 의견을 반영한 새 analysis plan을 제안한 뒤 검토를 요청하세요.`;
+    return `${instructions}\n\n<<agentlas-analysis-plan-review:v1 ${JSON.stringify(review)}>>`;
+  }
+
+  function analysisPlanReviewRequestSummary(message, rawText) {
+    if (message.role !== "user") return null;
+    const raw = String(rawText || "");
+    const marker = /\n\n<<agentlas-analysis-plan-review:v1 (\{[^\n]*\})>>$/.exec(raw);
+    if (!marker) {
+      // Existing review continuations created before the projection marker remain in immutable
+      // conversation history. Recognize only the exact generated prefix and suffix so those rows
+      // gain the same compact projection without hiding an ordinary researcher message.
+      const legacy = /^사람이 화면에서 analysis_spec_id=([0-9a-f-]{36}), version=(\d+), content_sha256=([a-f0-9]{64})의 수정을 요청했습니다\. 수정 의견: ([\s\S]+)\n\n현재 draft를 승인 또는 freeze하지 마세요\. 아직 입력 아티팩트가 없다면 data\.inputs=\[\]와 함께 data\.acquisition=\{strategy:"acquire-before-execution",sources:\[\{provider,sourceRefs,retrievalPlan,expectedArtifactKind\}\]\}를 작성하세요\. 수집이 끝난 뒤에는 실제 아티팩트 ID, 버전, content hash를 data\.inputs에 묶은 후속 계획이 다시 사람 승인을 받아야 합니다\. 이 의견을 반영한 새 analysis plan을 제안한 뒤 검토를 요청하세요\.$/.exec(raw);
+      return legacy ? `${uiCopy("분석계획 수정 요청", "Analysis plan changes requested")}\n\n${legacy[4]}` : null;
+    }
+    try {
+      const review = JSON.parse(marker[1]);
+      if (review.projectId !== message.projectId || review.conversationId !== message.conversationId
+        || !["approve", "revise"].includes(review.decision)
+        || typeof review.analysisSpecId !== "string" || !Number.isSafeInteger(review.analysisSpecVersion)
+        || typeof review.analysisSpecContentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(review.analysisSpecContentSha256)
+        || typeof review.receiptId !== "string" || typeof review.planTitle !== "string"
+        || typeof review.acquisitionOnly !== "boolean"
+        || (review.rationale !== null && typeof review.rationale !== "string")) return null;
+      // Project only messages generated by this exact function. An edited or ordinary user message
+      // remains verbatim, while the original controller instructions stay inspectable below it.
+      if (analysisPlanReviewContinuationPrompt(review) !== raw) return null;
+      return review.decision === "revise"
+        ? `${uiCopy("분석계획 수정 요청", "Analysis plan changes requested")}\n\n${review.rationale}`
+        : `${uiCopy("분석계획 승인", "Analysis plan approved")}\n\n${review.planTitle}`;
+    } catch { return null; }
+  }
+
+  function scienceChatMarkdown(text) {
+    if (!String(text || "").trim()) return "";
+    // Reuse the extension's escaped block renderer, never raw model HTML.
+    // Protect inline code before interpreting emphasis inside ordinary prose.
+    const inline = scienceInlineMarkdown;
+    // Keep list structure and source order in chat. The manuscript fallback's
+    // flat-list buffer cannot represent indented children or ordered lists.
+    const output = [], prose = [], lists = [];
+    const flushProse = () => {
+      if (prose.some((row) => row.trim())) output.push(manuscriptPreview(prose.join("\n"), inline));
+      prose.length = 0;
+    };
+    const closeList = () => output.push(`</li></${lists.pop().tag}>`);
+    const flushLists = () => { while (lists.length) closeList(); };
+    let fence = false;
+    for (const rawRow of String(text).split(/\r?\n/)) {
+      const row = rawRow.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length));
+      if (row.trim().startsWith("```")) {
+        flushLists();
+        prose.push(row);
+        fence = !fence;
+        continue;
+      }
+      if (fence) { prose.push(row); continue; }
+      const item = /^( *)([-+*]|\d{1,9}[.)])\s+(.+)$/.exec(row);
+      if (item) {
+        flushProse();
+        const indent = item[1].length, tag = /^\d/.test(item[2]) ? "ol" : "ul";
+        while (lists.length && lists[lists.length - 1].indent > indent) closeList();
+        if (lists.length && lists[lists.length - 1].indent === indent
+          && lists[lists.length - 1].tag !== tag) closeList();
+        if (lists.length && lists[lists.length - 1].indent === indent) output.push("</li><li>");
+        else {
+          const start = tag === "ol" ? ` start="${parseInt(item[2], 10)}"` : "";
+          output.push(`<${tag}${start}><li>`);
+          lists.push({ indent, tag });
+        }
+        output.push(inline(item[3]));
+      } else if (lists.length && row.trim() && /^\s/.test(row)
+        && row.length - row.trimStart().length > lists[lists.length - 1].indent) {
+        output.push(` ${inline(row.trim())}`);
+      } else {
+        flushLists();
+        prose.push(row);
+      }
+    }
+    flushLists();
+    flushProse();
+    return output.join("");
+  }
+
   function compactChatMessage(message) {
     const blocks = state.blocksByMessage.get(message.id) || [];
     const rawText = blocks.length ? blocks.map((block) => block.content).join("\n\n") : message.content;
-    const text = String(rawText || "")
-      .replace(/\n*<<agentlas-manuscript-selection:v1 \{[^\n]*\}>>\s*$/u, "")
-      .replace(/\n*<<agentlas-manuscript-draft-job:v1 \{[^\n]*\}>>\s*$/u, "");
+    const requestSummary = manuscriptRequestSummary(message, rawText) || analysisPlanReviewRequestSummary(message, rawText);
+    const text = requestSummary || String(rawText || "")
+      .replace(/\n*<<agentlas-manuscript-selection:v1 \{[^\n]*\}>>\s*$/u, "");
+    const instructions = requestSummary ? `<details class="chatMessageInstructions" data-chat-instructions="${escapeHtml(message.id)}"><summary>${uiCopy("실행 지시문 보기", "View execution instructions")}</summary><div class="chatMessageContent">${escapeHtml(rawText)}</div></details>` : "";
     const artifactContexts = state.artifactContextsByMessage.get(message.id) || [];
     const artifacts = artifactContexts.map((context) => `<button class="chatArtifactLink" data-chat-artifact-id="${escapeHtml(context.artifact.id)}" data-chat-artifact-version="${escapeHtml(context.selectedVersion.version)}" data-chat-conversation-id="${escapeHtml(message.conversationId)}" data-chat-message-id="${escapeHtml(message.id)}" title="${escapeHtml(`Open exact v${context.selectedVersion.version} in ${labLabel(context.linkage.labId)}`)}"><strong>${escapeHtml(context.artifact.title)}</strong><span>${escapeHtml(labLabel(context.linkage.labId))} · open v${escapeHtml(context.selectedVersion.version)} →</span></button>`).join("");
     const user = message.role === "user";
-    return `<article class="chatMessage ${user ? "isUser" : "isAssistant"}"><div class="chatMessageRole">${user ? "You" : "Agentlas Science"}</div><div class="chatMessageContent">${escapeHtml(text)}</div>${artifacts}${paleontologyCatalogReceiptMarkup(message)}</article>`;
+    return `<article class="chatMessage ${user ? "isUser" : "isAssistant"}" data-chat-message-id="${escapeHtml(message.id)}"><div class="chatMessageRole">${user ? "You" : "Agentlas Science"}</div><div class="chatMessageContent${user ? "" : " scienceChatMarkdown"}">${user ? escapeHtml(text) : scienceChatMarkdown(text)}</div>${instructions}${artifacts}${paleontologyCatalogReceiptMarkup(message)}</article>`;
   }
 
   function manuscriptProposalCardsMarkup() {
@@ -5183,16 +7010,43 @@ import { formatScienceCell } from "./format-cell.js";
   function manuscriptDraftJobMarkup() {
     const job = state.manuscriptDraftJob;
     if (!job || job.projectId !== state.selectedId) return "";
-    const label = job.status === "created" ? "Manuscript created" : job.status === "blocked" || job.status === "failed" ? "Manuscript not created" : "Publication draft in progress";
+    const label = job.status === "created" ? "Manuscript created" : job.status === "cancelled" ? uiCopy("원고 작성이 중단되었습니다", "Manuscript drafting stopped") : job.status === "blocked" || job.status === "failed" ? "Manuscript not created" : "Publication draft in progress";
     const detail = job.status === "created"
       ? `Blueprint v${job.receipt?.blueprintVersion || "-"} · ${job.receipt?.eligibilityReceiptIds?.length || 0} eligible comparables`
-      : job.error || "Research Director is collecting full text, qualifying 5+ comparable papers, calibrating the Blueprint, and drafting substantive sections.";
+      : job.status === "cancelled" ? uiCopy("중단 전에 완료·검증된 원고는 확인되지 않았습니다. 준비되면 원고 작성을 다시 요청할 수 있습니다.", "No completed, validated manuscript was found before this run stopped. You can request manuscript drafting again when ready.")
+        : job.error || "Research Director is collecting full text, qualifying 5+ comparable papers, calibrating the Blueprint, and drafting substantive sections.";
     return `<section class="manuscriptDraftJobCard" data-manuscript-draft-status="${escapeHtml(job.status)}"><span>${heroIcon("book")}</span><div><strong>${escapeHtml(label)}</strong><p>${escapeHtml(detail)}</p></div></section>`;
   }
 
+  function scienceLiveResponseText(raw) {
+    let visible = stripStormbreakerContinueMarker(String(raw || "")).text.split(STORMBREAKER_LONG_RUN_MARKER).join("");
+    // The host owns the full marker constants. Hide unfinished streaming tails
+    // without changing the raw receipt or its hash.
+    for (const marker of [STORMBREAKER_CONTINUE_MARKER, STORMBREAKER_LONG_RUN_MARKER]) {
+      for (let length = marker.length - 1; length >= 4; length -= 1) {
+        if (visible.endsWith(marker.slice(0, length))) { visible = visible.slice(0, -length); break; }
+      }
+    }
+    return stripAgentControlBlocks(visible, { streaming: true });
+  }
+
+  function liveChatResponseMarkup() {
+    const turn = state.activeTurn;
+    if (!turn || turn.projectId !== state.selectedId || turn.conversationId !== selectedConversation()?.id
+      || !["queued", "running", "cancelling"].includes(turn.status) || !String(turn.partialText || "").trim()) return "";
+    // Receipt-backed progress is not a durable assistant message or a completed
+    // artifact. Keep it separate from message/citation bindings and scroll IDs.
+    if (turn.assistantMessageId && state.messages.some((message) => message.id === turn.assistantMessageId)) return "";
+    const visible = scienceLiveResponseText(turn.partialText);
+    if (!visible) return "";
+    return `<article class="chatMessage isAssistant" data-chat-turn-id="${escapeHtml(turn.id)}"><div class="chatMessageRole">Agentlas Science · ${uiCopy("응답 작성 중", "Response in progress")}</div><div class="chatMessageContent scienceChatMarkdown">${scienceChatMarkdown(visible)}</div></article>`;
+  }
+
   function chatThreadMarkup() {
+    if (!chatMessagesReady()) return `<div class="chatDockEmpty" role="status">${uiCopy("대화를 불러오는 중…", "Loading conversation…")}</div>`;
     const messages = state.messages.length ? state.messages.map(compactChatMessage).join("") : `<div class="chatDockEmpty">This project conversation continues here.</div>`;
-    return `${messages}${manuscriptDraftJobMarkup()}${manuscriptProposalCardsMarkup()}`;
+    const failure = state.mode !== "session" || state.currentDestination !== "overview" ? runFailureNotice() : "";
+    return `${messages}${liveChatResponseMarkup()}${failure}${manuscriptDraftJobMarkup()}${manuscriptProposalCardsMarkup()}`;
   }
 
   function manuscriptDraftJobPrompt(job) {
@@ -5201,9 +7055,10 @@ import { formatScienceCell } from "./format-cell.js";
     return `Start a publication-grade manuscript workflow for this project.\n\nResearch objective: ${job.objective}\nArticle family: ${job.articleFamily}\nTarget journal: ${target}.${seed}\n\nUse the Research Director MCP path only. Do not create a renderer-side manuscript or an empty IMRaD scaffold.\n1. Collect and content-check relevant full-text prior work.\n2. Record immutable quantitative eligibility receipts for at least five comparable sources from one source-domain cohort and one article family; bind exact SourceVersions and two distinct-section byte quotes.\n3. Create a current corpus-calibrated Blueprint, binding verified official journal guidance if a target is supplied.\n4. Map every paragraph job, claim, citation, figure, table, and equation before prose; preserve the corpus-observed section transitions.\n5. Draft substantive sections in durable passes until the corpus-derived word and paragraph ranges are met without repeated-paragraph padding; draft the Abstract last.\n6. Assemble the versioned manuscript only through the gated MCP route, then close scholarly flow, claim, numeric provenance, and journal validation.\n\nIf evidence is missing, ask for the smallest necessary input instead of creating a placeholder.\n\n<<agentlas-manuscript-draft-job:v1 ${JSON.stringify({ requestId: job.requestId, projectId: job.projectId, conversationId: job.conversationId, articleFamily: job.articleFamily, journalTarget: job.journalTarget || null, seedBinding: job.seedBinding || null })}>>`;
   }
 
-  async function maybeOpenDraftJobManuscript(projectId, { terminal = false } = {}) {
+  async function maybeOpenDraftJobManuscript(projectId, { terminalStatus = null } = {}) {
     const job = state.manuscriptDraftJob;
-    if (!job || job.projectId !== projectId || job.status === "created") return false;
+    if (!job || job.projectId !== projectId || ["created", "cancelled"].includes(job.status)) return false;
+    if (state.activeTurn?.conversationId && state.activeTurn.conversationId !== job.conversationId) return false;
     const candidates = state.manuscripts.filter((item) => !job.existingManuscriptIds.includes(item.id));
     for (const manuscript of candidates) {
       try {
@@ -5221,17 +7076,77 @@ import { formatScienceCell } from "./format-cell.js";
         return true;
       } catch { /* fail closed until the exact closure can be read */ }
     }
-    if (terminal) {
+    if (terminalStatus === "cancelled") {
+      state.manuscriptDraftJob = { ...job, status: "cancelled", error: "" };
+    } else if (["completed", "failed", "interrupted"].includes(terminalStatus)) {
       state.manuscriptDraftJob = { ...job, status: "blocked", error: "The Research Director turn ended without a closed manuscript + Blueprint + 5 eligible-comparable receipt. No manuscript tab was opened." };
       state.composerError = state.manuscriptDraftJob.error;
     }
     return false;
   }
 
+  function composerTurnError(turn) {
+    // The terminal status is authoritative; some runtimes retain a generic
+    // runner error code even when their receipt explicitly records cancellation.
+    return turn && ["failed", "interrupted"].includes(turn.status)
+      ? turn.errorCode || `Research run ${turn.status}`
+      : "";
+  }
+
+  function scienceRuntimePickerMarkup() {
+    const locked = scienceRuntimePickerLocked();
+    const loading = state.runtimeSelectionLoading;
+    const busy = state.runtimeSelectionBusy;
+    const selected = scienceRuntimeSelectionForDisplay();
+    const selectedKey = scienceRuntimeSelectionKey(selected);
+    const label = scienceRuntimeDisplayLabel() || uiCopy("모델 선택", "Select model");
+    const provider = scienceRuntimeDisplayProvider();
+    const query = String(state.runtimePickerQuery || "").trim().toLocaleLowerCase(state.locale || "en");
+    const visibleOptions = state.runtimeOptions
+      .map((option, index) => ({ option, index }))
+      .filter(({ option }) => !query || [scienceRuntimeOptionLabel(option), scienceRuntimeOptionProvider(option), option.selection?.model, option.selection?.backend, option.selection?.kind]
+        .filter(Boolean).join(" ").toLocaleLowerCase(state.locale || "en").includes(query));
+    const buttonDisabled = locked || loading || busy || !selectedConversation();
+    const status = state.runtimeSelectionError
+      ? scienceRuntimeErrorText(state.runtimeSelectionError)
+      : state.runtimeUnavailable
+        ? uiCopy("연결된 모델을 사용할 수 없습니다.", "No connected model is available.")
+        : "";
+    const optionRows = visibleOptions.length
+      ? visibleOptions.map(({ option, index }) => {
+        const optionKey = scienceRuntimeSelectionKey(option.selection);
+        const optionLabel = scienceRuntimeOptionLabel(option);
+        const optionProvider = scienceRuntimeOptionProvider(option);
+        return `<button type="button" class="scienceModelOption${optionKey === selectedKey ? " isSelected" : ""}" data-action="select-science-model" data-science-runtime-option-index="${index}" role="option" aria-selected="${optionKey === selectedKey}" ${locked || busy ? "disabled" : ""}><span class="scienceModelOptionCopy"><strong>${escapeHtml(optionLabel)}</strong>${optionProvider ? `<em>${escapeHtml(optionProvider)}</em>` : ""}</span><span class="scienceModelOptionCheck" aria-hidden="true">${optionKey === selectedKey ? "✓" : ""}</span></button>`;
+      }).join("")
+      : `<div class="scienceModelEmpty">${escapeHtml(state.runtimeUnavailable ? uiCopy("사용 가능한 모델이 없습니다.", "No available models.") : query ? uiCopy("검색 결과가 없습니다.", "No models match this search.") : uiCopy("사용 가능한 모델이 없습니다.", "No models are available."))}</div>`;
+    const menu = state.runtimePickerOpen && !locked
+      ? `<div class="scienceModelMenu" role="dialog" aria-label="${escapeHtml(uiCopy("모델 선택", "Select model"))}"><div class="scienceModelMenuHeader"><strong>${escapeHtml(uiCopy("연구 모델", "Research model"))}</strong><button type="button" class="scienceModelClose" data-action="close-science-model" aria-label="${escapeHtml(uiCopy("닫기", "Close"))}">×</button></div><label class="scienceModelSearch">${heroIcon("search")}<span class="visuallyHidden">${escapeHtml(uiCopy("모델 검색", "Search models"))}</span><input type="search" data-science-model-search value="${escapeHtml(state.runtimePickerQuery)}" placeholder="${escapeHtml(uiCopy("모델 또는 제공자 검색", "Search model or provider"))}" autocomplete="off"></label><div class="scienceModelOptions" role="listbox" aria-label="${escapeHtml(uiCopy("사용 가능한 모델", "Available models"))}">${optionRows}</div>${status ? `<p class="scienceModelError" role="alert">${escapeHtml(status)}</p>` : ""}</div>`
+      : "";
+    const triggerTitle = locked
+      ? uiCopy("현재 연구 실행의 모델", "Model pinned for the running research")
+      : uiCopy("연구 모델 선택", "Choose the research model");
+    return `<div class="scienceModelPicker${state.runtimePickerOpen ? " isOpen" : ""}" data-science-model-picker><button type="button" class="scienceModelTrigger${!selected ? " isRequired" : ""}" data-action="toggle-science-model" data-science-model-trigger aria-haspopup="dialog" aria-expanded="${state.runtimePickerOpen && !locked}" aria-label="${escapeHtml(triggerTitle)}" title="${escapeHtml(triggerTitle)}" ${buttonDisabled ? "disabled" : ""}><span class="scienceModelTriggerMark" aria-hidden="true">✦</span><span class="scienceModelTriggerCopy"><strong>${escapeHtml(label)}</strong>${provider ? `<em>${escapeHtml(provider)}</em>` : ""}</span><span class="scienceModelTriggerChevron" aria-hidden="true">⌄</span></button>${menu}</div>`;
+  }
+
+  function scienceResearchLoopControlsMarkup() {
+    const session = state.researchLoopInspection?.session;
+    if (!session || session.status !== "paused" || session.projectId !== state.selectedId) return "";
+    const busy = state.researchLoopActionBusy;
+    const error = scienceResearchLoopActionErrorText(state.researchLoopActionError);
+    const detail = uiCopy(
+      `연구 ${session.currentEpisode || 0}회차가 멈췄습니다. 현재 모델은 이 연구에 고정되어 있습니다.`,
+      `Research is paused at episode ${session.currentEpisode || 0}. Its pinned model stays fixed until you continue or stop it.`,
+    );
+    return `<div class="scienceResearchLoopControls" data-research-loop-controls data-loop-session-id="${escapeHtml(session.id)}" data-loop-version="${escapeHtml(session.version)}" data-loop-state-sha256="${escapeHtml(session.stateSha256)}"><div class="scienceResearchLoopCopy"><strong>${escapeHtml(uiCopy("연구가 일시 중지됨", "Research paused"))}</strong><span>${escapeHtml(detail)}</span></div><div class="scienceResearchLoopActions"><button type="button" class="scienceResearchLoopResume" data-action="resume-science-loop" ${busy ? "disabled" : ""}>${escapeHtml(busy ? uiCopy("처리 중…", "Working…") : uiCopy("연구 계속", "Continue research"))}</button><button type="button" class="scienceResearchLoopCancel" data-action="cancel-science-loop" ${busy ? "disabled" : ""}>${escapeHtml(uiCopy("연구 중지", "Stop research"))}</button></div>${error ? `<p class="scienceResearchLoopError" role="alert">${escapeHtml(error)}</p>` : ""}</div>`;
+  }
+
   function composer(docked = false) {
-    const running = state.activeTurn && ["queued", "running", "cancelling"].includes(state.activeTurn.status);
+    const running = state.activeTurn && SCIENCE_RUNTIME_RUNNING_STATUSES.has(state.activeTurn.status);
     const needsInitialRun = !running && state.messages.length === 1 && state.messages[0].role === "user" && !state.messages.some((message) => message.role === "assistant");
-    const disabled = state.composerSending || !selectedConversation();
+    const disabled = state.composerSending || !selectedConversation() || !chatMessagesReady();
+    const runtimeSelectionBlocked = !state.runtimeSelection || state.runtimeUnavailable || state.runtimeSelectionLoading || state.runtimeSelectionBusy;
+    const sendDisabled = !running && (disabled || runtimeSelectionBlocked || (!needsInitialRun && !state.composerDraft.trim()));
     // 같은 실패가 두 번 나오면 안 된다. 본문 .failClosed 가 사람 문장으로 설명하는 경우
   // 하단 상태줄까지 오류 원문을 되풀이하면, 사람은 잘린 개발자 문자열
   // ("Error invoking remote method 'scien…")만 읽게 된다. 설명된 실패는 짧게 가리키고
@@ -5239,6 +7154,7 @@ import { formatScienceCell } from "./format-cell.js";
   const composerStatusText = (rawValue) => {
     const t = String(rawValue || "").trim();
     if (!t) return "";
+    if (t === "no-runtime") return uiCopy("AI 런타임 연결이 필요합니다", "AI runtime connection required");
     const explained = /^Error invoking remote method/i.test(t)
       || /science-research-director-package-version-mismatch/.test(t)
       || /package-integrity|package-signature/.test(t);
@@ -5246,16 +7162,21 @@ import { formatScienceCell } from "./format-cell.js";
     // .failClosed 가 본문 위쪽(303px)에 폭 760 으로 그려진다. 그래서 가리켜도 된다.
     return explained ? "실행을 시작하지 못했습니다 · 위 안내를 확인하세요" : t;
   };
-  const status = composerStatusText(state.composerError) || (running ? (state.activeTurn.status === "cancelling" ? "연구 실행을 중단하는 중…" : "Agent runtime 연구 중…") : needsInitialRun ? "저장된 첫 질문을 실행할 수 있습니다" : "Agent runtime 준비");
-    return `<footer class="composer${docked ? " dockedComposer" : ""}"><div class="composerBox"><textarea data-composer-input ${disabled || running || needsInitialRun ? "disabled" : ""} rows="2" aria-label="후속 질문" placeholder="후속 질문, 분석 또는 실험 요청">${escapeHtml(state.composerDraft)}</textarea><div class="composerBar"><div class="composerTools"><span class="composerStatus">${escapeHtml(status)}</span><button class="composerAttachButton" disabled title="첨부는 다음 단계에서 연결됩니다" aria-label="첨부 준비 중">${heroIcon("plus")}</button><span class="composerModePill">${heroIcon("sparkles")} Science</span></div><button class="sendButton" data-action="${running ? "cancel-turn" : "send-turn"}" ${disabled || (!needsInitialRun && !state.composerDraft.trim()) ? "disabled" : ""} aria-label="${running ? "중단" : needsInitialRun ? "첫 질문 실행" : "보내기"}">${running ? "■" : "↑"}</button></div></div></footer>`;
-  }
-
-  function chatContextLabel() {
-    return state.mode === "lab" && state.selectedLabId
-      ? `${labLabel(state.selectedLabId)} Lab와 함께 보는 대화`
-      : state.mode === "manuscript"
-        ? `${manuscriptById(state.selectedManuscriptId)?.title || "Manuscript"} · exact manuscript context`
-        : "Research와 함께 보는 대화";
+  const loopPresentation = researchLoopPresentation();
+  const status = composerStatusText(state.composerError) || (running
+    ? (state.activeTurn.status === "cancelling" ? "연구 실행을 중단하는 중…" : "Agent runtime 연구 중…")
+    : state.activeTurn?.status === "cancelled"
+      ? uiCopy("연구 실행 중단됨", "Research run stopped")
+      : loopPresentation?.attention
+        ? loopPresentation.label
+        : state.runtimeSelectionError
+          ? scienceRuntimeErrorText(state.runtimeSelectionError)
+          : state.runtimeUnavailable
+            ? uiCopy("연결된 모델을 사용할 수 없습니다.", "No connected model is available.")
+            : !state.runtimeSelection && !state.runtimeSelectionLoading
+              ? uiCopy("모델을 선택해 주세요.", "Choose a model to begin.")
+        : needsInitialRun ? "저장된 첫 질문을 실행할 수 있습니다" : "");
+    return `<footer class="composer${docked ? " dockedComposer" : ""}"><div class="composerBox"><textarea data-composer-input ${disabled || running || needsInitialRun ? "disabled" : ""} rows="2" aria-label="후속 질문" placeholder="후속 질문, 분석 또는 실험 요청">${escapeHtml(state.composerDraft)}</textarea><div class="composerBar"><div class="composerTools">${scienceRuntimePickerMarkup()}${scienceResearchLoopControlsMarkup()}${status ? `<span class="composerStatus">${escapeHtml(status)}</span>` : ""}</div><button class="sendButton" data-action="${running ? "cancel-turn" : "send-turn"}" ${sendDisabled ? "disabled" : ""} aria-label="${running ? "중단" : needsInitialRun ? "첫 질문 실행" : "보내기"}">${running ? "■" : "↑"}</button></div></div></footer>`;
   }
 
   function chatContextTokensMarkup() {
@@ -5266,20 +7187,58 @@ import { formatScienceCell } from "./format-cell.js";
       const label = node?.kind === "heading" ? node.text : node?.kind ? `${node.kind[0].toUpperCase()}${node.kind.slice(1)} block` : "Manuscript selection";
       return `<div class="chatContextTokens manuscriptChatContext" aria-label="Pinned manuscript selection"><span title="${escapeHtml(context.selectedText)}">${heroIcon("book")}<strong>${escapeHtml(label)}</strong><em>“${escapeHtml(context.selectedText.slice(0, 86))}${context.selectedText.length > 86 ? "…" : ""}”</em><button data-action="clear-manuscript-selection" aria-label="Remove pinned manuscript selection">×</button></span></div>`;
     }
-    if (state.mode !== "lab" || !state.selectedLabId) return "";
-    const contexts = state.labContextsById.get(state.selectedLabId) || [];
-    const context = contexts.find((item) => item.artifact.id === state.selectedArtifactId) || contexts[0];
-    if (!context?.artifact) return "";
-    const artifact = context.artifact;
-    return `<div class="chatContextTokens" aria-label="현재 연구 채팅 컨텍스트"><span title="${escapeHtml(artifact.title)}">${heroIcon("book")}<strong>${escapeHtml(artifact.title)}</strong><em>v${escapeHtml(artifact.currentVersion)}</em></span><span>${heroIcon(labIcons[state.selectedLabId] || "grid")}<strong>${escapeHtml(labLabel(state.selectedLabId))}</strong></span></div>`;
+    // Lab and artifact context is already implicit in the active workspace tab. Repeating it as
+    // fixed chips above the composer competes with the result and looks like a user attachment.
+    // Keep only the removable manuscript-selection token above, because that one is explicitly
+    // pinned by the researcher and changes the next request.
+    return "";
   }
 
   function chatDockComposerMarkup() {
-    return `<div class="chatContextLine">${heroIcon("book")}<span>연구 컨텍스트: ${escapeHtml(chatContextLabel())}</span></div>${chatContextTokensMarkup()}${composer(true)}`;
+    return `${chatContextTokensMarkup()}${composer(true)}`;
   }
 
   function chatDock() {
-    return `<aside class="chatDock" data-chat-dock aria-label="연구 협업 채팅"><div class="chatDockFrame"><header class="chatDockHeader"><div class="chatPartner"><span class="chatPartnerMark">${heroIcon("book")}</span><span><strong>연구 채팅</strong><em>${escapeHtml(lifecycleCompactLabel())}</em></span></div><button class="chatHeaderAction" data-action="toggle-drawer" aria-label="연구 문맥과 세부 정보">${heroIcon("ellipsis")}</button></header><div class="chatDockBody" data-chat-dock-body>${chatThreadMarkup()}</div><div class="chatDockComposer" data-chat-dock-composer>${chatDockComposerMarkup()}</div></div></aside>`;
+    return `<aside class="chatDock" data-chat-dock aria-label="연구 협업 채팅"><div class="chatDockFrame"><header class="chatDockHeader"><div class="chatPartner"><span class="chatPartnerMark">${heroIcon("book")}</span><span><strong>연구 채팅</strong><em>${escapeHtml(lifecycleCompactLabel())}</em></span></div><button class="chatHeaderAction" data-action="toggle-drawer" aria-label="연구 문맥과 세부 정보">${heroIcon("ellipsis")}</button></header><div class="chatDockBody" data-chat-dock-body data-chat-project-id="${escapeHtml(state.selectedId || "")}" data-chat-conversation-id="${escapeHtml(selectedConversation()?.id || "")}" data-chat-hydrated="${chatMessagesReady()}">${chatThreadMarkup()}</div><div class="chatDockComposer" data-chat-dock-composer>${chatDockComposerMarkup()}</div></div></aside>`;
+  }
+
+  const chatScrollSnapshots = new Map();
+
+  function chatMessagesReady() {
+    const conversation = selectedConversation();
+    return Boolean(state.selectedId && conversation && state.chatMessagesScope === JSON.stringify([state.selectedId, conversation.id]));
+  }
+
+  function chatScrollKey(body) {
+    const { chatProjectId, chatConversationId } = body?.dataset || {};
+    return chatProjectId && chatConversationId ? JSON.stringify([chatProjectId, chatConversationId]) : null;
+  }
+
+  function rememberChatScroll(body = document.querySelector("[data-chat-dock-body]")) {
+    const key = chatScrollKey(body);
+    if (!key || body.dataset.chatHydrated !== "true") return;
+    const top = body.getBoundingClientRect().top;
+    const anchor = [...body.querySelectorAll("article[data-chat-message-id]")].find((message) => message.getBoundingClientRect().bottom > top);
+    chatScrollSnapshots.delete(key);
+    chatScrollSnapshots.set(key, {
+      top: body.scrollTop,
+      following: body.scrollHeight - body.scrollTop - body.clientHeight < 80,
+      anchorId: anchor?.dataset.chatMessageId,
+      anchorOffset: anchor ? anchor.getBoundingClientRect().top - top : 0,
+      openInstructions: [...body.querySelectorAll("details[data-chat-instructions][open]")].map((details) => details.dataset.chatInstructions),
+    });
+    if (chatScrollSnapshots.size > 100) chatScrollSnapshots.delete(chatScrollSnapshots.keys().next().value);
+  }
+
+  function restoreChatScroll(body = document.querySelector("[data-chat-dock-body]")) {
+    const key = chatScrollKey(body);
+    if (!key) return;
+    const saved = chatScrollSnapshots.get(key);
+    for (const details of body.querySelectorAll("details[data-chat-instructions]")) details.open = saved?.openInstructions.includes(details.dataset.chatInstructions) || false;
+    if (!saved || saved.following) { body.scrollTop = body.scrollHeight; return; }
+    body.scrollTop = saved.top;
+    const anchor = [...body.querySelectorAll("article[data-chat-message-id]")].find((message) => message.dataset.chatMessageId === saved.anchorId);
+    if (anchor) body.scrollTop += anchor.getBoundingClientRect().top - body.getBoundingClientRect().top - saved.anchorOffset;
   }
 
   function renderChatDock() {
@@ -5289,10 +7248,13 @@ import { formatScienceCell } from "./format-cell.js";
       render();
       return;
     }
-    const followLatest = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+    rememberChatScroll(body);
+    body.dataset.chatProjectId = state.selectedId || "";
+    body.dataset.chatConversationId = selectedConversation()?.id || "";
+    body.dataset.chatHydrated = String(chatMessagesReady());
     body.innerHTML = chatThreadMarkup();
     composerHost.innerHTML = chatDockComposerMarkup();
-    if (followLatest) body.scrollTop = body.scrollHeight;
+    restoreChatScroll(body);
   }
 
   /**
@@ -5310,28 +7272,97 @@ import { formatScienceCell } from "./format-cell.js";
     render();
   }
 
+  function applyStartedComposerReceipt(started, projectId, conversationId) {
+    const turn = started?.turn;
+    const message = started?.userMessage;
+    if (!turn || !message || turn.projectId !== projectId || turn.conversationId !== conversationId
+      || message.projectId !== projectId || message.conversationId !== conversationId
+      || turn.userMessageId !== message.id || message.role !== "user" || message.visibility !== "visible") {
+      throw new Error("science-composer-start-receipt-invalid");
+    }
+    // This is the committed message returned by Main, never optimistic user text.
+    state.messages = [...state.messages.filter((item) => item.id !== message.id), message]
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    state.activeTurn = turn;
+    if (turn.runtimeSelection && turn.projectId === state.selectedId && turn.conversationId === selectedConversation()?.id) {
+      state.runtimeSelection = turn.runtimeSelection;
+    }
+  }
+
   async function startComposerTurn(options = {}) {
     const project = selectedProject();
     const conversation = selectedConversation();
-    if (!project || !conversation || state.composerSending) return;
+    if (!project || !conversation || state.composerSending || !chatMessagesReady()) return;
+    const requestEpoch = ++composerRequestEpoch;
+    const projectEpoch = selectionEpoch;
+    const isCurrent = () => requestEpoch === composerRequestEpoch && projectEpoch === selectionEpoch
+      && project.id === state.selectedId && conversation.id === selectedConversation()?.id;
+    let requestId = crypto.randomUUID();
+    let startInput = null;
+    const recoverFailure = async (reason) => {
+      if (!isCurrent()) return;
+      let recoveredReceiptTurn = null;
+      // A controller continuation can become the latest turn before this IPC
+      // response arrives. Replay the exact idempotency key, not a guessed latest
+      // turn, to recover the user's own committed request.
+      if (startInput) {
+        try {
+          const replayed = await science.composer.start(startInput);
+          if (!isCurrent()) return;
+          applyStartedComposerReceipt(replayed, project.id, conversation.id);
+          recoveredReceiptTurn = replayed.turn;
+        } catch {}
+      }
+      // Main may have committed a message/turn before dispatch or IPC failed.
+      // Recover it from the store instead of pretending the send never happened.
+      try { await refreshConversationOnly(project.id); } catch {}
+      if (!isCurrent()) return;
+      // The first refresh may have read messages/turn before dispatch settled
+      // while the remaining projections were still loading. Reattach after it
+      // so a dropped event during that window cannot leave a stale running UI.
+      try {
+        const attached = await science.composer.attach({ projectId: project.id, conversationId: conversation.id });
+        if (!isCurrent()) return;
+        if (attached?.turn?.requestId === requestId) {
+          if (state.activeTurn?.id !== attached.turn.id || attached.turn.lastSequence >= state.activeTurn.lastSequence) state.activeTurn = attached.turn;
+          if (["completed", "failed", "cancelled", "interrupted"].includes(state.activeTurn.status)) await refreshConversationOnly(project.id);
+        }
+      } catch {}
+      if (!isCurrent()) return;
+      state.composerSending = false;
+      const recovered = recoveredReceiptTurn || (state.activeTurn?.requestId === requestId ? state.activeTurn : null);
+      if (recovered) state.composerDraft = "";
+      recordRunFailure(recovered ? composerTurnError(recovered) : reason);
+    };
     const needsInitialRun = !options.forceAppend && state.messages.length === 1 && state.messages[0].role === "user" && !state.messages.some((message) => message.role === "assistant");
     const content = state.composerDraft.trim();
     const selectionContext = !needsInitialRun && state.mode === "manuscript" ? state.manuscriptSelectionContext : null;
     const runtimeContent = selectionContext ? `${content}\n\n<<agentlas-manuscript-selection:v1 ${JSON.stringify({ selectionContextId: selectionContext.id, manuscriptId: selectionContext.manuscriptId, manuscriptVersion: selectionContext.manuscriptVersion, manuscriptContentSha256: selectionContext.manuscriptContentSha256, manuscriptDocumentSha256: selectionContext.manuscriptDocumentSha256, nodeId: selectionContext.nodeId, nodeRevision: selectionContext.nodeRevision, nodeContentSha256: selectionContext.nodeContentSha256, startOffset: selectionContext.startOffset, endOffset: selectionContext.endOffset, selectedText: selectionContext.selectedText })}>>` : content;
     if (!needsInitialRun && !content) return;
+    const runtimeSelection = state.runtimeSelection;
+    if (!runtimeSelection || state.runtimeUnavailable || state.runtimeSelectionLoading || state.runtimeSelectionBusy) {
+      state.runtimePickerOpen = true;
+      state.composerError = state.runtimeUnavailable ? "science-runtime-selection-unavailable" : "science-runtime-selection-required";
+      renderChatDock();
+      requestAnimationFrame(() => document.querySelector("[data-science-model-trigger]")?.focus());
+      return;
+    }
     state.composerSending = true;
     state.composerError = "";
     renderChatDock();
     try {
-      const started = await science.composer.start({
-        requestId: crypto.randomUUID(),
+      startInput = {
+        requestId,
         projectId: project.id,
         conversationId: conversation.id,
+        runtimeSelection,
         ...(needsInitialRun
           ? { mode: "existing-user-message", userMessageId: state.messages[0].id }
           : { mode: "append-user-message", content: runtimeContent }),
-      });
-      state.activeTurn = started.turn;
+      };
+      const started = await science.composer.start(startInput);
+      if (!isCurrent()) return;
+      applyStartedComposerReceipt(started, project.id, conversation.id);
       if (!needsInitialRun) state.composerDraft = "";
       state.composerSending = false;
       if (["completed", "failed", "cancelled", "interrupted"].includes(started.turn.status)) {
@@ -5341,6 +7372,7 @@ import { formatScienceCell } from "./format-cell.js";
       }
       renderChatDock();
     } catch (error) {
+      if (!isCurrent()) return;
       // A first question whose turn DIED has to be askable again. The record keeps one turn per
       // message, so re-running that message is refused -- and "Run first question" is the only
       // control a study that never started offers, so the study could not begin at all and nothing
@@ -5353,14 +7385,18 @@ import { formatScienceCell } from "./format-cell.js";
       const refusedAsUsed = String(error?.message ?? error).includes("science-user-message-already-used");
       if (refusedAsUsed && needsInitialRun && state.messages[0]?.content) {
         try {
-          const retried = await science.composer.start({
-            requestId: crypto.randomUUID(),
+          requestId = crypto.randomUUID();
+          startInput = {
+            requestId,
             projectId: project.id,
             conversationId: conversation.id,
+            runtimeSelection,
             mode: "append-user-message",
             content: state.messages[0].content,
-          });
-          state.activeTurn = retried.turn;
+          };
+          const retried = await science.composer.start(startInput);
+          if (!isCurrent()) return;
+          applyStartedComposerReceipt(retried, project.id, conversation.id);
           state.composerSending = false;
           if (["completed", "failed", "cancelled", "interrupted"].includes(retried.turn.status)) {
             if (state.mode === "lab") await refreshConversationOnly(project.id);
@@ -5370,13 +7406,11 @@ import { formatScienceCell } from "./format-cell.js";
           renderChatDock();
           return;
         } catch (retryError) {
-          state.composerSending = false;
-          recordRunFailure(retryError);
+          await recoverFailure(retryError);
           return;
         }
       }
-      state.composerSending = false;
-      recordRunFailure(error);
+      await recoverFailure(error);
     }
   }
 
@@ -5397,9 +7431,114 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
+  function newProjectFolderErrorMessage(error) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    if (message.includes("expired")) return uiCopy("폴더 선택이 만료되었습니다. 폴더를 다시 선택해 주세요.", "The folder selection expired. Choose the folder again.");
+    if (message.includes("folder-selection") || message.includes("folder selection")) return uiCopy("폴더를 다시 선택해 주세요.", "Choose the folder again.");
+    return message || uiCopy("폴더를 선택하지 못했습니다.", "The folder could not be selected.");
+  }
+
+  async function pickNewProjectFolder() {
+    if (!state.modal || state.saving || state.newProjectFolderBusy) return;
+    const generation = state.newProjectGeneration;
+    state.newProjectFolderBusy = true;
+    state.newProjectFolderError = "";
+    try {
+      // Invoke IPC before the first await while the click's user activation is live;
+      // the immediate render only disables repeat taps while the native chooser is open.
+      const pendingSelection = science.projects.pickFolder();
+      render();
+      const result = await pendingSelection;
+      if (generation !== state.newProjectGeneration || !state.modal) return;
+      if (!result || result.canceled === true) return;
+      const selectionId = typeof result.selectionId === "string" ? result.selectionId.trim() : "";
+      const folderPath = typeof result.path === "string" ? result.path : "";
+      if (!selectionId || !folderPath.trim()) throw new Error("science-folder-selection-invalid");
+      state.newProjectDraft = { ...state.newProjectDraft, folderSelectionId: selectionId, folderPath };
+      state.newProjectRequestId = null;
+      state.newProjectRequestSignature = "";
+    } catch (error) {
+      if (generation !== state.newProjectGeneration || !state.modal) return;
+      state.newProjectFolderError = newProjectFolderErrorMessage(error);
+    } finally {
+      if (generation !== state.newProjectGeneration || !state.modal) return;
+      state.newProjectFolderBusy = false;
+      render();
+      requestAnimationFrame(() => document.querySelector('[data-action="pick-project-folder"]')?.focus({ preventScroll: true }));
+    }
+  }
+
+  function resetNewProjectDraft() {
+    state.newProjectDraft = blankNewProjectDraft();
+    state.newProjectFolderError = "";
+  }
+
   function modal() {
     if (!state.modal) return "";
-    return `<div class="modalBackdrop" role="presentation"><form class="modal" id="new-project-form" role="dialog" aria-modal="true" aria-labelledby="new-project-title"><h2 id="new-project-title">새 연구</h2><p class="modalLead">첫 질문과 프로젝트가 로컬 Science DB에 저장됩니다. 분석·출처·실험 결과는 실제 runtime이 생성한 뒤에만 표시됩니다.</p><label class="field"><span>연구 질문</span><textarea name="question" required maxlength="20000" placeholder="무엇을 발견하거나 검증하고 싶나요?"></textarea></label><label class="field"><span>분야</span><select name="domain"><option value="general">일반 과학</option><option value="life-science">생명과학</option><option value="chemistry">화학</option><option value="physics">물리학</option><option value="materials-science">재료과학</option><option value="genomics">유전체학</option><option value="astronomy">천문학</option><option value="earth-ecology">지구·생태</option><option value="statistics">통계학</option><option value="economics">경제학</option><option value="finance">금융 연구</option></select></label><label class="field"><span>프로젝트 이름 <span class="optional">선택</span></span><input name="title" maxlength="160" placeholder="비워두면 질문에서 이름을 만듭니다" /></label><div class="formError" id="form-error" role="alert"></div><div class="modalActions"><button class="secondaryButton" type="button" data-action="cancel">취소</button><button class="primaryButton" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? "저장 중…" : "프로젝트 만들기"}</button></div></form></div>`;
+    const template = researchTemplateById(state.selectedResearchTemplateId);
+    const classification = template ? `<div class="projectClassificationHint"><img src="./assets/research-templates/${escapeHtml(template.id)}.png" alt=""><span><small>${uiCopy("바로가기에서 선택한 분류", "Classification from shortcut")}</small><strong>${escapeHtml(researchTemplateLabel(template))}</strong></span><button type="button" data-action="clear-project-classification">${uiCopy("분류 지우기", "Clear")}</button></div>` : "";
+    const folderPath = typeof state.newProjectDraft.folderPath === "string" ? state.newProjectDraft.folderPath : "";
+    const hasFolder = Boolean(state.newProjectDraft.folderSelectionId && folderPath.trim());
+    const folderPicker = `<label class="field projectFolderField"><span>${uiCopy("프로젝트 폴더", "Project folder")}</span><button class="projectFolderPicker" type="button" data-action="pick-project-folder" ${state.saving || state.newProjectFolderBusy ? "disabled" : ""}><span class="projectFolderPickerIcon" aria-hidden="true">${heroIcon("folder")}</span><span class="projectFolderPickerCopy"><strong>${hasFolder ? uiCopy("폴더가 선택되었습니다", "Folder selected") : uiCopy("폴더 선택", "Choose a folder")}</strong><small class="projectFolderPickerPath${hasFolder ? "" : " isPlaceholder"}"${hasFolder ? ` title="${escapeHtml(folderPath)}"` : ""}>${hasFolder ? escapeHtml(folderPath) : uiCopy("프로젝트에 연결할 폴더를 선택하세요", "Choose a folder for this project")}</small></span><span class="projectFolderPickerArrow" aria-hidden="true">${heroIcon("chevron-right")}</span></button>${state.newProjectFolderError ? `<span class="formError projectFolderError" role="alert">${escapeHtml(state.newProjectFolderError)}</span>` : ""}</label>`;
+    return `<div class="modalBackdrop projectCreationBackdrop" role="presentation"><form class="modal newProjectModal projectDetailsModal" id="new-project-form" role="dialog" aria-modal="true" aria-labelledby="new-project-title"><header><div><span>${uiCopy("새 프로젝트", "New project")}</span><h2 id="new-project-title">${uiCopy("프로젝트를 시작해 보세요", "Start a project")}</h2></div><button class="newProjectClose" type="button" data-action="cancel" aria-label="${uiCopy("새 프로젝트 닫기", "Close new project")}">×</button></header><p class="modalLead">${uiCopy("프로젝트 이름과 개요를 입력하고 연결할 폴더를 선택하세요.", "Enter a name and overview, then choose a folder for this project.")}</p>${classification}<label class="field"><span>${uiCopy("프로젝트 이름", "Project name")}</span><input name="title" required maxlength="80" autocomplete="off" value="${escapeHtml(state.newProjectDraft.title)}" placeholder="${uiCopy("연구를 구분하기 쉬운 짧은 이름", "A short name to identify your research")}" /></label><label class="field"><span>${uiCopy("개요", "Overview")}</span><textarea name="question" required maxlength="20000" placeholder="${uiCopy("이 프로젝트에서 발견하거나 검증하고 싶은 내용을 적어 주세요.", "Describe what you want to discover or test in this project.")}">${escapeHtml(state.newProjectDraft.question)}</textarea></label>${folderPicker}<div class="formError" id="form-error" role="alert"></div><div class="modalActions"><button class="primaryButton" type="submit" ${state.saving || state.newProjectFolderBusy ? "disabled" : ""}>${state.saving ? uiCopy("저장 중…", "Saving…") : uiCopy("프로젝트 만들기", "Create project")}</button></div></form></div>`;
+  }
+
+  function labManagerModal() {
+    if (!state.labManagerOpen || !state.selectedId) return "";
+    const bindings = new Map(state.workspaceLabBindings.map((binding) => [binding.labId, binding]));
+    const candidates = state.labCatalog.length ? state.labCatalog : researchTemplates.map((template) => ({ id: template.id, label: researchTemplateLabel(template) }));
+    const rows = candidates.map((lab) => {
+      const binding = bindings.get(lab.id);
+      const enabled = binding?.enabled === true;
+      const busy = state.labManagerBusyId === lab.id;
+      const template = researchTemplateById(lab.id);
+      return `<button type="button" class="labManagerRow" data-action="toggle-project-lab" data-lab-id="${escapeHtml(lab.id)}" data-lab-enabled="${enabled}" aria-pressed="${enabled}" ${state.labManagerBusyId ? "disabled" : ""}><span class="labManagerCheck" aria-hidden="true">${busy ? "…" : enabled ? "✓" : "+"}</span><span><strong>${escapeHtml(lab.label || labLabel(lab.id))}</strong><em>${escapeHtml(template ? researchTemplateDescription(template) : uiCopy("프로젝트에서 필요할 때 사용할 수 있도록 북마크합니다.", "Bookmark this Lab so it is available when the project needs it."))}</em></span><small>${enabled ? uiCopy("추가됨", "Added") : uiCopy("추가", "Add")}</small></button>`;
+    }).join("");
+    return `<div class="modalBackdrop labManagerBackdrop" role="presentation"><section class="modal labManagerModal" role="dialog" aria-modal="true" aria-labelledby="lab-manager-title"><header><div><span>Labs</span><h2 id="lab-manager-title">${uiCopy("프로젝트 Lab 편집", "Edit project Labs")}</h2><p>${uiCopy("여기서 추가한 Lab은 북마크입니다. Science는 연구에 필요할 때만 해당 Lab을 실행합니다.", "Added Labs are bookmarks. Science runs a Lab only when the research needs it.")}</p></div><button type="button" data-action="close-project-labs" aria-label="${uiCopy("Lab 편집 닫기", "Close Lab editor")}">×</button></header><div class="labManagerList">${rows}</div>${state.labManagerError ? `<p class="formError" role="alert">${escapeHtml(state.labManagerError)}</p>` : ""}<footer><span>${uiCopy("Lab을 제거해도 기존 아티팩트와 기록은 삭제되지 않습니다.", "Removing a Lab does not delete its existing artifacts or records.")}</span><button class="primaryButton" type="button" data-action="close-project-labs">${uiCopy("완료", "Done")}</button></footer></section></div>`;
+  }
+
+  async function toggleProjectLabBookmark(labId, enabled) {
+    const projectId = state.selectedId;
+    if (!projectId || state.labManagerBusyId) return;
+    const generation = state.labManagerGeneration;
+    const existing = state.workspaceLabBindings.find((binding) => binding.labId === labId) || null;
+    state.labManagerBusyId = labId;
+    state.labManagerError = "";
+    render();
+    try {
+      await science.labs.upsertBinding({
+        requestId: crypto.randomUUID(),
+        projectId,
+        labId,
+        enabled,
+        pinned: existing?.pinned === true,
+        ...(Number.isSafeInteger(existing?.displayOrder) ? { displayOrder: existing.displayOrder } : {}),
+        activatedBy: existing?.activatedBy || "user",
+        config: existing?.config && typeof existing.config === "object" ? existing.config : {},
+      });
+      if (state.selectedId !== projectId || state.labManagerGeneration !== generation) return;
+      const [workspaceState, labs] = await Promise.all([science.workspace.get(projectId), science.labs.list(projectId)]);
+      if (state.selectedId !== projectId || state.labManagerGeneration !== generation) return;
+      state.workspaceLabBindings = Array.isArray(workspaceState?.labs) ? workspaceState.labs.filter((binding) => binding?.projectId === projectId) : [];
+      state.labs = Array.isArray(labs) ? labs : [];
+      if (!enabled) {
+        state.workspaceTabs = state.workspaceTabs.filter((tab) => tab.kind !== "lab" || tab.labId !== labId);
+        if (!state.workspaceTabs.some((tab) => tab.kind === "research")) state.workspaceTabs.unshift({ id: RESEARCH_TAB_ID, kind: "research", dirty: false });
+        if (state.selectedLabId === labId || !state.workspaceTabs.some((tab) => tab.id === state.activeWorkspaceTabId)) {
+          state.selectedLabId = null;
+          state.selectedArtifactId = null;
+          state.mode = "session";
+          state.activeWorkspaceTabId = RESEARCH_TAB_ID;
+        }
+      }
+      state.labManagerBusyId = null;
+      render();
+    } catch (error) {
+      if (state.selectedId !== projectId || state.labManagerGeneration !== generation) return;
+      state.labManagerBusyId = null;
+      state.labManagerError = error instanceof Error ? error.message : String(error);
+      render();
+    }
   }
 
   function manuscriptModal() {
@@ -5507,6 +7646,65 @@ import { formatScienceCell } from "./format-cell.js";
     return `<div class="chatQuestionScrim decisionSheetScrim" role="presentation"><form class="bottomSheet chatQuestionSheet researchDecisionSheet" id="research-decision-form" role="dialog" aria-modal="true" aria-labelledby="research-decision-title" data-chat-question-sheet="true"><header><div><span>Research decision · ${escapeHtml(analysisSpec?.title || "Analysis plan")}</span><h2 id="research-decision-title">${escapeHtml(decision.prompt.title)}</h2></div><button type="button" data-action="defer-research-decision" aria-label="이 결정을 나중에 답하기">×</button></header><div class="decisionSheetBody"><section class="decisionQuestion"><p>${escapeHtml(decision.prompt.question)}</p><div class="decisionWhy"><div><strong>왜 지금 묻나요?</strong><span>${escapeHtml(decision.prompt.whyAsked)}</span></div><div><strong>답하지 않으면</strong><span>${escapeHtml(decision.prompt.impactIfUnanswered)}</span></div></div></section><fieldset class="decisionOptions"><legend>연구 방향을 선택하세요</legend>${optionCards}</fieldset><label class="decisionRationale"><span>선택 이유 <em>선택 사항</em></span><textarea name="rationale" maxlength="8000" rows="3" placeholder="판단 근거, 제약 또는 AI가 다음 단계에서 고려할 내용을 남겨 주세요."></textarea></label><div class="decisionRecommendation"><strong>AI 추천 근거 · 신뢰도 ${escapeHtml(Math.round(Number(decision.recommendation?.confidence || 0) * 100))}%</strong><span>${escapeHtml(decision.recommendation?.rationale || "")}</span></div><div class="formError" role="alert">${escapeHtml(state.decisionError)}</div></div><footer><span>선택은 immutable decision receipt로 저장되며 분석계획 새 버전에 적용됩니다.</span><button class="secondaryButton" type="button" data-action="defer-research-decision" ${state.decisionBusy ? "disabled" : ""}>나중에</button><button class="primaryButton" type="submit" ${state.decisionBusy ? "disabled" : ""}>${state.decisionBusy ? "적용 중…" : "이 선택으로 계속"}</button></footer></form></div>`;
   }
 
+  const analysisPlanReviewKey = (plan) => plan
+    ? `${plan.id}:${plan.currentVersion}:${plan.currentDocumentSha256}:${plan.lockVersion}` : null;
+
+  function reviewableAnalysisPlan() {
+    const plan = analysisSpecById(state.selectedAnalysisPlanId) || state.analysisSpecs[0] || null;
+    if (!plan || plan.status !== "draft") return null;
+    const openDecisions = state.decisions.filter((decision) => decision.analysisSpecId === plan.id
+      && ["queued", "presented", "deferred"].includes(decision.status));
+    return openDecisions.length === 0 ? plan : null;
+  }
+
+  function maybePresentAnalysisPlanReview() {
+    const plan = reviewableAnalysisPlan();
+    const key = analysisPlanReviewKey(plan);
+    if (!plan || !key || plan.latestReview?.decision === "revise" || state.analysisPlanReviewDismissedKey === key) return;
+    state.selectedAnalysisPlanId = plan.id;
+    state.analysisPlanReviewSheet = true;
+    state.analysisPlanReviewError = "";
+  }
+
+  function analysisPlanReviewMissingReasons(document) {
+    const reasons = [];
+    if (!document?.estimand) reasons.push(uiCopy("분석 대상과 측정값", "estimand and outcome measure"));
+    if (!document?.design || document.design.dependence?.kind === "unresolved") reasons.push(uiCopy("반복·군집 구조", "dependence structure"));
+    if (!document?.missingData || document.missingData.strategy === "unresolved") reasons.push(uiCopy("결측값 처리", "missing-data strategy"));
+    if (!document?.multiplicity || document.multiplicity.strategy === "unresolved") reasons.push(uiCopy("다중 비교 처리", "multiplicity strategy"));
+    if (!Array.isArray(document?.requiredDiagnostics) || document.requiredDiagnostics.length === 0) reasons.push(uiCopy("필수 진단", "required diagnostics"));
+    const inputs = Array.isArray(document?.data?.inputs) ? document.data.inputs : [];
+    const plannedSources = Array.isArray(document?.data?.acquisition?.sources) ? document.data.acquisition.sources : [];
+    if (inputs.length === 0 && plannedSources.length === 0) reasons.push(uiCopy("고정된 입력 데이터 또는 사전 수집 계획", "pinned input data or a preregistered acquisition plan"));
+    return reasons;
+  }
+
+  function analysisPlanReviewSheet() {
+    if (!state.analysisPlanReviewSheet) return "";
+    const plan = reviewableAnalysisPlan();
+    if (!plan) return "";
+    const document = plan.version?.document || {};
+    const inputs = Array.isArray(document.data?.inputs) ? document.data.inputs : [];
+    const plannedSources = Array.isArray(document.data?.acquisition?.sources) ? document.data.acquisition.sources : [];
+    const missingReasons = analysisPlanReviewMissingReasons(document);
+    const inputRows = inputs.length
+      ? inputs.map((item) => `<li><strong>${escapeHtml(item.artifactId)} · v${escapeHtml(item.artifactVersion)}</strong><code title="${escapeHtml(item.contentSha256)}">${escapeHtml(String(item.contentSha256).slice(0, 16))}…</code></li>`).join("")
+      : plannedSources.length
+        ? plannedSources.map((source) => `<li class="analysisPlanReviewInputPlanned"><strong>${escapeHtml(source.provider)}</strong><span>${escapeHtml(source.expectedArtifactKind)}</span><span>${escapeHtml(source.retrievalPlan)}</span><code title="${escapeHtml(source.sourceRefs.join("\n"))}">${escapeHtml(uiCopy(`공식 출처 ${source.sourceRefs.length}개`, `${source.sourceRefs.length} source reference${source.sourceRefs.length === 1 ? "" : "s"}`))}</code></li>`).join("")
+        : `<li class="analysisPlanReviewInputEmpty"><strong>${uiCopy("입력 데이터나 수집 계획이 없습니다.", "No input data or acquisition plan is defined.")}</strong><span>${uiCopy("수정 요청을 보내 정확한 입력 아티팩트 또는 공식 출처·수집 방법을 계획에 추가하세요.", "Request changes to add exact input artifacts or a plan with authoritative sources and a retrieval method.")}</span></li>`;
+    const question = document.researchQuestion || uiCopy("정의되지 않음", "Not defined");
+    const estimand = document.estimand
+      ? `${document.estimand.population} · ${document.estimand.outcome} · ${document.estimand.summaryMeasure}`
+      : uiCopy("아직 정하지 않음", "Not defined yet");
+    const design = `${document.design?.studyType || uiCopy("미정", "Not set")} · ${document.design?.dependence?.kind || uiCopy("미정", "Not set")}`;
+    const model = document.model
+      ? `${document.model.family} · ${document.model.formula}`
+      : uiCopy("분석 실행 단계에서 해당 도구가 모형을 확정합니다.", "The analysis tool will define the model when the analysis runs.");
+    const incomplete = missingReasons.length
+      ? `<div class="analysisPlanReviewIncomplete" role="status"><strong>${uiCopy("승인 전에 계획을 보완해야 합니다.", "This plan needs changes before it can be approved.")}</strong><span>${escapeHtml(missingReasons.join(" · "))}</span></div>` : "";
+    return `<div class="chatQuestionScrim analysisPlanReviewScrim" role="presentation"><form class="bottomSheet analysisPlanReviewSheet" id="analysis-plan-review-form" role="dialog" aria-modal="true" aria-labelledby="analysis-plan-review-title" data-analysis-plan-id="${escapeHtml(plan.id)}" data-analysis-plan-version="${escapeHtml(plan.currentVersion)}" data-analysis-plan-sha256="${escapeHtml(plan.currentDocumentSha256)}" data-analysis-plan-lock-version="${escapeHtml(plan.lockVersion)}"><header><div><span>${uiCopy("사람 승인 · 현재 분석계획", "Human approval · current analysis plan")}</span><h2 id="analysis-plan-review-title">${uiCopy("이 분석계획을 승인하시겠습니까?", "Approve this analysis plan?")}</h2></div><button type="button" data-action="close-analysis-plan-review" aria-label="${uiCopy("분석계획 검토를 나중에 하기", "Review this analysis plan later")}">×</button></header><div class="analysisPlanReviewBody">${incomplete}<section class="analysisPlanReviewIdentity"><strong>${escapeHtml(plan.title)}</strong><dl><div><dt>${uiCopy("계획 ID", "Plan ID")}</dt><dd><code>${escapeHtml(plan.id)}</code></dd></div><div><dt>${uiCopy("버전", "Version")}</dt><dd>v${escapeHtml(plan.currentVersion)}</dd></div><div><dt>${uiCopy("콘텐츠 해시", "Content hash")}</dt><dd><code>${escapeHtml(plan.currentDocumentSha256)}</code></dd></div><div><dt>${uiCopy("변경 잠금", "Change lock")}</dt><dd>${escapeHtml(plan.lockVersion)}</dd></div></dl></section><section class="analysisPlanReviewSummary"><div><span>${uiCopy("연구 질문", "Research question")}</span><strong>${escapeHtml(question)}</strong></div><div><span>${uiCopy("분석 대상", "Estimand")}</span><strong>${escapeHtml(estimand)}</strong></div><div><span>${uiCopy("연구 설계", "Study design")}</span><strong>${escapeHtml(design)}</strong></div><div><span>${uiCopy("모형 설정", "Model setup")}</span><strong>${escapeHtml(model)}</strong></div></section><section class="analysisPlanReviewInputs"><span>${uiCopy(inputs.length ? "고정된 입력 데이터" : "사전 수집 계획", inputs.length ? "Pinned input data" : "Preregistered acquisition plan")}</span><ul>${inputRows}</ul></section><label class="decisionRationale"><span>${uiCopy("검토 의견", "Review note")} <em>${uiCopy("수정 요청 시 필수", "Required when requesting changes")}</em></span><textarea name="rationale" maxlength="8000" rows="3" placeholder="${uiCopy("승인 근거 또는 수정할 내용을 구체적으로 적어 주세요.", "Describe your approval rationale or the changes needed.")}"></textarea></label><div class="analysisPlanReviewBoundary"><strong>${uiCopy("승인은 AI 추천과 별개입니다.", "Your approval is separate from any AI recommendation.")}</strong><span>${uiCopy("승인하면 현재 버전과 해시가 고정됩니다. 수집 계획만 있는 경우에는 수집 후 정확한 입력 버전을 묶은 후속 계획을 다시 승인해야 분석을 실행할 수 있습니다.", "Approval pins the current version and hash. If this plan contains only an acquisition plan, analysis can run only after a successor plan binds the exact collected input versions and is approved again.")}</span></div><div class="formError" role="alert">${escapeHtml(state.analysisPlanReviewError)}</div></div><footer><button class="secondaryButton" type="submit" name="decision" value="revise" ${state.analysisPlanReviewBusy ? "disabled" : ""}>${uiCopy("수정 요청", "Request changes")}</button><button class="primaryButton" type="submit" name="decision" value="approve" ${state.analysisPlanReviewBusy || missingReasons.length ? "disabled" : ""} title="${missingReasons.length ? escapeHtml(uiCopy("필수 항목을 먼저 보완하세요.", "Complete the required plan fields first.")) : ""}">${state.analysisPlanReviewBusy ? uiCopy("저장 중…", "Saving…") : uiCopy("계획 승인", "Approve plan")}</button></footer></form></div>`;
+  }
+
   function researchContractApprovalSheet() {
     const contract = state.researchContract;
     const project = selectedProject();
@@ -5552,15 +7750,253 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
+  function runtimeQuestionMarkup() {
+    const request = state.runtimeQuestions[0];
+    if (!request) return "";
+    const freeTextDraft = state.runtimeQuestionDraftRequestId === request.requestId ? state.runtimeQuestionDraft : "";
+    const options = Array.isArray(request.options) ? request.options : [];
+    const compact = options.length === 2
+      && options.every((option) => !option.description && String(option.label || "").length <= 22);
+    const optionRows = options.map((option, index) => `<button type="button" data-action="answer-runtime-question" data-runtime-question-answer="${escapeHtml(option.label)}" ${state.runtimeQuestionBusy ? "disabled" : ""}><span>${index + 1}</span><strong>${escapeHtml(option.label)}</strong>${option.description ? `<em>${escapeHtml(option.description)}</em>` : ""}</button>`).join("");
+    const freeText = request.allowFreeText
+      ? `<form class="runtimeQuestionFreeText" id="runtime-question-form"><input name="answer" value="${escapeHtml(freeTextDraft)}" required maxlength="2000" autocomplete="off" placeholder="${uiCopy("직접 답하기", "Type an answer")}" aria-label="${uiCopy("직접 답하기", "Type an answer")}" ${state.runtimeQuestionBusy ? "disabled" : ""}><button type="submit" ${state.runtimeQuestionBusy ? "disabled" : ""}>${uiCopy("보내기", "Send")}</button></form>`
+      : "";
+    return `<div class="runtimeQuestionLayer" data-runtime-question-layer role="presentation"><section class="runtimeQuestionPopover" role="dialog" aria-modal="false" aria-labelledby="runtime-question-title" data-compact="${compact}" data-runtime-question-id="${escapeHtml(request.requestId)}"><header><span>${escapeHtml(request.askedBy || "Agentlas Science")}</span><button type="button" data-action="dismiss-runtime-question" aria-label="${uiCopy("질문 닫기", "Dismiss question")}" ${state.runtimeQuestionBusy ? "disabled" : ""}>×</button></header><p id="runtime-question-title">${escapeHtml(request.question)}</p><div class="runtimeQuestionOptions">${optionRows}</div>${freeText}${state.runtimeQuestionError ? `<div class="runtimeQuestionError" role="alert">${escapeHtml(state.runtimeQuestionError)}</div>` : ""}</section></div>`;
+  }
+
+  function syncRuntimeQuestionPopover() {
+    document.querySelector("[data-runtime-question-layer]")?.remove();
+    if (runtimeQuestionTimer) window.clearTimeout(runtimeQuestionTimer);
+    runtimeQuestionTimer = null;
+    const request = state.runtimeQuestions[0];
+    if (!request) {
+      state.runtimeQuestionDraft = "";
+      state.runtimeQuestionDraftRequestId = null;
+      return;
+    }
+    if (state.runtimeQuestionDraftRequestId !== request.requestId) {
+      state.runtimeQuestionDraft = "";
+      state.runtimeQuestionDraftRequestId = request.requestId;
+    }
+    root.insertAdjacentHTML("beforeend", runtimeQuestionMarkup());
+    const remaining = Math.max(0, Number(request.expiresAt) - Date.now());
+    runtimeQuestionTimer = window.setTimeout(() => {
+      state.runtimeQuestions = state.runtimeQuestions.filter((item) => item.requestId !== request.requestId);
+      syncRuntimeQuestionPopover();
+    }, remaining);
+  }
+
+  function receiveRuntimeQuestion(request) {
+    if (!request || typeof request.requestId !== "string" || request.askedBy !== "agentlas-science") return;
+    if (!Number.isFinite(Number(request.expiresAt)) || Number(request.expiresAt) <= Date.now()) {
+      state.runtimeQuestions = state.runtimeQuestions.filter((item) => item.requestId !== request.requestId);
+    } else if (!state.runtimeQuestions.some((item) => item.requestId === request.requestId)) {
+      state.runtimeQuestions = [...state.runtimeQuestions, request];
+      state.runtimeQuestionError = "";
+    }
+    syncRuntimeQuestionPopover();
+  }
+
+  async function answerRuntimeQuestion(answer) {
+    const request = state.runtimeQuestions[0];
+    if (!request || state.runtimeQuestionBusy) return;
+    state.runtimeQuestionBusy = true;
+    state.runtimeQuestionError = "";
+    syncRuntimeQuestionPopover();
+    try {
+      const delivered = await science.questions.answer(request.requestId, typeof answer === "string" && answer.trim() ? answer.trim() : null);
+      if (delivered !== true) throw new Error("science-runtime-question-answer-not-delivered");
+      state.runtimeQuestions = state.runtimeQuestions.filter((item) => item.requestId !== request.requestId);
+    } catch {
+      state.runtimeQuestionError = uiCopy("답을 전달하지 못했습니다. 다시 선택해 주세요.", "The answer was not delivered. Choose again.");
+    } finally {
+      state.runtimeQuestionBusy = false;
+      syncRuntimeQuestionPopover();
+    }
+  }
+
   function welcome() {
     return `<section class="welcome"><div class="welcomeInner"><div class="welcomeLabel">Agentlas Science</div><h1>질문에서 검증 가능한 연구까지.</h1><p>대화, 근거, 실험, 시각 자료와 논문을 하나의 로컬 연구 기록으로 연결합니다. 아직 생성된 연구는 없습니다.</p><button class="startButton" data-action="new">새 연구 시작</button></div>${modal()}</section>`;
   }
 
+  const emptyProjectSummary = () => ({ fileCount: 0, dataCount: 0, analysisCount: 0, manuscriptCount: 0, pdfCount: 0 });
+
+  function projectSummary(projectId) {
+    return state.projectLibrarySummaries.get(projectId) || emptyProjectSummary();
+  }
+
+  function projectTemplate(project) {
+    return researchTemplateById(project?.researchTemplateId || project?.initialLabId);
+  }
+
+  function projectMetricMarkup(summary, compact = false, available = true) {
+    if (!available) {
+      const label = state.projectLibrarySummaryState === "loading"
+        ? uiCopy("집계 중", "Counting…")
+        : uiCopy("집계 불가", "Counts unavailable");
+      return `<span class="projectHubMetricUnavailable">${escapeHtml(label)}</span>`;
+    }
+    const items = [
+      [uiCopy("파일", "Files"), summary.fileCount],
+      [uiCopy("데이터", "Data"), summary.dataCount],
+      [uiCopy("분석", "Analyses"), summary.analysisCount],
+      [uiCopy("원고", "Manuscripts"), summary.manuscriptCount],
+      ["PDF", summary.pdfCount],
+    ];
+    const visible = compact ? items.slice(0, 3) : items;
+    return visible.map(([label, count]) => `<span><strong>${escapeHtml(count)}</strong><em>${escapeHtml(label)}</em></span>`).join("");
+  }
+
+  function projectHubSidebar(selectedProjectId, folderMode = false) {
+    const query = state.librarySearch.trim().toLocaleLowerCase();
+    const projects = state.projects.filter((project) => {
+      if (!query) return true;
+      const template = projectTemplate(project);
+      return [project.title, project.question, template ? researchTemplateLabel(template) : domainLabel(project.domain)].some((value) => String(value || "").toLocaleLowerCase().includes(query));
+    });
+    const projectLinks = projects.map((project) => {
+      return `<button type="button" data-action="${folderMode ? "open-sidebar-project" : "select-library-project"}" data-library-project-id="${escapeHtml(project.id)}" aria-current="${project.id === selectedProjectId ? "page" : "false"}"><span class="projectFolderGlyph" aria-hidden="true">${heroIcon("folder")}</span><span title="${escapeHtml(project.title)}">${escapeHtml(project.title)}</span></button>`;
+    }).join("");
+    const backToWorkLabel = uiCopy("Agentlas Work로 돌아가기", "Back to Agentlas Work");
+    return `<aside class="projectHubSidebar"><header><span class="projectHubBrand"><img src="./assets/agentlas-mark.png" alt=""><strong>Agentlas <em>Science*</em></strong></span></header><button class="projectHubBack" type="button" data-action="back-to-work" aria-label="${backToWorkLabel}" title="${backToWorkLabel}"><strong>${backToWorkLabel}</strong></button><label class="projectHubSideSearch">${heroIcon("search")}<input type="search" data-project-search="side" value="${escapeHtml(state.librarySearch)}" placeholder="${uiCopy("프로젝트 검색", "Search projects")}" aria-label="${uiCopy("프로젝트 검색", "Search projects")}"></label><nav class="projectHubPrimaryNav" aria-label="${uiCopy("연구 보관함 메뉴", "Research library menu")}"><button type="button" class="isActive" data-action="back-to-projects">${heroIcon("grid")}<span>${uiCopy("프로젝트", "Projects")}</span></button><button type="button" data-action="new">${heroIcon("plus")}<span>${uiCopy("새 연구", "New research")}</span></button></nav><section class="projectHubProjectList"><header><strong>${uiCopy("프로젝트", "Projects")}</strong><span>${escapeHtml(state.projects.length)}</span></header><div>${projectLinks || `<p>${uiCopy("아직 프로젝트가 없습니다.", "No projects yet.")}</p>`}</div></section></aside>`;
+  }
+
+  function projectLibrary() {
+    const query = state.librarySearch.trim().toLocaleLowerCase();
+    const filteredProjects = state.projects.filter((project) => {
+      if (!query) return true;
+      const template = projectTemplate(project);
+      return [project.title, project.question, template ? researchTemplateLabel(template) : domainLabel(project.domain)].some((value) => String(value || "").toLocaleLowerCase().includes(query));
+    });
+    const preferred = state.projects.find((project) => project.id === state.librarySelectedProjectId);
+    const selectedProject = (preferred && (!query || filteredProjects.some((project) => project.id === preferred.id))) ? preferred : filteredProjects[0] || null;
+    if (selectedProject && state.librarySelectedProjectId !== selectedProject.id) state.librarySelectedProjectId = selectedProject.id;
+    const cards = filteredProjects.map((project) => {
+      const summary = projectSummary(project.id);
+      const template = projectTemplate(project);
+      const fieldLabel = template ? researchTemplateLabel(template) : domainLabel(project.domain);
+      return `<article class="projectHubCardWrap"><button class="projectHubCard" type="button" data-action="select-library-project" data-library-project-id="${escapeHtml(project.id)}" aria-pressed="${project.id === selectedProject?.id}"><span class="projectFolderGlyph" aria-hidden="true">${heroIcon("folder")}</span><span class="projectHubCardBody"><small>${escapeHtml(fieldLabel)}</small><strong title="${escapeHtml(project.title)}">${escapeHtml(project.title)}</strong><em title="${escapeHtml(project.question)}">${escapeHtml(project.question)}</em><span class="projectHubCardMetrics">${projectMetricMarkup(summary, true, state.projectLibrarySummaries.has(project.id))}</span></span></button><button class="projectHubCardMobileOpen" type="button" data-action="open-library-project" data-library-project-id="${escapeHtml(project.id)}">${uiCopy("프로젝트 폴더 열기", "Open folder")}${heroIcon("chevron-right")}</button></article>`;
+    }).join("");
+    const shortcutFields = researchTemplates.map((template) => `<button type="button" data-research-template="${escapeHtml(template.id)}" title="${escapeHtml(researchTemplateDescription(template))}"><img src="./assets/research-templates/${escapeHtml(template.id)}.png" alt=""><span>${escapeHtml(researchTemplateLabel(template))}</span></button>`).join("");
+    const summary = selectedProject ? projectSummary(selectedProject.id) : emptyProjectSummary();
+    const selectedTemplate = projectTemplate(selectedProject);
+    const selectedFolderPath = typeof selectedProject?.folderPath === "string" ? selectedProject.folderPath : "";
+    const folderFact = selectedFolderPath.trim() ? `<div><dt>${uiCopy("폴더", "Folder")}</dt><dd class="projectHubPathValue" title="${escapeHtml(selectedFolderPath)}">${escapeHtml(selectedFolderPath)}</dd></div>` : "";
+    const detail = selectedProject ? `<div class="projectHubDetailHero"><span class="projectFolderDetailGlyph" aria-hidden="true">${heroIcon("folder")}</span><span class="projectHubDetailLabel">${escapeHtml(selectedTemplate ? researchTemplateLabel(selectedTemplate) : domainLabel(selectedProject.domain))}</span></div><h2>${escapeHtml(selectedProject.title)}</h2><p>${escapeHtml(selectedProject.question)}</p><dl class="projectHubFacts"><div><dt>${uiCopy("업데이트", "Updated")}</dt><dd>${escapeHtml(formatDate(selectedProject.updatedAt))}</dd></div><div><dt>${uiCopy("분야", "Field")}</dt><dd>${escapeHtml(selectedTemplate ? researchTemplateLabel(selectedTemplate) : domainLabel(selectedProject.domain))}</dd></div>${folderFact}</dl><div class="projectHubDetailMetrics">${projectMetricMarkup(summary, false, state.projectLibrarySummaries.has(selectedProject.id))}</div>${state.projectFolderOpenError ? `<p class="projectHubActionError" role="alert">${escapeHtml(state.projectFolderOpenError)}</p>` : ""}<div class="projectHubDetailActions">${selectedFolderPath.trim() ? `<button class="secondaryButton" type="button" data-action="open-project-folder-os" data-project-id="${escapeHtml(selectedProject.id)}" ${state.projectFolderOpenBusy ? "disabled" : ""}>${state.projectFolderOpenBusy ? uiCopy("폴더 여는 중…", "Opening folder…") : uiCopy("폴더 열기", "Open folder")}</button>` : ""}<button class="primaryButton" type="button" data-action="open-library-project" data-library-project-id="${escapeHtml(selectedProject.id)}">${uiCopy("프로젝트 내용 열기", "Open project contents")}${heroIcon("chevron-right")}</button></div>` : `<div class="projectHubDetailEmpty">${heroIcon("folder")}<strong>${uiCopy("프로젝트를 선택하세요", "Select a project")}</strong><span>${uiCopy("실제 프로젝트 정보와 저장 항목 수가 여기에 표시됩니다.", "Project metadata and saved-item counts appear here.")}</span></div>`;
+    const projectCount = state.locale === "ko" ? `${filteredProjects.length}개 프로젝트` : `${filteredProjects.length} ${filteredProjects.length === 1 ? "project" : "projects"}`;
+    return `<section class="projectHub">${projectHubSidebar(selectedProject?.id || null)}<main class="projectHubMain"><header class="projectHubHeading"><div><span>Research library</span><h1>${uiCopy("연구 프로젝트", "Research projects")}</h1><p>${uiCopy("근거, 데이터, 분석과 원고가 연결된 프로젝트를 엽니다.", "Open projects that connect evidence, data, analysis, and manuscripts.")}</p></div><button class="primaryButton" type="button" data-action="new">${heroIcon("plus")}${uiCopy("새 연구", "New research")}</button></header><label class="projectHubMainSearch">${heroIcon("search")}<input type="search" data-project-search="main" value="${escapeHtml(state.librarySearch)}" placeholder="${uiCopy("이름, 질문 또는 분야로 검색", "Search by name, question, or field")}" aria-label="${uiCopy("연구 프로젝트 검색", "Search research projects")}"><span>${escapeHtml(projectCount)}</span></label><div class="projectHubGrid">${cards || `<div class="projectHubEmpty"><strong>${query ? uiCopy("검색 결과가 없습니다.", "No matching projects.") : uiCopy("아직 연구 프로젝트가 없습니다.", "No research projects yet.")}</strong><span>${query ? uiCopy("다른 이름이나 분야를 검색해 보세요.", "Try another project name or field.") : uiCopy("15개 연구 분야 중 하나를 골라 시작하세요.", "Choose one of 15 research fields to begin.")}</span>${query ? "" : `<button class="secondaryButton" type="button" data-action="new">${uiCopy("새 연구 시작", "Start new research")}</button>`}</div>`}</div><section class="projectHubShortcuts"><header><h2>${uiCopy("연구 분야 바로가기", "Research field shortcuts")}</h2><span>${uiCopy("15개 분야", "15 fields")}</span></header><div>${shortcutFields}</div></section></main><aside class="projectHubDetail" aria-label="${uiCopy("선택한 프로젝트 상세", "Selected project details")}"><header><span>${uiCopy("프로젝트 상세", "Project details")}</span></header>${detail}</aside>${modal()}</section>`;
+  }
+
+  function projectFolderRows() {
+    const rows = [];
+    for (const source of state.sources) {
+      rows.push({
+        key: `source:${source.id}`,
+        kind: source.kind === "dataset" ? uiCopy("데이터", "Data") : uiCopy("출처", "Source"),
+        icon: source.kind === "dataset" ? "table" : "book",
+        title: source.title || source.url || source.id,
+        detail: `${source.kind || "source"} · v${source.currentVersion || source.version?.version || 1}`,
+        byteSize: source.byteSize ?? source.version?.byteSize ?? null,
+        stamp: source.updatedAt || source.createdAt,
+        action: `data-action="open-project-folder-source" data-source-id="${escapeHtml(source.id)}"`,
+      });
+    }
+    for (const figure of state.sourceFigures) {
+      rows.push({
+        key: `source-figure:${figure.id}`,
+        kind: uiCopy("그림", "Figure"),
+        icon: "photo",
+        title: figure.figureLabel || figure.caption || figure.locator || figure.id,
+        detail: `${figure.mimeType || "image"} · ${figure.width || 0}×${figure.height || 0}`,
+        byteSize: figure.byteSize,
+        stamp: figure.createdAt,
+        action: `data-action="open-project-folder-source" data-source-id="${escapeHtml(figure.sourceId)}"`,
+      });
+    }
+    for (const run of state.runs.filter((item) => item?.status === "succeeded")) {
+      rows.push({
+        key: `run:${run.id}`,
+        kind: uiCopy("분석", "Analysis"),
+        icon: "chart",
+        title: run.title || run.toolId || run.kind || uiCopy("성공한 분석 실행", "Successful analysis run"),
+        detail: `${run.status} · ${String(run.id || "").slice(0, 8)}…`,
+        byteSize: Array.isArray(run.outputs) && run.outputs.length && run.outputs.every((item) => Number.isFinite(Number(item?.byteSize)))
+          ? run.outputs.reduce((total, item) => total + Number(item.byteSize), 0) : null,
+        stamp: run.completedAt || run.updatedAt || run.createdAt,
+        action: `data-action="open-project-folder-destination" data-destination="analysis-runs"`,
+      });
+    }
+    for (const artifact of state.artifacts.filter((item) => item?.status === "ready")) {
+      const labId = labForArtifact(artifact.id);
+      rows.push({
+        key: `artifact:${artifact.id}`,
+        kind: artifact.kind === "table" ? uiCopy("표", "Table") : artifact.kind === "figure" ? uiCopy("그림", "Figure") : uiCopy("결과", "Result"),
+        icon: artifact.kind === "table" ? "table" : artifact.kind === "figure" ? "photo" : "chart",
+        title: artifact.title || artifact.id,
+        detail: `${labId ? labLabel(labId) : artifact.kind || "artifact"} · v${artifact.currentVersion || artifact.version?.version || 1}`,
+        byteSize: artifact.byteSize ?? artifact.version?.byteSize ?? null,
+        stamp: artifact.updatedAt || artifact.createdAt,
+        action: labId
+          ? `data-action="open-project-folder-artifact" data-lab-id="${escapeHtml(labId)}" data-artifact-id="${escapeHtml(artifact.id)}"`
+          : `data-action="open-project-folder-destination" data-destination="results"`,
+      });
+    }
+    for (const manuscript of state.manuscripts) {
+      rows.push({
+        key: `manuscript:${manuscript.id}`,
+        kind: uiCopy("원고", "Manuscript"),
+        icon: "book",
+        title: manuscript.title || manuscript.id,
+        detail: `v${manuscript.currentVersion || manuscript.version?.version || 1}`,
+        byteSize: manuscript.version?.markdown ? new TextEncoder().encode(manuscript.version.markdown).byteLength : null,
+        stamp: manuscript.updatedAt || manuscript.createdAt,
+        action: `data-action="open-project-folder-manuscript" data-manuscript-id="${escapeHtml(manuscript.id)}"`,
+      });
+    }
+    for (const submission of state.submissionExports.filter((item) => item?.status === "ready")) {
+      rows.push({
+        key: `submission:${submission.id}`,
+        kind: "PDF",
+        icon: "arrow-down-tray",
+        title: submission.fileName || uiCopy("검증된 제출 패키지", "Verified submission package"),
+        detail: `${submission.manuscriptTitle || uiCopy("원고", "Manuscript")} · ${String(submission.packageSha256 || "").slice(0, 12)}…`,
+        byteSize: submission.packageByteSize,
+        stamp: submission.createdAt,
+        action: `data-action="open-project-folder-export" data-manuscript-id="${escapeHtml(submission.manuscriptId || "")}" data-export-id="${escapeHtml(submission.id)}"`,
+      });
+    }
+    return rows.sort((left, right) => String(right.stamp || "").localeCompare(String(left.stamp || "")) || left.key.localeCompare(right.key));
+  }
+
+  function projectFolder(project) {
+    const template = researchTemplateById(project.researchTemplateId || project.initialLabId);
+    const summary = projectSummary(project.id);
+    const rows = state.loadingProject ? [] : projectFolderRows();
+    const selectedRow = rows.find((row) => row.key === state.projectFolderSelectedKey) || rows[0] || null;
+    if (selectedRow && state.projectFolderSelectedKey !== selectedRow.key) state.projectFolderSelectedKey = selectedRow.key;
+    const fileRows = rows.map((row) => `<button class="projectHubFileCard" type="button" data-action="select-project-folder-item" data-folder-item-key="${escapeHtml(row.key)}" aria-pressed="${row.key === selectedRow?.key}"><span class="projectHubFileIcon">${heroIcon(row.icon)}</span><span><small>${escapeHtml(row.kind)}</small><strong title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</strong><em>${escapeHtml(row.detail)}</em></span><time>${escapeHtml(formatDate(row.stamp))}</time></button>`).join("");
+    const body = state.loadingProject
+      ? `<div class="projectHubEmpty" aria-live="polite"><strong>${uiCopy("프로젝트 내용을 불러오는 중…", "Loading project contents…")}</strong></div>`
+      : state.projectError
+        ? `<div class="projectHubEmpty" role="alert"><strong>${escapeHtml(state.projectError)}</strong></div>`
+        : fileRows || `<div class="projectHubEmpty"><strong>${uiCopy("아직 저장된 연구 내용이 없습니다.", "No research contents have been saved yet.")}</strong><span>${uiCopy("워크스페이스에서 출처를 추가하거나 Lab을 실행하면 실제 기록이 나타납니다.", "Add a source or run a Lab in the workspace to create a real record.")}</span></div>`;
+    const detail = selectedRow ? `<span class="projectHubDetailKind">${escapeHtml(selectedRow.kind)}</span><h2>${escapeHtml(selectedRow.title)}</h2><p>${escapeHtml(selectedRow.detail)}</p><dl class="projectHubFacts"><div><dt>${uiCopy("크기", "Size")}</dt><dd>${escapeHtml(formatByteSize(selectedRow.byteSize))}</dd></div><div><dt>${uiCopy("수정일", "Modified")}</dt><dd>${escapeHtml(formatDate(selectedRow.stamp))}</dd></div></dl><div class="projectHubDetailActions"><button class="primaryButton" type="button" ${selectedRow.action}>${uiCopy("작업공간에서 열기", "Open workspace")}${heroIcon("chevron-right")}</button></div>` : `<div class="projectHubDetailEmpty">${heroIcon("folder")}<strong>${uiCopy("저장 항목이 없습니다", "No saved items")}</strong><span>${uiCopy("새 출처나 분석 결과가 저장되면 여기에 표시됩니다.", "Saved sources and results will appear here.")}</span></div>`;
+    return `<section class="projectHub projectHubFolder">${projectHubSidebar(project.id, true)}<main class="projectHubMain"><header class="projectHubHeading projectHubFolderHeading"><div><button class="projectHubInlineBack" type="button" data-action="back-to-projects">${heroIcon("chevron-right", "uiIcon isReverse")}${uiCopy("프로젝트", "Projects")}</button><span>${escapeHtml(template ? researchTemplateLabel(template) : domainLabel(project.domain))}</span><h1>${escapeHtml(project.title)}</h1><p>${escapeHtml(project.question)}</p></div><button class="primaryButton" type="button" data-action="open-project-workspace">${uiCopy("워크스페이스 열기", "Open workspace")}${heroIcon("chevron-right")}</button></header><div class="projectHubFolderMetrics">${projectMetricMarkup(summary, false, state.projectLibrarySummaries.has(project.id))}</div><section class="projectHubFiles"><header><h2>${uiCopy("저장된 연구 내용", "Saved research contents")}</h2><span>${escapeHtml(uiCopy(`${rows.length}개 항목`, `${rows.length} ${rows.length === 1 ? "item" : "items"}`))}</span></header><div class="projectHubFileGrid">${body}</div></section></main><aside class="projectHubDetail" aria-label="${uiCopy("선택한 항목 상세", "Selected item details")}"><header><span>${uiCopy("항목 상세", "Item details")}</span></header>${detail}</aside>${modal()}</section>`;
+  }
+
   function workspace() {
     const project = selectedProject();
-    if (!project) return welcome();
+    if (!project) return projectLibrary();
+    if (state.projectFolderOpen) return projectFolder(project);
     const main = state.mode === "session" ? researchView(project) : state.mode === "manuscript" ? manuscriptWorkbench() : artifactWorkbench();
-    return `<section class="workspace ${state.drawer ? "drawerOpen" : ""}" data-workspace-mode="${escapeHtml(state.mode)}" data-project-destination="${escapeHtml(state.currentDestination)}" data-rail-collapsed="${state.railCollapsed}">${projectRail(project)}<button class="railScrim" data-action="collapse-rail" aria-label="사이드바 닫기"></button><main class="mainPane"><header class="topbar"><div class="topLocation workspaceLocation"><button class="workspaceSidebarReveal" data-action="expand-rail" aria-label="사이드바 열기" title="사이드바 열기">${heroIcon("chevron-right")}</button><div class="workspaceTabGroup" role="tablist" aria-label="연구, 열린 Lab 아티팩트와 원고">${researchWorkspaceTabButton()}<div class="workspaceTabsShell" data-workspace-tabs-shell><button class="workspaceTabOverflow workspaceTabOverflowPrevious" type="button" data-action="scroll-workspace-tabs" data-direction="previous" aria-label="이전 열린 탭 보기" hidden>${heroIcon("chevron-right", "uiIcon isReverse")}</button><nav class="workspaceTabs" data-workspace-tabs role="presentation">${workspaceTabButtons()}</nav><button class="workspaceTabOverflow workspaceTabOverflowNext" type="button" data-action="scroll-workspace-tabs" data-direction="next" aria-label="다음 열린 탭 보기" hidden>${heroIcon("chevron-right")}</button></div></div><button class="workspaceTabAdd" data-action="new" aria-label="새 연구 시작" title="새 연구">${heroIcon("plus")}</button></div><div class="topActions">${state.workspaceSyncError ? `<span class="workspaceSyncWarning" role="status" title="${escapeHtml(state.workspaceSyncError)}">저장 실패</span>` : ""}<span class="statusPill" title="${escapeHtml(`${lifecycleLabel()} · ${state.lifecycle?.stateSha256 || ""}`)}">${escapeHtml(lifecycleCompactLabel())}</span><button data-action="toggle-drawer">${state.mode === "session" ? "근거" : "세부"}</button></div></header><div class="workspaceBody"><div class="contentPane workspaceCenter"><div class="workspaceSurface" id="science-workspace-panel" role="tabpanel" aria-labelledby="${escapeHtml(workspaceTabDomId(state.activeWorkspaceTabId))}" data-workspace-surface>${main}</div></div>${chatDock()}</div></main>${contextDrawer()}${modal()}${manuscriptModal()}${journalTargetSheet()}${submissionExportSheet()}${evidenceGraphInferenceReviewSheet()}${episodeResultReviewSheet()}${researchContractApprovalSheet()}${researchDecisionSheet()}</section>`;
+    const loopPresentation = researchLoopPresentation();
+    const statusTitle = loopPresentation?.attention
+      ? `${loopPresentation.detail} · ${lifecycleLabel()} · ${state.lifecycle?.stateSha256 || ""}`
+      : `${lifecycleLabel()} · ${state.lifecycle?.stateSha256 || ""}`;
+    const sidebarToggleLabel = state.railCollapsed ? uiCopy("사이드바 열기", "Open sidebar") : uiCopy("사이드바 닫기", "Close sidebar");
+    const sidebarToggleAction = state.railCollapsed ? "expand-rail" : "collapse-rail";
+    const sidebarToggleIcon = heroIcon("chevron-right", state.railCollapsed ? "uiIcon" : "uiIcon isReverse");
+    return `<section class="workspace ${state.drawer ? "drawerOpen" : ""}" data-workspace-mode="${escapeHtml(state.mode)}" data-project-destination="${escapeHtml(state.currentDestination)}" data-rail-collapsed="${state.railCollapsed}">${projectRail(project)}<button class="railScrim" data-action="collapse-rail" aria-label="사이드바 닫기"></button><main class="mainPane"><header class="topbar"><div class="topLocation workspaceLocation"><button class="workspaceSidebarReveal" data-action="${sidebarToggleAction}" aria-label="${sidebarToggleLabel}" title="${sidebarToggleLabel}">${sidebarToggleIcon}</button><div class="workspaceTabGroup" role="tablist" aria-label="연구, 열린 Lab 아티팩트와 원고">${researchWorkspaceTabButton()}<div class="workspaceTabsShell" data-workspace-tabs-shell><button class="workspaceTabOverflow workspaceTabOverflowPrevious" type="button" data-action="scroll-workspace-tabs" data-direction="previous" aria-label="이전 열린 탭 보기" hidden>${heroIcon("chevron-right", "uiIcon isReverse")}</button><nav class="workspaceTabs" data-workspace-tabs role="presentation">${workspaceTabButtons()}</nav><button class="workspaceTabOverflow workspaceTabOverflowNext" type="button" data-action="scroll-workspace-tabs" data-direction="next" aria-label="다음 열린 탭 보기" hidden>${heroIcon("chevron-right")}</button></div></div><button class="workspaceTabAdd" data-action="new" aria-label="새 연구 시작" title="새 연구">${heroIcon("plus")}</button></div><div class="topActions">${state.workspaceSyncError ? `<span class="workspaceSyncWarning" role="status" title="${escapeHtml(state.workspaceSyncError)}">저장 실패</span>` : ""}<span class="statusPill" data-tone="${loopPresentation?.attention ? "manual" : "pass"}" title="${escapeHtml(statusTitle)}">${escapeHtml(lifecycleCompactLabel())}</span><button data-action="toggle-drawer">${state.mode === "session" ? "근거" : "세부"}</button></div></header><div class="workspaceBody"><div class="contentPane workspaceCenter"><div class="workspaceSurface" id="science-workspace-panel" role="tabpanel" aria-labelledby="${escapeHtml(workspaceTabDomId(state.activeWorkspaceTabId))}" data-workspace-surface>${main}</div></div>${chatDock()}</div></main>${contextDrawer()}${modal()}${labManagerModal()}${manuscriptModal()}${journalTargetSheet()}${submissionExportSheet()}${evidenceGraphInferenceReviewSheet()}${episodeResultReviewSheet()}${researchContractApprovalSheet()}${researchDecisionSheet()}${analysisPlanReviewSheet()}</section>`;
   }
 
   function rememberScroll(mode = state.mode) {
@@ -5569,6 +8005,8 @@ import { formatScienceCell } from "./format-cell.js";
   }
 
   function render() {
+    rememberChatScroll();
+    if (state.drawer && window.matchMedia("(max-width: 680px)").matches) state.railCollapsed = true;
     const selectedRendererIdentity = (() => {
       if (state.mode !== "lab" || state.inspectedArtifactVersion) return null;
       const artifacts = (state.labContextsById.get(state.selectedLabId) || []).map((context) => context.artifact);
@@ -5583,10 +8021,12 @@ import { formatScienceCell } from "./format-cell.js";
     root.innerHTML = workspace();
     i18n.localizeTree(root);
     root.setAttribute("aria-busy", "false");
+    restoreChatScroll();
     const contentPane = document.querySelector(".contentPane");
     if (contentPane) contentPane.scrollTop = state.scrollByMode[state.mode] || 0;
-    if (state.modal) document.querySelector('textarea[name="question"]')?.focus();
+    if (state.modal) document.querySelector('input[name="title"]')?.focus();
     if (state.researchContractSheet) requestAnimationFrame(() => document.querySelector(".researchContractSheet")?.focus({ preventScroll: true }));
+    if (state.analysisPlanReviewSheet) requestAnimationFrame(() => document.querySelector(".analysisPlanReviewSheet textarea")?.focus({ preventScroll: true }));
     if (!state.resultReviewSheet && state.mode === "lab" && state.selectedArtifactId && state.artifactHistoryById.has(state.selectedArtifactId)) {
       void hydrateArtifactRenderer();
       if (state.artifactComparison?.diff) void hydrateArtifactComparePreviews(state.artifactComparison);
@@ -5596,6 +8036,7 @@ import { formatScienceCell } from "./format-cell.js";
       void hydrateEvidenceGraph();
     }
     syncRailPresentation();
+    syncRuntimeQuestionPopover();
     requestAnimationFrame(revealActiveWorkspaceTab);
   }
 
@@ -5608,7 +8049,15 @@ import { formatScienceCell } from "./format-cell.js";
     const main = workspaceNode?.querySelector(".mainPane");
     if (!workspaceNode || !main) return;
     workspaceNode.dataset.railCollapsed = String(state.railCollapsed);
-    const overlayOpen = !state.railCollapsed && window.matchMedia("(max-width: 1279px)").matches;
+    const sidebarToggle = workspaceNode.querySelector('.workspaceSidebarReveal');
+    if (sidebarToggle) {
+      const label = state.railCollapsed ? uiCopy("사이드바 열기", "Open sidebar") : uiCopy("사이드바 닫기", "Close sidebar");
+      sidebarToggle.dataset.action = state.railCollapsed ? "expand-rail" : "collapse-rail";
+      sidebarToggle.setAttribute("aria-label", label);
+      sidebarToggle.setAttribute("title", label);
+      sidebarToggle.setAttribute("aria-expanded", String(!state.railCollapsed));
+    }
+    const overlayOpen = !state.railCollapsed && window.matchMedia("(max-width: 680px)").matches;
     if (overlayOpen || state.resultReviewSheet) main.setAttribute("inert", "");
     else main.removeAttribute("inert");
   }
@@ -5619,11 +8068,11 @@ import { formatScienceCell } from "./format-cell.js";
     syncRailPresentation();
     requestAnimationFrame(syncWorkspaceTabOverflow);
     window.setTimeout(syncWorkspaceTabOverflow, 220);
-    if (state.railCollapsed) document.querySelector('.workspaceSidebarReveal')?.focus();
-    else document.querySelector('.railCollapseButton')?.focus();
+    document.querySelector('.workspaceSidebarReveal')?.focus();
   }
 
   function teardownArtifactRenderer(preserveNativeRenderer = false) {
+    document.querySelectorAll("[data-artifact-host]").forEach((host) => host.__scienceVisualViewerCleanup?.());
     for (const view of state.inlineVegaViews) { try { view.finalize(); } catch {} }
     state.inlineVegaViews = [];
     for (const url of state.inlinePreviewUrls) { try { URL.revokeObjectURL(url); } catch {} }
@@ -5632,6 +8081,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (state.activeVegaView) { try { state.activeVegaView.finalize(); } catch {} state.activeVegaView = null; }
     if (state.activeCytoscape) { try { state.activeCytoscape.destroy(); } catch {} state.activeCytoscape = null; }
     if (state.activeNumericSurface) { try { state.activeNumericSurface.dispose(); } catch {} state.activeNumericSurface = null; }
+    if (state.activeSpatialScene) { try { state.activeSpatialScene.dispose(); } catch {} state.activeSpatialScene = null; }
     if (state.activeJBrowseTarget) {
       try { window.AgentlasJBrowse?.unmount?.(state.activeJBrowseTarget); } catch {}
       state.activeJBrowseTarget = null;
@@ -5647,37 +8097,71 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
-  async function hydrateInlineArtifactRenderers() {
-    if (!window.vega || !window.vegaExpressionInterpreter) return;
-    const hosts = [...document.querySelectorAll("[data-inline-vega-artifact]")];
-    for (const host of hosts) {
-      const artifactId = host.dataset.inlineVegaArtifact;
-      const artifactVersion = Number(host.dataset.inlineVegaVersion);
-      const context = [...state.artifactContextsByMessage.values()].flat().find((item) => item.artifact.id === artifactId && item.selectedVersion.version === artifactVersion);
-      const spec = context?.selectedVersion?.payload?.spec;
-      if (!spec || typeof spec !== "object" || Array.isArray(spec) || !host.isConnected) continue;
-      try {
+  function setInlineArtifactPreviewState(host, stateName) {
+    if (!host?.isConnected) return;
+    const card = host.closest(".inlineArtifact");
+    const retry = host.closest(".inlineArtifactItem")?.querySelector(".inlineArtifactRetry");
+    host.dataset.renderFailed = "true";
+    host.dataset.previewMissing = "true";
+    const status = document.createElement("span");
+    status.className = "inlineArtifactPreviewStatus";
+    status.textContent = stateName === "loading"
+      ? uiCopy("미리보기를 다시 불러오는 중…", "Reloading preview…")
+      : uiCopy("미리보기를 불러오지 못했습니다.", "Preview unavailable.");
+    host.replaceChildren(status);
+    if (card) {
+      card.setAttribute("aria-busy", String(stateName === "loading"));
+    }
+    if (retry) {
+      retry.hidden = false;
+      retry.disabled = stateName === "loading";
+      retry.textContent = stateName === "loading"
+        ? uiCopy("다시 불러오는 중…", "Retrying…")
+        : uiCopy("미리보기 다시 시도", "Retry preview");
+    }
+  }
+
+  function clearInlineArtifactPreviewState(host) {
+    delete host.dataset.renderFailed;
+    delete host.dataset.previewMissing;
+    const card = host.closest(".inlineArtifact");
+    const retry = host.closest(".inlineArtifactItem")?.querySelector(".inlineArtifactRetry");
+    if (!card) return;
+    card.removeAttribute("aria-busy");
+    if (retry) {
+      retry.hidden = true;
+      retry.disabled = false;
+    }
+  }
+
+  async function hydrateInlineArtifactPreview(host) {
+    if (!host?.isConnected || host.dataset.previewLoading === "true") return;
+    const isVega = host.matches("[data-inline-vega-artifact]");
+    host.dataset.previewLoading = "true";
+    setInlineArtifactPreviewState(host, "loading");
+    let view = null;
+    try {
+      if (isVega) {
+        if (!window.vega || !window.vegaExpressionInterpreter) throw new Error("science-vega-runtime-unavailable");
+        const artifactId = host.dataset.inlineVegaArtifact;
+        const artifactVersion = Number(host.dataset.inlineVegaVersion);
+        const context = [...state.artifactContextsByMessage.values()].flat().find((item) => item.artifact.id === artifactId && item.selectedVersion.version === artifactVersion);
+        const spec = context?.selectedVersion?.payload?.spec;
+        if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("science-vega-spec-invalid");
+        host.replaceChildren();
         const runtime = window.vega.parse(compileArtifactVegaSpec(spec), undefined, { ast: true });
-        const view = new window.vega.View(runtime, { expr: window.vegaExpressionInterpreter }).renderer("canvas").initialize(host).hover();
+        view = new window.vega.View(runtime, { expr: window.vegaExpressionInterpreter }).renderer("canvas").initialize(host).hover();
         const width = Math.max(220, Math.floor(host.getBoundingClientRect().width) - 110);
         view.width(width).height(230);
-        state.inlineVegaViews.push(view);
         await view.runAsync();
-        fitArtifactVegaCanvas(host, { gutter: 8 });
-      } catch (error) {
-        host.textContent = error instanceof Error ? error.message : String(error);
-        host.dataset.renderFailed = "true";
-      }
-    }
-    const captureHosts = [...document.querySelectorAll("[data-inline-capture-artifact]")];
-    for (const host of captureHosts) {
-      try {
+        if (!host.isConnected) { try { view.finalize(); } catch {} return; }
+        fitArtifactVegaCanvas(host, { gutter: 8, maxHeight: 230 });
+        state.inlineVegaViews.push(view);
+        view = null;
+      } else {
         const preview = await science.artifacts.preview(state.selectedId, host.dataset.inlineCaptureArtifact, Number(host.dataset.inlineCaptureVersion));
-        if (!preview?.bytes || !host.isConnected) {
-          host.innerHTML = refusalMarkup("absent", "검증된 시각 캡처가 아직 없습니다.", "실행이 캡처를 만들면 이 자리에 그대로 표시됩니다.");
-          host.dataset.previewMissing = "true";
-          continue;
-        }
+        if (!preview?.bytes) throw new Error("science-artifact-preview-unavailable");
+        if (!host.isConnected) return;
         const bytes = preview.bytes instanceof Uint8Array ? preview.bytes : new Uint8Array(preview.bytes);
         const url = URL.createObjectURL(new Blob([bytes], { type: preview.mimeType || "image/png" }));
         state.inlinePreviewUrls.push(url);
@@ -5687,10 +8171,20 @@ import { formatScienceCell } from "./format-cell.js";
         image.width = preview.width;
         image.height = preview.height;
         host.replaceChildren(image);
-      } catch (error) {
-        host.textContent = error instanceof Error ? error.message : String(error);
-        host.dataset.renderFailed = "true";
       }
+      clearInlineArtifactPreviewState(host);
+    } catch {
+      try { view?.finalize(); } catch {}
+      setInlineArtifactPreviewState(host, "failed");
+    } finally {
+      delete host.dataset.previewLoading;
+    }
+  }
+
+  async function hydrateInlineArtifactRenderers() {
+    const hosts = [...document.querySelectorAll("[data-inline-vega-artifact], [data-inline-capture-artifact]")];
+    for (const host of hosts) {
+      await hydrateInlineArtifactPreview(host);
     }
   }
 
@@ -6282,16 +8776,44 @@ import { formatScienceCell } from "./format-cell.js";
     const content = document.createElement("div"); content.className = "statisticsAnalysisContent";
     surface.append(header, content);
     host.replaceChildren(surface);
+    let restoreInteractiveView = null;
+    let captureLayoutError = null;
     if (view === "figure") {
       if (!window.vega || !window.vegaExpressionInterpreter) throw new Error("science-paleontology-vega-runtime-missing");
       content.classList.add("statisticsChartHost");
-      const runtime = window.vega.parse(compileArtifactVegaSpec(payload.spec), undefined, { ast: true });
+      const sourceSpec = compileArtifactVegaSpec(payload.spec);
+      const chartStyle = getComputedStyle(content);
+      const horizontalPadding = (Number.parseFloat(chartStyle.paddingLeft) || 0) + (Number.parseFloat(chartStyle.paddingRight) || 0);
+      const availableWidth = Math.max(1, content.clientWidth - horizontalPadding);
+      const displaySpec = interactive ? paleontologyInteractiveSpec(sourceSpec, availableWidth) : sourceSpec;
+      content.dataset.vegaDisplayLayout = interactive ? "responsive" : "source";
+      const runtime = window.vega.parse(displaySpec, undefined, { ast: true });
       state.activeVegaView = new window.vega.View(runtime, { expr: window.vegaExpressionInterpreter }).renderer("canvas").initialize(content).hover();
       await state.activeVegaView.runAsync();
       const canvas = content.querySelector("canvas");
       if (!canvas) throw new Error("science-paleontology-vega-canvas-missing");
+      canvas.style.maxWidth = "none";
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      fitArtifactVegaCanvas(content, { capture: true, gutter: 10 });
+      // The verification capture remains fitted. The interactive Lab restores
+      // the exact responsive Vega dimensions afterwards so the first view is
+      // readable while the full interval set remains available to inspect.
+      if (interactive) restoreInteractiveView = () => {
+        if (!canvas.isConnected) return;
+        canvas.style.width = `${canvas.dataset.vegaNaturalCssWidth}px`;
+        canvas.style.height = `${canvas.dataset.vegaNaturalCssHeight}px`;
+        canvas.style.marginInline = "0";
+        content.style.placeItems = "start";
+        content.scrollTop = 0;
+        content.scrollLeft = 0;
+        content.dataset.interactiveChartScale = "1";
+      };
+      try {
+        fitArtifactVegaCanvas(content, { capture: true, gutter: 10 });
+      } catch (error) {
+        if (!interactive) throw error;
+        captureLayoutError = error;
+        restoreInteractiveView?.();
+      }
       const footer = document.createElement("footer");
       const copy = document.createElement("div");
       const caption = document.createElement("strong"); caption.textContent = `${estimates.oldestBoundMa}–${estimates.youngestBoundMa} Ma reported envelope`;
@@ -6331,12 +8853,14 @@ import { formatScienceCell } from "./format-cell.js";
     host.dataset.paleontologyReady = "true";
     host.dataset.paleontologyView = view;
     host.dataset.tableRows = String(tablePayload.rows.length);
-    return { view, rowCount: tablePayload.rows.length, columnCount: tablePayload.columns.length };
+    return { view, rowCount: tablePayload.rows.length, columnCount: tablePayload.columns.length, restoreInteractiveView, captureLayoutError };
   }
 
   function renderDataTable(version, host, artifactId, interactive = true) {
-    const payload = version?.payload;
-    if (!payload || payload.schema !== "agentlas.science-table/v1" || !Array.isArray(payload.columns) || !Array.isArray(payload.rows) || !payload.profile) {
+    const actual = actualTablePayload(version);
+    const payload = actual.payload;
+    if (!payload) {
+      host.dataset.tablePayloadCause = actual.cause;
       throw new Error("검증된 Data Table payload가 없습니다.");
     }
     const pageSize = 100;
@@ -6350,6 +8874,7 @@ import { formatScienceCell } from "./format-cell.js";
     surface.dataset.scienceCapture = "";
     surface.dataset.tableRows = String(payload.profile.rowCount);
     surface.dataset.tableColumns = String(payload.profile.columnCount);
+    surface.dataset.tablePayloadShape = actual.sourceShape;
     const summary = document.createElement("header");
     summary.className = "dataTableSummary";
     const title = document.createElement("div");
@@ -6359,7 +8884,9 @@ import { formatScienceCell } from "./format-cell.js";
     const receipts = document.createElement("div");
     const missing = document.createElement("span"); missing.textContent = `Missing ${payload.profile.nullCount.toLocaleString()}`;
     const formulas = document.createElement("span"); formulas.textContent = `Formula-like text ${payload.profile.formulaLikeCellCount.toLocaleString()}`;
-    const hash = document.createElement("code"); hash.textContent = `${String(payload.receipts?.tableSha256 || "").slice(0, 12)}…`;
+    const hash = document.createElement("code");
+    const exactHash = String(payload.receipts?.tableSha256 || actual.contentSha256 || "");
+    hash.textContent = exactHash ? `${exactHash.slice(0, 12)}…` : "Hash unavailable";
     receipts.append(missing, formulas, hash);
     summary.append(title, receipts);
     const viewport = document.createElement("div");
@@ -6369,8 +8896,8 @@ import { formatScienceCell } from "./format-cell.js";
     const headRow = document.createElement("tr");
     for (const column of payload.columns) {
       const cell = document.createElement("th");
-      const label = document.createElement("span"); label.textContent = column.name;
-      const type = document.createElement("em"); type.textContent = `${column.logicalType}${column.nullable ? " · nullable" : ""}`;
+      const label = document.createElement("span"); label.textContent = column.label || column.name;
+      const type = document.createElement("em"); type.textContent = `${column.logicalType}${column.unit ? ` · ${column.unit}` : ""}${column.nullable ? " · nullable" : ""}`;
       cell.append(label, type);
       headRow.append(cell);
     }
@@ -6460,6 +8987,205 @@ import { formatScienceCell } from "./format-cell.js";
     return { rowCount: tablePayload.rows.length, columnCount: tablePayload.columns.length, page, pageCount };
   }
 
+  function spatialColor(value) {
+    let hash = 2166136261;
+    for (const character of String(value || "unknown")) hash = Math.imul(hash ^ character.codePointAt(0), 16777619);
+    return new THREE.Color().setHSL(((hash >>> 0) % 360) / 360, .48, .5);
+  }
+
+  const isExactFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+  function renderScientificPointScene(host, {
+    points, lines = [], title, subtitle, axisLabel, kind, lineColor = 0x8b8d89, grid = true, normalizePerAxis = false, returnView, returnLabel,
+  }, interactive = true) {
+    if (!Array.isArray(points) || !points.length) throw new Error("표시할 수 있는 검증된 3D 좌표가 없습니다.");
+    const validPoints = points.filter((point) => Array.isArray(point.position) && point.position.length === 3
+      && point.position.every(Number.isFinite) && Number.isFinite(point.radius) && point.radius > 0);
+    const validLines = lines.filter((line) => Array.isArray(line) && line.length === 2
+      && line.every((position) => Array.isArray(position) && position.length === 3 && position.every(Number.isFinite)));
+    if (!validPoints.length) throw new Error("표시할 수 있는 검증된 3D 좌표가 없습니다.");
+
+    const surface = document.createElement("section"); surface.className = "scientific3dSurface"; surface.dataset.scienceCapture = "";
+    const viewport = document.createElement("div"); viewport.className = "scientific3dViewport";
+    const canvas = document.createElement("canvas"); canvas.className = "scientific3dCanvas"; canvas.tabIndex = interactive ? 0 : -1;
+    canvas.setAttribute("role", "img"); canvas.setAttribute("aria-label", `${title}. ${axisLabel}`);
+    const overlay = document.createElement("div"); overlay.className = "scientific3dOverlay";
+    const heading = document.createElement("strong"); heading.textContent = title;
+    const copy = document.createElement("span"); copy.textContent = subtitle;
+    const axes = document.createElement("span"); axes.textContent = axisLabel;
+    overlay.append(heading, copy, axes);
+    const fallback = document.createElement("div"); fallback.className = "scientific3dFallback"; fallback.hidden = true;
+    const fallbackTitle = document.createElement("strong"); fallbackTitle.textContent = "3D 보기를 사용할 수 없습니다";
+    const fallbackCopy = document.createElement("span"); fallbackCopy.textContent = "WebGL/GPU 컨텍스트를 확인하거나 위의 2D 보기로 전환하세요.";
+    fallback.append(fallbackTitle, fallbackCopy);
+    const detail = document.createElement("aside"); detail.className = "scientific3dDetail"; detail.dataset.spatialPointDetail = ""; detail.dataset.selected = "false";
+    const detailTitle = document.createElement("strong"); detailTitle.textContent = "점을 선택하세요";
+    const detailCopy = document.createElement("span"); detailCopy.textContent = "검증된 원본 좌표와 측정값을 표시합니다.";
+    detail.append(detailTitle, detailCopy);
+    const footer = document.createElement("footer"); footer.className = "scientific3dFooter";
+    const help = document.createElement("span"); help.textContent = interactive ? "드래그 · 휠 · 키보드 조작" : "읽기 전용 3D 보기";
+    if (interactive) help.title = "드래그 회전 · Shift+드래그 이동 · 휠 확대 · 방향키 조작";
+    const footerActions = document.createElement("div");
+    if (returnView && returnLabel) {
+      const leave = document.createElement("button"); leave.type = "button"; leave.textContent = returnLabel; leave.dataset.spatialView = returnView; leave.disabled = !interactive; footerActions.append(leave);
+    }
+    const reset = document.createElement("button"); reset.type = "button"; reset.textContent = "3D 시야 초기화"; reset.disabled = !interactive;
+    footerActions.append(reset); footer.append(help, footerActions); viewport.append(canvas, overlay, detail, fallback); surface.append(viewport, footer); host.replaceChildren(surface);
+
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: false, powerPreference: "high-performance" });
+    } catch {
+      canvas.hidden = true; overlay.hidden = true; detail.hidden = true; fallback.hidden = false;
+      help.textContent = "Three.js WebGL 초기화 실패 · 검증된 원본 데이터는 2D 보기에서 계속 사용할 수 있습니다.";
+      reset.disabled = true; surface.dataset.webglState = "unavailable"; host.dataset.spatial3dReady = "false";
+      return { available: false, dispose() {} };
+    }
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setClearColor(0xf7f8f6, 1);
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(36, 1, .01, 100);
+    const target = new THREE.Vector3();
+    const defaultCamera = new THREE.Vector3(3.3, 2.6, 3.5);
+    camera.position.copy(defaultCamera); camera.lookAt(target);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xd5d8d2, 2.4));
+    const key = new THREE.DirectionalLight(0xffffff, 2); key.position.set(4, 6, 3); scene.add(key);
+    const fill = new THREE.DirectionalLight(0xb9d8ff, .85); fill.position.set(-4, 2, -4); scene.add(fill);
+
+    const vectors = validPoints.map((point) => new THREE.Vector3(...point.position));
+    for (const line of validLines) vectors.push(new THREE.Vector3(...line[0]), new THREE.Vector3(...line[1]));
+    const bounds = new THREE.Box3().setFromPoints(vectors);
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const scale = 2.6 / Math.max(size.x, size.y, size.z, 1e-9);
+    const axisScale = new THREE.Vector3(
+      2.6 / Math.max(size.x, 1e-9),
+      2.6 / Math.max(size.y, 1e-9),
+      2.6 / Math.max(size.z, 1e-9),
+    );
+    const normalized = (position) => {
+      const vector = new THREE.Vector3(...position).sub(center);
+      return normalizePerAxis ? vector.multiply(axisScale) : vector.multiplyScalar(scale);
+    };
+    const pointGeometry = new THREE.SphereGeometry(.052, 14, 10);
+    const pointMaterial = new THREE.MeshStandardMaterial({ roughness: .62, metalness: .02, vertexColors: true });
+    const pointMesh = new THREE.InstancedMesh(pointGeometry, pointMaterial, validPoints.length);
+    const transform = new THREE.Matrix4();
+    validPoints.forEach((point, index) => {
+      const position = normalized(point.position);
+      const radius = THREE.MathUtils.clamp(point.radius, .55, 2.8);
+      transform.compose(position, new THREE.Quaternion(), new THREE.Vector3(radius, radius, radius));
+      pointMesh.setMatrixAt(index, transform);
+      pointMesh.setColorAt(index, point.color instanceof THREE.Color ? point.color : new THREE.Color(point.color));
+    });
+    pointMesh.instanceMatrix.needsUpdate = true;
+    if (pointMesh.instanceColor) pointMesh.instanceColor.needsUpdate = true;
+    scene.add(pointMesh);
+
+    let lineGeometry = null; let lineMaterial = null;
+    if (validLines.length) {
+      const positions = new Float32Array(validLines.length * 6);
+      validLines.forEach((line, index) => {
+        positions.set(normalized(line[0]).toArray(), index * 6);
+        positions.set(normalized(line[1]).toArray(), index * 6 + 3);
+      });
+      lineGeometry = new THREE.BufferGeometry(); lineGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      lineMaterial = new THREE.LineBasicMaterial({ color: lineColor, transparent: true, opacity: .76 });
+      scene.add(new THREE.LineSegments(lineGeometry, lineMaterial));
+    }
+    let gridHelper = null;
+    if (grid) { gridHelper = new THREE.GridHelper(3, 12, 0xa0a6a0, 0xd9ddd8); gridHelper.position.y = normalized([center.x, bounds.max.y, center.z]).y; scene.add(gridHelper); }
+    const axesHelper = new THREE.AxesHelper(1.35); axesHelper.position.set(-1.35, -1.2, 1.35); scene.add(axesHelper);
+
+    let disposed = false; let queued = false; let pointer = null;
+    const draw = () => { if (!disposed) renderer.render(scene, camera); };
+    const requestDraw = () => { if (disposed || queued) return; queued = true; requestAnimationFrame(() => { queued = false; draw(); }); };
+    const resize = () => {
+      const rect = viewport.getBoundingClientRect();
+      const width = Math.max(320, Math.floor(rect.width)); const height = Math.max(320, Math.floor(rect.height));
+      camera.aspect = width / height; camera.updateProjectionMatrix(); renderer.setSize(width, height, false); requestDraw();
+    };
+    const resetView = () => { camera.position.copy(defaultCamera); target.set(0, 0, 0); camera.up.set(0, 1, 0); camera.lookAt(target); requestDraw(); };
+    const orbit = (dx, dy) => {
+      const offset = camera.position.clone().sub(target); const spherical = new THREE.Spherical().setFromVector3(offset);
+      spherical.theta -= dx * .008; spherical.phi = THREE.MathUtils.clamp(spherical.phi + dy * .008, .12, Math.PI - .12);
+      camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(spherical)); camera.lookAt(target); requestDraw();
+    };
+    const pan = (dx, dy) => {
+      const amount = camera.position.distanceTo(target) * .0016;
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0).multiplyScalar(-dx * amount);
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1).multiplyScalar(dy * amount);
+      camera.position.add(right).add(up); target.add(right).add(up); camera.lookAt(target); requestDraw();
+    };
+    const zoom = (delta) => {
+      const offset = camera.position.clone().sub(target).multiplyScalar(Math.exp(delta * .001));
+      const length = THREE.MathUtils.clamp(offset.length(), .8, 14); offset.setLength(length);
+      camera.position.copy(target).add(offset); camera.lookAt(target); requestDraw();
+    };
+    const selectAt = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+      const raycaster = new THREE.Raycaster(); raycaster.setFromCamera(mouse, camera);
+      const hit = raycaster.intersectObject(pointMesh, false)[0];
+      if (!hit || !Number.isSafeInteger(hit.instanceId)) return;
+      const point = validPoints[hit.instanceId]; detail.replaceChildren();
+      const selectedTitle = document.createElement("strong"); selectedTitle.textContent = point.label;
+      const selectedCopy = document.createElement("span"); selectedCopy.textContent = point.detail;
+      detail.append(selectedTitle, selectedCopy); detail.dataset.selected = "true";
+    };
+    const controller = new AbortController(); const signal = controller.signal;
+    if (interactive) {
+      canvas.addEventListener("contextmenu", (event) => event.preventDefault(), { signal });
+      canvas.addEventListener("pointerdown", (event) => {
+        pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false, pan: event.shiftKey || event.button === 2 };
+        try { canvas.setPointerCapture(event.pointerId); } catch {}
+      }, { signal });
+      canvas.addEventListener("pointermove", (event) => {
+        if (!pointer || pointer.id !== event.pointerId) return;
+        const dx = event.clientX - pointer.x; const dy = event.clientY - pointer.y;
+        if (Math.abs(dx) + Math.abs(dy) > 2) pointer.moved = true;
+        pointer.x = event.clientX; pointer.y = event.clientY; if (pointer.pan) pan(dx, dy); else orbit(dx, dy);
+      }, { signal });
+      canvas.addEventListener("pointerup", (event) => { if (pointer?.id !== event.pointerId) return; const moved = pointer.moved; pointer = null; if (!moved) selectAt(event); }, { signal });
+      canvas.addEventListener("pointercancel", () => { pointer = null; }, { signal });
+      canvas.addEventListener("wheel", (event) => { event.preventDefault(); zoom(event.deltaY); }, { passive: false, signal });
+      canvas.addEventListener("keydown", (event) => {
+        if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "+", "=", "-", "Home"].includes(event.key)) event.preventDefault();
+        if (event.key === "ArrowLeft") orbit(-12, 0); else if (event.key === "ArrowRight") orbit(12, 0);
+        else if (event.key === "ArrowUp") orbit(0, -12); else if (event.key === "ArrowDown") orbit(0, 12);
+        else if (event.key === "+" || event.key === "=") zoom(-90); else if (event.key === "-") zoom(90); else if (event.key === "Home") resetView();
+      }, { signal });
+      reset.addEventListener("click", resetView, { signal });
+    }
+    canvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault(); surface.dataset.webglState = "lost"; canvas.hidden = true; overlay.hidden = true; detail.hidden = true; fallback.hidden = false;
+      help.textContent = "WebGL context가 손실되었습니다. 위의 2D 보기로 전환하세요.";
+    }, { signal });
+    canvas.addEventListener("webglcontextrestored", () => {
+      surface.dataset.webglState = "restored"; canvas.hidden = false; overlay.hidden = false; detail.hidden = false; fallback.hidden = true; resize();
+    }, { signal });
+    const observer = new ResizeObserver(resize); observer.observe(viewport); resize();
+    host.dataset.spatial3dReady = "true"; host.dataset.spatial3dKind = kind; host.dataset.spatial3dPointCount = String(validPoints.length);
+    return {
+      available: true,
+      dispose() {
+        disposed = true; controller.abort(); observer.disconnect();
+        pointGeometry.dispose(); pointMaterial.dispose(); lineGeometry?.dispose(); lineMaterial?.dispose();
+        gridHelper?.geometry?.dispose?.(); gridHelper?.material?.dispose?.(); axesHelper.geometry.dispose(); axesHelper.material.dispose();
+        renderer.renderLists?.dispose?.(); renderer.dispose(); renderer.forceContextLoss?.();
+      },
+    };
+  }
+
+  function materialCellLines(lattice) {
+    if (!Array.isArray(lattice) || lattice.length !== 3 || lattice.some((row) => !Array.isArray(row) || row.length !== 3 || row.some((value) => !isExactFiniteNumber(value)))) return [];
+    const a = [...lattice[0]]; const b = [...lattice[1]]; const c = [...lattice[2]];
+    const add = (left, right) => left.map((value, index) => value + right[index]);
+    const origin = [0, 0, 0]; const ab = add(a, b); const ac = add(a, c); const bc = add(b, c); const abc = add(ab, c);
+    return [[origin, a], [origin, b], [origin, c], [a, ab], [a, ac], [b, ab], [b, bc], [c, ac], [c, bc], [ab, abc], [ac, abc], [bc, abc]];
+  }
+
   function renderMaterialsDataset(version, host, artifactId, interactive = true) {
     const payload = version?.payload;
     const dataset = payload?.normalized;
@@ -6467,6 +9193,53 @@ import { formatScienceCell } from "./format-cell.js";
     if (!payload || payload.schema !== "agentlas.science.materials-catalog-artifact/v1"
       || dataset?.schema !== "agentlas.materials.oqmd-optimade/v1" || tablePayload?.schema !== "agentlas.science-table/v1"
       || !Array.isArray(tablePayload.columns) || !Array.isArray(tablePayload.rows)) throw new Error("검증된 Materials structure payload가 없습니다.");
+    const structures = Array.isArray(dataset.structures) ? dataset.structures : [];
+    const renderable = structures.map((structure, index) => ({ structure, index })).filter(({ structure }) =>
+      Array.isArray(structure?.cartesianSitePositions) && structure.cartesianSitePositions.length > 0
+      && structure.cartesianSitePositions.every((position) => Array.isArray(position) && position.length === 3 && position.every(isExactFiniteNumber))
+      && Array.isArray(structure.speciesAtSites) && structure.speciesAtSites.length === structure.cartesianSitePositions.length);
+    const requestedStructureIndex = Number(state.materialsStructureIndexByArtifact.get(artifactId));
+    const selectedEntry = renderable.find((entry) => entry.index === requestedStructureIndex) || renderable[0] || null;
+    const requestedView = state.spatialViewByArtifact.get(artifactId);
+    const activeView = !interactive || requestedView === "materials-table" || !selectedEntry ? "materials-table" : "materials-3d";
+    const shell = document.createElement("section"); shell.className = "scientificArtifactShell"; shell.dataset.scientificView = activeView;
+    const toolbar = document.createElement("div"); toolbar.className = "scientificViewToolbar";
+    const modes = document.createElement("div"); modes.className = "scientificViewModes"; modes.setAttribute("role", "group"); modes.setAttribute("aria-label", "Materials 보기");
+    const tableMode = document.createElement("button"); tableMode.type = "button"; tableMode.textContent = "구조 목록"; tableMode.dataset.spatialView = "materials-table"; tableMode.setAttribute("aria-pressed", String(activeView === "materials-table")); tableMode.disabled = !interactive;
+    const structureMode = document.createElement("button"); structureMode.type = "button"; structureMode.textContent = "원자·격자 3D"; structureMode.dataset.spatialView = "materials-3d"; structureMode.setAttribute("aria-pressed", String(activeView === "materials-3d")); structureMode.disabled = !interactive || !renderable.length;
+    modes.append(tableMode, structureMode); toolbar.append(modes);
+    if (renderable.length) {
+      const label = document.createElement("label"); const labelText = document.createElement("span"); labelText.textContent = "결정 구조";
+      const select = document.createElement("select"); select.dataset.materialsStructureIndex = ""; select.disabled = !interactive;
+      renderable.forEach(({ structure, index }) => {
+        const option = document.createElement("option"); option.value = String(index); option.selected = index === selectedEntry?.index;
+        option.textContent = `${structure.formulaReduced || structure.formulaDescriptive || structure.id} · ${structure.cartesianSitePositions.length} sites`;
+        select.append(option);
+      });
+      label.append(labelText, select); toolbar.append(label);
+    }
+    const bodyHost = document.createElement("div"); bodyHost.className = "scientificViewBody";
+    shell.append(toolbar, bodyHost); host.replaceChildren(shell);
+    if (activeView === "materials-3d" && selectedEntry) {
+      const structure = selectedEntry.structure;
+      const points = structure.cartesianSitePositions.map((position, index) => {
+        const species = String(structure.speciesAtSites[index] || "unknown");
+        return {
+          position: [...position], color: spatialColor(species), radius: 1,
+          label: `${species} · site ${index + 1}`,
+          detail: `Cartesian ${position.map((value) => value.toPrecision(7)).join(", ")} Å · OQMD ${structure.id}`,
+        };
+      });
+      state.activeSpatialScene = renderScientificPointScene(bodyHost, {
+        points, lines: materialCellLines(structure.latticeVectors), kind: "materials-structure",
+        title: `${structure.formulaReduced || structure.formulaDescriptive || structure.id} crystal structure`,
+        subtitle: `${points.length.toLocaleString()} exact Cartesian sites · OQMD OPTIMADE ${structure.id}`,
+        axisLabel: "X · Y · Z = Cartesian Å · 선 = lattice vectors", grid: false, returnView: "materials-table", returnLabel: "구조 목록",
+      }, interactive);
+      if (interactive) resetArtifactViewScroll();
+      host.dataset.materialsReady = String(state.activeSpatialScene.available); host.dataset.materialsView = "structure-3d"; host.dataset.materialsStructureId = String(structure.id);
+      return { rowCount: tablePayload.rows.length, columnCount: tablePayload.columns.length, page: 0, pageCount: 1, view: "structure-3d" };
+    }
     const pageSize = 100;
     const pageCount = Math.max(1, Math.ceil(tablePayload.rows.length / pageSize));
     const requestedPage = Number(state.tablePageByArtifact.get(artifactId) || 0);
@@ -6508,9 +9281,65 @@ import { formatScienceCell } from "./format-cell.js";
     const previous = document.createElement("button"); previous.type = "button"; previous.textContent = "이전"; previous.dataset.tablePage = String(page - 1); previous.disabled = !interactive || page === 0;
     const current = document.createElement("span"); current.textContent = `${page + 1} / ${pageCount}`;
     const next = document.createElement("button"); next.type = "button"; next.textContent = "다음"; next.dataset.tablePage = String(page + 1); next.disabled = !interactive || page >= pageCount - 1;
-    controls.append(previous, current, next); footer.append(provenance, controls); surface.append(summary, viewport, footer); host.replaceChildren(surface);
-    host.dataset.materialsReady = "true";
+    controls.append(previous, current, next); footer.append(provenance, controls); surface.append(summary, viewport, footer); bodyHost.replaceChildren(surface);
+    host.dataset.materialsReady = "true"; host.dataset.materialsView = "table";
     return { rowCount: tablePayload.rows.length, columnCount: tablePayload.columns.length, page, pageCount };
+  }
+
+  function renderEarthquakeDepth3d(version, host, interactive = true) {
+    const catalog = version?.payload?.catalog;
+    if (catalog?.provider !== "usgs-fdsn-event" || !Array.isArray(catalog.events)) throw new Error("검증된 USGS 지진 좌표가 없습니다.");
+    const events = catalog.events.filter((event) => isExactFiniteNumber(event.longitude) && isExactFiniteNumber(event.latitude) && isExactFiniteNumber(event.depthKm));
+    if (!events.length) throw new Error("3D로 표시할 수 있는 지진 좌표가 없습니다.");
+    const depths = events.map((event) => event.depthKm);
+    const minimumDepth = Math.min(...depths); const maximumDepth = Math.max(...depths); const depthRange = Math.max(1e-9, maximumDepth - minimumDepth);
+    const points = events.map((event) => {
+      const depth = event.depthKm; const magnitude = isExactFiniteNumber(event.magnitude) ? event.magnitude : null;
+      const ratio = (depth - minimumDepth) / depthRange;
+      return {
+        position: [event.longitude, -depth, event.latitude],
+        color: new THREE.Color().setHSL(.5 - ratio * .42, .62, .43),
+        radius: magnitude !== null ? .65 + THREE.MathUtils.clamp((magnitude + 2) / 12, 0, 1) * 1.55 : .65,
+        label: event.place || event.id,
+        detail: `M${magnitude ?? "—"} · depth ${depth.toLocaleString("en-US", { maximumFractionDigits: 3 })} km · ${event.latitude.toFixed(5)}°, ${event.longitude.toFixed(5)}° · ${event.time}`,
+      };
+    });
+    const scene = renderScientificPointScene(host, {
+      points, kind: "earthquake-depth", title: "USGS earthquake depth volume",
+      subtitle: `${points.length.toLocaleString()} exact events · depth ${minimumDepth.toLocaleString()}–${maximumDepth.toLocaleString()} km`,
+      axisLabel: "X = longitude ° · Y = depth km (down) · Z = latitude ° · 화면 축별 정규화", grid: true, normalizePerAxis: true, returnView: "earthquake-map", returnLabel: "Map 2D",
+    }, interactive);
+    if (interactive) resetArtifactViewScroll();
+    host.dataset.earthquakeDepthReady = String(scene.available); host.dataset.earthquakeEventCount = String(points.length);
+    return scene;
+  }
+
+  function renderAstronomyDistance3d(version, host, interactive = true) {
+    const catalog = version?.payload?.catalog;
+    if (catalog?.provider !== "simbad-tap" || !Array.isArray(catalog.objects)) throw new Error("검증된 SIMBAD 천체 좌표가 없습니다.");
+    const objects = catalog.objects.filter((object) => isExactFiniteNumber(object.raDeg) && isExactFiniteNumber(object.decDeg)
+      && isExactFiniteNumber(object.parallaxMas) && object.parallaxMas > 0);
+    if (!objects.length) throw new Error("양의 parallax가 있는 천체가 없어 거리를 임의 생성하지 않았습니다.");
+    const distances = objects.map((object) => 1_000 / object.parallaxMas);
+    const points = objects.map((object, index) => {
+      const ra = object.raDeg * Math.PI / 180; const dec = object.decDeg * Math.PI / 180; const distancePc = distances[index];
+      const horizontal = Math.cos(dec) * distancePc;
+      return {
+        position: [horizontal * Math.cos(ra), horizontal * Math.sin(ra), Math.sin(dec) * distancePc],
+        color: spatialColor(object.objectType), radius: 1,
+        label: object.mainId,
+        detail: `${object.objectType}${object.spectralType ? ` · ${object.spectralType}` : ""} · ${distancePc.toLocaleString("en-US", { maximumFractionDigits: 3 })} pc · parallax ${object.parallaxMas.toLocaleString("en-US", { maximumFractionDigits: 8 })} mas · RA ${object.raDeg.toFixed(6)}° · Dec ${object.decDeg.toFixed(6)}°`,
+      };
+    });
+    const scene = renderScientificPointScene(host, {
+      points, kind: "astronomy-distance", title: "SIMBAD parallax distance view",
+      subtitle: `${points.length.toLocaleString()} / ${catalog.objects.length.toLocaleString()} objects with positive parallax · ${Math.min(...distances).toLocaleString("en-US", { maximumFractionDigits: 2 })}–${Math.max(...distances).toLocaleString("en-US", { maximumFractionDigits: 2 })} pc`,
+      axisLabel: "X · Y · Z = ICRS Cartesian pc · distance = 1000/parallax · 오차모형 미적용", grid: false, returnView: "astronomy-sky", returnLabel: "Sky 2D",
+    }, interactive);
+    if (interactive) resetArtifactViewScroll();
+    host.dataset.astronomyDistanceReady = String(scene.available); host.dataset.astronomyDistanceEligibleCount = String(points.length);
+    host.dataset.astronomyDistanceExcludedCount = String(catalog.objects.length - points.length);
+    return scene;
   }
 
   const NUMERIC_SURFACE_SCHEMA = "agentlas.science.numeric-surface-artifact/v1";
@@ -7094,6 +9923,7 @@ import { formatScienceCell } from "./format-cell.js";
         if (!host.isConnected) return;
         host.dataset.imageReady = "true";
         host.dataset.imageSha256 = String(preview.sha256 || expectedSha256 || "");
+        bindArtifactVisualViewport(host, { kind: "image" });
       } catch (error) {
         host.textContent = error instanceof Error ? error.message : String(error);
         host.dataset.renderFailed = "true";
@@ -7104,12 +9934,25 @@ import { formatScienceCell } from "./format-cell.js";
     if (paleontologyArtifactPayload(artifact.version)) {
       try {
         const rendered = await renderPaleontologyEvidence(artifact.version, host, artifact.id, true);
+        if (!host.isConnected || state.selectedArtifactId !== artifact.id) return;
         if (rendered.view === "figure") {
-          const bundle = await science.artifacts.capture({ projectId: artifact.projectId, artifactId: artifact.id, artifactVersion: artifact.version.version, contentSha256: artifact.version.contentSha256 });
-          const status = document.querySelector(".rendererStatus");
-          if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
+          try {
+            if (rendered.captureLayoutError) throw rendered.captureLayoutError;
+            const bundle = await science.artifacts.capture({ projectId: artifact.projectId, artifactId: artifact.id, artifactVersion: artifact.version.version, contentSha256: artifact.version.contentSha256 });
+            if (!host.isConnected || state.selectedArtifactId !== artifact.id) return;
+            const status = document.querySelector(".rendererStatus");
+            if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
+          } catch (error) {
+            if (!host.isConnected || state.selectedArtifactId !== artifact.id) return;
+            host.dataset.captureFailed = "true";
+            if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error);
+          } finally {
+            rendered.restoreInteractiveView?.();
+            if (rendered.view === "figure") bindArtifactVisualViewport(host, { kind: "chart", initialFit: false });
+          }
         }
       } catch (error) {
+        if (!host.isConnected || state.selectedArtifactId !== artifact.id) return;
         host.dataset.renderFailed = "true";
         if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error);
       }
@@ -7205,6 +10048,7 @@ import { formatScienceCell } from "./format-cell.js";
         else if (artifact.version.payload?.schema === "agentlas.science.physics-data-artifact/v1") renderPhysicsDataset(artifact.version, host, artifact.id, true);
         else if (artifact.version.payload?.schema === "agentlas.science.materials-catalog-artifact/v1") renderMaterialsDataset(artifact.version, host, artifact.id, true);
         else renderDataTable(artifact.version, host, artifact.id, true);
+        if (artifact.version.payload?.schema === "agentlas.science.statistics-analysis-artifact/v1") bindArtifactVisualViewport(host, { kind: "chart" });
         const bundle = await science.artifacts.capture({ projectId: artifact.projectId, artifactId: artifact.id, artifactVersion: artifact.version.version, contentSha256: artifact.version.contentSha256 });
         const status = document.querySelector(".rendererStatus");
         if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
@@ -7240,7 +10084,11 @@ import { formatScienceCell } from "./format-cell.js";
     }
     if (artifact.version?.rendererId === "agentlas.d3-sky") {
       try {
-        renderSkyCatalog(artifact.version, host, true);
+        if (state.spatialViewByArtifact.get(artifact.id) === "astronomy-distance") {
+          state.activeSpatialScene = renderAstronomyDistance3d(artifact.version, host, true);
+        } else {
+          renderSkyCatalog(artifact.version, host, true);
+        }
       } catch (error) {
         host.textContent = error instanceof Error ? error.message : String(error);
         host.dataset.renderFailed = "true";
@@ -7253,6 +10101,20 @@ import { formatScienceCell } from "./format-cell.js";
         if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
       } catch (error) {
         host.dataset.captureFailed = "true";
+        if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error);
+      }
+      return;
+    }
+    if (artifact.version?.rendererId === "agentlas.vega" && artifact.version.payload?.catalog?.provider === "usgs-fdsn-event"
+      && state.spatialViewByArtifact.get(artifact.id) === "earthquake-depth") {
+      try {
+        state.activeSpatialScene = renderEarthquakeDepth3d(artifact.version, host, true);
+        const bundle = await science.artifacts.capture({ projectId: artifact.projectId, artifactId: artifact.id, artifactVersion: artifact.version.version, contentSha256: artifact.version.contentSha256 });
+        const status = document.querySelector(".rendererStatus");
+        if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
+      } catch (error) {
+        host.textContent = error instanceof Error ? error.message : String(error);
+        host.dataset.renderFailed = "true";
         if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error);
       }
       return;
@@ -7279,6 +10141,10 @@ import { formatScienceCell } from "./format-cell.js";
       const status = document.querySelector(".rendererStatus");
       if (status && bundle?.visualReviewEligible) status.dataset.visualCapture = "verified";
     } catch (error) { if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error); }
+    finally {
+      restoreArtifactVegaCanvas(host);
+      bindArtifactVisualViewport(host, { kind: "chart" });
+    }
   }
 
   function fatal(error) {
@@ -7403,15 +10269,68 @@ import { formatScienceCell } from "./format-cell.js";
     }
   }
 
+  function resetArtifactViewScroll() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      let node = root.querySelector("[data-artifact-host]");
+      while (node && node !== document.body) {
+        if (node instanceof HTMLElement && node.scrollTop !== 0) node.scrollTop = 0;
+        node = node.parentElement;
+      }
+      if (document.scrollingElement?.scrollTop) document.scrollingElement.scrollTop = 0;
+    }));
+  }
+
   root.addEventListener("click", (event) => {
     const target = event.target.closest("button");
     if (!target) return;
+    if (target.dataset.action === "resume-science-loop") {
+      void transitionScienceResearchLoop("resume");
+      return;
+    }
+    if (target.dataset.action === "cancel-science-loop") {
+      void transitionScienceResearchLoop("cancel");
+      return;
+    }
+    if (target.dataset.action === "toggle-science-model") {
+      if (scienceRuntimePickerLocked() || state.runtimeSelectionLoading || state.runtimeSelectionBusy) return;
+      state.runtimePickerOpen = !state.runtimePickerOpen;
+      renderChatDock();
+      if (state.runtimePickerOpen) requestAnimationFrame(() => document.querySelector("[data-science-model-search]")?.focus());
+      return;
+    }
+    if (target.dataset.action === "close-science-model") {
+      state.runtimePickerOpen = false;
+      state.runtimePickerQuery = "";
+      renderChatDock();
+      requestAnimationFrame(() => document.querySelector("[data-science-model-trigger]")?.focus());
+      return;
+    }
+    if (target.dataset.action === "select-science-model") {
+      const optionIndex = Number(target.dataset.scienceRuntimeOptionIndex);
+      if (Number.isSafeInteger(optionIndex)) void selectScienceRuntimeOption(optionIndex);
+      return;
+    }
+    if (target.dataset.action === "retry-inline-preview") {
+      const host = target.closest(".inlineArtifactItem")?.querySelector("[data-inline-vega-artifact], [data-inline-capture-artifact]");
+      if (host) void hydrateInlineArtifactPreview(host);
+      return;
+    }
+    if (target.dataset.action === "answer-runtime-question") { void answerRuntimeQuestion(target.dataset.runtimeQuestionAnswer || ""); return; }
+    if (target.dataset.action === "dismiss-runtime-question") { void answerRuntimeQuestion(null); return; }
     if (target.dataset.tablePage !== undefined) {
       const page = Number(target.dataset.tablePage);
       if (Number.isSafeInteger(page) && page >= 0 && state.selectedArtifactId) {
         state.tablePageByArtifact.set(state.selectedArtifactId, page);
         render();
       }
+      return;
+    }
+    if (target.dataset.spatialView && state.selectedArtifactId) {
+      const view = target.dataset.spatialView;
+      if (!["materials-table", "materials-3d", "earthquake-map", "earthquake-depth", "astronomy-sky", "astronomy-distance"].includes(view)) return;
+      state.spatialViewByArtifact.set(state.selectedArtifactId, view);
+      render();
+      resetArtifactViewScroll();
       return;
     }
     if (target.dataset.citationLayout && state.activeCytoscape) {
@@ -7446,7 +10365,6 @@ import { formatScienceCell } from "./format-cell.js";
       return;
     }
     if (target.dataset.action === "decide-hypothesis") { void decideHypothesis(target.dataset); return; }
-    if (target.dataset.action === "toggle-approval-scope") { void toggleApprovalScope(target.dataset.scope); return; }
     if (target.dataset.action === "refresh-evidence-graph") { void refreshEvidenceGraph(); return; }
     if (target.dataset.action === "open-evidence-graph-exact") { openEvidenceGraphExactRecord(target.dataset.evidenceGraphNodeId); return; }
     if (target.dataset.action === "anchor-evidence-graph-path") {
@@ -7492,6 +10410,150 @@ import { formatScienceCell } from "./format-cell.js";
       });
       return;
     }
+    if (target.dataset.action === "back-to-projects") {
+      const action = () => {
+        rememberScroll();
+        if (state.selectedId) state.librarySelectedProjectId = state.selectedId;
+        state.selectedId = null;
+        state.visualViewportByArtifact = new Map();
+        state.projectFolderOpen = false;
+        state.selectedConversationId = null;
+        state.drawer = null;
+        state.projectMenuOpen = false;
+        render();
+        void refreshProjectLibrarySummaries().then(render).catch((error) => {
+          state.projectLibrarySummaryState = "unavailable";
+          state.projectLibrarySummaries = new Map();
+          state.workspaceSyncError = error instanceof Error ? error.message : String(error);
+          render();
+        });
+      };
+      if (!guardArtifactDraftNavigation(action)) action();
+      return;
+    }
+    if (target.dataset.action === "select-library-project") {
+      state.librarySelectedProjectId = target.dataset.libraryProjectId || null;
+      state.projectFolderOpenError = "";
+      render();
+      return;
+    }
+    if (target.dataset.action === "open-library-project" || target.dataset.action === "open-sidebar-project") {
+      const projectId = target.dataset.libraryProjectId;
+      if (!projectId) return;
+      const action = () => void selectProject(projectId, { openFolder: true });
+      if (!guardArtifactDraftNavigation(action)) action();
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-os") {
+      const projectId = target.dataset.projectId;
+      if (!projectId || state.projectFolderOpenBusy) return;
+      state.projectFolderOpenBusy = true;
+      state.projectFolderOpenError = "";
+      target.disabled = true;
+      void (async () => {
+        try {
+          await science.projects.openFolder(projectId);
+        } catch (error) {
+          if (state.librarySelectedProjectId === projectId || state.selectedId === projectId) {
+            state.projectFolderOpenError = error instanceof Error ? error.message : String(error);
+          }
+        } finally {
+          state.projectFolderOpenBusy = false;
+          render();
+        }
+      })();
+      return;
+    }
+    if (target.dataset.action === "select-project-folder-item") {
+      state.projectFolderSelectedKey = target.dataset.folderItemKey || null;
+      render();
+      return;
+    }
+    if (target.dataset.action === "open-project-workspace") {
+      state.projectFolderOpen = false;
+      render();
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-source") {
+      state.projectFolderOpen = false;
+      state.mode = "session";
+      state.activeWorkspaceTabId = RESEARCH_TAB_ID;
+      state.currentDestination = "literature";
+      state.selectedSourceId = target.dataset.sourceId || null;
+      state.drawer = state.selectedSourceId ? { kind: "source", id: state.selectedSourceId } : null;
+      render();
+      if (state.selectedId) void loadLiterature(state.selectedId);
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-destination") {
+      state.projectFolderOpen = false;
+      navigateProjectDestination(target.dataset.destination || "overview");
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-artifact") {
+      state.projectFolderOpen = false;
+      const action = () => {
+        void openLab(target.dataset.labId, target.dataset.artifactId, null, null).then(() => {
+          if (state.selectedArtifactId !== target.dataset.artifactId) return;
+          state.drawer = { kind: "artifact", id: target.dataset.artifactId };
+          render();
+        }).catch((error) => {
+          state.projectError = error?.message || String(error);
+          render();
+        });
+      };
+      if (!guardArtifactDraftNavigation(action)) action();
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-manuscript") {
+      state.projectFolderOpen = false;
+      const action = () => void openManuscript(target.dataset.manuscriptId);
+      if (!guardArtifactDraftNavigation(action)) action();
+      return;
+    }
+    if (target.dataset.action === "open-project-folder-export") {
+      state.projectFolderOpen = false;
+      state.selectedManuscriptId = target.dataset.manuscriptId || state.selectedManuscriptId;
+      navigateProjectDestination("submission-archive");
+      return;
+    }
+    if (target.dataset.researchTemplate) {
+      const template = researchTemplateById(target.dataset.researchTemplate);
+      if (!template) return;
+      state.modal = true;
+      state.selectedResearchTemplateId = template.id;
+      state.newProjectStep = "details";
+      state.newProjectFolderError = "";
+      state.newProjectFolderBusy = false;
+      state.newProjectGeneration += 1;
+      state.newProjectRequestId = null;
+      state.newProjectRequestSignature = "";
+      render();
+      requestAnimationFrame(() => document.querySelector('#new-project-form input[name="title"]')?.focus());
+      return;
+    }
+    if (target.dataset.action === "manage-project-labs") {
+      state.labManagerGeneration += 1;
+      state.labManagerOpen = true;
+      state.labManagerBusyId = null;
+      state.labManagerError = "";
+      render();
+      requestAnimationFrame(() => document.querySelector(".labManagerRow")?.focus());
+      return;
+    }
+    if (target.dataset.action === "close-project-labs") {
+      state.labManagerGeneration += 1;
+      state.labManagerOpen = false;
+      state.labManagerBusyId = null;
+      state.labManagerError = "";
+      render();
+      requestAnimationFrame(() => document.querySelector(".manageLabsButton")?.focus());
+      return;
+    }
+    if (target.dataset.action === "toggle-project-lab") {
+      void toggleProjectLabBookmark(target.dataset.labId || "", target.dataset.labEnabled !== "true");
+      return;
+    }
     if (target.dataset.action === "collapse-rail") { setRailCollapsed(true); return; }
     if (target.dataset.action === "expand-rail") { setRailCollapsed(false); return; }
     if (target.dataset.action === "scroll-workspace-tabs") {
@@ -7503,8 +10565,31 @@ import { formatScienceCell } from "./format-cell.js";
     if (target.dataset.closeWorkspaceTab) { closeWorkspaceTab(target.dataset.closeWorkspaceTab); return; }
     if (target.dataset.workspaceTabId) { activateWorkspaceTab(target.dataset.workspaceTabId); return; }
     if (target.dataset.action === "new") {
-      const action = () => { state.modal = true; render(); };
+      const action = () => {
+        state.modal = true;
+        state.saving = false;
+        state.newProjectStep = "details";
+        state.selectedResearchTemplateId = null;
+        state.newProjectFolderBusy = false;
+        state.newProjectGeneration += 1;
+        resetNewProjectDraft();
+        state.newProjectRequestId = null;
+        state.newProjectRequestSignature = "";
+        render();
+        requestAnimationFrame(() => document.querySelector('#new-project-form input[name="title"]')?.focus());
+      };
       if (!guardArtifactDraftNavigation(action)) action();
+      return;
+    }
+    if (target.dataset.action === "pick-project-folder") {
+      void pickNewProjectFolder();
+      return;
+    }
+    if (target.dataset.action === "clear-project-classification") {
+      state.selectedResearchTemplateId = null;
+      state.newProjectRequestId = null;
+      state.newProjectRequestSignature = "";
+      render();
       return;
     }
     if (target.dataset.action === "new-manuscript") { state.manuscriptModal = true; state.saving = false; render(); return; }
@@ -7531,6 +10616,14 @@ import { formatScienceCell } from "./format-cell.js";
     }
     if (target.dataset.action === "back-manuscript-insert") { if (state.manuscriptInsertion) state.manuscriptInsertion = { ...state.manuscriptInsertion, phase: "choose", selectedCandidateId: null, selectedArtifactId: null }; state.manuscriptInsertError = ""; render(); return; }
     if (target.dataset.action === "confirm-manuscript-insert") { void insertValidatedManuscriptArtifact(); return; }
+    // Any click that is not inside the menu closes it -- including the control that opened it, so
+    // a second press is a toggle rather than a second identical menu.
+    if (!target.closest?.("[data-manuscript-block-menu]")) {
+      const alreadyOpen = !!window.document.querySelector("[data-manuscript-block-menu]");
+      closeManuscriptBlockMenu();
+      if (target.dataset.action === "open-manuscript-block-menu") { if (!alreadyOpen) openManuscriptBlockMenu(target); return; }
+    }
+    if (target.dataset.action === "delete-manuscript-block") { void deleteManuscriptBlock(target.dataset.nodeId); return; }
     if (target.dataset.action === "undo-manuscript-transaction") { void undoManuscriptTransaction(target.dataset.transactionId); return; }
     if (target.dataset.action === "pin-manuscript-selection") { void persistManuscriptSelection(target); return; }
     if (target.dataset.action === "clear-manuscript-selection") { state.manuscriptSelectionContext = null; state.manuscriptSelectionError = ""; renderChatDock(); return; }
@@ -7538,6 +10631,23 @@ import { formatScienceCell } from "./format-cell.js";
     if (target.dataset.action === "reject-manuscript-proposal") { void decideManuscriptProposal(target.dataset.proposalId, "reject"); return; }
     if (target.dataset.action === "regenerate-manuscript-proposal") { prepareStaleProposalRegeneration(target.dataset.proposalId); return; }
     if (target.dataset.action === "defer-research-decision") { void deferPresentedResearchDecision(); return; }
+    if (target.dataset.action === "open-analysis-plan-review") {
+      const plan = reviewableAnalysisPlan();
+      if (!plan) return;
+      state.selectedAnalysisPlanId = plan.id;
+      state.analysisPlanReviewSheet = true;
+      state.analysisPlanReviewError = "";
+      render();
+      return;
+    }
+    if (target.dataset.action === "close-analysis-plan-review") {
+      state.analysisPlanReviewDismissedKey = analysisPlanReviewKey(reviewableAnalysisPlan());
+      state.analysisPlanReviewSheet = false;
+      state.analysisPlanReviewBusy = false;
+      state.analysisPlanReviewError = "";
+      render();
+      return;
+    }
     if (target.dataset.action === "open-research-contract-sheet") { state.researchContractSheet = state.researchContract?.status === "draft"; state.researchContractError = ""; render(); return; }
     if (target.dataset.action === "close-research-contract-sheet") {
       state.researchContractDismissedKey = researchContractKey(state.researchContract);
@@ -7666,13 +10776,17 @@ import { formatScienceCell } from "./format-cell.js";
     if (target.dataset.statisticsView && state.selectedArtifactId) {
       state.figureActionError = "";
       state.figureActionNotice = "";
-      state.statisticsViewByArtifact.set(state.selectedArtifactId, target.dataset.statisticsView);
-      void hydrateArtifactRenderer();
+      const requestedView = target.dataset.statisticsView;
+      state.statisticsViewByArtifact.set(state.selectedArtifactId, requestedView);
+      render();
+      requestAnimationFrame(() => document.querySelector(`[data-statistics-view="${CSS.escape(requestedView)}"]`)?.focus({ preventScroll: true }));
       return;
     }
     if (target.dataset.paleontologyView && state.selectedArtifactId) {
-      state.paleontologyViewByArtifact.set(state.selectedArtifactId, target.dataset.paleontologyView === "table" ? "table" : "figure");
-      void hydrateArtifactRenderer();
+      const requestedView = target.dataset.paleontologyView === "table" ? "table" : "figure";
+      state.paleontologyViewByArtifact.set(state.selectedArtifactId, requestedView);
+      render();
+      requestAnimationFrame(() => document.querySelector(`[data-paleontology-view="${CSS.escape(requestedView)}"]`)?.focus({ preventScroll: true }));
       return;
     }
     if (target.dataset.action === "suggest-publication-figure") {
@@ -7687,11 +10801,22 @@ import { formatScienceCell } from "./format-cell.js";
       requestAnimationFrame(() => document.querySelector(".dockedComposer textarea")?.focus());
       return;
     }
-    if (target.dataset.action === "cancel") { state.modal = false; render(); return; }
+    if (target.dataset.action === "cancel") {
+      state.modal = false;
+      state.saving = false;
+      state.newProjectStep = "details";
+      state.selectedResearchTemplateId = null;
+      state.newProjectFolderBusy = false;
+      state.newProjectGeneration += 1;
+      resetNewProjectDraft();
+      state.newProjectRequestId = null;
+      state.newProjectRequestSignature = "";
+      render();
+      return;
+    }
     if (target.dataset.action === "retry-project" && state.selectedId) { void selectProject(state.selectedId); return; }
     if (target.dataset.action === "toggle-drawer") { rememberScroll(); state.drawer = state.drawer ? null : { kind: state.mode === "lab" ? "artifact" : state.mode === "manuscript" ? "manuscript" : "source", id: state.mode === "lab" ? state.selectedArtifactId : state.mode === "manuscript" ? state.selectedManuscriptId : state.selectedSourceId }; render(); return; }
     if (target.dataset.action === "close-drawer") { rememberScroll(); state.drawer = null; render(); return; }
-    if (target.dataset.action === "toggle-projects") { state.projectMenuOpen = !state.projectMenuOpen; render(); return; }
     if (target.dataset.action === "project-research") { if (!guardArtifactDraftNavigation(returnToSession)) returnToSession(); return; }
     if (target.dataset.projectDestination) {
       const destination = target.dataset.projectDestination;
@@ -7745,7 +10870,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (target.dataset.action === "discard-manuscript-navigation") { const next = state.pendingDraftNavigation; state.pendingDraftNavigation = null; state.manuscriptDraft = null; state.manuscriptSaveError = ""; setActiveWorkspaceTabDirty(false); document.querySelector("[data-draft-history-guard]")?.remove(); if (typeof next === "function") next(); return; }
     if (target.dataset.action === "discard-workspace-navigation") { const next = state.pendingDraftNavigation; state.pendingDraftNavigation = null; setActiveWorkspaceTabDirty(false); document.querySelector("[data-draft-history-guard]")?.remove(); if (typeof next === "function") next(); return; }
     if (target.dataset.action === "reset-vega-draft") { state.vegaDraft = null; state.vegaSaveError = ""; setActiveWorkspaceTabDirty(false); render(); return; }
-    if (target.dataset.projectId) { const action = () => void selectProject(target.dataset.projectId); if (!guardArtifactDraftNavigation(action)) action(); return; }
+    if (target.dataset.projectId) { const action = () => void selectProject(target.dataset.projectId, { openFolder: true }); if (!guardArtifactDraftNavigation(action)) action(); return; }
     if (target.dataset.manuscriptId) { const action = () => void openManuscript(target.dataset.manuscriptId); if (!guardArtifactDraftNavigation(action)) action(); return; }
     if (target.dataset.labId) { const action = () => void openLab(target.dataset.labId, null, null, null); if (!guardArtifactDraftNavigation(action)) action(); return; }
     if (target.dataset.manuscriptArtifactId) {
@@ -7764,6 +10889,10 @@ import { formatScienceCell } from "./format-cell.js";
       if (!guardArtifactDraftNavigation(action)) action();
       return;
     }
+    if (target.dataset.action === "open-result-artifact") {
+      void openResultArtifact(target.dataset.resultArtifactId || "", Number(target.dataset.resultArtifactVersion));
+      return;
+    }
     if (target.dataset.inlineArtifactId || target.dataset.chatArtifactId) { const action = () => void openConversationArtifact(target); if (!guardArtifactDraftNavigation(action)) action(); return; }
     if (target.dataset.artifactHistoryVersion) { void inspectArtifactVersion(Number(target.dataset.artifactHistoryVersion)); return; }
     if (target.dataset.citationId) { rememberScroll(); state.selectedSourceId = target.dataset.sourceId; state.drawer = { kind: "citation", id: target.dataset.citationId }; render(); return; }
@@ -7772,6 +10901,19 @@ import { formatScienceCell } from "./format-cell.js";
   });
 
   root.addEventListener("change", (event) => {
+    const approvalScope = event.target.closest('input[data-action="toggle-approval-scope"]');
+    if (approvalScope) { void toggleApprovalScope(approvalScope.dataset.scope, approvalScope.checked); return; }
+    const materialsStructure = event.target.closest("[data-materials-structure-index]");
+    if (materialsStructure && state.selectedArtifactId) {
+      const index = Number(materialsStructure.value);
+      if (Number.isSafeInteger(index) && index >= 0) {
+        state.materialsStructureIndexByArtifact.set(state.selectedArtifactId, index);
+        state.spatialViewByArtifact.set(state.selectedArtifactId, "materials-3d");
+        render();
+        resetArtifactViewScroll();
+      }
+      return;
+    }
     const evidenceGraphNodeSelect = event.target.closest("[data-evidence-graph-node-select]");
     if (evidenceGraphNodeSelect) {
       const nodeId = evidenceGraphNodeSelect.value;
@@ -7944,7 +11086,90 @@ import { formatScienceCell } from "./format-cell.js";
     if (artifact) void loadArtifactComparison(artifact, fromVersion, toVersion);
   });
 
+  function scheduleProjectSearchRender(projectSearch) {
+    const source = projectSearch.dataset.projectSearch || "main";
+    const value = projectSearch.value;
+    const selectionStart = projectSearch.selectionStart;
+    const selectionEnd = projectSearch.selectionEnd;
+    state.librarySearch = value;
+    if (librarySearchTimer) window.clearTimeout(librarySearchTimer);
+    librarySearchTimer = window.setTimeout(() => {
+      librarySearchTimer = null;
+      if (librarySearchComposing) return;
+      render();
+      requestAnimationFrame(() => {
+        const input = document.querySelector(`[data-project-search="${CSS.escape(source)}"]`);
+        if (!input) return;
+        input.focus();
+        if (selectionStart !== null && selectionEnd !== null) input.setSelectionRange(selectionStart, selectionEnd);
+      });
+    }, 120);
+  }
+
+  function scheduleScienceModelSearchRender(modelSearch) {
+    const value = modelSearch.value;
+    const selectionStart = modelSearch.selectionStart;
+    const selectionEnd = modelSearch.selectionEnd;
+    state.runtimePickerQuery = value;
+    if (scienceModelSearchTimer) window.clearTimeout(scienceModelSearchTimer);
+    scienceModelSearchTimer = window.setTimeout(() => {
+      scienceModelSearchTimer = null;
+      if (scienceModelSearchComposing || !state.runtimePickerOpen) return;
+      renderChatDock();
+      requestAnimationFrame(() => {
+        const input = document.querySelector("[data-science-model-search]");
+        if (!input) return;
+        input.focus();
+        if (selectionStart !== null && selectionEnd !== null) input.setSelectionRange(selectionStart, selectionEnd);
+      });
+    }, 80);
+  }
+
+  root.addEventListener("compositionstart", (event) => {
+    if (event.target.closest("[data-science-model-search]")) {
+      scienceModelSearchComposing = true;
+      if (scienceModelSearchTimer) window.clearTimeout(scienceModelSearchTimer);
+      scienceModelSearchTimer = null;
+      return;
+    }
+    if (!event.target.closest("[data-project-search]")) return;
+    librarySearchComposing = true;
+    if (librarySearchTimer) window.clearTimeout(librarySearchTimer);
+    librarySearchTimer = null;
+  });
+
+  root.addEventListener("compositionend", (event) => {
+    const modelSearch = event.target.closest("[data-science-model-search]");
+    if (modelSearch) {
+      scienceModelSearchComposing = false;
+      scheduleScienceModelSearchRender(modelSearch);
+      return;
+    }
+    const projectSearch = event.target.closest("[data-project-search]");
+    if (!projectSearch) return;
+    librarySearchComposing = false;
+    scheduleProjectSearchRender(projectSearch);
+  });
+
   root.addEventListener("input", (event) => {
+    const modelSearch = event.target.closest("[data-science-model-search]");
+    if (modelSearch) {
+      state.runtimePickerQuery = modelSearch.value;
+      if (!event.isComposing && !scienceModelSearchComposing) scheduleScienceModelSearchRender(modelSearch);
+      return;
+    }
+    const projectSearch = event.target.closest("[data-project-search]");
+    if (projectSearch) {
+      state.librarySearch = projectSearch.value;
+      if (!event.isComposing && !librarySearchComposing) scheduleProjectSearchRender(projectSearch);
+      return;
+    }
+    const newProjectForm = event.target.closest("#new-project-form");
+    if (newProjectForm) {
+      const form = new FormData(newProjectForm);
+      state.newProjectDraft = { ...state.newProjectDraft, title: String(form.get("title") || ""), question: String(form.get("question") || "") };
+      return;
+    }
     const manuscriptInsertSearch = event.target.closest("[data-manuscript-insert-search]");
     if (manuscriptInsertSearch && state.manuscriptInsertion) {
       const value = manuscriptInsertSearch.value;
@@ -8010,7 +11235,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (!target) return;
     state.composerDraft = target.value;
     const send = document.querySelector('[data-action="send-turn"]');
-    if (send) send.disabled = !state.composerDraft.trim();
+    if (send) send.disabled = !state.composerDraft.trim() || !state.runtimeSelection || state.runtimeUnavailable || state.runtimeSelectionLoading || state.runtimeSelectionBusy;
   });
 
   root.addEventListener("mouseup", () => {
@@ -8080,6 +11305,21 @@ import { formatScienceCell } from "./format-cell.js";
       }
       return;
     }
+    const scienceModelSearch = event.target.closest?.("[data-science-model-search]");
+    if (scienceModelSearch) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        state.runtimePickerOpen = false;
+        state.runtimePickerQuery = "";
+        renderChatDock();
+        requestAnimationFrame(() => document.querySelector("[data-science-model-trigger]")?.focus());
+        return;
+      }
+      if (event.key === "Enter" || event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        return;
+      }
+    }
     const dialog = event.target.closest?.('[role="dialog"]') || document.querySelector('[role="dialog"]');
     if (dialog) {
       if (event.key === "Escape") {
@@ -8105,7 +11345,7 @@ import { formatScienceCell } from "./format-cell.js";
         }
       }
     }
-    if (event.key === "Escape" && !state.railCollapsed && window.matchMedia("(max-width: 1099px)").matches && !document.querySelector("[role=dialog]")) {
+    if (event.key === "Escape" && !state.railCollapsed && window.matchMedia("(max-width: 680px)").matches && !document.querySelector("[role=dialog]")) {
       event.preventDefault();
       setRailCollapsed(true);
       return;
@@ -8147,6 +11387,7 @@ import { formatScienceCell } from "./format-cell.js";
     if (event.target?.matches?.("[data-workspace-tabs]")) syncWorkspaceTabOverflow();
   }, true);
   window.addEventListener("resize", () => {
+    if (state.drawer && window.matchMedia("(max-width: 680px)").matches) state.railCollapsed = true;
     syncRailPresentation();
     requestAnimationFrame(() => {
       revealActiveWorkspaceTab();
@@ -8156,7 +11397,107 @@ import { formatScienceCell } from "./format-cell.js";
     window.setTimeout(syncWorkspaceTabOverflow, 220);
   }, { passive: true });
 
+  root.addEventListener("keydown", (event) => {
+    if (event.target.closest?.(".runtimeQuestionFreeText input")
+      && event.key === "Enter"
+      && (event.isComposing || event.keyCode === 229)) event.preventDefault();
+  });
+
+  root.addEventListener("input", (event) => {
+    const input = event.target.closest?.(".runtimeQuestionFreeText input");
+    const requestId = input?.closest("[data-runtime-question-id]")?.dataset.runtimeQuestionId;
+    if (!input || !requestId || requestId !== state.runtimeQuestions[0]?.requestId) return;
+    state.runtimeQuestionDraftRequestId = requestId;
+    state.runtimeQuestionDraft = input.value;
+  });
+
   root.addEventListener("submit", async (event) => {
+    if (event.target.id === "analysis-plan-review-form") {
+      event.preventDefault();
+      const plan = reviewableAnalysisPlan();
+      const projectId = state.selectedId;
+      const decision = event.submitter?.value === "revise" ? "revise" : "approve";
+      const form = new FormData(event.target);
+      const rationale = String(form.get("rationale") || "").trim() || null;
+      if (!plan || !projectId || state.analysisPlanReviewBusy) return;
+      if (decision === "approve") {
+        const missingReasons = analysisPlanReviewMissingReasons(plan.version?.document || {});
+        if (missingReasons.length) {
+          state.analysisPlanReviewError = uiCopy(
+            `승인 전에 다음 항목을 보완해야 합니다: ${missingReasons.join(" · ")}`,
+            `Complete these items before approval: ${missingReasons.join(" · ")}`,
+          );
+          render();
+          return;
+        }
+      }
+      if (decision === "revise" && !rationale) {
+        state.analysisPlanReviewError = uiCopy("수정할 내용을 적어 주세요.", "Describe the changes you need.");
+        render();
+        return;
+      }
+      state.analysisPlanReviewBusy = true;
+      state.analysisPlanReviewError = "";
+      render();
+      let routed = false;
+      try {
+        const current = await science.analysisSpecs.get(projectId, plan.id);
+        if (!current || current.status !== "draft"
+          || current.currentVersion !== plan.currentVersion
+          || current.currentDocumentSha256 !== plan.currentDocumentSha256
+          || current.lockVersion !== plan.lockVersion) throw new Error("science-analysis-version-conflict");
+        const result = await science.analysisSpecs.review({
+          requestId: crypto.randomUUID(), projectId, analysisSpecId: current.id,
+          expectedVersion: current.currentVersion, expectedContentSha256: current.currentDocumentSha256,
+          expectedLockVersion: current.lockVersion, decision, rationale,
+        });
+        if (!result?.receipt || result.receipt.actor !== "human" || result.receipt.decision !== decision || !result.analysisSpec) {
+          throw new Error("science-analysis-plan-review-result-invalid");
+        }
+        state.analysisSpecs = [result.analysisSpec, ...state.analysisSpecs.filter((item) => item.id !== result.analysisSpec.id)];
+        state.analysisPlanReviewSheet = false;
+        state.analysisPlanReviewDismissedKey = null;
+        const acquisitionOnly = result.analysisSpec.version.document.data.inputs.length === 0
+          && Boolean(result.analysisSpec.version.document.data.acquisition?.sources.length);
+        state.composerDraft = analysisPlanReviewContinuationPrompt({
+          decision,
+          projectId,
+          conversationId: selectedConversation()?.id || "",
+          analysisSpecId: result.analysisSpec.id,
+          analysisSpecVersion: result.analysisSpec.currentVersion,
+          analysisSpecContentSha256: result.analysisSpec.currentDocumentSha256,
+          receiptId: result.receipt.id,
+          planTitle: result.analysisSpec.title,
+          acquisitionOnly,
+          rationale,
+        });
+        routed = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/science-analysis-version-conflict/.test(message)) {
+          state.analysisPlanReviewError = uiCopy("검토 중 계획 버전이 바뀌었습니다. 자동 승인하지 않았습니다. 최신 계획을 다시 확인해 주세요.", "The plan changed while you were reviewing it. It was not approved. Review the latest version.");
+        } else if (/science-analysis-spec-incomplete/.test(message)) {
+          const missingReasons = analysisPlanReviewMissingReasons(plan.version?.document || {});
+          state.analysisPlanReviewError = uiCopy(
+            `계획을 승인하지 않았습니다. 다음 항목을 보완하세요: ${missingReasons.join(" · ")}`,
+            `The plan was not approved. Complete these items: ${missingReasons.join(" · ")}`,
+          );
+        } else state.analysisPlanReviewError = message;
+      } finally {
+        state.analysisPlanReviewBusy = false;
+        render();
+      }
+      if (routed && projectId === state.selectedId) await startComposerTurn({ forceAppend: true });
+      return;
+    }
+    if (event.target.id === "runtime-question-form") {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const answer = String(form.get("answer") || "").trim();
+      if (!answer) return;
+      void answerRuntimeQuestion(answer);
+      return;
+    }
     if (event.target.id === "episode-result-review-form") {
       event.preventDefault();
       await submitEpisodeResultReview(event.target);
@@ -8266,6 +11607,7 @@ import { formatScienceCell } from "./format-cell.js";
         state.decisionError = error instanceof Error ? error.message : String(error);
       } finally {
         state.decisionBusy = false;
+        maybePresentAnalysisPlanReview();
         render();
       }
       return;
@@ -8455,15 +11797,69 @@ import { formatScienceCell } from "./format-cell.js";
     }
     if (event.target.id !== "new-project-form") return;
     event.preventDefault();
+    if (state.saving || state.newProjectFolderBusy) return;
     const form = new FormData(event.target);
+    const template = researchTemplateById(state.selectedResearchTemplateId);
+    const title = String(form.get("title") || "").trim();
+    const question = String(form.get("question") || "").trim();
+    if (!title || !question) {
+      const errorNode = document.getElementById("form-error");
+      if (errorNode) errorNode.textContent = uiCopy("프로젝트 이름과 개요를 모두 입력해 주세요.", "Enter both a project name and an overview.");
+      return;
+    }
+    const folderSelectionId = typeof state.newProjectDraft.folderSelectionId === "string" ? state.newProjectDraft.folderSelectionId.trim() : "";
+    if (!folderSelectionId) {
+      const errorNode = document.getElementById("form-error");
+      if (errorNode) errorNode.textContent = uiCopy("프로젝트 폴더를 선택해 주세요.", "Choose a project folder.");
+      requestAnimationFrame(() => document.querySelector('[data-action="pick-project-folder"]')?.focus());
+      return;
+    }
+    const domain = template?.domain || "general";
+    const requestSignature = JSON.stringify({ title, question, domain, folderSelectionId });
+    if (!state.newProjectRequestId || state.newProjectRequestSignature !== requestSignature) {
+      state.newProjectRequestId = crypto.randomUUID();
+      state.newProjectRequestSignature = requestSignature;
+    }
+    const requestGeneration = state.newProjectGeneration;
+    const requestId = state.newProjectRequestId;
     state.saving = true;
     render();
     try {
-      const result = await science.projects.create({ requestId: crypto.randomUUID(), question: String(form.get("question") || ""), domain: String(form.get("domain") || "general"), title: String(form.get("title") || "") });
+      const result = await science.projects.create({
+        requestId,
+        question,
+        title,
+        domain,
+        folderSelectionId,
+      });
       state.projects = [result.project, ...state.projects.filter((item) => item.id !== result.project.id)];
+      state.projectLibrarySummaries.set(result.project.id, { projectId: result.project.id, fileCount: 0, dataCount: 0, analysisCount: 0, manuscriptCount: 0, pdfCount: 0 });
+      const ownsModal = requestGeneration === state.newProjectGeneration && state.modal;
+      if (!ownsModal) {
+        // The backend create cannot be canceled after dispatch. If the user
+        // closed the draft meanwhile, keep the late success in the library but
+        // do not take over a newer draft or force a workspace transition.
+        render();
+        return;
+      }
       state.modal = false;
       state.saving = false;
-      await selectProject(result.project.id);
+      state.newProjectStep = "details";
+      state.selectedResearchTemplateId = null;
+      state.newProjectFolderBusy = false;
+      state.newProjectGeneration += 1;
+      resetNewProjectDraft();
+      state.newProjectRequestId = null;
+      state.newProjectRequestSignature = "";
+      const navigationGeneration = state.newProjectGeneration;
+      const createdProjectId = result.project.id;
+      await selectProject(createdProjectId, { openFolder: false });
+      if (navigationGeneration !== state.newProjectGeneration || state.selectedId !== createdProjectId) {
+        // A user can navigate while the newly created project's workspace is
+        // loading. Do not start the old project's first turn in a newer view.
+        render();
+        return;
+      }
       // project.create persists the first question as a user message. Start that
       // exact message immediately so a new project opens on a live Research
       // Director turn instead of looking like an empty shell that needs a second
@@ -8473,6 +11869,10 @@ import { formatScienceCell } from "./format-cell.js";
         void startComposerTurn();
       }
     } catch (error) {
+      if (requestGeneration !== state.newProjectGeneration || !state.modal) {
+        render();
+        return;
+      }
       state.saving = false;
       render();
       const errorNode = document.getElementById("form-error");
@@ -8486,6 +11886,11 @@ import { formatScienceCell } from "./format-cell.js";
     state.locale = i18n.setLocale(bootstrap?.locale);
     i18n.observe(root);
     if (science.renderers?.onStatus && !state.rendererStatusDispose) state.rendererStatusDispose = science.renderers.onStatus(applyRendererStatus);
+    if (science.questions?.onRequest && !state.runtimeQuestionDispose) state.runtimeQuestionDispose = science.questions.onRequest(receiveRuntimeQuestion);
+    if (science.questions?.list) {
+      const pendingQuestions = await science.questions.list();
+      if (Array.isArray(pendingQuestions)) pendingQuestions.forEach(receiveRuntimeQuestion);
+    }
     if (science.artifacts?.onChanged && !state.artifactChangeDispose) state.artifactChangeDispose = science.artifacts.onChanged((change) => {
       if (!change || !state.selectedId || change.projectId !== state.selectedId) return;
       // AI-driven research: while a turn is running, every new artifact opens its own Lab tab
@@ -8569,30 +11974,68 @@ import { formatScienceCell } from "./format-cell.js";
         render();
       });
     });
-    if (science.composer?.onEvent && !state.composerEventDispose) state.composerEventDispose = science.composer.onEvent((event) => {
-      if (!event || event.projectId !== state.selectedId || event.conversationId !== selectedConversation()?.id || !state.activeTurn || event.turnId !== state.activeTurn.id) return;
-      void science.composer.receipt({ projectId: event.projectId, conversationId: event.conversationId, turnId: event.turnId }).then((turn) => {
-        if (!turn || turn.id !== state.activeTurn?.id) return;
-        state.activeTurn = turn;
-        if (["completed", "failed", "cancelled", "interrupted"].includes(turn.status)) {
-          const projectId = state.selectedId;
-          recordRunFailure(turn.status === "completed" ? "" : (turn.errorCode || `연구 실행이 ${turn.status} 상태로 종료되었습니다.`));
-          if (projectId) {
-            if (state.mode === "lab") void refreshConversationOnly(projectId).catch((error) => {
-              recordRunFailure(error);
-            });
-            else void selectProject(projectId, { preserveWorkspace: true });
+    if (science.composer?.onEvent && !state.composerEventDispose) {
+      const composerEventSync = createComposerEventSync({
+        getCurrentScope: () => state.activeTurn ? {
+          projectId: state.selectedId,
+          conversationId: selectedConversation()?.id,
+          turnId: state.activeTurn.id,
+          lastSequence: state.activeTurn.lastSequence,
+        } : null,
+        getCurrentConversationScope: () => ({
+          projectId: state.selectedId,
+          conversationId: selectedConversation()?.id,
+        }),
+        readReceipt: (input) => science.composer.receipt(input),
+        readAttach: (input) => science.composer.attach(input),
+        onAttach: (turn) => {
+          if (turn.projectId !== state.selectedId || turn.conversationId !== selectedConversation()?.id) return;
+          if (state.activeTurn?.id === turn.id && Number(turn.lastSequence) < Number(state.activeTurn.lastSequence)) return;
+          state.activeTurn = turn;
+          state.composerError = composerTurnError(turn);
+          if (turn.runtimeSelection) state.runtimeSelection = turn.runtimeSelection;
+          renderChatDock();
+        },
+        onProgress: (turn) => {
+          state.activeTurn = turn;
+          if (turn.runtimeSelection && turn.projectId === state.selectedId && turn.conversationId === selectedConversation()?.id) {
+            state.runtimeSelection = turn.runtimeSelection;
           }
-          return;
-        }
-        renderChatDock();
-      }).catch((error) => {
-        recordRunFailure(error);
+          renderChatDock();
+        },
+        onTerminal: async (turn) => {
+          state.activeTurn = turn;
+          if (turn.runtimeSelection && turn.projectId === state.selectedId && turn.conversationId === selectedConversation()?.id) {
+            state.runtimeSelection = turn.runtimeSelection;
+          }
+          const projectId = state.selectedId;
+          recordRunFailure(composerTurnError(turn));
+          if (!projectId) return;
+          if (state.projectFolderOpen) await selectProject(projectId, { openFolder: true, preserveWorkspace: true });
+          else if (state.mode === "lab") await refreshConversationOnly(projectId);
+          else await refreshConversationOnly(projectId);
+        },
+        onError: (error, event) => {
+          if (event.projectId !== state.selectedId || event.conversationId !== selectedConversation()?.id
+          ) return;
+          recordRunFailure(error);
+        },
       });
-    });
+      const unsubscribe = science.composer.onEvent((event) => composerEventSync.push(event));
+      state.composerEventDispose = () => {
+        composerEventSync.dispose();
+        unsubscribe?.();
+      };
+    }
     state.projects = Array.isArray(bootstrap.projects) ? bootstrap.projects : [];
+    try {
+      await refreshProjectLibrarySummaries();
+    } catch {
+      state.projectLibrarySummaries = new Map();
+      state.projectLibrarySummaryState = "unavailable";
+    }
     state.rendererPacks = Array.isArray(bootstrap.rendererPacks) ? bootstrap.rendererPacks : [];
-    if (state.projects[0]) await selectProject(state.projects[0].id); else render();
+    render();
   }
 
   void start().catch(fatal);

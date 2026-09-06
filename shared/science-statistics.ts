@@ -284,6 +284,12 @@ const NORMAL_IDENTITY_METHODS = new Set<ScienceStatisticsMethod>([
   "response_surface_regression",
 ]);
 
+const RANK_COMPANION_METHODS = new Set<ScienceStatisticsMethod>([
+  "spearman_correlation",
+  "kendall_correlation",
+  "wilcoxon_signed_rank",
+]);
+
 type JsonRecord = Record<string, unknown>;
 
 export type ScienceStatisticsPurpose = "descriptive" | "exploratory" | "confirmatory";
@@ -623,6 +629,15 @@ export function scienceStatisticsMethodMatchesAnalysisModel(method: unknown, val
   if (NORMAL_IDENTITY_METHODS.has(method)) {
     return family === "lm" && (distribution === null || distribution === "normal" || distribution === "gaussian")
       && (link === null || link === "identity");
+  }
+  if (RANK_COMPANION_METHODS.has(method)) {
+    // A confirmatory plan often freezes a Pearson/t-test primary analysis and a rank-based
+    // companion on the same outcome/predictor relation. One AnalysisSpec has one model binding, so
+    // accept the primary lm identity model as well as an explicitly rank/nonparametric model; the
+    // method receipt still records which calculation actually ran.
+    return (family === "lm" && (distribution === null || distribution === "normal" || distribution === "gaussian")
+      && (link === null || link === "identity"))
+      || (["rank-test", "nonparametric"].includes(family) && distribution === null && link === null);
   }
   if (method === "friedman_test") {
     return family === "rank-test" && (distribution === null || distribution === "friedman") && link === null;

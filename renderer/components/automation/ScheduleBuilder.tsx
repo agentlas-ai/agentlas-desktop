@@ -313,7 +313,7 @@ export function ScheduleBuilder({
             style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
           />
           {cronValid !== null && (
-            <div style={{ fontSize: 11, marginTop: 4, color: cronValid ? "var(--green-deep)" : "var(--red-deep, #b4533a)" }}>
+            <div style={{ fontSize: 11, marginTop: 4, color: cronValid ? "var(--green-deep)" : "var(--red-deep, var(--danger))" }}>
               {cronValid ? t("auto.sched.cron.valid") : t("auto.sched.cron.invalid")}
             </div>
           )}

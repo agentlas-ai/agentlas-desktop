@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { app, BrowserWindow, nativeImage, nativeTheme, screen, WebContentsView } from "electron";
 import type { Rectangle } from "electron";
+import { onAskUserLifecycle, submitAskUserAnswer } from "../confirm/ask-user";
 import { productExtensionSignedPayload, type ProductExtensionPermission, type ProductExtensionViewBounds, type ProductExtensionViewStatus } from "../../shared/product-extension";
 import { activeScienceExtension, SCIENCE_EXTENSION_ID } from "./science";
 import {
@@ -70,6 +71,8 @@ interface ActiveScienceView {
   manifestDigest: string;
   permissions: ReadonlySet<ProductExtensionPermission>;
   send: (status: ProductExtensionViewStatus) => void;
+  askUserDispose: (() => void) | null;
+  askUserRequestIds: Set<string>;
   renderer: ActiveScienceRendererView | null;
 }
 
@@ -140,9 +143,20 @@ function insideRelease(releaseDir: string, target: string): boolean {
   }
 }
 
+function closeScienceQuestionSurface(active: ActiveScienceView): void {
+  for (const requestId of active.askUserRequestIds) {
+    const heldElsewhere = [...activeViews.values()].some((other) => other !== active && other.askUserRequestIds.has(requestId));
+    if (!heldElsewhere) submitAskUserAnswer(requestId, null);
+  }
+  active.askUserRequestIds.clear();
+  active.askUserDispose?.();
+  active.askUserDispose = null;
+}
+
 function closeActive(active: ActiveScienceView, notify = true): void {
   if (activeViews.get(active.ownerId) !== active) return;
   activeViews.delete(active.ownerId);
+  closeScienceQuestionSurface(active);
   closeRenderer(active);
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
@@ -752,9 +766,20 @@ export async function openScienceExtensionView(input: {
     manifestDigest: createHash("sha256").update(productExtensionSignedPayload(release.manifest), "utf8").digest("hex"),
     permissions: new Set(release.manifest.permissions),
     send: input.send,
+    askUserDispose: null,
+    askUserRequestIds: new Set(),
     renderer: null,
   };
   activeViews.set(input.ownerId, active);
+  active.askUserDispose = onAskUserLifecycle((request) => {
+    if (request.askedBy !== SCIENCE_EXTENSION_ID
+      || activeViews.get(active.ownerId) !== active
+      || active.view.webContents.isDestroyed()) return false;
+    if (request.expiresAt <= 0) active.askUserRequestIds.delete(request.requestId);
+    else active.askUserRequestIds.add(request.requestId);
+    active.view.webContents.send("science:askUser", request);
+    return true;
+  });
   view.setBackgroundColor("#fcfaf9");
   view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   view.webContents.session.setPermissionCheckHandler(() => false);
@@ -783,6 +808,7 @@ export async function openScienceExtensionView(input: {
   });
   view.webContents.once("destroyed", () => {
     if (activeViews.get(active.ownerId) === active) activeViews.delete(active.ownerId);
+    closeScienceQuestionSurface(active);
     if (active.renderer) closeRenderer(active, "failed", "science-extension-view-destroyed", "The Science interface was closed.");
   });
   input.window.contentView.addChildView(view);

@@ -5,8 +5,8 @@
   padding: 14px 0;
   border-top: 1px solid var(--one-border, rgba(17, 24, 39, 0.1));
   border-bottom: 1px solid var(--one-border, rgba(17, 24, 39, 0.1));
-  background: #fff;
-  color: var(--one-ink, #171717);
+  background: var(--paper);
+  color: var(--one-ink, var(--ink));
 }
 
 .mark {
@@ -17,7 +17,7 @@
   place-items: center;
   border-radius: 999px;
   background: rgba(72, 92, 50, 0.1);
-  color: #4b612f;
+  color: var(--accent);
   font-size: 14px;
 }
 
@@ -29,7 +29,7 @@
 
 .card p {
   margin: 4px 0 0;
-  color: var(--one-muted, #6b6b6b);
+  color: var(--one-muted, var(--ink-soft));
   font-size: 12px;
   line-height: 1.5;
 }
@@ -39,7 +39,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: #4b612f;
+  color: var(--accent);
   font: inherit;
   font-size: 12px;
   font-weight: 650;

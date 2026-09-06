@@ -33,13 +33,13 @@
   gap: 7px;
   margin: 24px 0 0;
   padding: 16px;
-  border: 1px solid #d9e7cb;
+  border: 1px solid var(--ok-soft);
   border-radius: 14px;
-  background: #f5f9f0;
+  background: var(--ok-soft);
 }
 
 .onceReceipt strong {
-  color: #42592b;
+  color: var(--accent);
   font-size: 13px;
 }
 
@@ -50,7 +50,7 @@
 }
 
 .onceReceipt p { font-size: 14px; }
-.onceReceipt small { color: #6e7568; font-size: 11px; }
+.onceReceipt small { color: var(--muted-deep); font-size: 11px; }
 
 .section {
   display: grid;
@@ -104,7 +104,7 @@
 
 .card[data-enabled="false"] {
   background: var(--one-sheet-card-muted);
-  color: #777c73;
+  color: var(--muted-deep);
 }
 
 .cardTop {
@@ -124,25 +124,25 @@
   min-height: 26px;
   padding: 0 9px;
   border-radius: 999px;
-  background: #f0f3eb;
-  color: #53613f;
+  background: var(--paper-3);
+  color: var(--accent);
   font-size: 11px;
   font-weight: 700;
 }
 
 .pendingBadge {
-  background: #f4f1e8;
-  color: #74633d;
+  background: var(--paper-3);
+  color: var(--warn);
 }
 
 .enabledBadge {
-  background: #edf5e5;
-  color: #4b672f;
+  background: var(--ok-soft);
+  color: var(--ok);
 }
 
 .disabledBadge {
-  background: #eeefec;
-  color: #777c73;
+  background: var(--paper-3);
+  color: var(--muted-deep);
 }
 
 .cardContent {
@@ -157,8 +157,8 @@
   display: block;
   padding: 11px 12px;
   border-radius: 10px;
-  background: #f7f8f5;
-  color: #72786e;
+  background: var(--paper-2);
+  color: var(--muted-deep);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -167,7 +167,7 @@
   min-height: 32px;
   display: flex;
   align-items: center;
-  color: #5f685b;
+  color: var(--ink-soft);
   font-size: 12px;
   font-weight: 650;
   cursor: pointer;
@@ -207,14 +207,14 @@
 .primaryButton {
   border: 1px solid var(--one-sheet-primary);
   background: var(--one-sheet-primary);
-  color: #fff;
+  color: var(--white);
 }
 
 .secondaryButton,
 .dangerButton {
   border: 1px solid var(--one-sheet-control-border);
   background: var(--one-sheet-control-surface);
-  color: #42473e;
+  color: var(--ink);
 }
 
 .dangerButton,
@@ -290,7 +290,7 @@
   padding: 25px 18px;
   border: 1px dashed var(--one-sheet-control-border);
   border-radius: 13px;
-  color: #747a70;
+  color: var(--muted-deep);
   text-align: center;
   font-size: 13px;
 }
@@ -301,7 +301,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 12px 0;
-  border-bottom: 1px solid #eff0ed;
+  border-bottom: 1px solid var(--paper-3);
 }
 
 .historyRow:last-child { border-bottom: 0; }
@@ -313,8 +313,8 @@
 }
 
 .historyRow strong { font-size: 12px; }
-.historyRow span { overflow: hidden; color: #50554d; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.historyRow small { color: #858a81; font-size: 11px; }
+.historyRow span { overflow: hidden; color: var(--ink-soft); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.historyRow small { color: var(--muted-deep); font-size: 11px; }
 
 @media (max-width: 680px) {
   .message,
@@ -329,11 +329,11 @@
   width: 100%;
   margin: 4px 0 10px;
   padding: 9px 12px;
-  border: 1px solid #dfe3e2;
+  border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  background: #fff;
+  background: var(--paper);
   font: inherit;
   font-size: 13px;
-  color: #2c3033;
+  color: var(--ink);
 }
 .searchInput:focus { outline: 2px solid rgba(96, 122, 54, 0.3); outline-offset: 1px; }

@@ -68,6 +68,7 @@ import {
   SCIENCE_ASTRONOMY_LIGHT_CURVE_LAB_ID,
   SCIENCE_ASTRONOMY_LIGHT_CURVE_OUTPUT_MIME,
   SCIENCE_ASTRONOMY_LIGHT_CURVE_OUTPUT_ROLE,
+  SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION,
   SCIENCE_ASTRONOMY_LIGHT_CURVE_RENDERER_ID,
   SCIENCE_ASTRONOMY_LIGHT_CURVE_RENDERER_VERSION,
   SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_ID,
@@ -1093,6 +1094,12 @@ function normalizeStatisticsInput(input: ExecuteStatisticsAnalysisInput, store: 
       || spec.currentDocumentSha256 !== claimed.contentSha256 || spec.version.documentSha256 !== claimed.contentSha256) {
       throw new Error("science-statistics-analysis-plan-not-frozen-exact");
     }
+    if (spec.version.document.data.inputs.length === 0 && spec.version.document.data.acquisition?.sources.length) {
+      // An acquisition-only plan may authorize collection, but it intentionally does not identify
+      // the immutable bytes used by an analysis. After collection the director must propose and get
+      // approval for a successor plan whose exact inputs match this execution request.
+      throw new Error("science-statistics-execution-exact-input-plan-required");
+    }
     if (canonicalJson(inputArtifacts) !== canonicalJson(spec.version.document.data.inputs)) throw new Error("science-statistics-analysis-input-binding-mismatch");
     const model = spec.version.document.model as unknown as Record<string, unknown> | null;
     if (!model || scienceStatisticsSha256(model) !== claimed.modelSha256) throw new Error("science-statistics-analysis-model-binding-mismatch");
@@ -1257,14 +1264,28 @@ function normalizeAstronomyLightCurvePeriodicityInput(
     if (!column || !allowedTypes.includes(column.logicalType) || (requireNonNullable && column.nullable)) throw new Error(code);
     return name;
   };
+  // An inclusion mask is a refinement, not a fact of the measurement.
+  //
+  // This column used to be mandatory, and a published light curve does not carry one: the seeded
+  // catalogue here has observation id, time, magnitude and uncertainty, and nothing boolean. So the
+  // tool demanded a column real photometry never has, and refused every table it was ever pointed
+  // at. Measured on a live study: the director reached this exact call and was turned away with
+  // `use-column-invalid` on a table whose four columns were all correct.
+  //
+  // Absent, every row is used, and the receipt says so, so an analysis can never quietly claim a
+  // mask it did not apply.
+  const useColumnDeclared = columns.useColumn !== undefined && columns.useColumn !== null && columns.useColumn !== "";
   const exactColumns = {
     observationIdColumn: requireColumn(columns.observationIdColumn, ["string"], true, "science-tool-astronomy-light-curve-observation-id-column-invalid"),
     timeColumn: requireColumn(columns.timeColumn, ["integer", "number"], false, "science-tool-astronomy-light-curve-time-column-invalid"),
     valueColumn: requireColumn(columns.valueColumn, ["integer", "number"], false, "science-tool-astronomy-light-curve-value-column-invalid"),
     standardErrorColumn: requireColumn(columns.standardErrorColumn, ["integer", "number"], false, "science-tool-astronomy-light-curve-standard-error-column-invalid"),
-    useColumn: requireColumn(columns.useColumn, ["boolean"], true, "science-tool-astronomy-light-curve-use-column-invalid"),
+    useColumn: useColumnDeclared
+      ? requireColumn(columns.useColumn, ["boolean"], true, "science-tool-astronomy-light-curve-use-column-invalid")
+      : null,
   };
-  if (new Set(Object.values(exactColumns).map((name) => name.toLocaleLowerCase("en-US"))).size !== 5) {
+  const declaredNames = Object.values(exactColumns).filter((name): name is string => typeof name === "string");
+  if (new Set(declaredNames.map((name) => name.toLocaleLowerCase("en-US"))).size !== declaredNames.length) {
     throw new Error("science-tool-astronomy-light-curve-column-duplicate");
   }
   const measurements = table.rows.map((row, rowIndex) => {
@@ -1272,7 +1293,8 @@ function normalizeAstronomyLightCurvePeriodicityInput(
     const time = row[exactColumns.timeColumn];
     const value = row[exactColumns.valueColumn];
     const standardError = row[exactColumns.standardErrorColumn];
-    const use = row[exactColumns.useColumn];
+    // No declared mask means every measurement is in, which is what a table without the column means.
+    const use = exactColumns.useColumn === null ? true : row[exactColumns.useColumn];
     if (typeof observationId !== "string" || !observationId.trim() || observationId.length > 160 || /[\u0000-\u001f]/u.test(observationId)) {
       throw new Error(`science-tool-astronomy-light-curve-row-${rowIndex}-observation-id-invalid`);
     }
@@ -1287,7 +1309,7 @@ function normalizeAstronomyLightCurvePeriodicityInput(
   return validateScienceAstronomyLightCurveInputDescriptor({
     schema: "agentlas.science.astronomy-light-curve-periodicity-input/v1",
     title: boundedText(input.title, 240, "title"),
-    runtime: { pluginId: "agentlas-astronomy", pluginVersion: "1.2.1", runtimeSha256: pluginRuntimeSha256 },
+    runtime: { pluginId: "agentlas-astronomy", pluginVersion: SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION, runtimeSha256: pluginRuntimeSha256 },
     sourceTable: {
       artifactId: context.artifact.id,
       artifactVersion: context.selectedVersion.version,
@@ -2683,7 +2705,7 @@ export class ScienceToolGateway {
       toolId: SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_ID,
       toolVersion: SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_VERSION,
       workerSha256,
-      plugin: { id: "agentlas-astronomy", version: "1.2.1", runtimeSha256: pluginRuntimeSha256 },
+      plugin: { id: "agentlas-astronomy", version: SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION, runtimeSha256: pluginRuntimeSha256 },
       runtime: TOOL_RUNTIME,
       electron: process.versions.electron ?? null,
       node: process.versions.node,

@@ -16,15 +16,18 @@ export function KeyStatusBanner({
   mode = "banner",
   relevantProvider,
   problemsInBanner = false,
+  compact = false,
 }: {
   mode?: "banner" | "pill";
   relevantProvider?: string | null;
   /** Build shows one full warning banner; do not repeat the same warning in its header pill. */
   problemsInBanner?: boolean;
+  compact?: boolean;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
   const [status, setStatus] = useState<KeyStatus | null>(null);
+  const [dismissed, setDismissed] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -81,6 +84,23 @@ export function KeyStatusBanner({
   if (status.health === "ok") return null;
 
   const isError = status.health === "error";
+  const noticeKey = `${status.health}:${affected}`;
+  if (compact) {
+    if (dismissed === noticeKey) return null;
+    const summary = isError
+      ? (ko ? "키 연결을 확인하세요." : "Check your key connection.")
+      : (ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit.");
+    const detail = [summary, affected].filter(Boolean).join(" · ");
+    return (
+      <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: "4px 12px", background: "var(--paper)", color: "var(--ink-soft)", fontSize: 11, lineHeight: "20px" }}>
+        <span title={detail} style={{ minWidth: 0, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{detail}</span>
+        <button type="button" onClick={() => navigate("/dashboard")} style={{ flexShrink: 0, border: 0, background: "transparent", color: "inherit", padding: "2px 4px", font: "inherit", cursor: "pointer" }}>
+          {ko ? "사용량 확인" : "Check usage"}
+        </button>
+        <button type="button" aria-label={ko ? "사용량 알림 닫기" : "Dismiss usage notice"} onClick={() => setDismissed(noticeKey)} style={{ flexShrink: 0, border: 0, background: "transparent", color: "inherit", width: 28, height: 28, padding: 0, fontSize: 16, cursor: "pointer" }}>×</button>
+      </div>
+    );
+  }
   return (
     <div className="key-status-banner" data-health={status.health} role="status">
       {isError ? <IconShield size={15} /> : <IconBolt size={15} />}

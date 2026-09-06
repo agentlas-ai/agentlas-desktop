@@ -6,6 +6,7 @@ import { testServerConnection } from "../mcp-tools/client";
 import { buildMcpConfigFile, mcpConfigKey } from "../mcp-tools/mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import type { WorkforceExecutionContext, WorkforcePermissionPolicy } from "./workforce-orchestrator";
+import { isHostAuthorityPolicy } from "./workforce-orchestrator";
 
 const TOOL_INVENTORY_SCHEMA = "agentlas.workforce-tool-inventory.v1";
 const TOOL_INVENTORY_DIGEST_SCHEMA = "agentlas.workforce-tool-inventory-digest.v1";
@@ -46,7 +47,12 @@ export interface WorkforceToolMenuEntry {
   description: string;
   inputSchemaDigest: string;
   runtimeIds: string[];
-  selectiveEnforcement: "exact-tool-allowlist";
+  /**
+   * The actual Main enforcement path available to this exact runtime group.
+   * `host-broker` is Main's measured in-process dispatch ledger; it is never
+   * presented as a provider-native policy acknowledgement.
+   */
+  selectiveEnforcement: "exact-tool-allowlist" | "host-native" | "host-broker";
   status: "ready";
 }
 
@@ -63,7 +69,7 @@ export interface WorkforceToolInventory {
   schemaVersion: typeof TOOL_INVENTORY_SCHEMA;
   executionContextDigest: string;
   observedAt: string;
-  entries: Array<WorkforceToolMenuEntry & { capabilityIds: string[] }>;
+  entries: Array<Omit<WorkforceToolMenuEntry, "serverConfigKey"> & { capabilityIds: string[] }>;
 }
 
 export interface WorkforceCapabilityBindingPlan {
@@ -97,7 +103,8 @@ export interface WorkforcePairRuntimeGrant {
     mcpAllowedTools?: string[];
     mcpCodexConfigArgs?: string[];
     env?: NodeJS.ProcessEnv;
-    untrustedNoTools: true;
+    /** false for a host-authority row (2026-09-05): the run keeps the host's own mode. */
+    untrustedNoTools: boolean;
     untrustedAllowedMcpTools?: string[];
     workforceRuntimeToolGrant: WorkforceRuntimeToolGrant;
   };
@@ -210,18 +217,50 @@ function exactRoster(
   });
 }
 
-function claudeRuntimeInventory(runtimes: RuntimeStatus[]): {
-  runtimeIds: string[];
+function workforceRuntimeInventory(runtimes: RuntimeStatus[]): {
+  /** Legacy exact-tool rows remain Claude-only. */
+  legacyRuntimeIds: string[];
+  /** Host-authority rows may use an observed native Claude or Codex adapter. */
+  hostNativeRuntimeIds: string[];
+  /** Host-authority rows may use Main's actual in-process tool dispatcher. */
+  hostBrokerRuntimeIds: string[];
   runtimeVersions: Record<string, string | null>;
 } {
-  const runtimeIds: string[] = [];
+  const legacyRuntimeIds: string[] = [];
+  const hostNativeRuntimeIds: string[] = [];
+  const hostBrokerRuntimeIds: string[] = [];
   const runtimeVersions: Record<string, string | null> = {};
   runtimes.forEach((runtime, index) => {
+    // Keep the planner's runtime-N coordinates tied to its original candidate
+    // list. Filtering eligibility must never renumber model-selection slots.
     const runtimeId = `runtime-${index + 1}`;
     runtimeVersions[runtimeId] = runtime.version ?? null;
-    if (runtime.kind === "claude-code") runtimeIds.push(runtimeId);
+    if (runtime.kind === "claude-code") {
+      legacyRuntimeIds.push(runtimeId);
+      hostNativeRuntimeIds.push(runtimeId);
+    } else if (runtime.kind === "codex") {
+      hostNativeRuntimeIds.push(runtimeId);
+    } else if (
+      // A detected BYOK row without readable credentials cannot reach Main's
+      // brokered provider turn. Leave its coordinate intact for selection
+      // diagnostics, but never advertise it as a broker-capable binding.
+      (runtime.kind !== "byok" || runtime.credentialAccess?.status !== "unavailable") && (
+        runtime.kind === "ollama" ||
+        runtime.kind === "lmstudio" ||
+        runtime.kind === "mlx" ||
+        // Keep this exact backend set in lockstep with selection.ts. Every row
+        // below reaches prepareMainToolLoop and Main dispatches the admitted MCP
+        // or builtin tool itself; no ACP/native-provider policy is claimed.
+        (runtime.kind === "byok" && [
+          "anthropic", "openai", "google", "upstage", "custom", "glm",
+          "kimi", "deepseek", "minimax", "xai", "openrouter",
+        ].includes(runtime.backend))
+      )
+    ) {
+      hostBrokerRuntimeIds.push(runtimeId);
+    }
   });
-  return { runtimeIds, runtimeVersions };
+  return { legacyRuntimeIds, hostNativeRuntimeIds, hostBrokerRuntimeIds, runtimeVersions };
 }
 
 async function probeWithAbort(
@@ -256,13 +295,17 @@ export async function prepareWorkforceToolMenu(input: {
 }): Promise<PreparedWorkforceToolMenu> {
   if (!HASH_RE.test(input.executionContextDigest)) throw new Error("workforce_tool_inventory_context_digest_invalid");
   const roster = exactRoster(input.executionContext, input.specs);
-  const runtimeInventory = claudeRuntimeInventory(input.runtimes);
+  const runtimeInventory = workforceRuntimeInventory(input.runtimes);
   const observedAt = utcSeconds(input.deps?.now?.() ?? new Date());
-  if (
-    (input.hostPermission !== "write" && input.hostPermission !== "full") ||
-    runtimeInventory.runtimeIds.length === 0 ||
-    roster.every((row) => row.requiredCapabilities.length === 0)
-  ) {
+  const toolRows = roster.filter((row) => row.requiredCapabilities.length > 0 && (
+    isHostAuthorityPolicy(row.policy)
+      ? ["read", "write", "full"].includes(input.hostPermission ?? "")
+      : row.policy.mcp.mode === "allowlist" && (input.hostPermission === "write" || input.hostPermission === "full")
+  ) && (isHostAuthorityPolicy(row.policy)
+    ? runtimeInventory.hostNativeRuntimeIds.length > 0 || runtimeInventory.hostBrokerRuntimeIds.length > 0
+    : runtimeInventory.legacyRuntimeIds.length > 0
+  ));
+  if (toolRows.length === 0) {
     return {
       schemaVersion: MENU_SCHEMA,
       executionContextDigest: input.executionContextDigest,
@@ -281,11 +324,21 @@ export async function prepareWorkforceToolMenu(input: {
     byKey.set(key, server);
   }
   const relevantKeys = new Set<string>();
-  for (const row of roster) {
-    if (row.requiredCapabilities.length === 0 || row.policy.mcp.mode !== "allowlist") continue;
+  const explicitlyRequiredKeys = new Set<string>();
+  for (const row of toolRows) {
+    if (isHostAuthorityPolicy(row.policy)) {
+      // Host policy carries no package allowlist. Discover the enabled local
+      // inventory and let the planner bind semantic capabilities to observed
+      // tools; read-mode action approvals remain the runtime's responsibility.
+      for (const key of byKey.keys()) relevantKeys.add(key);
+      continue;
+    }
     for (const toolId of row.policy.mcp.allowedTools) {
       const match = /^mcp__([a-z0-9][a-z0-9_-]{0,79})__([A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127})$/.exec(toolId);
-      if (match) relevantKeys.add(match[1]);
+      if (match) {
+        relevantKeys.add(match[1]);
+        explicitlyRequiredKeys.add(match[1]);
+      }
     }
   }
   if (relevantKeys.size > MAX_RELEVANT_SERVERS) throw new Error("workforce_tool_inventory_server_limit_exceeded");
@@ -295,14 +348,40 @@ export async function prepareWorkforceToolMenu(input: {
     assertNotAborted(input.signal);
     const server = byKey.get(key);
     if (!server) continue;
-    const status = await probeWithAbort(server, probe, input.signal);
-    if (status.connected && status.error === null && status.missingEnv.length === 0) statuses.set(key, status);
+    try {
+      const status = await probeWithAbort(server, probe, input.signal);
+      if (status.connected && status.error === null && status.missingEnv.length === 0) statuses.set(key, status);
+    } catch (error) {
+      assertNotAborted(input.signal);
+      // Host discovery surveys available tools, so an unrelated unavailable
+      // server cannot suppress healthy candidates. Preserve the established
+      // failure for a server explicitly required by any legacy allowlist row.
+      if (explicitlyRequiredKeys.has(key)) throw error;
+    }
   }
 
   const entries: WorkforceToolMenuEntry[] = [];
-  for (const row of roster) {
-    if (row.requiredCapabilities.length === 0 || row.policy.mcp.mode !== "allowlist") continue;
-    for (const toolId of row.policy.mcp.allowedTools) {
+  for (const row of toolRows) {
+    const hostAuthority = isHostAuthorityPolicy(row.policy);
+    // A package-ceiling row never acquires Codex eligibility merely because a
+    // host row exists elsewhere in the roster. The choice is per exact
+    // slot/release/policy row and remains visible to planner validation.
+    // Keep each evidence mode on disjoint runtime IDs. A planner's exact
+    // runtimeId then selects either a native observation or Main's broker
+    // ledger; it cannot silently relabel broker dispatch as host-native.
+    const runtimeGroups: Array<{
+      runtimeIds: string[];
+      selectiveEnforcement: WorkforceToolMenuEntry["selectiveEnforcement"];
+    }> = hostAuthority
+      ? [
+        { runtimeIds: runtimeInventory.hostNativeRuntimeIds, selectiveEnforcement: "host-native" },
+        { runtimeIds: runtimeInventory.hostBrokerRuntimeIds, selectiveEnforcement: "host-broker" },
+      ]
+      : [{ runtimeIds: runtimeInventory.legacyRuntimeIds, selectiveEnforcement: "exact-tool-allowlist" }];
+    const candidateTools = hostAuthority
+      ? [...new Set([...statuses].flatMap(([key, status]) => status.tools.map((tool) => `mcp__${key}__${tool.name}`)))].sort()
+      : row.policy.mcp.allowedTools;
+    for (const toolId of candidateTools) {
       const match = /^mcp__([a-z0-9][a-z0-9_-]{0,79})__([A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127})$/.exec(toolId);
       if (!match || !MCP_TOOL_RE.test(toolId)) continue;
       const [, key, rawToolName] = match;
@@ -313,20 +392,23 @@ export async function prepareWorkforceToolMenu(input: {
       const matches = status.tools.filter((tool) => tool.name === rawToolName);
       if (matches.length !== 1) continue;
       const tool = matches[0];
-      entries.push({
-        slotId: row.slotId,
-        agentReleaseId: row.agentReleaseId,
-        permissionPolicyDigest: row.policyDigest,
-        provider: "mcp",
-        toolId,
-        serverId: server.id,
-        serverConfigKey: key,
-        description: boundedDescription(tool.description),
-        inputSchemaDigest: workforcePortableDigest(tool.inputSchema ?? {}),
-        runtimeIds: [...runtimeInventory.runtimeIds],
-        selectiveEnforcement: "exact-tool-allowlist",
-        status: "ready",
-      });
+      for (const group of runtimeGroups) {
+        if (group.runtimeIds.length === 0) continue;
+        entries.push({
+          slotId: row.slotId,
+          agentReleaseId: row.agentReleaseId,
+          permissionPolicyDigest: row.policyDigest,
+          provider: "mcp",
+          toolId,
+          serverId: server.id,
+          serverConfigKey: key,
+          description: boundedDescription(tool.description),
+          inputSchemaDigest: workforcePortableDigest(tool.inputSchema ?? {}),
+          runtimeIds: [...group.runtimeIds],
+          selectiveEnforcement: group.selectiveEnforcement,
+          status: "ready",
+        });
+      }
     }
   }
   entries.sort((left, right) => workforcePortableCanonicalJson(left).localeCompare(workforcePortableCanonicalJson(right)));
@@ -361,6 +443,7 @@ function validatePlannerBindings(input: {
   slotId: string;
   agentReleaseId: string;
   permissionPolicyDigest: string;
+  policy: WorkforcePermissionPolicy;
   runtimeId: string;
   bindings: WorkforcePlannerCapabilityBinding[];
   entries: WorkforceToolMenuEntry[];
@@ -393,6 +476,9 @@ function validatePlannerBindings(input: {
         entry.permissionPolicyDigest === row.policyDigest &&
         entry.provider === binding.provider &&
         entry.toolId === binding.toolId &&
+        (isHostAuthorityPolicy(row.policy)
+          ? entry.selectiveEnforcement === "host-native" || entry.selectiveEnforcement === "host-broker"
+          : entry.selectiveEnforcement === "exact-tool-allowlist") &&
         entry.runtimeIds.includes(runtimeId)
       ));
       if (matches.length !== 1) throw new Error("workforce_capability_binding_not_in_exact_inventory");
@@ -403,6 +489,7 @@ function validatePlannerBindings(input: {
       slotId: row.slotId,
       agentReleaseId: row.agentReleaseId,
       permissionPolicyDigest: row.policyDigest,
+      policy: row.policy,
       runtimeId,
       bindings,
       entries: selectedEntries,
@@ -465,7 +552,10 @@ export async function finalizeWorkforceCapabilityBinding(input: {
     schemaVersion: TOOL_INVENTORY_SCHEMA,
     executionContextDigest: input.menu.executionContextDigest,
     observedAt: input.menu.observedAt,
-    entries: selected.map(({ entry, capabilityIds }) => ({ ...entry, capabilityIds })),
+    // Config keys are Main's private launch mapping. Core's portable inventory
+    // accepts only public tool identity/descriptor fields, and its digest must
+    // cover that same projection. Keep full menu rows for config minting below.
+    entries: selected.map(({ entry: { serverConfigKey: _privateConfigKey, ...entry }, capabilityIds }) => ({ ...entry, capabilityIds })),
   };
   const toolInventoryDigest = workforceToolInventoryDigest(toolInventory);
   const unsignedPlan: Omit<WorkforceCapabilityBindingPlan, "bindingPlanDigest"> = {
@@ -539,7 +629,9 @@ export async function finalizeWorkforceCapabilityBinding(input: {
           mcpAllowedTools,
           mcpCodexConfigArgs,
           env,
-          untrustedNoTools: true,
+          // A host-authority policy means the package declared no ceiling: the row runs
+          // with the host's own permission mode instead of the no-authority sandbox.
+          untrustedNoTools: !isHostAuthorityPolicy(row.policy),
           untrustedAllowedMcpTools: mcpAllowedTools,
           workforceRuntimeToolGrant: {
             schemaVersion: "agentlas.desktop-workforce-runtime-tool-grant.v1",

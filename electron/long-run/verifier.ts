@@ -4,6 +4,7 @@ import type { RunEventUi } from "../../shared/types";
 import {
   bindLongRunWorker,
   getLongRunByGoalId,
+  getLongRunGoalRevisionBinding,
   listLongRunTasks,
   recordLongRunVerification,
   requestLongRunVerification,
@@ -188,11 +189,14 @@ export async function verifyGoalCompletionClaim(input: {
   evidence?: string | null;
   invocationRunId?: string | null;
   projectDir?: string | null;
+  signal?: AbortSignal;
 }): Promise<GoalVerificationResult | null> {
+  if (input.signal?.aborted) return null;
   if (!accepting) throw new Error("desktop_long_run_verifier_admission_closed");
   const run = getLongRunByGoalId(input.goalId);
   if (!run) return null;
-  requestLongRunVerification(input.goalId, input.evidence);
+  const goalRevision = getLongRunGoalRevisionBinding(run.id)?.revision;
+  if (!requestLongRunVerification(input.goalId, input.evidence)) return null;
   const task = listLongRunTasks(run.id, true)[0] ?? null;
   if (!task) return null;
 
@@ -222,6 +226,9 @@ export async function verifyGoalCompletionClaim(input: {
     runtimeSelection,
   });
   const controller = new AbortController();
+  const interrupt = () => controller.abort(input.signal?.reason ?? new Error("verification_cancelled"));
+  input.signal?.addEventListener("abort", interrupt, { once: true });
+  if (input.signal?.aborted) interrupt();
   controllers.set(attempt.attemptId, controller);
   const durableEvidence = collectDurableGoalVerificationEvidence(input.invocationRunId);
   const observation = [
@@ -262,6 +269,8 @@ export async function verifyGoalCompletionClaim(input: {
           verdict: "inconclusive" as const,
           reason: `Durable verification evidence is unavailable (${durableEvidence.reason}).`,
         }));
+    // A provider may resolve despite abort. Never persist its late verdicts.
+    if (controller.signal.aborted) throw controller.signal.reason;
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
       state: "completed",
@@ -270,6 +279,7 @@ export async function verifyGoalCompletionClaim(input: {
     for (const verdict of verdicts) {
       recordLongRunVerification({
         runId: run.id,
+        goalRevision,
         taskId: task.id,
         criterionIndex: verdict.criterionIndex,
         verifierWorkerId: workerId,
@@ -285,12 +295,13 @@ export async function verifyGoalCompletionClaim(input: {
       attemptId: attempt.attemptId,
       state: controller.signal.aborted ? "interrupted" : "failed",
       sideEffectState: "none",
-      errorCode: controller.signal.aborted ? "app_closed" : "verification_failed",
+      errorCode: controller.signal.aborted ? "verification_interrupted" : "verification_failed",
       errorMessage: error instanceof Error ? error.message : String(error),
     });
     if (controller.signal.aborted) return null;
     throw error;
   } finally {
+    input.signal?.removeEventListener("abort", interrupt);
     controllers.delete(attempt.attemptId);
   }
 }

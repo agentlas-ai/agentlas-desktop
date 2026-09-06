@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Map as MapLibreMap, MapLayerMouseEvent } from "maplibre-gl";
 import type { OneSurfaceMapBlock } from "@shared/one-surface";
 import styles from "./OneLiveMap.module.css";
+import { resolveCssColour } from "@/lib/design-tokens";
 
 type Location = OneSurfaceMapBlock["locations"][number];
 
@@ -145,7 +146,7 @@ export function OneLiveMap({
           source: "one-live-locations",
           filter: ["==", ["geometry-type"], "LineString"],
           paint: {
-            "line-color": "#176b46",
+            "line-color": resolveCssColour("var(--ok)"),
             "line-width": 4,
             "line-opacity": 0.84,
           },
@@ -158,8 +159,8 @@ export function OneLiveMap({
           filter: ["==", ["geometry-type"], "Point"],
           paint: {
             "circle-radius": 10,
-            "circle-color": "#ffffff",
-            "circle-stroke-color": "#176b46",
+            "circle-color": resolveCssColour("var(--white)"),
+            "circle-stroke-color": resolveCssColour("var(--ok)"),
             "circle-stroke-width": 4,
           },
         });
@@ -174,7 +175,7 @@ export function OneLiveMap({
             "text-font": ["Noto Sans Regular"],
             "text-allow-overlap": true,
           },
-          paint: { "text-color": "#176b46" },
+          paint: { "text-color": resolveCssColour("var(--ink)") },
         });
         const showPopup = (event: MapLayerMouseEvent) => {
           const feature = event.features?.[0];

@@ -219,11 +219,11 @@ export function AgentFilesPanel({
             {loading && files.length === 0 ? (
               <span style={{ fontSize: 12, color: "var(--muted)" }}>{t("import.loading")}</span>
             ) : sourceMissing ? (
-              <span role="status" style={{ fontSize: 12, color: "var(--amber-deep, #8a5a00)" }}>
+              <span role="status" style={{ fontSize: 12, color: "var(--amber-deep, var(--warn))" }}>
                 {t("agentfiles.source_missing")}
               </span>
             ) : loadError ? (
-              <span role="alert" style={{ fontSize: 12, color: "var(--danger, #b42318)" }}>
+              <span role="alert" style={{ fontSize: 12, color: "var(--danger, var(--danger))" }}>
                 {t("agentfiles.load_error")}: {loadError}
               </span>
             ) : files.length === 0 ? (

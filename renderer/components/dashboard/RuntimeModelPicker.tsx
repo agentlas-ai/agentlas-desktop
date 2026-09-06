@@ -97,7 +97,14 @@ function optionId(prefix: string, index: number): string {
   return `${prefix}-option-${index}`;
 }
 
+function optionIsUnavailable(option: RuntimeModelPickerOption): boolean {
+  return option.unavailable === true || option.runtime.credentialAccess?.status === "unavailable";
+}
+
 function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en"): string {
+  if (option.runtime.credentialAccess?.status === "unavailable") {
+    return `${option.label} · ${locale === "ko" ? "API 키 접근 불가" : "API key unavailable"}`;
+  }
   if (option.isDefault) return runtimeModelFallbackLabel(option.runtime.kind, locale);
   if (option.unavailable) return `${option.label} · ${locale === "ko" ? "연결 안 됨" : "unavailable"}`;
   return option.label;
@@ -144,6 +151,11 @@ export function RuntimeBrandIdentity({
       <span className="dashboard-runtime-identity-copy">
         <strong>{provider}</strong>
         <small>{engine}{source ? ` · ${source}` : ""}</small>
+        {runtime?.credentialAccess?.status === "unavailable" && (
+          <small role="status">{locale === "ko"
+            ? "저장된 API 키 접근 불가 · 도움말 메뉴에서 다시 시도할 수 있습니다."
+            : "Saved API key unavailable · Retry access from the Help menu."}</small>
+        )}
       </span>
     </span>
   );
@@ -217,7 +229,7 @@ export function RuntimeModelPicker({
   };
 
   const selectOption = (option: RuntimeModelPickerOption) => {
-    if (option.unavailable) return;
+    if (optionIsUnavailable(option)) return;
     onSelect(option);
     closeAndRestoreFocus();
   };
@@ -313,8 +325,8 @@ export function RuntimeModelPicker({
                   role="option"
                   tabIndex={activeIndex === index ? 0 : -1}
                   aria-selected={option.key === value}
-                  aria-disabled={option.unavailable ? "true" : undefined}
-                  data-unavailable={option.unavailable ? "true" : "false"}
+                  aria-disabled={optionIsUnavailable(option) ? "true" : undefined}
+                  data-unavailable={optionIsUnavailable(option) ? "true" : "false"}
                   className="dashboard-runtime-model-picker-option"
                   onClick={() => selectOption(option)}
                   onKeyDown={(event) => onOptionKeyDown(event, index)}

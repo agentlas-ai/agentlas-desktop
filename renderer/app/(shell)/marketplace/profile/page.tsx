@@ -186,7 +186,7 @@ function HubProfileEmbedPage() {
               : (ko ? "호출어 복사" : "Copy call")}
         </button>
         {copyError && (
-          <span role="alert" style={{ fontSize: 11, color: "#c0392b", lineHeight: 1.3 }}>
+          <span role="alert" style={{ fontSize: 11, color: "var(--danger)", lineHeight: 1.3 }}>
             {ko ? "복사 권한이 없어 자동 복사하지 못했습니다. 직접 선택하세요: " : "Clipboard access failed. Select the call directly: "}
             <code style={{ userSelect: "all", color: "var(--ink)" }}>{`/hep-call ${slug}`}</code>
           </span>

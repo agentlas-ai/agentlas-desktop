@@ -1,5 +1,6 @@
 // Main 프로세스 ↔ Renderer 간 공유 타입.
 // renderer/lib/types.ts에서 re-export.
+import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "./credential-recovery";
 import type {
   MultimodalProvider,
   MultimodalProviderStatus,
@@ -793,6 +794,10 @@ export interface RuntimeCommand {
 }
 
 export interface RuntimeStatus {
+  /** Credential access is separate from runtime/model discovery; absence has no runtime row. */
+  credentialAccess?:
+    | { status: "available" }
+    | { status: "unavailable"; errorCode: "keychain_unavailable" | "credential_read_failed" };
   kind: RuntimeKind;
   backend: RuntimeBackend;
   /** CLI 경로 또는 "byok:<backend>" 또는 "ollama" */
@@ -1041,7 +1046,9 @@ export interface BorrowedAgentProfile {
  */
 export interface EnvVarMeta {
   key: string;
-  hasValue: boolean;
+  /** null means access was unavailable; false means confirmed missing. */
+  hasValue: boolean | null;
+  credentialAccess?: "available" | "unavailable";
   /** 저장된 값의 마스킹 미리보기 (메인에서 생성, 전체 평문 아님). 미저장이면 null. */
   preview?: string | null;
   /** 이 env를 요구하는 설치된 에이전트들 (없으면 사용자가 직접 추가한 free-form) */
@@ -1826,6 +1833,8 @@ export interface AgentConcurrencyInfo {
 
 export interface ChatHistoryEntry {
   id: string;
+  /** Opaque Main-issued durable chat-message identity; never derived from copy or timestamps. */
+  durableMessageId?: string;
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
@@ -4433,6 +4442,25 @@ export interface AgentMessageEvent {
   handoffBlocked?: "depth" | "roundtrip" | "permission";
 }
 
+export interface AgentlasUserDecisionQuestion {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description?: string }>;
+}
+
+/**
+ * Host-parsed projection of a model-authored ask fence. This means only that
+ * the run is waiting for an explicit user choice. It is never an approval,
+ * capability grant, or authority to execute the recommended option.
+ */
+export interface AgentlasUserDecisionRequest {
+  schemaVersion: "agentlas.user-decision-request.v1";
+  /** Main-owned durable assistant row when the exact chat/run binding exists. */
+  sourceMessageId?: string;
+  questions: AgentlasUserDecisionQuestion[];
+}
+
 export interface McpInvocationEvent {
   kind:
     | "lifecycle"
@@ -4458,6 +4486,8 @@ export interface McpInvocationEvent {
   sequence?: number;
   /** Main observation time for this event. Preserved when an active run is reattached. */
   observedAt?: string;
+  /** Opaque durable assistant-message identity, present only after Main commits the transcript row. */
+  durableMessageId?: string;
   /** Main-owned run boundary. Unlike status prose, this is an authoritative lifecycle fact. */
   lifecycle?: {
     phase: "start" | "cancel_requested";
@@ -4478,6 +4508,8 @@ export interface McpInvocationEvent {
     code: "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume";
   };
   text?: string;
+  /** Validated semantic ask projection; raw control markers remain hidden. */
+  userDecisionRequest?: AgentlasUserDecisionRequest;
   /** Main-owned durable image attachment URLs for the completed assistant turn. */
   imageDataUrls?: string[];
   /**
@@ -4488,6 +4520,11 @@ export interface McpInvocationEvent {
    * publishing or recording the observable event.
    */
   durableTextForVerification?: string;
+  /**
+   * Main-internal owner of durableTextForVerification. InvocationService strips
+   * it before ledger or UI publication; model-authored ids are never accepted.
+   */
+  durableAssistantMessageIdForVerification?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
    *  이후 추가분만 담는다. IPC 페이로드를 O(전체)→O(증분)으로 줄인다. 리플레이/폴백 이벤트는
    *  여전히 text를 쓴다. */
@@ -4711,7 +4748,7 @@ export interface AuthSession {
 // ── LLM 엔진 사용량 (구독 rate-limit 창 + 크레딧) ──────────────
 // Claude/Codex/Gemini의 프로바이더 OAuth usage 엔드포인트에서 조회한 정규화 결과.
 /** 사용량 창 종류. 5h=5시간 롤링, 7d=주간(7일), monthly=월 크레딧, daily=일일(모델별·Gemini). */
-export type UsageWindowKind = "5h" | "7d" | "monthly" | "daily";
+export type UsageWindowKind = "5h" | "7d" | "monthly" | "daily" | "unknown";
 
 /** 한 프로바이더의 단일 사용량 창. */
 export interface UsageWindow {
@@ -4724,6 +4761,12 @@ export interface UsageWindow {
   usedPercent: number;
   /** 리셋 시각(epoch ms). 모르면 미설정. */
   resetAt?: number | null;
+  /** 공급자가 밝힌 실제 창 길이(분). 위치(primary/secondary)로 추정하지 않는다. */
+  windowDurationMins?: number | null;
+  /** 공급자 소유 제한 식별자. 모델별/일반 제한을 합치지 않기 위해 보존한다. */
+  limitId?: string | null;
+  /** 공급자 소유 제한 표시명. 모델별 제한을 구분할 때 사용한다. */
+  limitName?: string | null;
   /** 모델 한정 창이면 "opus" | "sonnet" 등. */
   model?: string | null;
   /** monthly 크레딧 창: 사용/한도/단위($·credits). */
@@ -4880,10 +4923,38 @@ export interface PendingConfirmation {
 export interface CommittedQuestionAnswer {
   /** 답한 질문을 소유한 assistant 메시지 id. */
   sourceMessageId: string;
-  /** 제출 당시의 답장 본문(원장 정책에 따라 800자 절단·시크릿 마스킹). */
+  /**
+   * Desktop continuation restore에만 반환되는 제출 당시 답장 본문.
+   * Mobile 진단 영수증에는 원문이 없으므로 빈 문자열일 수 있다.
+   */
   reply: string;
   /** 확정 시각(ISO). */
   ts: string;
+  /** Main-derived exact-once run reserved for this source question + reply. */
+  continuationRunId?: string;
+}
+
+/** Full formatted Decision reply limit, including every question/selection prefix. */
+export const QUESTION_CONTINUATION_REPLY_MAX_LENGTH = 250_000;
+
+/** Conservative UTF-8 ceiling for the canonical Decision reply stored by Main. */
+export const QUESTION_CONTINUATION_REPLY_MAX_BYTES = 1_000_000;
+
+/** Closed renderer input captured with the committed answer and reused verbatim on recovery. */
+export interface QuestionContinuationOptions {
+  locale?: "ko" | "en";
+  permissions?: "read" | "write" | "full";
+  sessionRouting?: boolean;
+  runtimeSelection?: RuntimeSelection;
+}
+
+export interface QuestionContinuationReceipt {
+  chatId: string;
+  sourceMessageId: string;
+  runId: string;
+  status: "started" | "already-running" | "already-terminal" | "rejected";
+  runStatus?: InvocationRunReceipt["status"];
+  reasonCode?: "invalid-intent" | "chat-busy" | "admission-closed" | "start-rejected";
 }
 
 /** electron-updater의 자동 업데이트 상태. main → renderer로 broadcast. */
@@ -6338,6 +6409,7 @@ export interface AgentlasIpc {
   listCapabilityGrants: (scope?: string) => Promise<Array<{
     id: number; capability: string; pattern: string | null;
     decision: "allow" | "deny"; scope: string; source: string; createdAt: string;
+    binding?: ToolApprovalConsentBinding;
   }>>;
   revokeCapabilityGrant: (id: number) => Promise<boolean>;
   /** 대화 단위 "항상 승인" — renderer localStorage 에서 공유 DB 로 이관됐다. */
@@ -6719,9 +6791,16 @@ export interface AgentlasIpc {
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;
-    /** 답변 제출 수락을 durable 영수증으로 확정 — 실행 분기와 무관하게 질문을 해소한다. */
-    commitAnswer: (input: { chatId: string; reply: string; sourceMessageId?: string }) =>
-      Promise<{ chatId: string; sourceMessageId: string }>;
+    /** 답변과 그 exact continuation request를 한 durable intent로 확정한다. */
+    commitAnswer: (input: {
+      chatId: string;
+      reply: string;
+      sourceMessageId?: string;
+      continuation?: QuestionContinuationOptions;
+    }) => Promise<{ chatId: string; sourceMessageId: string; continuationRunId: string }>;
+    /** Main이 저장된 request만 사용해 exact-once continuation을 시작하거나 재확인한다. */
+    continueAnswer: (input: { chatId: string; sourceMessageId: string; reply: string }) =>
+      Promise<QuestionContinuationReceipt>;
     /** 정확한 현재 Decision만 24시간 미룬다. 실행·승인 상태는 바꾸지 않는다. */
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
       Promise<{ chatId: string; sourceMessageId: string; snoozedUntil: string }>;
@@ -6802,6 +6881,12 @@ export interface AgentlasIpc {
     saveApiKey: (backend: RuntimeBackend, key: string) => Promise<void>;
     hasApiKey: (backend: RuntimeBackend) => Promise<boolean>;
     deleteApiKey: (backend: RuntimeBackend) => Promise<void>;
+  };
+  credentialRecovery: {
+    /** Read failure metadata only; never probes the credential backend. */
+    list: () => Promise<CredentialRecoveryFailure[]>;
+    /** One explicit attempt at the exact Main-issued resource handle. */
+    retry: (retryToken: string) => Promise<CredentialRecoveryResult>;
   };
   /** 글로벌 env vault — 에이전트들이 공유하는 외부 API 키.
    *  값은 macOS Keychain에 저장, renderer는 metadata만 받음.
@@ -7956,6 +8041,8 @@ export interface ToolApprovalRequestEvent {
   mode: "live" | "post-denial";
   deniedBy?: "runtime-headless" | "sandbox";
   requestedAt: string;
+  /** Main이 이 live 요청을 자동 거부하는 정확한 시각. 오래된 요청은 없을 수 있다. */
+  expiresAt?: string;
   /**
    * 요청이 붙어 있는 대화(chat id). 승인 카드는 이 대화 안에서만 뜨고, 다른 화면에는
    * 확인필요 배지만 남는다(오너 결정 2026-08-15). 없으면(대화 없는 실행) 전역 배지.
@@ -7968,6 +8055,39 @@ export interface ToolApprovalRequestEvent {
   capability?: string;
   /** 실행 중인 에이전트 — 에이전트 스코프 규칙의 대상. */
   agentId?: string;
+  /**
+   * Main-owned durable-consent identity.  This is deliberately opaque to the
+   * renderer: it binds an allow-always decision to one user, workspace,
+   * requester, exact credential/resource, and exact permission level.
+   */
+  consentBinding?: ToolApprovalConsentBinding;
+}
+
+/**
+ * Exact identity required for a durable tool consent.  Resource identity is
+ * value-free (normally a Main-computed digest), so raw credentials never cross
+ * the approval IPC or enter the SQLite row.
+ */
+export interface ToolApprovalConsentBinding {
+  userIdentity: string;
+  workspaceIdentity: string;
+  requesterIdentity: string;
+  credentialResourceIdentity: string;
+  permissionScope: "read" | "write" | "full";
+}
+
+export type ToolApprovalDurableConsentStatus = "persisted" | "failed" | "unavailable";
+
+/** Separate from the runtime decision: allow-once/session may still succeed
+ * when an allow-always write was unavailable, but the UI must not call it
+ * durable until this receipt says `persisted`. */
+export interface ToolApprovalDurableConsentReceipt {
+  status: ToolApprovalDurableConsentStatus;
+  code?:
+    | "missing-binding"
+    | "missing-persister"
+    | "storage-failure"
+    | "storage-receipt-missing";
 }
 
 /**
@@ -7991,6 +8111,7 @@ export interface ToolApprovalResolutionReceipt {
   status: "resolved" | "replayed" | "pending" | "expired" | "conflict" | "not_found" | "invalid_action";
   pending: boolean;
   decidedAt: string | null;
+  durableConsent?: ToolApprovalDurableConsentReceipt;
 }
 
 /** One's durable memory row as the renderer may see it: bounded content, project slug only, never a local path. */

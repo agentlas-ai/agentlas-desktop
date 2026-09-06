@@ -9,12 +9,19 @@
 //  - 1M 컨텍스트: Anthropic은 beta 헤더(opt-in), OpenAI/Google은 모델 내장(자동)
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
-import { runApprovedBuiltinTool, type BuiltinApprovalContext } from "./tool-approval";
-import { builtinToolsAsAnthropic, type ToolPermission } from "../../shared/builtin-tools";
+import {
+  prepareMainToolLoop,
+  runLocalOpenAiChat,
+  runMainToolDispatch,
+  runOneToolCall,
+  type ChatMessage,
+  type LocalChatContent,
+} from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
+import { detectRuntimeRefusal } from "./runtime-refusal";
 import {
   ANTHROPIC_1M_BETA,
   anthropicCompatProvider,
@@ -27,6 +34,13 @@ import {
 /** 도구 왕복 상한 — 저가·로컬 모델이 같은 도구를 무한 반복하는 실측 때문이다. */
 const MAX_BYOK_TOOL_TURNS = 8;
 const MAX_BYOK_TOOL_RESULT_CHARS = 20_000;
+
+function byokFailure(
+  kind: RunnerFailure["kind"],
+  message: string,
+): RunnerFailure {
+  return { kind, message: message.slice(0, 400), runtime: "byok", source: "marker" };
+}
 
 function resolveModel(backend: ByokBackend, req: RunnerRequest): string {
   return req.model?.trim() || defaultByokModel(backend) || "";
@@ -222,20 +236,13 @@ async function runAnthropicMessages(
    *
    * 무도구 격리 실행(Agent App)은 도구를 받지 않는다 — 그 계약이 이 런타임의 존재 이유다.
    */
-  const toolPermission = (req.permission ?? "read") as ToolPermission;
-  const toolsEnabled = !req.untrustedNoTools && Boolean(req.cwd);
-  const anthropicTools = toolsEnabled
-    ? builtinToolsAsAnthropic(toolPermission, { canAskUser: req.unattended !== true && req.noSynchronousAsk !== true })
-    : [];
-  const approval: BuiltinApprovalContext = {
-    runtimeKind: "byok",
-    sessionKey: `byok:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
-    permission: req.permission,
-    ...(req.cwd ? { cwd: req.cwd } : {}),
-    ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
-    unattended: req.unattended === true,
-    ...(req.signal ? { signal: req.signal } : {}),
-  };
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok");
+  const toolsEnabled = tools.length > 0;
+  const anthropicTools = tools.map((tool) => ({
+    name: tool.function.name,
+    ...(tool.function.description ? { description: tool.function.description } : {}),
+    input_schema: tool.function.parameters,
+  }));
 
   let acc = "";
   let lastEmit = 0;
@@ -246,6 +253,7 @@ async function runAnthropicMessages(
   let outputTokens = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
+  let reachedAnswer = false;
 
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
@@ -318,7 +326,10 @@ async function runAnthropicMessages(
       }
     }
 
-    if (stopReason !== "tool_use" || pendingToolUse.size === 0) break;
+    if (stopReason !== "tool_use" || pendingToolUse.size === 0) {
+      reachedAnswer = true;
+      break;
+    }
 
     // 어시스턴트 턴을 그대로 되돌려 넣는다(텍스트 + tool_use). 그래야 다음 호출에서
     // tool_result 가 짝을 찾는다.
@@ -330,22 +341,21 @@ async function runAnthropicMessages(
       try {
         input = entry.json ? (JSON.parse(entry.json) as Record<string, unknown>) : {};
       } catch {
-        resultContent.push({
-          type: "tool_result",
-          tool_use_id: entry.id,
-          content: "Error: invalid JSON arguments",
-          is_error: true,
-        });
-        assistantContent.push({ type: "tool_use", id: entry.id, name: entry.name, input: {} });
-        continue;
+        input = {};
       }
       assistantContent.push({ type: "tool_use", id: entry.id, name: entry.name, input });
-      const outcome = await runApprovedBuiltinTool(entry.name, input, approval, events, entry.id);
+      const outcome = await runOneToolCall(
+        byName,
+        { id: entry.id, type: "function", function: { name: entry.name, arguments: entry.json } },
+        events,
+        approval,
+        broker,
+      );
       resultContent.push({
         type: "tool_result",
         tool_use_id: entry.id,
-        content: outcome.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS),
-        ...(outcome.ok ? {} : { is_error: true }),
+        content: outcome.toolMessage.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS),
+        ...(outcome.isError ? { is_error: true } : {}),
       });
     }
     messages.push({ role: "assistant", content: assistantContent });
@@ -362,8 +372,19 @@ async function runAnthropicMessages(
       `[cache] read=${cacheRead} write=${cacheWrite} fresh=${inputTokens} hit=${hitRate}%`,
     );
   }
+  const answer = acc.trim();
+  let failure: RunnerFailure | null = null;
+  if (!reachedAnswer) {
+    failure = byokFailure("exit", `BYOK tool loop did not reach a final answer after ${MAX_BYOK_TOOL_TURNS} turns.`);
+  } else if (!answer) {
+    failure = byokFailure("empty", `BYOK returned an empty answer for ${model}.`);
+  } else {
+    const refusal = detectRuntimeRefusal(answer);
+    if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
+  }
   return {
-    text: acc.trim(),
+    text: answer || (failure ? failure.message : ""),
+    ...(failure ? { failure } : {}),
     ...(totalInput > 0 || outputTokens > 0
       ? { observedUsage: { inputTokens: totalInput, outputTokens } }
       : {}),
@@ -376,20 +397,24 @@ async function runAnthropicMessages(
      * 거짓말을 한다. 붙지 않은 것(browser·mcp·apps·세션 지속)만 남기고, 파일은
      * 항상, 셸은 full 권한에서만 살아 있다고 말한다.
      */
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      toolsEnabled
-        ? [
-            ...(toolPermission === "full" ? [] : ["shell"]),
-            ...(toolPermission === "read" ? ["filesystem_write"] : []),
-            "browser",
-            "mcp",
-            "apps",
-            "session_persistence",
-          ]
-        : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
+    workforcePermissionEnforcement: failure
+      ? broker?.finish(false)
+      : broker
+        ? broker.finish(true)
+        : workforceZeroToolsEnforcement(
+            req,
+            "byok",
+            toolsEnabled
+              ? [
+                  ...((req.permission ?? "read") === "full" ? [] : ["shell"]),
+                  ...((req.permission ?? "read") === "read" ? ["filesystem_write"] : []),
+                  "browser",
+                  "mcp",
+                  "apps",
+                  "session_persistence",
+                ]
+              : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+          ),
   };
 }
 
@@ -436,9 +461,61 @@ function makeAnthropicCompatByok(backend: ByokBackend): Runner {
 export const runGlmByok: Runner = makeAnthropicCompatByok("glm");
 
 // ── OpenAI Chat Completions ──────────────────────────────
-type OpenAIContent =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+function openAiMessages(
+  recent: RunnerRequest["history"],
+  system: string,
+  req: RunnerRequest,
+): ChatMessage[] {
+  const messages: ChatMessage[] = [{ role: "system", content: system }];
+  for (const message of recent) {
+    if (message.role === "user" || message.role === "assistant") {
+      messages.push({ role: message.role, content: message.text });
+    }
+  }
+  if (req.images && req.images.length > 0) {
+    const content: LocalChatContent[] = req.images.map((image) => ({
+      type: "image_url",
+      image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+    }));
+    content.push({ type: "text", text: req.userPrompt });
+    messages.push({ role: "user", content });
+  } else {
+    messages.push({ role: "user", content: req.userPrompt });
+  }
+  return messages;
+}
+
+/**
+ * The provider owns its endpoint and authentication header. Main owns the
+ * admitted inventory, approval gate, actual dispatch, and broker receipt in
+ * runLocalOpenAiChat; every OpenAI-compatible BYOK provider uses that loop.
+ */
+async function runOpenAiCompletionWithMainToolLoop(
+  backend: ByokBackend,
+  baseUrl: string,
+  providerLabel: string,
+  key: string,
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> {
+  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+  const { model, recent, system } = prepareContext(backend, req, events);
+  const endpoint = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+  return runLocalOpenAiChat(
+    {
+      req,
+      events,
+      runtimeKind: "byok",
+      host: baseUrl.replace(/\/$/, ""),
+      chatEndpoint: endpoint,
+      headers: { authorization: `Bearer ${key}` },
+      providerLabel,
+      model,
+      unreachableMessage: `${providerLabel} API unreachable`,
+    },
+    openAiMessages(recent, system, req),
+  );
+}
 
 async function runOpenAICompatible(
   backend: ByokBackend,
@@ -456,67 +533,7 @@ async function runOpenAICompatible(
     );
   }
 
-  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
-  const { model, recent, system } = prepareContext(backend, req, events);
-  const messages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string | OpenAIContent[];
-  }> = [{ role: "system", content: system }];
-  for (const message of recent) {
-    if (message.role === "user" || message.role === "assistant") {
-      messages.push({ role: message.role, content: message.text });
-    }
-  }
-  if (req.images && req.images.length > 0) {
-    const content: OpenAIContent[] = req.images.map((image) => ({
-      type: "image_url",
-      image_url: { url: `data:${image.mediaType};base64,${image.data}` },
-    }));
-    content.push({ type: "text", text: req.userPrompt });
-    messages.push({ role: "user", content });
-  } else {
-    messages.push({ role: "user", content: req.userPrompt });
-  }
-
-  const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    signal: req.signal,
-    body: JSON.stringify({ model, stream: true, messages }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  let acc = "";
-  let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    try {
-      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-      const delta = event.choices?.[0]?.delta?.content;
-      if (!delta) continue;
-      acc += delta;
-      const now = Date.now();
-      if (now - lastEmit > 80) {
-        events.onPartial(acc);
-        lastEmit = now;
-      }
-    } catch {
-      // Provider ping or non-content event.
-    }
-  }
-  return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
-  };
+  return runOpenAiCompletionWithMainToolLoop(backend, baseUrl, providerLabel, key, req, events);
 }
 
 function makeOpenAICompatibleByok(
@@ -559,82 +576,9 @@ export const runOpenAIByok: Runner = async (
 ): Promise<RunnerResult> => {
   const key = await readApiKey("openai");
   if (!key) throw new Error(tStatus(req.locale, "errKeyMissingOpenAI"));
-
-  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
-
-  const { model, recent, system } = prepareContext("openai", req, events);
-
-  const messages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string | OpenAIContent[];
-  }> = [{ role: "system", content: system }];
-  for (const m of recent) {
-    if (m.role === "user" || m.role === "assistant") {
-      messages.push({ role: m.role, content: m.text });
-    }
-  }
-
-  if (req.images && req.images.length > 0) {
-    const content: OpenAIContent[] = req.images.map((img) => ({
-      type: "image_url" as const,
-      image_url: { url: `data:${img.mediaType};base64,${img.data}` },
-    }));
-    content.push({ type: "text", text: req.userPrompt });
-    messages.push({ role: "user", content });
-  } else {
-    messages.push({ role: "user", content: req.userPrompt });
-  }
-
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
-    },
-    signal: req.signal,
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`OpenAI API ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  let acc = "";
-  let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    try {
-      const event = JSON.parse(payload) as {
-        choices?: Array<{ delta?: { content?: string } }>;
-      };
-      const delta = event.choices?.[0]?.delta?.content;
-      if (delta) {
-        acc += delta;
-        const now = Date.now();
-        if (now - lastEmit > 80) {
-          events.onPartial(acc);
-          lastEmit = now;
-        }
-      }
-    } catch {
-      // 무시
-    }
-  }
-  return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
-  };
+  return runOpenAiCompletionWithMainToolLoop(
+    "openai", "https://api.openai.com/v1", "OpenAI", key, req, events,
+  );
 };
 
 // ── Upstage Solar (OpenAI-compatible; Korean sovereign LLM) ──────
@@ -644,59 +588,9 @@ export const runUpstageByok: Runner = async (
 ): Promise<RunnerResult> => {
   const key = await readApiKey("upstage");
   if (!key) throw new Error("Upstage Solar API key missing (Settings → BYOK)");
-
-  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
-
-  const { model, recent, system } = prepareContext("upstage", req, events);
-
-  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-    { role: "system", content: system },
-  ];
-  for (const m of recent) {
-    if (m.role === "user" || m.role === "assistant") messages.push({ role: m.role, content: m.text });
-  }
-  messages.push({ role: "user", content: req.userPrompt });
-
-  const resp = await fetch("https://api.upstage.ai/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    signal: req.signal,
-    body: JSON.stringify({ model, stream: true, messages }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`Upstage API ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  let acc = "";
-  let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    try {
-      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-      const delta = event.choices?.[0]?.delta?.content;
-      if (delta) {
-        acc += delta;
-        const now = Date.now();
-        if (now - lastEmit > 80) {
-          events.onPartial(acc);
-          lastEmit = now;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
-  };
+  return runOpenAiCompletionWithMainToolLoop(
+    "upstage", "https://api.upstage.ai/v1", "Upstage", key, req, events,
+  );
 };
 
 import { getDb } from "../store/db";
@@ -716,71 +610,7 @@ export const runCustomByok: Runner = async (
       baseUrl = row.value.trim().replace(/\/$/, "");
     }
   } catch {}
-
-  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
-
-  const { model, recent, system } = prepareContext("custom", req, events);
-
-  const messages: Array<{ role: "system" | "user" | "assistant"; content: string | OpenAIContent[] }> = [
-    { role: "system", content: system },
-  ];
-  for (const m of recent) {
-    if (m.role === "user" || m.role === "assistant") {
-      messages.push({ role: m.role, content: m.text });
-    }
-  }
-
-  if (req.images && req.images.length > 0) {
-    const content: OpenAIContent[] = req.images.map((img) => ({
-      type: "image_url" as const,
-      image_url: { url: `data:${img.mediaType};base64,${img.data}` },
-    }));
-    content.push({ type: "text", text: req.userPrompt });
-    messages.push({ role: "user", content });
-  } else {
-    messages.push({ role: "user", content: req.userPrompt });
-  }
-
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    signal: req.signal,
-    body: JSON.stringify({ model, stream: true, messages }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`Custom API ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  let acc = "";
-  let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    try {
-      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-      const delta = event.choices?.[0]?.delta?.content;
-      if (delta) {
-        acc += delta;
-        const now = Date.now();
-        if (now - lastEmit > 80) {
-          events.onPartial(acc);
-          lastEmit = now;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
-  };
+  return runOpenAiCompletionWithMainToolLoop("custom", baseUrl, "Custom", key, req, events);
 };
 
 // ── Google Generative (Gemini) ───────────────────────────
@@ -796,9 +626,20 @@ export const runGoogleByok: Runner = async (
 
   const { model, recent, system } = prepareContext("google", req, events);
 
-  type GooglePart =
-    | { text: string }
-    | { inlineData: { mimeType: string; data: string } };
+  type GoogleFunctionCall = { id?: unknown; name?: unknown; args?: unknown };
+  /** Keep provider Parts verbatim in model history. Gemini thought signatures
+   * and other continuation metadata are opaque protocol values, not text to
+   * normalize or discard in an adapter. */
+  type GooglePart = {
+    text?: string;
+    inlineData?: { mimeType: string; data: string };
+    functionCall?: GoogleFunctionCall;
+    functionResponse?: { id?: string; name: string; response: Record<string, unknown> };
+    thought?: boolean;
+    thoughtSignature?: string;
+    partMetadata?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   const contents: Array<{ role: "user" | "model"; parts: GooglePart[] }> = [];
   for (const m of recent) {
     if (m.role === "user") contents.push({ role: "user", parts: [{ text: m.text }] });
@@ -815,51 +656,164 @@ export const runGoogleByok: Runner = async (
   contents.push({ role: "user", parts: lastParts });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal: req.signal,
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: system }] },
-      contents,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok");
+  const functionDeclarations = tools.map((tool) => ({
+    name: tool.function.name,
+    ...(tool.function.description ? { description: tool.function.description } : {}),
+    // MCP and builtin descriptors are JSON Schema. Gemini's SDK provides this
+    // field explicitly; sending it as OpenAPI `parameters` loses schema forms
+    // outside its narrowed Schema representation.
+    parametersJsonSchema: tool.function.parameters,
+  }));
   let acc = "";
   let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (!payload) continue;
-    try {
-      const event = JSON.parse(payload) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const text = event.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) {
-        acc += text;
-        const now = Date.now();
-        if (now - lastEmit > 80) {
-          events.onPartial(acc);
-          lastEmit = now;
-        }
-      }
-    } catch {
-      // 무시
+  let reachedAnswer = false;
+  let includeTools = functionDeclarations.length > 0;
+  /** Monotonic across every SSE event in this provider invocation. */
+  let responseIndex = 0;
+
+  for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
+    const requestBody = {
+      systemInstruction: { parts: [{ text: system }] },
+      contents,
+      ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
+    };
+    let resp = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: req.signal,
+      body: JSON.stringify(requestBody),
+    });
+    if (!resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
+      // A Workforce grant is for this advertised inventory. A tools-free retry
+      // would make any later success evidence describe a different invocation.
+      if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
+      includeTools = false;
+      events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
+      resp = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: req.signal,
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents }),
+      });
     }
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const modelParts: GooglePart[] = [];
+    const functionCalls: Array<{
+      providerCallId: string | null;
+      providerCallLocation: { responseIndex: number; partIndex: number };
+      name: string;
+      args: Record<string, unknown>;
+    }> = [];
+    for await (const line of iterSseLines(resp)) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+      try {
+        const event = JSON.parse(payload) as {
+          candidates?: Array<{ content?: { parts?: GooglePart[] } }>;
+        };
+        const currentResponseIndex = responseIndex;
+        responseIndex += 1;
+        const parts = event.candidates?.[0]?.content?.parts ?? [];
+        for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+          const part = parts[partIndex];
+          // Preserve the exact provider Part, including thoughtSignature and
+          // future continuation fields, before interpreting the callable bit.
+          modelParts.push(part);
+          if (typeof part.text === "string" && part.thought !== true) {
+            acc += part.text;
+            const now = Date.now();
+            if (now - lastEmit > 80) {
+              events.onPartial(acc);
+              lastEmit = now;
+            }
+            continue;
+          }
+          if (!part.functionCall) continue;
+          const call = part.functionCall;
+          if ((call.id !== undefined && (typeof call.id !== "string" || !call.id)) ||
+            typeof call.name !== "string" || !call.name) {
+            throw new Error("workforce_broker_provider_tool_call_invalid");
+          }
+          const args = call.args === undefined ? {} : call.args;
+          if (!args || typeof args !== "object" || Array.isArray(args)) {
+            throw new Error("workforce_broker_provider_tool_arguments_invalid");
+          }
+          const exactArgs = args as Record<string, unknown>;
+          const providerCallId = typeof call.id === "string" ? call.id : null;
+          functionCalls.push({
+            providerCallId,
+            providerCallLocation: { responseIndex: currentResponseIndex, partIndex },
+            name: call.name,
+            args: exactArgs,
+          });
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("workforce_broker_")) throw err;
+        // Provider keep-alives and malformed non-tool chunks carry no dispatch
+        // authority, so ignore them just as the previous text-only adapter did.
+      }
+    }
+    if (functionCalls.length === 0 || req.untrustedNoTools) {
+      reachedAnswer = true;
+      break;
+    }
+    contents.push({ role: "model", parts: modelParts });
+    const resultParts: GooglePart[] = [];
+    for (const call of functionCalls) {
+      const outcome = await runMainToolDispatch(
+        byName,
+        {
+          providerCallId: call.providerCallId,
+          providerCallLocation: call.providerCallLocation,
+          toolName: call.name,
+          arguments: JSON.stringify(call.args),
+        },
+        events,
+        approval,
+        broker,
+      );
+      resultParts.push({
+        functionResponse: {
+          ...(call.providerCallId ? { id: call.providerCallId } : {}),
+          name: call.name,
+          response: outcome.isError
+            ? { error: outcome.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS) }
+            : { output: outcome.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS) },
+        },
+      });
+    }
+    contents.push({ role: "user", parts: resultParts });
+    acc = "";
+  }
+  const answer = acc.trim();
+  let failure: RunnerFailure | null = null;
+  if (!reachedAnswer) {
+    failure = byokFailure("exit", `Google BYOK tool loop did not reach a final answer after ${MAX_BYOK_TOOL_TURNS} turns.`);
+  } else if (!answer) {
+    failure = byokFailure("empty", `Google returned an empty answer for ${model}.`);
+  } else {
+    const refusal = detectRuntimeRefusal(answer);
+    if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
   return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
-      req,
-      "byok",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
+    text: answer || (failure ? failure.message : ""),
+    ...(failure ? { failure } : {}),
+    workforcePermissionEnforcement: failure
+      ? broker?.finish(false)
+      : broker
+        ? broker.finish(true)
+        : workforceZeroToolsEnforcement(
+            req,
+            "byok",
+            includeTools
+              ? ["browser", "mcp", "apps", "session_persistence"]
+              : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+          ),
   };
 };

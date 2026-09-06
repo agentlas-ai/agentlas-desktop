@@ -939,10 +939,10 @@ const choiceGridStyle: React.CSSProperties = {
 
 const errorStyle: React.CSSProperties = {
   marginTop: 8,
-  border: "1px solid color-mix(in srgb, var(--red-deep, #b4533a) 28%, var(--paper-edge))",
+  border: "1px solid color-mix(in srgb, var(--red-deep, var(--danger)) 28%, var(--paper-edge))",
   borderRadius: "var(--radius-md)",
-  background: "color-mix(in srgb, var(--red-deep, #b4533a) 8%, var(--paper))",
-  color: "var(--red-deep, #b4533a)",
+  background: "color-mix(in srgb, var(--red-deep, var(--danger)) 8%, var(--paper))",
+  color: "var(--red-deep, var(--danger))",
   padding: "9px 11px",
   fontSize: 12,
   lineHeight: 1.45,

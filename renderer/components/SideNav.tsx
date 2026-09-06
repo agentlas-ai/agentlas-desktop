@@ -12,8 +12,9 @@ import { AccountChip } from "./AccountChip";
 import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipc } from "@/lib/ipc";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
+import { useScienceSuiteStatus } from "@/lib/use-science-suite-status";
 import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import {
@@ -40,7 +41,6 @@ import {
   IconSidebar,
 } from "./Icon";
 import type { MarketplaceListing } from "@/lib/types";
-import type { ScienceSuiteStatus } from "@shared/product-extension";
 import type { ComponentType } from "react";
 
 type IconType = ComponentType<{ size?: number }>;
@@ -76,7 +76,9 @@ export function SideNav({
   const { t, locale } = useT();
   const pathname = usePathname() ?? "/";
   const [collapsedPref, setCollapsed] = useState(false);
-  const collapsed = forceCollapsed || collapsedPref;
+  const [compactViewport, setCompactViewport] = useState(false);
+  const [compactOpen, setCompactOpen] = useState(false);
+  const collapsed = forceCollapsed || (compactViewport ? !compactOpen : collapsedPref);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -84,7 +86,7 @@ export function SideNav({
   const [searchSuggestions, setSearchSuggestions] = useState<MarketplaceListing[]>([]);
   const [searchSuggestionQuery, setSearchSuggestionQuery] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
-  const [scienceSuite, setScienceSuite] = useState<ScienceSuiteStatus | null>(null);
+  const scienceSuite = useScienceSuiteStatus();
   const scienceReady = Boolean(scienceSuite?.installed && scienceSuite.enabled);
   const searchGenerationRef = useRef(0);
   // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
@@ -103,21 +105,19 @@ export function SideNav({
   }, []);
 
   useEffect(() => {
-    let disposed = false;
+    const query = window.matchMedia("(max-width: 820px)");
     const sync = () => {
-      void ipc()?.productExtensions?.scienceSuiteStatus?.().then((status) => {
-        if (!disposed) setScienceSuite(status);
-      }).catch(() => {
-        if (!disposed) setScienceSuite(null);
-      });
+      setCompactViewport(query.matches);
+      if (!query.matches) setCompactOpen(false);
     };
     sync();
-    const off = ipcEvents()?.onProductExtensionChanged?.(() => sync());
-    return () => {
-      disposed = true;
-      off?.();
-    };
+    query.addEventListener?.("change", sync);
+    return () => query.removeEventListener?.("change", sync);
   }, []);
+
+  useEffect(() => {
+    setCompactOpen(false);
+  }, [pathname]);
 
   // 글로벌 Hub 검색은 Enter 제출 전용이 아니다. 입력 중 실제 Hub 결과를 짧게
   // debounce해 보여주고, 늦은 이전 응답은 generation으로 폐기한다.
@@ -155,6 +155,10 @@ export function SideNav({
 
   function toggleCollapsed() {
     if (forceCollapsed) return;
+    if (compactViewport) {
+      setCompactOpen((open) => !open);
+      return;
+    }
     setCollapsed((c) => {
       const next = !c;
       try {
@@ -268,7 +272,13 @@ export function SideNav({
   const searchSuggestionsOpen = searchFocused && Boolean(currentSearchQuery);
 
   return (
-    <aside className="sidenav glass-thin" data-collapsed={collapsed ? "true" : "false"} data-merged={forceCollapsed ? "true" : "false"}>
+    <aside
+      className="sidenav glass-thin"
+      data-collapsed={collapsed ? "true" : "false"}
+      data-compact={compactViewport ? "true" : "false"}
+      data-compact-open={compactViewport && compactOpen ? "true" : "false"}
+      data-merged={forceCollapsed ? "true" : "false"}
+    >
       {/* 맥 신호등 회피 + 창 드래그 */}
       <div className="sidenav-drag titlebar-drag" />
 
