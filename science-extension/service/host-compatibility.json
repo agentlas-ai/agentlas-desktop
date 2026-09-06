@@ -2,7 +2,7 @@
   "schema": "agentlas.science-extension-host-compatibility/v1",
   "extension": {
     "id": "agentlas-science",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "minimumDesktopVersion": "1.1.5",
     "updateMode": "extension-only",
     "serviceEntry": "service/descriptor.json"

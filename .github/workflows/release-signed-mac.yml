@@ -234,6 +234,8 @@ jobs:
       # it proves this tag's pinned Core, schema version, README, and CHANGELOG
       # agree, which is what makes the artifact a valid release at all.
       - name: Verify deterministic release contracts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm run release:preflight
           npm run build:electron

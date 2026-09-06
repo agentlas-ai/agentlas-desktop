@@ -4034,7 +4034,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .literatureSourceRetracted { background: rgba(179,38,30,.08); color: var(--alarm); }
 .literatureSourceRetracted::before { content: ""; width: 6px; height: 6px; border-radius: 1px; background: currentColor; }
 .literatureSourceUnresolved { border: 1px dashed var(--grey-400); color: var(--grey-600); }
-.resultArtifactPreview { border: 1px solid var(--grey-200); border-radius: 8px; background: var(--surface); padding: 10px; }
+.resultArtifactPreview { min-width: 0; max-width: 100%; border: 1px solid var(--grey-200); border-radius: 8px; background: var(--surface); padding: 10px; overflow: hidden; }
+.resultArtifactPreview img { display: block; min-width: 0; max-width: 100%; height: auto; }
 .resultArtifactValidation strong, .resultArtifactNoPreview strong, .resultArtifactFailed strong { color: var(--ink); font-size: 12px; font-weight: 650; }
 .resultArtifactValidation span, .resultArtifactNoPreview span, .resultArtifactFailed span { color: var(--grey-600); }
 .resultArtifactValidation[data-result-validation="unchecked"] { border-left-style: dashed; border-left-color: var(--grey-400); }

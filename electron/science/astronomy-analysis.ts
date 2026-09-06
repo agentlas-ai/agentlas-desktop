@@ -558,9 +558,21 @@ export class ScienceAstronomyAnalysisService {
       const mapping = columns as Record<string, unknown> | undefined;
       if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) throw new Error("science-astronomy-analysis-column-mapping-invalid");
       const exact: Record<string, string> = {};
+      const fieldByColumnKey = new Map<string, RowField>();
+      for (const entry of definition.rowFields) {
+        // The Science descriptor names these values as `<column>_column`, while
+        // older callers used the runtime table key directly. Keep both wire
+        // spellings bound to one internal field so the service remains
+        // compatible without allowing an alias to silently overwrite another.
+        fieldByColumnKey.set(entry.key, entry);
+        fieldByColumnKey.set(`${entry.key}_column`, entry);
+      }
       for (const [key, value] of Object.entries(mapping)) {
-        const field = definition.rowFields.find((entry) => entry.key === key);
+        const field = fieldByColumnKey.get(key);
         if (!field || typeof value !== "string") throw new Error("science-astronomy-analysis-column-mapping-invalid");
+        if (Object.hasOwn(exact, field.field) && exact[field.field] !== value) {
+          throw new Error("science-astronomy-analysis-column-mapping-invalid");
+        }
         exact[field.field] = value;
       }
       request.columns = exact;
