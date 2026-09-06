@@ -17,7 +17,6 @@ import type {
   ScienceJournalHumanAttestationReceipt,
   ScienceManuscript,
   ScienceManuscriptBinding,
-  ScienceManuscriptLayoutSpec,
   ScienceSubmissionMetadata,
 } from "../../shared/science-contract";
 import { SCIENCE_TABLE_SCHEMA, validateScienceTablePayload } from "../../shared/science-table";
@@ -38,22 +37,13 @@ import {
   validateScienceNumericSurfaceRasterArtifactPayload,
 } from "../../shared/science-numeric-3d";
 import { ScienceStore } from "./store";
-import { DEFAULT_MANUSCRIPT_LAYOUT, ScienceManuscriptRenderService, type ManuscriptRenderResult } from "./manuscript";
+import { ScienceManuscriptRenderService, type ManuscriptRenderResult } from "./manuscript";
+import { deriveScienceJournalRenderProfile, type ScienceJournalRenderProfileReceipt } from "./manuscript/journal-render-profile";
+export { deriveScienceJournalRenderProfile } from "./manuscript/journal-render-profile";
+export type { ScienceJournalRenderProfileReceipt } from "./manuscript/journal-render-profile";
 
 const MAX_GUIDELINE_BYTES = 8 * 1024 * 1024;
 const MAX_GUIDELINE_TEXT = 2_000_000;
-
-export interface ScienceJournalRenderProfileReceipt {
-  schema: "agentlas.science-journal-render-profile/v2";
-  journalProfileId: string;
-  journalProfileVersion: number;
-  journalProfileContentSha256: string;
-  bibliographyStyle: "numeric" | "apa" | "nature";
-  layout: ScienceManuscriptLayoutSpec;
-  appliedRuleIds: string[];
-  fallbackFields: Array<"bibliographyStyle" | "layout" | "renderTarget" | "latexTemplate" | "latexJournalStyle" | "columns" | "titlePageMode">;
-  contentSha256: string;
-}
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -66,53 +56,6 @@ function sha256(value: string | Uint8Array): string { return createHash("sha256"
 function derivedRequestId(requestId: string, purpose: string): string {
   const hex = sha256(`${requestId}:${purpose}`);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
-
-export function deriveScienceJournalRenderProfile(profile: ScienceJournalProfile): ScienceJournalRenderProfileReceipt {
-  const bibliographyRules = profile.version.rules.filter((rule) => rule.check.kind === "bibliography-style");
-  const layoutRules = profile.version.rules.filter((rule) => rule.check.kind === "manuscript-layout");
-  const bibliographyStyles = new Set(bibliographyRules.map((rule) => rule.check.kind === "bibliography-style" ? rule.check.style : "numeric"));
-  const layoutValues = new Map(layoutRules.map((rule) => [
-    canonicalJson(rule.check.kind === "manuscript-layout" ? rule.check : DEFAULT_MANUSCRIPT_LAYOUT),
-    rule.check.kind === "manuscript-layout" ? rule.check : DEFAULT_MANUSCRIPT_LAYOUT,
-  ]));
-  if (bibliographyStyles.size > 1) throw new Error("science-journal-render-bibliography-conflict");
-  if (layoutValues.size > 1) throw new Error("science-journal-render-layout-conflict");
-  const bibliographyStyle = bibliographyRules.length ? [...bibliographyStyles][0] : "numeric";
-  const selectedLayout = layoutRules.length ? [...layoutValues.values()][0] : DEFAULT_MANUSCRIPT_LAYOUT;
-  const layout: ScienceManuscriptLayoutSpec = {
-    pageSize: selectedLayout.pageSize,
-    marginsMm: { ...selectedLayout.marginsMm },
-    fontFamily: selectedLayout.fontFamily,
-    fontSizePt: selectedLayout.fontSizePt,
-    lineSpacing: selectedLayout.lineSpacing,
-    lineNumbers: selectedLayout.lineNumbers,
-    ...(selectedLayout.renderTarget === undefined ? {} : { renderTarget: selectedLayout.renderTarget }),
-    ...(selectedLayout.latexTemplate === undefined ? {} : { latexTemplate: selectedLayout.latexTemplate }),
-    ...(selectedLayout.latexJournalStyle === undefined ? {} : { latexJournalStyle: selectedLayout.latexJournalStyle }),
-    ...(selectedLayout.columnCount === undefined ? {} : { columnCount: selectedLayout.columnCount }),
-    ...(selectedLayout.columnGapMm === undefined ? {} : { columnGapMm: selectedLayout.columnGapMm }),
-    ...(selectedLayout.titlePageMode === undefined ? {} : { titlePageMode: selectedLayout.titlePageMode }),
-  };
-  const core = {
-    schema: "agentlas.science-journal-render-profile/v2" as const,
-    journalProfileId: profile.id,
-    journalProfileVersion: profile.currentVersion,
-    journalProfileContentSha256: profile.version.contentSha256,
-    bibliographyStyle,
-    layout,
-    appliedRuleIds: [...bibliographyRules, ...layoutRules].map((rule) => rule.id).sort(),
-    fallbackFields: [
-      ...(bibliographyRules.length ? [] : ["bibliographyStyle" as const]),
-      ...(layoutRules.length ? [] : ["layout" as const]),
-      ...(selectedLayout.renderTarget === undefined ? ["renderTarget" as const] : []),
-      ...(selectedLayout.latexTemplate === undefined ? ["latexTemplate" as const] : []),
-      ...(selectedLayout.latexTemplate === "aps-revtex4-2" && selectedLayout.latexJournalStyle === undefined ? ["latexJournalStyle" as const] : []),
-      ...(selectedLayout.columnCount === undefined ? ["columns" as const] : []),
-      ...(selectedLayout.titlePageMode === undefined ? ["titlePageMode" as const] : []),
-    ],
-  };
-  return { ...core, contentSha256: sha256(canonicalJson(core)) };
 }
 
 interface ScienceJournalRenderRealizationReceipt {
@@ -380,7 +323,6 @@ function markdownSections(markdown: string): Map<string, string> {
   return sections;
 }
 
-function words(value: string): number { return (value.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []).length; }
 function normalizedNeedle(value: string): string { return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(); }
 
 function metadataInput(value: ScienceSubmissionMetadata): ScienceSubmissionMetadata {
@@ -414,7 +356,7 @@ function metadataInput(value: ScienceSubmissionMetadata): ScienceSubmissionMetad
   };
 }
 
-function evaluateRule(rule: ScienceJournalRule, manuscript: ScienceManuscript, metadata: ScienceSubmissionMetadata, attestedCodes: Set<string>, store: ScienceStore): { status: "pass" | "fail" | "manual"; observed: string } {
+function evaluateRule(rule: ScienceJournalRule, manuscript: ScienceManuscript, metadata: ScienceSubmissionMetadata, attestedCodes: Set<string>, store: ScienceStore, rendered: ManuscriptRenderResult | null): { status: "pass" | "fail" | "manual"; observed: string } {
   const markdown = manuscript.version.markdown;
   const sections = markdownSections(markdown);
   const check = rule.check;
@@ -426,13 +368,18 @@ function evaluateRule(rule: ScienceJournalRule, manuscript: ScienceManuscript, m
   if (check.kind === "max-title-characters") return { status: manuscript.title.length <= check.maximum ? "pass" : "fail", observed: `${manuscript.title.length}/${check.maximum} title characters` };
   if (check.kind === "max-section-words") {
     const target = normalizedNeedle(check.heading);
-    const section = [...sections.entries()].find(([name]) => normalizedNeedle(name) === target)?.[1] ?? "";
-    const count = words(section);
-    return { status: section && count <= check.maximum ? "pass" : "fail", observed: `${count}/${check.maximum} words in ${check.heading}` };
+    const report = rendered?.document.wordCountReport;
+    if (!report) return { status: "fail", observed: "rendered-document word count unavailable" };
+    const count = report.sectionWordCounts[target];
+    if (count === undefined) return { status: "fail", observed: `rendered-document section "${check.heading}" unavailable` };
+    return { status: count <= check.maximum ? "pass" : "fail", observed: `${count}/${check.maximum} words in ${check.heading} (shared rendered-document count; section headings excluded)` };
   }
   if (check.kind === "max-manuscript-words") {
-    const count = words(markdown.replace(/^#{1,6}\s+.*$/gm, ""));
-    return { status: count <= check.maximum ? "pass" : "fail", observed: `${count}/${check.maximum} manuscript words` };
+    const report = rendered?.document.wordCountReport;
+    if (!report) return { status: "fail", observed: "rendered-document word count unavailable" };
+    const count = report.total;
+    const scope = Object.entries(report.scope).filter(([, included]) => included).map(([name]) => name).join(", ");
+    return { status: count <= check.maximum ? "pass" : "fail", observed: `${count}/${check.maximum} manuscript words (basis=${report.basis}; included=${scope})` };
   }
   if (check.kind === "binding-count") {
     const count = manuscript.version.bindings.filter((binding) => binding.role === check.role).length;
@@ -726,8 +673,18 @@ export class ScienceJournalPublicationService {
       && scholarlyAssessment.receipt.blueprintAssessment.contentSha256 === blueprintAssessment?.receipt.contentSha256);
     const coherenceAssessment = this.store.getManuscriptCoherenceAssessmentForManuscript(manuscript.projectId, manuscript.id);
     const coherenceAssessmentReady = currentPassedCoherenceAssessment(coherenceAssessment, manuscript, claimLedger);
+    const renderProfile = deriveScienceJournalRenderProfile(profile);
+    let validationRender: ManuscriptRenderResult | null = null;
+    try {
+      validationRender = new ScienceManuscriptRenderService(this.store).renderSync(manuscript, {
+        outputs: ["html"], journalRenderProfile: renderProfile, draftBoundary: null,
+      });
+    } catch {
+      // Rendering remains an independent readiness check; the rule report below records the
+      // unavailable shared document count instead of silently reverting to raw Markdown.
+    }
     const findings: ScienceJournalValidationFinding[] = profile.version.rules.map((rule) => {
-      const result = evaluateRule(rule, manuscript, metadata, attestedCodes, this.store);
+      const result = evaluateRule(rule, manuscript, metadata, attestedCodes, this.store, validationRender);
       const source = profile.version.sources.find((item) => item.inspectionId === rule.inspectionId)!;
       return { ruleId: rule.id, severity: rule.severity, status: result.status, requirement: rule.requirement, observed: result.observed, sourceUrl: source.sourceUrl, evidenceQuote: rule.evidenceQuote };
     });
@@ -955,6 +912,7 @@ export class ScienceJournalPublicationService {
       const renderProfile = deriveScienceJournalRenderProfile(profile);
       const rendered = await new ScienceManuscriptRenderService(this.store).render(manuscript, {
         outputs: ["html", "latex", "docx", "pdf"], metadata, style: renderProfile.bibliographyStyle, layout: renderProfile.layout,
+        journalRenderProfile: renderProfile, draftBoundary: null,
       });
       const pdfRequired = profile.version.rules.some((rule) => rule.check.kind === "output-format" && rule.check.allowed.includes("pdf"));
       if (pdfRequired && !rendered.pdf) throw new Error(`science-submission-pdf-required:${rendered.pdfFailure ?? "pdf-render-failed"}`);

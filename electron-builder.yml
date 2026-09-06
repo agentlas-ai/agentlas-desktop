@@ -71,6 +71,8 @@ asarUnpack:
   - "dist/plugins/**/*"
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
+  # Science image rendering needs the native addon and its adjacent libvips libraries.
+  - "**/node_modules/@img/sharp-*/**/*"
   # node-pty loads its native addon and spawn-helper at runtime. Keep the
   # complete package outside app.asar so both POSIX forkpty and Windows
   # ConPTY assets remain executable in the packaged app.

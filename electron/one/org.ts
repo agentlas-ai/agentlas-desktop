@@ -20,6 +20,7 @@ import type {
   UpdateOneOrgMemberInput,
   OneTeamAgentAvatarInput,
 } from "../../shared/one-org";
+import { getAgentLeaseQuote } from "../cloud-agents/leases";
 import { getAgentConcurrencyInfo } from "../store/concurrency";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
@@ -607,16 +608,29 @@ function handoverNote(value: string | null | undefined, row: Row): string | null
   return safe ? safe.slice(0, 8_000) : null;
 }
 
-export function addOneOrgMember(input: AddOneOrgMemberInput): OneOrgState {
+async function verifiedStandingLease(agent: InstalledAgent): Promise<string | null> {
+  if (sourceFor(agent) !== "hub") return null;
+  const quote = await getAgentLeaseQuote(agent.slug);
+  if (!quote.ok) throw new Error("one_hub_lease_unavailable: Could not verify the Hub lease. Retry after reconnecting.");
+  if (!quote.active || !quote.leasedUntil || Date.parse(quote.leasedUntil) <= Date.now()
+    || !Number.isFinite(Date.parse(quote.leasedUntil))) {
+    throw new Error("one_hub_lease_required: Purchase a Hub lease before adding this agent to a standing seat.");
+  }
+  return quote.leasedUntil;
+}
+
+export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneOrgState> {
   ensureSlot();
   const agent = ensureAvailableAgent(input.installedAgentId);
+  const verifiedLeaseExpiresAt = await verifiedStandingLease(agent);
+  ensureSlot();
   const duplicate = getDb().prepare(
     "SELECT 1 FROM one_org_members WHERE installed_agent_id = ? AND archived_at IS NULL LIMIT 1",
   ).get(agent.id);
   if (duplicate) throw new Error("This installed agent is already in One Team.");
   const now = new Date().toISOString();
   const displayName = input.displayName ? assertText(input.displayName, "displayName", 80) : null;
-  const leaseExpiresAt = input.leaseExpiresAt ?? null;
+  const leaseExpiresAt = verifiedLeaseExpiresAt;
   if (leaseExpiresAt !== null && !Number.isFinite(Date.parse(leaseExpiresAt))) {
     throw new Error("leaseExpiresAt must be an ISO timestamp or null.");
   }
@@ -773,18 +787,22 @@ export function oneOrgExecutionGuidance(installedAgentIds: string[]): string {
   ].join("\n");
 }
 
-export function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): OneOrgState {
+export async function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): Promise<OneOrgState> {
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
   assertExpectedRevision(row, input.expectedRevision);
   const agent = ensureAvailableAgent(input.installedAgentId);
+  const verifiedLeaseExpiresAt = await verifiedStandingLease(agent);
+  const current = getDb().prepare("SELECT * FROM one_org_members WHERE id = ?").get(id) as Row | undefined;
+  if (!current) throw new Error("One Team member not found.");
+  assertExpectedRevision(current, row.revision);
   const duplicate = getDb().prepare(
     "SELECT 1 FROM one_org_members WHERE installed_agent_id = ? AND archived_at IS NULL AND id <> ? LIMIT 1",
   ).get(agent.id, id);
   if (duplicate) throw new Error("This installed agent is already in One Team.");
   const now = new Date().toISOString();
-  const nextLease = input.leaseExpiresAt ?? null;
+  const nextLease = verifiedLeaseExpiresAt;
   if (nextLease !== null && !Number.isFinite(Date.parse(nextLease))) {
     throw new Error("leaseExpiresAt must be an ISO timestamp or null.");
   }

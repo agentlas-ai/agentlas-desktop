@@ -702,9 +702,28 @@ function normalizedBrowserAddress(value: string): string | null {
   }
 }
 
+const MAX_BROWSER_LIVE_RETRIES = 5;
+
+function browserLiveErrorCopy(error: Exclude<BrowserLiveFrame["error"], null>, locale: "ko" | "en"): string {
+  if (error === "browser-offline") {
+    return locale === "ko"
+      ? "전용 브라우저가 아직 준비되지 않았습니다. 잠시 후 다시 연결해 주세요."
+      : "The dedicated browser is not ready yet. Try connecting again in a moment.";
+  }
+  if (error === "no-page") {
+    return locale === "ko"
+      ? "이 주소에 연결된 브라우저 화면을 찾지 못했습니다. 다시 연결해 주세요."
+      : "The browser page for this address was not found. Try connecting again.";
+  }
+  return locale === "ko"
+    ? "브라우저 화면을 캡처하지 못했습니다. 다시 연결해 주세요."
+    : "The browser view could not be captured. Try connecting again.";
+}
+
 function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string; previewScopeId?: string }) {
   const [frame, setFrame] = useState<BrowserLiveFrame | null>(null);
   const [loading, setLoading] = useState(false);
+  const [liveError, setLiveError] = useState<Exclude<BrowserLiveFrame["error"], null> | null>(null);
   const [interactive, setInteractive] = useState(false);
   /*
    * 로컬 검증 서버 생명주기 — U-D-1/U-D-5.
@@ -729,6 +748,7 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
   const tabSequenceRef = useRef(0);
   const sessionRef = useRef<string | null>(null);
   const stopFlightRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [retryNonce, setRetryNonce] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const pointerFrameRef = useRef<number | null>(null);
@@ -754,6 +774,8 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     if (!active) {
       setFrame(null);
       setInteractive(false);
+      setLoading(false);
+      setLiveError(null);
       return;
     }
     const bridge = ipc();
@@ -775,10 +797,13 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     let retryTimer: number | null = null;
     let retryAttempt = 0;
     setLoading(true);
+    setLiveError(null);
     const unsubscribe = bridge.browser.onLiveFrame((next) => {
       if (!disposed && next.sessionId === sessionRef.current && next.viewport === viewport) {
         setFrame(next);
         setLoading(false);
+        if (next.available) setLiveError(null);
+        else if (next.error) setLiveError(next.error);
         if (next.url) {
           setAddress(next.url);
           setTabs((current) => {
@@ -792,8 +817,13 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
         }
       }
     });
-    const scheduleRetry = () => {
+    const scheduleRetry = (error: Exclude<BrowserLiveFrame["error"], null>) => {
       if (disposed || retryTimer != null) return;
+      if (retryAttempt >= MAX_BROWSER_LIVE_RETRIES) {
+        setLoading(false);
+        setLiveError(error);
+        return;
+      }
       const delay = Math.min(2_500, 600 + retryAttempt * 400);
       retryAttempt += 1;
       retryTimer = window.setTimeout(() => {
@@ -820,6 +850,7 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
         setInteractive(result.interactive);
         if (result.sessionId && result.frame.available) {
           retryAttempt = 0;
+          setLiveError(null);
           setLoading(false);
           return;
         }
@@ -829,13 +860,13 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
         // empty forever. Retry only the exact attributed URL until its durable
         // rail target exists.
         setLoading(true);
-        scheduleRetry();
+        scheduleRetry(result.frame.error ?? "capture-failed");
       } catch {
         if (!disposed) {
           setFrame(null);
           setInteractive(false);
           setLoading(true);
-          scheduleRetry();
+          scheduleRetry("capture-failed");
         }
       }
     };
@@ -849,7 +880,7 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
       }
       if (sessionRef.current === ownedSession) sessionRef.current = null;
     };
-  }, [active, activeTabId, effectiveUrl, locale, viewport]);
+  }, [active, activeTabId, effectiveUrl, locale, retryNonce, viewport]);
 
   useEffect(() => () => {
     if (pointerFrameRef.current != null) window.cancelAnimationFrame(pointerFrameRef.current);
@@ -1279,6 +1310,16 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
             <strong>{locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…"}</strong>
             <small>{locale === "ko" ? "실제 페이지를 인앱 브라우저에 연결하고 있습니다." : "Connecting the real page to the in-app browser."}</small>
             <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />
+          </> : liveError ? <>
+            <strong>{locale === "ko" ? "브라우저 화면을 불러오지 못했습니다" : "The browser view could not be loaded"}</strong>
+            <small>{browserLiveErrorCopy(liveError, locale)}</small>
+            <button type="button" onClick={() => {
+              setFrame(null);
+              setInteractive(false);
+              setLiveError(null);
+              setLoading(true);
+              setRetryNonce((value) => value + 1);
+            }}>{locale === "ko" ? "다시 연결" : "Connect again"}</button>
           </> : localPreviewGone ? <>
             <strong>{locale === "ko" ? "미리보기를 정리했습니다" : "The preview was cleaned up"}</strong>
             <small>{locale === "ko"

@@ -27,7 +27,7 @@ function cardCopy(proposal: AgentEvolutionProposalUi): GrowthProposalCardCopy | 
 }
 
 export function GrowthProposals() {
-  const { locale } = useT();
+  const { locale, t } = useT();
   const ko = locale === "ko";
   const [inbox, setInbox] = useState<GrowthProposalInbox | null>(() => (
     readViewData<GrowthProposalInbox>("dashboard.growth-proposals")?.value ?? null
@@ -62,14 +62,15 @@ export function GrowthProposals() {
   useVisibleInterval(() => void load(true), POLL_MS);
 
   const act = useCallback(
-    async (id: string, action: "apply" | "reject" | "rollback") => {
+    async (id: string, action: "apply" | "reject" | "rollback" | "delete") => {
       const api = ipc();
       if (!api) return;
       setBusy(id);
       try {
         if (action === "apply") await api.agentEvolution.approveAndApply(id);
         else if (action === "reject") await api.agentEvolution.reject(id);
-        else await api.agentEvolution.rollback(id);
+        else if (action === "rollback") await api.agentEvolution.rollback(id);
+        else await api.agentEvolution.deleteGrowthSession(id);
         await load(true);
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
       } catch {
@@ -81,6 +82,11 @@ export function GrowthProposals() {
     },
     [load],
   );
+
+  const deleteSession = useCallback((id: string) => {
+    if (!window.confirm(t("one.growth.confirm_delete_session"))) return;
+    void act(id, "delete");
+  }, [act, t]);
 
   const proposalKey = (proposal: AgentEvolutionProposalUi) => {
     const card = cardCopy(proposal);
@@ -185,6 +191,16 @@ export function GrowthProposals() {
                   >
                     {ko ? "안 함" : "Dismiss"}
                   </button>
+                  <button
+                    type="button"
+                    disabled={busy === proposal.id}
+                    onClick={() => deleteSession(proposal.id)}
+                    className="titlebar-nodrag"
+                    data-dashboard-action="true"
+                    data-destructive-action="true"
+                  >
+                    {t("one.growth.delete_session")}
+                  </button>
                 </div>
               </div>
             );
@@ -205,17 +221,29 @@ export function GrowthProposals() {
                     {ko ? "안전장치" : "Safety"} · {card!.reversible}
                   </div>
                 </div>
-                {canUndo && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {canUndo && (
+                    <button
+                      type="button"
+                      disabled={busy === proposal.id}
+                      onClick={() => void act(proposal.id, "rollback")}
+                      className="titlebar-nodrag"
+                      data-dashboard-action="true"
+                    >
+                      {ko ? "이 성장 변경만 되돌리기" : "Undo only this growth change"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={busy === proposal.id}
-                    onClick={() => void act(proposal.id, "rollback")}
+                    onClick={() => deleteSession(proposal.id)}
                     className="titlebar-nodrag"
                     data-dashboard-action="true"
+                    data-destructive-action="true"
                   >
-                    {ko ? "이 성장 변경만 되돌리기" : "Undo only this growth change"}
+                    {t("one.growth.delete_session")}
                   </button>
-                )}
+                </div>
               </div>
             );
           })}

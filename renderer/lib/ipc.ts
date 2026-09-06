@@ -76,6 +76,7 @@ interface AgentlasFilesBridge {
   chatFiles?: {
     snapshot: (input: unknown) => Promise<unknown>;
     listGroup: (input: unknown) => Promise<unknown>;
+    appendMessage?: (input: unknown) => Promise<unknown>;
   };
   /** webUtils가 확인한 드롭 항목에 대해 main이 발급한 세션 권한. */
   grantForFile: (file: File) => Promise<FsPathGrant | null>;

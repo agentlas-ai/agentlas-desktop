@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { ipc } from "@/lib/ipc";
 import styles from "./OneOrgChart.module.css";
 import {
   IconApps,
@@ -70,6 +72,25 @@ function leaseLabel(member: OneOrgMember, locale: string): string | null {
   return locale === "ko"
     ? `${date.getMonth() + 1}/${date.getDate()} 만료`
     : `Expires ${date.toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}`;
+}
+
+type PendingHubAdd = {
+  listing: MarketplaceListing;
+  leasedUntil: string;
+  installed?: InstalledAgent;
+};
+
+function validLeaseExpiry(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp > Date.now() ? value : null;
+}
+
+function hubLeaseQuoteError(code: string | undefined, ko: boolean): string {
+  if (code === "signed_out") return ko ? "Agentlas 로그인이 필요합니다. 로그인 후 다시 시도하세요." : "Sign in to Agentlas, then try again.";
+  if (code === "account_changed") return ko ? "계정이 바뀌어 이전 대여 조건을 적용하지 않았습니다. 현재 계정에서 다시 시도하세요." : "The account changed, so the previous lease terms were discarded. Try again for the current account.";
+  if (code === "lease_not_offered") return ko ? "이 Hub 에이전트는 장기대여를 제공하지 않습니다." : "This Hub agent does not offer long-term leases.";
+  return ko ? "Hub 대여 조건을 확인하지 못했습니다. 네트워크를 확인한 뒤 다시 시도하세요." : "The Hub lease terms could not be checked. Check the network and try again.";
 }
 
 function AgentInventoryLoading({ locale }: { locale: string }) {
@@ -182,6 +203,8 @@ export function OneOrgChart({
   const [leaseDays, setLeaseDays] = useState("0");
   const [busy, setBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [leaseDialogListing, setLeaseDialogListing] = useState<MarketplaceListing | null>(null);
+  const [pendingHubAdd, setPendingHubAdd] = useState<PendingHubAdd | null>(null);
   const [editName, setEditName] = useState("");
   const [editorMember, setEditorMember] = useState<OneOrgMember | null>(null);
   /*
@@ -203,6 +226,26 @@ export function OneOrgChart({
   const [toolsBusy, setToolsBusy] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const authEpochRef = useRef(0);
+  useEffect(() => {
+    const onAuthChanged = () => {
+      // Hub purchase/install state is account-owned. Drop the in-memory picker
+      // and receipt when the account changes so an old result cannot be seated
+      // into the newly selected account; the dialog's durable request key stays
+      // scoped for a later retry under its original account.
+      authEpochRef.current += 1;
+      setLeaseDialogListing(null);
+      setPendingHubAdd(null);
+      setBusy(false);
+      setSelectedAgent("");
+      setLeaseDays("0");
+      setAddSearch("");
+      setAddError(null);
+      setAddOpen(false);
+    };
+    window.addEventListener("agentlas:auth-changed", onAuthChanged);
+    return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
+  }, []);
   useEffect(() => {
     if (!addRequest?.token) return;
     setAddTab(addRequest.source);
@@ -360,6 +403,9 @@ export function OneOrgChart({
   const selectedInstalled = toolsMember ? installedAgents.find((agent) => agent.id === toolsMember.installedAgentId) : undefined;
   const selectedCandidate = addTab === "my" && selectedAgent ? installedAgents.find((agent) => agent.id === selectedAgent) : undefined;
   const selectedListing = addTab !== "my" && selectedAgent ? remoteCandidates.find((listing) => listing.slug === selectedAgent) : undefined;
+  // Capture the auth epoch in the render that opened the lease dialog. A stale
+  // promise retains this value even after the auth-change render unmounts it.
+  const leaseDialogAuthEpoch = leaseDialogListing ? authEpochRef.current : null;
   const editorInstalled = editorMember ? installedAgents.find((agent) => agent.id === editorMember.installedAgentId) : undefined;
   const assignedTools = (selectedInstalled?.mcpServers ?? []).map((serverId) => {
     const installed = installedPlugins.find((server) => server.id === serverId || server.catalogId === serverId);
@@ -381,30 +427,115 @@ export function OneOrgChart({
   });
   const visibleAssignedTools = assignedTools.filter((tool) => toolsTab === "plugins" ? tool.source === "plugin" : tool.source === "custom");
 
+  const completeHubAdd = async (request: PendingHubAdd) => {
+    const requestAuthEpoch = authEpochRef.current;
+    const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
+    if (!isCurrentRequest()) return;
+    if (!state || state.slots.available <= 0) {
+      setAddError(ko ? "One 슬롯이 가득 찼습니다." : "There is no available One slot.");
+      setPendingHubAdd(request);
+      return;
+    }
+    setBusy(true);
+    setAddError(null);
+    let installed = request.installed;
+    try {
+      // The receipt is kept in component state before install/seat mutation. A retry
+      // after either step fails therefore never purchases the same lease again.
+      installed = installed ?? await onMaterializeSource("hub", request.listing);
+      if (!isCurrentRequest()) return;
+      if (!installed) throw new Error(ko ? "에이전트를 찾을 수 없습니다." : "The selected agent could not be found.");
+      setPendingHubAdd({ ...request, installed });
+      /*
+       * 이름·캐릭터를 보내지 않는다 = 원본 패키지의 이름과 얼굴 그대로 앉는다.
+       * org.ts 는 이 호출 직전에 서버의 활성 lease를 다시 확인한다.
+       */
+      if (!isCurrentRequest()) return;
+      await onAdd(installed.id, undefined, request.leasedUntil, undefined);
+      if (!isCurrentRequest()) return;
+      setPendingHubAdd(null);
+      setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
+      // The seat mutation has committed at this point. A picker cleanup callback
+      // must not turn that success into a retryable receipt if it throws.
+      try { onAddExistingComplete?.(); } catch { /* preserve the committed seat */ }
+    } catch (cause) {
+      if (!isCurrentRequest()) return;
+      setPendingHubAdd({ ...request, ...(installed ? { installed } : {}) });
+      // Keep the retryable Hub selection visible after install or seat failure.
+      // The lease receipt is already in `request`; retrying the picker must not
+      // require a fresh confirmation (or a second purchase).
+      setAddTab("hub");
+      setSelectedAgent(request.listing.slug);
+      setAddOpen(true);
+      setAddError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (isCurrentRequest()) setBusy(false);
+    }
+  };
+
   const submitAdd = async () => {
     if (!selectedAgent || busy || !state || state.slots.available <= 0) return;
     if (addTab !== "my" && !selectedListing) return;
+    const requestAuthEpoch = authEpochRef.current;
+    const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
+
+    if (addTab === "hub") {
+      const listing = selectedListing;
+      if (!listing) return;
+      const preserved = pendingHubAdd?.listing.slug === listing.slug ? pendingHubAdd : null;
+      if (preserved) {
+        await completeHubAdd(preserved);
+        return;
+      }
+
+      setBusy(true);
+      setAddError(null);
+      try {
+        const bridge = ipc();
+        if (!bridge) throw new Error("network");
+        const quote = await bridge.agentLeases.quote(listing.slug);
+        if (!isCurrentRequest()) return;
+        const leasedUntil = quote?.ok && quote.active ? validLeaseExpiry(quote.leasedUntil) : null;
+        if (leasedUntil) {
+          // An active account lease is already the server receipt. Do not open the
+          // purchase dialog or bill a second time; proceed directly to installation.
+          await completeHubAdd({ listing, leasedUntil });
+        } else if (!quote?.ok || quote.code === "signed_out" || quote.code === "network" || quote.code === "http" || quote.code === "invalid_slug") {
+          setAddError(hubLeaseQuoteError(quote?.code, ko));
+        } else {
+          setLeaseDialogListing(listing);
+        }
+      } catch {
+        if (isCurrentRequest()) setAddError(hubLeaseQuoteError("network", ko));
+      } finally {
+        if (isCurrentRequest()) setBusy(false);
+      }
+      return;
+    }
+
     setBusy(true);
     setAddError(null);
     try {
       const installed = addTab === "my"
         ? selectedCandidate
         : await onMaterializeSource(addTab, selectedListing!);
+      if (!isCurrentRequest()) return;
       if (!installed) throw new Error(ko ? "에이전트를 찾을 수 없습니다." : "The selected agent could not be found.");
-      const days = addTab === "hub" ? Number.parseInt(leaseDays, 10) : 0;
-      const leaseExpiresAt = addTab === "hub" && Number.isFinite(days) && days > 0
-        ? new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString()
-        : null;
+      const leaseExpiresAt: string | null = null;
       /*
        * 이름·캐릭터를 보내지 않는다 = 원본 패키지의 이름과 얼굴 그대로 앉는다.
-       * (org.ts 의 `chosen?.icon ?? agent.tone` 이 그 얼굴을 고른다.)
+       * Cloud와 로컬은 장기대여 없이 기존 상주 좌석 흐름을 유지한다.
        */
+      if (!isCurrentRequest()) return;
       await onAdd(installed.id, undefined, leaseExpiresAt, undefined);
+      if (!isCurrentRequest()) return;
       setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
       onAddExistingComplete?.();
     } catch (cause) {
-      setAddError(cause instanceof Error ? cause.message : String(cause));
-    } finally { setBusy(false); }
+      if (isCurrentRequest()) setAddError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (isCurrentRequest()) setBusy(false);
+    }
   };
 
   const submitMemberUpdate = async () => {
@@ -591,6 +722,26 @@ export function OneOrgChart({
           </div>
         </div>}
       </OneBottomSheet>
+
+      {leaseDialogListing && (
+        <AgentLeaseDialog
+          slug={leaseDialogListing.slug}
+          agentName={(ko ? leaseDialogListing.name : leaseDialogListing.nameEn) || leaseDialogListing.name || leaseDialogListing.slug}
+          locale={locale}
+          initialDays={Number.parseInt(leaseDays, 10)}
+          skipPurchaseIfActive
+          onClose={() => setLeaseDialogListing(null)}
+          onLeased={(leasedUntil) => {
+            // The dialog can finish after auth-changed unmounted it. Its receipt
+            // belongs to the epoch that opened this dialog; never materialize or
+            // seat that receipt into the newly selected account.
+            if (leaseDialogAuthEpoch === null || authEpochRef.current !== leaseDialogAuthEpoch) return;
+            const listing = leaseDialogListing;
+            setLeaseDialogListing(null);
+            if (listing && authEpochRef.current === leaseDialogAuthEpoch) void completeHubAdd({ listing, leasedUntil });
+          }}
+        />
+      )}
 
       <OneBottomSheet
         open={addOpen}

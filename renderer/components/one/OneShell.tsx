@@ -2138,12 +2138,13 @@ export function OneShell() {
     }
   }, [appLocale, router]);
 
-  const mutateOneOrg = useCallback(async (operation: () => Promise<OneOrgState>) => {
+  const mutateOneOrg = useCallback(async (operation: () => Promise<OneOrgState>, propagateFailure = false) => {
     try {
       const next = await operation();
       setOneOrgState(next);
     } catch (cause) {
       requestOneOperationalRecovery("one-org", cause);
+      if (propagateFailure) throw cause;
     }
   }, []);
   const addOneOrg = useCallback((installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => mutateOneOrg(() => {
@@ -2156,7 +2157,7 @@ export function OneShell() {
       // 고른 캐릭터가 없으면 패키지가 들고 온 얼굴을 그대로 쓴다.
       ...(characterId ? { avatar: { kind: "preset" as const, characterId } } : {}),
     });
-  }), [mutateOneOrg]);
+  }, true), [mutateOneOrg]);
   const materializeOneOrgSource = useCallback(async (source: "cloud" | "hub", listing: MarketplaceListing) => {
     const api = ipc();
     if (!api) throw new Error("Desktop bridge unavailable");
@@ -2195,7 +2196,7 @@ export function OneShell() {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
     return api.oneOrg.replace({ id: member.id, installedAgentId, handoverNote: handoverNote ?? null, expectedRevision: member.revision });
-  }), [mutateOneOrg]);
+  }, true), [mutateOneOrg]);
   const archiveOneOrg = useCallback((member: OneOrgMember) => mutateOneOrg(() => {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));

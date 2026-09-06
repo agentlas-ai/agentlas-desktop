@@ -1,8 +1,8 @@
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 "use client";
-import { Suspense, useCallback, useEffect, useRef, useState, useMemo, type Dispatch, type SetStateAction } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import type {
   Chat,
   AgentlasSurfaceAction,
@@ -25,6 +25,7 @@ import type {
   AgentMessageDirection,
   AgentProcessState,
   ChatGoalContext,
+  ComputerUsePreview,
   InvocationRunReceipt,
   OrchestrationTarget,
   Recommendation,
@@ -34,7 +35,7 @@ import type {
   RunEventUi,
   RuntimeSelection,
 } from "@shared/types";
-import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
+import { ChatStream, workActivityStateFromMessage, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-detail";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
@@ -45,11 +46,11 @@ import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { completePromptStartIntent } from "@/lib/prompt-actions";
 import { ChatInput } from "@/components/ChatInput";
-import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/WorkbenchPanel";
+import { WorkbenchPanel, type SurfaceActionHandler, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
-import { ChatRightPanel, RIGHT_PANEL_MIN_HEIGHT, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import {
+  Markdown,
   firstMediaArtifactInText,
   linkedFileArtifactsInText,
   type CodeArtifact,
@@ -68,6 +69,12 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
+import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "@/components/one/OneActivityTimeline";
+import oneActivityStyles from "@/components/one/OneActivityTimeline.module.css";
+import type { OneActivityState } from "@/lib/one-activity";
+import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
+import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
+import { NativeLiveWebView } from "@/components/NativeLiveWebView";
 import {
   appendChatFileMarker,
   chatFileItem,
@@ -389,6 +396,13 @@ function viewerKindFromName(name: string): WorkspaceFilePreview["viewerKind"] {
   if ([".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".csv", ".tsv", ".ods", ".numbers"].includes(ext)) return "spreadsheet";
   if (ext === ".zip") return "archive";
   if ([".doc", ".docx", ".docm", ".dot", ".dotx", ".rtf", ".odt", ".pages", ".hwp", ".hwpx"].includes(ext)) return "document";
+  // Native/emulator deliverables are opaque packages or bundles. Keep them
+  // explicit so Work offers the verified external capture path instead of
+  // rendering a misleading empty text preview.
+  if ([
+    ".app", ".appimage", ".apk", ".aab", ".ipa", ".xcarchive", ".xctest",
+    ".simruntime", ".dmg", ".pkg", ".deb", ".rpm", ".msi", ".msix", ".exe", ".bin", ".elf",
+  ].includes(ext)) return "binary";
   return "text";
 }
 
@@ -522,13 +536,264 @@ const CHAT_SIDEBAR_WIDTH = 274;
 /** 한국어 본문이 한 줄에 충분히 들어가는 최소 대화 열 폭(실측 기준). */
 const MIN_READABLE_CHAT_COLUMN = 520;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
-const RIGHT_PANEL_HEIGHT_KEY = "agentlas.chat.right_panel_height";
 
 /** picker 모델 옵션 — runtime.listModels가 실시간 조회해 채워준다. */
 type ModelOption = { id: string; label: string; tag?: string };
 type PermissionLevel = "read" | "write" | "full";
+type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 
 const DEFAULT_PERMISSION: PermissionLevel = "full";
+
+type WorkRailPreview = WorkspaceFilePreview | null;
+
+type ExternalCaptureSource = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+};
+
+type ExternalCaptureState =
+  | { phase: "idle" }
+  | { phase: "capturing"; target: string; sourceId?: string }
+  | {
+      phase: "selecting";
+      target: string;
+      sources: ExternalCaptureSource[];
+      selectedSourceId: string | null;
+      reason: "identity-unavailable" | "source-stale";
+    }
+  | { phase: "failed"; code: string; detail: string }
+  | {
+      phase: "captured";
+      target: string;
+      bytes: number;
+      sha256: string;
+      capturedAt: string;
+      sourceId: string | null;
+    };
+
+interface CapturedImageBytes {
+  dataUrl: string;
+  mediaType: "image/png" | "image/jpeg";
+  bytes: Uint8Array;
+}
+
+function decodeCapturedImage(dataUrl: string | null | undefined): CapturedImageBytes | null {
+  if (typeof dataUrl !== "string") return null;
+  const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/u.exec(dataUrl);
+  if (!match) return null;
+  try {
+    const raw = atob(match[2]);
+    const bytes = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+    const isPng = match[1] === "image/png"
+      && bytes.length >= 8
+      && bytes.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]);
+    const isJpeg = match[1] === "image/jpeg"
+      && bytes.length >= 3
+      && bytes[0] === 0xff
+      && bytes[1] === 0xd8
+      && bytes[2] === 0xff;
+    if (bytes.length < 128 || (!isPng && !isJpeg)) return null;
+    return { dataUrl, mediaType: match[1] as "image/png" | "image/jpeg", bytes };
+  } catch {
+    return null;
+  }
+}
+
+async function capturedImageSha256(bytes: Uint8Array): Promise<string | null> {
+  try {
+    // DOM lib versions differ on whether Uint8Array.buffer is ArrayBuffer or
+    // ArrayBufferLike. Copy into an owned ArrayBuffer so Electron/Next builds
+    // and the WebCrypto overload agree on the exact bytes being hashed.
+    const owned = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(owned).set(bytes);
+    const digest = await crypto.subtle.digest("SHA-256", owned);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+function openableTargetFromPreview(preview: WorkRailPreview): string | null {
+  if (!preview) return null;
+  return [preview.browserUrl, ...(preview.openTargets ?? []), preview.path]
+    .find((candidate) => typeof candidate === "string" && (isAbsoluteLocalPath(candidate) || /^https?:\/\//iu.test(candidate))) ?? null;
+}
+
+function externalCaptureSources(preview: ComputerUsePreview): ExternalCaptureSource[] {
+  return preview.sources
+    .filter((source) => source.kind === "window")
+    .map((source) => ({ id: source.id, name: source.name, width: source.width, height: source.height }));
+}
+
+function waitForExternalCapture(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function workLiveOutputKind(value: WorkspaceFilePreview["viewerKind"]): LiveOutputKind | null {
+  return ["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"].includes(value)
+    ? value as LiveOutputKind
+    : null;
+}
+
+/**
+ * Work supplies the data, while One owns the result surface. Unsupported or
+ * native outputs stay explicit and offer only a verified external action; a
+ * dead iframe or fabricated screenshot is never used as a substitute.
+ */
+function WorkRailResult({
+  artifact,
+  surface,
+  preview,
+  locale,
+  onSurfaceAction,
+  onSurfaceStatePatch,
+  onClose,
+  onOpenExternal,
+  onCaptureExternal,
+  onSelectExternalWindow,
+  externalCaptureState = { phase: "idle" },
+}: {
+  artifact: CodeArtifact | null;
+  surface: WorkbenchSurface | null;
+  preview: WorkRailPreview;
+  locale: "ko" | "en";
+  onSurfaceAction?: SurfaceActionHandler;
+  onSurfaceStatePatch?: SurfaceStatePatchHandler;
+  onClose: () => void;
+  onOpenExternal?: () => void;
+  onCaptureExternal?: (sourceId?: string) => void;
+  onSelectExternalWindow?: (sourceId: string) => void;
+  externalCaptureState?: ExternalCaptureState;
+}) {
+  if (artifact || surface) {
+    return (
+      <WorkbenchPanel
+        embedded
+        artifact={artifact}
+        surface={surface}
+        onSurfaceAction={onSurfaceAction}
+        onSurfaceStatePatch={onSurfaceStatePatch}
+        onClose={onClose}
+      />
+    );
+  }
+  if (!preview) return null;
+  const liveKind = workLiveOutputKind(preview.viewerKind);
+  if (liveKind) {
+    return (
+      <LiveOutputViewer
+        source={preview.fileUrl}
+        name={preview.name}
+        kind={liveKind}
+        mimeType={preview.mimeType}
+        size={preview.size}
+        locale={locale}
+        fill
+        placement="sidebar"
+        imageActions={liveKind === "image"}
+        onOpenExternal={onOpenExternal}
+        openExternalHint={locale === "ko" ? "검증된 외부 대상 열기" : "Open the verified external target"}
+      />
+    );
+  }
+  if (preview.viewerKind === "browser") {
+    return <NativeLiveWebView url={preview.browserUrl || preview.fileUrl} title={preview.name} runtimeLabel={preview.live ? "watched" : "web"} />;
+  }
+  if (isCodeArtifactName(preview.name) && preview.content) {
+    return <CodeIdeViewer path={preview.path} name={preview.name} locale={locale} initialContent={preview.content} fill />;
+  }
+  if (preview.viewerKind === "markdown") {
+    return <Markdown text={preview.content || ""} messageId={`work-rail:${preview.path || preview.fileUrl}`} />;
+  }
+  if (preview.viewerKind === "json" || preview.viewerKind === "text") {
+    return <pre style={{ margin: 0, padding: 16, whiteSpace: "pre-wrap", overflow: "auto", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55 }}>{preview.content || (locale === "ko" ? "내용을 읽을 수 없습니다." : "The file content is unavailable.")}</pre>;
+  }
+  return (
+    <div
+      role="status"
+      data-external-capture-state={externalCaptureState.phase}
+      style={{ display: "grid", gap: 10, placeItems: "start", padding: 18, color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
+    >
+      <strong>{locale === "ko" ? "이 형식은 인앱 렌더링을 지원하지 않습니다." : "This format has no in-app renderer."}</strong>
+      <span>{locale === "ko" ? "외부 도구로 연 정확한 창을 선택해 실제 캡처를 이 대화에 첨부할 수 있습니다." : "Choose the exact window opened by the external tool before attaching its capture to this chat."}</span>
+      {externalCaptureState.phase === "capturing" && (
+        <span role="status">{locale === "ko" ? "외부 화면을 열고 실제 캡처 바이트를 확인하는 중…" : "Opening the external surface and verifying captured bytes…"}</span>
+      )}
+      {externalCaptureState.phase === "selecting" && (
+        <div
+          data-external-window-selection="required"
+          style={{ display: "grid", gap: 8, width: "min(100%, 420px)", padding: 10, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}
+        >
+          <span
+            role="alert"
+            data-external-capture-error={externalCaptureState.reason === "source-stale" ? "external_capture_source_stale" : "external_capture_window_identity_required"}
+          >
+            {externalCaptureState.reason === "source-stale"
+              ? (locale === "ko" ? "선택한 외부 창이 사라졌습니다. 현재 목록에서 다시 선택해 주세요." : "The selected external window is no longer available. Choose a current window again.")
+              : (locale === "ko" ? "정확한 외부 창을 선택한 뒤 캡처하세요." : "Choose the exact external window before capturing.")}
+          </span>
+          <label htmlFor="external-window-capture-select">
+            {locale === "ko" ? "캡처할 외부 창" : "External window to capture"}
+          </label>
+          <select
+            id="external-window-capture-select"
+            value={externalCaptureState.selectedSourceId ?? ""}
+            onChange={(event) => onSelectExternalWindow?.(event.target.value)}
+            data-external-capture-window-select="true"
+          >
+            <option value="">{locale === "ko" ? "창을 선택하세요" : "Select a window"}</option>
+            {externalCaptureState.sources.map((source) => (
+              <option key={source.id} value={source.id}>
+                {source.name} · {source.width}×{source.height}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => onCaptureExternal?.(externalCaptureState.selectedSourceId ?? undefined)}
+            disabled={!externalCaptureState.selectedSourceId}
+            data-external-capture-action="capture-selected-window"
+          >
+            {locale === "ko" ? "선택한 창 캡처" : "Capture selected window"}
+          </button>
+        </div>
+      )}
+      {externalCaptureState.phase === "failed" && (
+        <span role="alert" data-external-capture-error={externalCaptureState.code}>
+          {locale === "ko" ? `캡처하지 못했습니다: ${externalCaptureState.detail}` : `Capture failed: ${externalCaptureState.detail}`}
+        </span>
+      )}
+      {externalCaptureState.phase === "captured" && (
+        <span role="status">{locale === "ko" ? "외부 창을 캡처해 대화에 첨부했습니다." : "The external window was captured and attached to this chat."}</span>
+      )}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {onCaptureExternal && (
+          <button
+            type="button"
+            onClick={() => onCaptureExternal()}
+            disabled={externalCaptureState.phase === "capturing" || externalCaptureState.phase === "selecting"}
+            data-external-capture-action={externalCaptureState.phase === "selecting" ? "refresh-windows" : "capture"}
+          >
+            {externalCaptureState.phase === "capturing"
+              ? (locale === "ko" ? "캡처 중…" : "Capturing…")
+              : externalCaptureState.phase === "selecting"
+                ? (locale === "ko" ? "창 목록 새로고침" : "Refresh window list")
+              : externalCaptureState.phase === "failed"
+                ? (locale === "ko" ? "다시 시도" : "Retry capture")
+                : (locale === "ko" ? "외부 도구 열고 캡처" : "Open externally and capture")}
+          </button>
+        )}
+        {onOpenExternal && (
+          <button type="button" onClick={onOpenExternal} data-external-capture-action="open">
+            {locale === "ko" ? "외부 도구로 열기" : "Open externally"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 type RightPanelPreference = { open: boolean; tab: ChatRightPanelTab };
 
@@ -607,26 +872,6 @@ function preferredRichResultWidth(): number {
         window.innerWidth - CHAT_SIDEBAR_WIDTH - MIN_READABLE_CHAT_COLUMN,
       );
   return clampRightPanelWidth(requested);
-}
-
-function readRightPanelHeight(): number | null {
-  try {
-    const raw = window.localStorage.getItem(RIGHT_PANEL_HEIGHT_KEY);
-    if (!raw) return null;
-    const value = Number(raw);
-    return Number.isFinite(value) && value >= RIGHT_PANEL_MIN_HEIGHT ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeRightPanelHeight(height: number | null) {
-  try {
-    if (height === null) window.localStorage.removeItem(RIGHT_PANEL_HEIGHT_KEY);
-    else window.localStorage.setItem(RIGHT_PANEL_HEIGHT_KEY, String(height));
-  } catch {
-    // ignore
-  }
 }
 
 function readRightPanelWidth(): number {
@@ -1343,7 +1588,10 @@ function ChatPage() {
     let cancelled = false;
     void Promise.all(groupIds.map(async (groupId) => {
       const stored = await bridge.listGroup({ chatId, groupId });
-      return [groupId, stored.map((file) => chatFileItem(file, "user-attachment"))] as const;
+      const provenance = messages.some((message) => message.role === "agent" && message.chatFileGroupIds?.includes(groupId))
+        ? "agent-output"
+        : "user-attachment";
+      return [groupId, stored.map((file) => chatFileItem(file, provenance))] as const;
     })).then((groups) => {
       if (cancelled) return;
       for (const [groupId, files] of groups) hydratedChatFileGroupsRef.current.set(groupId, files);
@@ -1515,6 +1763,8 @@ function ChatPage() {
   // 실행 전 API 키 요청 시트 — mcp-key-request 이벤트가 채우고, 응답/만료/런 종료가 비운다.
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
+  const [externalCaptureState, setExternalCaptureState] = useState<ExternalCaptureState>({ phase: "idle" });
+  const externalCaptureBusyRef = useRef(false);
   const watchedPreviewPath = useMemo(() => {
     if (!mediaPreview) return null;
     return [mediaPreview.path, ...(mediaPreview.openTargets ?? [])]
@@ -1609,10 +1859,6 @@ function ChatPage() {
   const restorePreferredRightPanelWidth = useCallback(() => {
     setRightPanelWidth(clampRightPanelWidth(rightPanelPreferredWidthRef.current));
   }, []);
-  const clearRightPanelFilePreview = useCallback(() => {
-    setMediaPreview(null);
-    restorePreferredRightPanelWidth();
-  }, [restorePreferredRightPanelWidth]);
   const readableRightPanelActive = rightPanelOpen && rightPanelTab === "panel" && Boolean(mediaPreview);
   /*
    * ★창이 좁아지면 레일도 같이 줄어든다(2026-09-04 실측).
@@ -1637,7 +1883,6 @@ function ChatPage() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [readableRightPanelActive]);
-  const [rightPanelHeight, setRightPanelHeight] = useState<number | null>(() => readRightPanelHeight());
   const workspaceOpen = rightPanelOpen && rightPanelTab === "file";
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
   // 슬래시 명령(/folder·/global)으로 워킹 폴더를 바꾸면 하단 폴더 바를 다시 읽게 하는 토큰
@@ -1890,7 +2135,7 @@ function ChatPage() {
   useEffect(() => {
     if (!chatId || hydratedChatId !== chatId || busy || linkedOutputFiles.length === 0) return;
     const candidate = [...linkedOutputFiles].reverse().find((file) => (
-      ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]
+      ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive", "binary"]
         .includes(file.viewerKind)
     ));
     if (!candidate) return;
@@ -1937,12 +2182,6 @@ function ChatPage() {
     setRightPanelWidth(next);
     writeRightPanelWidth(next);
   }, []);
-  // 가용 높이는 패널만 알 수 있어 clamp 는 패널이 한다. 여기는 소유와 저장만 맡는다.
-  const resizeRightPanelHeight = useCallback((next: number | null) => {
-    setRightPanelHeight(next);
-    writeRightPanelHeight(next);
-  }, []);
-
   // 한 실행의 이벤트(라이브 스트림 OR 재접속 리플레이)를 메인 버블 + 네트워크 패널에 반영.
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
   const consumeEvent = useCallback(
@@ -2127,7 +2366,7 @@ function ChatPage() {
               delegateTo: ev.delegateTo,
           });
         }
-        // 메인 버블에도 활동 반영 — 접기요약(WorkingPanel)이 "돌아가는 중 + 도구 N개"를
+        // 메인 버블에도 활동 반영 — OneTurnWork가 "돌아가는 중 + 도구 N개"를
         // 보여줘 긴 멀티에이전트 실행 중 불안을 줄인다 (per-agent 상세는 네트워크 패널).
         setMessages((m) =>
           m.map((msg) => {
@@ -4851,23 +5090,6 @@ function ChatPage() {
       .catch(() => setChat(previous));
   }, [chat]);
 
-  if (
-    requestedTaskId &&
-    (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
-  ) {
-    return null;
-  }
-  if (!chat) {
-    if (chatId) return null; // 특정 Task/채팅 로딩 중
-    return (
-      <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <div style={{ textAlign: "center", maxWidth: 440 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}>{t("chat.empty.title")}</div>
-          <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ink-soft)" }}>{t("chat.empty.hint")}</div>
-        </div>
-      </div>
-    );
-  }
   // @ is an optional one-turn override. It uses the same user-facing roster as
   // every other picker and never exposes a team's private system-role cells.
   // (pickerAgents/displayAgents/projectForDisplay는 훅 구역에서 참조 고정.)
@@ -4886,18 +5108,296 @@ function ChatPage() {
     }
     return null;
   })();
-  // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.
-  const hasPipeline = (lastMessageOfRole(messages, "agent")?.pipeline?.length ?? 0) > 1;
+  const latestWorkActivityMessage = [...messages].reverse().find((message) => (
+    message.role === "agent"
+    && Boolean(message.busy || message.steps?.length || message.notices?.length || message.failure)
+  )) ?? null;
+  const workActivity = useMemo<OneActivityState>(
+    () => latestWorkActivityMessage
+      ? workActivityStateFromMessage(latestWorkActivityMessage)
+      : { items: [], artifacts: [], sources: [], handoffs: [], lastSequence: 0 },
+    [latestWorkActivityMessage],
+  );
+  const workBrowserHistoryUrl = useMemo(() => taskBrowserUrl(workActivity.items), [workActivity.items]);
+  const workRailResultKey = artifact
+    ? `artifact:${artifact.id}`
+    : liveWorkbenchSurface
+      ? `surface:${liveWorkbenchSurface.id}`
+      : mediaPreview
+        ? `preview:${mediaPreview.path || mediaPreview.fileUrl}:${mediaPreview.revision ?? ""}`
+        : null;
+  const workAppPreview = useMemo<OneLiveAppPreview | null>(() => {
+    const currentSurface = liveWorkbenchSurface;
+    if (!currentSurface) return null;
+    const url = currentSurface?.manifest.app?.deployment?.previewUrl;
+    if (typeof url !== "string" || !url.trim()) return null;
+    return {
+      appId: currentSurface.liveAppId ?? currentSurface.id,
+      title: currentSurface.manifest.title,
+      url,
+      runtime: "managed preview",
+    };
+  }, [liveWorkbenchSurface]);
+  const openWorkRailExternal = useCallback(async () => {
+    const target = openableTargetFromPreview(mediaPreview);
+    if (!target) {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "external_target_missing",
+        detail: locale === "ko" ? "검증할 외부 대상 경로가 없습니다." : "There is no verified external target to open.",
+      });
+      return;
+    }
+    const api = ipc();
+    if (!api) {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "desktop_bridge_unavailable",
+        detail: locale === "ko" ? "Desktop 연결이 없어 외부 도구를 열 수 없습니다." : "The Desktop bridge is unavailable, so the external tool could not be opened.",
+      });
+      return;
+    }
+    const opened = await api.fs.openPath(target).catch((error) => ({
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    if (!opened.ok) {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "external_open_failed",
+        detail: opened.message || (locale === "ko" ? "외부 도구를 열지 못했습니다." : "The external tool could not be opened."),
+      });
+    }
+  }, [locale, mediaPreview]);
+
+  const selectExternalWindow = useCallback((sourceId: string) => {
+    setExternalCaptureState((current) => current.phase === "selecting"
+      ? { ...current, selectedSourceId: sourceId || null }
+      : current);
+  }, []);
+
+  const captureWorkRailExternal = useCallback(async (requestedSourceId?: string) => {
+    if (externalCaptureBusyRef.current) return;
+    const target = openableTargetFromPreview(mediaPreview);
+    if (!target) {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "external_target_missing",
+        detail: locale === "ko" ? "검증할 외부 대상 경로가 없습니다." : "There is no verified external target to capture.",
+      });
+      return;
+    }
+    const api = ipc();
+    const bridge = chatFilesBridge();
+    if (!api || !bridge || typeof bridge.appendMessage !== "function" || typeof window.agentlasFiles?.grantForPastedImage !== "function") {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "capture_attachment_bridge_unavailable",
+        detail: locale === "ko"
+          ? "Desktop 캡처·첨부 연결을 사용할 수 없어 캡처를 대화에 첨부하지 못했습니다."
+          : "The Desktop capture or attachment bridge is unavailable, so the capture was not attached to this chat.",
+      });
+      return;
+    }
+    if (!chatId || !isCurrentChat()) {
+      setExternalCaptureState({
+        phase: "failed",
+        code: "chat_unavailable",
+        detail: locale === "ko" ? "현재 대화가 없어 캡처를 첨부할 수 없습니다." : "There is no current chat to attach the capture to.",
+      });
+      return;
+    }
+
+    externalCaptureBusyRef.current = true;
+    setExternalCaptureState({ phase: "capturing", target, ...(requestedSourceId ? { sourceId: requestedSourceId } : {}) });
+    try {
+      const opened = await api.fs.openPath(target).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      if (!opened.ok) throw new Error(opened.message || "external_open_failed");
+
+      let captured: CapturedImageBytes | null = null;
+      let capturedAt = new Date().toISOString();
+      let sourceId: string | null = requestedSourceId ?? null;
+      let lastCaptureDetail = locale === "ko" ? "화면 기록 권한 또는 캡처 소스를 확인해 주세요." : "Check Screen Recording permission and available capture sources.";
+      // shell.openPath/openExternal acknowledges the OS request before the
+      // external app has necessarily painted. A short bounded retry window
+      // avoids claiming a capture from the still-visible Agentlas window.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (attempt > 0) await waitForExternalCapture(450);
+        const preview = await api.computerUse.capturePreview(requestedSourceId, { mode: "window" }).catch(() => null);
+        if (!preview) {
+          lastCaptureDetail = locale === "ko" ? "화면 캡처 요청이 실패했습니다." : "The screen capture request failed.";
+          continue;
+        }
+        if (preview.screenPermission === "denied" || preview.screenPermission === "restricted") {
+          lastCaptureDetail = locale === "ko" ? "macOS 화면 기록 권한이 거부되었거나 제한되어 있습니다." : "macOS Screen Recording permission is denied or restricted.";
+          continue;
+        }
+        if (preview.captureMode !== "window") {
+          lastCaptureDetail = locale === "ko" ? "외부 창을 특정할 수 없는 화면 캡처는 사용할 수 없습니다." : "A desktop screen capture without an identified external window cannot be used.";
+          continue;
+        }
+        if (preview.error === "source-stale") {
+          const sources = externalCaptureSources(preview);
+          if (sources.length > 0) {
+            setExternalCaptureState({ phase: "selecting", target, sources, selectedSourceId: null, reason: "source-stale" });
+            return;
+          }
+          lastCaptureDetail = locale === "ko" ? "선택한 외부 창이 더 이상 없습니다. 다시 창을 확인해 주세요." : "The selected external window is no longer available. Refresh the window list and try again.";
+          continue;
+        }
+        if (preview.selectionRequired || preview.error === "window-selection-required") {
+          const sources = externalCaptureSources(preview);
+          if (sources.length > 0) {
+            setExternalCaptureState({ phase: "selecting", target, sources, selectedSourceId: null, reason: "identity-unavailable" });
+            return;
+          }
+          lastCaptureDetail = locale === "ko" ? "캡처할 외부 창을 찾지 못했습니다." : "No external window was available to capture.";
+          continue;
+        }
+        if (!preview.observationAvailable || !preview.dataUrl) {
+          lastCaptureDetail = preview.error === "screen-unavailable"
+            ? (locale === "ko" ? "캡처할 화면 소스를 사용할 수 없습니다." : "No capturable screen source is available.")
+            : preview.error === "window-not-found"
+              ? (locale === "ko" ? "캡처할 외부 창을 찾지 못했습니다." : "No external window was available to capture.")
+            : (locale === "ko" ? "외부 화면 캡처가 아직 준비되지 않았습니다." : "The external screen capture is not ready yet.");
+          continue;
+        }
+        const decoded = decodeCapturedImage(preview.dataUrl);
+        const source = preview.sources.find((candidate) => candidate.id === preview.selectedSourceId) ?? null;
+        if (
+          !decoded
+          || !source
+          || source.kind !== "window"
+          || !preview.selectedSourceId
+          || (requestedSourceId && preview.selectedSourceId !== requestedSourceId)
+          || source.width < 1
+          || source.height < 1
+        ) {
+          lastCaptureDetail = locale === "ko" ? "캡처 바이트 또는 화면 크기를 검증하지 못했습니다." : "The captured bytes or screen dimensions could not be verified.";
+          continue;
+        }
+        captured = decoded;
+        capturedAt = preview.capturedAt;
+        sourceId = preview.selectedSourceId;
+        break;
+      }
+      if (!captured) throw new Error(lastCaptureDetail);
+      const sha256 = await capturedImageSha256(captured.bytes);
+      if (!sha256) throw new Error(locale === "ko" ? "캡처 SHA-256을 계산하지 못했습니다." : "The capture SHA-256 could not be computed.");
+
+      const extension = captured.mediaType === "image/png" ? "png" : "jpg";
+      const name = "external-capture-" + new Date(capturedAt).toISOString().replace(/[:.]/gu, "-") + "." + extension;
+      const fileBytes = new ArrayBuffer(captured.bytes.byteLength);
+      new Uint8Array(fileBytes).set(captured.bytes);
+      const file = new File([fileBytes], name, { type: captured.mediaType, lastModified: Date.now() });
+      const grant = await grantForPastedImage(file);
+      if (!grant) throw new Error(locale === "ko" ? "캡처 파일 권한을 발급하지 못했습니다." : "The capture file capability could not be issued.");
+      const snapshot = await bridge.snapshot({
+        chatId,
+        files: [{ grant, name, mediaType: captured.mediaType, size: captured.bytes.byteLength, kind: "file" }],
+      });
+      const stored = snapshot.files[0];
+      if (!stored || stored.sha256 !== sha256 || stored.size !== captured.bytes.byteLength) {
+        throw new Error(locale === "ko" ? "첨부 저장 후 캡처 무결성을 확인하지 못했습니다." : "The capture integrity check failed after attachment storage.");
+      }
+      const chatFile = chatFileItem(stored, "agent-output");
+      hydratedChatFileGroupsRef.current.set(snapshot.groupId, [chatFile]);
+      if (!isCurrentChat()) return;
+      const railPreview: WorkspaceFilePreview = {
+        ...chatFile.viewer,
+        mimeType: captured.mediaType,
+        fileUrl: chatFile.fileUrl || captured.dataUrl,
+        openTargets: uniqueStrings([target, ...(chatFile.viewer.openTargets ?? [])]),
+        size: captured.bytes.byteLength,
+        available: true,
+      };
+      const receiptText = locale === "ko"
+        ? "외부 도구 창을 실제 캡처해 이 대화에 첨부했습니다."
+        : "Captured the external tool window and attached it to this chat.";
+      const encodedImage = captured.dataUrl.split(",", 2)[1] ?? "";
+      if (!encodedImage) throw new Error(locale === "ko" ? "캡처 이미지 데이터를 저장하지 못했습니다." : "The captured image data could not be persisted.");
+      const persistedMessage = await bridge.appendMessage({
+        chatId,
+        text: appendChatFileMarker(receiptText, snapshot.groupId),
+        images: [{ name, mediaType: captured.mediaType, data: encodedImage }],
+      });
+      if (!persistedMessage?.id || !persistedMessage.imageDataUrls?.length) {
+        throw new Error(locale === "ko" ? "캡처 대화 기록을 영구 저장하지 못했습니다." : "The capture message could not be persisted to this chat.");
+      }
+      if (!isCurrentChat()) return;
+      const durableMessage = historyEntryToStreamMessage(persistedMessage);
+      setExternalCaptureState({
+        phase: "captured",
+        target,
+        bytes: captured.bytes.byteLength,
+        sha256,
+        capturedAt,
+        sourceId,
+      });
+      setSurface(null);
+      setArtifact(null);
+      setMediaPreview(railPreview);
+      openPanelTab("panel");
+      setMessages((current) => [
+        ...current,
+        { ...durableMessage, imageDataUrls: [captured.dataUrl], chatFiles: [chatFile], chatFileGroupIds: [snapshot.groupId] },
+      ]);
+    } catch (error) {
+      if (isCurrentChat()) {
+        setExternalCaptureState({
+          phase: "failed",
+          code: "external_capture_failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } finally {
+      externalCaptureBusyRef.current = false;
+    }
+  }, [chatId, isCurrentChat, locale, mediaPreview, openPanelTab]);
+
+  if (
+    requestedTaskId &&
+    (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
+  ) {
+    return null;
+  }
+  if (!chat) {
+    if (chatId) return null; // 특정 Task/채팅 로딩 중
+    return (
+      <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ textAlign: "center", maxWidth: 440 }}>
+          <div style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}>{t("chat.empty.title")}</div>
+          <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ink-soft)" }}>{t("chat.empty.hint")}</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="task-cockpit-shell" style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
+    <div
+      className={`task-cockpit-shell ${oneActivityStyles.taskCockpitShell}`}
+      data-output-flow={rightPanelOpen ? "true" : "false"}
+      style={{
+        position: "relative",
+        display: "flex",
+        height: "100%",
+        width: "100%",
+        minWidth: 0,
+        minHeight: 0,
+        overflow: "hidden",
+        "--task-cockpit-output-width": `${rightPanelWidth}px`,
+      } as CSSProperties}
+    >
       {/* ★대화 영역은 One 과 같이 흰 면 위에 놓는다(2026-09-04 실측).
           예전에는 이 열이 투명이라 페이지 배경(--paper-2)이 그대로 비쳤고, 작성창만 흰
           카드로 떠 보였다. One 은 workspace 전체가 흰 면이라 대화가 한 장의 면 위에 앉는다.
           같은 뜻의 토큰(--paper)을 쓴다 — 다크 테마에서도 함께 따라간다. */}
       <div
         className="task-cockpit-main"
-        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, background: "var(--paper)" }}
+        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden", boxSizing: "border-box", background: "var(--paper)" }}
       >
       <header
         className="task-cockpit-header titlebar-drag"
@@ -5212,7 +5712,7 @@ function ChatPage() {
       ))}
       </div>
 
-      <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
+      <div data-tour-id="workspace.chat" style={{ minHeight: 0, minWidth: 0, width: "100%", flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <ChatStream
           messages={messages}
           agentName="Agentlas"
@@ -5331,42 +5831,40 @@ function ChatPage() {
         />
       </div>
       </div>
-      {rightPanelOpen && (
-        <ChatRightPanel
-          key={chatId || "new-task"}
-          activeTab={rightPanelTab}
-          onTabChange={openPanelTab}
-          onClose={closeRightPanel}
-          chatId={chatId || null}
-          artifact={artifact}
-          surface={liveWorkbenchSurface}
-          filePreview={mediaPreview}
-          onHydrateFilePreview={openWorkspaceFilePreview}
-          agentScreen={agentScreen}
-          onAgentScreenMode={(mode) => setAgentScreen({ mode })}
-          linkedFiles={linkedFiles}
-          linkedOutputs={linkedOutputFiles}
-          onSurfaceAction={handleSurfaceAction}
-          onSurfaceStatePatch={handleSurfaceStatePatch}
-          firm={firm}
-          org={resolvedOrg}
-          agent={displayAgent}
-          agents={displayAgents}
-          project={projectForDisplay}
-          busy={busy}
-          liveAgents={liveAgents}
-          timeline={netTimeline}
-          chatTitle={chat.title}
-          latestUserPrompt={latestUserPrompt}
-          hasPipeline={hasPipeline}
-          width={rightPanelWidth}
-          onResizeWidth={resizeRightPanel}
-          onRequestReadableWidth={requestReadableRightPanelWidth}
-          onFileTabsEmpty={clearRightPanelFilePreview}
-          height={rightPanelHeight}
-          onResizeHeight={resizeRightPanelHeight}
-        />
-      )}
+      <OneActivityArtifactRail
+        key={chatId || "new-task"}
+        items={workActivity.artifacts}
+        activity={workActivity}
+        locale={locale === "ko" ? "ko" : "en"}
+        visible={rightPanelOpen}
+        onClose={closeRightPanel}
+        width={rightPanelWidth}
+        onResize={resizeRightPanel}
+        onRequestReadableWidth={requestReadableRightPanelWidth}
+        onRestorePreferredWidth={restorePreferredRightPanelWidth}
+        minWidth={RIGHT_PANEL_MIN_WIDTH}
+        maxWidth={clampRightPanelWidth(RIGHT_PANEL_MAX_WIDTH)}
+        defaultWidth={RIGHT_PANEL_DEFAULT_WIDTH}
+        browserScopeKey={chatId || undefined}
+        browserHistoryUrl={workBrowserHistoryUrl}
+        result={(
+          <WorkRailResult
+            artifact={artifact}
+            surface={liveWorkbenchSurface}
+            preview={mediaPreview}
+            locale={locale === "ko" ? "ko" : "en"}
+            onSurfaceAction={handleSurfaceAction}
+            onSurfaceStatePatch={handleSurfaceStatePatch}
+            onClose={closeRightPanel}
+            onOpenExternal={openWorkRailExternal}
+            onCaptureExternal={captureWorkRailExternal}
+            onSelectExternalWindow={selectExternalWindow}
+            externalCaptureState={externalCaptureState}
+          />
+        )}
+        resultKey={workRailResultKey}
+        appPreview={workAppPreview}
+      />
     </div>
   );
 }

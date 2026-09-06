@@ -21,6 +21,17 @@ import { renderManuscriptDocx } from "./render-docx";
 import { renderManuscriptHtml } from "./render-html";
 import { renderManuscriptLatex } from "./render-latex";
 import { renderManuscriptPdf, resolveTectonic, type LatexCompileDiagnostics, type ManuscriptPdfEngine, type ManuscriptPdfResult, type TectonicToolchainReceipt } from "./render-pdf";
+import {
+  DEFAULT_MANUSCRIPT_LAYOUT,
+  countScienceManuscriptWords,
+  draftBoundaryForProfile,
+  deriveScienceJournalRenderProfile,
+  legacyScienceWordCountPolicy,
+  type ScienceJournalRenderProfileReceipt,
+  type ScienceJournalWordCountPolicy,
+  type ScienceManuscriptDraftBoundary,
+  type ScienceManuscriptWordCountReport,
+} from "./journal-render-profile";
 
 export const SCIENCE_MANUSCRIPT_RENDER_SCHEMA = "agentlas.science.manuscript-render/v1" as const;
 
@@ -30,6 +41,14 @@ export interface ManuscriptRenderOptions {
   lineNumbers?: boolean;
   /** Exact page and typography settings derived from an evidence-backed journal rule. */
   layout?: ScienceManuscriptLayoutSpec;
+  /** Resolve this exact verified profile inside the render service before rendering. */
+  journalProfileId?: string;
+  expectedJournalProfileVersion?: number;
+  expectedJournalProfileContentSha256?: string;
+  /** Internal submission path may pass its already-derived receipt to avoid a second lookup. */
+  journalRenderProfile?: ScienceJournalRenderProfileReceipt | null;
+  /** Ordinary preview/render output is explicitly DRAFT; submission export passes null. */
+  draftBoundary?: ScienceManuscriptDraftBoundary | null;
   /** Backward-compatible caller input. Prefer layout.lineSpacing. */
   doubleSpacing?: boolean;
   /** Which outputs to produce. Preview callers ask for html only; the exporter asks for everything. */
@@ -52,9 +71,12 @@ export interface ManuscriptRenderResult {
   manuscriptContentSha256: string;
   style: BibliographyStyle;
   layout: ScienceManuscriptLayoutSpec;
+  journalRenderProfile: ScienceJournalRenderProfileReceipt | null;
+  draftBoundary: ScienceManuscriptDraftBoundary | null;
   document: {
     title: string;
     wordCount: number;
+    wordCountReport: ScienceManuscriptWordCountReport;
     figures: Array<{ locator: string; number: number; caption: string; resolved: boolean }>;
     tables: Array<{ locator: string | null; number: number; caption: string | null; bound: boolean; editable: boolean; rows: number }>;
     equations: Array<{ label: string; number: number }>;
@@ -87,14 +109,8 @@ export interface ManuscriptRenderResult {
 
 function sha256(bytes: Uint8Array | string): string { return createHash("sha256").update(bytes).digest("hex"); }
 
-export const DEFAULT_MANUSCRIPT_LAYOUT: ScienceManuscriptLayoutSpec = {
-  pageSize: "a4",
-  marginsMm: { top: 25, right: 25, bottom: 25, left: 25 },
-  fontFamily: "serif",
-  fontSizePt: 11,
-  lineSpacing: "single",
-  lineNumbers: false,
-};
+export { DEFAULT_MANUSCRIPT_LAYOUT } from "./journal-render-profile";
+export type { ScienceJournalRenderProfileReceipt, ScienceJournalWordCountPolicy, ScienceManuscriptDraftBoundary, ScienceManuscriptWordCountReport } from "./journal-render-profile";
 
 async function rasterizeSvg(bytes: Uint8Array, sha: string): Promise<RasterAsset> {
   const image = sharp(Buffer.from(bytes), { density: 300 });
@@ -118,6 +134,36 @@ export function draftManuscript(projectId: string, title: string, markdown: stri
 export class ScienceManuscriptRenderService {
   constructor(private readonly store: ScienceStore) {}
 
+  private resolveJournalRenderProfile(manuscript: ScienceManuscript, options: ManuscriptRenderOptions): ScienceJournalRenderProfileReceipt | null {
+    const hasProfileId = options.journalProfileId !== undefined;
+    const hasExpectedProfile = options.expectedJournalProfileVersion !== undefined || options.expectedJournalProfileContentSha256 !== undefined;
+    if (hasProfileId) {
+      if (!options.journalProfileId) throw new Error("science-journal-render-profile-precondition-invalid");
+      if (!Number.isSafeInteger(options.expectedJournalProfileVersion) || !/^[a-f0-9]{64}$/u.test(options.expectedJournalProfileContentSha256 ?? "")) throw new Error("science-journal-render-profile-precondition-invalid");
+      const profile = this.store.getJournalProfileForProject(manuscript.projectId, options.journalProfileId);
+      if (!profile) throw new Error("science-journal-profile-not-found");
+      if (profile.currentVersion !== options.expectedJournalProfileVersion || profile.version.version !== options.expectedJournalProfileVersion || profile.version.contentSha256 !== options.expectedJournalProfileContentSha256) throw new Error("science-journal-profile-version-conflict");
+      const derived = deriveScienceJournalRenderProfile(profile);
+      if (options.journalRenderProfile && options.journalRenderProfile.contentSha256 !== derived.contentSha256) throw new Error("science-journal-render-profile-version-conflict");
+      return derived;
+    }
+    if (hasExpectedProfile) throw new Error("science-journal-render-profile-precondition-invalid");
+    return options.journalRenderProfile ?? null;
+  }
+
+  private effectiveOptions(manuscript: ScienceManuscript, options: ManuscriptRenderOptions): ManuscriptRenderOptions {
+    const journalRenderProfile = this.resolveJournalRenderProfile(manuscript, options);
+    return {
+      ...options,
+      journalRenderProfile,
+      style: journalRenderProfile?.bibliographyStyle ?? options.style,
+      layout: journalRenderProfile?.layout ?? options.layout,
+      draftBoundary: options.draftBoundary === undefined
+        ? draftBoundaryForProfile(journalRenderProfile, manuscript)
+        : options.draftBoundary,
+    };
+  }
+
   parse(manuscript: ScienceManuscript): { document: ManuscriptDocument; assets: ResolvedManuscriptAssets } {
     const bindings = manuscript.version.bindings;
     const document = parseManuscript(manuscript.version.markdown, {
@@ -137,11 +183,13 @@ export class ScienceManuscriptRenderService {
    */
   renderSync(manuscript: ScienceManuscript, options: ManuscriptRenderOptions = {}): ManuscriptRenderResult {
     const { document, assets } = this.parse(manuscript);
-    return this.renderSyncWithAssets(manuscript, document, assets, options);
+    return this.renderSyncWithAssets(manuscript, document, assets, this.effectiveOptions(manuscript, options));
   }
 
   private renderSyncWithAssets(manuscript: ScienceManuscript, document: ManuscriptDocument, assets: ResolvedManuscriptAssets, options: ManuscriptRenderOptions): ManuscriptRenderResult {
     const style = options.style ?? "numeric";
+    const journalRenderProfile = options.journalRenderProfile ?? null;
+    const wordCountPolicy: ScienceJournalWordCountPolicy = journalRenderProfile?.wordCountPolicy ?? legacyScienceWordCountPolicy();
     const layout: ScienceManuscriptLayoutSpec = options.layout ?? {
       ...DEFAULT_MANUSCRIPT_LAYOUT,
       marginsMm: { ...DEFAULT_MANUSCRIPT_LAYOUT.marginsMm },
@@ -198,15 +246,16 @@ export class ScienceManuscriptRenderService {
       }
     }
     const html = outputs.has("html") || outputs.has("pdf") || outputs.has("package")
-      ? renderManuscriptHtml(document, assets, { style, mode: outputs.has("pdf") || outputs.has("package") ? "print" : "preview", metadata, embedAssets: true, layout, lang: options.lang })
+      ? renderManuscriptHtml(document, assets, { style, mode: outputs.has("pdf") || outputs.has("package") ? "print" : "preview", metadata, embedAssets: true, layout, draftBoundary: options.draftBoundary, lang: options.lang })
       : null;
     const latex = outputs.has("latex") || outputs.has("pdf") || outputs.has("package")
-      ? renderManuscriptLatex(document, assets, { style, metadata, figureFiles, layout })
+      ? renderManuscriptLatex(document, assets, { style, metadata, figureFiles, layout, draftBoundary: options.draftBoundary })
       : null;
     const docx = outputs.has("docx") || outputs.has("package")
-      ? renderManuscriptDocx(document, assets, { style, metadata, figureRasters, layout })
+      ? renderManuscriptDocx(document, assets, { style, metadata, figureRasters, layout, draftBoundary: options.draftBoundary })
       : null;
     const references = html?.references ?? latex?.references ?? docx?.references ?? [];
+    const wordCountReport = countScienceManuscriptWords(document, references, wordCountPolicy);
     return {
       schema: SCIENCE_MANUSCRIPT_RENDER_SCHEMA,
       manuscriptId: manuscript.id === "draft" ? null : manuscript.id,
@@ -214,9 +263,12 @@ export class ScienceManuscriptRenderService {
       manuscriptContentSha256: manuscript.version.contentSha256,
       style,
       layout,
+      journalRenderProfile,
+      draftBoundary: options.draftBoundary === undefined ? draftBoundaryForProfile(journalRenderProfile, manuscript) : options.draftBoundary,
       document: {
         title: document.title,
-        wordCount: document.wordCount,
+        wordCount: wordCountReport.total,
+        wordCountReport,
         figures: document.figures.map((figure) => ({ locator: figure.locator, number: figure.number, caption: plain(figure.caption), resolved: Boolean(assets.figures.get(figure.locator)?.raster || assets.figures.get(figure.locator)?.svg) })),
         tables: document.tables.map((table) => { const asset = table.locator ? assets.tables.get(table.locator) : undefined; return { locator: table.locator, number: table.number, caption: table.caption ? plain(table.caption) : null, bound: table.bound, editable: table.bound ? Boolean(asset?.editable) : true, rows: table.bound ? (asset?.rows.length ?? 0) : (table.rowCount ?? 0) }; }),
         equations: document.equations,
@@ -245,9 +297,13 @@ export class ScienceManuscriptRenderService {
    * screen capture) and produces the PDF (tectonic when installed, else Chromium).
    */
   async render(manuscript: ScienceManuscript, options: ManuscriptRenderOptions = {}): Promise<ManuscriptRenderResult> {
-    const outputs = new Set(options.outputs ?? ["html"]);
+    const effective = this.effectiveOptions(manuscript, options);
+    const outputs = new Set(effective.outputs ?? ["html"]);
     const wantsBinary = outputs.has("docx") || outputs.has("latex") || outputs.has("pdf") || outputs.has("package");
-    if (!wantsBinary) return this.renderSync(manuscript, options);
+    if (!wantsBinary) {
+      const { document, assets } = this.parse(manuscript);
+      return this.renderSyncWithAssets(manuscript, document, assets, effective);
+    }
     const { document, assets } = this.parse(manuscript);
     const upgraded = new Map<string, RasterAsset>();
     const warnings: ManuscriptWarning[] = [];
@@ -280,7 +336,7 @@ export class ScienceManuscriptRenderService {
       catch (error) { warnings.push({ code: "figure-rasterize-failed", message: `Vector figure "${figure.locator}" could not be rasterized at 300 dpi: ${error instanceof Error ? error.message : String(error)}; the verified capture is used instead.`, line: null }); }
     }
     for (const [locator, raster] of upgraded) { const asset = assets.figures.get(locator); if (asset) asset.raster = raster; }
-    const result = this.renderSyncWithAssets(manuscript, document, assets, options);
+    const result = this.renderSyncWithAssets(manuscript, document, assets, effective);
     result.warnings.push(...warnings);
     if (outputs.has("pdf") || outputs.has("package")) {
       const pdf = await renderManuscriptPdf({

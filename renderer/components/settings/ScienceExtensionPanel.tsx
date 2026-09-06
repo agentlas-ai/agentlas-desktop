@@ -49,6 +49,26 @@ export function ScienceExtensionPanel() {
     requestScienceInstall();
   };
 
+  const update = async () => {
+    const api = ipc();
+    if (!api?.productExtensions || busy) return;
+    setBusy("install");
+    setNotice({ text: ko ? "Science 업데이트를 확인하고 설치하고 있습니다." : "Checking and installing the Science update.", error: false });
+    try {
+      const receipt = await api.productExtensions.installScienceSuite();
+      const next = await api.productExtensions.scienceStatus();
+      setStatus(next);
+      setNotice(receipt.ok && next.installed && next.enabled
+        ? { text: ko ? `Science ${next.version ?? ""}을 사용할 수 있습니다.` : `Science ${next.version ?? ""} is ready.`, error: false }
+        : { text: receipt.message ?? (ko ? "Science를 업데이트하지 못했습니다." : "Could not update Science."), error: true });
+    } catch {
+      await refresh();
+      setNotice({ text: ko ? "Science를 업데이트하지 못했습니다. 다시 시도해 주세요." : "Could not update Science. Please try again.", error: true });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const toggle = async () => {
     const api = ipc();
     if (!api?.productExtensions || !status?.installed || busy) return;
@@ -121,6 +141,9 @@ export function ScienceExtensionPanel() {
             </button>
           ) : (
             <>
+              <button type="button" className={styles.button} data-testid="science-settings-update" disabled={busy !== null} onClick={() => void update()}>
+                <IconCheck size={14} /> {busy === "install" ? (ko ? "업데이트 중…" : "Updating…") : (ko ? "업데이트" : "Update")}
+              </button>
               <button type="button" className={styles.button} data-primary={status.enabled ? "false" : "true"} disabled={busy !== null} onClick={() => void toggle()}>
                 <IconPower size={14} /> {status.enabled ? (ko ? "끄기" : "Disable") : (ko ? "켜기" : "Enable")}
               </button>

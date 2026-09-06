@@ -2975,6 +2975,9 @@ app.whenReady().then(async () => {
       outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html" as const],
       style: (input.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
       lineNumbers: input.lineNumbers === true, doubleSpacing: input.doubleSpacing === true,
+      journalProfileId: typeof input.journalProfileId === "string" ? input.journalProfileId : undefined,
+      expectedJournalProfileVersion: typeof input.expectedJournalProfileVersion === "number" ? input.expectedJournalProfileVersion : undefined,
+      expectedJournalProfileContentSha256: typeof input.expectedJournalProfileContentSha256 === "string" ? input.expectedJournalProfileContentSha256 : undefined,
       metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as ScienceSubmissionMetadata : null,
     };
     if (typeof input.manuscriptId === "string") return service.renderStored(input.projectId, input.manuscriptId, options);

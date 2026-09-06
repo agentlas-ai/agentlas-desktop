@@ -3,6 +3,8 @@
 const { execFileSync } = require("node:child_process");
 const { readFileSync } = require("node:fs");
 const path = require("node:path");
+const { Arch } = require("builder-util");
+const { prepareScienceNativeDependencies } = require("./science-native-dependencies.cjs");
 const {
   materializeProductExtensionSigningPolicy,
 } = require("./product-extension-signing-policy.cjs");
@@ -33,6 +35,8 @@ function verifyPublicPackageMetadata(projectDir) {
 module.exports = async function beforePackPrepare(context) {
   const projectDir = context.packager.projectDir;
   verifyPublicPackageMetadata(projectDir);
+  const scienceNative = await prepareScienceNativeDependencies(projectDir, context.electronPlatformName, Arch[context.arch]);
+  console.log(`[beforePack] prepared Science native dependencies ${JSON.stringify(scienceNative)}`);
   const signingPolicy = materializeProductExtensionSigningPolicy(projectDir);
   console.log(
     `[beforePack] prepared product-extension signing policy ${signingPolicy.sha256} `

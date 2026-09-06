@@ -22,7 +22,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { getSessionCookieHeader } from "../auth";
+import { getAuthSession, getSessionCookieHeader } from "../auth";
 
 export interface AgentLeaseQuote {
   ok: boolean;
@@ -30,6 +30,8 @@ export interface AgentLeaseQuote {
   leasedUntil: string | null;
   perDayCredits: number | null;
   leaseOffered: boolean;
+  code?: "signed_out" | "network" | "http" | "invalid_slug" | "lease_not_offered" | "account_changed" | string;
+  message?: string;
 }
 
 export type AgentLeasePurchaseResult =
@@ -45,38 +47,101 @@ function webBase(): string {
   return (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
 }
 
+type LeaseAuthIdentity = {
+  cookie: string;
+  accountScope: string;
+};
+
+/**
+ * A quote is a read, but it is still account authority: One uses `active` to
+ * decide whether it may create a standing seat without another purchase.
+ * Capture both the credential and the renderer-safe account scope before the
+ * request, then reject a late response from the account that was active when
+ * the request started. Cookie equality alone is not enough for diagnostics;
+ * account scope also catches an auth cache transition before its cookie is
+ * replaced, while the cookie catches two identities sharing a workspace.
+ */
+function captureLeaseAuthIdentity(): LeaseAuthIdentity | null {
+  const cookie = getSessionCookieHeader();
+  const session = getAuthSession();
+  if (!cookie || !session.signedIn) return null;
+  const fingerprint = session.accountFingerprint?.trim();
+  const workspaceId = session.workspaceId?.trim();
+  const accountScope = fingerprint
+    ? `account:${fingerprint}`
+    : workspaceId
+      ? `workspace:${workspaceId}`
+      : null;
+  return accountScope ? { cookie, accountScope } : null;
+}
+
+function leaseAuthIdentityCurrent(start: LeaseAuthIdentity): boolean {
+  const current = captureLeaseAuthIdentity();
+  return current?.cookie === start.cookie && current.accountScope === start.accountScope;
+}
+
+function accountChangedQuote(): AgentLeaseQuote {
+  return {
+    ok: false,
+    active: false,
+    leasedUntil: null,
+    perDayCredits: null,
+    leaseOffered: false,
+    code: "account_changed",
+    message: "The signed-in account changed while checking the Hub lease.",
+  };
+}
+
 export async function getAgentLeaseQuote(slug: string): Promise<AgentLeaseQuote> {
   const missing: AgentLeaseQuote = { ok: false, active: false, leasedUntil: null, perDayCredits: null, leaseOffered: false };
-  const cookie = getSessionCookieHeader();
-  if (!cookie || !slug.trim()) return missing;
+  const authAtRequest = captureLeaseAuthIdentity();
+  if (!authAtRequest) return { ...missing, code: "signed_out", message: "Sign in to agentlas.cloud to check the lease." };
+  if (!slug.trim()) return { ...missing, code: "invalid_slug", message: "The Hub agent identifier is invalid." };
   try {
     const base = webBase();
     const response = await fetch(
       `${base}/api/account/agent-leases?slug=${encodeURIComponent(slug.trim())}`,
-      { headers: { cookie, origin: base } },
+      { headers: { cookie: authAtRequest.cookie, origin: base } },
     );
-    if (!response.ok) return missing;
+    if (!leaseAuthIdentityCurrent(authAtRequest)) return accountChangedQuote();
+    if (!response.ok) {
+      return response.status === 401 || response.status === 403
+        ? { ...missing, code: "signed_out", message: "Sign in to agentlas.cloud to check the lease." }
+        : { ...missing, code: "http", message: "Could not check the Hub lease right now." };
+    }
     const body = (await response.json()) as {
       active?: boolean;
       leasedUntil?: string | null;
       perDayCredits?: number | null;
       leaseOffered?: boolean;
     };
-    return {
+    // The account may switch while the response body is being read. Do this
+    // second check before interpreting `active` as authority for One seating.
+    if (!leaseAuthIdentityCurrent(authAtRequest)) return accountChangedQuote();
+    const leaseOffered = body.leaseOffered === true;
+    const quote: AgentLeaseQuote = {
       ok: true,
       active: body.active === true,
       leasedUntil: typeof body.leasedUntil === "string" ? body.leasedUntil : null,
       perDayCredits: typeof body.perDayCredits === "number" && Number.isFinite(body.perDayCredits)
         ? body.perDayCredits
         : null,
-      leaseOffered: body.leaseOffered === true,
+      leaseOffered,
     };
+    if (body.leaseOffered === false) {
+      return { ...quote, code: "lease_not_offered", message: "This Hub agent does not offer long-term leases." };
+    }
+    if (body.leaseOffered !== true) {
+      return { ...quote, code: "http", message: "Could not read the Hub lease terms right now." };
+    }
+    return quote;
   } catch {
-    return missing;
+    if (!leaseAuthIdentityCurrent(authAtRequest)) return accountChangedQuote();
+    return { ...missing, code: "network", message: "Could not reach agentlas.cloud to check the lease." };
   }
 }
 
-export async function purchaseAgentLease(input: { slug: string; days: number }): Promise<AgentLeasePurchaseResult> {
+export async function purchaseAgentLease(input: { slug: string; days: number; idempotencyKey?: string }): Promise<AgentLeasePurchaseResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) {
     return { ok: false, code: "signed_out", message: "Sign in to agentlas.cloud to lease an agent." };
@@ -90,7 +155,10 @@ export async function purchaseAgentLease(input: { slug: string; days: number }):
     // One key per user confirmation (this function runs once per confirmed
     // purchase click) — a network retry of the same confirmation must not
     // charge twice, while a deliberate second purchase gets a fresh key.
-    const idempotencyKey = randomUUID();
+    const idempotencyKey = input.idempotencyKey ?? randomUUID();
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) {
+      return { ok: false, code: "invalid_idempotency_key", message: "The lease request identity is invalid." };
+    }
     const response = await fetch(`${base}/api/account/agent-leases`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin: base },
@@ -115,11 +183,11 @@ export async function purchaseAgentLease(input: { slug: string; days: number }):
       ...(typeof body.have === "number" ? { have: body.have } : {}),
       message: typeof body.error === "string" ? body.error : "The lease could not be purchased.",
     };
-  } catch (error) {
+  } catch {
     return {
       ok: false,
       code: "network",
-      message: error instanceof Error ? error.message : "Could not reach agentlas.cloud.",
+      message: "Could not reach agentlas.cloud.",
     };
   }
 }

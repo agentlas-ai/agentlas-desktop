@@ -235,6 +235,7 @@ import {
   type ScienceJournalProfile,
   type ScienceJournalRule,
   type ScienceJournalRuleInput,
+  type ScienceJournalWordCountScope,
   type CreateScienceJournalProfileInput,
   type CreateScienceJournalProfileResult,
   type ScienceJournalValidationReport,
@@ -3569,6 +3570,31 @@ function normalizedGuidelineText(value: unknown, maximum = 2_000_000, minimum = 
   return text;
 }
 
+function normalizeJournalWordCountScope(value: unknown): ScienceJournalWordCountScope {
+  const scope = safeJsonRecord(value, 4 * 1024, "journal-rule-word-count-scope");
+  const keys = [
+    "includeTitle",
+    "includeHeadings",
+    "includeAbstract",
+    "includeCaptions",
+    "includeReferences",
+    "includeTableCells",
+    "includeKeywords",
+  ] as const;
+  if (!hasExactKeys(scope, [...keys]) || keys.some((key) => typeof scope[key] !== "boolean")) {
+    throw new Error("science-journal-rule-word-count-scope-invalid");
+  }
+  return {
+    includeTitle: scope.includeTitle as boolean,
+    includeHeadings: scope.includeHeadings as boolean,
+    includeAbstract: scope.includeAbstract as boolean,
+    includeCaptions: scope.includeCaptions as boolean,
+    includeReferences: scope.includeReferences as boolean,
+    includeTableCells: scope.includeTableCells as boolean,
+    includeKeywords: scope.includeKeywords as boolean,
+  };
+}
+
 function normalizeJournalRuleInput(value: unknown): ScienceJournalRuleInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science-journal-rule-invalid");
   const record = value as Record<string, unknown>;
@@ -3596,7 +3622,14 @@ function normalizeJournalRuleInput(value: unknown): ScienceJournalRuleInput {
   } else if (kind === "max-section-words") {
     check = { kind, heading: safeText(raw.heading, 200, "journal-rule-heading"), maximum: safePositiveInteger(raw.maximum, 1, 1_000_000, "journal-rule-maximum") };
   } else if (kind === "max-manuscript-words") {
-    check = { kind, maximum: safePositiveInteger(raw.maximum, 1, 2_000_000, "journal-rule-maximum") };
+    if (raw.scope !== undefined && raw.wordCountScope !== undefined) throw new Error("science-journal-rule-word-count-scope-ambiguous");
+    const scopeValue = raw.scope !== undefined ? raw.scope : raw.wordCountScope;
+    const scope = scopeValue === undefined ? undefined : normalizeJournalWordCountScope(scopeValue);
+    check = {
+      kind,
+      maximum: safePositiveInteger(raw.maximum, 1, 2_000_000, "journal-rule-maximum"),
+      ...(scope === undefined ? {} : { scope }),
+    };
   } else if (kind === "binding-count") {
     const role = String(raw.role) as ScienceManuscriptBinding["role"];
     if (!["claim", "citation", "figure", "table", "supplement"].includes(role)) throw new Error("science-journal-rule-binding-role-invalid");
@@ -16845,8 +16878,7 @@ export class ScienceStore {
       // approved, so approval/turn timestamps do not reliably identify it.
       // A basis-less user turn at the first episode is the durable admission
       // boundary; later successor turns always carry a continuation basis.
-      const firstContractAdmissionProgress = contract.completionScope === "full-study"
-        && sourceTurn.origin === "user"
+      const firstContractAdmissionProgress = sourceTurn.origin === "user"
         && continuationBasis === null
         && session.currentEpisode <= 1;
       const continuationPreparedForSource = Boolean(this.db.prepare(`

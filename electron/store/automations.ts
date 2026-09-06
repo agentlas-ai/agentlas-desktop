@@ -1135,7 +1135,56 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
 
   const runtimeSelections = runtimeFactsForRun(row.id);
 
-  return {
+  // A fresh-run review may need the exact old checkpoint even when the current
+  // graph has drifted and ordinary reconciliation cannot parse that graph.
+  // These are identity fields only; the terminal-close mutation revalidates
+  // every value against the durable row before recording its receipt.
+  let checkpointIdentity: {
+    occurrenceId: string;
+    graphDigest: string;
+    checkpointDigest: string;
+    checkpointUpdatedAt: string;
+    inFlightNodeIds: string[];
+    ambiguousNodeIds: string[];
+    completedEffectNodeIds: string[];
+  } | null = null;
+  try {
+    const checkpoint = row.checkpoint_json ? JSON.parse(row.checkpoint_json) as Record<string, unknown> : null;
+    const occurrenceId = typeof checkpoint?.occurrenceId === "string" ? checkpoint.occurrenceId : row.occurrence_id;
+    const graphDigest = typeof checkpoint?.graphDigest === "string" ? checkpoint.graphDigest : row.graph_digest;
+    const checkpointDigest = typeof checkpoint?.checkpointDigest === "string" ? checkpoint.checkpointDigest : null;
+    const checkpointUpdatedAt = typeof checkpoint?.updatedAt === "string" ? checkpoint.updatedAt : null;
+    const inFlightNodeIds = Array.isArray(checkpoint?.inFlightNodeIds)
+      ? checkpoint.inFlightNodeIds.filter((value): value is string => typeof value === "string")
+      : null;
+    const ambiguousNodeIds = Array.isArray(checkpoint?.ambiguousNodeIds)
+      ? checkpoint.ambiguousNodeIds.filter((value): value is string => typeof value === "string")
+      : null;
+    const effectNodeIds = Array.isArray(checkpoint?.effectNodeIds)
+      ? checkpoint.effectNodeIds.filter((value): value is string => typeof value === "string")
+      : null;
+    const completedNodeIds = Array.isArray(checkpoint?.completedNodeIds)
+      ? checkpoint.completedNodeIds.filter((value): value is string => typeof value === "string")
+      : null;
+    if (occurrenceId && graphDigest && checkpointDigest && checkpointUpdatedAt
+      && inFlightNodeIds && ambiguousNodeIds && effectNodeIds && completedNodeIds) {
+      const effects = new Set(effectNodeIds);
+      checkpointIdentity = {
+        occurrenceId,
+        graphDigest,
+        checkpointDigest,
+        checkpointUpdatedAt,
+        inFlightNodeIds,
+        ambiguousNodeIds,
+        completedEffectNodeIds: completedNodeIds.filter((nodeId) => effects.has(nodeId)),
+      };
+    }
+  } catch {
+    // A malformed historical checkpoint stays a visible run, but never lends
+    // identity material to a terminal-close request.
+  }
+
+  const snapshot = {
     runId: row.id,
     automationId: row.automation_id ?? automationId,
     startedAt: row.started_at ?? "",
@@ -1145,7 +1194,9 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
     ...(typeof tokensUsed === "number" ? { tokensUsed } : {}),
     ...(runtimeSelections.length > 0 ? { runtimeSelections } : {}),
     ...(Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {}),
+    ...(checkpointIdentity ?? {}),
   };
+  return snapshot as WorkflowRunSnapshot;
 }
 
 /** Latest terminal row only; an intervening successful run cancels old resume state. */

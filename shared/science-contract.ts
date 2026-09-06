@@ -2766,11 +2766,26 @@ export interface ScienceManuscriptLayoutSpec {
   titlePageMode?: ScienceManuscriptTitlePageMode;
 }
 
+/**
+ * The source-of-truth word-count boundary for a verified journal rule.
+ * Renderers and validation consume the same fields so the reported count does
+ * not change when a manuscript moves between preview and export.
+ */
+export interface ScienceJournalWordCountScope {
+  includeTitle: boolean;
+  includeHeadings: boolean;
+  includeAbstract: boolean;
+  includeCaptions: boolean;
+  includeReferences: boolean;
+  includeTableCells: boolean;
+  includeKeywords: boolean;
+}
+
 export type ScienceJournalRuleCheck =
   | { kind: "heading-present"; headings: string[]; minimumMatches: number }
   | { kind: "max-title-characters"; maximum: number }
   | { kind: "max-section-words"; heading: string; maximum: number }
-  | { kind: "max-manuscript-words"; maximum: number }
+  | { kind: "max-manuscript-words"; maximum: number; scope?: ScienceJournalWordCountScope }
   | { kind: "binding-count"; role: ScienceManuscriptBinding["role"]; minimum?: number; maximum?: number }
   | { kind: "required-text"; patterns: string[]; minimumMatches: number }
   | { kind: "output-format"; allowed: Array<"docx" | "tex" | "pdf" | "zip">; preferred: "docx" | "tex" | "pdf" }

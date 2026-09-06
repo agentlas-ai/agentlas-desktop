@@ -46,6 +46,11 @@ function toAgent(row: AgentRow): InstalledAgent {
   const persistedKind =
     row.entity_kind === "team" ? "team" : row.entity_kind === "agent" ? "agent" : undefined;
   const kind = route?.kind ?? persistedKind;
+  // Legacy automatic imports from deleted pytest workspaces are diagnostic
+  // registrations, not selectable workers. Keep their identities and history;
+  // suppress only the inventory projection proven by source + missing path.
+  const missingTestImport = asset.source === "local-import" && Boolean(route?.missingSince)
+    && /[/\\](?:pytest-of-[^/\\]+|pytest-\d+)[/\\]/i.test(route?.path ?? "");
   return {
     id: row.id,
     slug: row.slug,
@@ -63,7 +68,7 @@ function toAgent(row: AgentRow): InstalledAgent {
     tone: row.tone as InstalledAgent["tone"],
     bookmarkedAt: (row as { bookmarked_at?: string | null }).bookmarked_at ?? null,
     parentTeamId: (row as { parent_team_id?: string | null }).parent_team_id ?? null,
-    visibility: publicAgentVisibility(row),
+    visibility: missingTestImport ? "background" : publicAgentVisibility(row),
     ...(route
       ? {
           runtimeLabel: route.runtime,

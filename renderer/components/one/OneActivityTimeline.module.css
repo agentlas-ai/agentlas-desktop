@@ -1259,6 +1259,55 @@ button.artifactVisual { cursor: pointer; }
   padding-left: 0;
   border-top: 1px solid var(--paper-3);
 }
+
+/* Work mounts the canonical One output rail inside its own shell. Keep the
+   rail in the shell's layout on desktop so the transcript and composer shrink
+   with it; the default artifact rail position is an overlay for surfaces that
+   do not own a grid track. The 20px trailing gutter matches the desktop Work
+   window's existing output inset. */
+.taskCockpitShell[data-output-flow="true"] {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) calc(var(--task-cockpit-output-width, 392px) + 20px);
+}
+
+.taskCockpitShell[data-output-flow="true"] > :global(.task-cockpit-main) {
+  grid-column: 1;
+  min-width: 0;
+}
+
+.taskCockpitShell[data-output-flow="true"] > [data-one-runtime-artifacts="true"] {
+  position: relative !important;
+  inset: auto !important;
+  grid-column: 2;
+  width: var(--task-cockpit-output-width, 392px) !important;
+  height: 100%;
+  min-width: 0;
+  margin-right: 20px;
+  border-radius: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 760px) {
+  .taskCockpitShell[data-output-flow="true"] {
+    display: flex !important;
+  }
+
+  .taskCockpitShell[data-output-flow="true"] > [data-one-runtime-artifacts="true"] {
+    position: absolute !important;
+    top: 80px !important;
+    right: 20px !important;
+    bottom: 20px !important;
+    inset-inline-start: auto !important;
+    width: min(var(--task-cockpit-output-width, 392px), calc(100% - 56px)) !important;
+    height: auto;
+    margin-right: 0;
+    border-left: 1px solid var(--paper-3);
+    box-shadow: -16px 0 36px rgba(24, 29, 32, .09);
+  }
+}
 .appPreviewView,
 .appPreviewView > section,
 .browserLive { border: 0; border-radius: 0; box-shadow: none; }

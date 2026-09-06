@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import {
   acquireBrowserCdpLease,
   browserCdpPort,
+  browserCdpPortReady,
+  ensureBrowserCdpHost,
   releaseBrowserCdpLease,
   scheduleBrowserCdpIdleShutdown,
 } from "../mcp-tools/browser-cdp-launcher";
@@ -56,8 +58,30 @@ const railTargetFlights = new Map<string, Promise<VerifiedCdpTarget | null>>();
 // the old 15fps rail while CDP acknowledgements still provide backpressure.
 const LIVE_FRAME_INTERVAL_MS = 1_000 / 24;
 const CDP_CALL_TIMEOUT_MS = 5_000;
+const INITIAL_DOCUMENT_READY_TIMEOUT_MS = 4_000;
 const WEB_VIEWPORT = { width: 1_280, height: 800 } as const;
 const PHONE_VIEWPORT = { width: 390, height: 844 } as const;
+
+type LiveDiagnosticValue = string | number | boolean | null;
+const liveDiagnosticCounts = new Map<string, number>();
+const LIVE_DIAGNOSTIC_LIMIT = 8;
+
+/**
+ * Keep the live-view failure boundary observable without ever writing the
+ * requested URL, query, cookies, or page content to the durable main log.
+ * A bounded counter prevents a disconnected stream from flooding it.
+ */
+function logLiveDiagnostic(stage: string, fields: Record<string, LiveDiagnosticValue> = {}): void {
+  const key = `${stage}:${String(fields.error ?? fields.outcome ?? "")}`;
+  const count = liveDiagnosticCounts.get(key) ?? 0;
+  if (count >= LIVE_DIAGNOSTIC_LIMIT) return;
+  liveDiagnosticCounts.set(key, count + 1);
+  try {
+    console.info("[agentlas-browser-live]", JSON.stringify({ stage, ...fields }));
+  } catch {
+    // Diagnostics must never affect the browser stream.
+  }
+}
 
 function unavailable(error: BrowserLiveFrame["error"], viewport: BrowserLiveViewport = "desktop"): BrowserLiveFrame {
   return {
@@ -283,7 +307,63 @@ class CdpLiveStream {
     private readonly onClosed: () => void,
   ) {}
 
+  private async waitForInitialDocument(): Promise<void> {
+    const startedAt = Date.now();
+    const deadline = startedAt + INITIAL_DOCUMENT_READY_TIMEOUT_MS;
+    let latest: { readyState: string; bodyTextLength: number; bodyChildren: number } = {
+      readyState: "unknown",
+      bodyTextLength: 0,
+      bodyChildren: 0,
+    };
+    while (Date.now() < deadline) {
+      try {
+        const evaluated = await this.call("Runtime.evaluate", {
+          expression: `(() => {
+            const body = document.body;
+            const text = body?.innerText || "";
+            return {
+              readyState: document.readyState,
+              bodyTextLength: text.length,
+              bodyChildren: body?.children.length || 0,
+            };
+          })()`,
+          returnByValue: true,
+        }) as {
+          result?: {
+            value?: {
+              readyState?: unknown;
+              bodyTextLength?: unknown;
+              bodyChildren?: unknown;
+            };
+          };
+        };
+        const value = evaluated.result?.value;
+        latest = {
+          readyState: typeof value?.readyState === "string" ? value.readyState : "unknown",
+          bodyTextLength: Math.max(0, Math.trunc(Number(value?.bodyTextLength) || 0)),
+          bodyChildren: Math.max(0, Math.trunc(Number(value?.bodyChildren) || 0)),
+        };
+        if (
+          (latest.readyState === "interactive" || latest.readyState === "complete")
+          && (latest.bodyTextLength > 0 || latest.bodyChildren > 0)
+        ) {
+          logLiveDiagnostic("document-ready", { ...latest, waitMs: Date.now() - startedAt });
+          return;
+        }
+      } catch {
+        // The execution context can be unavailable while the new document is swapping in.
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    logLiveDiagnostic("document-ready-timeout", { ...latest, waitMs: Date.now() - startedAt });
+  }
+
   async start(): Promise<BrowserLiveFrame> {
+    logLiveDiagnostic("stream-start", {
+      viewport: this.viewport,
+      targetIdPresent: Boolean(this.target.id),
+      urlPresent: Boolean(this.target.url),
+    });
     const socket = new WebSocket(this.target.socketUrl);
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
@@ -329,6 +409,10 @@ class CdpLiveStream {
     this.width = Math.max(1, Math.round(Number(measuredViewport?.clientWidth) || viewport.width));
     this.height = Math.max(1, Math.round(Number(measuredViewport?.clientHeight) || viewport.height));
 
+    // /json/new returns the target before its navigation has committed. Wait for
+    // the target's own document to become observable so the first frame cannot
+    // replace a usable page with the transient white about:blank capture.
+    await this.waitForInitialDocument();
     await this.call("Page.startScreencast", {
       format: "jpeg",
       quality: 72,
@@ -346,6 +430,11 @@ class CdpLiveStream {
     }) as { data?: string };
     if (!screenshot.data) throw new Error("empty-stream-frame");
     const frame = this.frame(screenshot.data);
+    logLiveDiagnostic("initial-frame", {
+      width: this.width,
+      height: this.height,
+      bytes: screenshot.data.length,
+    });
     this.sink(frame);
     return frame;
   }
@@ -596,7 +685,9 @@ class CdpLiveStream {
       this.width = Math.max(1, Math.round(Number(row.deviceWidth) || this.width));
       this.height = Math.max(1, Math.round(Number(row.deviceHeight) || this.height));
     }
+    const first = this.frameSequence === 0;
     this.sink(this.frame(data));
+    if (first) logLiveDiagnostic("first-screencast-frame", { bytes: data.length, width: this.width, height: this.height });
   }
 
   private frame(data: string): BrowserLiveStreamFrame {
@@ -620,6 +711,7 @@ class CdpLiveStream {
     if (this.disposed) return;
     this.disposed = true;
     this.rejectPending("stream-disconnected");
+    logLiveDiagnostic("stream-closed", { error: "browser-offline", viewport: this.viewport });
     // 마지막으로 "이제 볼 수 없다"는 프레임을 한 번 밀어 준다. 이것 없이는
     // 렌더러가 마지막 정상 프레임을 영원히 들고 있어, 죽은 페이지가 살아있는
     // 것처럼 보였다(U-D-1 범위 밖 3종 ①, 2026-08-25). 정상 종료(close())는
@@ -871,9 +963,34 @@ export async function startBrowserLiveSession(
 ): Promise<BrowserLiveSessionResult> {
   const port = browserCdpPort();
   const preferred = matchUrl(preferredUrl);
-  if (!preferred) return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+  logLiveDiagnostic("start-request", {
+    ownerId,
+    viewport: viewportMode,
+    urlPresent: Boolean(preferred),
+  });
+  if (!preferred) {
+    logLiveDiagnostic("start-rejected", { error: "no-page", viewport: viewportMode });
+    return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+  }
   const lease = await acquireBrowserCdpLease("live-view").catch(() => null);
-  if (!lease) return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+  if (!lease) {
+    logLiveDiagnostic("lease-unavailable", { error: "browser-offline", viewport: viewportMode });
+    return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+  }
+  try {
+    const host = await ensureBrowserCdpHost();
+    logLiveDiagnostic("cdp-host-ready", { started: host.started, pidPresent: host.pid > 0, viewport: viewportMode });
+  } catch {
+    releaseBrowserCdpLease(lease);
+    logLiveDiagnostic("cdp-unavailable", { error: "browser-offline", viewport: viewportMode });
+    return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+  }
+  if (!(await browserCdpPortReady())) {
+    releaseBrowserCdpLease(lease);
+    logLiveDiagnostic("cdp-unavailable-after-ensure", { error: "browser-offline", viewport: viewportMode });
+    return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+  }
+  logLiveDiagnostic("cdp-ready", { viewport: viewportMode, port });
   let leaseReleased = false;
   const releaseLease = (scheduleShutdown = true) => {
     if (leaseReleased) return;
@@ -886,12 +1003,19 @@ export async function startBrowserLiveSession(
     target = await ensureRailTarget(port, preferred);
   } catch {
     releaseLease();
+    logLiveDiagnostic("target-resolution-failed", { error: "capture-failed", viewport: viewportMode });
     return { sessionId: null, interactive: false, frame: unavailable("capture-failed", viewportMode) };
   }
   if (!target) {
     releaseLease();
+    logLiveDiagnostic("target-missing", { error: "no-page", viewport: viewportMode });
     return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
   }
+  logLiveDiagnostic("target-ready", {
+    viewport: viewportMode,
+    targetIdPresent: Boolean(target.id),
+    urlPresent: Boolean(target.url),
+  });
 
   const sessionId = randomUUID();
   let stream!: CdpLiveStream;
@@ -903,10 +1027,16 @@ export async function startBrowserLiveSession(
   liveSessions.set(sessionId, { ownerId, stream, releaseLease });
   try {
     const frame = await stream.start();
+    logLiveDiagnostic("session-ready", {
+      viewport: viewportMode,
+      width: frame.width ?? 0,
+      height: frame.height ?? 0,
+    });
     return { sessionId, interactive: true, frame };
   } catch {
     liveSessions.delete(sessionId);
     await stream.close().catch(() => undefined);
+    logLiveDiagnostic("session-failed", { error: "capture-failed", viewport: viewportMode });
     return { sessionId: null, interactive: false, frame: unavailable("capture-failed", viewportMode) };
   }
 }

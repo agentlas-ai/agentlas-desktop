@@ -477,6 +477,7 @@ export function listPendingGrowthProposals(limit?: number): {
     .prepare(
       `SELECT * FROM agent_evolution_proposals
         WHERE json_extract(source_json, '$._growth') = 1
+          AND json_extract(source_json, '$._growthDeletedAt') IS NULL
           AND status IN ('candidate', 'applied', 'measured')
         ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
         LIMIT ?`,
@@ -497,10 +498,54 @@ export function countPendingGrowthProposals(): number {
   const row = getDb()
     .prepare(
       `SELECT COUNT(*) AS n FROM agent_evolution_proposals
-        WHERE json_extract(source_json, '$._growth') = 1 AND status = 'candidate'`,
+        WHERE json_extract(source_json, '$._growth') = 1
+          AND json_extract(source_json, '$._growthDeletedAt') IS NULL
+          AND status = 'candidate'`,
     )
     .get() as { n?: number } | undefined;
   return Number(row?.n ?? 0);
+}
+
+/**
+ * Remove one growth-proposal session from the user-facing inbox while keeping
+ * the governed asset, apply/rollback receipts, and append-only ledger intact.
+ * This is deliberately a soft delete: a deleted card must never be mistaken
+ * for an undo of an already applied change.
+ */
+export function deleteAgentGrowthProposalSession(proposalId: string): AgentEvolutionProposalUi {
+  recoverIncompleteAgentEvolutionOperations();
+  let row = proposalRow(proposalId);
+  const source = parseObject(row.source_json);
+  if (source._growth !== true) {
+    throw new Error("Only a growth proposal session can be deleted from the dashboard");
+  }
+  const existingDeletedAt = typeof source._growthDeletedAt === "string"
+    ? source._growthDeletedAt
+    : null;
+  if (existingDeletedAt) return toUi(row);
+  if (row.status === "applying" || row.status === "rolling_back") {
+    throw new Error("Cannot delete a growth proposal while its operation is running");
+  }
+  const deletedAt = nowIso();
+  const nextSource = { ...source, _growthDeletedAt: deletedAt };
+  const result = getDb()
+    .prepare(
+      `UPDATE agent_evolution_proposals
+       SET source_json = ?, updated_at = ?
+       WHERE id = ?
+         AND json_extract(source_json, '$._growth') = 1
+         AND json_extract(source_json, '$._growthDeletedAt') IS NULL`,
+    )
+    .run(JSON.stringify(nextSource), deletedAt, row.id);
+  if (result.changes !== 1) {
+    row = proposalRow(row.id);
+    const racedSource = parseObject(row.source_json);
+    if (typeof racedSource._growthDeletedAt === "string") return toUi(row);
+    throw new Error("Growth proposal deletion lost a concurrent state race");
+  }
+  row = proposalRow(row.id);
+  appendLedger(row, "proposal_session_deleted");
+  return toUi(row);
 }
 
 /** Candidate collection only. No approval timestamp and no package file write. */

@@ -1,4 +1,4 @@
-import type { FsPathGrant } from "@shared/types";
+import type { ChatHistoryEntry, FsPathGrant, ImageAttachment } from "@shared/types";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 
 export const CHAT_FILE_MARKER_VERSION = "v1" as const;
@@ -45,6 +45,7 @@ export interface ChatFilesBridge {
   snapshot: (input: { chatId: string; files: ChatFileDraft[] }) => Promise<ChatFileSnapshotResult>;
   listGroup: (input: { chatId: string; groupId: string }) => Promise<StoredChatFile[]>;
   openExternal: (input: { chatId: string; groupId: string; id: string; sha256: string }) => Promise<{ ok: boolean; message?: string }>;
+  appendMessage: (input: { chatId: string; text: string; images?: ImageAttachment[] }) => Promise<ChatHistoryEntry>;
 }
 
 export function chatFilesBridge(): ChatFilesBridge | null {

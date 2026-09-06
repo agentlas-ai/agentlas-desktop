@@ -1144,6 +1144,156 @@ export function resolveChromeExe(): string | null {
   return resolveAgentlasBrowserRuntimeExecutable();
 }
 
+export interface BrowserCdpHostEnsureResult {
+  started: boolean;
+  pid: number;
+}
+
+const BROWSER_CDP_HOST_ENSURE_TIMEOUT_MS = 20_000;
+let browserCdpHostEnsureFlight: Promise<BrowserCdpHostEnsureResult> | null = null;
+
+type BrowserCdpLauncherMessage = {
+  id?: unknown;
+  error?: unknown;
+  result?: { isError?: unknown };
+};
+
+/**
+ * Run one read-only MCP call through the shipped launcher so its own lazy
+ * ensureChrome path starts the bundled browser. The launcher process is only
+ * a bootstrap client: the live-view lease stays in this process and the
+ * guardian is rebound to this process before the bootstrap exits.
+ */
+async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<void> {
+  const child = spawn(process.execPath, [launcher], {
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      AGENTLAS_CDP_PROFILE: browserCdpProfilePath(),
+      AGENTLAS_CDP_PORT: String(browserCdpPort()),
+      AGENTLAS_CDP_HEADLESS: process.env.AGENTLAS_CDP_HEADLESS ?? "1",
+      AGENTLAS_CDP_AUTO_STOP: "1",
+      // The bootstrap owns no live-view lease. Rebind the exact browser to the
+      // Electron host below before closing this short-lived MCP client.
+      AGENTLAS_CDP_SKIP_GUARDIAN: "1",
+    },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let settled = false;
+  let outputBuffer = "";
+  const pending = new Map<number, { resolve: (message: BrowserCdpLauncherMessage) => void; reject: (error: Error) => void }>();
+  const rejectPending = (error: Error) => {
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  };
+  const onOutput = (chunk: Buffer | string) => {
+    outputBuffer += String(chunk);
+    let newline = outputBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = outputBuffer.slice(0, newline).trim();
+      outputBuffer = outputBuffer.slice(newline + 1);
+      newline = outputBuffer.indexOf("\n");
+      if (!line) continue;
+      let message: BrowserCdpLauncherMessage;
+      try { message = JSON.parse(line) as BrowserCdpLauncherMessage; } catch { continue; }
+      const id = Number(message.id);
+      if (!Number.isInteger(id)) continue;
+      const waiter = pending.get(id);
+      if (!waiter) continue;
+      pending.delete(id);
+      waiter.resolve(message);
+    }
+  };
+  child.stdout?.on("data", onOutput);
+  child.once("error", (error) => rejectPending(error instanceof Error ? error : new Error(String(error))));
+  child.once("exit", (code, signal) => {
+    if (!settled) rejectPending(new Error(`browser-bootstrap-exited:${code ?? signal ?? "unknown"}`));
+  });
+
+  const response = (id: number): Promise<BrowserCdpLauncherMessage> => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`browser-bootstrap-timeout:${id}`));
+    }, BROWSER_CDP_HOST_ENSURE_TIMEOUT_MS);
+    pending.set(id, {
+      resolve: (message) => { clearTimeout(timer); resolve(message); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    });
+  });
+  const send = (message: Record<string, unknown>): void => {
+    if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("browser-bootstrap-stdin-closed");
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+  };
+  const close = async (): Promise<void> => {
+    settled = true;
+    rejectPending(new Error("browser-bootstrap-closed"));
+    try { child.stdin?.end(); } catch { /* already closed */ }
+    await new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      const timer = setTimeout(() => {
+        try { child.kill("SIGTERM"); } catch { /* already exited */ }
+        resolve();
+      }, 2_000);
+      child.once("exit", () => { clearTimeout(timer); resolve(); });
+    });
+  };
+
+  try {
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "agentlas-live-view-bootstrap", version: "1" },
+    } });
+    const initialized = await response(1);
+    if (initialized.error) throw new Error("browser-bootstrap-initialize-failed");
+    send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+    send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "browser_tabs",
+      arguments: { action: "list" },
+    } });
+    const listed = await response(2);
+    if (listed.error || listed.result?.isError === true) throw new Error("browser-bootstrap-tabs-failed");
+  } finally {
+    await close();
+    child.stdout?.removeListener("data", onOutput);
+  }
+}
+
+async function ensureBrowserCdpHostOnce(): Promise<BrowserCdpHostEnsureResult> {
+  ensureBrowserCdpProfilePrivate();
+  if (await browserCdpPortReady()) {
+    const ownership = await reconcileBrowserCdpOwnerWithRetry();
+    if (ownership.state !== "owned" || !ownership.pid) {
+      throw new Error(`browser-cdp-host-unverified:${ownership.state}:${ownership.reason}`);
+    }
+    if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new Error("browser-cdp-guardian-unavailable");
+    return { started: false, pid: ownership.pid };
+  }
+
+  const launcher = materializeBrowserCdpLauncher();
+  if (!fs.existsSync(launcher)) throw new Error("browser-cdp-launcher-unavailable");
+  await invokeBrowserTabsListThroughLauncher(launcher);
+  if (!(await browserCdpPortReady())) throw new Error("browser-cdp-host-not-ready");
+  const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 6, delayMs: 100 });
+  if (ownership.state !== "owned" || !ownership.pid) {
+    throw new Error(`browser-cdp-host-unverified:${ownership.state}:${ownership.reason}`);
+  }
+  if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new Error("browser-cdp-guardian-unavailable");
+  return { started: true, pid: ownership.pid };
+}
+
+/** Ensure the exact Agentlas browser host exists without opening a login window. */
+export function ensureBrowserCdpHost(): Promise<BrowserCdpHostEnsureResult> {
+  if (browserCdpHostEnsureFlight) return browserCdpHostEnsureFlight;
+  const flight = ensureBrowserCdpHostOnce();
+  browserCdpHostEnsureFlight = flight;
+  void flight.then(
+    () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
+    () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
+  );
+  return flight;
+}
+
 /**
  * Materialized launcher and regression tests share one classifier source so
  * approval behavior cannot drift between the shipped script and its tests.
@@ -1613,6 +1763,7 @@ function scheduleIdleReaper() {
   } catch (e) {}
 }
 function scheduleBrowserGuardian(browserPid) {
+  if (process.env.AGENTLAS_CDP_SKIP_GUARDIAN === '1') return;
   if (!Number.isInteger(browserPid) || browserPid <= 0 || !process.argv[1]) return;
   try {
     const child = spawn(process.execPath, [process.argv[1], '--agentlas-cdp-guard', String(browserPid), String(process.pid)], {

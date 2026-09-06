@@ -2827,6 +2827,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 }
 .journalTargetButton { border: 1px solid #e3e3e3; padding-left: 10px; font-size: 12px; }
 .journalTargetButton:hover { background: #f5f5f5; }
+.journalTargetLabel { min-width: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .journalToolbar .journalMetric { color: #7c7c7c; }
 .journalSubmitButton { min-height: 34px; margin-left: auto; border-radius: 8px; font-size: 12px; }
 
@@ -3874,8 +3875,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   background: linear-gradient(var(--grey-600), var(--grey-600)) center/5.6px 1.6px no-repeat;
 }
 .acquisitionBoundary, .analysisRunsSummary, .resultsSummary { color: var(--grey-600); font-size: 12px; line-height: 1.6; }
-.analysisRunsSummary { display: flex; flex-wrap: wrap; gap: 7px 18px; margin: 14px 0 18px; }
-.analysisRunsSummary > span { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.analysisRunsSummary, .resultsSummary { display: flex; flex-wrap: wrap; gap: 7px 18px; margin: 14px 0 18px; }
+.analysisRunsSummary > span, .resultsSummary > span { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .analysisRunsSummary strong { color: var(--ink); font-variant-numeric: tabular-nums; }
 .analysisRunsSummary [data-alert="true"] { color: var(--notice-ink); }
 .acquisitionBoundary { margin-top: 16px; border-left: 2px solid var(--grey-300); padding: 2px 0 2px 12px; font-size: 13px; color: var(--grey-700); }

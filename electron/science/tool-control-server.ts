@@ -569,7 +569,24 @@ const JOURNAL_RULE_SCHEMA = {
         { type: "object", properties: { kind: { const: "heading-present" }, headings: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } }, minimumMatches: { type: "integer", minimum: 1, maximum: 20 } }, required: ["kind", "headings", "minimumMatches"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "max-title-characters" }, maximum: { type: "integer", minimum: 1, maximum: 10000 } }, required: ["kind", "maximum"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "max-section-words" }, heading: { type: "string", minLength: 1, maxLength: 200 }, maximum: { type: "integer", minimum: 1, maximum: 1000000 } }, required: ["kind", "heading", "maximum"], additionalProperties: false },
-        { type: "object", properties: { kind: { const: "max-manuscript-words" }, maximum: { type: "integer", minimum: 1, maximum: 2000000 } }, required: ["kind", "maximum"], additionalProperties: false },
+        { type: "object", properties: {
+          kind: { const: "max-manuscript-words" },
+          maximum: { type: "integer", minimum: 1, maximum: 2000000 },
+          scope: {
+            type: "object",
+            properties: {
+              includeTitle: { type: "boolean" },
+              includeHeadings: { type: "boolean" },
+              includeAbstract: { type: "boolean" },
+              includeCaptions: { type: "boolean" },
+              includeReferences: { type: "boolean" },
+              includeTableCells: { type: "boolean" },
+              includeKeywords: { type: "boolean" },
+            },
+            required: ["includeTitle", "includeHeadings", "includeAbstract", "includeCaptions", "includeReferences", "includeTableCells", "includeKeywords"],
+            additionalProperties: false,
+          },
+        }, required: ["kind", "maximum"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "binding-count" }, role: { type: "string", enum: ["claim", "citation", "figure", "table", "supplement"] }, minimum: { type: "integer", minimum: 0, maximum: 100000 }, maximum: { type: "integer", minimum: 0, maximum: 100000 } }, required: ["kind", "role"], anyOf: [{ required: ["minimum"] }, { required: ["maximum"] }], additionalProperties: false },
         { type: "object", properties: { kind: { const: "required-text" }, patterns: { type: "array", minItems: 1, maxItems: 30, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 500 } }, minimumMatches: { type: "integer", minimum: 1, maximum: 30 } }, required: ["kind", "patterns", "minimumMatches"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "output-format" }, allowed: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", enum: ["docx", "tex", "pdf", "zip"] } }, preferred: { type: "string", enum: ["docx", "tex", "pdf"] } }, required: ["kind", "allowed", "preferred"], additionalProperties: false },
@@ -2532,6 +2549,10 @@ const PLATFORM_TOOLS: McpTool[] = [
         tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: { type: "string" },
         style: { type: "string", enum: ["numeric", "apa", "nature"] }, line_numbers: { type: "boolean" }, double_spacing: { type: "boolean" },
         outputs: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["html", "latex", "docx", "pdf", "package"] } },
+
+        journal_profile_id: { type: "string", minLength: 1 },
+        expected_journal_profile_version: { type: "integer", minimum: 1 },
+        expected_journal_profile_content_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         metadata: SUBMISSION_METADATA_SCHEMA,
       },
       required: ["tool_call_id", "manuscript_id"], additionalProperties: false,
@@ -4322,6 +4343,9 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     const rendered = await scienceManuscriptRenderService().render(manuscript, {
       outputs, style: (body.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
       lineNumbers: body.line_numbers === true, doubleSpacing: body.double_spacing === true,
+      journalProfileId: typeof body.journal_profile_id === "string" ? body.journal_profile_id : undefined,
+      expectedJournalProfileVersion: typeof body.expected_journal_profile_version === "number" ? body.expected_journal_profile_version : undefined,
+      expectedJournalProfileContentSha256: typeof body.expected_journal_profile_content_sha256 === "string" ? body.expected_journal_profile_content_sha256 : undefined,
       metadata: body.metadata && typeof body.metadata === "object" ? body.metadata as ScienceSubmissionMetadata : null,
     });
     const directory = userDataPath("extensions", "agentlas-science", "manuscript-renders", grant.context.projectId, manuscript.id, `v${manuscript.currentVersion}`);
@@ -4342,7 +4366,8 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     for (const file of rendered.files) write(file.name, file.bytes);
     const report = {
       schema: rendered.schema, manuscriptId: rendered.manuscriptId, manuscriptVersion: rendered.manuscriptVersion, manuscriptContentSha256: rendered.manuscriptContentSha256,
-      style: rendered.style, document: rendered.document, references: rendered.references.map((reference) => ({ locator: reference.locator, ordinal: reference.ordinal, text: reference.text })),
+      style: rendered.style, layout: rendered.layout, journalRenderProfile: rendered.journalRenderProfile, draftBoundary: rendered.draftBoundary,
+      document: rendered.document, references: rendered.references.map((reference) => ({ locator: reference.locator, ordinal: reference.ordinal, text: reference.text })),
       warnings: rendered.warnings, equationFallbacks: rendered.equationFallbacks,
       pdf: rendered.pdf ? { engine: rendered.pdf.engine, degraded: rendered.pdf.degraded, degradedReason: rendered.pdf.degradedReason, byteSize: rendered.pdf.bytes.byteLength } : null,
       pdfFailure: rendered.pdfFailure, capabilities: rendered.capabilities,

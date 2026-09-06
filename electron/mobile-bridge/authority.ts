@@ -2029,7 +2029,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["installedAgentId", "displayName"]);
         const installedAgentId = requiredIdentifier(params, "installedAgentId");
         const displayName = optionalIdentifier(params, "displayName", 80);
-        return asJsonValue(addOneOrgMember({ installedAgentId, ...(displayName ? { displayName } : {}) }), request.method);
+        return asJsonValue(await addOneOrgMember({ installedAgentId, ...(displayName ? { displayName } : {}) }), request.method);
       }
       case "one.org.openMember": {
         const params = guardedParams(request, ["id", "expectedRevision"]);

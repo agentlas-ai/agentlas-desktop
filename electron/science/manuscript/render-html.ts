@@ -15,6 +15,7 @@ import type { ScienceManuscriptLayoutSpec, ScienceSubmissionMetadata } from "../
 import { citationMarker, formatReference, orderReferences, type BibliographyStyle, type FormattedReference } from "./bibliography";
 import type { ResolvedManuscriptAssets, ResolvedTable, TableCell } from "./assets";
 import { inlineToPlainText, type BlockNode, type InlineNode, type ManuscriptDocument } from "./document-model";
+import type { ScienceManuscriptDraftBoundary } from "./journal-render-profile";
 
 export interface HtmlRenderOptions {
   style: BibliographyStyle;
@@ -24,6 +25,7 @@ export interface HtmlRenderOptions {
   /** When false, figures render as placeholders that name the locator (fast preview without bytes). */
   embedAssets: boolean;
   layout: ScienceManuscriptLayoutSpec;
+  draftBoundary?: ScienceManuscriptDraftBoundary | null;
   /** Language hint for hyphenation and quotes. */
   lang?: string;
 }
@@ -279,6 +281,7 @@ export const MANUSCRIPT_PAPER_CSS = `
 .manuscriptPaper{font-family:"Times New Roman","Nimbus Roman No9 L","Liberation Serif",Times,serif;font-size:11pt;line-height:1.35;color:#111;max-width:180mm;margin:0 auto;padding:0 0 24pt;word-break:normal;overflow-wrap:anywhere;hyphens:auto}
 .manuscriptPaper *{box-sizing:border-box}
 .manuscriptPaperHeader{text-align:center;margin:0 0 18pt}
+.manuscriptPaperDraftBoundary{font-size:9pt;font-weight:700;letter-spacing:.08em;text-align:center;color:#444;border-bottom:1px solid #888;padding:0 0 4pt;margin:0 0 12pt}
 .manuscriptPaperTitle{font-size:18pt;font-weight:700;line-height:1.3;margin:0 0 10pt}
 .manuscriptPaperAuthors{font-size:11pt;margin:0 0 4pt}
 .manuscriptPaperAffiliations{list-style:none;padding:0;margin:0 0 4pt;font-size:9.5pt;color:#333}
@@ -365,8 +368,15 @@ export function renderManuscriptHtml(doc: ManuscriptDocument, assets: ResolvedMa
   const body = doc.body.map((block) => writer.block(block)).join("\n");
   const references = writer.referencesBlock();
   const classes = ["manuscriptPaper", options.mode === "print" ? "isPrint" : "isPreview", options.layout.lineNumbers ? "hasLineNumbers" : ""].filter(Boolean).join(" ");
-  const bodyHtml = `<article class="${classes}" lang="${escapeHtml(options.lang ?? "en")}" data-render-target="${escapeHtml(options.layout.renderTarget ?? "initial-submission")}" data-latex-template="${escapeHtml(options.layout.latexTemplate ?? "generic-article")}"${options.layout.latexJournalStyle ? ` data-latex-journal="${escapeHtml(options.layout.latexJournalStyle)}"` : ""} data-columns="${options.layout.columnCount ?? 1}" data-figures="${doc.figures.length}" data-tables="${doc.tables.length}" data-references="${references.references.length}">${writer.titleBlock(title)}${writer.abstractBlock()}<main class="manuscriptPaperBody">${body}</main>${writer.statementsBlock()}${references.html}</article>`;
+  const draft = options.draftBoundary;
+  const draftMarkup = draft
+    ? `<div class="manuscriptPaperDraftBoundary" data-draft-token="${escapeHtml(draft.machineReadableToken)}">${escapeHtml(draft.literalText)}</div>`
+    : "";
+  const bodyHtml = `<article class="${classes}" lang="${escapeHtml(options.lang ?? "en")}" data-render-target="${escapeHtml(options.layout.renderTarget ?? "initial-submission")}" data-latex-template="${escapeHtml(options.layout.latexTemplate ?? "generic-article")}"${options.layout.latexJournalStyle ? ` data-latex-journal="${escapeHtml(options.layout.latexJournalStyle)}"` : ""} data-columns="${options.layout.columnCount ?? 1}" data-figures="${doc.figures.length}" data-tables="${doc.tables.length}" data-references="${references.references.length}" data-draft-status="${draft ? "draft" : "ready"}">${draftMarkup}${writer.titleBlock(title)}${writer.abstractBlock()}<main class="manuscriptPaperBody">${body}</main>${writer.statementsBlock()}${references.html}</article>`;
   const css = `${MANUSCRIPT_PAPER_CSS}${manuscriptLayoutCss(options.layout)}`;
-  const html = `<!doctype html><html lang="${escapeHtml(options.lang ?? "en")}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>${css}</style></head><body style="margin:0;background:#fff">${bodyHtml}</body></html>`;
+  const draftMetadata = draft
+    ? `<meta name="agentlas-manuscript-status" content="draft"><meta name="agentlas-draft-token" content="${escapeHtml(draft.machineReadableToken)}"><meta name="agentlas-manuscript-content-sha256" content="${escapeHtml(draft.manuscriptContentSha256)}">${draft.journalProfileId ? `<meta name="agentlas-journal-profile-id" content="${escapeHtml(draft.journalProfileId)}"><meta name="agentlas-journal-profile-version" content="${escapeHtml(String(draft.journalProfileVersion))}"><meta name="agentlas-journal-profile-content-sha256" content="${escapeHtml(draft.journalProfileContentSha256 ?? "")}">` : ""}`
+    : `<meta name="agentlas-manuscript-status" content="ready">`;
+  const html = `<!doctype html><html lang="${escapeHtml(options.lang ?? "en")}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${draftMetadata}<title>${escapeHtml(title)}</title><style>${css}</style></head><body style="margin:0;background:#fff">${bodyHtml}</body></html>`;
   return { html, bodyHtml, css, references: references.references };
 }

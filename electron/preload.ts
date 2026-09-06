@@ -15,6 +15,9 @@ import type {
   Automation,
   AutomationCreateInput,
   AutomationGraphReconcileInput,
+  AutomationGraphTerminalCloseCandidate,
+  AutomationGraphTerminalCloseInput,
+  AutomationGraphTerminalCloseReceipt,
   AutomationTriggerEventReconcileInput,
   FsPathGrant,
   FsReadScope,
@@ -432,6 +435,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentEvolution:rollback", proposalId),
     listGrowth: (limit?: number) =>
       ipcRenderer.invoke("agentEvolution:listGrowth", limit),
+    deleteGrowthSession: (proposalId: string) =>
+      ipcRenderer.invoke("agentEvolution:deleteGrowthSession", proposalId),
   },
   // 엔진 텍스트 자산(스킬·훅·어댑터 매니페스트) 직접 편집.
   runtimeFiles: {
@@ -592,7 +597,8 @@ const api: AgentlasIpc = {
     focusLiveTarget: (targetId?: string) => ipcRenderer.invoke("browser:focusLiveTarget", targetId),
   },
   computerUse: {
-    capturePreview: (sourceId?: string) => ipcRenderer.invoke("computerUse:capturePreview", sourceId),
+    capturePreview: (sourceId?: string, options?: { mode?: "screen" | "window" }) =>
+      ipcRenderer.invoke("computerUse:capturePreview", sourceId, options),
     revealPreview: () => ipcRenderer.invoke("computerUse:revealPreview"),
   },
   projects: {
@@ -814,7 +820,7 @@ const api: AgentlasIpc = {
         | { ok: true; automationId: string; versionId: string; automation: Automation }
         | { ok: false; reason: string }
       >,
-    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) =>
+    runNow: (id: string, opts?: { dryRun?: boolean; fresh?: boolean; input?: Record<string, unknown> }) =>
       ipcRenderer.invoke("automations:runNow", id, opts) as Promise<import("../shared/types").AutomationRunNowResult>,
     inputRequirement: (id: string) => ipcRenderer.invoke("automations:inputRequirement", id),
     connectionReport: (id: string) => ipcRenderer.invoke("automations:connectionReport", id),
@@ -864,6 +870,10 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:listTriggerAttention", automationId),
     reconcileTriggerEvent: (input: AutomationTriggerEventReconcileInput) =>
       ipcRenderer.invoke("automations:reconcileTriggerEvent", input),
+    terminalCloseCandidate: (automationId: string) =>
+      ipcRenderer.invoke("automations:terminalCloseCandidate", automationId) as Promise<AutomationGraphTerminalCloseCandidate | null>,
+    terminalClose: (input: AutomationGraphTerminalCloseInput) =>
+      ipcRenderer.invoke("automations:terminalClose", input) as Promise<AutomationGraphTerminalCloseReceipt>,
     getGraphReconciliation: (automationId: string) =>
       ipcRenderer.invoke("automations:getGraphReconciliation", automationId),
     reconcileGraph: (input: AutomationGraphReconcileInput) =>
@@ -1058,6 +1068,7 @@ contextBridge.exposeInMainWorld("agentlasFiles", {
     snapshot: (input: unknown) => ipcRenderer.invoke("chatFiles:snapshot", input),
     listGroup: (input: unknown) => ipcRenderer.invoke("chatFiles:listGroup", input),
     openExternal: (input: unknown) => ipcRenderer.invoke("chatFiles:openExternal", input),
+    appendMessage: (input: unknown) => ipcRenderer.invoke("chatFiles:appendMessage", input),
   },
   grantForFile: async (file: File): Promise<FsPathGrant | null> => {
     try {

@@ -2196,6 +2196,40 @@ export interface AutomationGraphReconciliation {
   nodes: AutomationGraphReconciliationNode[];
 }
 
+/** Exact failed occurrence reviewed before explicitly starting a new run. */
+export interface AutomationGraphTerminalCloseInput {
+  automationId: string;
+  runId: string;
+  occurrenceId: string;
+  graphDigest: string;
+  checkpointDigest: string;
+  expectedUpdatedAt: string;
+  decision: "reviewed_external_effects";
+}
+
+export interface AutomationGraphTerminalCloseReceipt {
+  automationId: string;
+  runId: string;
+  occurrenceId: string;
+  graphDigest: string;
+  checkpointDigest: string;
+  closedAt: string;
+  status: "closed" | "already-closed";
+  consequence: "fresh_occurrence_may_repeat_completed_effects";
+}
+
+export interface AutomationGraphTerminalCloseCandidate {
+  automationId: string;
+  runId: string;
+  occurrenceId: string;
+  graphDigest: string;
+  checkpointDigest: string;
+  updatedAt: string;
+  simulation: boolean;
+  unresolvedNodeIds: string[];
+  completedEffectNodeIds: string[];
+}
+
 export interface AutomationGraphReconciliationDecision {
   nodeId: string;
   /** completed = it happened; retry = it definitely did not happen. */
@@ -2356,6 +2390,7 @@ export type BrowserLiveDispatchResult =
     };
 export interface ComputerUsePreviewSource {
   id: string;
+  kind: "screen" | "window";
   name: string;
   displayId: string | null;
   width: number;
@@ -2363,8 +2398,13 @@ export interface ComputerUsePreviewSource {
   bounds: { x: number; y: number; width: number; height: number } | null;
   scaleFactor: number | null;
 }
+export interface ComputerUseCaptureOptions {
+  /** The default keeps existing computer-control callers on display capture. */
+  mode?: "screen" | "window";
+}
 export interface ComputerUsePreview {
   platform: NodeJS.Platform;
+  captureMode: "screen" | "window";
   screenPermission: "not-determined" | "granted" | "denied" | "restricted" | "unknown";
   accessibility: boolean;
   observationAvailable: boolean;
@@ -2373,9 +2413,11 @@ export interface ComputerUsePreview {
   interactionDriver: "agentlas-native-required" | "agentlas-native";
   sources: ComputerUsePreviewSource[];
   selectedSourceId: string | null;
+  /** Window mode returns candidates without an image until the user chooses one. */
+  selectionRequired: boolean;
   dataUrl: string | null;
   capturedAt: string;
-  error: "screen-unavailable" | "capture-failed" | null;
+  error: "screen-unavailable" | "capture-failed" | "source-stale" | "window-selection-required" | "window-not-found" | null;
 }
 /** electron → renderer 로 밀리는 승인 요청(경량 바텀시트가 받는다). */
 export interface BrowserApprovalRequestEvent {
@@ -6371,13 +6413,17 @@ export type CloudAgentSetPricesResult =
  * bought explicitly for 1..30 days. While active, calls to that slug cost 0.
  */
 export interface AgentLeaseQuote {
-  /** False when signed out or the server could not be reached. */
+  /** False when the account is signed out or the server could not be reached. */
   ok: boolean;
   active: boolean;
   leasedUntil: string | null;
   perDayCredits: number | null;
   /** False → the creator does not sell long-term leases for this agent. */
   leaseOffered: boolean;
+  /** Machine-readable reason when the quote could not be used. */
+  code?: "signed_out" | "network" | "http" | "invalid_slug" | "lease_not_offered" | string;
+  /** Safe, user-facing explanation; never includes response payloads. */
+  message?: string;
 }
 
 export type AgentLeasePurchaseResult =
@@ -6782,6 +6828,8 @@ export interface AgentlasIpc {
     rollback: (proposalId: string) => Promise<AgentEvolutionProposalUi>;
     /** 4표면 발화 UX — 전역 성장 제안(고위험 pending + 저위험 자동적용분). */
     listGrowth: (limit?: number) => Promise<GrowthProposalInbox>;
+    /** Hide one growth-proposal session without changing the governed asset or receipts. */
+    deleteGrowthSession: (proposalId: string) => Promise<AgentEvolutionProposalUi>;
   };
   /** 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 유휴+슬롯 완전 유휴+쿨다운 가드로 메모리 통합. */
   memoryDreaming: {
@@ -7228,7 +7276,7 @@ export interface AgentlasIpc {
     focusLiveTarget: (targetId?: string) => Promise<{ ok: boolean }>;
   };
   computerUse: {
-    capturePreview: (sourceId?: string) => Promise<ComputerUsePreview>;
+    capturePreview: (sourceId?: string, options?: ComputerUseCaptureOptions) => Promise<ComputerUsePreview>;
     revealPreview: () => Promise<{ ok: boolean }>;
   };
   projects: {
@@ -7262,7 +7310,7 @@ export interface AgentlasIpc {
   };
   agentLeases: {
     quote: (slug: string) => Promise<AgentLeaseQuote>;
-    purchase: (input: { slug: string; days: number }) => Promise<AgentLeasePurchaseResult>;
+    purchase: (input: { slug: string; days: number; idempotencyKey?: string }) => Promise<AgentLeasePurchaseResult>;
     /** Cached (~60s) list of this account's leases; active ones call at 0 credits. */
     list: () => Promise<AgentLeaseRow[]>;
   };
@@ -7559,7 +7607,7 @@ export interface AgentlasIpc {
       | { ok: false; reason: string }
     >;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
-    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<AutomationRunNowResult>;
+    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown>; fresh?: boolean }) => Promise<AutomationRunNowResult>;
     /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */
     inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
     /** 이 그래프가 연결돼야 하는 것 — 공급자 묶음별로. 켜기 게이트와 같은 계산을 쓴다. */
@@ -7707,6 +7755,8 @@ export interface AgentlasIpc {
     reconcileTriggerEvent: (
       input: AutomationTriggerEventReconcileInput,
     ) => Promise<AutomationTriggerEventReconcileResult>;
+    terminalCloseCandidate: (automationId: string) => Promise<AutomationGraphTerminalCloseCandidate | null>;
+    terminalClose: (input: AutomationGraphTerminalCloseInput) => Promise<AutomationGraphTerminalCloseReceipt>;
     getGraphReconciliation: (
       automationId: string,
     ) => Promise<AutomationGraphReconciliation | null>;

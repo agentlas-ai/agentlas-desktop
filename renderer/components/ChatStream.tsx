@@ -24,6 +24,110 @@ import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
 import type { ChatFileItem } from "@/lib/chat-files";
+import { OneTurnWork } from "./one/OneTurnWork";
+import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
+
+/**
+ * Work keeps its transport projection in StreamMessage for compatibility with
+ * the chat bridge.  The visible execution surface is One's canonical
+ * OneTurnWork component, so this adapter is the only Work-specific boundary:
+ * it maps typed stream steps to the same One activity ledger shape without
+ * reimplementing any row, disclosure, or status styling here.
+ */
+export function workActivityStateFromMessage(message: StreamMessage): OneActivityState {
+  const startedAt = message.startedAt ?? Date.now();
+  const startedIso = new Date(startedAt).toISOString();
+  const finishedIso = message.finishedAt != null ? new Date(message.finishedAt).toISOString() : undefined;
+  const settled = !message.busy;
+  const cancelled = message.failure?.code === "cancelled";
+  const items: OneActivityItem[] = [{
+    id: "run:lifecycle",
+    kind: "run",
+    status: cancelled ? "cancelled" : message.failure ? "failed" : settled ? "completed" : "running",
+    observedAt: startedIso,
+    ...(finishedIso ? { completedAt: finishedIso } : {}),
+    ...(message.finishedAt != null ? { durationMs: Math.max(0, message.finishedAt - startedAt) } : {}),
+  }];
+
+  for (const step of message.steps ?? []) {
+    const observedAt = new Date(step.createdAt ?? startedAt).toISOString();
+    const status: OneActivityItem["status"] = step.resultIsError
+      ? "failed"
+      : step.result != null
+        ? "completed"
+        : !settled
+          ? "running"
+          : cancelled
+            ? "cancelled"
+            : message.failure
+              ? "failed"
+              : "info";
+    if (step.kind === "tool") {
+      items.push({
+        id: `tool:${step.id}`,
+        kind: "tool",
+        status,
+        observedAt,
+        ...(finishedIso && status !== "running" ? { completedAt: finishedIso } : {}),
+        agentName: step.agentName,
+        role: step.role,
+        phase: step.phase,
+        tool: {
+          name: step.tool ?? step.text,
+          args: step.args,
+          result: step.result,
+          id: step.toolUseId,
+          isError: step.resultIsError,
+        },
+      });
+      continue;
+    }
+    items.push({
+      id: `reasoning:${step.id}`,
+      kind: "reasoning",
+      status,
+      observedAt,
+      ...(finishedIso && status !== "running" ? { completedAt: finishedIso } : {}),
+      agentName: step.agentName,
+      role: step.role,
+      phase: step.phase,
+      message: step.text,
+      text: step.text,
+    });
+  }
+
+  for (const notice of message.notices ?? []) {
+    items.push({
+      id: `notice:${notice.id}`,
+      kind: "notice",
+      status: notice.level === "error" ? "failed" : "info",
+      observedAt: finishedIso ?? startedIso,
+      message: notice.message,
+      detail: notice.details,
+      noticeLevel: notice.level,
+      noticeDisplay: notice.display,
+    });
+  }
+  if (message.failure && !items.some((item) => item.kind === "notice" && item.message === message.failure?.message)) {
+    items.push({
+      id: `failure:${message.id}`,
+      kind: "notice",
+      status: "failed",
+      observedAt: finishedIso ?? startedIso,
+      message: message.failure.message,
+      noticeLevel: "error",
+    });
+  }
+  return {
+    items,
+    artifacts: [],
+    sources: [],
+    handoffs: [],
+    tokens: message.tokens ?? message.liveTokens,
+    lastSequence: items.length,
+    terminalStatus: cancelled ? "cancelled" : message.failure ? "failed" : settled ? "completed" : undefined,
+  };
+}
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -176,9 +280,6 @@ export function ChatStream({
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
-  onStop,
-  interactionBusy = false,
-  stopRequested = false,
   mediaBasePaths = [],
   workspaceRoot,
   focusMessageId,
@@ -380,11 +481,8 @@ export function ChatStream({
               onOpenLinkedFile={onOpenLinkedFile}
               onOpenChatFile={onOpenChatFile}
               onOpenWorkflow={onOpenWorkflow}
-              onStop={onStop}
               onAnswerQuestion={onAnswerQuestion}
               onOpenMultimodalSetup={onOpenMultimodalSetup}
-              interactionBusy={interactionBusy}
-              stopRequested={stopRequested}
               mediaBasePaths={mediaBasePaths}
             />
           </div>
@@ -632,30 +730,6 @@ export function ChatStream({
             bottom: 10px;
             max-width: calc(100% - 32px);
           }
-          .agentlas-working-thinking-row {
-            display: grid !important;
-            grid-template-columns: 14px minmax(0, 1fr);
-            align-items: start !important;
-          }
-          .agentlas-working-thinking-copy,
-          .agentlas-working-thinking-owner {
-            grid-column: 2;
-          }
-          .agentlas-working-thinking-copy { grid-row: 1; }
-          .agentlas-working-thinking-owner { grid-row: 2; }
-          .agentlas-working-thinking-owner,
-          .agentlas-working-tool-owner {
-            max-width: 100%;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-          }
-          .agentlas-working-tool-button {
-            flex-wrap: wrap;
-          }
-          .agentlas-working-tool-owner {
-            flex: 1 0 100% !important;
-          }
         }
         @media (prefers-reduced-motion: reduce) {
           .agentlas-chat-streaming-cursor {
@@ -768,9 +842,6 @@ const Bubble = memo(function Bubble({
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
-  interactionBusy,
-  onStop,
-  stopRequested,
   mediaBasePaths,
 }: {
   message: StreamMessage;
@@ -781,14 +852,17 @@ const Bubble = memo(function Bubble({
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   onOpenChatFile?: (file: ChatFileItem) => void;
   onOpenWorkflow?: () => void;
-  onStop?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   onOpenMultimodalSetup?: () => void;
-  interactionBusy: boolean;
-  stopRequested: boolean;
   mediaBasePaths: string[];
 }) {
   const { locale } = useT();
+  // These hooks must run before the role-specific early returns below. A
+  // streaming assistant row can become a settled/user/system row during
+  // transcript reconciliation; keeping the adapter hooks conditional causes a
+  // hook-order crash exactly at that transition.
+  const workspaceRootForRun = useContext(WorkspaceRootContext);
+  const workActivity = useMemo(() => workActivityStateFromMessage(message), [message]);
   if (message.role === "user") {
     // 질문 시트 배치 답장(스캐폴드 "질문:/선택:/답변:")은 어시스턴트 턴의 인용 카드가
     // 이미 질문+답을 보여준다 — 영상처럼 원문 버블은 숨긴다(첨부 이미지가 있으면 유지).
@@ -872,32 +946,27 @@ const Bubble = memo(function Bubble({
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
   const showWorkActivity = hasProgress && (
     isParallelWorkMessage(message)
-    || (message.steps ?? []).some((step) => step.reasoning === true)
+    || (message.steps ?? []).some((step) => step.reasoning === true || step.kind === "tool")
   );
   return (
-    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 0, alignSelf: "stretch", maxWidth: 740 }}>
+    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
       <div
         className="agentlas-chat-answer"
-        style={{ minWidth: 0, flex: 1, padding: "9px 0 14px" }}
+        style={{ minWidth: 0, flex: 1, width: "100%", overflow: "hidden", padding: "9px 0 14px" }}
       >
         {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
           <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
         )}
-        {message.pipeline && message.pipeline.length > 0 && showWorkActivity && (
-          <PipelineStepper stages={message.pipeline} running={Boolean(message.busy)} />
-        )}
         {showWorkActivity && (
-          <WorkingPanel
-            steps={message.steps ?? []}
-            fallback={message.status}
-            startedAt={message.startedAt}
-            done={!message.busy}
-            tokens={message.tokens}
-            onStop={message.busy ? onStop : undefined}
-            stopRequested={stopRequested}
+          <OneTurnWork
+            state={workActivity}
+            busy={Boolean(message.busy)}
+            startedAt={message.startedAt ?? null}
+            locale={locale === "ko" ? "ko" : "en"}
+            workspacePath={workspaceRootForRun ?? null}
           />
         )}
         {showWorkActivity && displayText && message.busy && (
@@ -1297,6 +1366,9 @@ function SingleRunBody({
         display: "flex",
         flexDirection: "column",
         gap: 10,
+        width: "100%",
+        minWidth: 0,
+        overflow: "hidden",
       }}
     >
       {segments.map((seg, i) => (
@@ -1398,13 +1470,16 @@ function ToolGroupBlock({
     const liveLabel = liveFilePath ? baseName(liveFilePath) : view.label;
     const completedResultSteps = steps.filter((step) => step.result?.trim()).slice(-3);
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}>
         <div
           role="status"
           style={{
             display: "flex",
             alignItems: "center",
             gap: 6,
+            width: "100%",
+            minWidth: 0,
+            overflow: "hidden",
             fontSize: 13,
             fontWeight: 550,
             color: "var(--muted-deep)",
@@ -1415,8 +1490,9 @@ function ToolGroupBlock({
             <span
               title={view.label}
               style={{
+                flex: 1,
                 minWidth: 0,
-                maxWidth: "min(62ch, 64vw)",
+                maxWidth: "100%",
                 overflow: "hidden",
                 color: "var(--ink-soft)",
                 textOverflow: "ellipsis",
@@ -1440,7 +1516,7 @@ function ToolGroupBlock({
     locale,
   );
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -1543,7 +1619,7 @@ function ToolGroupRow({
     else onOpenWorkflow?.();
   };
   return (
-    <div style={{ borderTop: divider ? "1px solid var(--paper-edge)" : "none" }}>
+    <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden", borderTop: divider ? "1px solid var(--paper-edge)" : "none" }}>
       <button
         type="button"
         onClick={onActivate}
@@ -1555,11 +1631,14 @@ function ToolGroupRow({
               : undefined
         }
         style={{
-          display: "flex",
+          display: "grid",
+          gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
           alignItems: "center",
           gap: 7,
           width: "100%",
           minWidth: 0,
+          boxSizing: "border-box",
+          overflow: "hidden",
           border: "none",
           background: "transparent",
           padding: "10px 12px",
@@ -2170,630 +2249,6 @@ const QuestionBlock = memo(function QuestionBlock({
 });
 QuestionBlock.displayName = "QuestionBlock";
 
-// ── 파이프라인 스테퍼 ──────────────────────────────────────
-// 추천 시트에서 pipeline 을 고르면 시드된 단계 계획(PRD→배포)을 메시지 상단에 가로 스테퍼로 보여준다.
-// 단계별 실시간 상태는 아직 신뢰성 있게 추적할 수 없으므로(엔진 이벤트→단계 매핑은 후속), 전체
-// 진행/완료만 정직하게 표시하고 단계는 계획으로 노출한다.
-function PipelineStepper({ stages, running }: { stages: PipelineStage[]; running: boolean }) {
-  const { t, locale } = useT();
-  const stageLabel = (kind: string): string => {
-    const key = (kind || "").toLowerCase();
-    if (key === "plan") return locale === "ko" ? "기획" : "Plan";
-    if (key === "build") return locale === "ko" ? "개발" : "Build";
-    if (key === "verify" || key === "qa") return locale === "ko" ? "검증·QA" : "Verify · QA";
-    if (key === "deploy") return locale === "ko" ? "배포" : "Deploy";
-    return kind;
-  };
-  return (
-    <div
-      style={{
-        marginBottom: 9,
-        display: "flex",
-        flexDirection: "column",
-        gap: 5,
-        color: "var(--muted-deep)",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, color: "var(--ink-soft)" }}>
-        <span>{t("chatstream.pipeline")}</span>
-        <span style={{ opacity: 0.7 }}>· {running ? t("chatstream.running") : t("chatstream.done")}</span>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4 }}>
-        {stages.map((s, i) => {
-          const st = s.status;
-          const marker = st === "done" ? "✓" : st === "running" ? "●" : String(s.order);
-          const markerColor =
-            st === "done" ? "var(--green-deep)" : st === "running" ? "var(--amber-deep)" : "var(--ink-soft)";
-          return (
-            <span key={s.order} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: st === "running" ? "var(--ink)" : "var(--muted-deep)",
-                  opacity: !st || st === "pending" ? 0.72 : 1,
-                }}
-                title={s.agentName ?? undefined}
-              >
-                <span style={{ color: markerColor, fontWeight: 700 }}>{marker}</span>
-                <span>{stageLabel(s.kind)}</span>
-              </span>
-              {i < stages.length - 1 && <span style={{ color: "var(--ink-soft)", fontSize: 12 }}>→</span>}
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── 워킹 패널 ──────────────────────────────────────────────
-// "12s 동안 작업 중입니다" + step log. Codex/Claude 데스크톱 톤.
-function WorkingPanel({
-  steps,
-  fallback,
-  startedAt,
-  done,
-  tokens,
-  onStop,
-  stopRequested = false,
-}: {
-  steps: StreamStep[];
-  fallback?: string;
-  startedAt?: number;
-  done: boolean;
-  tokens?: number;
-  onStop?: () => void;
-  stopRequested?: boolean;
-}) {
-  const { t, locale } = useT();
-  const elapsed = useElapsedSeconds(startedAt, !done);
-  const [override, setOverride] = useState<boolean | null>(null);
-
-  const candidateRows: StreamStep[] = steps.length > 0
-    ? steps
-    : fallback
-      ? [{ id: "_f", kind: "thinking", text: fallback }]
-      : [];
-  const allRows = candidateRows.filter(isUserFacingStreamStep);
-  const latestStep = allRows[allRows.length - 1];
-  // Tool rows often carry timestamps/counts but no novice-facing sentence.
-  // Keep their freshness signal while showing the newest real progress text
-  // instead of incorrectly claiming that no update has arrived.
-  const latestTextStep = [...allRows].reverse().find((step) => (
-    Boolean(step.text.trim()) && !isInternalRuntimeStatus(step.text)
-  ));
-  const latestStepAt = latestStep?.createdAt ?? (allRows.length > 0 ? startedAt : undefined);
-  const quietFor = useElapsedSeconds(latestStepAt, !done);
-  const liveState = buildLiveState({
-    done,
-    elapsed,
-    quietFor,
-    latestText: latestTextStep?.text,
-    locale,
-  });
-  const workspaceRootForRun = useContext(WorkspaceRootContext);
-  const toolSteps = allRows.filter((s) => s.tool);
-
-  // 연속 도구 호출 한 줄 요약. 파일은 집합으로 세어 같은 파일 반복 편집을 부풀리지 않는다.
-  const summary = formatToolRunSummary(
-    summarizeToolRun(toolSteps.map((s) => toolView(s.tool!, s.args, locale, s.result, workspaceRootForRun).detail)),
-    locale,
-  );
-
-  // Codex grammar: the live turn is open; a settled turn is one quiet
-  // "Worked for" disclosure. No status dashboard or per-tool color cards.
-  const expanded = override ?? !done;
-  const liveHeadline = latestTextStep?.text.trim()
-    || (fallback && !isInternalRuntimeStatus(fallback) ? fallback.trim() : "")
-    || liveState.message;
-  const elapsedLabel = formatElapsed(elapsed, locale);
-  const headerLabel = done
-    ? (locale === "ko" ? `${elapsedLabel} 동안 작업` : `Worked for ${elapsedLabel}`)
-    : liveHeadline;
-  const tokenLabel = tokens != null && tokens > 0 ? `${formatTokens(tokens)} tokens` : "";
-
-  return (
-    <div
-      data-testid="thinking-text-stream"
-      data-state={done ? "completed" : "busy"}
-      className="agentlas-work-activity"
-      style={{
-        color: "var(--muted-deep)",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div
-        className="agentlas-work-activity-header"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          minWidth: 0,
-        }}
-      >
-        <button
-          className="agentlas-work-activity-toggle"
-          type="button"
-          onClick={() => allRows.length > 0 && setOverride(!expanded)}
-          aria-expanded={allRows.length > 0 ? expanded : undefined}
-          disabled={allRows.length === 0}
-          style={{
-            minWidth: 0,
-            flex: 1,
-            display: "grid",
-            gridTemplateColumns: "18px auto minmax(0, 1fr) auto 14px",
-            alignItems: "center",
-            gap: 8,
-            border: "none",
-            background: "transparent",
-            padding: 0,
-            color: done ? "var(--muted-deep)" : "var(--ink-soft)",
-            font: "inherit",
-            fontSize: done ? 13 : 13.5,
-            fontWeight: done ? 500 : 560,
-            textAlign: "left",
-            cursor: allRows.length > 0 ? "pointer" : "default",
-          }}
-        >
-          <span aria-hidden style={{ width: 18, height: 18, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: done ? "var(--muted)" : "var(--accent)" }}>
-            {done ? <ThinkingGlyph /> : <GlyphSpinner active />}
-          </span>
-          <strong className="agentlas-work-activity-title">{locale === "ko" ? "활동" : "Activity"}</strong>
-          <span className="agentlas-work-activity-meta">{headerLabel}</span>
-          <span className="agentlas-work-activity-count" aria-label={locale === "ko" ? `${allRows.length}개 단계` : `${allRows.length} steps`}>
-            {allRows.length || ""}
-          </span>
-          {allRows.length > 0 && (
-            <span
-              className="agentlas-work-activity-chevron"
-              aria-hidden
-              style={{
-                display: "inline-flex",
-                flexShrink: 0,
-                color: "var(--muted)",
-                transform: expanded ? "rotate(180deg)" : "none",
-                transition: "transform .12s",
-              }}
-            >
-              <ChevronDown />
-            </span>
-          )}
-        </button>
-        <span
-          style={{
-            flexShrink: 0,
-            color: "var(--muted)",
-            fontSize: 11.5,
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {!done ? [elapsedLabel, tokenLabel].filter(Boolean).join(" · ") : tokenLabel}
-        </span>
-        {onStop && !done && (
-          <button
-            type="button"
-            data-chat-stop-button="true"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!stopRequested) onStop?.();
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!stopRequested) onStop?.();
-            }}
-            disabled={stopRequested}
-            aria-label={stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
-            title={stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
-            style={{
-              width: 24,
-              height: 24,
-              flexShrink: 0,
-              display: "inline-grid",
-              placeItems: "center",
-              border: "none",
-              borderRadius: 6,
-              background: "transparent",
-              color: stopRequested ? "var(--muted)" : "var(--muted-deep)",
-              cursor: stopRequested ? "default" : "pointer",
-            }}
-          >
-            <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "currentColor" }} />
-          </button>
-        )}
-      </div>
-
-      {!done && liveState.tone !== "active" && (
-        <div
-          role="status"
-          style={{
-            marginLeft: 26,
-            color: liveState.tone === "stale" ? "var(--danger)" : "var(--amber-deep)",
-            fontSize: 11.5,
-            lineHeight: 1.45,
-          }}
-        >
-          {stopRequested
-            ? (locale === "ko" ? "중지 요청을 보냈습니다. 실행을 정리하는 중입니다." : "Stop requested. Cleaning up the run.")
-            : [liveState.message, liveState.detail].filter(Boolean).join(" ")}
-        </div>
-      )}
-
-      {expanded && allRows.length > 0 && (
-        <div
-          className="agentlas-work-activity-rows"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            minWidth: 0,
-            overflowY: "auto",
-          }}
-        >
-          {allRows.map((s, idx) => (
-            <div
-              key={s.id}
-              className="agentlas-work-activity-row"
-              data-kind={s.tool ? "tool" : "reasoning"}
-            >
-              <ActivityRow
-                step={s}
-                current={!done && idx === allRows.length - 1}
-                done={done}
-              />
-            </div>
-          ))}
-          {toolSteps.length > 1 && (
-            <span style={{ marginTop: 5, color: "var(--muted)", fontSize: 11.5 }}>{summary}</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ActivityRow({
-  step,
-  current,
-  done,
-}: {
-  step: StreamStep;
-  current?: boolean;
-  done: boolean;
-}) {
-  if (step.tool) return <ToolRow step={step} current={current && !done} />;
-  return <ThinkingRow step={step} current={current && !done} />;
-}
-
-function AgentActivityCard({ step, current, onOpenWorkflow }: { step: StreamStep; current?: boolean; onOpenWorkflow?: () => void }) {
-  const { locale } = useT();
-  const kind = step.activity ?? activityKindFromStep(step);
-  const title = agentActivityTitle(step, kind, locale);
-  const eyebrow = agentActivityEyebrow(step, kind, locale);
-  const detail = step.text.trim();
-  const isDone = kind === "complete";
-  return (
-    <div
-      className={`agentlas-activity-card${current && !isDone ? " is-running" : ""}${isDone ? " is-complete" : ""}`}
-      style={{ ...activityCardBase, cursor: onOpenWorkflow ? "pointer" : "default" }}
-      role={onOpenWorkflow ? "button" : undefined}
-      tabIndex={onOpenWorkflow ? 0 : undefined}
-      onClick={onOpenWorkflow}
-      onKeyDown={(event) => {
-        if (!onOpenWorkflow) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpenWorkflow();
-        }
-      }}
-      title={locale === "ko" ? "우측 실행 로그 열기" : "Open workflow logs"}
-    >
-      <div style={activityCardHeader}>
-        <span aria-hidden style={activityStatusDot(kind, current)} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={activityTitleStyle}>{title}</div>
-          <div style={activityEyebrowStyle}>{eyebrow}</div>
-        </div>
-        <span style={activityChevronStyle}>›</span>
-      </div>
-      {detail && detail !== title && (
-        <div style={activityDetailStyle}>
-          {detail}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ToolActivityCard({
-  step,
-  current,
-  done,
-  onOpenWorkflow,
-}: {
-  step: StreamStep;
-  current?: boolean;
-  done: boolean;
-  onOpenWorkflow?: () => void;
-}) {
-  const { locale } = useT();
-  const [argsOpen, setArgsOpen] = useState(false);
-  const [resultOpen, setResultOpen] = useState(false);
-  const view = toolView(step.tool!, step.args, locale);
-  const tone = toolTone(view.group, step.resultIsError === true);
-  const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
-  const hasResult = !!(step.result && step.result.trim());
-  // Do not surface raw JSON, shell commands, internal paths, or runtime
-  // payloads in the product conversation. The receipt keeps audit counts.
-  const hasDisclosure = false;
-  const kind = step.activity ?? (view.verb === "위임" || view.verb === "delegated" ? "handoff" : "tool");
-  const isRunning = current && !done && !hasResult;
-  const title = toolActivityTitle(view, locale);
-  const eyebrow = hasResult
-    ? step.resultIsError
-      ? locale === "ko" ? "에이전트 작업 오류" : "Agent work failed"
-      : locale === "ko" ? "에이전트 작업 완료" : "Agent work completed"
-    : isRunning
-      ? locale === "ko" ? "에이전트 시작됨" : "Agent started"
-      : toolActivityEyebrow(view, locale);
-  return (
-    <div
-      className={`agentlas-activity-card${isRunning ? " is-running" : ""}${hasResult && !step.resultIsError ? " is-complete" : ""}`}
-      style={{
-        ...activityCardBase,
-        borderColor: isRunning ? tone.border : "var(--paper-edge)",
-        cursor: onOpenWorkflow ? "pointer" : "default",
-      }}
-      onClick={(event) => {
-        const target = event.target as HTMLElement;
-        if (target.closest("pre")) return;
-        onOpenWorkflow?.();
-      }}
-      title={locale === "ko" ? "우측 실행 로그 열기" : "Open workflow logs"}
-    >
-      <button
-        onClick={() => {
-          if (!hasDisclosure) return;
-          if (hasResult) setResultOpen((v) => !v);
-          else if (hasArgs) setArgsOpen((v) => !v);
-        }}
-        disabled={!hasDisclosure}
-        style={{
-          ...activityCardButton,
-          cursor: hasDisclosure ? "pointer" : "default",
-        }}
-      >
-        <span aria-hidden style={activityStatusDot(kind, isRunning, tone.accent)} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={activityTitleStyle}>{title}</div>
-          <div style={activityEyebrowStyle}>{eyebrow}</div>
-        </div>
-        <span style={{ ...activityPillStyle, color: tone.accent, background: tone.bg, borderColor: tone.border }}>
-          {view.verb}
-        </span>
-        <span style={activityChevronStyle}>›</span>
-      </button>
-      {step.agentName && (
-        <div style={activityMetaStyle}>
-          {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
-        </div>
-      )}
-      <McpResultPreview result={step.result} toolName={step.tool} locale={locale} compact />
-      {argsOpen && hasArgs && (
-        <pre style={{ ...toolPre, borderColor: tone.border }}>{prettyJson(step.args!)}</pre>
-      )}
-      {resultOpen && hasResult && (
-        <pre
-          style={{
-            ...toolPre,
-            background: step.resultIsError
-              ? "color-mix(in srgb, var(--danger-soft) 78%, var(--paper) 22%)"
-              : "color-mix(in srgb, var(--ok-soft) 72%, var(--paper) 28%)",
-            borderColor: step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)",
-            color: step.resultIsError ? "var(--danger)" : "var(--ok)",
-          }}
-        >
-          {step.result}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean }) {
-  return (
-    <div
-      className="agentlas-working-thinking-row"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        minHeight: 38,
-        minWidth: 0,
-        fontSize: 12.5,
-        color: "var(--ink-soft)",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          flexShrink: 0,
-          color: current ? "var(--accent)" : "var(--muted-deep)",
-          display: "inline-flex",
-        }}
-      >
-        <ThinkingGlyph />
-      </span>
-      <span
-        className="agentlas-working-thinking-copy"
-        style={{
-          flex: 1,
-          minWidth: 0,
-          overflowWrap: "anywhere",
-          lineHeight: 1.45,
-          fontWeight: current ? 560 : 400,
-        }}
-      >
-        {step.text}
-      </span>
-      {step.agentName && (
-        <span className="agentlas-working-thinking-owner" style={{ flexShrink: 0, color: "var(--muted)", fontSize: 11.5 }}>
-          {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
-        </span>
-      )}
-    </div>
-  );
-}
-
-// 단일 도구 행 — "실행됨 <명령>" / "읽기 <파일>" 형식. 입력과 결과를 각각 접고 펼침.
-function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
-  const { t, locale } = useT();
-  const [argsOpen, setArgsOpen] = useState(false);
-  const [resultOpen, setResultOpen] = useState(false);
-  const view = toolView(step.tool!, step.args, locale);
-  const tone = toolTone(view.group, step.resultIsError === true);
-  const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
-  const hasResult = !!(step.result && step.result.trim());
-  const hasDisclosure = false;
-  return (
-    <div
-      className="agentlas-working-tool-row"
-      style={{
-        minWidth: 0,
-        minHeight: 38,
-        padding: "2px 0",
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "center",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <button
-        className="agentlas-working-tool-button"
-        onClick={() => {
-          if (!hasDisclosure) return;
-          if (hasResult) setResultOpen((v) => !v);
-          else if (hasArgs) setArgsOpen((v) => !v);
-        }}
-        disabled={!hasDisclosure}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          minWidth: 0,
-          flex: 1,
-          textAlign: "left",
-          background: "transparent",
-          border: "none",
-          padding: 0,
-          fontSize: 12.5,
-          color: "var(--ink-soft)",
-          cursor: hasDisclosure ? "pointer" : "default",
-        }}
-      >
-        <span
-          style={{
-            flexShrink: 0,
-            fontSize: 11,
-            color: current ? "var(--accent)" : "var(--muted-deep)",
-            padding: 0,
-            fontWeight: current ? 650 : 500,
-          }}
-        >
-          {view.verb}
-        </span>
-        <span
-          style={{
-            flex: 1,
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
-            color: current ? "var(--ink)" : "var(--ink-soft)",
-            fontWeight: current ? 560 : 400,
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {view.label || step.tool}
-        </span>
-        {step.agentName && (
-          <span className="agentlas-working-tool-owner" style={{ color: "var(--muted)", fontSize: 11.5, flexShrink: 0 }}>
-            {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
-          </span>
-        )}
-        {hasResult && (
-          <span
-            style={{
-              color: step.resultIsError ? "var(--danger)" : "var(--ok)",
-              fontSize: 11,
-              fontWeight: 700,
-              flexShrink: 0,
-            }}
-          >
-            {step.resultIsError ? t("chatstream.tool_error") : t("chatstream.tool_result")}
-          </span>
-        )}
-      </button>
-        {hasDisclosure && hasArgs && (
-          <button
-            onClick={() => setArgsOpen((v) => !v)}
-            style={{
-              ...toolMiniButton,
-              color: argsOpen ? tone.accent : "var(--muted-deep)",
-              borderColor: argsOpen ? tone.border : "var(--paper-edge)",
-            }}
-          >
-            {t("chatstream.tool_args")}
-          </button>
-        )}
-        {hasDisclosure && hasResult && (
-          <button
-            onClick={() => setResultOpen((v) => !v)}
-            style={{
-              ...toolMiniButton,
-              color: resultOpen ? (step.resultIsError ? "var(--danger)" : "var(--ok)") : "var(--muted-deep)",
-              borderColor: resultOpen ? (step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)") : "var(--paper-edge)",
-            }}
-          >
-            {step.resultIsError ? t("chatstream.tool_error") : t("chatstream.tool_result")}
-          </button>
-        )}
-      </div>
-      <McpResultPreview result={step.result} toolName={step.tool} locale={locale} compact />
-      {hasDisclosure && argsOpen && hasArgs && (
-        <pre
-          style={{
-            ...toolPre,
-            borderColor: tone.border,
-          }}
-        >
-          {prettyJson(step.args!)}
-        </pre>
-      )}
-      {hasDisclosure && resultOpen && hasResult && (
-        <pre
-          style={{
-            ...toolPre,
-            background: step.resultIsError
-              ? "color-mix(in srgb, var(--danger-soft) 78%, var(--paper) 22%)"
-              : "color-mix(in srgb, var(--ok-soft) 72%, var(--paper) 28%)",
-            borderColor: step.resultIsError ? "var(--danger-soft)" : "var(--ok-soft)",
-            color: step.resultIsError ? "var(--danger)" : "var(--ok)",
-          }}
-        >
-          {step.result}
-        </pre>
-      )}
-    </div>
-  );
-}
-
 // ── 도구 분류 (이름+인자 → 동사 + 간결 라벨 + 그룹) ───────────────
 type ToolGroup = "command" | "read" | "edit" | "search" | "other";
 interface ToolViewModel {
@@ -2805,94 +2260,6 @@ interface ToolViewModel {
   /** 정규화된 의미 — 상세 렌더와 요약 집계가 이걸 읽는다. */
   detail: ToolCallDetail;
 }
-
-type ActivityKind = NonNullable<StreamStep["activity"]>;
-type LiveStateTone = "active" | "quiet" | "stale";
-
-function buildLiveState({
-  done,
-  elapsed,
-  quietFor,
-  latestText,
-  locale,
-}: {
-  done: boolean;
-  elapsed: number;
-  quietFor: number;
-  latestText?: string;
-  locale: "ko" | "en";
-}): { label: string; message: string; detail: string; tone: LiveStateTone } {
-  if (done) {
-    return {
-      label: locale === "ko" ? "완료" : "Done",
-      message: locale === "ko" ? "완료됐습니다." : "Completed.",
-      detail: "",
-      tone: "active",
-    };
-  }
-  const compact = compactStatusText(latestText);
-  const current = compact && !isInternalRuntimeStatus(compact) ? compact : "";
-  if (quietFor >= 180) {
-    return {
-      label: locale === "ko" ? "멈춤 가능성" : "Possibly stuck",
-      message: locale === "ko" ? `마지막 업데이트 후 ${formatElapsed(quietFor, locale)} 동안 조용합니다.` : `No update for ${formatElapsed(quietFor, locale)}.`,
-      detail: current
-        ? locale === "ko"
-          ? `마지막 단계: ${current}`
-          : `Last step: ${current}`
-        : locale === "ko"
-          ? "아직 첫 진행 이벤트가 오지 않았습니다. 필요하면 중지 후 다시 보낼 수 있습니다."
-          : "No first progress event yet. You can stop and retry if needed.",
-      tone: "stale",
-    };
-  }
-  if (quietFor >= 45) {
-    return {
-      label: locale === "ko" ? "조용히 실행 중" : "Quietly running",
-      message: locale === "ko" ? `아직 실행 중입니다. 마지막 업데이트 ${formatElapsed(quietFor, locale)} 전.` : `Still running. Last update ${formatElapsed(quietFor, locale)} ago.`,
-      detail: current
-        ? locale === "ko"
-          ? `현재 보이는 단계: ${current}`
-          : `Visible step: ${current}`
-        : locale === "ko"
-          ? "첫 업데이트를 기다리는 중입니다."
-          : "Waiting for the first update.",
-      tone: "quiet",
-    };
-  }
-  return {
-    label: locale === "ko" ? "실행 중" : "Running",
-    message: locale === "ko" ? "실행이 살아 있습니다." : "Run is active.",
-    detail: current
-      ? locale === "ko"
-        ? `현재 단계: ${current}`
-        : `Current step: ${current}`
-      : elapsed >= 5
-        ? locale === "ko"
-          ? "첫 업데이트를 기다리는 중입니다."
-          : "Waiting for the first update."
-        : locale === "ko"
-          ? "막 시작했습니다."
-          : "Just started.",
-    tone: "active",
-  };
-}
-
-function compactStatusText(value?: string): string {
-  const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
-  if (!trimmed) return "";
-  return trimmed.length > 96 ? `${trimmed.slice(0, 95)}…` : trimmed;
-}
-
-const toolMiniButton: CSSProperties = {
-  flexShrink: 0,
-  border: "none",
-  background: "transparent",
-  padding: "2px 3px",
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: "pointer",
-};
 
 const toolPre: CSSProperties = {
   margin: "5px 0 2px 0",
@@ -2908,163 +2275,6 @@ const toolPre: CSSProperties = {
   maxHeight: 220,
   overflow: "auto",
 };
-
-const activityCardBase: CSSProperties = {
-  position: "relative",
-  width: "min(386px, 100%)",
-  minHeight: 58,
-  overflow: "hidden",
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "color-mix(in srgb, var(--paper-2) 88%, var(--paper) 12%)",
-  padding: "10px 12px",
-  boxShadow: "0 1px 2px rgba(11, 11, 15, 0.03)",
-};
-
-const activityCardHeader: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 9,
-  minWidth: 0,
-};
-
-const activityCardButton: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 9,
-  width: "100%",
-  minWidth: 0,
-  border: "none",
-  background: "transparent",
-  padding: 0,
-  textAlign: "left",
-};
-
-const activityTitleStyle: CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--ink)",
-  fontSize: 12.5,
-  fontWeight: 720,
-  letterSpacing: 0,
-};
-
-const activityEyebrowStyle: CSSProperties = {
-  marginTop: 2,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--muted-deep)",
-  fontSize: 11.5,
-  fontWeight: 560,
-  letterSpacing: 0,
-};
-
-const activityDetailStyle: CSSProperties = {
-  marginTop: 8,
-  color: "var(--ink-soft)",
-  fontSize: 11.5,
-  lineHeight: 1.45,
-  overflowWrap: "anywhere",
-  display: "-webkit-box",
-  WebkitLineClamp: 2,
-  WebkitBoxOrient: "vertical",
-  overflow: "hidden",
-};
-
-const activityMetaStyle: CSSProperties = {
-  marginTop: 7,
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  fontWeight: 650,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const activityPillStyle: CSSProperties = {
-  flexShrink: 0,
-  border: "1px solid var(--paper-edge)",
-  borderRadius: 999,
-  padding: "2px 7px",
-  fontSize: 10.5,
-  fontWeight: 760,
-};
-
-const activityChevronStyle: CSSProperties = {
-  flexShrink: 0,
-  color: "var(--muted)",
-  fontSize: 22,
-  lineHeight: 1,
-  marginLeft: 1,
-};
-
-function activityStatusDot(kind: ActivityKind, active?: boolean, accent?: string): CSSProperties {
-  const base = accent ?? (kind === "complete" ? "var(--green-deep)" : kind === "handoff" ? "var(--accent)" : "var(--muted-deep)");
-  return {
-    width: kind === "handoff" ? 10 : 9,
-    height: 9,
-    borderRadius: kind === "handoff" ? 3 : "50%",
-    flexShrink: 0,
-    background: active || kind === "complete" ? base : "transparent",
-    border: active || kind === "complete" ? "none" : `1.5px solid ${base}`,
-    boxShadow: active ? `0 0 0 4px color-mix(in srgb, ${base} 14%, transparent)` : undefined,
-  };
-}
-
-function activityKindFromStep(step: StreamStep): ActivityKind {
-  if (step.delegateTo && step.delegateTo.length > 0) return "handoff";
-  if (step.phase === "delegate") return "start";
-  if (step.phase === "synthesize") return "complete";
-  return "status";
-}
-
-function agentActivityTitle(step: StreamStep, kind: ActivityKind, locale: "ko" | "en"): string {
-  const name = step.agentName || (locale === "ko" ? "에이전트" : "Agent");
-  if (kind === "handoff") return locale === "ko" ? `${name} 위임` : `${name} delegation`;
-  return name;
-}
-
-function agentActivityEyebrow(step: StreamStep, kind: ActivityKind, locale: "ko" | "en"): string {
-  if (kind === "complete") return locale === "ko" ? "에이전트 작업 완료" : "Agent work completed";
-  if (kind === "handoff") {
-    const count = step.delegateTo?.length ?? 0;
-    if (count > 0) return locale === "ko" ? `${count}개 에이전트로 위임` : `Delegated to ${count} agent${count > 1 ? "s" : ""}`;
-    return locale === "ko" ? "위임" : "Delegation";
-  }
-  if (kind === "start") return locale === "ko" ? "에이전트 시작됨" : "Agent started";
-  if (step.role) return step.role;
-  return locale === "ko" ? "에이전트" : "Agent";
-}
-
-function toolActivityTitle(view: ToolViewModel, locale: "ko" | "en"): string {
-  const label = view.label || (locale === "ko" ? "에이전트 작업" : "Agent task");
-  if (view.verb === "위임") return `${label} 위임`;
-  if (view.verb === "delegated") return `Delegated ${label}`;
-  return locale === "ko" ? `${view.verb} ${label}` : `${view.verb} ${label}`;
-}
-
-function toolActivityEyebrow(view: ToolViewModel, locale: "ko" | "en"): string {
-  if (view.verb === "위임" || view.verb === "delegated") return locale === "ko" ? "에이전트" : "Agent";
-  return locale === "ko" ? "에이전트 작업" : "Agent activity";
-}
-
-function toolTone(group: ToolGroup, isError: boolean): { accent: string; bg: string; border: string } {
-  if (isError) {
-    return { accent: "var(--danger)", bg: "var(--danger-soft)", border: "var(--danger-soft)" };
-  }
-  const tones: Record<ToolGroup, { accent: string; bg: string; border: string }> = {
-    command: { accent: "var(--info)", bg: "var(--info-soft)", border: "var(--info-soft)" },
-    read: { accent: "var(--info)", bg: "var(--ok-soft)", border: "var(--ok-soft)" },
-    edit: { accent: "var(--warn)", bg: "var(--warn-soft)", border: "var(--warn-soft)" },
-    search: { accent: "var(--purple-deep)", bg: "var(--purple-soft)", border: "var(--purple-soft)" },
-    other: { accent: "var(--info)", bg: "var(--info-soft)", border: "var(--info-soft)" },
-  };
-  return tones[group];
-}
 
 const VERB: Record<ToolGroup, { ko: string; en: string }> = {
   command: { ko: "실행됨", en: "ran" },
@@ -3263,14 +2473,6 @@ function toolGroupOf(detail: ToolCallDetail): ToolGroup {
       return "other";
   }
 }
-function ChevronDown() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
-}
-
 function prettyJson(s: string): string {
   try {
     return JSON.stringify(JSON.parse(s), null, 2);
@@ -3282,14 +2484,6 @@ function prettyJson(s: string): string {
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
-}
-
-function ThinkingGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z" />
-    </svg>
-  );
 }
 
 function BlinkingCursor() {
@@ -3306,11 +2500,4 @@ function useElapsedSeconds(startedAt: number | undefined, ticking: boolean): num
   }, [ticking, startedAt]);
   if (!startedAt) return 0;
   return Math.max(0, Math.floor((now - startedAt) / 1000));
-}
-
-function formatElapsed(sec: number, locale: "ko" | "en"): string {
-  if (sec < 60) return locale === "ko" ? `${sec}초` : `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return locale === "ko" ? `${m}분 ${s}초` : `${m}m ${s}s`;
 }

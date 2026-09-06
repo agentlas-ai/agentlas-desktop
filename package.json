@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -78,7 +78,6 @@
     "test:schedule-describe": "npm run build:electron && node scripts/schedule-describe-contract.cjs",
     "test:goal-completion": "npm run build:electron && node scripts/goal-completion-contract.cjs",
     "parity:hep-build": "npm run build:electron && node scripts/hep-build-parity.mjs",
-    "verify:browser-rail": "npm run build:electron && node scripts/verify-browser-rail.mjs",
     "verify:keychain-boundary": "node scripts/verify-keychain-boundary.mjs",
     "test:telegram-command-surface": "npm run build:electron && node scripts/telegram-command-surface-contract.cjs",
     "test:telegram-one-binding": "npm run build:electron && electron scripts/telegram-one-binding-contract.cjs",
@@ -181,7 +180,9 @@
     "simple-icons": "16.22.0",
     "three": "0.173.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "sharp": ">=0.35.0",
+    "molstar": "5.11.0"
   },
   "devDependencies": {
     "@electron/fuses": "^1.8.0",
@@ -206,7 +207,6 @@
     "ketcher-core": "3.17.2",
     "ketcher-react": "3.17.2",
     "ketcher-standalone": "3.17.2",
-    "molstar": "5.11.0",
     "next": "^15.0.0",
     "playwright": "^1.60.0",
     "react": "^18.3.1",

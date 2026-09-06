@@ -5,6 +5,7 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
 const { verifyStudioRuntime } = require("./studio-runtime-contract.cjs");
+const { verifyScienceRuntimePackage } = require("./science-runtime-package.cjs");
 const {
   verifyProductExtensionSigningPolicyFile,
 } = require("./product-extension-signing-policy.cjs");
@@ -1012,6 +1013,12 @@ exports.default = async function afterPackClean(context) {
   const studioResources = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
+  const sciencePackage = verifyScienceRuntimePackage(
+    path.join(studioResources, "app.asar"),
+    context.electronPlatformName,
+    typeof context.arch === "string" ? context.arch : require("builder-util").Arch[context.arch],
+  );
+  console.log(`[afterPack] verified Science runtime dependencies (${sciencePackage.platform}-${sciencePackage.arch})`);
   await verifyStudioRuntime(path.join(studioResources, "studio-pack"));
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {

@@ -26,7 +26,16 @@ import {
 import "@xyflow/react/dist/style.css";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { Automation, RuntimeSelection, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
+import type {
+  Automation,
+  AutomationGraphTerminalCloseCandidate,
+  AutomationGraphTerminalCloseInput,
+  AutomationGraphTerminalCloseReceipt,
+  RuntimeSelection,
+  WorkflowGraph,
+  WorkflowNode,
+  WorkflowNodeRunState,
+} from "@/lib/types";
 import { layoutGraph, needsLayout } from "@shared/graph-layout";
 import { validateWorkflow, type WorkflowIssue } from "@/lib/workflow-validate";
 import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/components/automation/nodes";
@@ -42,7 +51,7 @@ import {
   runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
-import { IconBolt, IconClose, IconPaperclip } from "@/components/Icon";
+import { IconBolt, IconClose, IconPaperclip, IconRefresh } from "@/components/Icon";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 
 function runtimeSelectionPresentation(selection: RuntimeSelection | null | undefined, locale: string): {
@@ -78,6 +87,20 @@ function exactAutomationProjection(value: unknown, automationId: string): Automa
 function sameWorkflowGraph(left: WorkflowGraph | null | undefined, right: WorkflowGraph | null | undefined): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
+
+type TerminalCloseRunSnapshot = Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["automations"]["latestRun"]>> & {
+  occurrenceId?: string;
+  graphDigest?: string;
+  checkpointDigest?: string;
+  checkpointUpdatedAt?: string;
+  inFlightNodeIds?: string[];
+  ambiguousNodeIds?: string[];
+  completedEffectNodeIds?: string[];
+};
+
+type TerminalCloseInput = AutomationGraphTerminalCloseInput;
+type TerminalCloseReceipt = AutomationGraphTerminalCloseReceipt;
+type TerminalCloseCandidate = AutomationGraphTerminalCloseCandidate;
 
 /** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
 const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
@@ -145,12 +168,13 @@ function AutomationFlowPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   // 켜기/끄기가 도는 동안 버튼을 잠근다(중복 클릭 방지 + 눌린 티).
   const [stopping, setStopping] = useState(false);
   const [toggling, setToggling] = useState(false);
   const togglingRef = useRef(false);
   /** 시작 값을 받아야 하는 그래프에서 사람에게 값을 묻는 상태. */
-  const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
+  const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string; fresh: boolean } | null>(null);
   /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   /* ★이전 판 — 저장이 덮어쓰기뿐이라, 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
@@ -798,6 +822,7 @@ function AutomationFlowPage() {
   // 멈췄는가 — 사유가 아직 안 실렸어도 노드가 failed 면 멈춘 것이다. 사유가 없다고
   // "정상 종료"처럼 말하면, 빨간 노드를 보고 있는 사람에게 화면이 거짓말을 한다.
   const stopped = errorCount > 0 || Object.values(runStates).some((st) => st === "failed");
+  const freshStartable = !editing && !liveRunning && stopped;
 
   const selectedNode: WorkflowNode | null = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -1267,7 +1292,12 @@ function AutomationFlowPage() {
     }
   }
 
-  async function runNow(dryRun = false, inputValue?: string) {
+  async function runNow(
+    dryRun = false,
+    inputValue?: string,
+    fresh = false,
+    reviewedFresh = false,
+  ) {
     const api = ipc();
     if (!api || !automation) return;
     let requirement: Awaited<ReturnType<typeof api.automations.inputRequirement>> = null;
@@ -1289,10 +1319,20 @@ function AutomationFlowPage() {
       }
       if (inputValue === undefined && requirement?.required) {
         setRunning(false);
-        setInputPrompt({ label: requirement.label, value: "" });
+        setInputPrompt({ label: requirement.label, value: "", fresh });
         setMessage("");
         return;
       }
+    }
+    if (fresh) {
+      // A fresh run must be visibly distinct before Main accepts it. If the
+      // safety gate rejects it, the catch path hydrates the durable failure
+      // back into this view instead of hiding that record.
+      setRunStates(Object.fromEntries((automation.graph?.nodes ?? []).map((node) => [node.id, "pending" as const])));
+      setNodeProgress({});
+      setNodeFailures({});
+      setActivity([]);
+      setRunStartedAt(null);
     }
     setRunning(true);
     setMessage(
@@ -1304,22 +1344,150 @@ function AutomationFlowPage() {
     );
     const previousRun = await api.automations.latestRun(automation.id).catch(() => undefined);
     let result: Awaited<ReturnType<typeof api.automations.runNow>>;
+    const runNowRequest = api.automations.runNow as unknown as (
+      automationId: string,
+      options?: { dryRun?: boolean; fresh?: boolean; input?: Record<string, unknown> },
+    ) => Promise<Awaited<ReturnType<NonNullable<typeof api>["automations"]["runNow"]>>>;
+    const runOptions = dryRun
+      ? { dryRun: true }
+      : {
+        ...(requirement?.required && inputValue !== undefined
+          ? { input: { [requirement.varName]: inputValue } }
+          : {}),
+        ...(fresh ? { fresh: true } : {}),
+      };
+    const reviewFreshAndRetry = async (): Promise<boolean> => {
+      if (!fresh || reviewedFresh || !previousRun) return false;
+      const currentRun = await api.automations.latestRun(automation.id).catch(() => null) as TerminalCloseRunSnapshot | null;
+      if (!currentRun || currentRun.automationId !== automation.id
+        || currentRun.runId !== previousRun.runId || currentRun.status !== "error") {
+        return false;
+      }
+      let reconciliation: Awaited<ReturnType<typeof api.automations.getGraphReconciliation>>;
+      let reconciliationRead = false;
+      try {
+        reconciliation = await api.automations.getGraphReconciliation(automation.id);
+        reconciliationRead = true;
+      } catch {
+        // Graph drift can make the current reconciliation view unavailable.
+        // The old checkpoint identity below still decides whether terminal
+        // close is possible; unresolved nodes remain fail-closed.
+        reconciliation = null;
+      }
+      if (reconciliation) return false;
+      const latestRunUnresolvedNodeIds = [...new Set([
+        ...(currentRun.inFlightNodeIds ?? []),
+        ...(currentRun.ambiguousNodeIds ?? []),
+      ])];
+      const terminalCloseCandidateReader = (api.automations as unknown as {
+        terminalCloseCandidate?: (automationId: string) => Promise<TerminalCloseCandidate | null>;
+      }).terminalCloseCandidate;
+      const terminalCloseCandidate = terminalCloseCandidateReader
+        ? await terminalCloseCandidateReader(automation.id).catch(() => null)
+        : null;
+      const candidate = terminalCloseCandidate
+        && terminalCloseCandidate.automationId === automation.id
+        && terminalCloseCandidate.runId === currentRun.runId
+        ? terminalCloseCandidate
+        : null;
+      const unresolvedNodeIds = candidate?.unresolvedNodeIds ?? latestRunUnresolvedNodeIds;
+      if (unresolvedNodeIds.length > 0) {
+        setMessage(locale === "en"
+          ? `A fresh run was not started because unresolved external effects remain (${unresolvedNodeIds.join(", ")}). Verify the result, restore the old graph if needed, and reconcile it first.`
+          : `미확정 외부 동작(${unresolvedNodeIds.join(", ")})이 남아 있어 새 실행을 시작하지 않았습니다. 실제 결과를 확인한 뒤 이전 그래프로 복원해 재조정해 주세요.`);
+        return true;
+      }
+      const terminalCloseInput: TerminalCloseInput | null = candidate
+        ? candidate.simulation === false
+          ? {
+            automationId: candidate.automationId,
+            runId: candidate.runId,
+            occurrenceId: candidate.occurrenceId,
+            graphDigest: candidate.graphDigest,
+            checkpointDigest: candidate.checkpointDigest,
+            expectedUpdatedAt: candidate.updatedAt,
+            decision: "reviewed_external_effects",
+          }
+          : null
+        : currentRun.occurrenceId
+        && currentRun.graphDigest
+        && currentRun.checkpointDigest
+        && currentRun.checkpointUpdatedAt
+        ? {
+          automationId: automation.id,
+          runId: currentRun.runId,
+          occurrenceId: currentRun.occurrenceId,
+          graphDigest: currentRun.graphDigest,
+          checkpointDigest: currentRun.checkpointDigest,
+          expectedUpdatedAt: currentRun.checkpointUpdatedAt,
+          decision: "reviewed_external_effects",
+        }
+        : null;
+      if (!terminalCloseInput) {
+        if (!reconciliationRead) {
+          setMessage(locale === "en"
+            ? "The old run checkpoint could not be read safely. No fresh run was started; restore the old graph before reconciling it."
+            : "이전 실행의 체크포인트를 안전하게 읽지 못해 새 실행을 시작하지 않았습니다. 이전 그래프로 복원한 뒤 재조정해 주세요.");
+          return true;
+        }
+        return false;
+      }
+      const confirmed = window.confirm(locale === "en"
+        ? `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`
+        : `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`);
+      if (!confirmed) return false;
+      try {
+        const terminalCloseApi = api.automations as unknown as {
+          terminalClose?: (input: TerminalCloseInput) => Promise<TerminalCloseReceipt>;
+          /** Temporary compatibility while an older preload is open. */
+          terminalCloseGraph?: (input: TerminalCloseInput) => Promise<TerminalCloseReceipt>;
+        };
+        const terminalClose = terminalCloseApi.terminalClose ?? terminalCloseApi.terminalCloseGraph;
+        if (!terminalClose) throw new Error("automation_graph_terminal_close_unavailable");
+        const receipt = await terminalClose(terminalCloseInput);
+        if (
+          receipt.automationId !== terminalCloseInput.automationId
+          || receipt.runId !== terminalCloseInput.runId
+          || receipt.occurrenceId !== terminalCloseInput.occurrenceId
+          || receipt.graphDigest !== terminalCloseInput.graphDigest
+          || receipt.checkpointDigest !== terminalCloseInput.checkpointDigest
+          || (receipt.status !== "closed" && receipt.status !== "already-closed")
+        ) throw new Error("automation_graph_terminal_close_receipt_mismatch");
+        setInputPrompt(null);
+        setMessage(locale === "en"
+          ? "The previous run was reviewed. Starting a separate occurrence…"
+          : "이전 실행을 확인했습니다. 별도 발생을 새로 시작합니다…");
+        await runNow(dryRun, inputValue, fresh, true);
+        return true;
+      } catch {
+        setMessage(locale === "en"
+          ? "The exact terminal-close receipt could not be verified. No separate run was started. Refresh the history; if the graph drifted, restore the old graph to reconcile it."
+          : "해당 실행의 종결 영수증을 저장·검증하지 못해 별도 실행을 시작하지 않았습니다. 기록을 새로고침하고 그래프가 바뀌었다면 이전 그래프로 복원해 재조정해 주세요.");
+        return true;
+      }
+    };
     try {
-      result = await api.automations.runNow(
+      result = await runNowRequest(
         automation.id,
-        dryRun
-          ? { dryRun: true }
-          : (requirement?.required && inputValue !== undefined
-            ? { input: { [requirement.varName]: inputValue } }
-            : undefined),
+        Object.keys(runOptions).length > 0 ? runOptions : undefined,
       );
       if (!result.accepted || result.automationId !== automation.id || !result.status) {
         throw new Error("automation_run_receipt_mismatch");
       }
-    } catch {
+    } catch (err) {
       try {
         const currentRun = await api.automations.latestRun(automation.id);
-        if (currentRun && currentRun.automationId === automation.id && previousRun !== undefined && currentRun.runId !== previousRun?.runId) {
+        const freshBlocked = fresh && /fresh_run_blocked|ambiguous_side_effect|reconciliation required/i.test(String(err));
+        if (freshBlocked && await reviewFreshAndRetry()) return;
+        if (currentRun && currentRun.automationId === automation.id && freshBlocked) {
+          setInputPrompt(null);
+          setRunStates(currentRun.nodeStates);
+          applySnapshotFailures(currentRun.nodeFailures);
+          setRunStartedAt(currentRun.startedAt);
+          setMessage(locale === "en"
+            ? "A fresh run was not started because the earlier run may have changed external state. Review the exact run and explicitly close it before starting a separate occurrence."
+            : "이전 실행이 외부 상태를 바꿨을 수 있어 처음부터 새 실행을 시작하지 않았습니다. 해당 실행을 확인하고 명시적으로 종결한 뒤 별도 실행을 시작해 주세요.");
+        } else if (currentRun && currentRun.automationId === automation.id && previousRun !== undefined && currentRun.runId !== previousRun?.runId) {
           setInputPrompt(null);
           setRunStates(currentRun.nodeStates);
           applySnapshotFailures(currentRun.nodeFailures);
@@ -1328,6 +1496,11 @@ function AutomationFlowPage() {
             ? `A new run ${currentRun.runId} is in history with status ${currentRun.status}, but its reply was lost. Inspect that run and do not start another one just to check.`
             : `새 실행 ${currentRun.runId}이(가) 기록에 ${currentRun.status} 상태로 남아 있지만 응답이 유실됐습니다. 해당 실행을 확인하고 확인 목적으로 다시 실행하지 마세요.`);
         } else if (previousRun !== undefined && currentRun?.runId === previousRun?.runId) {
+          if (fresh) {
+            setRunStates(currentRun?.nodeStates ?? {});
+            applySnapshotFailures(currentRun?.nodeFailures);
+            setRunStartedAt(currentRun?.startedAt ?? null);
+          }
           setMessage(locale === "en"
             ? "Run history still shows the same run as before this request. No new run was confirmed; inspect history before trying again."
             : "실행 기록에는 요청 전과 같은 실행만 보입니다. 새 실행은 확인되지 않았으니 다시 시도하기 전에 기록을 확인하세요.");
@@ -1345,8 +1518,15 @@ function AutomationFlowPage() {
       return;
     }
     setInputPrompt(null);
+    const freshBlocked = fresh && result.status !== "ok"
+      && /fresh_run_blocked|ambiguous_side_effect|reconciliation required/i.test(result.error ?? "");
+    if (freshBlocked && await reviewFreshAndRetry()) return;
     const terminalMessage =
-      result.status !== "ok"
+      freshBlocked
+        ? (locale === "en"
+          ? "A fresh run was not started because the earlier run may have changed external state. Review the exact run and explicitly close it before starting a separate occurrence."
+          : "이전 실행이 외부 상태를 바꿨을 수 있어 처음부터 새 실행을 시작하지 않았습니다. 해당 실행을 확인하고 명시적으로 종결한 뒤 별도 실행을 시작해 주세요.")
+        : result.status !== "ok"
         ? (result.error || (locale === "en"
           ? `Run ended with status ${result.status ?? "failed"}.`
           : `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`))
@@ -1360,12 +1540,43 @@ function AutomationFlowPage() {
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
       applySnapshotFailures(snap?.nodeFailures);
+      setRunStartedAt(snap?.startedAt ?? null);
     } catch {
       setMessage(locale === "en"
         ? `${terminalMessage} The run-history view could not refresh. Do not rerun solely to refresh this screen.`
         : `${terminalMessage} 실행 기록 화면을 새로고침하지 못했습니다. 이 화면 갱신만을 위해 다시 실행하지 마세요.`);
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function refreshRunView() {
+    const api = ipc();
+    if (!api || !automation || refreshing) return;
+    setRefreshing(true);
+    setMessage(locale === "en" ? "Refreshing the saved run state…" : "저장된 실행 상태를 새로 읽는 중입니다…");
+    try {
+      const snap = await api.automations.latestRun(automation.id);
+      if (snap && snap.automationId !== automation.id) throw new Error("automation_refresh_identity_mismatch");
+      if (snap) {
+        setRunStates(snap.nodeStates ?? {});
+        applySnapshotFailures(snap.nodeFailures);
+        setRunStartedAt(snap.startedAt ?? null);
+      } else if (!snap) {
+        setRunStates({});
+        setNodeFailures({});
+        setRunStartedAt(null);
+      }
+      window.dispatchEvent(new CustomEvent("agentlas:automation-run-refresh", {
+        detail: { automationId: automation.id },
+      }));
+      setMessage(locale === "en" ? "The saved run state was refreshed." : "저장된 실행 상태를 새로고침했습니다.");
+    } catch {
+      setMessage(locale === "en"
+        ? "The saved run state could not be refreshed. No new run was started."
+        : "저장된 실행 상태를 새로고침하지 못했습니다. 새 실행은 시작하지 않았습니다.");
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -1421,7 +1632,7 @@ function AutomationFlowPage() {
             placeholder={locale === "en" ? "Type the value this run starts from" : "이번 실행이 시작할 값을 입력하세요"}
             onChange={(e) => setInputPrompt({ ...inputPrompt, value: e.target.value })}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim());
+              if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim(), inputPrompt.fresh);
               if (e.key === "Escape") setInputPrompt(null);
             }}
             className="titlebar-nodrag"
@@ -1435,7 +1646,7 @@ function AutomationFlowPage() {
               data-testid="graph-input-start"
               className="titlebar-nodrag"
               disabled={running || !inputPrompt.value.trim()}
-              onClick={() => void runNow(false, inputPrompt.value.trim())}
+              onClick={() => void runNow(false, inputPrompt.value.trim(), inputPrompt.fresh)}
               style={{ ...actionBtn, opacity: inputPrompt.value.trim() ? 1 : 0.5 }}
             >
               {locale === "en" ? "Start with this" : "이 값으로 실행"}
@@ -1722,6 +1933,20 @@ return (
               {locale === "en" ? "History" : "이전 판"}
             </button>
             <button
+              type="button"
+              data-testid="refresh-automation-run"
+              onClick={() => void refreshRunView()}
+              disabled={refreshing}
+              className="titlebar-nodrag"
+              style={{ ...pillBtn(false), opacity: refreshing ? 0.55 : 1 }}
+              title={locale === "en"
+                ? "Read the saved run snapshot and history again. This does not start a run."
+                : "저장된 실행 스냅샷과 기록만 다시 읽습니다. 실행은 시작하지 않습니다."}
+            >
+              <IconRefresh size={13} style={{ marginRight: 4 }} />
+              {refreshing ? (locale === "en" ? "Refreshing…" : "새로 읽는 중…") : (locale === "en" ? "Refresh" : "새로고침")}
+            </button>
+            <button
               onClick={() => void runNow(true)}
               disabled={running}
               className="titlebar-nodrag"
@@ -1753,6 +1978,21 @@ return (
                   ? (locale === "en" ? "Continue run" : "이어서 실행")
                   : t("auto.flow.run_now")}
             </button>
+            {freshStartable ? (
+              <button
+                type="button"
+                data-testid="fresh-automation-run"
+                onClick={() => void runNow(false, undefined, true)}
+                disabled={running || liveRunning}
+                className="titlebar-nodrag"
+                style={{ ...pillBtn(false), opacity: running || liveRunning ? 0.55 : 1 }}
+                title={locale === "en"
+                  ? "Start a separate run from the first step. An unresolved external effect will block it until reconciled."
+                  : "첫 단계부터 별도 실행을 시작합니다. 외부 동작이 미확정이면 재조정할 때까지 시작하지 않습니다."}
+              >
+                {locale === "en" ? "Start fresh" : "처음부터 새 실행"}
+              </button>
+            ) : null}
             {/* ★도는 것을 사람이 멈춘다. 자동화는 사람이 안 볼 때 도는 것이라,
                 봤을 때 세울 수 있어야 한다(다른 기능은 전부 취소가 있었다). */}
             {liveRunning ? (

@@ -389,7 +389,7 @@ function createComposerEventSync({
     projects: [], selectedId: null, lifecycle: null, researchLoopInspection: null, researchLoopActionBusy: false, researchLoopActionError: "", conversations: [], selectedConversationId: null, messages: [], sources: [], sourceFigures: [], runs: [], artifacts: [], labs: [], workspaceLabBindings: [], labCatalog: [], labDecisionProjections: [], rendererPacks: [], manuscripts: [], claimLedger: null, journalProfiles: [], submissionExports: [], analysisSpecs: [], decisions: [],
     artifactContextsByMessage: new Map(), labContextsById: new Map(), artifactHistoryById: new Map(), selectedLabId: null, selectedArtifactOriginVersion: null, inspectedArtifactVersion: null, inspectedArtifactContext: null, artifactComparison: null, draftHistoryGuard: null, labsExpanded: true, expandedLabGroups: new Set(["chemistry"]), expandedLabDecisions: new Set(), projectMenuOpen: false, projectFolderOpen: false, projectLibrarySummaries: new Map(), projectLibrarySummaryState: "loading", librarySearch: "", librarySelectedProjectId: null, projectFolderSelectedKey: null, newProjectStep: "details", selectedResearchTemplateId: null, newProjectDraft: blankNewProjectDraft(), newProjectFolderError: "", newProjectFolderBusy: false, newProjectGeneration: 0, newProjectRequestId: null, newProjectRequestSignature: "", labManagerOpen: false, labManagerBusyId: null, labManagerGeneration: 0, labManagerError: "", historyOpen: false, railCollapsed: readRailCollapsed(),
     blocksByMessage: new Map(), citationsByMessage: new Map(), evidenceById: new Map(), selectedSourceId: null, selectedArtifactId: null,
-    evidenceGraph: null, evidenceGraphReviews: [], evidenceGraphLoading: false, evidenceGraphError: "", selectedEvidenceGraphNodeId: null, selectedEvidenceGraphCandidateId: null, evidenceGraphReviewSheet: false, evidenceGraphReviewDecision: "accepted", evidenceGraphReviewBusy: false, evidenceGraphReviewError: "", evidenceGraphPathAnchorId: null, evidenceGraphPath: null,
+    evidenceGraph: null, evidenceGraphReviews: [], evidenceGraphLoading: false, evidenceGraphRefreshId: null, evidenceGraphError: "", selectedEvidenceGraphNodeId: null, selectedEvidenceGraphCandidateId: null, evidenceGraphReviewSheet: false, evidenceGraphReviewDecision: "accepted", evidenceGraphReviewBusy: false, evidenceGraphReviewError: "", evidenceGraphPathAnchorId: null, evidenceGraphPath: null,
     mode: "session", drawer: null, modal: false, manuscriptModal: false, saving: false, loadingProject: false, projectError: "", projectFolderOpenBusy: false, projectFolderOpenError: "", activeVegaView: null, activeCytoscape: null, activeNumericSurface: null, activeJBrowseTarget: null, scrollByMode: { session: 0, lab: 0, manuscript: 0 }, returnMessageId: null,
     workspaceTabs: [{ id: "research", kind: "research", dirty: false }], activeWorkspaceTabId: "research", currentDestination: "overview", hypotheses: [], hypothesesError: "", approvalPolicy: null, approvalPolicyError: "", workspaceSyncError: "",
     analysisRuns: [], analysisRunArtifacts: [], analysisRunsError: "", analysisRunsProjectId: null,
@@ -1912,6 +1912,7 @@ function createComposerEventSync({
     state.evidenceGraph = null;
     state.evidenceGraphReviews = [];
     state.evidenceGraphLoading = false;
+    state.evidenceGraphRefreshId = null;
     state.evidenceGraphError = "";
     state.selectedEvidenceGraphNodeId = null;
     state.selectedEvidenceGraphCandidateId = null;
@@ -3284,7 +3285,7 @@ function createComposerEventSync({
       <div class="researchKicker"><span>${escapeHtml(domainLabel(project.domain))}</span> · <span>결과와 그림</span></div>
       <h1>${escapeHtml(project.title)}</h1>
       ${state.resultsError ? `<div class="errorCopy" role="alert">${escapeHtml(`결과 목록을 불러오지 못했습니다. ${state.resultsError}`)}</div>` : ""}
-      ${loaded && artifacts.length ? `<div class="resultsSummary"><span>총 ${escapeHtml(artifacts.length)}개</span><span>게재 검증됨 ${escapeHtml(readyCount)}</span><span data-alert="${artifacts.length - readyCount > 0}">원고 연결 불가 ${escapeHtml(artifacts.length - readyCount)}</span></div>` : ""}
+      ${loaded && artifacts.length ? `<div class="resultsSummary"><span>${escapeHtml(uiCopy(`총 ${artifacts.length}개`, `${artifacts.length} total`))}</span><span>${escapeHtml(uiCopy(`게재 검증됨 ${readyCount}`, `${readyCount} publication-verified`))}</span><span data-alert="${artifacts.length - readyCount > 0}">${escapeHtml(uiCopy(`원고 연결 불가 ${artifacts.length - readyCount}`, `${artifacts.length - readyCount} not linkable to a manuscript`))}</span></div>` : ""}
       ${body}
     </div></section>`;
   }
@@ -3592,15 +3593,27 @@ function createComposerEventSync({
   // Main-process manuscript rendering (electron/science/manuscript): numbered figures/tables,
   // embedded verified assets, editable tables from exact rows, math, references. The local
   // manuscriptPreview() below is only the instant fallback while the render is in flight.
+  function selectedManuscriptJournalOptions() {
+    const profile = journalProfileById(state.selectedJournalProfileId);
+    return profile ? {
+      journalProfileId: profile.id,
+      expectedJournalProfileVersion: profile.currentVersion,
+      expectedJournalProfileContentSha256: profile.version.contentSha256,
+    } : {};
+  }
   function manuscriptDraftKey(draft) {
-    return JSON.stringify([draft.markdown, draft.bindings.map((binding) => [binding.ordinal, binding.role, binding.locator, binding.target])]);
+    const manuscript = manuscriptById(state.selectedManuscriptId);
+    return JSON.stringify([state.selectedId, manuscript?.id, manuscript?.title, selectedManuscriptJournalOptions(), draft.markdown, draft.bindings.map((binding) => [binding.ordinal, binding.role, binding.locator, binding.target])]);
   }
   function ensureManuscriptPaperCss(css) {
-    if (!css || document.querySelector("style[data-manuscript-paper-css]")) return;
-    const style = document.createElement("style");
-    style.dataset.manuscriptPaperCss = "true";
+    if (!css) return;
+    let style = document.querySelector("style[data-manuscript-paper-css]");
+    if (!style) {
+      style = document.createElement("style");
+      style.dataset.manuscriptPaperCss = "true";
+      document.head.append(style);
+    }
     style.textContent = css;
-    document.head.append(style);
   }
   async function requestManuscriptPreview() {
     const manuscript = manuscriptById(state.selectedManuscriptId);
@@ -3616,7 +3629,7 @@ function createComposerEventSync({
         projectId,
         draft: { title: manuscript.title, markdown: draft.markdown, bindings: draft.bindings },
         outputs: ["html", "latex"],
-        lineNumbers: true,
+        ...selectedManuscriptJournalOptions(),
       });
       if (state.selectedId !== projectId || !state.manuscriptDraft || manuscriptDraftKey(state.manuscriptDraft) !== key) return;
       ensureManuscriptPaperCss(result.css);
@@ -3627,7 +3640,7 @@ function createComposerEventSync({
       state.manuscriptPreviewKey = key;
       state.manuscriptPreviewWarnings = Array.isArray(result.warnings) ? result.warnings : [];
       state.manuscriptPreviewReport = result.document || null;
-      if (state.mode === "manuscript" && state.manuscriptView !== "write") render();
+      if (state.mode === "manuscript") render();
     } catch (error) {
       state.manuscriptPreviewWarnings = [{ code: "render-failed", message: error instanceof Error ? error.message : String(error), line: null }];
       if (state.mode === "manuscript" && state.manuscriptView !== "write") render();
@@ -3644,13 +3657,13 @@ function createComposerEventSync({
     try {
       const outputs = format === "pdf" ? ["pdf"] : format === "docx" ? ["docx"] : ["latex"];
       const result = draft.dirty
-        ? await science.manuscripts.render({ projectId: state.selectedId, draft: { title: manuscript.title, markdown: draft.markdown, bindings: draft.bindings }, outputs, lineNumbers: format === "pdf" })
-        : await science.manuscripts.render({ projectId: state.selectedId, manuscriptId: manuscript.id, outputs, lineNumbers: format === "pdf" });
+        ? await science.manuscripts.render({ projectId: state.selectedId, draft: { title: manuscript.title, markdown: draft.markdown, bindings: draft.bindings }, outputs, ...selectedManuscriptJournalOptions() })
+        : await science.manuscripts.render({ projectId: state.selectedId, manuscriptId: manuscript.id, outputs, ...selectedManuscriptJournalOptions() });
       const base = (manuscript.title || "manuscript").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").slice(0, 60) || "manuscript";
       const journalProfile = journalProfileById(state.selectedJournalProfileId);
       const claimReady = claimLedgerIsCurrent(manuscript, draft);
       const readiness = manuscriptReadinessView(manuscript, draft, state.manuscriptEditorModel, journalProfile, claimReady);
-      const version = readiness.publicationReady ? `v${manuscript.currentVersion}` : `DRAFT-v${manuscript.currentVersion}`;
+      const version = result.draftBoundary ? `DRAFT-v${manuscript.currentVersion}` : `v${manuscript.currentVersion}`;
       const payload = format === "pdf" ? result.pdf?.bytes : format === "docx" ? result.docx : result.latex;
       if (!payload) throw new Error(result.pdfFailure || `manuscript-${format}-render-failed`);
       const blob = new Blob([payload], { type: format === "pdf" ? "application/pdf" : format === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/x-tex" });
@@ -4422,7 +4435,7 @@ function createComposerEventSync({
     // need different next steps, so the empty state asks which one this is before it speaks.
     if (!manuscript || !draft || draft.manuscriptId !== manuscript.id) {
       const noManuscripts = !(state.manuscripts && state.manuscripts.length);
-      return `<section class="emptyView"><div><div class="emptyIcon">M</div><strong>${noManuscripts ? "아직 원고가 없습니다." : "원고를 선택해 주세요."}</strong><p>${noManuscripts ? "제목과 첫 Markdown만 정하면 원고가 열립니다. 이후 저장할 때마다 덮어쓰지 않고 새 버전이 쌓입니다." : "저장된 원고는 브라우저형 탭에서 열리고, 우측 연구 채팅과 함께 편집됩니다."}</p><button class="primaryButton manuscriptCreateInline" data-action="new-manuscript">${noManuscripts ? "첫 원고 만들기" : "새 원고 만들기"}</button></div></section>`;
+      return `<section class="emptyView"><div><div class="emptyIcon">M</div><strong>${noManuscripts ? "아직 원고가 없습니다." : "원고를 선택해 주세요."}</strong><p>${noManuscripts ? uiCopy("Research Director에서 필요한 근거와 작성 단계를 확인하고 연구 채팅에서 시작하세요. 근거 검증을 통과하면 원고가 생성됩니다.", "Review the required evidence and writing steps in Research Director, then start in Research chat. A manuscript is created after the evidence gates pass.") : "저장된 원고는 브라우저형 탭에서 열리고, 우측 연구 채팅과 함께 편집됩니다."}</p><button class="primaryButton manuscriptCreateInline" data-action="new-manuscript">${noManuscripts ? "첫 원고 만들기" : "새 원고 만들기"}</button></div></section>`;
     }
     const journalProfile = journalProfileById(state.selectedJournalProfileId);
     const claimReady = claimLedgerIsCurrent(manuscript, draft);
@@ -4443,13 +4456,27 @@ function createComposerEventSync({
     const blueprintAssessment = manuscriptBlueprintAssessmentView(editorModel?.blueprintAssessment);
     const scholarlyAssessment = manuscriptScholarlyAssessmentView(editorModel?.scholarlyAssessment);
     const readiness = manuscriptReadinessView(manuscript, draft, editorModel, journalProfile, claimReady);
-    const previewLabel = readiness.publicationReady ? "Publication preview" : "Typeset preview";
-    const exportPrefix = readiness.publicationReady ? "" : "DRAFT ";
-    const draftBoundary = readiness.publicationReady ? "" : `<div class="manuscriptDraftBoundary" role="status"><strong>DRAFT · NOT FOR SUBMISSION</strong><span>${escapeHtml(readiness.blocker)}</span></div>`;
-    const draftWatermark = readiness.publicationReady ? "" : `<span class="manuscriptDraftWatermark" aria-hidden="true">DRAFT</span>`;
+    const previewLabel = "Typeset preview";
+    const exportPrefix = "DRAFT ";
+    const draftBoundaryMessage = readiness.publicationReady
+      ? uiCopy("미리보기와 일반 내보내기는 초안입니다. 제출용 파일은 제출 패키지에서 받으세요.", "Preview and ordinary exports are drafts. Get submission files from the submission package.")
+      : readiness.blocker;
+    const draftBoundary = `<div class="manuscriptDraftBoundary" role="status"><strong>DRAFT · NOT FOR SUBMISSION</strong><span>${escapeHtml(draftBoundaryMessage)}</span></div>`;
+    const draftWatermark = `<span class="manuscriptDraftWatermark" aria-hidden="true">DRAFT</span>`;
     const outline = (document?.nodes || []).filter((node) => node.kind === "heading");
-    const wordCount = String(draft.markdown || "").trim().split(/\s+/).filter(Boolean).length;
     const previewKey = manuscriptDraftKey(draft);
+    const wordCount = state.manuscriptPreviewKey === previewKey && Number.isFinite(state.manuscriptPreviewReport?.wordCountReport?.total)
+      ? state.manuscriptPreviewReport.wordCountReport.total : "—";
+    const wordCountReport = wordCount === "—" ? null : state.manuscriptPreviewReport.wordCountReport;
+    const wordCountParts = [
+      ["includeTitle", uiCopy("제목", "Title")], ["includeHeadings", uiCopy("소제목", "Headings")],
+      ["includeAbstract", uiCopy("초록", "Abstract")], ["includeCaptions", uiCopy("캡션", "Captions")],
+      ["includeReferences", uiCopy("참고문헌", "References")], ["includeTableCells", uiCopy("표 내용", "Table cells")],
+      ["includeKeywords", uiCopy("키워드", "Keywords")],
+    ];
+    const wordCountExplanation = wordCountReport
+      ? `<strong>${escapeHtml(wordCountReport.basis === "journal-rule" ? uiCopy("저널 규칙 기준", "Journal rule") : uiCopy("기본 집계 기준 · 저널 집계 규칙 미지정", "Default counting scope · journal scope not specified"))}</strong><p>${escapeHtml(uiCopy("포함", "Includes"))}: ${escapeHtml([uiCopy("본문", "Body"), ...wordCountParts.filter(([key]) => wordCountReport.scope?.[key]).map(([, label]) => label)].join(", "))}</p><p>${escapeHtml(uiCopy("제외", "Excludes"))}: ${escapeHtml(wordCountParts.filter(([key]) => !wordCountReport.scope?.[key]).map(([, label]) => label).join(", ") || uiCopy("없음", "None"))}</p>${Number.isFinite(wordCountReport.maximum) ? `<p>${escapeHtml(uiCopy("상한", "Maximum"))}: ${escapeHtml(wordCountReport.maximum)} ${escapeHtml(uiCopy("단어", "words"))}</p>` : ""}`
+      : `<p>${escapeHtml(uiCopy("현재 원고와 저널 기준으로 집계 중입니다.", "Counting the current manuscript with the selected journal scope."))}</p>`;
     const typesetterStatus = state.manuscriptPreviewCapabilities?.tectonic === true
       ? "Tectonic available"
       : state.manuscriptPreviewCapabilities?.tectonic === false
@@ -4457,24 +4484,24 @@ function createComposerEventSync({
         : "Checking LaTeX toolchain";
     // Both the typeset proof and the generated .tex come from the same render call, so the LaTeX
     // view asks for it too. Without this the tab would sit there showing "generating…" forever.
-    const needsRender = state.manuscriptView === "preview" || state.manuscriptView === "latex";
+    const needsRender = state.manuscriptPreviewKey !== previewKey || !state.manuscriptPreviewHtml;
     const renderedPreview = state.manuscriptView === "preview" && state.manuscriptPreviewKey === previewKey && state.manuscriptPreviewHtml;
     const latexReady = state.manuscriptPreviewKey === previewKey && state.manuscriptPreviewLatex;
-    if (needsRender && !(renderedPreview || (state.manuscriptView === "latex" && latexReady))) {
+    if (needsRender) {
       queueMicrotask(() => { void requestManuscriptPreview(); });
     }
-    const previewWarnings = needsRender && state.manuscriptPreviewWarnings.length
+    const previewWarnings = state.manuscriptPreviewWarnings.length
       ? `<div class="manuscriptPaperWarnings" role="status"><strong><span class="stateGlyph" data-state="awaiting-human" aria-hidden="true"></span>${escapeHtml(String(state.manuscriptPreviewWarnings.length))}건 확인 필요</strong><ul>${state.manuscriptPreviewWarnings.slice(0, 12).map((warning) => `<li data-code="${escapeHtml(warning.code)}">${escapeHtml(warning.message)}${warning.line ? ` <em>(line ${escapeHtml(String(warning.line))})</em>` : ""}</li>`).join("")}</ul></div>`
       : "";
     const canvas = state.manuscriptView === "preview"
       ? renderedPreview
-        ? `${draftBoundary}${previewWarnings}<div class="manuscriptPaperHost" data-manuscript-preview data-rendered="true" data-preview-kind="${readiness.publicationReady ? "publication" : "draft"}">${draftWatermark}${state.manuscriptPreviewHtml}</div>`
-        : `${draftBoundary}${previewWarnings}<article class="manuscriptPaper manuscriptPreview" data-manuscript-preview data-rendered="false" data-preview-kind="${readiness.publicationReady ? "publication" : "draft"}" aria-busy="true">${draftWatermark}<header class="manuscriptDocumentTitle"><span>Research Article</span><h1>${escapeHtml(manuscript.title)}</h1></header>${manuscriptPreview(draft.markdown)}</article>`
+        ? `${draftBoundary}${previewWarnings}<div class="manuscriptPaperHost" data-manuscript-preview data-rendered="true" data-preview-kind="draft">${draftWatermark}${state.manuscriptPreviewHtml}</div>`
+        : `${draftBoundary}${previewWarnings}<article class="manuscriptPaper manuscriptPreview" data-manuscript-preview data-rendered="false" data-preview-kind="draft" aria-busy="true">${draftWatermark}<header class="manuscriptDocumentTitle"><span>Research Article</span><h1>${escapeHtml(manuscript.title)}</h1></header>${manuscriptPreview(draft.markdown)}</article>`
       : state.manuscriptView === "latex"
         // What the typesetter is actually handed. A proof can look right while the source that
         // produces it is wrong, and the researcher is the one who has to send that source to a
         // journal -- so it is readable here, and downloadable, rather than only inferable.
-        ? `<section class="manuscriptLatexWorkspace"><header><div><span>제출용 생성 소스</span><strong>main.tex</strong></div><div><span>${escapeHtml(typesetterStatus)}</span><span>그림 ${escapeHtml(state.manuscriptPreviewReport?.figures?.length || 0)} · 표 ${escapeHtml(state.manuscriptPreviewReport?.tables?.length || 0)} · 인용 ${escapeHtml(state.manuscriptPreviewReport?.citations?.length || 0)}</span></div></header>${previewWarnings}<pre aria-label="Generated LaTeX source"><code>${latexReady ? escapeHtml(state.manuscriptPreviewLatex) : "% LaTeX 소스를 생성하는 중…"}</code></pre>${state.manuscriptPreviewBibtex ? `<details><summary>references.bib</summary><pre><code>${escapeHtml(state.manuscriptPreviewBibtex)}</code></pre></details>` : ""}<footer><span>정확한 원고 버전과 결합된 연구 아티팩트에서 생성됩니다.</span><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="latex">.tex 내려받기</button></footer></section>`
+        ? `<section class="manuscriptLatexWorkspace"><header><div><span>${escapeHtml(uiCopy("초안 생성 소스", "Generated draft source"))}</span><strong>main.tex</strong></div><div><span>${escapeHtml(typesetterStatus)}</span><span>그림 ${escapeHtml(state.manuscriptPreviewReport?.figures?.length || 0)} · 표 ${escapeHtml(state.manuscriptPreviewReport?.tables?.length || 0)} · 인용 ${escapeHtml(state.manuscriptPreviewReport?.citations?.length || 0)}</span></div></header>${previewWarnings}<pre aria-label="Generated LaTeX source"><code>${latexReady ? escapeHtml(state.manuscriptPreviewLatex) : "% LaTeX 소스를 생성하는 중…"}</code></pre>${state.manuscriptPreviewBibtex ? `<details><summary>references.bib</summary><pre><code>${escapeHtml(state.manuscriptPreviewBibtex)}</code></pre></details>` : ""}<footer><span>정확한 원고 버전과 결합된 연구 아티팩트에서 생성됩니다.</span><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="latex">.tex 내려받기</button></footer></section>`
       : state.manuscriptView === "write"
         ? manuscriptSourceEditorMarkup(manuscript, draft)
         : manuscriptBlockPaperMarkup(manuscript, document);
@@ -4496,7 +4523,7 @@ function createComposerEventSync({
     return `<section class="manuscriptWorkspace">
       <header class="journalToolbar">
         <div class="manuscriptToolbarIdentity"><span>Manuscript</span><strong>${escapeHtml(manuscript.title)}</strong></div>
-        <button class="journalTargetButton" data-action="open-journal-sheet">${escapeHtml(journalProfile?.journalName || "Choose target journal")} ${heroIcon("chevron-down")}</button>
+        <button class="journalTargetButton" data-action="open-journal-sheet"><span class="journalTargetLabel">${escapeHtml(journalProfile?.journalName || "Choose target journal")}</span>${heroIcon("chevron-down")}</button>
         <!-- The tick means "these guidelines were actually read", not "a journal is selected".
              It used to appear whenever a profile existed, so the line read "Guidelines checked:
              not yet inspected ✓" -- a claim contradicting the words beside it. -->
@@ -4512,7 +4539,7 @@ function createComposerEventSync({
         <span class="visuallyHidden">Manuscript · immutable v${escapeHtml(manuscript.currentVersion)}</span>
         <div class="manuscriptViewSwitch segmentTrack" role="tablist" aria-label="Manuscript view"><button role="tab" data-manuscript-view="paper" aria-selected="${state.manuscriptView === "paper"}" aria-pressed="${state.manuscriptView === "paper"}">Block editor</button><button role="tab" data-manuscript-view="write" aria-selected="${state.manuscriptView === "write"}" aria-pressed="${state.manuscriptView === "write"}">Edit source</button><button role="tab" data-manuscript-view="preview" aria-selected="${state.manuscriptView === "preview"}" aria-pressed="${state.manuscriptView === "preview"}">${previewLabel}</button><button role="tab" data-manuscript-view="latex" aria-selected="${state.manuscriptView === "latex"}" aria-pressed="${state.manuscriptView === "latex"}">LaTeX</button></div>
         <div class="manuscriptStatus" data-manuscript-status data-state="${error ? "error" : "saved"}">v${escapeHtml(manuscript.currentVersion)} · ${escapeHtml(document?.documentSha256?.slice(0, 10) || draft.baseContentSha256.slice(0, 10))}…${error ? ` · ${escapeHtml(error)}` : " · saved"}</div>
-        <div class="manuscriptToolbarActions"><button class="primaryButton manuscriptSaveButton" data-action="save-manuscript" ${!draft.dirty || state.manuscriptSaving ? "disabled" : ""}>${state.manuscriptSaving ? "Saving…" : draft.dirty ? "Save version" : "Saved"}</button><button class="secondaryButton" data-action="ask-manuscript-review">${heroIcon("sparkles")} Ask Science</button><button class="secondaryButton manuscriptInspectorToggle" data-action="toggle-manuscript-inspector" aria-controls="manuscript-submission-inspector" aria-pressed="${state.manuscriptInspectorOpen}">${heroIcon("book")} Checks</button><span class="manuscriptExportGroup" data-draft-export="${!readiness.publicationReady}"><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="pdf" ${state.manuscriptExportBusy ? "disabled" : ""}>${exportPrefix}PDF</button><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="docx" ${state.manuscriptExportBusy ? "disabled" : ""}>${exportPrefix}DOCX</button><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="latex" ${state.manuscriptExportBusy ? "disabled" : ""}>${state.manuscriptExportBusy === "latex" ? "Building…" : ".tex"}</button></span></div>
+        <div class="manuscriptToolbarActions"><button class="primaryButton manuscriptSaveButton" data-action="save-manuscript" ${!draft.dirty || state.manuscriptSaving ? "disabled" : ""}>${state.manuscriptSaving ? "Saving…" : draft.dirty ? "Save version" : "Saved"}</button><button class="secondaryButton" data-action="ask-manuscript-review">${heroIcon("sparkles")} Ask Science</button><button class="secondaryButton manuscriptInspectorToggle" data-action="toggle-manuscript-inspector" aria-controls="manuscript-submission-inspector" aria-pressed="${state.manuscriptInspectorOpen}">${heroIcon("book")} Checks</button><span class="manuscriptExportGroup" data-draft-export="true"><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="pdf" ${state.manuscriptExportBusy ? "disabled" : ""}>${exportPrefix}PDF</button><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="docx" ${state.manuscriptExportBusy ? "disabled" : ""}>${exportPrefix}DOCX</button><button class="secondaryButton ghostButton" data-action="export-manuscript" data-format="latex" ${state.manuscriptExportBusy ? "disabled" : ""}>${state.manuscriptExportBusy === "latex" ? "Building…" : ".tex"}</button></span></div>
       </div>
       ${notice}
       <div class="manuscriptWorkGrid" data-inspector-open="${state.manuscriptInspectorOpen}" data-manuscript-view="${escapeHtml(state.manuscriptView)}">
@@ -4523,6 +4550,7 @@ function createComposerEventSync({
           <header><div><span>Manuscript checks</span><strong>Submission readiness</strong></div><button data-action="toggle-manuscript-inspector" aria-label="Close">×</button></header>
           ${manuscriptBlueprintAssessmentMarkup(blueprintAssessment, editorModel?.blueprint)}
           ${manuscriptScholarlyAssessmentMarkup(scholarlyAssessment)}
+          <section data-manuscript-word-count><div class="manuscriptInspectorLabel">${escapeHtml(uiCopy("단어 수 집계 기준", "Word count scope"))}</div><p>${escapeHtml(wordCount)} ${escapeHtml(uiCopy("단어", "words"))}</p>${wordCountExplanation}</section>
           <section><div class="manuscriptInspectorLabel">Claim &amp; evidence ledger</div><div class="journalValidationSummary" data-status="${claimReady ? "ready" : "blocked"}"><strong>${claimReady ? "ready" : "blocked"}</strong><span>${escapeHtml(claimSummary)}</span></div></section>
           <section class="journalProfileSection"><div class="manuscriptInspectorLabel">Target journal</div>${journalProfile ? `<label class="journalProfileSelect"><span>Profile</span><select data-journal-profile-select>${profileOptions}</select></label><div class="journalProfileProof"><strong>${escapeHtml(journalProfile.version.rules.length)} verified rules</strong><span>${escapeHtml(journalProfile.version.sources.map((source) => source.officialHost).join(", "))}</span></div><button class="primaryButton manuscriptSubmissionAction" data-action="open-submission-sheet">Review submission package</button>` : `<div class="journalEmpty"><strong>No target journal</strong><p>Pin the official journal rules before creating a submission package.</p><button class="primaryButton" data-action="open-journal-sheet">Choose journal</button></div>`}</section>
           <section><div class="manuscriptInspectorLabel">Evidence bindings</div><div class="manuscriptBindingList">${bindings}</div></section>
@@ -10154,28 +10182,37 @@ function createComposerEventSync({
 
   async function refreshEvidenceGraph() {
     if (!state.selectedId || state.evidenceGraphLoading) return;
+    const projectId = state.selectedId;
+    const requestId = crypto.randomUUID();
+    const currentRequest = () => state.selectedId === projectId && state.evidenceGraphRefreshId === requestId;
+    state.evidenceGraphRefreshId = requestId;
     state.evidenceGraphLoading = true;
     state.evidenceGraphError = "";
     render();
     try {
       const result = await science.evidenceGraph.refresh({
-        requestId: crypto.randomUUID(),
-        projectId: state.selectedId,
+        requestId,
+        projectId,
         expectedRevision: state.evidenceGraph?.revision ?? null,
         expectedContentSha256: state.evidenceGraph?.contentSha256 ?? null,
       });
-      const snapshot = await science.evidenceGraph.get(state.selectedId);
-      if (!result?.graph || snapshot?.graph?.id !== result.graph.id || snapshot.graph.contentSha256 !== result.graph.contentSha256) throw new Error("science-evidence-graph-refresh-readback-mismatch");
+      if (!currentRequest()) return;
+      const snapshot = await science.evidenceGraph.get(projectId);
+      if (!currentRequest()) return;
+      if (!result?.graph || result.graph.projectId !== projectId || snapshot?.graph?.projectId !== projectId || snapshot.graph.id !== result.graph.id || snapshot.graph.contentSha256 !== result.graph.contentSha256) throw new Error("science-evidence-graph-refresh-readback-mismatch");
       state.evidenceGraph = snapshot.graph;
       state.evidenceGraphReviews = Array.isArray(snapshot.reviews) ? snapshot.reviews : [];
       if (!evidenceGraphNodeById(state.selectedEvidenceGraphNodeId)) state.selectedEvidenceGraphNodeId = null;
       if (!evidenceGraphCandidateById(state.selectedEvidenceGraphCandidateId)) state.selectedEvidenceGraphCandidateId = null;
       state.evidenceGraphPath = null;
     } catch (error) {
-      state.evidenceGraphError = error instanceof Error ? error.message : String(error);
+      if (currentRequest()) state.evidenceGraphError = error instanceof Error ? error.message : String(error);
     } finally {
-      state.evidenceGraphLoading = false;
-      render();
+      if (currentRequest()) {
+        state.evidenceGraphLoading = false;
+        state.evidenceGraphRefreshId = null;
+        render();
+      }
     }
   }
 

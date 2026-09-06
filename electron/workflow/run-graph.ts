@@ -50,6 +50,7 @@ import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentConcurrency } from "../store/concurrency";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
+import { hasAutomationGraphTerminalClose } from "../store/graph-terminal-close";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
@@ -100,6 +101,11 @@ export interface RunGraphOptions {
    * ② 부수효과 노드(effect: "mutation")는 아예 호출하지 않고 모의 결과를 돌려준다.
    */
   dryRun?: boolean;
+  /**
+   * 실패한 occurrence의 체크포인트를 재개하지 않고 새 occurrence를 만든다.
+   * 이전 실행이 외부 상태를 바꿨을 수 있으면 이 옵션도 안전 게이트에서 거절한다.
+   */
+  fresh?: boolean;
 }
 
 /** 노드가 바깥 세상에 무엇을 하는가. 선언하지 않으면 시뮬레이션에서 변경으로 간주한다(fail-closed). */
@@ -564,6 +570,57 @@ function failedRunHasCommittedEffect(
   // graph changes, any completed node is conservatively treated as a possible
   // effect so deleting/renaming the old node cannot authorize duplicate work.
   return Object.values(latestFailed.nodeStates).some((state) => state === "done");
+}
+
+/**
+ * Reconciliation itself is an exact-run review. If every uncertain node was
+ * explicitly marked completed, a later fresh occurrence should not become a
+ * dead end just because the original run remains an `error` snapshot.
+ */
+function hasTerminalGraphReconciliation(
+  latestFailed: NonNullable<ReturnType<typeof getLatestFailedGraphCheckpoint>>,
+): boolean {
+  const checkpoint = latestFailed.checkpoint;
+  const checkpointDigest = checkpoint && typeof checkpoint === "object" && !Array.isArray(checkpoint)
+    && typeof (checkpoint as Record<string, unknown>).checkpointDigest === "string"
+    ? (checkpoint as Record<string, unknown>).checkpointDigest
+    : null;
+  if (!checkpointDigest) return false;
+  for (const event of listRunEvents(latestFailed.runId, 500)) {
+    if (event.kind !== "workflow_reconciliation_committed") continue;
+    const payload = event.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+    const retryNodeIds = (payload as { retryNodeIds?: unknown }).retryNodeIds;
+    const eventCheckpointDigest = (payload as { checkpointDigest?: unknown }).checkpointDigest;
+    const simulation = (payload as { simulation?: unknown }).simulation;
+    if (
+      event.automationId === latestFailed.automationId &&
+      simulation !== true &&
+      eventCheckpointDigest === checkpointDigest &&
+      Array.isArray(retryNodeIds) && retryNodeIds.length === 0
+    ) return true;
+  }
+  return false;
+}
+
+function hasTerminalGraphClose(
+  latestFailed: NonNullable<ReturnType<typeof getLatestFailedGraphCheckpoint>>,
+): boolean {
+  const checkpoint = latestFailed.checkpoint;
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return false;
+  const row = checkpoint as Record<string, unknown>;
+  if (
+    typeof row.occurrenceId !== "string" ||
+    typeof row.graphDigest !== "string" ||
+    typeof row.checkpointDigest !== "string"
+  ) return false;
+  return hasAutomationGraphTerminalClose({
+    automationId: latestFailed.automationId,
+    runId: latestFailed.runId,
+    occurrenceId: row.occurrenceId,
+    graphDigest: row.graphDigest,
+    checkpointDigest: row.checkpointDigest,
+  });
 }
 
 const READ_ONLY_WORKFORCE_AUDIT_TOOLS = new Set([
@@ -1431,9 +1488,42 @@ export async function runGraph(
       .map((node) => node.id),
   );
   const latestFailedCandidate = getLatestFailedGraphCheckpoint(automation.id);
+  const previousLiveFailure = latestFailedCandidate && !latestFailedCandidate.simulation
+    ? latestFailedCandidate
+    : null;
+  if (opts.fresh === true && !dryRun && previousLiveFailure) {
+    const rawCheckpoint = previousLiveFailure.checkpoint;
+    const checkpointRow = rawCheckpoint && typeof rawCheckpoint === "object" && !Array.isArray(rawCheckpoint)
+      ? rawCheckpoint as Record<string, unknown>
+      : null;
+    const inFlightNodeIds = Array.isArray(checkpointRow?.inFlightNodeIds)
+      ? checkpointRow.inFlightNodeIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const ambiguousNodeIds = Array.isArray(checkpointRow?.ambiguousNodeIds)
+      ? checkpointRow.ambiguousNodeIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const committedEffect = failedRunHasCommittedEffect(previousLiveFailure);
+    const reviewedCommittedEffect = committedEffect && (
+      hasTerminalGraphClose(previousLiveFailure) ||
+      hasTerminalGraphReconciliation(previousLiveFailure)
+    );
+    if (inFlightNodeIds.length > 0 || ambiguousNodeIds.length > 0 || (committedEffect && !reviewedCommittedEffect)) {
+      const affectedNodes = [...new Set([...inFlightNodeIds, ...ambiguousNodeIds])];
+      const nodeDetail = affectedNodes.length > 0
+        ? ` 미확정 단계: ${affectedNodes.join(", ")}.`
+        : " 이전 실행에서 외부 동작이 기록됐을 수 있습니다.";
+      throw new GraphContractError({
+        code: "automation_fresh_run_blocked",
+        reason:
+          `처음부터 새로 실행하면 이전 외부 동작을 다시 수행할 수 있어 새 실행을 시작하지 않았습니다.${nodeDetail}`,
+        nextAction:
+          "실행 기록에서 외부 상태를 확인하고 이 실행을 명시적으로 종결한 뒤, 처음부터 새 실행을 다시 선택하세요.",
+      });
+    }
+  }
   // Trigger deliveries carry a stable event occurrence. Never resume the
   // latest failure from a different fs/chain/webhook/poll event.
-  const latestFailed = latestFailedCandidate &&
+  const latestFailed = opts.fresh !== true && latestFailedCandidate &&
       latestFailedCandidate.simulation === dryRun &&
       (!requestedOccurrenceId || latestFailedCandidate.occurrenceId === requestedOccurrenceId)
     ? latestFailedCandidate

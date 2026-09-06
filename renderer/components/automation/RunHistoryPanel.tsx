@@ -21,6 +21,9 @@ import type {
   AutomationFixPlan,
   AutomationGraphReconciliation,
   AutomationGraphReconciliationDecision,
+  AutomationGraphTerminalCloseCandidate,
+  AutomationGraphTerminalCloseInput,
+  AutomationGraphTerminalCloseReceipt,
   AutomationRunRecord,
   AutomationTriggerEventAttention,
   WorkflowRunSnapshot,
@@ -40,6 +43,26 @@ type NodeDecisionDraft = {
   resolution?: AutomationGraphReconciliationDecision["resolution"];
   output: string;
 };
+
+/**
+ * Main adds these identity-only fields to latestRun so a graph-drifted failed
+ * run can still be reviewed against its old checkpoint. Shared/preload should
+ * eventually expose this shape directly; keep the local extension while the
+ * IPC contract is being integrated.
+ */
+type TerminalCloseRunSnapshot = WorkflowRunSnapshot & {
+  occurrenceId?: string;
+  graphDigest?: string;
+  checkpointDigest?: string;
+  checkpointUpdatedAt?: string;
+  inFlightNodeIds?: string[];
+  ambiguousNodeIds?: string[];
+  completedEffectNodeIds?: string[];
+};
+
+type TerminalCloseReceipt = AutomationGraphTerminalCloseReceipt;
+type TerminalCloseCandidate = AutomationGraphTerminalCloseCandidate;
+type TerminalCloseInput = AutomationGraphTerminalCloseInput;
 
 export function RunHistoryPanel({ automation, locale, compact = false }: RunHistoryPanelProps) {
   const ko = locale === "ko";
@@ -97,6 +120,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const [reconciling, setReconciling] = useState(false);
   const [eventActionId, setEventActionId] = useState<string | null>(null);
   const [rerunning, setRerunning] = useState(false);
+  const [freshRerunning, setFreshRerunning] = useState(false);
   const [fixPlan, setFixPlan] = useState<AutomationFixPlan | null>(null);
   const [fixBusy, setFixBusy] = useState<string | null>(null);
   const [fixMessage, setFixMessage] = useState("");
@@ -124,7 +148,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
      어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
      버튼을 다시 누르고, 그게 "아무리 눌러도 안 된다"의 정체였다. */
-  const load = useCallback(async (options: { reportFailure?: boolean } = {}): Promise<boolean> => {
+  const load = useCallback(async (options: { reportFailure?: boolean; forceReconciliation?: boolean } = {}): Promise<boolean> => {
     const api = ipc();
     if (!api) return false;
     let snap: WorkflowRunSnapshot | null = null;
@@ -150,7 +174,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       return true;
     }
     const reconciliationKey = `${snap.runId}:${JSON.stringify(automation.graph)}`;
-    if (reconciliationAttemptRef.current === reconciliationKey) return true;
+    if (!options.forceReconciliation && reconciliationAttemptRef.current === reconciliationKey) return true;
     reconciliationAttemptRef.current = reconciliationKey;
     try {
       const nextReconciliation = await api.automations.getGraphReconciliation(automation.id);
@@ -168,6 +192,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     void load();
   }, [load]);
   useVisibleInterval(() => void load(), POLL_MS);
+  useEffect(() => {
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<{ automationId?: unknown }>).detail;
+      if (detail?.automationId === automation.id) void load({ forceReconciliation: true });
+    };
+    window.addEventListener("agentlas:automation-run-refresh", onRefresh);
+    return () => window.removeEventListener("agentlas:automation-run-refresh", onRefresh);
+  }, [automation.id, load]);
 
   // 복구 계획은 모델 호출을 포함하므로 폴링하지 않는다. 확인이 필요한 상태가 됐을 때 한 번,
   // 그리고 조치를 실행한 뒤 다시 계산한다.
@@ -479,6 +511,144 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }
   }
 
+  async function startFresh(reviewedFresh = false) {
+    const api = ipc();
+    if (!api || rerunning || freshRerunning || rerunBlocked) return;
+    setFreshRerunning(true);
+    setMessage("");
+    try {
+      const runNowRequest = api.automations.runNow as unknown as (
+        automationId: string,
+        options?: { dryRun?: boolean; fresh?: boolean; input?: Record<string, unknown> },
+      ) => Promise<Awaited<ReturnType<NonNullable<typeof api>["automations"]["runNow"]>>>;
+      const previousRun = await api.automations.latestRun(automation.id).catch(() => null) as TerminalCloseRunSnapshot | null;
+      const result = await runNowRequest(automation.id, { fresh: true });
+      if (!result.accepted || result.automationId !== automation.id || !result.status) {
+        throw new Error("automation_fresh_run_receipt_mismatch");
+      }
+      const blocked = result.status !== "ok"
+        && /fresh_run_blocked|ambiguous_side_effect|reconciliation required/i.test(result.error ?? "");
+      const currentRun = blocked
+        ? await api.automations.latestRun(automation.id).catch(() => null) as TerminalCloseRunSnapshot | null
+        : null;
+      if (blocked && !reviewedFresh && previousRun && currentRun
+        && currentRun.automationId === automation.id
+        && currentRun.runId === previousRun.runId
+        && currentRun.status === "error") {
+        let reconciliation: Awaited<ReturnType<typeof api.automations.getGraphReconciliation>>;
+        let reconciliationRead = false;
+        try {
+          reconciliation = await api.automations.getGraphReconciliation(automation.id);
+          reconciliationRead = true;
+        } catch {
+          reconciliation = null;
+        }
+        const latestRunUnresolvedNodeIds = [...new Set([
+          ...(currentRun.inFlightNodeIds ?? []),
+          ...(currentRun.ambiguousNodeIds ?? []),
+        ])];
+        const terminalCloseCandidateReader = (api.automations as unknown as {
+          terminalCloseCandidate?: (automationId: string) => Promise<TerminalCloseCandidate | null>;
+        }).terminalCloseCandidate;
+        const terminalCloseCandidate = (!reconciliationRead || !reconciliation) && terminalCloseCandidateReader
+          ? await terminalCloseCandidateReader(automation.id).catch(() => null)
+          : null;
+        const candidate = terminalCloseCandidate
+          && terminalCloseCandidate.automationId === automation.id
+          && terminalCloseCandidate.runId === currentRun.runId
+          ? terminalCloseCandidate
+          : null;
+        const unresolvedNodeIds = candidate?.unresolvedNodeIds ?? latestRunUnresolvedNodeIds;
+        const terminalCloseInput: TerminalCloseInput | null = candidate
+          ? candidate.simulation === false && unresolvedNodeIds.length === 0
+            ? {
+              automationId: candidate.automationId,
+              runId: candidate.runId,
+              occurrenceId: candidate.occurrenceId,
+              graphDigest: candidate.graphDigest,
+              checkpointDigest: candidate.checkpointDigest,
+              expectedUpdatedAt: candidate.updatedAt,
+              decision: "reviewed_external_effects",
+            }
+            : null
+          : currentRun.occurrenceId
+          && currentRun.graphDigest
+          && currentRun.checkpointDigest
+          && currentRun.checkpointUpdatedAt
+          && unresolvedNodeIds.length === 0
+          ? {
+            automationId: automation.id,
+            runId: currentRun.runId,
+            occurrenceId: currentRun.occurrenceId,
+            graphDigest: currentRun.graphDigest,
+            checkpointDigest: currentRun.checkpointDigest,
+            expectedUpdatedAt: currentRun.checkpointUpdatedAt,
+            decision: "reviewed_external_effects",
+          }
+          : null;
+        if ((!reconciliationRead || !reconciliation) && terminalCloseInput) {
+          const confirmed = window.confirm(ko
+            ? `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`
+            : `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`);
+          if (confirmed) {
+            try {
+              const terminalCloseApi = api.automations as unknown as {
+                terminalClose?: (input: TerminalCloseInput) => Promise<TerminalCloseReceipt>;
+                /** Temporary compatibility while an older preload is open. */
+                terminalCloseGraph?: (input: TerminalCloseInput) => Promise<TerminalCloseReceipt>;
+              };
+              const terminalClose = terminalCloseApi.terminalClose ?? terminalCloseApi.terminalCloseGraph;
+              if (!terminalClose) throw new Error("automation_graph_terminal_close_unavailable");
+              const receipt = await terminalClose(terminalCloseInput);
+              if (
+                receipt.automationId !== terminalCloseInput.automationId
+                || receipt.runId !== terminalCloseInput.runId
+                || receipt.occurrenceId !== terminalCloseInput.occurrenceId
+                || receipt.graphDigest !== terminalCloseInput.graphDigest
+                || receipt.checkpointDigest !== terminalCloseInput.checkpointDigest
+                || (receipt.status !== "closed" && receipt.status !== "already-closed")
+              ) throw new Error("automation_graph_terminal_close_receipt_mismatch");
+              setMessage(ko
+                ? "이전 실행을 확인했습니다. 별도 발생을 새로 시작합니다…"
+                : "The previous run was reviewed. Starting a separate occurrence…");
+              setFreshRerunning(false);
+              await startFresh(true);
+              return;
+            } catch {
+              setMessage(ko
+                ? "해당 실행의 종결 영수증을 저장·검증하지 못해 별도 실행을 시작하지 않았습니다. 기록을 새로고침하고 그래프가 바뀌었다면 이전 그래프로 복원해 재조정해 주세요."
+                : "The exact terminal-close receipt could not be verified. No separate run was started. Refresh the history; if the graph drifted, restore the old graph to reconcile it.");
+              return;
+            }
+          }
+        } else if ((!reconciliationRead || !reconciliation) && unresolvedNodeIds.length > 0) {
+          setMessage(ko
+            ? `미확정 외부 동작(${unresolvedNodeIds.join(", ")})이 남아 있어 새 실행을 시작하지 않았습니다. 실제 결과를 확인한 뒤 이전 그래프로 복원해 재조정해 주세요.`
+            : `A fresh run was not started because unresolved external effects remain (${unresolvedNodeIds.join(", ")}). Verify the result, restore the old graph if needed, and reconcile it first.`);
+        }
+      }
+      const terminalMessage = blocked
+        ? freshRunFailureMessage(result.error, ko)
+        : result.status === "ok"
+        ? (ko ? "처음부터 새 실행을 완료했습니다." : "The fresh run completed.")
+        : result.error || (ko
+          ? "처음부터 새 실행이 " + (result.status ?? "실패") + " 상태로 끝났습니다."
+          : "The fresh run ended with status " + (result.status ?? "failed") + ".");
+      setMessage(result.runId
+        ? terminalMessage + " (" + (ko ? "실행 ID" : "run") + " " + result.runId + ")"
+        : terminalMessage);
+      if (!await load({ reportFailure: false })) {
+        setMessage(terminalMessage + " " + (ko
+          ? "실행 기록 화면만 새로고침하지 못했습니다. 화면 갱신을 위해 다시 실행하지 마세요."
+          : "Only the run-history view failed to refresh. Do not rerun just to refresh the screen."));
+      }
+    } catch (err) {
+      setMessage(freshRunFailureMessage(err, ko));
+    } finally {
+      setFreshRerunning(false);
+    }
+  }
+
   async function submitGraphReconciliation() {
     const api = ipc();
     if (!api || !reconciliation || reconciling || !graphDecisionReady) return;
@@ -684,16 +854,31 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             <button
               type="button"
               onClick={() => void rerun()}
-              disabled={rerunning || rerunBlocked}
+              disabled={rerunning || freshRerunning || rerunBlocked}
               title={rerunBlocked
                 ? (ko
                     ? "아래에서 각 단계가 실제로 실행됐는지 먼저 확정해 주세요. 그 전에 다시 실행하면 같은 동작이 두 번 일어날 수 있어 막아 둡니다."
                     : "Confirm below whether each step actually ran. Until then a rerun could repeat the same action, so it is blocked.")
                 : undefined}
             >
-              {rerunning ? (ko ? "시작하는 중…" : "Starting…") : ko ? "지금 다시 실행" : "Run again now"}
+              {rerunning ? (ko ? "이어 실행 중…" : "Continuing…") : ko ? "이어서 실행" : "Continue run"}
             </button>
             ) : null}
+            <button
+              type="button"
+              data-testid="fresh-run"
+              onClick={() => void startFresh()}
+              disabled={rerunning || freshRerunning || rerunBlocked}
+              title={rerunBlocked
+                ? (ko
+                    ? "외부 동작이 실제로 끝났는지 먼저 확정해 주세요. 확인 전에는 처음부터 새 실행도 막아 둡니다."
+                    : "Confirm whether the external action finished first. A fresh run is blocked until then.")
+                : (ko
+                    ? "이전 체크포인트를 이어가지 않고 첫 단계부터 별도 실행합니다."
+                    : "Start a separate run from the first step instead of resuming the earlier checkpoint.")}
+            >
+              {freshRerunning ? (ko ? "새 실행 중…" : "Starting fresh…") : ko ? "처음부터 새 실행" : "Start a fresh run"}
+            </button>
           </div>
           {rerunBlocked ? (
             <p className="automation-fix-result">
@@ -944,7 +1129,20 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   );
 }
 
-/** 재실행 실패를 사람 말로 — main이 던지는 코드 문자열을 그대로 노출하지 않는다. */
+/** 처음부터 새 실행이 안전 게이트에 막힌 이유를 사람 말로 설명한다. */
+function freshRunFailureMessage(error: unknown, ko: boolean): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/fresh_run_blocked|ambiguous_side_effect|reconciliation required/i.test(raw)) {
+    return ko
+      ? "이전 실행이 외부 상태를 바꿨을 수 있어 처음부터 새 실행을 시작하지 않았습니다. 해당 실행의 실제 결과를 확인하고 명시적으로 종결한 뒤 다시 시도해 주세요."
+      : "The fresh run was not started because the earlier run may have changed external state. Review the exact run and explicitly close it before trying again.";
+  }
+  return ko
+    ? "처음부터 새 실행의 최종 접수 결과를 확인하지 못했습니다. 실행 기록을 새로고침해 결과를 확인하기 전에는 반복하지 마세요."
+    : "The fresh run acknowledgement could not be verified. Refresh the run history and confirm the result before repeating it.";
+}
+
+/** 이어서 실행 실패를 사람 말로 — main이 던지는 코드 문자열을 그대로 노출하지 않는다. */
 function rerunFailureMessage(error: unknown, ko: boolean): string {
   const raw = error instanceof Error ? error.message : String(error);
   if (/reconciliation_pending|ambiguous_side_effect|reconciliation required/i.test(raw)) {

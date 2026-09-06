@@ -18,6 +18,7 @@ import { citationMarker, formatReference, orderReferences, type BibliographyStyl
 import type { RasterAsset, ResolvedManuscriptAssets, ResolvedTable } from "./assets";
 import { formatCell } from "./render-html";
 import { inlineToPlainText, type BlockNode, type InlineNode, type ManuscriptDocument } from "./document-model";
+import type { ScienceManuscriptDraftBoundary } from "./journal-render-profile";
 
 export interface DocxRenderOptions {
   style: BibliographyStyle;
@@ -25,6 +26,7 @@ export interface DocxRenderOptions {
   /** PNG bytes per figure locator (SVG figures must be rasterized by the packager before calling). */
   figureRasters: Map<string, RasterAsset>;
   layout: ScienceManuscriptLayoutSpec;
+  draftBoundary?: ScienceManuscriptDraftBoundary | null;
 }
 
 export interface DocxRenderResult {
@@ -380,7 +382,10 @@ export function renderManuscriptDocx(doc: ManuscriptDocument, assets: ResolvedMa
   const titlePageBreak = layout.titlePageMode === "separate"
     ? paragraph("<w:r><w:br w:type=\"page\"/></w:r>")
     : "";
-  const bodyParts = [writer.titleBlock(), titlePageBreak, writer.abstractBlock(), frontMatterBreak, ...doc.body.map((block) => writer.block(block)), writer.statementsBlock()];
+  const draftBoundary = options.draftBoundary
+    ? paragraph(run("DRAFT — NOT FOR SUBMISSION", { bold: true, size: 20 }), "<w:jc w:val=\"center\"/><w:spacing w:after=\"160\"/>")
+    : "";
+  const bodyParts = [writer.titleBlock(), draftBoundary, titlePageBreak, writer.abstractBlock(), frontMatterBreak, ...doc.body.map((block) => writer.block(block)), writer.statementsBlock()];
   const references = writer.referencesBlock();
   bodyParts.push(references.xml);
   const sectPr = sectionProperties(columns);
@@ -393,8 +398,9 @@ export function renderManuscriptDocx(doc: ManuscriptDocument, assets: ResolvedMa
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${mediaDefaults}<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>`;
   const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`;
+  const keywords = [...doc.keywords, ...(options.draftBoundary ? [options.draftBoundary.machineReadableToken] : [])];
   const core = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEscape(doc.title || "Untitled manuscript")}</dc:title><dc:creator>${xmlEscape(options.metadata?.authors.map((author) => author.name).join("; ") ?? "")}</dc:creator><cp:keywords>${xmlEscape(doc.keywords.join("; "))}</cp:keywords></cp:coreProperties>`;
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEscape(doc.title || "Untitled manuscript")}</dc:title><dc:creator>${xmlEscape(options.metadata?.authors.map((author) => author.name).join("; ") ?? "")}</dc:creator><dc:subject>${xmlEscape(options.draftBoundary ? `Agentlas draft ${options.draftBoundary.machineReadableToken}; manuscript sha256 ${options.draftBoundary.manuscriptContentSha256}; journal profile ${options.draftBoundary.journalProfileId ?? "none"}@${options.draftBoundary.journalProfileVersion ?? "none"}; profile sha256 ${options.draftBoundary.journalProfileContentSha256 ?? "none"}` : "Agentlas manuscript ready")}</dc:subject><cp:keywords>${xmlEscape(keywords.join("; "))}</cp:keywords></cp:coreProperties>`;
   const files: Record<string, Uint8Array> = {
     "[Content_Types].xml": strToU8(contentTypes),
     "_rels/.rels": strToU8(rootRels),

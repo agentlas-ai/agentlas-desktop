@@ -512,6 +512,10 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
 }
 
 function requiresGraphReconciliation(detail: string | null | undefined): boolean {
+  // A user-requested fresh occurrence can be rejected by the graph kernel
+  // while the prior receipt is being reviewed. That rejection does not mean
+  // the scheduler discovered a new unresolved side effect, so it must not
+  // suspend the automation or manufacture another reconciliation card.
   return /(?:partial_reconciliation_required|ambiguous_side_effect|automation_partial_graph_changed)/i.test(detail ?? "");
 }
 
@@ -538,6 +542,8 @@ async function runOne(
     allowDisabledLease?: boolean;
     /** 시뮬레이션 실행 — 외부에 나가는 변경을 막고 무엇이 막혔는지 영수증으로 남긴다. */
     dryRun?: boolean;
+    /** 실패한 occurrence를 재개하지 않고, 안전하게 허용될 때 새 occurrence로 시작한다. */
+    fresh?: boolean;
     triggerDelivery?: TriggerDeliveryHooks;
     triggerContext?: TriggerEventPayload;
     /** The scheduled fire time. Recording the run and advancing the schedule
@@ -813,6 +819,7 @@ async function runOne(
           runGraph(a, a.graph!, {
             signal: controller.signal,
             ...(opts?.dryRun ? { dryRun: true } : {}),
+            ...(opts?.fresh ? { fresh: true } : {}),
           runId,
           occurrenceId: opts?.triggerDelivery?.occurrenceId,
           initialVars: graphInitialVars,
@@ -1207,9 +1214,19 @@ async function runOne(
       runtimeSelection: a.runtimeSelection,
     });
     runStatus = classified.status;
-    runError = classified.reasonCode
+    // Keep the graph kernel's machine gate alongside the human explanation.
+    // The fresh-run UI must be able to distinguish an intentional replay
+    // refusal from an unrelated failed preflight; the judgment service is
+    // allowed to rewrite prose, but it must not erase this typed boundary.
+    const durableGateCode = rawError.match(
+      /^(automation_(?:fresh_run_blocked|ambiguous_side_effect|partial_reconciliation_required|partial_graph_changed))(?::|$)/i,
+    )?.[1] ?? null;
+    const classifiedReason = classified.reasonCode
       ? `[${classified.reasonCode}] ${classified.reason ?? rawError}`
       : classified.reason ?? rawError;
+    runError = durableGateCode
+      ? `[${durableGateCode}] ${classifiedReason}`
+      : classifiedReason;
     parentMissing = isAutomationRunParentMissingError(err);
     if (!parentMissing) {
       tryRecordFailureEvent({
@@ -1425,6 +1442,7 @@ async function runOne(
             allowDisabledLease: opts?.allowDisabledLease,
             triggerContext: opts?.triggerContext,
             zeroToolRetried: true,
+            fresh: opts?.fresh,
           },
         );
         // ★사전 확인의 관측 기반 완결 — 재시도가 도구로 실제 완주했다면 그 사실을
@@ -1468,17 +1486,21 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
-export async function runAutomationNow(id: string, opts?: { dryRun?: boolean }): Promise<TriggerDispatchResult> {
+export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean }): Promise<TriggerDispatchResult> {
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
   // Disabled automations remain manually runnable, but still acquire the same
   // shared lease as every scheduled/headless execution.
+  const freshRunId = opts?.fresh
+    ? `run-${id}-${Date.now()}-${randomUUID().slice(0, 8)}`
+    : undefined;
   return runOne(a, {
     claim: true,
     advanceSchedule: false,
     allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
+    ...(opts?.fresh ? { fresh: true, runId: freshRunId } : {}),
   });
 }
 

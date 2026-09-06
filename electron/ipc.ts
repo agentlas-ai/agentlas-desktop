@@ -34,7 +34,7 @@ import {
   pickModelRoleFromPool,
   setModelRoleMembers as setModelRoleMembersStore,
 } from "./store/model-roles";
-import type { RuntimeRole, RuntimeRolePoolState } from "../shared/types";
+import type { ImageAttachment, RuntimeRole, RuntimeRolePoolState } from "../shared/types";
 import { requiredExecutionPermission } from "../shared/graph-node-protocol";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
@@ -160,6 +160,7 @@ import { listAgentFiles, readAgentFile, readAgentPromptSource, writeAgentFile } 
 import {
   approveAndApplyAgentEvolutionProposal,
   createAgentEvolutionProposal,
+  deleteAgentGrowthProposalSession,
   listAgentEvolutionProposals,
   listPendingGrowthProposals,
   markAgentEvolutionProposalMeasured,
@@ -802,6 +803,11 @@ import {
   listTriggerEventAttention,
   reconcileParkedTriggerEvent,
 } from "./store/trigger-events";
+import {
+  getAutomationGraphTerminalCloseCandidate,
+  terminalCloseAutomationGraph,
+} from "./store/graph-terminal-close";
+import type { AutomationGraphTerminalCloseInput } from "../shared/types";
 import {
   getAutomationGraphReconciliation,
   reconcileAutomationGraph,
@@ -2388,6 +2394,29 @@ export function registerIpcHandlers(): void {
   // arbitrary path into a durable chat file.
   ipcMain.handle("chatFiles:snapshot", (_e, input: unknown) => persistChatFileSnapshot(input as Parameters<typeof persistChatFileSnapshot>[0]));
   ipcMain.handle("chatFiles:listGroup", (_e, input: unknown) => listChatFileSnapshot(input as Parameters<typeof listChatFileSnapshot>[0]));
+  ipcMain.handle("chatFiles:appendMessage", (event, input: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("Invalid chat attachment message");
+    const value = input as { chatId?: unknown; text?: unknown; images?: unknown };
+    const chatId = typeof value.chatId === "string" ? value.chatId.trim() : "";
+    const text = typeof value.text === "string" ? value.text.trim() : "";
+    if (!chatId || !text || text.length > 50_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) {
+      throw new TypeError("Invalid chat attachment message");
+    }
+    const images = Array.isArray(value.images)
+      ? value.images.map((image): ImageAttachment => {
+          if (!image || typeof image !== "object" || Array.isArray(image)) throw new TypeError("Invalid chat attachment image");
+          const candidate = image as { mediaType?: unknown; name?: unknown; data?: unknown };
+          if (typeof candidate.mediaType !== "string" || typeof candidate.data !== "string") throw new TypeError("Invalid chat attachment image");
+          return {
+            mediaType: candidate.mediaType,
+            name: typeof candidate.name === "string" ? candidate.name : undefined,
+            data: candidate.data,
+          };
+        })
+      : [];
+    return appendChatMessage(chatId, "assistant", text, { images });
+  });
   ipcMain.handle("chatFiles:openExternal", async (_e, input: unknown): Promise<{ ok: boolean; message?: string }> => {
     let root = "";
     try {
@@ -3191,6 +3220,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentEvolution:listGrowth", (_e, limit?: number) =>
     listPendingGrowthProposals(limit),
   );
+  ipcMain.handle("agentEvolution:deleteGrowthSession", (_e, proposalId: string) =>
+    deleteAgentGrowthProposalSession(proposalId),
+  );
 
   // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
   // 하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 name/description 을 읽는다.
@@ -3946,9 +3978,17 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(event);
     return focusBrowserLiveTarget(typeof targetId === "string" ? targetId.slice(0, 256) : undefined);
   });
-  ipcMain.handle("computerUse:capturePreview", (event, sourceId?: string) => {
+  ipcMain.handle("computerUse:capturePreview", (event, sourceId?: unknown, rawOptions?: unknown) => {
     assertTrustedSitePublishIpcSender(event);
-    return captureComputerUsePreview(typeof sourceId === "string" ? sourceId.slice(0, 256) : undefined);
+    const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
+      ? rawOptions as { mode?: unknown }
+      : undefined;
+    return captureComputerUsePreview(
+      typeof sourceId === "string" ? sourceId.slice(0, 256) : undefined,
+      {
+        mode: options?.mode === "window" ? "window" : "screen",
+      },
+    );
   });
   ipcMain.handle("computerUse:revealPreview", (event) => {
     assertTrustedSitePublishIpcSender(event);
@@ -4051,8 +4091,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentLeases:quote", (_e, slug: string) => getAgentLeaseQuote(String(slug || "")));
   ipcMain.handle(
     "agentLeases:purchase",
-    (_e, input: { slug: string; days: number }) =>
-      purchaseAgentLease({ slug: String(input?.slug || ""), days: Number(input?.days) }),
+    (_e, input: { slug: string; days: number; idempotencyKey?: string }) =>
+      purchaseAgentLease({ slug: String(input?.slug || ""), days: Number(input?.days), idempotencyKey: input?.idempotencyKey }),
   );
   ipcMain.handle("agentLeases:list", () => listAgentLeasesCached());
 
@@ -4878,6 +4918,12 @@ export function registerIpcHandlers(): void {
       };
     },
   );
+  ipcMain.handle("automations:terminalCloseCandidate", (_e, automationId: string) =>
+    getAutomationGraphTerminalCloseCandidate(automationId),
+  );
+  ipcMain.handle("automations:terminalClose", (_e, input: AutomationGraphTerminalCloseInput) =>
+    terminalCloseAutomationGraph(input),
+  );
   ipcMain.handle("automations:getGraphReconciliation", (_e, automationId: string) =>
     getAutomationGraphReconciliation(automationId),
   );
@@ -5467,7 +5513,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:runNow", async (
     _e,
     id: string,
-    opts?: { dryRun?: boolean; input?: Record<string, unknown> },
+    opts?: { dryRun?: boolean; input?: Record<string, unknown>; fresh?: boolean },
   ) => {
     // 켜도 되는가의 판단은 **한 곳**에서 한다(shared/graph-run-request).
     // 입구마다 각자 검사하면 같은 그래프가 부르는 쪽에 따라 다르게 돈다 — 지금 터미널은
@@ -5498,11 +5544,11 @@ export function registerIpcHandlers(): void {
     // not block a side-effect-proof simulation used to diagnose the graph.
     // runGraph also mode-matches durable checkpoints, so this simulation starts
     // a fresh occurrence and can never inherit or consume the live coordinate.
-    if (!dryRun && getAutomationGraphReconciliation(id)) {
+    if (!dryRun && opts?.fresh !== true && getAutomationGraphReconciliation(id)) {
       throw new Error("automation_reconciliation_pending");
     }
     const { runAutomationNow } = await import("./automation-scheduler");
-    const result = await runAutomationNow(id, dryRun ? { dryRun: true } : undefined);
+    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), ...(opts?.fresh === true ? { fresh: true } : {}) });
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
