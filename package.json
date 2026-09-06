@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",

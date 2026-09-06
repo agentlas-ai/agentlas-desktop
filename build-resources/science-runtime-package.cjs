@@ -6,7 +6,7 @@ const fs = require("node:fs");
 // Resolve from the final archive so a development dependency cannot mask a
 // missing production module. Native binaries must also exist outside ASAR.
 function verifyScienceRuntimePackage(archive, platform, arch) {
-  const files = new Set(asar.listPackage(archive).map((name) => name.replace(/^\//, "")));
+  const files = new Set(asar.listPackage(archive).map((name) => name.replace(/\\/g, "/").replace(/^\/+/, "")));
   const manifest = JSON.parse(asar.extractFile(archive, "package.json").toString());
   const required = [
     "node_modules/sharp/package.json",

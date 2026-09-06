@@ -1,6 +1,17 @@
 # Changelog
 
-## 1.1.5 — 2026-09-07
+## 1.1.6 — 2026-09-07
+
+Includes the Science, Work, Graph, and Hub fixes below. Corrects Windows path
+handling in the packaged Science runtime check. The 1.1.5 installer build was
+stopped before publication; existing installations continue through the normal
+update feed when this release is available.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d.
+Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
+## 1.1.5 — 2026-09-07 (installer build not published)
 
 Fixes Science startup when packaged runtime dependencies are missing. Desktop
 now ships Sharp and Molstar with the Science services and verifies the final
