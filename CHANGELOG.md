@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.3 — 2026-09-06
+
+This release includes the One, Work, and Science improvements described in 1.1.2,
+including Science's independent model selection and continued research runs,
+Ollama setup navigation, and document navigation that fits narrow Work panels.
+Linux packaging applies the AppImage relaunch guard when its launcher is created.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d.
+Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.1.2 — 2026-09-06
 
 This source update reconciles the newest Desktop, One, Work, and Science runtime

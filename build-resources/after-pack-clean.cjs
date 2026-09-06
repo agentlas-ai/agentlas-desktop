@@ -788,21 +788,106 @@ async function verifyMacComputerUseDriver(context) {
  * JavaScript bootstrap. The current AppRun path is authoritative, so clear
  * the inherited value before electron-builder's generated path discovery.
  */
+const LINUX_APPIMAGE_ENTRYPOINT_MARKER = "# Agentlas: recompute APPDIR for an inherited AppImage relaunch";
+const LINUX_APPIMAGE_ENTRYPOINT_NEEDLE = 'args=("$@")\nNUMBER_OF_ARGS="$#"\n';
+
+function patchLinuxAppImageEntrypointContent(content, appRun) {
+  if (content.includes(LINUX_APPIMAGE_ENTRYPOINT_MARKER)) {
+    return { content, changed: false };
+  }
+  if (!content.includes(LINUX_APPIMAGE_ENTRYPOINT_NEEDLE)) {
+    throw new Error(`[afterPack] generated Linux AppRun has an unexpected shape: ${appRun}`);
+  }
+  const replacement = `${LINUX_APPIMAGE_ENTRYPOINT_NEEDLE}\n${LINUX_APPIMAGE_ENTRYPOINT_MARKER}\n# Native updater relaunches may inherit the previous image's extraction root.\nif [ -n "\${APPIMAGE:-}" ]; then\n  unset APPDIR\nfi\n`;
+  return {
+    content: content.replace(LINUX_APPIMAGE_ENTRYPOINT_NEEDLE, replacement),
+    changed: true,
+  };
+}
+
+function isLinuxAppImageTarget(target) {
+  return String(target?.name || "").replaceAll("-", "").replaceAll("_", "").toLowerCase() === "appimage";
+}
+
+function armLinuxAppImageEntrypointStageRepair(context) {
+  const appImageTargets = Array.isArray(context.targets) ? context.targets.filter(isLinuxAppImageTarget) : [];
+  if (appImageTargets.length === 0) {
+    console.log("[afterPack] no AppImage target is present; Linux AppRun stage repair is not armed");
+    return;
+  }
+
+  for (const target of appImageTargets) {
+    if (typeof target.build !== "function") {
+      throw new Error("[afterPack] AppImage target does not expose a build hook");
+    }
+    if (target.build.__agentlasEntrypointGuard === true) continue;
+    const originalBuild = target.build;
+    const guardedBuild = async function guardedAppImageBuild(...args) {
+      const appImageFs = require("fs-extra");
+      const originalWriteFile = appImageFs.writeFile;
+      let appRunWritten = false;
+      let active = true;
+      let guardedWriteFile;
+      const restore = () => {
+        if (active && appImageFs.writeFile === guardedWriteFile) {
+          appImageFs.writeFile = originalWriteFile;
+          active = false;
+        }
+      };
+      guardedWriteFile = async function guardedAppImageWrite(file, data, options) {
+        if (!appRunWritten && path.basename(String(file)) === "AppRun") {
+          appRunWritten = true;
+          const content = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+          const patched = patchLinuxAppImageEntrypointContent(content, String(file));
+          restore();
+          const result = await originalWriteFile.call(this, file, patched.content, options);
+          const stat = await lstat(file);
+          if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
+            throw new Error(`[afterPack] Linux AppImage entrypoint guard made AppRun invalid: ${file}`);
+          }
+          console.log(`[afterPack] ${patched.changed ? "repaired" : "verified"} Linux AppImage entrypoint guard ${file}`);
+          return result;
+        }
+        return originalWriteFile.call(this, file, data, options);
+      };
+      appImageFs.writeFile = guardedWriteFile;
+      let buildSucceeded = false;
+      try {
+        const result = await originalBuild.apply(this, args);
+        buildSucceeded = true;
+        return result;
+      } finally {
+        restore();
+        if (buildSucceeded && !appRunWritten) {
+          throw new Error("[afterPack] AppImage target completed without generating AppRun");
+        }
+      }
+    };
+    Object.defineProperty(guardedBuild, "__agentlasEntrypointGuard", { value: true });
+    target.build = guardedBuild;
+  }
+  console.log(`[afterPack] armed Linux AppImage entrypoint guard for ${appImageTargets.length} target(s)`);
+}
+
 async function repairLinuxAppImageEntrypoint(context) {
   if (context.electronPlatformName !== "linux") return;
+  armLinuxAppImageEntrypointStageRepair(context);
   const appRun = path.join(context.appOutDir, "AppRun");
-  const marker = "# Agentlas: recompute APPDIR for an inherited AppImage relaunch";
-  const content = await readFile(appRun, "utf8");
-  if (content.includes(marker)) {
+  let content;
+  try {
+    content = await readFile(appRun, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  const patched = patchLinuxAppImageEntrypointContent(content, appRun);
+  if (!patched.changed) {
     console.log(`[afterPack] verified Linux AppImage entrypoint guard ${appRun}`);
     return;
   }
-  const needle = 'args=("$@")\nNUMBER_OF_ARGS="$#"\n';
-  if (!content.includes(needle)) {
-    throw new Error(`[afterPack] generated Linux AppRun has an unexpected shape: ${appRun}`);
-  }
-  const replacement = `${needle}\n${marker}\n# Native updater relaunches may inherit the previous image's extraction root.\nif [ -n "\${APPIMAGE:-}" ]; then\n  unset APPDIR\nfi\n`;
-  await writeFile(appRun, content.replace(needle, replacement), "utf8");
+  await writeFile(appRun, patched.content, "utf8");
   const stat = await lstat(appRun);
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
     throw new Error(`[afterPack] Linux AppImage entrypoint guard made AppRun invalid: ${appRun}`);
