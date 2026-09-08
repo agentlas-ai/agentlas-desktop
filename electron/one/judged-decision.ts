@@ -17,7 +17,7 @@ import {
   type OneDecisionRiskLevel,
 } from "../../shared/one-decision";
 import type { PendingConfirmation } from "../../shared/types";
-import { judgeRequired, peekJudgment } from "../system-agents/judgment";
+import { judgeRequired, peekJudgment, runtimeSelectionCacheScope } from "../system-agents/judgment";
 
 const RISK_LABELS = ["R0", "R1", "R2", "R3", "R4"] as const;
 const DISPOSITION_LABELS = ["choice", "approve", "reject", "modify"] as const;
@@ -101,8 +101,9 @@ export async function prejudgeOneDecision(
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
   const texts = oneDecisionJudgmentTexts(confirmation);
-  if (attemptedWarm.has(texts.combined)) return;
-  markAttempted(texts.combined);
+  const key = JSON.stringify([runtimeSelectionCacheScope(), texts.combined]);
+  if (attemptedWarm.has(key)) return;
+  markAttempted(key);
   const timeoutMs = opts.timeoutMs ?? 8_000;
   try {
     // These judgments are independent. Serial execution made one cold mobile

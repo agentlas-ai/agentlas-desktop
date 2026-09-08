@@ -8,7 +8,7 @@
 // that own the statements warm the cache here and the sync sites peek.
 
 import { ONE_COMPLETION_CLAIM_JUDGMENT_KIND } from "../../shared/one-value-closure";
-import { judgeRequired, peekJudgment } from "../system-agents/judgment";
+import { judgeRequired, peekJudgment, runtimeSelectionCacheScope } from "../system-agents/judgment";
 
 const COMPLETION_CLAIM_QUESTION =
   "Does this statement claim that an external or hard-to-reverse action has ALREADY been performed — something was sent, published, posted, booked, reserved, purchased, paid, delivered, submitted, deployed, or completed?";
@@ -59,7 +59,7 @@ export async function prejudgeCompletionClaims(
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
   for (const text of [...new Set(texts)]) {
-    const key = claimInput(text);
+    const key = JSON.stringify([runtimeSelectionCacheScope(), claimInput(text)]);
     if (attemptedWarm.has(key)) continue;
     attemptedWarm.add(key);
     if (attemptedWarm.size > ATTEMPTED_MAX) {

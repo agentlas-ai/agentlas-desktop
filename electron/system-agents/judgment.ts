@@ -276,7 +276,8 @@ function judgmentCacheKey(kind: string, input: string): string {
   return `${kind}\u0000${intentSignature(input)}`;
 }
 
-function runtimeSelectionCacheScope(selection?: RuntimeSelection): string {
+/** Share the verdict-cache scope with callers that suppress duplicate warming. */
+export function runtimeSelectionCacheScope(selection?: RuntimeSelection): string {
   if (!selection) {
     const pool = readJudgmentPool();
     return pool.state === "unconfigured" ? "" : `\u0000orchestrator-pool:${pool.fingerprint}`;
