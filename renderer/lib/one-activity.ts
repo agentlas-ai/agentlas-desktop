@@ -59,6 +59,8 @@ export interface OneActivityItem {
   kind: OneActivityKind;
   status: OneActivityStatus;
   observedAt: string;
+  /** Latest typed event updating this row, independent of its original start. */
+  updatedAt?: string;
   completedAt?: string;
   durationMs?: number;
   agentName?: string;
@@ -67,6 +69,8 @@ export interface OneActivityItem {
   /** Orchestration node identity; several workers may share one accounting agent. */
   agentId?: string;
   model?: string;
+  /** True only for an explicit worker terminal envelope, never whole-turn closure. */
+  agentTerminalObserved?: boolean;
   message?: string;
   failureCode?: ToolFailureCode;
   detail?: string;
@@ -456,6 +460,8 @@ export function reduceOneActivity(
         ...item,
         status: event.tool?.isError || event.agentLifecycle?.state === "failed" || event.nodeState === "failed" ? "failed" : "completed",
         completedAt: observedAt,
+        agentTerminalObserved: true,
+        updatedAt: observedAt,
         ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
       } : item);
   }
@@ -564,15 +570,17 @@ export function reduceOneActivity(
       (event.agentId || event.runtimeAgentId || event.agentName)
       && (event.phase !== undefined || (event.tier ?? 1) > 1)
     ) {
-      const agentId = event.agentId || event.runtimeAgentId || event.agentName || `agent-${sequence}`;
-      const id = `agent:${agentId}:${event.phase || "work"}`;
+      const agentId = event.agentId || event.runtimeAgentId;
+      const id = agentId ? `agent:${agentId}:${event.phase || "work"}` : `agent:unattributed:${sequence}`;
       const existing = items.find((item) => item.id === id);
       items = upsertItem(items, {
         id,
         kind: "agent",
         status: event.nodeState === "failed" || event.agentLifecycle?.state === "failed" ? "failed" : event.done ? "completed" : "running",
         observedAt: existing?.observedAt || observedAt,
-        agentId,
+        ...(agentId ? { agentId } : {}),
+        updatedAt: observedAt,
+        agentTerminalObserved: Boolean(event.done || event.nodeState === "failed" || event.agentLifecycle?.state === "failed"),
         ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
         ...(event.done ? { completedAt: observedAt } : {}),
         ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
@@ -597,14 +605,20 @@ export function reduceOneActivity(
   ) {
     items = closeRunning(items, observedAt, "completed", true);
     activeReasoningId = undefined;
+    const toolActor = event.agentId || event.runtimeAgentId;
+    const matchingIds = event.tool.id ? items.filter((item) => item.kind === "tool"
+      && item.tool?.id === event.tool?.id && (!toolActor || item.agentId === toolActor)) : [];
     const existing = event.tool.id
-      ? items.find((item) => item.id === `tool:${event.tool?.id}`)
+      ? matchingIds.length === 1 ? matchingIds[0] : undefined
       : [...items].reverse().find((item) => (
           item.kind === "tool"
           && item.status === "running"
+          && item.agentId === toolActor
           && item.tool?.name === event.tool?.name
         ));
-    const id = existing?.id || `tool:${event.tool.id || sequence}`;
+    const id = existing?.id || (toolActor
+      ? `tool:${JSON.stringify([toolActor, event.tool.id || sequence])}`
+      : `tool:${event.tool.id || sequence}`);
     const status: OneActivityStatus = event.tool.isError
       ? "failed"
       : event.tool.result !== undefined
@@ -622,8 +636,11 @@ export function reduceOneActivity(
       kind: "tool",
       status,
       observedAt: existing?.observedAt || observedAt,
+      updatedAt: observedAt,
       ...(status !== "running" ? { completedAt: observedAt } : {}),
-      ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
+      ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : existing?.agentId ? { agentId: existing.agentId } : {}),
+      ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : existing?.model ? { model: existing.model } : {}),
+      ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : existing?.agentName ? { agentName: existing.agentName } : {}),
       ...(event.role?.trim() ? { role: event.role.trim() } : {}),
       // A completion event often repeats the tool without its arguments. A
       // spread copies `args: undefined` over the start event's real args and
@@ -636,7 +653,8 @@ export function reduceOneActivity(
       } as OneActivityTool,
     });
   } else if (event.kind === "tool-use" && event.activity) {
-    const id = `notice:${event.activity.code}`;
+    const activityActor = event.agentId || event.runtimeAgentId;
+    const id = activityActor ? `notice:${JSON.stringify([activityActor, event.activity.code])}` : `notice:${event.activity.code}`;
     const existing = items.find((item) => item.id === id);
     items = upsertItem(items, {
       id,
@@ -644,6 +662,9 @@ export function reduceOneActivity(
       status: "info",
       observedAt: existing?.observedAt || observedAt,
       activityCode: event.activity.code,
+      updatedAt: observedAt,
+      ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : {}),
+      ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
       noticeLevel: "info",
     });
   } else if (event.kind === "notice" && event.notice?.message) {
@@ -653,6 +674,7 @@ export function reduceOneActivity(
       status: event.notice.level === "error" ? "failed" : "info",
       observedAt,
       message: event.notice.message,
+      ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : {}),
       detail: event.notice.details,
       noticeLevel: event.notice.level,
       ...(event.notice.display ? { noticeDisplay: event.notice.display } : {}),

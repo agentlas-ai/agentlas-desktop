@@ -3,6 +3,8 @@
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { InvocationRunReceipt } from "@shared/types";
 import {
+  IconAlertTriangle,
+  IconRefresh,
   IconBrain,
   IconCheck,
   IconChevronDown,
@@ -19,6 +21,9 @@ import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
   cellVerb,
+  cellObject,
+  groupOneWorkerWork,
+  type OneWorkerWorkGroup,
   formatWorkElapsed,
   type OneWorkCell,
   type OneWorkPresentation,
@@ -115,6 +120,8 @@ function ExpandableRow({
 
 function CellIcon({ cell }: { cell: OneWorkCell }) {
   const props = { size: 13, strokeWidth: 1.7 };
+  if (cell.kind === "notice" && (cell.activityCode === "recovery_retry" || cell.activityCode === "goal_pass_retry")) return <IconRefresh {...props} />;
+  if (cell.status === "failed") return <IconAlertTriangle {...props} />;
   if (cell.status === "completed" && (cell.kind === "answer" || cell.kind === "notice")) return <IconCheck {...props} />;
   switch (cell.kind) {
     case "thought":
@@ -372,6 +379,68 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
   }
 }
 
+/** One invocation's exact node identity; an avatar is a fallback, not a provider logo. */
+function WorkerWorkCard({ group, active, locale, onOpenWorker }: {
+  group: OneWorkerWorkGroup;
+  active: boolean;
+  locale: "ko" | "en";
+  onOpenWorker?: (group: OneWorkerWorkGroup) => void;
+}) {
+  const ko = locale === "ko";
+  const [open, setOpen] = useState(false);
+  const name = group.name || (ko ? "이름 없는 작업자" : "Unnamed worker");
+  const lifecycle = group.lifecycle;
+  const terminal = lifecycle?.terminalObserved ? lifecycle.status : undefined;
+  const latest = group.latest;
+  const recovery = latest.kind === "notice" && (latest.activityCode === "recovery_retry" || latest.activityCode === "goal_pass_retry");
+  const status = recovery && active ? "recovering" : terminal === "failed" ? "failed" : terminal === "cancelled" ? "cancelled"
+    : terminal === "completed" ? "ended" : active && (lifecycle?.status === "running" || latest.status === "running") ? "running" : "recorded";
+  const stateLabel = status === "recovering" ? (ko ? "복구 재시도" : "Recovery retry")
+    : status === "ended" ? (ko ? "이번 실행 종료" : "Run ended")
+    : status === "failed" ? (ko ? "실행 실패" : "Run failed")
+    : status === "cancelled" ? (ko ? "중단됨" : "Stopped")
+    : recovery ? (ko ? "복구 재시도" : "Recovery retry")
+    : status === "running" ? (ko ? "실행 중" : "Running") : (ko ? "활동 기록" : "Recorded activity");
+  const stage = latest.kind === "notice" ? latest.message : latest.kind === "thought" ? latest.headline || cellVerb(latest, locale) : cellVerb(latest, locale);
+  const target = latest.kind === "agent" ? "" : cellObject(latest);
+  const phase = lifecycle?.phase === "plan" ? (ko ? "계획" : "Planning")
+    : lifecycle?.phase === "delegate" ? (ko ? "위임" : "Delegated")
+    : lifecycle?.phase === "synthesize" ? (ko ? "종합" : "Synthesis") : lifecycle?.role;
+  // Color distinguishes identities only; it is not a provider logo or status.
+  const tone = Array.from(group.agentId).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % 5;
+  const terminalOrRecovery = terminal != null || recovery;
+  const update = terminalOrRecovery ? stateLabel : latest.kind === "agent" ? `${phase ? `${phase} · ` : ""}${stateLabel}` : `${stage}${target ? ` · ${target}` : ""}`;
+  const title = [name, group.model, phase, stateLabel, stage, target].filter(Boolean).join(" · ");
+  const content = <>
+    <span className={styles.workerAvatar} data-tone={tone} aria-hidden="true">{Array.from(name.trim())[0]?.toLocaleUpperCase() || "?"}</span>
+    <strong className={styles.workerName}>{name}</strong>
+    <span className={styles.workerStep} data-step-kind={latest.kind} data-status={status}>
+      <span aria-hidden="true"><CellIcon cell={latest} /></span>
+      <span>{update}</span>
+    </span>
+    {group.model && <span className={styles.workerModel} data-worker-model="true">{group.model}</span>}
+    <span className={styles.workerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
+  </>;
+  if (onOpenWorker) return (
+    <button type="button" className={styles.workerSummary} data-worker-id={group.agentId} data-worker-state={status}
+      data-worker-panel="true" title={title} aria-label={`${name}: ${update}${group.model ? ` · ${group.model}` : ""} · ${ko ? "작업자 상세 열기" : "Open worker details"}`}
+      onClick={() => onOpenWorker(group)}>{content}</button>
+  );
+  return (
+    <details className={styles.workerCard} data-worker-id={group.agentId} data-worker-state={status} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className={styles.workerSummary} title={title}>{content}</summary>
+      {open && <OneWorkerWorkDetails group={group} locale={locale} />}
+    </details>
+  );
+}
+
+/** Same typed tool records for the right panel and the inline disclosure. */
+export function OneWorkerWorkDetails({ group, locale }: { group: OneWorkerWorkGroup; locale: "ko" | "en" }) {
+  return <div className={styles.workerRows}>
+    {group.cells.map((cell) => <WorkRow key={cell.id} cell={{ ...cell, agent: undefined }} locale={locale} />)}
+  </div>;
+}
+
 export function OneTurnWorkDividers({ presentation }: { presentation: OneWorkPresentation }) {
   if (presentation.dividers.length === 0) return null;
   return (
@@ -400,6 +469,7 @@ export function OneTurnWork({
   runStatus,
   onRetry,
   retryDisabled = false,
+  onOpenWorker,
 }: {
   state: OneActivityState;
   /** True only for the live run this block belongs to. */
@@ -422,6 +492,8 @@ export function OneTurnWork({
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
   retryDisabled?: boolean;
+  /** Caller binds this exact node group to its own chat and invocation scope. */
+  onOpenWorker?: (group: OneWorkerWorkGroup) => void;
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
@@ -468,9 +540,12 @@ export function OneTurnWork({
       }
     }
   }
-  const visibleCells = liveHeadlineCell < 0
+  const visibleCells = useMemo(() => liveHeadlineCell < 0
     ? presentation.cells
-    : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell);
+    : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell), [presentation.cells, liveHeadlineCell]);
+  // Worker details retain every attributed receipt, including the live headline.
+  const workerGroups = useMemo(() => groupOneWorkerWork(presentation.cells), [presentation.cells]);
+  const ungroupedCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId), [visibleCells]);
   const hasRows = visibleCells.length > 0;
 
   if (!active && !hasRows && !presentation.terminalMessage && !interrupted) {
@@ -534,9 +609,14 @@ export function OneTurnWork({
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
       )}
-      {expanded && hasRows && (
+      {(active || expanded) && workerGroups.length > 0 && (
+        <div className={styles.workerList} aria-label={ko ? "작업자별 활동" : "Activity by worker"}>
+          {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onOpenWorker={onOpenWorker} />)}
+        </div>
+      )}
+      {expanded && ungroupedCells.length > 0 && (
         <div className={styles.rows}>
-          {visibleCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
+          {ungroupedCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
         </div>
       )}
       {/* ★ 실패 사유는 접힘과 무관하게 보인다 (2026-08-23).
