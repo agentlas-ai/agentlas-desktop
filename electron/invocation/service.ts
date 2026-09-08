@@ -2329,9 +2329,59 @@ export class InvocationService {
         if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
         try {
-          const admitted = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
+          const prepared = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
             userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal });
-          if (!admitted || controller.signal.aborted) return;
+          if (controller.signal.aborted) {
+            if (prepared.kind === "admitted") {
+              try {
+                let cancelledGoal = getLongRunByGoalId(prepared.run.goalId);
+                if (cancelledGoal && !["completed", "failed", "cancelled"].includes(cancelledGoal.status)) {
+                  if (cancelledGoal.status !== "cancelling") {
+                    cancelledGoal = transitionLongRun({
+                      runId: cancelledGoal.id,
+                      to: "cancelling",
+                      actorKind: "host",
+                      reason: "automatic_goal_cancelled_before_execution",
+                    });
+                  }
+                  transitionLongRun({
+                    runId: cancelledGoal.id,
+                    to: "cancelled",
+                    actorKind: "host",
+                    reason: "automatic_goal_cancelled_before_execution",
+                  });
+                }
+                completeChatGoalContract(prepared.run.goalId, "cancelled");
+                if (getChat(chat.id)?.goalId === prepared.run.goalId) setChatGoalBinding(chat.id, null);
+              } catch (cleanupError) {
+                tryRecordRunEvent({
+                  runId,
+                  chatId: chat.id,
+                  kind: "automatic_goal_cancel_before_execution_cleanup_failed",
+                  payload: { goalId: prepared.run.goalId },
+                });
+                console.warn("[long-run] automatic Goal pre-execution cancellation cleanup failed:", cleanupError);
+              }
+            }
+            return;
+          }
+          if (prepared.kind === "unavailable") {
+            // A Task request may execute only after its automatic Goal intake is
+            // classified and durably admitted. The prompt row already exists,
+            // so this visible, retryable stop preserves the exact request.
+            if (runReq.taskIntent !== "conversation") {
+              return {
+                blockInvocation: true as const,
+                code: "automatic-goal-intake-unavailable" as const,
+                message: pickLocale(runReq) === "ko"
+                  ? "목표 분류 엔진을 사용할 수 없어 이번 작업을 시작하지 않았습니다. 요청은 저장됐습니다. 다시 시도해 주세요."
+                  : "The Goal intake engine was unavailable, so this task did not start. Your request was saved; try again.",
+              };
+            }
+            return;
+          }
+          if (prepared.kind === "bypass") return;
+          const admitted = prepared.run;
           projectionGoalId = admitted.goalId;
           record.automaticGoalId = admitted.goalId;
           transitionLongRun({ runId: admitted.id, to: "running", actorKind: "host", reason: "automatic-goal-user-dispatch" });
@@ -2359,7 +2409,43 @@ export class InvocationService {
           }
         } catch {
           tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_binding_failed", payload: { sourceMessageId } });
-          // Goal enrichment failure must never swallow the original request.
+          const failedGoalId = record.automaticGoalId;
+          if (failedGoalId) {
+            try {
+              const failedGoal = getLongRunByGoalId(failedGoalId);
+              if (failedGoal && ["queued", "running", "waiting_worker", "waiting_tool", "waiting_user"].includes(failedGoal.status)) {
+                transitionLongRun({
+                  runId: failedGoal.id,
+                  to: failedGoal.status === "queued" ? "failed" : "blocked",
+                  actorKind: "host",
+                  reason: "automatic_goal_binding_failed",
+                });
+              }
+            } catch (cleanupError) {
+              tryRecordRunEvent({
+                runId,
+                chatId: chat.id,
+                kind: "automatic_goal_binding_cleanup_failed",
+                payload: { goalId: failedGoalId },
+              });
+              console.warn("[long-run] automatic Goal binding cleanup failed:", cleanupError);
+            } finally {
+              // The invocation did not start. Never synthesize a completion
+              // claim or verifier retry from runMcpInvocation's empty result.
+              record.automaticGoalId = undefined;
+              record.longRunProjection = undefined;
+              projectionGoalId = null;
+            }
+          }
+          if (runReq.taskIntent !== "conversation") {
+            return {
+              blockInvocation: true as const,
+              code: "automatic-goal-intake-unavailable" as const,
+              message: pickLocale(runReq) === "ko"
+                ? "목표 실행을 준비하지 못해 이번 작업을 시작하지 않았습니다. 요청은 저장됐습니다. 다시 시도해 주세요."
+                : "The Goal could not be prepared, so this task did not start. Your request was saved; try again.",
+            };
+          }
         }
       },
     )

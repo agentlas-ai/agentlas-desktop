@@ -1,7 +1,18 @@
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
-import { judgeRequired, type RequiredJudgeSpec, type RequiredVerdict } from "../system-agents/judgment";
+import {
+  judgeRequired,
+  type JudgmentRuntimeAttempt,
+  type RequiredJudgeSpec,
+  type RequiredVerdict,
+} from "../system-agents/judgment";
 
 type IntakeLabel = GoalIntakeDecision["intent"];
+
+export interface AutomaticGoalIntentResolution extends GoalIntakeDecision {
+  classification: "classified" | "unavailable";
+  failureKind?: RequiredVerdict<IntakeLabel>["failureKind"];
+  attempts?: JudgmentRuntimeAttempt[];
+}
 
 /** Reuses the resident judgment service. No lexical fallback, permission change
  * or task dispatch occurs when the judge is unavailable or the request is vague.
@@ -13,9 +24,15 @@ export async function resolveAutomaticGoalIntent(
     timeoutMs?: number;
     judgeFn?: (spec: RequiredJudgeSpec<IntakeLabel>) => Promise<RequiredVerdict<IntakeLabel>>;
   } = {},
-): Promise<GoalIntakeDecision> {
-  const abstain: GoalIntakeDecision = { messageId: source.messageId, intent: "unknown", commitment: "uncertain" };
-  if (source.role !== "user" || !source.text.trim() || source.text.length > 32_000 || options.signal?.aborted) return abstain;
+): Promise<AutomaticGoalIntentResolution> {
+  const abstain = (diagnostic: Partial<Pick<AutomaticGoalIntentResolution, "failureKind" | "attempts">> = {}): AutomaticGoalIntentResolution => ({
+    messageId: source.messageId,
+    intent: "unknown",
+    commitment: "uncertain",
+    classification: "unavailable",
+    ...diagnostic,
+  });
+  if (source.role !== "user" || !source.text.trim() || source.text.length > 32_000 || options.signal?.aborted) return abstain();
   try {
     const result = await (options.judgeFn ?? judgeRequired)({
       kind: "automatic-goal-intake-v1",
@@ -34,9 +51,17 @@ export async function resolveAutomaticGoalIntent(
       scanSecrets: true,
       timeoutMs: Math.min(30_000, Math.max(1, options.timeoutMs ?? 30_000)),
     });
-    if (options.signal?.aborted || result.source !== "llm" || !result.verdict) return abstain;
-    return { messageId: source.messageId, intent: result.verdict, commitment: result.verdict === "execute" ? "now" : "uncertain" };
+    if (options.signal?.aborted || result.source !== "llm" || !result.verdict) {
+      return abstain({ failureKind: result.failureKind, attempts: result.attempts });
+    }
+    return {
+      messageId: source.messageId,
+      intent: result.verdict,
+      commitment: result.verdict === "execute" ? "now" : "uncertain",
+      classification: "classified",
+      ...(result.attempts ? { attempts: result.attempts } : {}),
+    };
   } catch {
-    return abstain;
+    return abstain();
   }
 }

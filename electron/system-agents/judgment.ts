@@ -32,6 +32,14 @@ export interface JudgmentRuntimeReceipt {
   execution: "invoked" | "cached";
 }
 
+/** Value-free outcome of one actual runner attempt; diagnostic text stays private. */
+export interface JudgmentRuntimeAttempt {
+  runtimeReceipt: JudgmentRuntimeReceipt;
+  outcome: "success" | "refused" | "timeout" | "cancelled" | "invalid_output" | "failed";
+  failureKind?: RunnerFailureKind;
+  elapsedMs: number;
+}
+
 type JudgmentPool = { state: "configured" | "unconfigured" | "unavailable"; selections: RuntimeSelection[]; fingerprint: string };
 function routingFingerprint(selections: RuntimeSelection[]): string {
   return createHash("sha256").update(JSON.stringify(selections)).digest("hex");
@@ -106,6 +114,8 @@ export interface Verdict<V extends string> {
  * never a fabricated verdict.
  */
 export interface RequiredVerdict<V extends string> {
+  attempts?: JudgmentRuntimeAttempt[];
+  failureKind?: RunnerFailureKind;
   runtimeReceipt?: JudgmentRuntimeReceipt;
   verdict: V | null;
   confidence: number;
@@ -395,7 +405,7 @@ export async function callConnectedModelDetailed(opts: {
    * 자세한 배경은 callJudgmentModelDetailed 의 같은 이름 옵션 주석에 있다.
    */
   authoring?: boolean;
-}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt }> {
+}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   return callJudgmentModelDetailed(opts);
 }
 
@@ -435,10 +445,11 @@ async function callJudgmentModelDetailed(opts: {
    * 얻으면 자기가 판정할 대상을 스스로 만들어 낼 수 있다.
    */
   authoring?: boolean;
-}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt }> {
+}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
   let runtimeReceipt: JudgmentRuntimeReceipt | undefined;
+  const attempts: JudgmentRuntimeAttempt[] = [];
   let runtimes: RuntimeStatus[];
   let operationalStoreUnavailable = false;
   try {
@@ -481,7 +492,10 @@ async function callJudgmentModelDetailed(opts: {
 
   const controller = new AbortController();
   const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  let timedOut = false;
   const timeout = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
     controller.abort(new Error(`Connected model timed out after ${Math.round(timeoutMs / 1000)}s`));
   }, timeoutMs);
   const onAbort = () => controller.abort(
@@ -489,11 +503,23 @@ async function callJudgmentModelDetailed(opts: {
   );
   if (opts.signal?.aborted) onAbort();
   else opts.signal?.addEventListener("abort", onAbort, { once: true });
+  const recordAttempt = (startedAt: number, outcome: JudgmentRuntimeAttempt["outcome"], failure?: RunnerFailure) => {
+    if (!runtimeReceipt) return;
+    const attempt: JudgmentRuntimeAttempt = {
+      runtimeReceipt, outcome, elapsedMs: Math.max(0, Date.now() - startedAt),
+      ...(failure ? { failureKind: failure.kind } : {}),
+    };
+    attempts.push(attempt);
+    console.info("[judgment-runtime-result]", JSON.stringify(attempt));
+  };
+  const failedOutcome = (failure: RunnerFailure): JudgmentRuntimeAttempt["outcome"] =>
+    timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
+      : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
   try {
     for (const runtime of ordered) {
       if (!opts.runtimeSelection && readJudgmentPool().fingerprint !== fingerprint) return { text: null, failure: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
-      }, runtimeReceipt };
+      }, runtimeReceipt, attempts };
       if (controller.signal.aborted) break;
       const picked = pickRunner(runtime);
       if (!picked) continue;
@@ -501,6 +527,7 @@ async function callJudgmentModelDetailed(opts: {
         kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
       } };
       console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
+      const startedAt = Date.now();
       try {
         const result = await awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
@@ -536,6 +563,7 @@ async function callJudgmentModelDetailed(opts: {
            * 한 번도 시도되지 않았다(실측 2026-08-06).
            */
           lastFailure = result.failure;
+          recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
           continue;
         }
         const text = result.text ?? "";
@@ -548,9 +576,11 @@ async function callJudgmentModelDetailed(opts: {
             runtime: runtime.kind,
             source: "exit",
           };
+          recordAttempt(startedAt, "invalid_output", lastFailure);
           continue;
         }
-        return { text, runtimeReceipt };
+        recordAttempt(startedAt, "success");
+        return { text, runtimeReceipt, attempts };
       } catch (error) {
         // Timeout or caller cancellation ends the whole judgment; a runtime that
         // merely cannot isolate just yields to the next candidate.
@@ -559,12 +589,13 @@ async function callJudgmentModelDetailed(opts: {
           // ★"이 런타임은 판정을 못 한다"와 "한도·오류로 실패했다"는 다음 행동이 다르다.
           //   앞의 것은 기다려도 안 풀리고 다른 런타임을 하나 연결해야 풀린다. 문장을
           //   읽어 짐작하지 않고 표식(RuntimeJudgmentRefusal)으로 가른다.
-          kind: isJudgmentRefusal(error) ? "refused" : "exit",
+          kind: timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
           message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
           runtime: runtime.kind,
           source: "exit",
         };
-        if (controller.signal.aborted) return { text: null, failure: lastFailure, runtimeReceipt };
+        recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
+        if (controller.signal.aborted) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
       }
     }
     if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
@@ -575,6 +606,7 @@ async function callJudgmentModelDetailed(opts: {
           kind: selection.kind, backend: selection.backend, source: selection.source, model: selection.model,
         } };
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
+        const startedAt = Date.now();
         try {
           const result = await awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
@@ -597,6 +629,7 @@ async function callJudgmentModelDetailed(opts: {
           ), controller.signal);
           if (result.failure) {
             lastFailure = result.failure;
+            recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
           } else {
             const recoveredText = result.text ?? "";
             if (opts.accept && !opts.accept(recoveredText)) {
@@ -606,21 +639,24 @@ async function callJudgmentModelDetailed(opts: {
                 runtime: selection.kind,
                 source: "exit",
               };
+              recordAttempt(startedAt, "invalid_output", lastFailure);
             } else {
-              return { text: recoveredText, runtimeReceipt };
+              recordAttempt(startedAt, "success");
+              return { text: recoveredText, runtimeReceipt, attempts };
             }
           }
         } catch (error) {
           lastFailure = {
-            kind: "exit",
+            kind: timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
             message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
             runtime: selection.kind,
             source: "exit",
           };
+          recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
         }
       }
     }
-    return { text: null, ...(lastFailure ? { failure: lastFailure } : {}), ...(runtimeReceipt ? { runtimeReceipt } : {}) };
+    return { text: null, ...(lastFailure ? { failure: lastFailure } : {}), ...(runtimeReceipt ? { runtimeReceipt } : {}), attempts };
   } finally {
     clearTimeout(timeout);
     opts.signal?.removeEventListener("abort", onAbort);
@@ -760,23 +796,24 @@ export async function judgeRequired<V extends string>(
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    accept: (text) => parseVerdict<V>(text, spec.labels) !== null,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
   });
   const text = detailed.text;
   if (text === null) {
     // ★reason을 비우지 않는다 — 소비자(EVAL_UNAVAILABLE 카드 등)가 "왜"를 말할 유일한 통로다.
     const reason = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
-    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
+    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: detailed.failure?.kind };
   }
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) {
-    return { verdict: null, confidence: 0, reason: "", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
+    return { verdict: null, confidence: 0, reason: "judgment_invalid_output", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: "exit" };
   }
   if (runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) {
     cacheSet(cacheKey, { ...parsed, source: "llm", runtimeReceipt: detailed.runtimeReceipt });
     durablePut(spec.kind, signature, { ...parsed, source: "llm" });
   }
-  return { ...parsed, source: "llm", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
+  return { ...parsed, source: "llm", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts };
 }
 
 export interface RequiredActionOption {

@@ -1519,6 +1519,12 @@ function deterministicOneCompletionCopy(
  * 2) 사용자 메시지를 chat_messages에 영구화
  * 3) 활성 런타임 선택 → 러너에 위임
  */
+export interface DurableUserMessageHookBlock {
+  blockInvocation: true;
+  code: "automatic-goal-intake-unavailable";
+  message: string;
+}
+
 export async function runMcpInvocation(
   req: McpInvocationRequest,
   sink: EventSink,
@@ -1526,7 +1532,7 @@ export async function runMcpInvocation(
   workspaceBinding?: InvocationWorkspaceBinding,
   executionContext?: InvocationExecutionContext,
   /** Main-only hook after this invocation's user message is durably stored. */
-  onDurableUserMessage?: (messageId: string) => Promise<void>,
+  onDurableUserMessage?: (messageId: string) => Promise<void | DurableUserMessageHookBlock>,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   // A scheduled invocation is the worker leg of the automation, even though
@@ -1764,7 +1770,14 @@ export async function runMcpInvocation(
   persistUserMessage();
   if (persistedUserMessageId && onDurableUserMessage && !signal?.aborted) {
     try {
-      await onDurableUserMessage(persistedUserMessageId);
+      const hookResult = await onDurableUserMessage(persistedUserMessageId);
+      if (hookResult?.blockInvocation) {
+        // The user row is already durable. Publish through the ordinary error
+        // sink so InvocationService records invoke_failed and releases busy
+        // state, while returning before any runtime or tool can start.
+        sink({ kind: "error", error: { code: hookResult.code, message: hookResult.message } });
+        return earlyResult();
+      }
       chat.goalId = getChatGoalId(chat.id);
     } catch {
       tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "durable_user_message_hook_failed", payload: { messageId: persistedUserMessageId } });
