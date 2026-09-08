@@ -994,6 +994,10 @@ export interface SubsetVerdict<V extends string> {
   reason: string;
   /** "fallback" means NO model answered — callers must not treat `selected` as a decision. */
   source: "llm" | "fallback";
+  /** Value-free diagnostics; absence on cached verdicts is not a fresh invocation. */
+  failureKind?: RunnerFailureKind;
+  decisionFailure?: "unavailable" | "invalid_output";
+  attempts?: JudgmentRuntimeAttempt[];
 }
 
 const subsetCache = new Map<string, SubsetVerdict<string>>();
@@ -1057,6 +1061,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
     confidence: 0,
     reason: "No connected model answered; nothing was selected.",
     source: "fallback",
+    decisionFailure: "unavailable",
   };
   if (spec.labels.length === 0 || !input.trim()) return undecided;
 
@@ -1075,17 +1080,18 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
     .filter(Boolean)
     .join("\n");
 
-  const text = await callJudgmentModel({
+  const detailed = await callJudgmentModelDetailed({
     systemPrompt,
     input,
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
   });
-  if (text === null) return undecided;
+  const text = detailed.text;
+  if (text === null) return { ...undecided, failureKind: detailed.failure?.kind, attempts: detailed.attempts };
 
   const parsed = parseSubset<V>(text, spec.labels);
-  if (!parsed) return undecided;
+  if (!parsed) return { ...undecided, decisionFailure: "invalid_output", failureKind: "exit", attempts: detailed.attempts };
   const verdict: SubsetVerdict<V> = { ...parsed, source: "llm" };
   if (runtimeScope === runtimeSelectionCacheScope()) {
     subsetCache.set(cacheKey, verdict);

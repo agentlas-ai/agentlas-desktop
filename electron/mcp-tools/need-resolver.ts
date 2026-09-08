@@ -17,7 +17,7 @@
 // Hub first: the Hub routing plugin already resolves capabilities and tool-calls correctly,
 // so its entries are offered first and win ties against a local catalog entry.
 
-import { judgeSubset, type JudgeHint } from "../system-agents/judgment";
+import { judgeSubset, type JudgeHint, type SubsetVerdict } from "../system-agents/judgment";
 
 export interface McpNeedCandidate {
   /** Catalog id or hub slug. */
@@ -40,6 +40,9 @@ export interface ResolvedMcpNeeds {
   reason: string;
   /** Candidates dropped by the cap, so a truncated inventory is never read as "all of it". */
   omitted: string[];
+  failureKind?: SubsetVerdict<string>["failureKind"];
+  decisionFailure?: SubsetVerdict<string>["decisionFailure"];
+  attempts?: SubsetVerdict<string>["attempts"];
 }
 
 export interface McpGoalNeedContext {
@@ -164,7 +167,10 @@ export async function resolveMcpNeeds(input: {
   });
 
   if (verdict.source !== "llm") {
-    return { needed: [], decided: false, reason: "no connected model answered", omitted };
+    return { needed: [], decided: false, reason: "no connected model answered", omitted,
+      ...(verdict.failureKind ? { failureKind: verdict.failureKind } : {}),
+      ...(verdict.decisionFailure ? { decisionFailure: verdict.decisionFailure } : {}),
+      ...(verdict.attempts ? { attempts: verdict.attempts } : {}) };
   }
   return {
     needed: verdict.selected,

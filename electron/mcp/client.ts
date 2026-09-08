@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { passFailureVerdict } from "../long-run/pass-failure-verdict";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
@@ -173,7 +173,12 @@ import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown } from "../runtime/runtime-cooldown";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
-import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
+import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate } from "../mcp-tools/mcp-config";
+import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
+import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
+import { mcpServerConfigurationDigest, preparedMcpBindings } from "../mcp-tools/prepared-transport";
+import { createWorkerCapabilityPreparer } from "./worker-capability-preparer";
+import { WorkerCapabilityError, type PrepareWorkerCapabilities } from "./worker-capabilities";
 import { browserCdpHostFailureDiagnostic } from "../mcp-tools/browser-cdp-launcher";
 import {
   refreshBrowserCredentialsIfDue,
@@ -2670,6 +2675,7 @@ ${effectiveUserPrompt}`;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
   let isolatedMcpConfig = false;
+  let prepareWorkerCapabilities: PrepareWorkerCapabilities | undefined;
   // Selecting an authenticated browser adds a capability; it does not revoke
   // the file/shell grant needed by mixed implementation and visual QA work.
   // Only the explicit host-normalized tool mode restricts execution to browser.
@@ -3062,6 +3068,77 @@ ${effectiveUserPrompt}`;
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
       }
+      const workerGoalScope = autoSelectInput.resolveActiveGoalScope();
+      if (workerGoalScope && !executionContext && !req.agentAppMode) {
+        const baselineIds = [...new Set(mcpIncludedServers.map((row) => row.catalogId ?? row.serverId))];
+        prepareWorkerCapabilities = createWorkerCapabilityPreparer({
+          scope: workerGoalScope, cwd: workingFolder ?? undefined, baselineIds,
+          readScope: autoSelectInput.resolveActiveGoalScope,
+          assertParentCurrent: () => {
+            assertMcpGoalSelectionCurrent();
+            if (workspaceBinding) revalidateInvocationWorkspaceBinding(workspaceBinding);
+          },
+          inventory: () => {
+            const servers = listInstalledMcpServers().filter((server) => server.enabled && server.configurationValid !== false);
+            const canonicalBrowser = servers.some((server) => server.catalogId === "agentlas-browser");
+            const eligible = servers.filter((server) => (!browserOnly || baselineIds.includes(server.catalogId ?? server.id))
+              && (!canonicalBrowser || server.catalogId || baselineIds.includes(server.id) || !isKeylessPlaywrightMcpDuplicate(server)));
+            return {
+              fingerprint: createHash("sha256").update(JSON.stringify(eligible.map((server) =>
+                [server.id, mcpServerConfigurationDigest(server)]).sort())).digest("hex"),
+              candidates: [...new Map(eligible.map((server) => {
+                const entry = MCP_TOOL_CATALOG.find((candidate) => candidate.id === server.catalogId);
+                const id = server.catalogId ?? server.id;
+                return [id, { id, name: server.nameEn || server.name,
+                  description: entry?.descriptionEn || entry?.description || "Owner-installed custom MCP server",
+                  origin: "local" as const, needsCredential: server.envKeys.length > 0 }] as const;
+              })).values()],
+            };
+          },
+          select: (input) => resolveMcpNeeds({ ...input, runtimeCapabilities: {
+            nativeBrowser: nativeBrowserGrant && mcpConfigPath ? "available" : "unknown",
+          } }),
+          receipt: (payload) => recordRunEvent({ runId: req.runId!, chatId: chat.id,
+            kind: "mcp_worker_capability_selection", payload }),
+          materialize: async (input, ids, generation) => {
+            let grant: NativeBrowserRelayGrant | undefined;
+            let childConfig: Awaited<ReturnType<typeof buildMcpConfigFile>>;
+            let released = false;
+            const release = () => {
+              if (released) return;
+              released = true;
+              grant?.release();
+              if (childConfig) fs.rmSync(childConfig.configPath, { force: true });
+            };
+            try {
+              if (ids.includes("agentlas-browser")) {
+                grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
+                  permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
+                  presentation: agent.visibility === "background" || agent.visibility === "private" ? "background" : "foreground" });
+              }
+              childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
+                skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
+                toolGate: { runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
+                  permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
+                  ...(req.simulation === true ? { simulation: true as const } : {}) } });
+              const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
+              if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
+                throw new WorkerCapabilityError("worker-capability-credential-or-server-unavailable");
+              }
+              const preparedConfig = childConfig;
+              return { runner: { mcpConfigPath: preparedConfig.configPath, mcpAllowedTools: preparedConfig.allowedTools,
+                mcpCodexConfigArgs: preparedConfig.codexConfigArgs, isolatedMcpConfig: true as const,
+                ...(browserOnly ? { browserOnly: true as const } : {}),
+                env: { ...orchestrationRunnerEnv, ...preparedConfig.runtimeEnv,
+                  ...(grant ? { AGENTLAS_NATIVE_BROWSER_SCOPE: "task" } : {}) } },
+                assertCurrent: () => {
+                  if (released) throw new WorkerCapabilityError("worker-capability-lease-released");
+                  preparedMcpBindings(preparedConfig.configPath);
+                }, release };
+            } catch (error) { release(); throw error; }
+          },
+        });
+      }
     } catch (err) {
       // Every runtime must receive this invocation's approved transport. In
       // particular AGY otherwise falls through to a prior chat's global proxy
@@ -3232,6 +3309,7 @@ ${effectiveUserPrompt}`;
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
       bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
+      prepareWorkerCapabilities,
     });
   };
   const workforceProjectDir = workingFolder ?? process.cwd();
@@ -4067,6 +4145,7 @@ ${effectiveUserPrompt}`;
             ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
             ...(browserOnly ? { browserOnly: true as const } : {}),
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+            prepareWorkerCapabilities,
             onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
             onControllerRuntimeFallback: emitControllerRuntimeFallback,
             runtimePinHonored: runtimeResolution.pinHonored,
