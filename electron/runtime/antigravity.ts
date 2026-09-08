@@ -1,6 +1,7 @@
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
+import { acquireAgyMcpLease } from "./agy-mcp-lease";
 import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { pathToFileURL } from "node:url";
@@ -752,7 +753,7 @@ export function antigravityExitFailure(
  * agy 는 설정 파일이 하나뿐이라 동시 실행이 같은 파일을 공유한다. 계수 없이 정리하면
  * 먼저 끝난 실행이 아직 도는 실행의 도구를 지운다 — 그래프에서 노드 둘이 병렬로 도는
  * 흔한 경우가 정확히 그 모양이다. 모든 실행이 같은 메인 프로세스 안에 있으므로
- * 프로세스 안 계수로 충분하다.
+ * 프로세스 안 계수는 동일 Main 공유만 담당하고, 별도 lifetime lease가 설치 간 충돌을 막는다.
  */
 const AGY_MCP_REFCOUNT = new Map<string, number>();
 const AGY_MCP_ACTIVE_ENTRIES = new Map<string, AgyMcpServerEntry>();
@@ -969,6 +970,60 @@ async function reconcileAgyMcpServers(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
+): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
+  const noop = { cleanup: async () => {} };
+  let lease: Awaited<ReturnType<typeof acquireAgyMcpLease>>;
+  try { lease = await acquireAgyMcpLease(agyMcpConfigPath()); }
+  catch { return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
+    providerCode: "agy_mcp_scope_conflict", message: "Antigravity MCP configuration is leased by another run or its owner could not be verified." } }; }
+  try {
+    const global = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
+      throw error;
+    }));
+    const requested = mcpConfigPath ? JSON.parse(await fs.readFile(mcpConfigPath, "utf8")) : {};
+    const browser = global.mcpServers?.["agentlas-browser"];
+    if (browser && isAgentlasOwnedBrowserMcpEntry(browser)) {
+      if (!requested.mcpServers?.["agentlas-browser"]) throw new Error("agy_mcp_browser_binding_missing");
+      const previousControl = browser.env?.[MCP_PROXY_CONTROL_FILE_ENV];
+      const nextControl = requested.mcpServers["agentlas-browser"].env?.[MCP_PROXY_CONTROL_FILE_ENV];
+      // A foreign extant channel is not proven stale. Old Desktop versions do
+      // not know about this lease, so never overwrite their live/unknown grant.
+      if (previousControl !== nextControl && typeof previousControl === "string") {
+        try { await fs.stat(previousControl); throw new Error("agy_mcp_foreign_owner_unverified"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+    }
+    const bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation);
+    if (bound.failure) { await lease.release(); return bound; }
+    const stagedConfig = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
+    const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
+    const assertReady = async () => {
+      await lease.assertOwned();
+      const current = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
+      for (const key of guardedKeys) {
+        const entry = current.mcpServers?.[key];
+        if (!isAgyMcpEntryEqual(entry, stagedConfig.mcpServers[key])) {
+          throw new Error("agy_mcp_configuration_drift");
+        }
+      }
+      onStatus(`[agy-mcp-scope] phase=load generation=${lease.generation}`);
+    };
+    onStatus(`[agy-mcp-scope] phase=staged generation=${lease.generation}`);
+    return { assertReady, cleanup: async () => { try { await bound.cleanup(); } finally { await lease.release(); } } };
+  } catch (error) {
+    await lease.release().catch(() => {});
+    const code = error instanceof Error && /^agy_mcp_[a-z_]+$/.test(error.message) ? error.message : "agy_mcp_config_unavailable";
+    return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
+      providerCode: code, message: "Antigravity MCP configuration could not be bound to this authorized run." } };
+  }
+}
+
+async function reconcileAgyMcpServersUnderLease(
+  mcpConfigPath: string | undefined,
+  onStatus: (message: string) => void,
+  runtimeEnv: NodeJS.ProcessEnv = {},
+  generation?: string,
 ): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   if (!mcpConfigPath) return noop;
@@ -985,11 +1040,19 @@ async function reconcileAgyMcpServers(
     for (const server of Object.values(requested.mcpServers ?? {})) {
       const aliases = Object.keys(server.env ?? {}).filter((key) => /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key)).sort();
       server.env = inheritAgyMcpSecretAliases(server.env, runtimeEnv);
+      if (generation) server.env = { ...server.env, AGENTLAS_AGY_MCP_CONFIG: agyMcpConfigPath(),
+        AGENTLAS_AGY_MCP_GENERATION: generation, AGENTLAS_AGY_MCP_SERVER_KEY: Object.entries(requested.mcpServers ?? {}).find(([, value]) => value === server)?.[0] ?? "" };
       if (aliases.length) {
         // Removing overlays must not make different live grants appear equal
         // to the global-config concurrency guard. Only a digest is persisted.
         server.env = { ...server.env, AGENTLAS_MCP_RUN_BINDING: createHash("sha256")
           .update(JSON.stringify(aliases.map((key) => [key, runtimeEnv[key]]))).digest("hex") };
+      }
+      if (generation) {
+        const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+          : value && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value;
+        server.env = { ...server.env, AGENTLAS_AGY_MCP_ENTRY_INTEGRITY: createHash("sha256")
+          .update(JSON.stringify(canonical(requestedAgyMcpEntry(server)))).digest("hex") };
       }
     }
   } catch {
@@ -1038,8 +1101,15 @@ async function reconcileAgyMcpServers(
   // instead of lending it the first run's authority.
     for (const [key, server] of entries) {
     const live = AGY_MCP_REFCOUNT.get(key);
-    if (live === undefined) continue;
     const requestedEntry = requestedAgyMcpEntry(server);
+    if (live === undefined) {
+      if (key === "agentlas-browser" && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[key] ?? {})) continue;
+      if (!parsed.mcpServers[key] || isAgyMcpEntryEqual(parsed.mcpServers[key], requestedEntry ?? undefined)) continue;
+      // Preserve user entries without borrowing their different scope. This
+      // preflight must precede any process refcount or global-file mutation.
+      return { cleanup: async () => {}, failure: { kind: "refused", source: "marker", runtime: "antigravity",
+        providerCode: "agy_mcp_scope_conflict", message: "An existing MCP key belongs to a different transport scope." } };
+    }
     const activeEntry = AGY_MCP_ACTIVE_ENTRIES.get(key);
     if (requestedEntry && isAgyMcpEntryEqual(activeEntry, requestedEntry)
       && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) continue;
@@ -1425,6 +1495,11 @@ async function runPreparedAntigravity(
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
       if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
       for (const row of preparedMcpBindings(req.mcpConfigPath)) preparedMcpTransport(row, row.server);
+    }
+    if ("assertReady" in mcpReconcile) {
+      try { await mcpReconcile.assertReady?.(); }
+      catch { return { text: "", failure: { kind: "refused", source: "marker", runtime: "antigravity",
+        providerCode: "agy_mcp_configuration_drift", message: "Antigravity MCP scope changed before model execution." } }; }
     }
     return await runAgyProcess();
   } finally {

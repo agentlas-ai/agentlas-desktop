@@ -24,6 +24,7 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
+const { createHash } = require("node:crypto");
 
 const CONTROL_FILE = process.env.AGENTLAS_MCP_PROXY_CONTROL || "";
 const TARGET_RAW = process.env.AGENTLAS_MCP_PROXY_TARGET || "";
@@ -99,7 +100,7 @@ function askApproval(toolName) {
       // 관문에 못 물어봤다 = 거부. 이 프록시가 존재하는 이유가 관문이므로,
       // 관문 부재를 허용으로 바꾸면 프록시가 통과 파이프로 전락한다.
       warn("approval channel is unavailable — denying");
-      resolve(false);
+      resolve({ decision: "deny", reason: "channel-unavailable" });
       return;
     }
     const body = JSON.stringify({
@@ -133,15 +134,19 @@ function askApproval(toolName) {
         res.on("data", (c) => { raw += c; });
         res.on("end", () => {
           try {
-            resolve(JSON.parse(raw)?.decision === "allow");
+            const body = JSON.parse(raw);
+            if (res.statusCode === 401 || res.statusCode === 403) resolve({ decision: "deny", reason: "channel-auth-failed" });
+            else if (res.statusCode !== 200) resolve({ decision: "deny", reason: "channel-http-error" });
+            else if (body?.decision === "allow") resolve({ decision: "allow" });
+            else resolve({ decision: "deny", reason: body?.reason === "user-declined" ? "user-declined" : "policy-denied" });
           } catch {
-            resolve(false);
+            resolve({ decision: "deny", reason: res.statusCode === 401 || res.statusCode === 403 ? "channel-auth-failed" : "channel-invalid-response" });
           }
         });
       },
     );
-    req.on("timeout", () => { req.destroy(); resolve(false); });
-    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve({ decision: "deny", reason: "approval-expired" }); });
+    req.on("error", () => resolve({ decision: "deny", reason: "channel-unavailable" }));
     req.end(body);
   });
 }
@@ -206,8 +211,23 @@ process.stdin.on("data", (chunk) => {
       });
       continue;
     }
-    void askApproval(String(toolName)).then((allowed) => {
-      if (allowed) {
+    void askApproval(String(toolName)).then((outcome) => {
+      const generation = process.env.AGENTLAS_AGY_MCP_GENERATION;
+      if (generation && outcome.decision === "allow") {
+        try {
+          const config = JSON.parse(fs.readFileSync(process.env.AGENTLAS_AGY_MCP_CONFIG, "utf8"));
+          const row = config.mcpServers?.[process.env.AGENTLAS_AGY_MCP_SERVER_KEY];
+          if (row?.env?.AGENTLAS_AGY_MCP_GENERATION !== generation) throw new Error("scope drift");
+          const expected = process.env.AGENTLAS_AGY_MCP_ENTRY_INTEGRITY;
+          if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) throw new Error("scope integrity unavailable");
+          const entry = { ...row, env: { ...row.env } };
+          delete entry.env.AGENTLAS_AGY_MCP_ENTRY_INTEGRITY;
+          const canonical = (value) => Array.isArray(value) ? value.map(canonical)
+            : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value;
+          if (createHash("sha256").update(JSON.stringify(canonical(entry))).digest("hex") !== expected) throw new Error("scope drift");
+        } catch { outcome = { decision: "deny", reason: "configuration-drift" }; }
+      }
+      if (outcome.decision === "allow") {
         send(upstream.stdin, message);
         return;
       }
@@ -219,10 +239,11 @@ process.stdin.on("data", (chunk) => {
         id,
         result: {
           isError: true,
+          _meta: { agentlasProxyFailure: outcome.reason || "policy-denied" },
           content: [
             {
               type: "text",
-              text: `Tool call denied: "${toolName}" was not approved for this run.`,
+              text: `MCP_PROXY_${String(outcome.reason || "policy-denied").replace(/-/g, "_").toUpperCase()}: Tool execution was not authorized by its bound approval channel.`,
             },
           ],
         },

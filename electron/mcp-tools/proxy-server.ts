@@ -162,7 +162,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
           decision = "deny";
         }
         if (res.destroyed) return;
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision, ...(decision === "deny" ? { reason: "policy-denied" } : {}) }));
       });
     });
 

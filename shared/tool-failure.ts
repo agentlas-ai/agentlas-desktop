@@ -58,6 +58,10 @@ export function classifyToolFailure(input: {
     .filter(Boolean)
     .join("\n");
   if (/^APPROVAL_EXPIRED:/m.test(raw)) return "approval_expired";
+  if (/^MCP_PROXY_APPROVAL_EXPIRED:/m.test(raw)) return "approval_expired";
+  if (/^MCP_PROXY_USER_DECLINED:/m.test(raw)) return "approval_declined";
+  if (/^MCP_PROXY_POLICY_DENIED:/m.test(raw)) return "approval_required";
+  if (/^MCP_PROXY_[A-Z_]+:/m.test(raw)) return "tool_failed";
   if (
     /\buser\s+(?:rejected|declined|denied)\s+(?:(?:the|this)\s+)?(?:mcp\s+)?tool\s+call\b/i.test(raw)
     || /\btool\s+call\s+(?:was\s+)?(?:rejected|declined|denied)\b/i.test(raw)
