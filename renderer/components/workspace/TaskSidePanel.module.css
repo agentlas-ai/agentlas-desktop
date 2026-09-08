@@ -1343,7 +1343,7 @@ button.artifactVisual { cursor: pointer; }
 .workerFeedItem { margin: 10px 0; min-width: 0; }
 .workerReport { padding: 14px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .workerReport small, .workerPanelEmpty { color: var(--muted-deep); font-size: 11px; }
-.workerReport > div { margin-top: 7px; white-space: pre-wrap; }
+.workerReport > div { margin-top: 7px; }
 .workerOriginal { margin: 4px 0 10px 23px; font-size: 11px; color: var(--muted-deep); }
 .workerOriginal summary { cursor: pointer; padding: 4px 0; }
 .workerOriginal pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 10px; border-radius: 7px; background: var(--paper-2); color: var(--ink); font-size: 11px; line-height: 1.55; }

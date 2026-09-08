@@ -1025,6 +1025,7 @@ const api: AgentlasIpc = {
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
     attach: (chatId: string) => ipcRenderer.invoke("invoke:attach", chatId),
     receipt: (runId: string) => ipcRenderer.invoke("invoke:receipt", runId),
+    workerReport: (scope) => ipcRenderer.invoke("invoke:workerReport", scope),
     latestReceipt: (chatId: string) => ipcRenderer.invoke("invoke:latestReceipt", chatId),
     latestOneSurface: (input) => ipcRenderer.invoke("invoke:latestOneSurface", input),
   },

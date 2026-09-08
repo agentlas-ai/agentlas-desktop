@@ -13,6 +13,7 @@ export type OneHandoffStatus = "running" | "completed" | "failed" | "cancelled";
  * `agentMessage` envelope; it is not a second chat or a free-form transcript.
  */
 export interface OneActivityHandoffMessage {
+  reportAvailable?: boolean;
   id: string;
   direction: AgentMessageDirection;
   fromAgentId: string;
@@ -330,6 +331,7 @@ function mergeHandoffs(
             ...(message.usedTools && message.usedTools.length > 0
               ? { usedTools: message.usedTools }
               : {}),
+            reportAvailable: message.reportAvailable === true,
             text: message.text.trim(),
             observedAt,
           } satisfies OneActivityHandoffMessage
@@ -896,6 +898,7 @@ function ledgerAgentMessage(payload: Record<string, unknown>): NonNullable<McpIn
   if (direction !== "orchestrator-to-worker" && direction !== "worker-to-orchestrator") return undefined;
   return {
     messageId, direction, fromAgentId, toAgentId,
+    reportAvailable: payload.agentMessageReportAvailable === true,
     ...(replyToMessageId ? { replyToMessageId } : {}),
     ...(usedTools.length > 0 ? { usedTools } : {}),
     text,

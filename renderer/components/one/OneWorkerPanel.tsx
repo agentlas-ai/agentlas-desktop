@@ -1,6 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Markdown } from "../Markdown";
+import { parseWorkerReport, type WorkerReport } from "@shared/worker-report";
+import type { OneActivityHandoffMessage } from "@/lib/one-activity";
 import { IconArrowLeft, IconSparkles } from "../Icon";
 import { buildOneWorkPresentation, groupOneWorkerWork } from "@/lib/one-turn-work";
 import { oneWorkerPanelFeed, ONE_WORKER_FEED_LIMIT, type OneWorkerPanelRun, type OneWorkerPanelSelection } from "@/lib/one-worker-panel";
@@ -28,6 +31,33 @@ function WorkerRequestOriginal({ text, locale }: { text: string; locale: "ko" | 
   </details>;
 }
 
+function WorkerReportBody({ selection, message, locale }: { selection: OneWorkerPanelSelection; message: OneActivityHandoffMessage; locale: "ko" | "en" }) {
+  const scopeKey = JSON.stringify([selection.chatId, selection.runId, selection.agentId, message.id]);
+  const [loaded, setLoaded] = useState<{ key: string; report: WorkerReport | null } | null>(null);
+  useEffect(() => {
+    let current = true;
+    const scope = { chatId: selection.chatId, runId: selection.runId, agentId: selection.agentId, messageId: message.id };
+    const read = window.agentlas?.invoke.workerReport;
+    if (!message.reportAvailable || !read) { setLoaded({ key: scopeKey, report: null }); return; }
+    void read(scope).then(value => {
+      const report = parseWorkerReport(JSON.stringify(value));
+      const exact = report && report.chatId === scope.chatId && report.runId === scope.runId
+        && report.agentId === scope.agentId && report.messageId === scope.messageId ? report : null;
+      if (current) setLoaded({ key: scopeKey, report: exact });
+    }).catch(() => { if (current) setLoaded({ key: scopeKey, report: null }); });
+    return () => { current = false; };
+  }, [scopeKey, message.reportAvailable, selection.chatId, selection.runId, selection.agentId, message.id]);
+  const report = loaded?.key === scopeKey ? loaded.report : null;
+  const text = report?.text ?? message.text.replace(/…?\[middle omitted\]…?/g, "\n\n…\n\n");
+  return <>
+    <small>{report ? (report.truncated
+      ? (locale === "ko" ? "보고서 · 저장 크기 제한으로 뒷부분 생략" : "Report · remainder exceeds storage limit")
+      : (locale === "ko" ? "에이전트 보고" : "Agent report"))
+      : (locale === "ko" ? "요약 기록" : "Summary record")}</small>
+    <Markdown chatId={selection.chatId} messageId={message.id} text={text} />
+  </>;
+}
+
 /** Mounted only for the open worker tab; uses the already-loaded exact run. */
 export function OneWorkerPanel({ selection, run, locale, onBack }: {
   selection: OneWorkerPanelSelection;
@@ -50,8 +80,7 @@ export function OneWorkerPanel({ selection, run, locale, onBack }: {
           return <WorkerRequestOriginal key={entry.id} text={entry.message.text} locale={locale} />;
         }
         if (entry.kind === "message") return <article key={entry.id} className={styles.workerReport}>
-          <small>{locale === "ko" ? "에이전트 보고" : "Agent report"}</small>
-          <div>{entry.message.text}</div>
+          <WorkerReportBody selection={selection} message={entry.message} locale={locale} />
         </article>;
         const state = { items: [entry.item], artifacts: [], sources: [], handoffs: [], lastSequence: 0 };
         const group = groupOneWorkerWork(buildOneWorkPresentation(state, locale, run?.state.cwd ?? null).cells)[0];

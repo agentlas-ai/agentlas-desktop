@@ -58,7 +58,7 @@ import {
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
-import { tryRecordRunEvent } from "../store/run-events";
+import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
 import {
   defaultWorkloadAllocation,
   normalizeEffort,
@@ -1604,8 +1604,13 @@ function boundedTaskForceText(text: string, limit: number): string {
   return `${compact.slice(0, headBudget).trimEnd()} …[middle omitted]… ${compact.slice(-tailBudget).trimStart()}${factLine}`;
 }
 
-/** The durable handoff rail is a conversation preview, not a second copy of
- * the worker transcript. */
+/** Store a bounded report independently of the model-facing handoff capsule. */
+function persistWorkerReport(p: BorrowedTaskForceParams, agentId: string, messageId: string, text: string): boolean {
+  return recordWorkerReport({ chatId: p.chat.id, runId: p.req.runId ?? `task-force:${p.chat.id}`, agentId, messageId },
+    stripTaskForceControlEnvelopes(redactSensitiveText(text)));
+}
+
+/** The durable handoff rail remains a conversation preview. */
 export function boundedTaskForceMessage(text: string): string {
   return boundedTaskForceText(text, 900);
 }
@@ -3847,6 +3852,7 @@ async function runBorrowedAgentTurn(
           direction: "worker-to-orchestrator",
           fromAgentId: id,
           toAgentId: controllerAgentId,
+          reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, teamResult.text),
           text: redactSensitiveText(teamResult.text).slice(0, 1_000),
         },
       }));
@@ -3854,7 +3860,7 @@ async function runBorrowedAgentTurn(
         ...resultMeta,
         spec,
         packet,
-        text: redactSensitiveText(teamResult.text),
+          text: redactSensitiveText(teamResult.text),
         ok: teamResult.ok,
       };
     }
@@ -4439,6 +4445,7 @@ async function runBorrowedAgentTurn(
           direction: "worker-to-orchestrator",
           fromAgentId: id,
           toAgentId: controllerAgentId,
+          reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, teamText),
           text: redactSensitiveText(teamText).slice(0, 1_000),
         },
       }));
@@ -4655,6 +4662,7 @@ async function runBorrowedAgentTurn(
         direction: "worker-to-orchestrator",
         fromAgentId: id,
         toAgentId: controllerAgentId,
+        reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, workerText),
         text: workerText.slice(0, 1_000),
         ...(observedTools.length > 0 ? { usedTools: [...observedTools] } : {}),
       },
@@ -4751,6 +4759,7 @@ async function runBorrowedAgentTurn(
         direction: "worker-to-orchestrator",
         fromAgentId: id,
         toAgentId: controllerAgentId,
+        reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, message),
         text: redactSensitiveText(message).slice(0, 1_000),
       },
     }));
@@ -5561,7 +5570,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       `^\\s*\\*{0,2}\\[${result.spec.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\*{0,2}\\s*[:：]?\\s*`,
       "u",
     );
-    const text = boundedTaskForceMessage(stripTaskForceControlEnvelopes(result.text.replace(selfTag, "")));
+    const fullReport = stripTaskForceControlEnvelopes(result.text.replace(selfTag, ""));
+    const text = boundedTaskForceMessage(fullReport);
     if (!text) return null;
     // runBorrowedAgentTurn already emitted this exact worker result. Reuse the
     // protocol identity so the outer room delivery enriches one message rather
@@ -5583,6 +5593,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         messageId,
         direction: "worker-to-orchestrator",
         fromAgentId,
+        reportAvailable: persistWorkerReport(p, fromAgentId, messageId, fullReport),
         toAgentId: orchestratorId,
         ...(replyToMessageId ? { replyToMessageId } : {}),
         text,

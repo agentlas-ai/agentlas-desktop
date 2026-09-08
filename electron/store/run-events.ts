@@ -1,3 +1,4 @@
+import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
 import { externalToolNames } from "../../shared/tool-activity";
 import { getDb } from "./db";
@@ -384,6 +385,17 @@ function safePayload(
     // OneSurface is already normalized and redacted by Main. Preserve its exact
     // JSON only after the closed durable contract passes again at the ledger
     // boundary; ordinary strings stay on the small diagnostic limit below.
+    if (key === "workerReportJson") {
+      const report = parseWorkerReport(value);
+      if (report && context?.kind === "worker_report_snapshot" && report.runId === context.runId && report.chatId === context.chatId) out[key] = JSON.stringify(report);
+      continue;
+    }
+    // This protocol identity is not a credential. Preserve its exact value
+    // across live/replay so an exact scoped report can be resolved.
+    if (key === "agentMessageId" && typeof value === "string" && /^task-force-handoff:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:result$/.test(value)) {
+      out[key] = value;
+      continue;
+    }
     if (key === "oneSurfaceJson" && typeof value === "string") {
       if (parseDurableOneSurfaceJson(value)) out[key] = value;
       continue;
@@ -464,6 +476,18 @@ export function scrubLegacyRunEventSecrets(): number {
           parsed.toolResultPreview = redactRunEventSensitiveText(parsed.toolResultPreview);
         }
         next = redactRunEventSensitiveText(JSON.stringify(parsed));
+        if (typeof parsed.agentMessageId === "string" && /^task-force-handoff:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:result$/.test(parsed.agentMessageId)) {
+          const scrubbed = JSON.parse(next) as Record<string, unknown>;
+          scrubbed.agentMessageId = parsed.agentMessageId;
+          next = JSON.stringify(scrubbed);
+        }
+        const report = parseWorkerReport(parsed.workerReportJson);
+        if (report) {
+          // Re-scrub report prose while retaining its exact typed lookup identity.
+          const scrubbed = JSON.parse(next) as Record<string, unknown>;
+          scrubbed.workerReportJson = JSON.stringify({ ...report, text: redactRunEventSensitiveText(report.text) });
+          next = JSON.stringify(scrubbed);
+        }
       } catch {
         // Keep the row parseable state unchanged while removing recognized values.
       }
@@ -485,6 +509,7 @@ const OPERATIONAL_SECRET_FIELD_RE =
 
 function redactPayloadValue(value: unknown, fieldName?: string): unknown {
   if (fieldName && OPERATIONAL_SECRET_FIELD_RE.test(fieldName)) return "[redacted-secret]";
+  if (fieldName === "agentMessageId" && typeof value === "string" && /^task-force-handoff:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:result$/.test(value)) return value;
   if (typeof value === "string") return redactOperationalSecrets(value);
   if (Array.isArray(value)) return value.map((nested) => redactPayloadValue(nested));
   if (!value || typeof value !== "object") return value;
@@ -497,6 +522,7 @@ function redactPayloadValue(value: unknown, fieldName?: string): unknown {
 function parsePayload(json: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(json);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) delete parsed.workerReportJson;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? redactPayloadValue(parsed) as Record<string, unknown>
       : {};
@@ -763,6 +789,7 @@ function runRowToUi(row: RunEventRow): RunEventUi {
   if (row.kind === ONE_DOMAIN_EVENT_KIND) delete payload.oneDomainEventJson;
   // Delete unconditionally so a malformed/legacy row cannot smuggle this
   // Main-only field through another event kind.
+  delete payload.workerReportJson;
   delete payload[QUESTION_CONTINUATION_REPLY_FIELD];
   enrichOneArtifactContentIdentity(payload);
   return {
@@ -1053,6 +1080,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     agentMessageTo: ev.agentMessage?.toAgentId,
     agentMessageReplyTo: ev.agentMessage?.replyToMessageId,
     agentMessageText: ev.agentMessage?.text,
+    agentMessageReportAvailable: ev.agentMessage?.reportAvailable === true,
     agentMessageTools: ev.agentMessage?.usedTools,
     handoffDepth: ev.agentMessage?.handoffDepth,
     handoffRoundtrip: ev.agentMessage?.handoffRoundtrip,
@@ -1760,4 +1788,35 @@ export function previousTurnObservation(chatId: string): PreviousTurnObservation
     ? Math.round((last - first) / 1000)
     : 0;
   return { toolCalls, seconds, hadTrouble, ranAsTeam, observedAt: rows[rows.length - 1].ts };
+}
+
+/** Private report body never enters generic ledger pages or model context. */
+export function recordWorkerReport(scope: WorkerReportScope, text: string): boolean {
+  if (!isWorkerReportScope(scope) || typeof text !== "string") return false;
+  const redacted = redactRunEventSensitiveText(text);
+  let end = Math.min(redacted.length, WORKER_REPORT_MAX_BYTES);
+  while (end > 0 && Buffer.byteLength(redacted.slice(0, end), "utf8") > WORKER_REPORT_MAX_BYTES) {
+    end -= Math.max(1, Math.ceil((Buffer.byteLength(redacted.slice(0, end), "utf8") - WORKER_REPORT_MAX_BYTES) / 4));
+  }
+  if (end > 0 && /[\uD800-\uDBFF]/.test(redacted[end - 1])) end -= 1;
+  const report: WorkerReport = { ...scope, text: redacted.slice(0, end), truncated: end < redacted.length };
+  try {
+    recordRunEvent({ runId: scope.runId, chatId: scope.chatId, agentId: scope.agentId,
+      kind: "worker_report_snapshot", payload: { workerReportJson: JSON.stringify(report) } });
+    return true;
+  } catch { return false; }
+}
+
+export function getWorkerReport(scope: WorkerReportScope): WorkerReport | null {
+  if (!isWorkerReportScope(scope)) return null;
+  const row = getDb().prepare(`SELECT payload_json FROM run_events
+    WHERE run_id = ? AND chat_id = ? AND agent_id = ? AND kind = 'worker_report_snapshot'
+    AND json_extract(json_extract(payload_json, '$.workerReportJson'), '$.messageId') = ?
+    ORDER BY seq DESC LIMIT 1`).get(scope.runId, scope.chatId, scope.agentId, scope.messageId) as { payload_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const report = parseWorkerReport(JSON.parse(row.payload_json).workerReportJson);
+    return report && report.runId === scope.runId && report.chatId === scope.chatId
+      && report.agentId === scope.agentId && report.messageId === scope.messageId ? report : null;
+  } catch { return null; }
 }

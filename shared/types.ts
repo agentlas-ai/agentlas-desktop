@@ -4577,7 +4577,9 @@ export interface AgentMessageEvent {
    * prose or exposing execution identifiers in the room.
    */
   replyToMessageId?: string;
-  /** Bounded, user-visible brief/result excerpt. The full worker result stays internal. */
+  /** Exact Main-owned report is loaded only when its worker panel opens. */
+  reportAvailable?: boolean;
+  /** Bounded, user-visible brief/result excerpt. */
   text: string;
   /** Host-enforced typed-handoff facts. Depth is 1..3; a pair may round-trip at most 4 times. */
   handoffDepth?: number;
@@ -8097,6 +8099,7 @@ export interface AgentlasIpc {
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */
     latestReceipt: (chatId: string) => Promise<InvocationRunReceipt | null>;
+    workerReport: (scope: import("./worker-report").WorkerReportScope) => Promise<import("./worker-report").WorkerReport | null>;
     /** Exact Main-projected surface for one canonical Task/run binding. */
     latestOneSurface: (input: {
       runId: string;

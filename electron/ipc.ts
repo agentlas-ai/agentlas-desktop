@@ -360,6 +360,7 @@ import {
 } from "./experience/cloud";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
 import {
+  getWorkerReport,
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
   hasInvocationRunReceipt,
@@ -6446,6 +6447,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
   ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
+  ipcMain.handle("invoke:workerReport", (_event, scope) => getWorkerReport(scope));
   ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
   ipcMain.handle("invoke:latestOneSurface", (_event, input: unknown) => {
     if (
