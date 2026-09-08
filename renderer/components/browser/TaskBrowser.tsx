@@ -1,9 +1,11 @@
 "use client";
 
 import { createPortal } from "react-dom";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IconArrowLeft, IconChevronRight, IconClose, IconMoreHorizontal, IconPlus, IconRefresh } from "@/components/Icon";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
+import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type { WorkLiveViewStatus } from "@/lib/types";
 import styles from "./TaskBrowser.module.css";
 
@@ -28,13 +30,12 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [importing, setImporting] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
-  const importInFlight = useRef(false);
   const createInFlight = useRef(false);
   const current = tabs.find((tab) => tab.id === selectedId) ?? tabs[0];
   const tabsRef = useRef(tabs);
@@ -51,7 +52,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
   useEffect(() => {
     if (!menuOpen) return;
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    menuRef.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
     const dismiss = (event: PointerEvent) => {
       if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !menuButton.current?.contains(event.target)) setMenuOpen(false);
     };
@@ -62,30 +63,6 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
   }, [menuOpen]);
-
-  const importCookies = async () => {
-    if (importInFlight.current) return;
-    importInFlight.current = true;
-    setImporting(true);
-    setMenuOpen(false);
-    try {
-      const result = await window.agentlas.workLiveView.importBrowserCookies();
-      if (!mounted.current) return;
-      if (result.ok || result.code === "partial") {
-        setNotice(ko ? `쿠키 ${result.imported}개를 가져왔습니다.${result.code === "partial" ? " 일부 쿠키는 가져오지 못했습니다." : ""} 페이지를 새로고침해 로그인 상태를 확인하세요.`
-          : `Imported ${result.imported} cookies.${result.code === "partial" ? " Some cookies could not be imported." : ""} Reload the page to check your login.`);
-      } else if (result.code === "source-empty" || result.code === "no-transferable-cookies") {
-        setNotice(ko ? "기존 Agentlas Browser에 가져올 수 있는 쿠키가 없습니다." : "No transferable cookies were found in the existing Agentlas Browser.");
-      } else {
-        setNotice(ko ? "쿠키를 가져오지 못했습니다. 기존 Agentlas Browser 연결을 확인한 뒤 다시 시도하세요." : "Could not import cookies. Check the existing Agentlas Browser connection and try again.");
-      }
-    } catch {
-      if (mounted.current) setNotice(ko ? "쿠키 가져오기에 실패했습니다. 다시 시도해 주세요." : "Cookie import failed. Please try again.");
-    } finally {
-      importInFlight.current = false;
-      if (mounted.current) setImporting(false);
-    }
-  };
 
   const acceptStatus = useCallback((status: WorkLiveViewStatus) => {
     if (status.taskScopeId !== taskScopeId) return;
@@ -117,6 +94,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       if (disposed) return;
       if (!result.ok) { setNotice(result.reason || (ko ? "이 작업의 브라우저에 연결하지 못했습니다." : "Could not connect this task browser.")); return; }
       setConnected(true);
+      setLoginNotice(browserLoginImportNotice([...result.tabs].reverse().find((tab) => tab.nativeSession)?.nativeSession, ko));
       for (const tab of result.tabs) if (tab.taskScopeId === taskScopeId && !closed.has(tab.viewId)) knownTabs.current.add(tab.viewId);
       setTabs((current) => {
         const merged = new Map(result.tabs.filter((tab) => tab.taskScopeId === taskScopeId && !closed.has(tab.viewId))
@@ -129,7 +107,10 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
         setCreating(true);
         try {
           const created = await api.createTab({ taskScopeId, url: preferredUrl });
-          if (!disposed && created.tab) acceptStatus(created.tab);
+          if (!disposed && created.tab) {
+            acceptStatus(created.tab);
+            setLoginNotice(browserLoginImportNotice(created.tab.nativeSession, ko));
+          }
           else if (!disposed && !created.ok) setNotice(created.reason ?? "Browser unavailable");
         } finally {
           createInFlight.current = false;
@@ -155,7 +136,11 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     try {
       const result = await window.agentlas.workLiveView.createTab({ taskScopeId, url });
       if (!mounted.current) return;
-      if (result.tab) { acceptStatus(result.tab); setSelectedId(result.tab.viewId); }
+      if (result.tab) {
+        acceptStatus(result.tab);
+        setSelectedId(result.tab.viewId);
+        setLoginNotice(browserLoginImportNotice(result.tab.nativeSession, ko));
+      }
       else if (!result.ok) setNotice(result.reason ?? (ko ? "탭을 열지 못했습니다." : "Could not open a tab."));
     } catch { if (mounted.current) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
     finally { createInFlight.current = false; if (mounted.current) setCreating(false); }
@@ -237,10 +222,10 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       <button ref={menuButton} type="button" aria-label={ko ? "브라우저 메뉴" : "Browser menu"} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={16}/></button>
     </form>
     {menuOpen && <div ref={menuRef} className={styles.menu} role="menu" aria-label={ko ? "브라우저 메뉴" : "Browser menu"}>
-      <button type="button" role="menuitem" disabled={importing} onClick={() => void importCookies()}>{ko ? "Agentlas Browser 쿠키 가져오기" : "Import Agentlas Browser cookies"}</button>
-      <p>{ko ? "기존 Agentlas Browser의 쿠키를 이 브라우저에 복사합니다. 다른 로그인 저장 정보는 포함하지 않습니다." : "Copy cookies from the existing Agentlas Browser. Other stored login data is not included."}</p>
+      <Link href="/browser" role="menuitem" onClick={() => setMenuOpen(false)}>{ko ? "로그인 연결 관리" : "Manage browser logins"}</Link>
+      <p>{ko ? "커넥트 → 브라우저에서 가져온 로그인을 함께 사용합니다." : "Uses logins imported in Connect → Browser."}</p>
     </div>}
-    {importing && <p className={styles.notice} role="status">{ko ? "Agentlas Browser 쿠키를 가져오는 중…" : "Importing Agentlas Browser cookies…"}</p>}
+    {loginNotice && <p className={styles.notice} role="status">{ko ? "이 브라우저를 열 때 확인한 로그인 연결: " : "Login transfer checked when opening this browser: "}{loginNotice}</p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     <div className={styles.pages}>
       {tabs.filter((tab) => tab.initialUrl).map((tab) => <div key={tab.id} className={styles.page} hidden={tab.id !== current?.id}>

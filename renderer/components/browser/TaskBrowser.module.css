@@ -26,7 +26,10 @@
 .tabs[data-inline=true] { min-height:28px; padding:0; overflow:visible; }
 .browser { position:relative; }
 .menu { position:absolute; z-index:20; top:40px; right:8px; width:min(300px,calc(100% - 16px)); padding:5px; border:1px solid var(--line,#ddd); border-radius:10px; background:var(--paper,#fff); box-shadow:0 6px 20px #00000012; }
-.menu button { display:block; width:100%; padding:9px; text-align:left; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; font-size:12px; cursor:pointer; }
+.menu [role=menuitem] { display:block; width:100%; padding:9px; text-align:left; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; font-size:12px; cursor:pointer; }
+.menu a { text-decoration:none; box-sizing:border-box; }
+.menu a:hover { background:color-mix(in srgb,var(--ink,#202124) 7%,transparent); }
+.menu a:focus-visible { outline:2px solid var(--accent,#777); outline-offset:1px; }
 .menu p { margin:4px 9px 7px; color:var(--muted,#888); font-size:11px; line-height:1.5; }
 
 .browser[data-inline-header=false] .menu { top:78px; }

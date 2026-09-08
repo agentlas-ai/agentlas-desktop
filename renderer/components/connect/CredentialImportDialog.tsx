@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
@@ -39,6 +40,7 @@ export function CredentialImportDialog({
   const [relaxed, setRelaxed] = useState(false);
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [loginRequired, setLoginRequired] = useState<string[]>([]);
 
   /*
@@ -108,7 +110,8 @@ export function CredentialImportDialog({
     );
   }, [domains, query]);
 
-  const selectable = useMemo(() => visible.filter((d) => !d.alreadyLinked), [visible]);
+  // Existing connections can be selected again to recover an incomplete transfer.
+  const selectable = visible;
   const allVisibleChecked = selectable.length > 0 && selectable.every((d) => checked.has(d.domain));
 
   const toggle = (domain: string) => {
@@ -125,38 +128,51 @@ export function CredentialImportDialog({
     setImportingNow(true);
     setError(null);
     setLoginRequired([]);
-    const res = await api.browser.importCredentials(profileId, [...checked]);
-    setImportingNow(false);
-    if (!res.ok) {
-      setError(res.error ?? (ko ? "가져오지 못했습니다." : "Import failed."));
-      return;
+    setSessionNotice(null);
+    try {
+      const res = await api.browser.importCredentials(profileId, [...checked]);
+      if (!res.ok) {
+        setError(res.error ?? (ko ? "가져오지 못했습니다." : "Import failed."));
+        return;
+      }
+      // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
+      const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
+      setSessionNotice(nativeNotice);
+      const linked = res.linkedSites.length;
+      const skipped = res.skipped.length;
+      const protectedSites = res.requiresLoginSites ?? [];
+      if (protectedSites.length > 0) {
+        // Windows Chrome can bind modern cookies to Chrome's own executable.
+        // That is a normal protected-session path, not an import error: keep the
+        // dialog open and transition the selected site to the dedicated login UI.
+        setChecked(new Set());
+        setLoginRequired(protectedSites);
+        void loadDomains(profileId);
+        return;
+      }
+      const msg = ko
+        ? `${linked}개 연동됨${skipped > 0 ? ` · ${skipped}개 건너뜀` : ""}`
+        : `Linked ${linked}${skipped > 0 ? ` · skipped ${skipped}` : ""}`;
+      if (skipped > 0) {
+        setError(
+          (ko ? "건너뛴 항목: " : "Skipped: ") +
+            res.skipped.map((s) => `${s.domain} (${s.reason})`).join(", "),
+        );
+        // 사유를 읽을 수 있게 창은 열어 두고, 목록만 새로 고친다.
+        void loadDomains(profileId);
+        return;
+      }
+      if (nativeNotice) {
+        setChecked(new Set());
+        void loadDomains(profileId);
+        return;
+      }
+      onDone(msg);
+    } catch {
+      setError(ko ? "로그인을 가져오지 못했습니다. 브라우저 연결을 확인하고 다시 시도하세요." : "Could not import logins. Check the browser connection and try again.");
+    } finally {
+      setImportingNow(false);
     }
-    // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
-    const linked = res.linkedSites.length;
-    const skipped = res.skipped.length;
-    const protectedSites = res.requiresLoginSites ?? [];
-    if (protectedSites.length > 0) {
-      // Windows Chrome can bind modern cookies to Chrome's own executable.
-      // That is a normal protected-session path, not an import error: keep the
-      // dialog open and transition the selected site to the dedicated login UI.
-      setChecked(new Set());
-      setLoginRequired(protectedSites);
-      void loadDomains(profileId);
-      return;
-    }
-    const msg = ko
-      ? `${linked}개 연동됨${skipped > 0 ? ` · ${skipped}개 건너뜀` : ""}`
-      : `Linked ${linked}${skipped > 0 ? ` · skipped ${skipped}` : ""}`;
-    if (skipped > 0) {
-      setError(
-        (ko ? "건너뛴 항목: " : "Skipped: ") +
-          res.skipped.map((s) => `${s.domain} (${s.reason})`).join(", "),
-      );
-      // 사유를 읽을 수 있게 창은 열어 두고, 목록만 새로 고친다.
-      void loadDomains(profileId);
-      return;
-    }
-    onDone(msg);
   };
 
   return (
@@ -227,11 +243,11 @@ export function CredentialImportDialog({
           )}
           {!scanning &&
             visible.map((d) => (
-              <label key={d.domain} className={d.alreadyLinked ? "cid-row linked" : "cid-row"}>
+              <label key={d.domain} className="cid-row">
                 <input
                   type="checkbox"
                   checked={checked.has(d.domain)}
-                  disabled={d.alreadyLinked}
+                  disabled={importingNow}
                   onChange={() => toggle(d.domain)}
                 />
                 {/*
@@ -250,6 +266,7 @@ export function CredentialImportDialog({
         </div>
 
         {error && <div className="cid-error">{error}</div>}
+        {sessionNotice && <div className="cid-error" role="status">{sessionNotice}</div>}
 
         {loginRequired.length > 0 && (
           <div className="cid-login-required">
@@ -408,10 +425,6 @@ export function CredentialImportDialog({
         }
         .cid-row:last-child {
           border-bottom: 0;
-        }
-        .cid-row.linked {
-          opacity: 0.5;
-          cursor: default;
         }
         .cid-title {
           overflow: hidden;

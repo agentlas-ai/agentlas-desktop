@@ -1,5 +1,6 @@
 "use client";
 
+import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
@@ -376,6 +377,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         setSiteError(res.error ?? (ko ? "가져오지 못했어요." : "Import failed."));
         return;
       }
+      const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
       const linked = res.linkedSites.length;
       const skipped = res.skipped.length;
       const loginRequired = res.requiresLoginSites ?? [];
@@ -383,18 +385,24 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         const first = loginRequired[0];
         const opened = await api.browser.openLogin(first);
         setSitePicked(new Set());
-        setSiteNote(opened.ok
+        setSiteNote([opened.ok
           ? (ko
               ? `${first}은 Chrome이 보호한 세션이라 깨진 복사본을 만들지 않고 Agentlas 전용 로그인 창을 열었어요. 여기서 한 번 로그인하면 이후 자동화가 계속 재사용합니다.${loginRequired.length > 1 ? ` 나머지 ${loginRequired.length - 1}개는 Connect 목록에 추가했어요.` : ""}`
               : `${first} is protected by Chrome, so Agentlas opened its dedicated sign-in instead of making a broken copy. Sign in once and later automations will reuse it.${loginRequired.length > 1 ? ` The other ${loginRequired.length - 1} were added to Connect.` : ""}`)
-          : (opened.error ?? (ko ? "전용 로그인 창을 열지 못했어요." : "Could not open the dedicated sign-in window.")));
+          : (opened.error ?? (ko ? "전용 로그인 창을 열지 못했어요." : "Could not open the dedicated sign-in window.")), nativeNotice].filter(Boolean).join(" "));
         await loadSites(siteProfileId);
         return;
       }
       if (skipped > 0) {
-        setSiteNote(ko
+        setSiteNote([ko
           ? `${linked}개를 가져왔어요. 가져오지 못한 곳: ${res.skipped.map((row) => `${row.domain} (${row.reason})`).join(", ")}`
-          : `Brought over ${linked}. Could not bring: ${res.skipped.map((row) => `${row.domain} (${row.reason})`).join(", ")}`);
+          : `Brought over ${linked}. Could not bring: ${res.skipped.map((row) => `${row.domain} (${row.reason})`).join(", ")}`, nativeNotice].filter(Boolean).join(" "));
+        await loadSites(siteProfileId);
+        return;
+      }
+      if (nativeNotice) {
+        setSitePicked(new Set());
+        setSiteNote(nativeNotice);
         await loadSites(siteProfileId);
         return;
       }
