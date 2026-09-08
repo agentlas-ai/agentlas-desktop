@@ -267,6 +267,21 @@ function mergeHandoffs(
     if (id && id !== sourceId) targets.add(id);
   }
   const message = event.agentMessage;
+  const messageId = message?.messageId.trim();
+  if (messageId) {
+    const existingMessage = current
+      .flatMap((handoff) => handoff.messages)
+      .find((candidate) => candidate.id === messageId);
+    if (existingMessage && (
+      existingMessage.fromAgentId !== message?.fromAgentId.trim()
+      || existingMessage.toAgentId !== message?.toAgentId.trim()
+    )) {
+      // Message IDs are protocol identities. A replay that reuses one for a
+      // different edge is contradictory evidence; keep the first typed owner
+      // instead of duplicating it or guessing equivalence from message text.
+      return current;
+    }
+  }
   // `agentId` is the orchestration node used by delegateTo; runtimeAgentId is
   // the installed memory/accounting owner. Topology must prefer the former.
   const observedAgentId = nonEmptyAgentId(event.agentId) ?? nonEmptyAgentId(event.runtimeAgentId);
@@ -320,8 +335,16 @@ function mergeHandoffs(
           } satisfies OneActivityHandoffMessage
         : undefined;
     const messages = existing?.messages ? [...existing.messages] : [];
-    if (matchingMessage && !messages.some((candidate) => candidate.id === matchingMessage.id)) {
-      messages.push(matchingMessage);
+    if (matchingMessage) {
+      const messageIndex = messages.findIndex((candidate) => candidate.id === matchingMessage.id);
+      if (messageIndex >= 0) {
+        // A lifecycle event and the room-delivery event may carry the same
+        // protocol message at different times. Merge typed enrichment such as
+        // replyTo/usedTools while retaining one visible message identity.
+        messages[messageIndex] = { ...messages[messageIndex], ...matchingMessage };
+      } else {
+        messages.push(matchingMessage);
+      }
     }
     const hasDeliveredWorkerMessage = messages.some((candidate) => candidate.direction === "worker-to-orchestrator");
     const workerAgentId = matchingMessage?.direction === "worker-to-orchestrator" ? sourceId

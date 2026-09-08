@@ -3453,6 +3453,7 @@ async function runBorrowedAgentTurn(
   peerResults: BorrowedAgentResult[] = [],
   recoveryRuntime?: RuntimeStatus,
   preApprovalStage = false,
+  initialDelegationMessageId?: string,
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
   const installedAgent =
@@ -3572,7 +3573,10 @@ async function runBorrowedAgentTurn(
   }
   const active = workloadResolution.runtime;
   const observedRuntimeSelection = childRuntimeSelection(active, spec);
-  const controllerAgentId = p.chat.agentId ?? `controller:${p.chat.id}`;
+  // The room topology uses one stable controller node. The installed agent ID
+  // remains runtimeAgentId/accounting metadata; using it as a second topology
+  // identity creates a duplicate edge for the same handoff.
+  const controllerAgentId = `${p.chat.id}:borrow-orchestrator`;
   if (agentRuntimeChoice?.fallbackStage) {
     p.sink(tag({
       kind: "tool-use",
@@ -3643,11 +3647,15 @@ async function runBorrowedAgentTurn(
     runtimeSelection: observedRuntimeSelection,
     agentLifecycle: { source: "cli-process", state: "running", reason: "turn-started", runtime: active.kind },
     agentMessage: {
-      messageId: `${handoffId}:task`,
+      // The outer room event already announced the initial delegation. Reuse
+      // its typed identity when this lifecycle event confirms the same handoff;
+      // retries without an outer announcement receive a fresh attempt ID.
+      messageId: initialDelegationMessageId ?? `${handoffId}:task`,
       direction: "orchestrator-to-worker",
       fromAgentId: controllerAgentId,
       toAgentId: id,
-      text: redactSensitiveText(packet.brief).slice(0, 1_000),
+      text: boundedTaskForceMessage(stripTaskForceControlEnvelopes(packet.brief || packet.expectedOutput))
+        || redactSensitiveText(packet.brief).slice(0, 1_000),
       handoffPermission: workerPermission,
       permissionInherited: false,
     },
@@ -5411,6 +5419,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
+  const initialDelegationMessageByPacket = new WeakMap<BorrowedInputPacket, string>();
   const emitDelegationMessage = (packet: BorrowedInputPacket): string | null => {
     const targetId = agentNodeId(packet.agent);
     const text = boundedTaskForceMessage(stripTaskForceControlEnvelopes(packet.brief || packet.expectedOutput));
@@ -5446,6 +5455,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         permissionInherited: false,
       },
     });
+    initialDelegationMessageByPacket.set(packet, messageId);
     return messageId;
   };
   const emitWorkerResultMessage = (
@@ -5462,7 +5472,10 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     );
     const text = boundedTaskForceMessage(stripTaskForceControlEnvelopes(result.text.replace(selfTag, "")));
     if (!text) return null;
-    const messageId = randomUUID();
+    // runBorrowedAgentTurn already emitted this exact worker result. Reuse the
+    // protocol identity so the outer room delivery enriches one message rather
+    // than creating a second copy with a different controller node.
+    const messageId = `${result.handoffId}:result`;
     p.sink({
       kind: "tool-use",
       done: true,
@@ -5538,6 +5551,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     packet: (typeof plan.packets)[number],
     peerResults: BorrowedAgentResult[] = [],
     recoveryRuntime?: RuntimeStatus,
+    initialDelegationMessageId?: string,
   ) => {
     const spec = specBySlug.get(packet.agent) ?? specs[0];
     const slotId = spec.routeLabel?.startsWith("workforce:")
@@ -5554,13 +5568,16 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       peerResults,
       recoveryRuntime,
       approvalPartition.gateActive,
+      initialDelegationMessageId,
     );
   };
   const runPacketWithRetry = async (
     packet: (typeof plan.packets)[number],
     peerResults: BorrowedAgentResult[] = [],
   ) => {
-    let result = await runPacket(packet, peerResults);
+    const initialDelegationMessageId = initialDelegationMessageByPacket.get(packet);
+    initialDelegationMessageByPacket.delete(packet);
+    let result = await runPacket(packet, peerResults, undefined, initialDelegationMessageId);
     if (result.ok || p.signal?.aborted) return result;
     // A typed provider refusal is never an output-format problem. Walk the
     // remaining worker pool in DB priority order, once per configured member,
