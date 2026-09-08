@@ -1919,14 +1919,23 @@ export function requireBorrowedAgentSpecs(
   return specs;
 }
 
-export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
+/** Accept one complete JSON document, or the existing Markdown-fenced plan.
+ * Never search prose for an object or salvage a fragment from malformed JSON. */
+function localPlannerJson(text: string): unknown {
+  const whole = text.trim();
+  try { return JSON.parse(whole); } catch {
+    if (whole.startsWith("{") || whole.startsWith("[")) return null;
+  }
   const headingIndex = text.lastIndexOf(PACKET_HEADING);
   const scope = headingIndex >= 0 ? text.slice(headingIndex + PACKET_HEADING.length) : text;
   const fence = scope.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const rawJson = fence?.[1]?.trim();
-  if (!rawJson) return [];
+  if (!fence?.[1]?.trim()) return null;
+  try { return JSON.parse(fence[1].trim()); } catch { return null; }
+}
+
+export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
   try {
-    const parsed = JSON.parse(rawJson);
+    const parsed = localPlannerJson(text);
     const rawPackets = Array.isArray(parsed)
       ? parsed
       : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).packets)
@@ -1980,11 +1989,8 @@ export function parseBorrowedWorkloadPlan(text: string): {
   synthesisAllocation: WorkloadAllocation | null;
 } {
   const packets = parseBorrowedInputPackets(text);
-  const headingIndex = text.lastIndexOf(PACKET_HEADING);
-  const scope = headingIndex >= 0 ? text.slice(headingIndex + PACKET_HEADING.length) : text;
-  const fence = scope.match(/```(?:json)?\s*([\s\S]*?)```/);
   try {
-    const parsed = JSON.parse(fence?.[1]?.trim() ?? "null");
+    const parsed = localPlannerJson(text);
     const obj = asObject(parsed);
     return {
       packets,
@@ -2415,6 +2421,21 @@ export function closeTaskForceDeliveryDependencies(
 
 export type LocalPlannerValidationCode = "unknown_agent" | "duplicate_team" | "duplicate_step"
   | "invalid_dependency" | "dependency_cycle" | "missing_agents" | "no_packets";
+
+/** A schema retry may not erase the first valid partial assignment merely
+ * because the second response contains no usable packets. Missing roles keep
+ * their existing fallback permission ceiling and the plan remains explicitly partial. */
+export function selectLocalPlannerRepair(input: {
+  firstPacketCount: number;
+  firstValidationCodes: readonly LocalPlannerValidationCode[];
+  repairedPacketCount: number;
+}): { selectedAttempt: 1 | 2; reason: "preserve_partial_after_empty_repair" | "use_repair" } {
+  const preserve = input.firstPacketCount > 0 && input.repairedPacketCount === 0
+    && input.firstValidationCodes.length === 1 && input.firstValidationCodes[0] === "missing_agents";
+  return preserve
+    ? { selectedAttempt: 1, reason: "preserve_partial_after_empty_repair" }
+    : { selectedAttempt: 2, reason: "use_repair" };
+}
 
 export function normalizePacketsForRoster(
   packets: BorrowedInputPacket[],
@@ -4798,6 +4819,7 @@ async function runPlanner(
       });
   const plannerInvocationBaseId = taskForceSessionId(p, "borrow-orchestrator");
   let plannerRuntime = p.active;
+  let selectedPlanRuntime: RuntimeStatus | undefined;
   let plannerPicked = p.picked;
   p.sink({
     kind: "thinking",
@@ -5153,6 +5175,7 @@ async function runPlanner(
     }
   } else {
     result = await invokePlannerWithFallback(plannerInvocationId, baseSystemPrompt, "", 1);
+    selectedPlanRuntime = plannerRuntime;
     plannerText = restrictedTaskForceText(p, result.text, {
       nodeId: orchestratorId,
       phase: "planner",
@@ -5185,6 +5208,7 @@ async function runPlanner(
           details: normalized.validationCodes.join(", "),
         },
       });
+      const firstPlannerInvocationId = plannerInvocationId;
       plannerInvocationId = `${plannerInvocationBaseId}:room-plan-repair:${randomUUID()}`;
       const validationError = normalized.validationErrors.join("; ") || "the plan did not cover the selected room";
       const repairSystemPrompt = [
@@ -5208,17 +5232,37 @@ async function runPlanner(
         agentId: p.orchestratorAgent.id,
       }, "read");
       const repairedPlan = parseBorrowedWorkloadPlan(repairedText);
-      normalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale);
+      const repairedNormalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale);
+      const selection = selectLocalPlannerRepair({ firstPacketCount: parsedPlan.packets.length,
+        firstValidationCodes: normalized.validationCodes, repairedPacketCount: repairedPlan.packets.length });
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
         nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_planner_schema_attempt",
-        payload: { ...repairReceipt, attempt: 2, status: normalized.parseSuccess ? "accepted" : "rejected",
-          validationCodes: normalized.validationCodes, sameModelRetry: true,
+        payload: { ...repairReceipt, attempt: 2, status: repairedNormalized.parseSuccess ? "accepted" : "rejected",
+          validationCodes: repairedNormalized.validationCodes, sameModelRetry: true,
           runtimeKind: plannerRuntime.kind, runtimeBackend: plannerRuntime.backend,
           runtimeSource: plannerRuntime.source, runtimeModel: plannerRuntime.model },
       });
-      plannerText = repairedText;
-      synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
-      result = repairedResult;
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_planner_repair_selection",
+        payload: { ...selection,
+          firstPacketCount: parsedPlan.packets.length, repairedPacketCount: repairedPlan.packets.length,
+          firstValidationCodes: normalized.validationCodes, repairedValidationCodes: repairedNormalized.validationCodes,
+          firstInvocationId: firstPlannerInvocationId, repairedInvocationId: plannerInvocationId,
+          selectedRuntime: selection.selectedAttempt === 1
+            ? { kind: selectedPlanRuntime.kind, backend: selectedPlanRuntime.backend,
+                source: selectedPlanRuntime.source, model: selectedPlanRuntime.model }
+            : { kind: plannerRuntime.kind, backend: plannerRuntime.backend,
+                source: plannerRuntime.source, model: plannerRuntime.model } },
+      });
+      if (selection.selectedAttempt === 2) {
+        selectedPlanRuntime = plannerRuntime;
+        normalized = repairedNormalized;
+        plannerText = repairedText;
+        synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
+        result = repairedResult;
+      } else {
+        plannerInvocationId = firstPlannerInvocationId;
+      }
     }
     packets = normalized.packets;
     parseSuccess = normalized.parseSuccess;
@@ -5229,7 +5273,7 @@ async function runPlanner(
     const blockedReceipt = {
       schemaVersion: "agentlas.workforce-planner-receipt.v1",
       invocationId: plannerInvocationId,
-      modelId: modelLabel(plannerRuntime),
+      modelId: modelLabel(selectedPlanRuntime ?? plannerRuntime),
       parseSuccess,
       fallbackUsed,
       status: "blocked",
