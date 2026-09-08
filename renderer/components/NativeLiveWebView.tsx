@@ -81,7 +81,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
         height: rect.height,
       };
     };
-    const overlaySelector = '[role="dialog"], [aria-modal="true"], [role="menu"], dialog[open]';
+    const overlaySelector = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"], dialog[open]';
     const geometricallyVisible = () => {
       const rect = stage.getBoundingClientRect();
       const covered = Array.from(document.querySelectorAll<HTMLElement>(overlaySelector)).some((overlay) => {
@@ -134,11 +134,11 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
     };
     syncRef.current = syncBounds;
     const overlayChanged = (node: Node) => node instanceof Element
-      && (node.matches(overlaySelector) || Boolean(node.querySelector(overlaySelector)));
+      && (Boolean(node.closest(overlaySelector)) || Boolean(node.querySelector(overlaySelector)));
     const overlays = new MutationObserver((records) => {
       if (!visibilityRef.current) return;
-      if (records.some((record) => record.type === "attributes" ? overlayChanged(record.target)
-        : [...record.addedNodes, ...record.removedNodes].some(overlayChanged))) {
+      if (records.some((record) => overlayChanged(record.target)
+        || [...record.addedNodes, ...record.removedNodes].some(overlayChanged))) {
         if (!geometricallyVisible()) hideImmediately();
         else syncBounds();
       }
