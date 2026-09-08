@@ -1823,25 +1823,11 @@ export const runCodex: Runner = async (
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
       : [];
-  // Exact Agentlas Browser turns must not inherit provider-global MCP/plugin
-  // configuration (for example a user-level Playwright server that opens its
-  // own Chrome profile). Codex supports this on the one-shot exec surface; its
-  // app-server has no equivalent flag, so isolated turns intentionally bypass
-  // residency and use the exact Main-authored `-c mcp_servers.*` overrides.
-  const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
-  // Browser-only turns must not expose Codex's shell/code/native browser tools.
-  // The exact Main-authored MCP overrides below remain available, so the model
-  // can operate the shared Agentlas session without a permission prompt or a
-  // second Playwright/Chrome process.
-  const browserOnlyConfigArgs = runReq.browserOnly || runReq.judgmentOnly
-    ? [
-        "-c", "features.shell_tool=false",
-        "-c", "features.code_mode=false",
-        "-c", "features.browser_use=false",
-        "-c", "features.computer_use=false",
-        "-c", "features.in_app_browser=false",
-      ]
-    : [];
+  // Preserve Codex's own settings, plugins, and native tools while adding the
+  // Agentlas MCP bridge. The CLI/runtime owns its native tool policy; browser
+  // mode is an additional capability, not a reason to turn those tools off.
+  const isolatedConfigArgs: string[] = [];
+  const browserOnlyConfigArgs: string[] = [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).

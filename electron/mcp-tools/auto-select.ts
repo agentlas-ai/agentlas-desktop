@@ -448,6 +448,7 @@ export async function autoSelectMcpTools(input: {
   const activeGoalScope = input.resolveActiveGoalScope?.() ?? null;
   const runtimeCapabilities: McpRuntimeCapabilities = {
     nativeBrowser: input.runtimeCapabilities?.nativeBrowser ?? "unknown",
+    nativeWebSearch: input.runtimeCapabilities?.nativeWebSearch ?? "unknown",
   };
   const registryFingerprint = (servers: InstalledMcpServer[]): string => createHash("sha256").update(servers
     .map((server) => JSON.stringify([server.id, server.catalogId, server.enabled, server.configurationValid !== false,
@@ -579,6 +580,9 @@ export async function autoSelectMcpTools(input: {
   // need a credential, so this can never produce a key prompt on its own.
   for (const server of initialInstalledServers) {
     if (!server.catalogId || !server.enabled) continue;
+    if (server.catalogId === "brave-search"
+      && runtimeCapabilities.nativeWebSearch === "available"
+      && !(input.requiredToolCatalogIds ?? []).includes("brave-search")) continue;
     // `local-only` is an execution boundary, not merely a catalog filter. The
     // Network resolver starts the federated Workforce runtime and was being
     // re-attached as an installed convenience pin even after Hub routing had
@@ -601,6 +605,13 @@ export async function autoSelectMcpTools(input: {
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
+    // Codex/Claude/Antigravity already expose a native web-search tool. Keep
+    // Brave available only when the user explicitly pins that exact MCP; an
+    // optional catalog judge must never turn an ordinary research prompt into
+    // a blocking API-key sheet when the active runtime can search itself.
+    if (entry.id === "brave-search"
+      && runtimeCapabilities.nativeWebSearch === "available"
+      && !(input.requiredToolCatalogIds ?? []).includes("brave-search")) return false;
     if (entry.id === "hephaestus-network") return hubAllowed;
     return true;
   }).map((entry) => ({

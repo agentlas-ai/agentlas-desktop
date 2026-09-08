@@ -860,13 +860,12 @@ const runClaudeTurn = async (
   const mcpArgs = agentAppMcpConfigArg && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
     ? ["--mcp-config", agentAppMcpConfigArg]
     : [];
-  // Exact Agentlas Browser intent is an authority binding, not a preference.
-  // Claude's user-level plugins can otherwise reintroduce generic Playwright
-  // beside Main's approval-gated CDP host and silently execute browser_evaluate
-  // without the native sheet. Isolate this turn to the exact Main config.
-  const isolatedMcpArgs = runReq.isolatedMcpConfig || req.permission === "write"
-    ? ["--setting-sources", "", "--strict-mcp-config"]
-    : [];
+  // Keep the user's Claude Code tools and plugins available when Agentlas is
+  // wrapping the CLI. The native runtime owns its own tool policy; Agentlas
+  // must only add its MCP bridge and approval broker. `isolatedMcpConfig` is
+  // retained as metadata for audit/replay, but must not silently erase the
+  // runtime's settings or plugins.
+  const isolatedMcpArgs: string[] = [];
   /*
    * 헤드리스에서 권한 프롬프트로 막히지 않도록 승인된 MCP 툴을 미리 허용한다.
    * ★읽기 실행 포함 — 오너 결정 2026-08-18. 읽기의 경계는 위 READ_ONLY_DENIED_TOOLS
@@ -918,16 +917,10 @@ const runClaudeTurn = async (
         "",
       ]
     : [];
-  const browserOnlyArgs = runReq.browserOnly
-    ? [
-        "--setting-sources", "",
-        "--disable-slash-commands",
-        "--no-chrome",
-        "--no-session-persistence",
-        "--strict-mcp-config",
-        "--tools", "",
-      ]
-    : [];
+  // Browser turns still expose Agentlas' approval-gated MCP bridge, while
+  // Claude Code's own browser, shell, slash commands, and plugins remain
+  // usable. Only the explicit untrustedNoTools path below disables tools.
+  const browserOnlyArgs: string[] = [];
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,

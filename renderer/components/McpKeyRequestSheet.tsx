@@ -6,11 +6,10 @@
 //    "provided"/"declined" 완료 신호만 나른다 — 비밀 값은 절대 싣지 않는다.
 //  - [없이 진행]/시간초과면 메인이 해당 툴 없이 대안 지시 블록과 함께 계속 실행한다.
 // 스타일은 BrowserActionApprovalSheet를 따른다(경량 고정 바텀시트).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { McpRunKeyRequest } from "@/lib/types";
-import { OneBottomSheet } from "@/components/one/OneBottomSheet";
 
 export function McpKeyRequestSheet({
   request,
@@ -161,26 +160,26 @@ export function McpKeyRequestSheet({
       <style jsx>{`
         .mkr-wrap {
           position: fixed;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          display: flex;
-          justify-content: center;
-          padding: 0 16px 20px;
+          left: 50%;
+          bottom: 96px;
+          transform: translateX(-50%);
+          width: min(var(--agentlas-composer-width, 740px), calc(100% - var(--agentlas-composer-inset, 0px)));
+          max-width: calc(100% - 32px);
           z-index: 90;
           pointer-events: none;
         }
         .mkr {
           pointer-events: auto;
-          width: var(--popup-3-width);
-          max-height: min(70vh, 560px);
+          width: 100%;
+          box-sizing: border-box;
+          max-height: min(56vh, 460px);
           overflow-y: auto;
-          background: var(--rd-bg);
-          color: var(--rd-ink);
-          border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
-          border-radius: 16px;
-          padding: 16px 18px;
-          box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+          background: var(--paper);
+          color: var(--ink);
+          border: 1px solid var(--paper-edge);
+          border-radius: 13px;
+          padding: 10px 12px;
+          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
           animation: mkr-in 0.16s ease-out;
         }
         @keyframes mkr-in {
@@ -217,14 +216,14 @@ export function McpKeyRequestSheet({
           opacity: 0.6;
         }
         .mkr-summary {
-          font-size: 14px;
+          font-size: 12px;
           line-height: 1.5;
           font-weight: 600;
           margin-bottom: 4px;
         }
         .mkr-note {
-          font-size: 12px;
-          opacity: 0.6;
+          font-size: 10px;
+          color: var(--muted-deep);
           margin-bottom: 10px;
         }
         .mkr-tool {
@@ -240,12 +239,12 @@ export function McpKeyRequestSheet({
           margin-bottom: 6px;
         }
         .mkr-tool-name {
-          font-size: 13px;
+          font-size: 11px;
           font-weight: 700;
         }
         .mkr-setup {
           font-size: 12px;
-          color: var(--rd-accent);
+          color: var(--accent);
           text-decoration: none;
         }
         .mkr-field {
@@ -261,11 +260,11 @@ export function McpKeyRequestSheet({
         }
         .mkr-field input {
           border-radius: 8px;
-          border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.14));
-          background: rgba(255, 255, 255, 0.04);
-          color: var(--rd-ink);
-          padding: 8px 10px;
-          font-size: 13px;
+          border: 1px solid var(--paper-edge-strong);
+          background: var(--paper-2);
+          color: var(--ink);
+          padding: 7px 9px;
+          font-size: 11px;
           font-family: ui-monospace, Menlo, monospace;
         }
         .mkr-hint {
@@ -364,28 +363,14 @@ export function McpKeyRequestSheet({
     </>
   );
 
-  if (presentation === "one") {
-    return (
-      <OneBottomSheet
-        open
-        onClose={() => void decline()}
-        closeLabel={ko ? "키 없이 계속" : "Continue without keys"}
-        ariaLabelledBy="one-mcp-key-request-title"
-        dialogRole="alertdialog"
-        closeOnBackdrop={false}
-        closeOnEscape={false}
-        closeDisabled={busy}
-        eyebrow={ko ? "API 키 필요" : "API keys required"}
-        title={ko ? "도구 연결이 필요해요" : "Connect the required tool"}
-        titleId="one-mcp-key-request-title"
-        description={ko
-          ? "필요한 키를 저장하면 이번 실행부터 사용합니다. 값은 키체인에만 저장됩니다."
-          : "Save the required keys to use them in this run. Values stay in your keychain."}
-      >
-        {content}
-      </OneBottomSheet>
-    );
-  }
-
-  return <div className="mkr-wrap" role="alertdialog" aria-live="assertive">{content}</div>;
+  return (
+    <div
+      className="mkr-wrap"
+      role="alertdialog"
+      aria-live="assertive"
+      style={presentation === "one" ? ({ "--agentlas-composer-width": "720px" } as CSSProperties) : undefined}
+    >
+      {content}
+    </div>
+  );
 }

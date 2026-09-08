@@ -3071,7 +3071,9 @@ button[data-dashboard-import="true"]:disabled {
   width: min(var(--agentlas-composer-width, 720px),
              calc(100% - var(--agentlas-composer-inset, 0px)));
   max-width: var(--agentlas-composer-width, 720px);
-  margin: 0 auto 38px;
+  /* The chip is part of the composer stack: keep only a small breathing gap so
+     its lower edge stays immediately above the white input shell. */
+  margin: 0 auto 6px;
 }
 
 .tool-approval-inline > * + * {

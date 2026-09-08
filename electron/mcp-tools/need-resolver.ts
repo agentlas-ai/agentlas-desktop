@@ -53,6 +53,8 @@ export interface McpGoalNeedContext {
 export interface McpRuntimeCapabilities {
   /** Host-proven native browser access for this exact invocation. */
   nativeBrowser: "available" | "unavailable" | "unknown";
+  /** Runtime-provided web search (for example Codex web_search or Claude WebSearch). */
+  nativeWebSearch?: "available" | "unavailable" | "unknown";
 }
 
 /** Inventory ceiling for one judgment call. Hub entries are offered first, so a cut
@@ -79,6 +81,7 @@ export const MCP_NEED_JUDGMENT_GUIDANCE = [
   "Treat a native browser as available only when the runtime capability context explicitly says available. Unknown or unavailable means you must not assume the runtime has its own browser, UI capture, or interaction channel.",
   "Even an available native browser satisfies a criterion only when it can produce the required evidence on the same target surface; availability alone does not prove Desktop can observe that surface.",
   "When a criterion requires rendered UI, interaction, screenshots, or browser-visible evidence and no explicit runtime capability supplies it, select the appropriate offered browser or computer-use tool.",
+  "When nativeWebSearch=available, use the runtime's built-in web search and do not select a credentialed Brave Search MCP unless the user explicitly requested that exact service.",
   "Do not select a browser merely because the task mentions an app, Flutter, frontend, or a website. Source-only implementation, build, or test criteria may need no browser.",
   "Return an empty list only when every capability required for the complete Goal is either explicitly available in the runtime context or needs none of the offered tools.",
   "An entry marked 'needs credential' costs the user a blocking API-key prompt before the run starts, so name it only when the task is impossible without it.",
@@ -119,6 +122,7 @@ function renderMcpRuntimeCapabilities(capabilities?: McpRuntimeCapabilities): st
   return [
     "RUNTIME CAPABILITIES (host-proven for this invocation):",
     `nativeBrowser=${capabilities?.nativeBrowser ?? "unknown"}`,
+    `nativeWebSearch=${capabilities?.nativeWebSearch ?? "unknown"}`,
   ].join("\n");
 }
 

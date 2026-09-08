@@ -242,6 +242,7 @@ import {
 } from "../workflow/tool-broker-runtime";
 import type { ToolBrokerLevel } from "../../shared/graph-tool-broker";
 import { runtimeKindCanUseMcp } from "../../shared/runtime-mcp";
+import { RUNTIME_NATIVE_CAPABILITIES } from "../runtime/native-capabilities";
 import type {
   Chat,
   AppFactoryAppRecord,
@@ -2814,7 +2815,12 @@ ${effectiveUserPrompt}`;
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         // A CLI's name or inherited MCP configuration does not prove a native
         // browser is available to this invocation or visible in Desktop.
-        runtimeCapabilities: { nativeBrowser: "unknown" as const },
+        runtimeCapabilities: {
+          nativeBrowser: "unknown" as const,
+          nativeWebSearch: RUNTIME_NATIVE_CAPABILITIES[active.kind]?.includes("web.search")
+            ? "available" as const
+            : "unknown" as const,
+        },
         agentName: agent.nameEn || agent.name,
         workingFolder,
         toolMode: req.toolMode,
@@ -3112,6 +3118,8 @@ ${effectiveUserPrompt}`;
           },
           select: (input) => resolveMcpNeeds({ ...input, runtimeCapabilities: {
             nativeBrowser: nativeBrowserGrant && mcpConfigPath ? "available" : "unknown",
+            nativeWebSearch: RUNTIME_NATIVE_CAPABILITIES[active.kind]?.includes("web.search")
+              ? "available" : "unknown",
           } }),
           receipt: (payload) => recordRunEvent({ runId: req.runId!, chatId: chat.id,
             kind: "mcp_worker_capability_selection", payload }),

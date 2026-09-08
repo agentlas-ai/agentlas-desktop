@@ -7,7 +7,7 @@
 // 결과를 받아 다음 단계로 가야 한다. 이 시트가 답을 돌려주면 그 자리에서 실행이 이어진다.
 //
 // 형태는 BrowserActionApprovalSheet 와 같은 규칙(큐 + 만료 + 창 없으면 애초에 안 옴).
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
@@ -158,7 +158,13 @@ export function AskUserSheet() {
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
   return (
-    <div className={`aus ${oneRoute ? "aus-one" : ""}`} role="dialog" aria-modal="false" aria-label={ko ? "확인이 필요합니다" : "Your input is needed"}>
+    <div
+      className={`aus ${oneRoute ? "aus-one" : ""}`}
+      role="dialog"
+      aria-modal="false"
+      aria-label={ko ? "확인이 필요합니다" : "Your input is needed"}
+      style={oneRoute ? ({ "--agentlas-composer-width": "720px" } as CSSProperties) : undefined}
+    >
       <div className="aus-card">
         <AskCard
           key={req.requestId}
@@ -198,28 +204,24 @@ export function AskUserSheet() {
         .aus {
           position: fixed;
           left: 50%;
-          bottom: 22px;
+          bottom: 96px;
           z-index: 95;
           transform: translateX(-50%);
-          width: var(--popup-3-width);
+          width: min(var(--agentlas-composer-width, 740px), calc(100% - var(--agentlas-composer-inset, 0px)));
+          max-width: calc(100% - 32px);
         }
         .aus-card {
           padding: 14px 16px;
           border-radius: 14px;
-          background: var(--rd-bg);
-          color: var(--rd-ink);
-          border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
-          box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
+          background: var(--paper);
+          color: var(--ink);
+          border: 1px solid var(--paper-edge);
+          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
           display: flex;
           flex-direction: column;
           gap: 10px;
         }
-        .aus-one .aus-card {
-          background: var(--one-toast-bg);
-          color: var(--one-toast-ink);
-          border-color: rgba(40, 48, 39, 0.12);
-          box-shadow: 0 16px 44px rgba(28, 35, 27, 0.18);
-        }
+        .aus-one .aus-card { background: var(--paper); color: var(--ink); }
         .aus-top {
           display: flex;
           align-items: center;
