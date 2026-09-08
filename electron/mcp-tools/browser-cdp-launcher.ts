@@ -2941,6 +2941,25 @@ export function materializeBrowserCdpLauncher(): string {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const existing = fs.existsSync(dest) ? fs.readFileSync(dest, "utf8") : null;
     if (existing === LAUNCHER_SOURCE) return dest;
+    // An explicitly isolated host launcher is owned by this build. Applying
+    // the shared production non-downgrade rule here retains healthy bindings
+    // to the previous frozen app, which the exact-source check then rejects.
+    // Never use this exception for the default shared path or a symlink to it.
+    const sharedDest = path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME);
+    const canonicalDestination = fs.realpathSync(path.dirname(dest)) + path.sep + path.basename(dest);
+    const canonicalShared = fs.existsSync(path.dirname(sharedDest))
+      ? fs.realpathSync(path.dirname(sharedDest)) + path.sep + path.basename(sharedDest)
+      : sharedDest;
+    const isolatedOverride = Boolean(process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim())
+      && canonicalDestination !== canonicalShared
+      && !fs.lstatSync(dest, { throwIfNoEntry: false })?.isSymbolicLink();
+    if (isolatedOverride && existing !== null
+      && readLauncherContractVersion(existing) === BROWSER_CDP_LAUNCHER_CONTRACT
+      && readLauncherWriter(existing) === BROWSER_CDP_LAUNCHER_WRITER
+      && hasUsableLauncherRuntimeBindings(LAUNCHER_SOURCE)) {
+      fs.writeFileSync(dest, LAUNCHER_SOURCE, "utf8");
+      return dest;
+    }
     // 더 높은 계약과 같은 번호의 다른 writer는 보존한다. 같은 Desktop 계약은
     // 현재 설치 앱의 런타임 경로로 다시 결합해야 업그레이드 뒤 회수기가 동작한다.
     const installed = existing ? readLauncherContractVersion(existing) : null;

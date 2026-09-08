@@ -174,6 +174,7 @@ import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntime
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
+import { browserCdpHostFailureDiagnostic } from "../mcp-tools/browser-cdp-launcher";
 import {
   refreshBrowserCredentialsIfDue,
   type BrowserCredentialRefreshReport,
@@ -3043,6 +3044,9 @@ ${effectiveUserPrompt}`;
         },
       });
       assertMcpGoalSelectionCurrent();
+      if (nativeBrowserGrant && !cfg?.nativeBrowserBound) {
+        throw new Error("native-browser-config-unbound");
+      }
       if (cfg) {
         mcpConfigPath = cfg.configPath;
         mcpAllowedTools = cfg.allowedTools;
@@ -3054,7 +3058,23 @@ ${effectiveUserPrompt}`;
         mcpIncludedServers = cfg.includedServers ?? [];
       }
     } catch (err) {
-      console.error("[mcp] buildMcpConfigFile failed:", err);
+      // Every runtime must receive this invocation's approved transport. In
+      // particular AGY otherwise falls through to a prior chat's global proxy
+      // when config creation fails. A Full Access grant is not transferable to
+      // that old proxy. Preserve the failure before any runner dispatch.
+      if (signal?.aborted) return earlyResult();
+      const diagnostic = browserCdpHostFailureDiagnostic(err);
+      const scopeChanged = err && typeof err === "object" && "code" in err
+        && err.code === "mcp-goal-tool-scope-changed";
+      const code = scopeChanged ? "mcp-goal-tool-scope-changed" : "mcp-runtime-config-unavailable";
+      console.error("[mcp]", { code, diagnostic });
+      sink({ kind: "error", error: {
+        code,
+        message: locale === "ko"
+          ? `이번 실행의 도구 연결을 준비하지 못했습니다. 도구 연결을 확인한 뒤 다시 시도해 주세요. (${diagnostic.code})`
+          : `Could not prepare this run's tool connections. Check the tool connection and retry. (${diagnostic.code})`,
+      } });
+      return earlyResult();
     }
   }
 
