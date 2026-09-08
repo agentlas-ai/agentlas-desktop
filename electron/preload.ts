@@ -957,6 +957,8 @@ const api: AgentlasIpc = {
     listOperations: (appId) => ipcRenderer.invoke("appFactory:listOperations", appId),
   },
   workLiveView: {
+    listTabs: (input) => ipcRenderer.invoke("workLiveView:listTabs", input),
+    createTab: (input) => ipcRenderer.invoke("workLiveView:createTab", input),
     open: (input) => ipcRenderer.invoke("workLiveView:open", input),
     setBounds: (input) => ipcRenderer.invoke("workLiveView:setBounds", input),
     reload: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:reload", viewId, taskScopeId),

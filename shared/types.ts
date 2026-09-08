@@ -3782,6 +3782,13 @@ export type WorkLiveViewInput =
   | { kind: "key"; phase: "down" | "up"; key: string }
   | { kind: "text"; text: string };
 
+export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
+  /** True only for the currently shown, ready guest. */
+  visible?: boolean;
+  taskScopeId: string;
+  url: string;
+}
+
 export interface WorkLiveViewStatus {
   viewId: string;
   taskScopeId?: string;
@@ -7957,6 +7964,8 @@ export interface AgentlasIpc {
    * preload, Node API, or Desktop IPC to the loaded page.
    */
   workLiveView: {
+    listTabs: (input: { taskScopeId: string }) => Promise<{ ok: boolean; tabs: WorkLiveBrowserTab[]; reason?: string }>;
+    createTab: (input: { taskScopeId: string; url?: string }) => Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }>;
     open: (input: {
       viewId: string;
       taskScopeId?: string;

@@ -702,6 +702,9 @@ import {
   stopAppFactoryLivePreview,
 } from "./app-factory/live-preview";
 import {
+  registerNativeBrowserTask,
+  listWorkBrowserTabs,
+  createWorkBrowserTab,
   captureWorkLiveView,
   dispatchWorkLiveViewInput,
   closeWorkLiveView,
@@ -6056,6 +6059,26 @@ export function registerIpcHandlers(): void {
     return stopAppFactoryLivePreview(input?.appId);
   });
 
+  const bindNativeBrowserChat = (event: Electron.IpcMainInvokeEvent, taskScopeId: unknown) => {
+    const window = assertTrustedSitePublishIpcSender(event);
+    if (typeof taskScopeId !== "string" || !getChat(taskScopeId)) throw new Error("native-browser-chat-missing");
+    registerNativeBrowserTask({ ownerId: event.sender.id, window, taskScopeId,
+      send: (status) => { if (!event.sender.isDestroyed()) event.sender.send("workLiveView:status", status); } });
+    if (!workLiveCleanupOwners.has(event.sender.id)) {
+      workLiveCleanupOwners.add(event.sender.id);
+      event.sender.once("destroyed", () => { closeWorkLiveViewsForOwner(event.sender.id); workLiveCleanupOwners.delete(event.sender.id); });
+    }
+    return taskScopeId;
+  };
+  ipcMain.handle("workLiveView:listTabs", (event, input: { taskScopeId: string }) => {
+    const scope = bindNativeBrowserChat(event, input?.taskScopeId);
+    return { ok: true, tabs: listWorkBrowserTabs(event.sender.id, scope) };
+  });
+  ipcMain.handle("workLiveView:createTab", (event, input: { taskScopeId: string; url?: string }) => {
+    const scope = bindNativeBrowserChat(event, input?.taskScopeId);
+    return createWorkBrowserTab(event.sender.id, scope, input?.url);
+  });
+
   // Native Work live view. Every operation is bound to the requesting renderer;
   // a different window cannot resize, reload, or close its surface by guessing an id.
   ipcMain.handle("workLiveView:open", async (event, input: {
@@ -6067,6 +6090,7 @@ export function registerIpcHandlers(): void {
     mode?: "app" | "browser";
   }) => {
     const win = assertTrustedSitePublishIpcSender(event);
+    if (input?.mode === "browser") bindNativeBrowserChat(event, input?.taskScopeId);
     const ownerId = event.sender.id;
     if (!workLiveCleanupOwners.has(ownerId)) {
       workLiveCleanupOwners.add(ownerId);

@@ -5,8 +5,9 @@
 // Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
 // the persistent Agentlas native-browser session; app previews remain isolated.
 import { BrowserWindow, WebContentsView } from "electron";
+import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
-import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput } from "../shared/types";
+import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
 
 type ActiveWorkView = {
   ownerId: number;
@@ -28,6 +29,70 @@ type ActiveWorkView = {
 const activeViews = new Map<string, ActiveWorkView>();
 export const NATIVE_BROWSER_PARTITION = "persist:agentlas-browser-default";
 export const MAX_NATIVE_BROWSER_TABS_PER_OWNER = 8;
+type NativeTaskOwner = { ownerId: number; window: BrowserWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void };
+const nativeTaskOwners = new Map<string, NativeTaskOwner>();
+const ownerCleanup = new Map<number, { window: BrowserWindow; listener: () => void }>();
+const MAX_NATIVE_TASK_BINDINGS_PER_OWNER = 64;
+
+function ensureOwnerCleanup(ownerId: number, window: BrowserWindow): void {
+  if (ownerCleanup.has(ownerId)) return;
+  const listener = () => closeWorkLiveViewsForOwner(ownerId);
+  ownerCleanup.set(ownerId, { window, listener });
+  window.once("closed", listener);
+}
+
+/** Main calls only after verifying an actual chat and its trusted Desktop sender. */
+export function registerNativeBrowserTask(owner: NativeTaskOwner): void {
+  if (owner.window.isDestroyed()) throw new Error("native-browser-owner-closed");
+  ensureOwnerCleanup(owner.ownerId, owner.window);
+  const ownerKey = key(owner.ownerId, owner.taskScopeId);
+  if (!nativeTaskOwners.has(ownerKey)) {
+    const bindings = [...nativeTaskOwners.entries()].filter(([, entry]) => entry.ownerId === owner.ownerId);
+    if (bindings.length >= MAX_NATIVE_TASK_BINDINGS_PER_OWNER) {
+      const unused = bindings.find(([, entry]) => ![...activeViews.values()].some((active) =>
+        active.ownerId === owner.ownerId && active.taskScopeId === entry.taskScopeId));
+      if (!unused) throw new Error("native-browser-task-binding-limit");
+      nativeTaskOwners.delete(unused[0]);
+    }
+  }
+  nativeTaskOwners.set(ownerKey, owner);
+}
+
+export function nativeBrowserTaskOwner(taskScopeId: string): NativeTaskOwner | null {
+  const matches = [...nativeTaskOwners.values()].filter((owner) => owner.taskScopeId === taskScopeId && !owner.window.isDestroyed());
+  // An unattended or ambiguous window binding cannot select a guest on the model's behalf.
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function browserTab(active: ActiveWorkView): WorkLiveBrowserTab {
+  return { viewId: active.viewId, taskScopeId: active.taskScopeId!, state: active.state, visible: active.visible && active.state === "ready",
+    url: active.view.webContents.getURL() || active.pendingUrl, title: active.view.webContents.getTitle(),
+    canGoBack: active.view.webContents.navigationHistory.canGoBack(),
+    canGoForward: active.view.webContents.navigationHistory.canGoForward(), error: active.error };
+}
+
+export function listWorkBrowserTabs(ownerId: number, taskScopeId: string): WorkLiveBrowserTab[] {
+  return [...activeViews.values()].filter((active) => active.ownerId === ownerId
+    && active.mode === "browser" && active.taskScopeId === taskScopeId && isCurrent(active)).map(browserTab);
+}
+
+export async function createWorkBrowserTab(ownerId: number, taskScopeId: string, url = "about:blank"):
+  Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }> {
+  const owner = nativeTaskOwners.get(key(ownerId, taskScopeId));
+  if (!owner || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
+  const viewId = `browser_${randomUUID().replace(/-/g, "")}`;
+  const result = await openWorkLiveView({ ...owner, viewId, url, mode: "browser", visible: false,
+    bounds: { x: 0, y: 0, width: 1000, height: 750 } });
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  return result.ok && active ? { ok: true, tab: browserTab(active) } : { ok: false, reason: result.reason ?? "guest-unavailable" };
+}
+
+/** Main-only access for the scoped CDP relay; never exposed through renderer IPC. */
+export function nativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string): WebContents | null {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  return active?.mode === "browser" ? active.view.webContents : null;
+}
+
 
 function isCurrent(active: ActiveWorkView): boolean {
   return activeViews.get(key(active.ownerId, active.viewId)) === active
@@ -94,7 +159,7 @@ function sameLiveAppTarget(active: ActiveWorkView, target: string): boolean {
 }
 
 function permittedNavigation(active: ActiveWorkView, target: string): boolean {
-  if (active.mode === "browser") return sanitizeWorkLiveUrl(target) !== null;
+  if (active.mode === "browser") return target === "about:blank" || sanitizeWorkLiveUrl(target) !== null;
   return sameLiveAppTarget(active, target);
 }
 
@@ -146,6 +211,12 @@ export function closeWorkLiveView(ownerId: number, viewId: string, taskScopeId?:
 }
 
 export function closeWorkLiveViewsForOwner(ownerId: number): void {
+  const cleanup = ownerCleanup.get(ownerId);
+  if (cleanup) {
+    cleanup.window.removeListener("closed", cleanup.listener);
+    ownerCleanup.delete(ownerId);
+  }
+  for (const [id, owner] of nativeTaskOwners) if (owner.ownerId === ownerId) nativeTaskOwners.delete(id);
   for (const active of [...activeViews.values()]) {
     if (active.ownerId === ownerId) closeActive(active, false);
   }
@@ -191,7 +262,7 @@ export async function navigateWorkLiveView(
   input: { viewId: string; url: string; taskScopeId?: string },
 ): Promise<{ ok: boolean; url?: string; reason?: string }> {
   const active = registeredGuest(ownerId, input?.viewId, input?.taskScopeId);
-  const target = sanitizeWorkLiveUrl(input?.url);
+  const target = active?.mode === "browser" && input?.url === "about:blank" ? new URL("about:blank") : sanitizeWorkLiveUrl(input?.url);
   if (!active || active.view.webContents.isDestroyed()) return { ok: false, reason: "view-unavailable" };
   if (!target || !permittedNavigation(active, target.toString())) return { ok: false, reason: "navigation-not-allowed" };
   try {
@@ -232,7 +303,7 @@ export async function openWorkLiveView(input: {
   send: (status: WorkLiveViewStatus) => void;
 }): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }> {
   const viewId = sanitizeViewId(input?.viewId);
-  const url = sanitizeWorkLiveUrl(input?.url);
+  const url = input?.mode === "browser" && input?.url === "about:blank" ? new URL("about:blank") : sanitizeWorkLiveUrl(input?.url);
   if (!viewId) return { ok: false, viewId: String(input?.viewId ?? ""), reason: "invalid-view-id" };
   if (!url) return { ok: false, viewId, reason: "Only HTTPS or loopback HTTP live apps are allowed." };
   if (input.window.isDestroyed()) return { ok: false, viewId, reason: "window-closed" };
@@ -352,12 +423,8 @@ export async function openWorkLiveView(input: {
   view.setBounds(sanitizeBounds(input.bounds, input.window));
   view.setVisible(active.visible);
   emit(active, { state: "opening", url: url.toString() });
-  const onWindowClosed = () => {
-    if (activeViews.get(key(input.ownerId, viewId)) === active) closeActive(active, false);
-  };
-  input.window.once("closed", onWindowClosed);
+  ensureOwnerCleanup(input.ownerId, input.window);
   view.webContents.once("destroyed", () => {
-    input.window.removeListener("closed", onWindowClosed);
     if (activeViews.get(key(input.ownerId, viewId)) === active) closeActive(active);
   });
   const epoch = ++active.navigationEpoch;
