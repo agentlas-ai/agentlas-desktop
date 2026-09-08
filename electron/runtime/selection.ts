@@ -384,7 +384,9 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   return true;
 }
 
-const QUOTA_FALLBACK_PERCENT = 90;
+// A near-limit warning still leaves usable quota. Only an exhausted snapshot
+// excludes a candidate; actual provider quota/auth failures retain their cooldown.
+const QUOTA_EXHAUSTED_PERCENT = 100;
 const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx"]);
 
 function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
@@ -410,7 +412,7 @@ function runtimeSelectionUnavailableReason(
   if (isRuntimeCredentialUnavailable(runtime)) return null;
   if (runtimeModelUnavailable(runtime, selection.model)) return "model-unavailable";
   const used = peekProviderUsedPercent(selection.kind);
-  if (used !== null && used >= QUOTA_FALLBACK_PERCENT) return "quota-exceeded";
+  if (used !== null && used >= QUOTA_EXHAUSTED_PERCENT) return "quota-exceeded";
   return null;
 }
 
