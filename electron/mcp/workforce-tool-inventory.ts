@@ -520,6 +520,8 @@ function stableConfigProof(configPath: string, expectedKeys: string[]): { digest
 }
 
 export async function finalizeWorkforceCapabilityBinding(input: {
+  /** Exact Main-authorized project; absent for isolated Agent Apps. */
+  projectDir?: string;
   menu: PreparedWorkforceToolMenu;
   executionContext: WorkforceExecutionContext;
   specs: WorkforceToolRosterSpec[];
@@ -597,6 +599,7 @@ export async function finalizeWorkforceCapabilityBinding(input: {
           serverIds,
           skipDefaultSeed: true,
           configKey: `workforce-${randomUUID()}`,
+          workingFolder: input.projectDir,
         });
         if (!config || JSON.stringify([...config.includedServerIds].sort()) !== JSON.stringify(serverIds)) {
           throw new Error("workforce_tool_grant_config_incomplete");

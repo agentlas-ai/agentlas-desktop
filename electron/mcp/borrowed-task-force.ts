@@ -5054,6 +5054,7 @@ async function runPlanner(
           throw new Error("workforce_tool_menu_missing");
         }
         capabilityBinding = await finalizeWorkforceCapabilityBinding({
+          projectDir: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
           menu: workforceToolMenu,
           executionContext,
           specs,

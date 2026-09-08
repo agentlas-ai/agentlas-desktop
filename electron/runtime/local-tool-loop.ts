@@ -5,10 +5,9 @@
 // OpenAI Chat Completions의 tools/tool_calls 왕복을 여기서 직접 구현한다.
 //
 // mcpConfigPath는 buildMcpConfigFile()이 만든 { mcpServers: { [key]: {...} } } 형식의
-// 파일이다(mcp-config.ts). key는 mcpConfigKey(server)와 동일하므로, 등록된
-// InstalledMcpServer 목록에서 역으로 찾아 testServerConnection/callServerTool을 그대로
-// 재사용한다 — Transport 생성 로직을 새로 만들지 않는다.
-import fs from "node:fs";
+// 파일이다(mcp-config.ts). Main이 작성할 때 봉인한 실제 transport를 사용한다.
+// key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
+import { preparedMcpBindings, preparedMcpTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { createHash } from "node:crypto";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
@@ -85,6 +84,7 @@ export type ResolvedTool =
       serverConfigKey: string;
       /** Digest of the resolved Main dispatch record; its contents never leave Main. */
       serverConfigDigest: string;
+      prepared: PreparedMcpBinding;
       /** Canonical Main inventory ID; provider function names may be sanitized. */
       brokerToolId: string;
     }
@@ -116,19 +116,6 @@ function localFailure(
   return { kind, message: message.slice(0, 400), runtime: runtimeKind, source };
 }
 
-/**
- * 카탈로그의 filesystem류 서버는 허용 루트가 "~"(홈 전체)로 등록돼 있다. CLI 런타임은
- * 자식 CLI가 cwd를 따로 받아 실사용 경로가 실행 폴더로 잡히지만, 이 in-process 루프는
- * 서버 정의를 그대로 쓰므로 상대경로 쓰기가 전부 홈에 떨어진다(2026-07-16 Qwen 빌드
- * 실측: ~/.agentlas·~/docs 오염). 실행 폴더가 있으면 "~" 허용 루트를 그 폴더로 좁힌다 —
- * 폴더 밖 쓰기는 서버의 allowed-directories 검증이 거부하고, 그 에러가 tool 결과로
- * 모델에 돌아가 스스로 교정한다.
- */
-function scopeServerToWorkspace(server: InstalledMcpServer, workspaceRoot: string | undefined): InstalledMcpServer {
-  if (!workspaceRoot || server.transport !== "stdio" || !server.args?.includes("~")) return server;
-  return { ...server, args: server.args.map((arg) => (arg === "~" ? workspaceRoot : arg)) };
-}
-
 export async function loadMainToolInventory(
   mcpConfigPath: string | undefined,
   workspaceRoot: string | undefined,
@@ -137,16 +124,15 @@ export async function loadMainToolInventory(
   canAskUser: boolean,
   /** 멀티모달 슬롯이 그림을 그릴 수 있는가 — 없으면 generate_image 는 목록에 안 뜬다. */
   canGenerateImage: boolean,
+  signal?: AbortSignal,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
   // These imports deliberately live inside the tool-admission path. An
   // untrusted no-tools run must not initialize the MCP registry/catalog or
   // builtin tool implementations merely by importing this runner module.
-  const [{ builtinToolsAsOpenAi }, { listInstalledServers }, { mcpConfigKey }, { testServerConnection }] = await Promise.all([
+  const [{ builtinToolsAsOpenAi }, { testServerConnection }] = await Promise.all([
     import("../../shared/builtin-tools"),
-    import("../mcp-tools/registry"),
-    import("../mcp-tools/mcp-config"),
     import("../mcp-tools/client"),
   ]);
 
@@ -164,27 +150,21 @@ export async function loadMainToolInventory(
   }
 
   if (!mcpConfigPath) return { tools, byName };
-  let parsed: { mcpServers?: Record<string, unknown> };
-  try {
-    parsed = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"));
-  } catch {
-    return { tools, byName };
-  }
-  const keys = Object.keys(parsed.mcpServers ?? {});
-  if (keys.length === 0) return { tools, byName };
-
-  const serverByKey = new Map(
-    listInstalledServers().map((s) => [mcpConfigKey(s), scopeServerToWorkspace(s, workspaceRoot)]),
-  );
-  for (const key of keys) {
-    const server = serverByKey.get(key);
-    if (!server) continue; // config가 가리키는 서버가 레지스트리에서 사라진 경우 — 건너뜀
+  const admitted = preparedMcpBindings(mcpConfigPath);
+  for (const prepared of admitted) {
+    signal?.throwIfAborted();
+    const key = prepared.configKey;
+    const server = prepared.server;
     let status;
     try {
-      status = await testServerConnection(server, { timeoutMs: 8_000 });
+      status = await testServerConnection(server, { timeoutMs: 8_000, signal, prepared });
     } catch {
+      signal?.throwIfAborted();
+      preparedMcpTransport(prepared, server);
       continue;
     }
+    signal?.throwIfAborted();
+    preparedMcpTransport(prepared, server);
     if (!status.connected) continue;
     for (const tool of status.tools) {
       const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -208,6 +188,7 @@ export async function loadMainToolInventory(
         serverToolName: tool.name,
         serverConfigKey: key,
         serverConfigDigest: workforceBrokerDigest(server),
+        prepared,
         brokerToolId: `mcp__${key}__${tool.name}`,
       });
     }
@@ -302,6 +283,7 @@ export async function prepareMainToolLoop(
           (req.permission ?? "read") as ToolPermission,
           req.unattended !== true && req.noSynchronousAsk !== true,
           imageSlotDiagnosis.state === "ready",
+          req.signal,
         );
       })();
   return {
@@ -414,6 +396,8 @@ export async function runMainToolDispatch(
       isError: true,
     };
   }
+  approval.signal?.throwIfAborted();
+  if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
   let approvalDecision: RuntimeToolPermissionDecision | null = null;
   const actionApproval: LocalToolApprovalContext = actionId
@@ -436,6 +420,8 @@ export async function runMainToolDispatch(
       isError: true,
     };
   }
+  approval.signal?.throwIfAborted();
+  if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
       import("../../shared/builtin-tools"),
@@ -443,6 +429,7 @@ export async function runMainToolDispatch(
       import("../multimodal/slot"),
       import("../multimodal/image"),
     ]);
+    approval.signal?.throwIfAborted();
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: approval.cwd ?? process.cwd(),
       permission: (approval.permission ?? "read") as ToolPermission,
@@ -496,9 +483,10 @@ export async function runMainToolDispatch(
       import("../mcp-tools/client"),
       import("../media/capture-artifacts"),
     ]);
-    const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000 });
+    const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared });
+    if (!result) throw new Error("mcp_tool_result_unavailable");
     const text = result?.text ?? "";
-    const images = result?.images ?? [];
+    const images = result.isError ? [] : result.images;
     // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
     // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
     // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
@@ -510,12 +498,12 @@ export async function runMainToolDispatch(
       call.arguments,
       text,
       eventCallId,
-      false,
+      result.isError,
       capturePaths.length > 0 ? capturePaths : undefined,
     );
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
-      broker?.finishAction(actionId, "succeeded");
+      broker?.finishAction(actionId, result.isError ? "failed" : "succeeded");
     }
     return {
       content: text.slice(0, MAX_TOOL_RESULT_CHARS),
@@ -531,7 +519,7 @@ export async function runMainToolDispatch(
             ],
           }
         : null,
-      isError: false,
+      isError: result.isError,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

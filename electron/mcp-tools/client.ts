@@ -1,3 +1,4 @@
+import { preparedMcpTransport, type PreparedMcpBinding } from "./prepared-transport";
 // 실제 MCP 클라이언트 — @modelcontextprotocol/sdk로 외부 서버에 붙어 tools/list.
 // 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
 // 시크릿은 keychain 글로벌 vault에서 읽어 stdio는 자식 env로, 원격은 HTTP 헤더로 주입.
@@ -499,8 +500,25 @@ async function createTransport(
   resolved: Record<string, string>,
   runtimeRootOverride?: string | null,
   signal?: AbortSignal,
+  prepared?: PreparedMcpBinding,
 ): Promise<CreatedTransport> {
   signal?.throwIfAborted();
+  if (prepared) {
+    const launch = preparedMcpTransport(prepared, server);
+    if (launch.kind === "stdio") {
+      const base = await withUvxPath(launch.command, withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }), { signal });
+      signal?.throwIfAborted();
+      preparedMcpTransport(prepared, server);
+      Object.assign(resolved, launch.env);
+      return { transport: new StdioClientTransport({ command: launch.command, args: launch.args,
+        env: { ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")), ...launch.env }, stderr: "ignore" }) as unknown as Transport, runtimeRoot: launch.runtimeRoot };
+    }
+    Object.assign(resolved, launch.headers, { __preparedEndpoint: launch.url });
+    const init = { requestInit: { headers: launch.headers },
+      ...(server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}) };
+    return { transport: (launch.kind === "sse" ? new SSEClientTransport(new URL(launch.url), init)
+      : new StreamableHTTPClientTransport(new URL(launch.url), init)) as unknown as Transport, runtimeRoot: null };
+  }
   if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
     throw new Error("Agentlas System Time MCP launch contract is invalid");
   }
@@ -644,7 +662,7 @@ async function closeMcpProbeBounded(client: Client, transport: Transport | null)
 /** 한 서버에 붙어 tools/list 해보고 상태 반환. 연결은 즉시 닫는다(테스트 전용). */
 export async function testServerConnection(
   server: InstalledMcpServer,
-  options?: { timeoutMs?: number; signal?: AbortSignal },
+  options?: { timeoutMs?: number; signal?: AbortSignal; prepared?: PreparedMcpBinding },
 ): Promise<McpServerStatus> {
   const checkedAt = new Date().toISOString();
   const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
@@ -658,12 +676,12 @@ export async function testServerConnection(
     const tools = await withAbortSignal(withTimeout((async () => {
       if (options?.signal?.aborted) stop();
       controller.signal.throwIfAborted();
-      const environment = await resolveEnv(server.envKeys);
+      const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveEnv(server.envKeys);
       resolved = environment.resolved;
       missing = environment.missing;
       controller.signal.throwIfAborted();
       if (missing.length > 0) return [];
-      transport = (await createTransport(server, resolved, undefined, controller.signal)).transport;
+      transport = (await createTransport(server, resolved, undefined, controller.signal, options?.prepared)).transport;
       controller.signal.throwIfAborted();
       await client.connect(transport);
       controller.signal.throwIfAborted();
@@ -684,10 +702,12 @@ export async function testServerConnection(
 
 export interface McpToolContentResult {
   text: string;
+  isError: boolean;
   images: Array<{ mediaType: "image/png" | "image/jpeg"; data: string }>;
 }
 
 export interface McpToolCallOptions {
+  prepared?: PreparedMcpBinding;
   timeoutMs?: number;
   maxTextChars?: number;
   signal?: AbortSignal;
@@ -723,7 +743,7 @@ async function callServerToolContentInternal(
       (async () => {
         if (options?.signal?.aborted) stop();
         preparation.signal.throwIfAborted();
-        const environment = await resolveEnv(server.envKeys);
+        const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveEnv(server.envKeys);
         resolved = environment.resolved;
         preparation.signal.throwIfAborted();
         if (environment.missing.length > 0) return null;
@@ -733,7 +753,7 @@ async function callServerToolContentInternal(
         // Workforce never changes Core underneath one logical transaction. A
         // background updater may prepare the next run, but this run fails
         // closed instead of silently switching to a different runtime.
-        const maxRuntimeAttempts = server.catalogId !== HEPHAESTUS_NETWORK_CATALOG_ID
+        const maxRuntimeAttempts = options?.prepared || server.catalogId !== HEPHAESTUS_NETWORK_CATALOG_ID
           ? 1
           : workforceCall
             // Before the first tools/call there is no remote side effect and no
@@ -752,7 +772,7 @@ async function callServerToolContentInternal(
             { capabilities: {} },
           );
           client = activeClient;
-          const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal);
+          const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal, options?.prepared);
           preparation.signal.throwIfAborted();
           const transport = created.transport;
           instrumentMcpToolCallTransport(transport, boundaryState);
@@ -841,9 +861,12 @@ async function callServerToolContentInternal(
           }
 
           preparation.signal.throwIfAborted();
+          if (options?.prepared) preparedMcpTransport(options.prepared, server);
           const res = (await activeClient.callTool({ name: toolName, arguments: args })) as {
             content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
+            isError?: boolean;
           };
+          if (res.isError !== undefined && typeof res.isError !== "boolean") throw new Error("mcp_tool_result_invalid_error_flag");
           const content = res.content ?? [];
           const text = joinMcpToolText(content, maxTextChars);
           const images: McpToolContentResult["images"] = [];
@@ -863,7 +886,7 @@ async function callServerToolContentInternal(
           }
           await activeClient.close().catch(() => {});
           client = null;
-          return { text, images };
+          return { text, images, isError: res.isError === true };
         }
         throw new Error(`Agentlas OS runtime could not provide MCP tool: ${toolName}`);
       })(),

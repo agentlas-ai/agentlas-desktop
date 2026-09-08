@@ -7,6 +7,7 @@
 //
 // 이게 없으면 카탈로그의 Playwright(브라우저) 서버가 "설치"만 되고 채팅 중 호출되지 않았다.
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
+import { registerPreparedMcpConfig, mcpServerConfigurationDigest } from "./prepared-transport";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
@@ -142,6 +143,8 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Exact Main-authorized workspace, including runs without a tool-gate proxy. */
+  workingFolder?: string;
   /** Main-only, run-scoped native guest grant; token remains in runtime secret aliases. */
   nativeBrowser?: { endpoint: string; token: string };
   /** Playwright MCP persistent profile key. Used by automations to avoid sharing the interactive browser profile lock. */
@@ -478,31 +481,22 @@ function argsWithBrowserProfile(_key: string, args: string[], _opts?: McpConfigB
   return args;
 }
 
-/**
- * The official filesystem MCP receives its allowed roots as positional args.
- * The catalog default is the user's home directory, but a Work project may be
- * explicitly bound elsewhere (for example a temporary or external volume).
- * Narrow that one built-in server to the already-authorized per-run folder;
- * leave custom servers and runs without a folder unchanged.
- */
+/** Narrow default roots before sealing the exact per-run launch transport. */
 function argsWithToolGateWorkingFolder(
   server: InstalledMcpServer,
   args: string[],
   opts?: McpConfigBuildOptions,
 ): string[] {
-  if (server.catalogId !== "filesystem") return args;
-  const rawFolder = opts?.toolGate?.cwd?.trim();
-  if (!rawFolder) return args;
-  let folder: string;
-  try {
-    folder = path.resolve(rawFolder);
-    if (!fs.statSync(folder).isDirectory()) return args;
-  } catch {
-    return args;
-  }
-  // The trusted catalog places the allowed root in the final argument. Keep
-  // the package launcher flags intact and replace only that root.
-  return args.length > 0 ? [...args.slice(0, -1), folder] : [folder];
+  const rawFolder = opts?.workingFolder ?? opts?.toolGate?.cwd;
+  if (!rawFolder) return args.map(expandHome);
+  const folder = path.resolve(rawFolder);
+  if (!fs.statSync(folder).isDirectory()) throw new Error("mcp_workspace_not_directory");
+  // Preserve the local tool loop's established literal-tilde narrowing for
+  // custom servers too; do not reinterpret their other explicit arguments.
+  const scoped = args.map((arg) => arg === "~" ? folder : expandHome(arg));
+  if (server.catalogId !== "filesystem") return scoped;
+  // The trusted catalog places its allowed root in the final argument.
+  return scoped.length > 0 ? [...scoped.slice(0, -1), folder] : [folder];
 }
 
 /**
@@ -596,11 +590,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const codexConfigArgs: string[] = [];
   const runtimeEnv: Record<string, string> = {};
   let nativeBrowserBound = false;
+  const preparedRows: Parameters<typeof registerPreparedMcpConfig>[0]["servers"] = [];
   const includedServerIds: string[] = [];
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let mcpChildWrapper: string | null = null;
 
   for (const s of serializedServers) {
+    let preparedRuntimeRoot: string | null = null;
     if (s.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(s)) {
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;
@@ -643,7 +639,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         ? agentlasBrowserCdpRuntimeContract()
         : null;
       let command = resolveStdioCommand(s);
-      let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
+      let args = argsWithBrowserProfile(key, s.args ?? [], opts);
       args = argsWithToolGateWorkingFolder(s, args, opts);
       if (browserRuntime) {
         // The host-selected path is part of the browser isolation contract.
@@ -673,6 +669,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (!launch) continue;
         command = launch.command;
         args = launch.args;
+        preparedRuntimeRoot = launch.runtimeRoot;
         builtInEnv = Object.fromEntries(
           Object.entries(launch.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         );
@@ -858,6 +855,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     } else {
       continue;
     }
+    preparedRows.push({ configKey: key, server: s, transport: mcpServers[key], runtimeRoot: preparedRuntimeRoot });
     includedServerIds.push(s.id);
     includedServers.push({ serverId: s.id, catalogId: s.catalogId, configKey: key });
     allowedTools.push(`mcp__${key}`, `mcp__${key}__*`);
@@ -879,5 +877,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   if (Object.keys(mcpServers).length === 0) return null;
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
+  const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
+  registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv, isCurrent: () => {
+    const current = new Map(listInstalledServers().map((server) => [server.id, mcpServerConfigurationDigest(server)]));
+    return configurations.every(([id, digest]) => current.get(id) === digest);
+  } });
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}) };
 }
