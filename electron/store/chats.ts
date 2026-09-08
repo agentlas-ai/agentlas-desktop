@@ -2,6 +2,7 @@
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
+import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
@@ -16,6 +17,7 @@ import {
 import type {
   Chat,
   ChatHistoryEntry,
+  ChatHostNotice,
   ImageAttachment,
   RuntimeBackend,
   RuntimeKind,
@@ -870,6 +872,7 @@ interface MessageRow {
   role: "user" | "assistant" | "system";
   text: string;
   created_at: string;
+  host_notice_json?: string | null;
 }
 
 // Builds before v0.9.36 accidentally persisted the CEO's private synthesis
@@ -886,16 +889,17 @@ export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
   text: string,
-  options?: { images?: readonly ImageAttachment[] },
+  options?: { images?: readonly ImageAttachment[]; hostNotice?: ChatHostNotice },
 ): ChatHistoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
+  const hostNotice = normalizeChatHostNotice(role, options?.hostNotice);
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
-      "INSERT INTO chat_messages (id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, chatId, role, text, now);
+      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null);
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
       persistedImageUrls = persisted.map((item) => item.url);
@@ -912,6 +916,7 @@ export function appendChatMessage(
     role,
     text,
     createdAt: now,
+    ...(hostNotice ? { hostNotice } : {}),
     ...(persistedImageUrls?.length
       ? { imageDataUrls: persistedImageUrls }
       : {}),
@@ -952,8 +957,8 @@ export function latestDurableAssistantMessage(
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
-      `SELECT id, role, text, created_at FROM (
-         SELECT id, role, text, created_at
+      `SELECT id, role, text, created_at, host_notice_json FROM (
+         SELECT id, role, text, created_at, host_notice_json
            FROM chat_messages
           WHERE chat_id = ?
             AND NOT (role = 'user' AND instr(text, ?) > 0)
@@ -963,14 +968,18 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
     )
     .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
-  return rows.map((r) => ({
-    id: r.id,
-    durableMessageId: r.id,
-    role: r.role,
-    text: r.text,
-    createdAt: r.created_at,
-    ...(imageUrls.has(r.id) ? { imageDataUrls: imageUrls.get(r.id) } : {}),
-  }));
+  return rows.map((r) => {
+    const hostNotice = parseChatHostNotice(r.role, r.host_notice_json);
+    return {
+      id: r.id,
+      durableMessageId: r.id,
+      role: r.role,
+      text: r.text,
+      createdAt: r.created_at,
+      ...(hostNotice ? { hostNotice } : {}),
+      ...(imageUrls.has(r.id) ? { imageDataUrls: imageUrls.get(r.id) } : {}),
+    };
+  });
 }
 
 /** recap용 — 마지막으로 본 시각(last_viewed_at) 이후 도착한 에이전트(assistant) 메시지들.

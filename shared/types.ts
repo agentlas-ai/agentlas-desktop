@@ -1853,6 +1853,12 @@ export interface AgentConcurrencyInfo {
   userSet: boolean;
 }
 
+/** Main-authored display metadata. It grants no execution authority. */
+export interface ChatHostNotice {
+  purpose: "goal-continuation";
+  runId: string;
+}
+
 export interface ChatHistoryEntry {
   id: string;
   /** Opaque Main-issued durable chat-message identity; never derived from copy or timestamps. */
@@ -1860,6 +1866,8 @@ export interface ChatHistoryEntry {
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
+  /** Exact Main-issued purpose of a system turn; absent on legacy history. */
+  hostNotice?: ChatHostNotice;
   /** 사용자 또는 호스트가 생성해 영구화한 이미지 첨부 URL. */
   imageDataUrls?: string[];
 }

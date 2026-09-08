@@ -1,4 +1,7 @@
 "use client";
+import type { ChatHostNotice } from "../../../shared/types";
+import { normalizeChatHostNotice } from "../../../shared/chat-host-notice";
+import { HostContinuationNotice } from "../HostContinuationNotice";
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { failureMessage, isChatBusyFailure } from "@/lib/invocation-failure";
@@ -511,6 +514,7 @@ function decisionRejectCopy(locale: "ko" | "en"): string {
 }
 
 type UiMessage = {
+  hostNotice?: ChatHostNotice;
   id: string;
   /** Exact Main-issued transcript identity for a settled assistant row. */
   durableMessageId?: string;
@@ -702,10 +706,11 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
     if (entry.role === "assistant") userTurnAwaitingAnswer = false;
     const parsedFiles = parseChatFileMessage(entry.text);
     visible.push({
+      hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
       id: entry.id,
       durableMessageId: entry.durableMessageId ?? entry.id,
       role: entry.role === "assistant" ? "assistant" : entry.role,
-      text: parsedFiles.visibleText,
+      text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
       images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
       chatFileGroupIds: parsedFiles.groupIds,
       createdAt: entry.createdAt,
@@ -846,6 +851,7 @@ function readableOneJson(text: string): string | null {
  * once closed, reuse the canonical parser so malformed JSON is still removed.
  */
 function visibleOneMessageText(message: UiMessage): string {
+  if (normalizeChatHostNotice(message.role, message.hostNotice)) return message.text;
   if (isResultContinuationMessage(message)) {
     return "";
   }
@@ -6774,7 +6780,9 @@ export function OneShell() {
                           {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
                         </>}
-                        {(visibleText || hasAttachments) && (systemLabel
+                        {(visibleText || hasAttachments) && (normalizeChatHostNotice(message.role, message.hostNotice)
+                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} />
+                          : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One
                             // continued the remaining steps") is a quiet system

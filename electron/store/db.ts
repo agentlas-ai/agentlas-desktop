@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 112;
+const SCHEMA_VERSION = 113;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -4740,6 +4740,7 @@ export function initStore(options: StoreInitOptions = {}): void {
      * ~/.agentlas/networking/workforce-goals.sqlite3 (goal_ledger 테이블)에 산다.
      */
     chats: [["goal_id", "goal_id TEXT"]],
+    chat_messages: [["host_notice_json", "host_notice_json TEXT"]],
     automations: [
       ["goal", "goal TEXT"],
       ["goal_id", "goal_id TEXT"],
@@ -6154,6 +6155,12 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (userVersion < 112 && tableExists(_db, "capability_grants")) {
     // No additional DDL is needed here; the backstop has already added every
     // column before this ladder reaches the version marker.
+  }
+
+  // v113: Main-authored system-turn display purpose. The required-column
+  // backstop above adds the nullable column for old and partially upgraded DBs.
+  if (userVersion < 113 && tableExists(_db, "chat_messages")) {
+    // Existing rows remain NULL; never infer a purpose from legacy text.
   }
 
   } catch (error) {

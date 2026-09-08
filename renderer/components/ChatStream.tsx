@@ -1,6 +1,9 @@
+"use client";
+import type { ChatHostNotice } from "../../shared/types";
+import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { HostContinuationNotice } from "./HostContinuationNotice";
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
-"use client";
 import { Fragment, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project } from "@/lib/types";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
@@ -205,6 +208,7 @@ export interface StreamActivityRun {
 }
 
 export interface StreamMessage {
+  hostNotice?: ChatHostNotice;
   id: string;
   role: "user" | "agent" | "system";
   text: string;
@@ -968,6 +972,9 @@ const Bubble = memo(function Bubble({
     );
   }
   if (message.role === "system") {
+    if (normalizeChatHostNotice(message.role, message.hostNotice)) {
+      return <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} />;
+    }
     if (isInternalSystemNote(message.text)) return null;
     const isError = message.text.trim().startsWith("⚠️");
     return (

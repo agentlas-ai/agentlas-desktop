@@ -1,5 +1,7 @@
-// ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 "use client";
+import type { ChatHostNotice } from "../../shared/types";
+import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+// ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -1234,6 +1236,7 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
 }
 
 function historyEntryToStreamMessage(entry: {
+  hostNotice?: ChatHostNotice;
   id: string;
   role: string;
   text: string;
@@ -1245,6 +1248,7 @@ function historyEntryToStreamMessage(entry: {
   const role: StreamMessage["role"] =
     entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
   const durableIdentity = {
+    hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
     ...(entry.createdAt ? { createdAt: entry.createdAt } : {}),
     ...(entry.durableMessageId ? { durableMessageId: entry.durableMessageId } : {}),
   };
@@ -1252,7 +1256,7 @@ function historyEntryToStreamMessage(entry: {
     return {
       id: entry.id,
       role,
-      text: parsedFiles.visibleText,
+      text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
       ...durableIdentity,
       imageDataUrls: entry.imageDataUrls,
       chatFileGroupIds: parsedFiles.groupIds,
