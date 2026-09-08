@@ -1,3 +1,4 @@
+import { importDedicatedBrowserCookies } from "./browser/native-session-cookie-import";
 import { getLongRunByGoalId } from "./store/long-runs";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -6059,6 +6060,10 @@ export function registerIpcHandlers(): void {
     return stopAppFactoryLivePreview(input?.appId);
   });
 
+  ipcMain.handle("workLiveView:importBrowserCookies", async (event) => {
+    assertTrustedSitePublishIpcSender(event);
+    return importDedicatedBrowserCookies({ authorization: "explicit-user-action" });
+  });
   const bindNativeBrowserChat = (event: Electron.IpcMainInvokeEvent, taskScopeId: unknown) => {
     const window = assertTrustedSitePublishIpcSender(event);
     if (typeof taskScopeId !== "string" || !getChat(taskScopeId)) throw new Error("native-browser-chat-missing");

@@ -957,6 +957,7 @@ const api: AgentlasIpc = {
     listOperations: (appId) => ipcRenderer.invoke("appFactory:listOperations", appId),
   },
   workLiveView: {
+    importBrowserCookies: () => ipcRenderer.invoke("workLiveView:importBrowserCookies"),
     listTabs: (input) => ipcRenderer.invoke("workLiveView:listTabs", input),
     createTab: (input) => ipcRenderer.invoke("workLiveView:createTab", input),
     open: (input) => ipcRenderer.invoke("workLiveView:open", input),

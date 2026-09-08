@@ -13,36 +13,8 @@ import {
 } from "../mcp-tools/browser-cdp-launcher";
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 
-type CookieImportFailureCode =
-  | "authorization-required"
-  | "source-host-unavailable"
-  | "source-ownership-unverified"
-  | "source-reservation-failed"
-  | "source-protocol-unavailable"
-  | "source-cookie-read-failed"
-  | "source-empty"
-  | "no-transferable-cookies"
-  | "destination-write-failed";
-
-export type NativeBrowserCookieImportCode = "imported" | "partial" | CookieImportFailureCode;
-
-export interface NativeBrowserCookieImportResult {
-  ok: boolean;
-  code: NativeBrowserCookieImportCode;
-  /** This transfer intentionally excludes DOM storage, IndexedDB, cache, and service-worker state. */
-  scope: "cookies-only";
-  destinationPartition: typeof NATIVE_BROWSER_PARTITION;
-  observed: number;
-  imported: number;
-  skipped: {
-    expired: number;
-    partitioned: number;
-    invalid: number;
-    writeFailed: number;
-  };
-  /** Present only for the bounded machine-readable browser-host failure contract. */
-  hostFailure?: BrowserCdpHostFailureDiagnostic;
-}
+import type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
+export type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 
 interface CdpCookie {
   name?: unknown;
@@ -67,7 +39,7 @@ interface CookieWriteSummary {
 type NativeCookieSession = Pick<Session, "cookies" | "flushStorageData">;
 
 class CookieImportError extends Error {
-  constructor(readonly code: CookieImportFailureCode) {
+  constructor(readonly code: Exclude<NativeBrowserCookieImportCode, "imported" | "partial">) {
     super(code);
     this.name = "CookieImportError";
   }

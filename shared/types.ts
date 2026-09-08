@@ -3782,6 +3782,38 @@ export type WorkLiveViewInput =
   | { kind: "key"; phase: "down" | "up"; key: string }
   | { kind: "text"; text: string };
 
+type NativeBrowserCookieImportFailureCode =
+  | "authorization-required"
+  | "source-host-unavailable"
+  | "source-ownership-unverified"
+  | "source-reservation-failed"
+  | "source-protocol-unavailable"
+  | "source-cookie-read-failed"
+  | "source-empty"
+  | "no-transferable-cookies"
+  | "destination-write-failed";
+
+export type NativeBrowserCookieImportCode = "imported" | "partial" | NativeBrowserCookieImportFailureCode;
+
+export interface NativeBrowserCookieImportResult {
+  ok: boolean;
+  code: NativeBrowserCookieImportCode;
+  /** This transfer intentionally excludes DOM storage, IndexedDB, cache, and service-worker state. */
+  scope: "cookies-only";
+  destinationPartition: "persist:agentlas-browser-default";
+  observed: number;
+  imported: number;
+  skipped: {
+    expired: number;
+    partitioned: number;
+    invalid: number;
+    writeFailed: number;
+  };
+  /** Present only for the bounded machine-readable browser-host failure contract. */
+  hostFailure?: BrowserCdpHostFailureDiagnostic;
+}
+
+
 export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
   /** True only for the currently shown, ready guest. */
   visible?: boolean;
@@ -7964,6 +7996,8 @@ export interface AgentlasIpc {
    * preload, Node API, or Desktop IPC to the loaded page.
    */
   workLiveView: {
+    /** Explicit user action; source and destination are fixed by Main. */
+    importBrowserCookies: () => Promise<NativeBrowserCookieImportResult>;
     listTabs: (input: { taskScopeId: string }) => Promise<{ ok: boolean; tabs: WorkLiveBrowserTab[]; reason?: string }>;
     createTab: (input: { taskScopeId: string; url?: string }) => Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }>;
     open: (input: {
