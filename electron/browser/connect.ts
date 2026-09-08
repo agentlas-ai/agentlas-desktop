@@ -407,7 +407,7 @@ export interface BrowserApprovalRequest {
 export interface BrowserApprovalOptions {
   signal?: AbortSignal;
 }
-export type BrowserApprovalResult = "approved" | "denied" | "cancelled";
+export type BrowserApprovalResult = "approved" | "denied" | "cancelled" | "expired";
 
 interface PendingApproval {
   resolve: (v: BrowserPermissionDecision | "timeout" | "cancelled") => void;
@@ -597,7 +597,7 @@ export async function browserRequestApproval(
       result: "denied",
       approval: "timeout",
     });
-    return "denied";
+    return "expired";
   }
   if (decision === "cancelled") {
     logBrowserAction({

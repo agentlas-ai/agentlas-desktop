@@ -56,8 +56,8 @@ export function BrowserActionApprovalSheet() {
       setQueue((current) => current.filter((item) => item.requestId !== req.requestId));
       setExpiredNotice(
         ko
-          ? "응답 시간이 지나 이번 브라우저 작업을 안전하게 거부했습니다."
-          : "This browser action timed out and was safely denied.",
+          ? "승인 시간이 만료되어 이번 브라우저 작업은 실행되지 않았습니다."
+          : "Approval expired. This browser action was not executed.",
       );
     }, remaining);
     return () => {
@@ -149,7 +149,7 @@ export function BrowserActionApprovalSheet() {
           {
             id: "once",
             title: ko ? "한 번만 허용" : "Allow once",
-            note: summaryLine,
+            note: isUnsafeCode ? (ko ? "아래 코드 내용을 확인해 주세요." : "Review the code below.") : summaryLine,
             active: true,
           },
           ...(req.allowAlways ? [{
@@ -167,7 +167,16 @@ export function BrowserActionApprovalSheet() {
         ]}
         onChoose={(id) => resolve(id as "once" | "always" | "deny")}
       />
+      {isUnsafeCode && (
+        <details className="baa-code-review">
+          <summary>{ko ? "실행할 코드 전체 보기" : "Review full code"}</summary>
+          <pre tabIndex={0} aria-label={ko ? "실행할 브라우저 코드" : "Browser code to execute"}>{unsafeCodeDetail}</pre>
+        </details>
+      )}
       <style jsx>{`
+        .baa-code-review { margin-top: 12px; }
+        .baa-code-review summary { cursor: pointer; font-size: 13px; }
+        .baa-code-review pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 12px; line-height: 1.5; }
         .baa-wrap {
           position: fixed;
           left: 0;

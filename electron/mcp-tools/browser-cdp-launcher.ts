@@ -2522,6 +2522,16 @@ function readCdpPageUrl() {
 function readApprovalInfo() {
   try { if (!APPROVAL_FILE || !path.isAbsolute(APPROVAL_FILE) || !fs.existsSync(APPROVAL_FILE)) return null; return JSON.parse(fs.readFileSync(APPROVAL_FILE, 'utf8')); } catch (e) { return null; }
 }
+function browserApprovalFailure(denied) {
+              const code = denied === 'approval-expired' ? 'approval_expired'
+                : denied === 'approval-cancelled' ? 'cancelled'
+                : denied === 'approval-unavailable' || denied === 'unverified-site' ? 'approval_required' : 'approval_declined';
+              const message = code === 'approval_expired' ? 'APPROVAL_EXPIRED: The approval deadline elapsed without a decision. The action was not executed; the user did not decline it.'
+                : code === 'cancelled' ? 'CANCELLED: This browser approval request was cancelled. The action was not executed.'
+                : code === 'approval_required' ? 'APPROVAL_REQUIRED: The approval service or current site could not be verified. The action was not executed.'
+                : 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.';
+  return { code, content: [{ type: 'text', text: message }], isError: true };
+}
 function requestApproval(site, actionType, summary, signal) {
   return new Promise((resolve) => {
     const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
@@ -2543,13 +2553,13 @@ function requestApproval(site, actionType, summary, signal) {
     if (signal && signal.aborted) return finish('cancelled');
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     const info = readApprovalInfo();
-    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish(trustFallback ? 'approved' : 'denied'); }
+    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish(trustFallback ? 'approved' : 'unavailable'); }
     const payload = JSON.stringify({ site, actionType, summary });
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
-      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { finish(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); } catch (e) { finish('denied'); } });
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
     });
-    req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : (trustFallback ? 'approved' : 'denied')));
-    req.on('timeout', () => { req.destroy(); finish('denied'); });
+    req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : (trustFallback ? 'approved' : 'unavailable')));
+    req.on('timeout', () => { finish('expired'); req.destroy(); });
     req.write(payload); req.end();
   });
 }
@@ -2717,10 +2727,10 @@ async function main() {
     let site = ''; try { site = new URL(contextUrl).host; } catch (e) { site = ''; }
     if (!site) { log('blocked sensitive action: invalid approval URL', contextUrl); return 'unverified-site'; }
     const detail = actionType === 'unsafe-code'
-      ? String(args.function || args.code || args.filename || name).slice(0, 240)
+      ? String(args.function || args.expression || args.code || args.filename || name)
       : (args.element || args.url || args.key || name);
     const decision = await requestApproval(site, actionType, actionType + ': ' + detail, signal);
-    return decision === 'approved' ? null : (decision === 'cancelled' ? 'cancelled' : actionType);
+    return decision === 'approved' ? null : (decision === 'denied' ? actionType : 'approval-' + decision);
   };
 
   // 내부에서 child 에 tools/call 을 보내고 응답을 받는다(replay 용).
@@ -2736,7 +2746,7 @@ async function main() {
     const results = [];
     for (const step of (skill.steps || [])) {
       const denied = await gate(step.name, step.arguments || {});
-      if (denied) { results.push(step.name + ': BLOCKED(' + denied + ')'); writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replay stopped — ' + denied + ' action needs approval. Trust mode may continue ordinary actions, but payment and arbitrary code always require explicit approval.' }], isError: true } }); return; }
+      if (denied) { results.push(step.name + ': BLOCKED(' + denied + ')'); writeClient({ jsonrpc: '2.0', id: replyId, result: browserApprovalFailure(denied) }); return; }
       if (step.name === 'browser_navigate' && step.arguments && step.arguments.url) currentUrl = String(step.arguments.url);
       const resp = await callChild(step.name, step.arguments || {});
       const isErr = resp && resp.result && resp.result.isError;
@@ -2778,7 +2788,9 @@ async function main() {
           const controller = gateLifecycle.begin(msg.id);
           gate(name, args, controller.signal).then((denied) => {
             if (!gateLifecycle.settle(msg.id, controller)) return;
-            if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.' }], isError: true } }); return; }
+            if (denied) {
+              writeClient({ jsonrpc: '2.0', id: msg.id, result: browserApprovalFailure(denied) }); return;
+            }
             if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
             if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
             forwardRaw(forwardedLine);

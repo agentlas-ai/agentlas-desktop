@@ -9,12 +9,14 @@
 export type ToolFailureCode =
   | "approval_declined"
   | "approval_required"
+  | "approval_expired"
   | "cancelled"
   | "tool_failed";
 
 const TOOL_FAILURE_CODES: ReadonlySet<string> = new Set([
   "approval_declined",
   "approval_required",
+  "approval_expired",
   "cancelled",
   "tool_failed",
 ]);
@@ -38,6 +40,7 @@ function explicitFailureCode(value: unknown): ToolFailureCode | undefined {
   }
   if (code === "approval_required" || code === "approval_needed") return "approval_required";
   if (code === "cancelled" || code === "canceled" || code === "aborted_by_user") return "cancelled";
+  if (code === "approval_expired") return "approval_expired";
   if (code === "tool_failed") return "tool_failed";
   return undefined;
 }
@@ -54,6 +57,7 @@ export function classifyToolFailure(input: {
   const raw = [normalizedText(input.result), normalizedText(input.status)]
     .filter(Boolean)
     .join("\n");
+  if (/^APPROVAL_EXPIRED:/m.test(raw)) return "approval_expired";
   if (
     /\buser\s+(?:rejected|declined|denied)\s+(?:(?:the|this)\s+)?(?:mcp\s+)?tool\s+call\b/i.test(raw)
     || /\btool\s+call\s+(?:was\s+)?(?:rejected|declined|denied)\b/i.test(raw)
@@ -82,6 +86,8 @@ export function toolFailureCopy(value: unknown, locale: "ko" | "en"): string | n
     switch (value) {
       case "approval_declined":
         return "승인하지 않아 도구 실행을 중단했습니다. 실행하려면 승인해 주세요.";
+      case "approval_expired":
+        return "승인 시간이 만료되어 도구가 실행되지 않았습니다.";
       case "approval_required":
         return "이 작업은 승인이 필요합니다. 승인하면 다시 진행할 수 있습니다.";
       case "cancelled":
@@ -93,6 +99,8 @@ export function toolFailureCopy(value: unknown, locale: "ko" | "en"): string | n
   switch (value) {
     case "approval_declined":
       return "The tool stopped because approval was declined. Approve it to continue.";
+    case "approval_expired":
+      return "Approval expired. The tool was not executed.";
     case "approval_required":
       return "This action needs approval. Approve it to continue.";
     case "cancelled":
