@@ -74,6 +74,8 @@ import {
 } from "../store/invocation-steers";
 import {
   appendChatMessage,
+  bindGoalResultMessage,
+  settleGoalResultMessages,
   getChat,
   getChatWorkingFolder,
   hasDurableAssistantMessage,
@@ -1780,6 +1782,7 @@ export class InvocationService {
       runReq,
       (rawEvent) => {
         rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
+        rawEvent = { ...rawEvent, goalResult: undefined };
         // One provider/run gets one terminal settlement. Late duplicate finals,
         // EOF callbacks, and post-cancel deliveries cannot reopen a Decision.
         if (terminalObserved && (rawEvent.kind === "final" || rawEvent.kind === "error")) return;
@@ -2144,6 +2147,16 @@ export class InvocationService {
             sequence: observableStepSequence,
             observedAt: event.observedAt,
           };
+        }
+        const resultGoalId = projectionGoalId ?? record.automaticGoalId;
+        if (resultGoalId && !event.agentId && (event.kind === "partial" || event.kind === "final")) {
+          event = { ...event, goalResult: { goalId: resultGoalId, runId, status: "pending" } };
+          if (event.kind === "final" && typeof event.text === "string") {
+            const messageId = bindGoalResultMessage({ chatId: runReq.chatId, goalId: resultGoalId, runId,
+              text: typeof durableTextForVerification === "string" && durableTextForVerification.trim()
+                ? durableTextForVerification : stripPermissionEscalationMarker(event.text), notBefore: startedAt });
+            if (messageId) event = { ...event, durableMessageId: messageId };
+          }
         }
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence);
 
@@ -2516,6 +2529,8 @@ export class InvocationService {
                *
                * The goal being verified is named by the claim. That is the identity to act on.
                */
+              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId,
+                verified: !controller.signal.aborted && verification?.disposition === "completed" });
               if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
               const verifiedGoalId = completionClaim.goalId!;
               if (verification?.disposition === "completed") {
@@ -2532,6 +2547,7 @@ export class InvocationService {
               }
             })
             .catch((error: unknown) => {
+              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false });
               console.warn("[long-run] terminal verification failed:", error);
               if (controller.signal.aborted) return;
               // A verifier that never answered must still leave the goal somewhere a person can act

@@ -1860,6 +1860,7 @@ export interface ChatHostNotice {
 }
 
 export interface ChatHistoryEntry {
+  goalResult?: import("./goal-result").GoalResultPresentation;
   id: string;
   /** Opaque Main-issued durable chat-message identity; never derived from copy or timestamps. */
   durableMessageId?: string;
@@ -4649,6 +4650,7 @@ export interface McpInvocationEvent {
   observedAt?: string;
   /** Opaque durable assistant-message identity, present only after Main commits the transcript row. */
   durableMessageId?: string;
+  goalResult?: import("./goal-result").GoalResultPresentation;
   /** Main-owned run boundary. Unlike status prose, this is an authoritative lifecycle fact. */
   lifecycle?: {
     phase: "start" | "cancel_requested";

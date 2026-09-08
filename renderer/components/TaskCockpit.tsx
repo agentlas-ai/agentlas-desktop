@@ -1,4 +1,5 @@
 "use client";
+import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
@@ -1236,6 +1237,7 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
 }
 
 function historyEntryToStreamMessage(entry: {
+  goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
   role: string;
@@ -1248,6 +1250,7 @@ function historyEntryToStreamMessage(entry: {
   const role: StreamMessage["role"] =
     entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
   const durableIdentity = {
+    ...(entry.goalResult ? { goalResult: entry.goalResult } : {}),
     hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
     ...(entry.createdAt ? { createdAt: entry.createdAt } : {}),
     ...(entry.durableMessageId ? { durableMessageId: entry.durableMessageId } : {}),
@@ -1313,6 +1316,7 @@ function mergeStreamMessageDuplicate(existing: StreamMessage, candidate: StreamM
     ...preferred,
     id: existing.id,
     text: preferred.text.trim() ? preferred.text : existing.text || candidate.text,
+    goalResult: mergeGoalResults(existing.goalResult, candidate.goalResult),
     ...(preferred.durableMessageId || existing.durableMessageId || candidate.durableMessageId
       ? { durableMessageId: preferred.durableMessageId ?? existing.durableMessageId ?? candidate.durableMessageId }
       : {}),
@@ -3187,6 +3191,7 @@ function ChatPage() {
                   return {
                     ...msg,
                     text: resyncSetup.text,
+                    ...(snap?.goalResult ? { goalResult: snap.goalResult } : {}),
                     streaming: true,
                     questions: resync.questions.length > 0 ? resync.questions : msg.questions,
                     needsMultimodalSetup: resyncSetup.needsSetup || msg.needsMultimodalSetup,
@@ -3213,6 +3218,7 @@ function ChatPage() {
             return {
               ...msg,
               text: setup.text,
+              ...(ev.goalResult ? { goalResult: ev.goalResult } : {}),
               streaming: true,
               // 새 텍스트 활동 — 직전 "N초 동안 생각함" 잔류 표시는 걷는다.
               thinking:
@@ -3226,7 +3232,9 @@ function ChatPage() {
         );
       } else if (ev.kind === "final") {
         lastFinalRunIdRef.current = sourceRunId ?? runIdRef.current;
-        pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
+        pushWorkflow("status", ev.goalResult && ev.goalResult.status !== "verified"
+          ? locale === "ko" ? "보고서 작성됨 · 검증 대기" : "Report ready · verification pending"
+          : locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         transcriptRevisionRef.current += 1;
         setMessages((m) =>
           dedupeStreamMessages(m.map((msg) => {
@@ -3244,6 +3252,7 @@ function ChatPage() {
             return {
               ...msg,
               text: setup.text,
+              ...(ev.goalResult ? { goalResult: ev.goalResult } : {}),
               ...(ev.durableMessageId ? { durableMessageId: ev.durableMessageId } : {}),
               imageDataUrls: ev.imageDataUrls ?? msg.imageDataUrls,
               busy: false,
@@ -3542,6 +3551,7 @@ function ChatPage() {
     const events = ipcEvents();
     if (!api || !events?.onStoreChanged || !chatId) return;
     let generation = 0;
+    let disposed = false;
     const refresh = () => {
       const requestGeneration = ++generation;
       void api.runtime.detect().then((list) => {
@@ -3572,7 +3582,7 @@ function ChatPage() {
         );
       }).catch(() => undefined);
     };
-    return events.onStoreChanged((change) => {
+    const unsubscribe = events.onStoreChanged((change) => {
       if (change.entity === "runtime") { refresh(); return; }
       /*
        * ★목표가 닫혀도 화면이 그 사실을 못 받던 자리 (QA 실측 2026-09-08).
@@ -3587,9 +3597,18 @@ function ChatPage() {
        * 소유한 값은 이 경로로만 화면에 도착한다.
        */
       if (change.entity === "chat" && change.id === chatId) {
+        void api.invoke.history(chatId).then((history) => {
+          if (disposed) return;
+          const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
+          setMessages((current) => current.map((message) => {
+            const result = states.get(message.durableMessageId ?? message.id);
+            return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
+          }));
+        }).catch(() => undefined);
         void api.chats.get(chatId).then((next) => { if (next) setChat(next); }).catch(() => undefined);
       }
     });
+    return () => { disposed = true; unsubscribe(); };
   }, [chat?.runtimeSelection, chatId]);
 
   // The transcript is durable, so the Agent work panel must be durable too.

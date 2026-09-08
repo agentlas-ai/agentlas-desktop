@@ -6,6 +6,7 @@ import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
+import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
@@ -895,11 +896,14 @@ export function appendChatMessage(
   const now = new Date().toISOString();
   const db = getDb();
   const hostNotice = normalizeChatHostNotice(role, options?.hostNotice);
+  const goalId = role === "assistant" ? getChat(chatId)?.goalId : null;
+  const goalResult: GoalResultPresentation | undefined = goalId ? { goalId, runId: null, status: "pending" } : undefined;
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
       "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null);
+    if (goalResult) persistGoalResult(chatId, id, goalResult);
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
       persistedImageUrls = persisted.map((item) => item.url);
@@ -913,6 +917,7 @@ export function appendChatMessage(
   return {
     id,
     durableMessageId: id,
+    ...(goalResult ? { goalResult } : {}),
     role,
     text,
     createdAt: now,
@@ -954,6 +959,82 @@ export function latestDurableAssistantMessage(
   return row ? { id: row.id, text: row.text, createdAt: row.created_at } : null;
 }
 
+/** Result presentation is a typed ledger fact, independent of model text and schema migrations. */
+function persistGoalResult(chatId: string, messageId: string, result: GoalResultPresentation): void {
+  const db = getDb();
+  // Unbound pending rows have a private metadata stream, never an invoke_started receipt.
+  const ledgerRunId = result.runId ?? `goal-result:${messageId}`;
+  db.prepare(`INSERT INTO run_events(id, run_id, seq, ts, kind, chat_id, payload_json)
+    VALUES (?, ?, (SELECT COALESCE(MAX(seq) + 1, 0) FROM run_events WHERE run_id = ?), ?, 'goal_result_presentation', ?, ?)`)
+    .run(randomUUID(), ledgerRunId, ledgerRunId, new Date().toISOString(), chatId, JSON.stringify({ messageId, ...result }));
+}
+
+function storedGoalResults(chatId: string, messageIds: string[]): Map<string, GoalResultPresentation> {
+  const result = new Map<string, GoalResultPresentation>();
+  if (!messageIds.length) return result;
+  const rows = getDb().prepare(`SELECT payload_json FROM run_events WHERE chat_id = ? AND kind = 'goal_result_presentation'
+    AND json_extract(payload_json, '$.messageId') IN (${messageIds.map(() => '?').join(',')}) ORDER BY rowid ASC`)
+    .all(chatId, ...messageIds) as {payload_json: string}[];
+  for (const row of rows) {
+    const parsed = parseGoalResult(row.payload_json);
+    if (parsed) result.set(JSON.parse(row.payload_json).messageId, parsed);
+  }
+  return result;
+}
+
+/** Bind by exact persisted body and invocation interval, never by "latest answer" alone. */
+export function bindGoalResultMessage(p: { chatId: string; goalId: string; runId: string; text: string; notBefore: string }): string | undefined {
+  const db = getDb();
+  const id = db.transaction(() => {
+    const rows = db.prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND text = ? AND created_at >= ? ORDER BY rowid DESC`).all(p.chatId, p.text, p.notBefore) as {id: string}[];
+    if (rows.length !== 1) return undefined;
+    const existing = storedGoalResults(p.chatId, [rows[0].id]).get(rows[0].id);
+    if (existing && (existing.goalId !== p.goalId || (existing.runId && existing.runId !== p.runId))) return undefined;
+    if (existing?.status === "verified") return rows[0].id;
+    persistGoalResult(p.chatId, rows[0].id, { goalId: p.goalId, runId: p.runId, status: "pending" });
+    return rows[0].id;
+  })();
+  if (id) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
+  return id;
+}
+
+/** Promotion is scoped to the exact host verification and its bound message. */
+export function settleGoalResultMessages(p: { chatId: string; goalId: string; runId: string; verified: boolean }): void {
+  const db = getDb();
+  let changed = false;
+  db.transaction(() => {
+    const ids = db.prepare(`SELECT DISTINCT json_extract(payload_json, '$.messageId') AS id FROM run_events
+      WHERE run_id = ? AND chat_id = ? AND kind = 'goal_result_presentation'`).all(p.runId, p.chatId) as {id: string}[];
+    const states = storedGoalResults(p.chatId, ids.map((row) => row.id));
+    for (const [id, current] of states) {
+      if (current.goalId !== p.goalId || current.runId !== p.runId || current.status === "verified") continue;
+      persistGoalResult(p.chatId, id, { ...current, status: p.verified ? "verified" : "unverified" });
+      changed = true;
+    }
+  })();
+  if (changed) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
+}
+
+/** Old reports have no stored verifier result. Only exact ledger identities can mark them as Goal reports. */
+function legacyGoalResults(chatId: string, messageIds: string[]): Map<string, GoalResultPresentation> {
+  const result = new Map<string, GoalResultPresentation>();
+  if (!messageIds.length) return result;
+  const rows = getDb().prepare(`SELECT f.run_id, json_extract(f.payload_json, '$.durableMessageId') AS message_id,
+      json_extract(g.payload_json, '$.goalId') AS goal_id
+    FROM run_events f JOIN run_events g ON g.run_id = f.run_id AND g.chat_id = f.chat_id
+    WHERE f.chat_id = ? AND f.kind = 'mcp_final' AND g.kind = 'mcp_goal_tool_selection'
+      AND json_extract(f.payload_json, '$.durableMessageId') IN (${messageIds.map(() => '?').join(',')})`).all(chatId, ...messageIds) as {run_id: string; message_id: string; goal_id: string}[];
+  const ambiguous = new Set<string>();
+  for (const row of rows) {
+    if (!row.goal_id || !row.run_id) continue;
+    const previous = result.get(row.message_id);
+    if (previous && (previous.runId !== row.run_id || previous.goalId !== row.goal_id)) ambiguous.add(row.message_id);
+    result.set(row.message_id, { goalId: row.goal_id, runId: row.run_id, status: "legacy" });
+  }
+  for (const id of ambiguous) result.delete(id);
+  return result;
+}
+
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
@@ -968,11 +1049,15 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
     )
     .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
+  const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
+  const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
   return rows.map((r) => {
     const hostNotice = parseChatHostNotice(r.role, r.host_notice_json);
     return {
       id: r.id,
       durableMessageId: r.id,
+      ...(r.role === "assistant" && (goalResults.get(r.id) ?? legacyResults.get(r.id))
+        ? { goalResult: goalResults.get(r.id) ?? legacyResults.get(r.id) } : {}),
       role: r.role,
       text: r.text,
       createdAt: r.created_at,

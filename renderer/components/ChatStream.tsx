@@ -1,4 +1,6 @@
 "use client";
+import type { GoalResultPresentation } from "../../shared/goal-result";
+import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { HostContinuationNotice } from "./HostContinuationNotice";
@@ -208,6 +210,7 @@ export interface StreamActivityRun {
 }
 
 export interface StreamMessage {
+  goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
   role: "user" | "agent" | "system";
@@ -1048,6 +1051,7 @@ const Bubble = memo(function Bubble({
             ))}
           </div>
         )}
+        <GoalResultReport result={message.goalResult} locale={locale}>
         {showWorkActivity && displayText && message.busy && (
           <LiveOutputPanel
             text={displayText}
@@ -1089,6 +1093,7 @@ const Bubble = memo(function Bubble({
             mediaBasePaths={mediaBasePaths}
           />
         )}
+        </GoalResultReport>
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (
           <div
             data-testid="chat-generated-images"

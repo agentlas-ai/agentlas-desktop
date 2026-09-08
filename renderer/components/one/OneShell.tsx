@@ -1,4 +1,6 @@
 "use client";
+import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
+import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice } from "../../../shared/types";
 import { normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
@@ -515,6 +517,7 @@ function decisionRejectCopy(locale: "ko" | "en"): string {
 }
 
 type UiMessage = {
+  goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
   /** Exact Main-issued transcript identity for a settled assistant row. */
@@ -718,6 +721,7 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
       id: entry.id,
       durableMessageId: entry.durableMessageId ?? entry.id,
+      ...(entry.goalResult ? { goalResult: entry.goalResult } : {}),
       role: entry.role === "assistant" ? "assistant" : entry.role,
       text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
       images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
@@ -2528,7 +2532,7 @@ export function OneShell() {
       if (typeof event.delta === "string") streamTextRef.current += event.delta;
       else streamTextRef.current = event.text ?? streamTextRef.current;
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => upsertLiveMessage(current, streamTextRef.current, true));
+      setMessages((current) => upsertLiveMessage(current, streamTextRef.current, true).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message));
       /*
        * ★ 답이 흘러나오는 동안에도 화면이 따라 내려간다 (오너 지적 2026-08-24).
        *
@@ -2558,7 +2562,7 @@ export function OneShell() {
       oneTranscriptRevisionRef.current += 1;
       setMessages((current) => upsertLiveMessage(current, text, false).map((message) => (
         message.id === "one-live-response"
-          ? { ...message, id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
+          ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
           : message
       )));
       setBusy(false);
@@ -2919,6 +2923,25 @@ export function OneShell() {
   // a picker started in chat A can settle after navigation and paint A's path
   // into chat B.
   activeThreadChatIdRef.current = activeThreadChatId;
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !activeThreadChatId) return;
+    let disposed = false;
+    return (() => {
+      const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+        if (change.entity !== "chat" || change.id !== activeThreadChatId) return;
+        void api.invoke.history(activeThreadChatId).then((history) => {
+          if (disposed || activeThreadChatIdRef.current !== activeThreadChatId) return;
+          const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
+          setMessages((current) => current.map((message) => {
+            const result = states.get(message.durableMessageId ?? message.id);
+            return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
+          }));
+        }).catch(() => undefined);
+      });
+      return () => { disposed = true; unsubscribe?.(); };
+    })();
+  }, [activeThreadChatId]);
   useEffect(() => {
     onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
   }, [activeThreadChatId, selectedConversationId]);
@@ -6792,6 +6815,7 @@ export function OneShell() {
                                 * 답이 자라는 중에는 평소대로 그린다: 표식만 있고 본문이
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
+                              <GoalResultReport result={message.goalResult} locale={appLocale}>
                               {visibleText && (message.streaming
                                 ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />
                                 : (() => {
@@ -6800,6 +6824,7 @@ export function OneShell() {
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
                                     : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />;
                                 })())}
+                              </GoalResultReport>
                             </div>
                             )}
                             </div>

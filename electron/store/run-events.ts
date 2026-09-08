@@ -1067,6 +1067,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     // run to history only through this opaque ID; worker message IDs and
     // timestamp/text guesses are intentionally not persisted as substitutes.
     durableMessageId: ev.kind === "final" ? ev.durableMessageId : undefined,
+    goalResult: ev.kind === "final" ? ev.goalResult : undefined,
     // Worker messaging and CLI process lifecycle are explicit durable facts.
     // Keep them flat in the diagnostic payload so old ledger readers can
     // replay the event without needing to understand a new nested schema.
