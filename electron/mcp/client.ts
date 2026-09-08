@@ -65,6 +65,8 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
+import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
+import { getLongRunByGoalId } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
@@ -155,14 +157,14 @@ import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMark
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { previousTurnObservation, projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
+import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
-import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
+import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown } from "../runtime/runtime-cooldown";
@@ -2641,6 +2643,14 @@ ${effectiveUserPrompt}`;
   // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
   // 런타임별 설정으로 직렬화해 넘긴다. env가 필요한 플러그인은 vault 값이 있을 때만 자동 설치한다.
   let mcpConfigPath: string | undefined;
+  let mcpGoalSelectionIsCurrent: (() => boolean) | undefined;
+  let mcpGoalSelectionInvalidated = false;
+  const assertMcpGoalSelectionCurrent = (): void => {
+    if (mcpGoalSelectionIsCurrent && !mcpGoalSelectionIsCurrent()) mcpGoalSelectionInvalidated = true;
+    if (mcpGoalSelectionInvalidated) {
+      throw Object.assign(new Error("mcp_goal_tool_scope_changed"), { code: "mcp-goal-tool-scope-changed" });
+    }
+  };
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
@@ -2782,7 +2792,36 @@ ${effectiveUserPrompt}`;
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
           : {}),
         // 같은 채팅의 후속 턴이면 지난 선택과 접속 확인을 재사용한다(auto-select 메모).
-        conversationId: req.chatId,
+        conversationId: chat.id,
+        resolveActiveGoalScope: () => {
+          if (req.agentAppMode || signal?.aborted) return null;
+          const goalId = getChatGoalId(chat.id);
+          if (!goalId || goalId !== chat.goalId) return null;
+          const contract = getChatGoalContract(goalId);
+          const revision = getChatGoalRevision(goalId);
+          const run = getLongRunByGoalId(goalId);
+          if (contract?.status !== "active" || revision?.chatId !== chat.id
+            || !run || !["queued", "running", "waiting_worker", "waiting_tool", "verifying"].includes(run.status)) return null;
+          // Permission is this invocation's host-normalized grant. A later
+          // invocation with a narrower grant receives a different scope hash.
+          return { goalId, revision: revision.revision, permission: normalizedPermission };
+        },
+        readGoalSelection: (scope: Omit<GoalToolSelectionReceipt, "selectedIds">): string[] => {
+          // Only the latest Main receipt in this chat can supply a hint. Searching
+          // older matching scopes would resurrect a revoked permission/configuration.
+          const row = getDb().prepare(
+            "SELECT payload_json FROM run_events WHERE chat_id = ? AND kind = 'mcp_goal_tool_selection' ORDER BY rowid DESC LIMIT 1",
+          ).get(chat.id) as { payload_json: string } | undefined;
+          if (!row) return [];
+          const receipt = JSON.parse(row.payload_json) as Partial<GoalToolSelectionReceipt>;
+          return receipt.goalId === scope.goalId && receipt.revision === scope.revision && receipt.scopeHash === scope.scopeHash
+            && Array.isArray(receipt.selectedIds) && receipt.selectedIds.length <= 100
+            && receipt.selectedIds.every((id) => typeof id === "string" && id.length > 0 && id.length <= 200)
+            ? receipt.selectedIds : [];
+        },
+        writeGoalSelection: (receipt: GoalToolSelectionReceipt): void => {
+          recordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_tool_selection", payload: { ...receipt } });
+        },
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
       };
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
@@ -2801,35 +2840,34 @@ ${effectiveUserPrompt}`;
         sink,
         signal,
         // 키가 저장된 뒤의 재선택은 세상이 바뀐 시점이다 — 메모를 버리고 처음부터 다시 고른다.
-        reselect: () => autoSelectMcpTools({ ...autoSelectInput, bypassSelectionMemo: true }),
+        reselect: () => autoSelectMcpTools({
+          ...autoSelectInput,
+          bypassSelectionMemo: true,
+          ...(selectedContext.goalSelectionScope ? { credentialRetry: {
+            ...selectedContext.goalSelectionScope,
+            // This callback runs only after the current gate's typed provided
+            // outcome. Recheck these exact requested IDs, never a stale ready row.
+            selectedIds: selectedContext.tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0)
+              .map((tool) => tool.id),
+          } } : {}),
+        }),
       });
       selectedContext = keyGate.context;
-      /*
-       * Only say this when it actually cost something.
-       *
-       * "Nothing was decided" and "there was nothing to decide" arrived here as the same boolean, so
-       * a plain request with zero optional tools in play raised the same alarming card as a browser
-       * task whose judge was dead — on every single message, permanently, for anyone whose only
-       * connected runtime cannot prove tool-free isolation. A warning that is always on is a warning
-       * nobody reads, and this one told the person to re-send a request that had nothing wrong with
-       * it.
-       *
-       * The notice now requires a real loss (candidates existed and none could be judged) and names
-       * the cause, because the next action differs: a runtime that refuses judgment outright is not
-       * fixed by waiting or retrying — it is fixed by connecting one that can.
-       */
+      mcpGoalSelectionIsCurrent = selectedContext.goalSelectionIsCurrent;
+      assertMcpGoalSelectionCurrent();
+      // A selection failure does not establish that a provider is disconnected
+      // or authorize suggesting a runtime outside the user's configured pool.
       const needsOutcome = selectedContext.needsOutcome;
       const undecidedCostSomething = !selectedContext.needsDecided && (needsOutcome?.candidateCount ?? 0) > 0;
       if (undecidedCostSomething) {
-        const cause = needsOutcome?.reason ?? "no connected model answered";
         sink({
           kind: "notice",
           notice: {
             level: "warning",
             code: "mcp-selection-undecided",
             message: locale === "ko"
-              ? `이번 실행에서는 어떤 선택형 도구가 필요한지 정해 줄 모델이 대답하지 않아, 미리 지정된 도구만 붙여 진행했습니다(사유: ${cause}). 브라우저나 컴퓨터 제어가 필요한 일이었다면 결과를 완료로 보지 마시고, 격리 실행이 가능한 런타임(예: Claude Code)을 하나 연결한 뒤 다시 보내 주세요.`
-              : `No model answered which optional tools this task needs, so the run continued with only the explicitly configured ones (cause: ${cause}). If this task needed browser or computer control, do not treat the result as complete: connect a runtime that can run isolated judgment (Claude Code, for example) and send it again.`,
+              ? "이번 실행의 선택형 도구 판정이 완료되지 않았습니다. 현재 설정된 도구와 같은 활성 Goal에서 선택되어 다시 확인된 도구로 진행합니다. 필요한 도구가 없다면 현재 허용된 모델과 도구 설정을 확인해 주세요."
+              : "Optional-tool judgment did not complete for this run. Work continues with configured tools and revalidated selections from the same active Goal. If a required tool is unavailable, check the currently allowed models and tool settings.",
           },
         });
       }
@@ -2938,6 +2976,9 @@ ${effectiveUserPrompt}`;
           console.warn("[mcp] hub plugin bridge failed:", bridgeError);
         }
       }
+      // Hub/credential setup may await user or network work. Re-check the
+      // selected server bindings before materializing their runtime config.
+      assertMcpGoalSelectionCurrent();
       const cfg = await buildMcpConfigFile({
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
         // 그래프가 선으로 이어 선언한 도구는 자동 선택 결과와 **함께** 켠다.
@@ -2971,6 +3012,7 @@ ${effectiveUserPrompt}`;
           ...(executionContext ? { unattended: true } : {}),
         },
       });
+      assertMcpGoalSelectionCurrent();
       if (cfg) {
         mcpConfigPath = cfg.configPath;
         mcpAllowedTools = cfg.allowedTools;
@@ -3058,6 +3100,7 @@ ${effectiveUserPrompt}`;
   // last shared point before any direct, group, firm, swarm, or borrowed runner
   // can start. A deleted/replaced directory cannot inherit the earlier check.
   if (workspaceBinding) revalidateInvocationWorkspaceBinding(workspaceBinding);
+  assertMcpGoalSelectionCurrent();
   let coreStormbreakerHarnessPromise: ReturnType<typeof stormbreakerHarness> | null = null;
   const loadCoreStormbreakerHarness = () => {
     coreStormbreakerHarnessPromise ??= stormbreakerHarness({
