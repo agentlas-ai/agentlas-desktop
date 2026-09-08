@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const source = fs.readFileSync(new URL("../science-extension/ui/app.js", import.meta.url), "utf8");
+const source = fs.readFileSync(new URL("../node_modules/agentlas-science/ui/app.js", import.meta.url), "utf8");
 const start = source.indexOf("// RESULT_ARTIFACT_ROUTE_HELPER_START");
 const end = source.indexOf("// RESULT_ARTIFACT_ROUTE_HELPER_END");
 assert.ok(start >= 0 && end > start, "production result-artifact route helper markers must exist");

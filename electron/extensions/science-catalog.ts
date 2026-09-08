@@ -1,5 +1,5 @@
 import type { ScienceSuiteComponentId } from "../../shared/product-extension";
-import { SCIENCE_DESKTOP_HOST_API_NAME, SCIENCE_DESKTOP_HOST_API_VERSION } from "../../shared/science-extension-host-compatibility";
+import { SCIENCE_DESKTOP_HOST_API_NAME, SCIENCE_DESKTOP_HOST_API_VERSION } from "agentlas-science/dist/contracts/science-extension-host-compatibility";
 import type { SciencePackageArchiveSpec } from "./downloader";
 
 const CATALOG_SCHEMA = "agentlas.science-catalog/v1";

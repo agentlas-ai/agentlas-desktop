@@ -381,7 +381,8 @@
     "styled-exceljs": "0.21.1",
     "three": "0.173.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "agentlas-science": "github:agentlas-ai/agentlas-science"
   },
   "devDependencies": {
     "@electron/fuses": "^1.8.0",

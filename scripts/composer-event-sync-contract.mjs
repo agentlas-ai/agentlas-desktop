@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const appSource = fs.readFileSync(new URL("../science-extension/ui/app.js", import.meta.url), "utf8");
+const appSource = fs.readFileSync(new URL("../node_modules/agentlas-science/ui/app.js", import.meta.url), "utf8");
 const syncSource = appSource.slice(
   appSource.indexOf("// COMPOSER_EVENT_SYNC_BEGIN"),
   appSource.indexOf("// COMPOSER_EVENT_SYNC_END"),

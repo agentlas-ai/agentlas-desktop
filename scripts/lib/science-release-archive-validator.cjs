@@ -30,7 +30,7 @@ const {
 const { parseScienceServiceDescriptor } = require("../../dist/shared/science-lab-capability.js");
 const {
   assertScienceExtensionReleaseHostCompatibility,
-} = require("../../dist/electron/science/tool-control-server.js");
+} = require("../../node_modules/agentlas-science/dist/tool-control-server.js");
 
 const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;

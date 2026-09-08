@@ -1,25 +1,25 @@
 import { webContents, type IpcMain, type IpcMainInvokeEvent } from "electron";
 import { createHash, randomUUID } from "node:crypto";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
-import type { ScienceStore } from "./store";
-import type { ScienceDatasetIngestionService } from "./dataset-ingestion";
-import { createScienceDatasetIngestionService } from "./lazy-services";
+import type { ScienceStore } from "agentlas-science";
+import type { ScienceDatasetIngestionService } from "agentlas-science";
+import { createScienceDatasetIngestionService } from "agentlas-science";
 import {
   discoverScienceProjectData,
   revalidateResolvedScienceProjectDataCandidate,
   readResolvedScienceProjectDataCandidate,
   resolveScienceProjectDataCandidate,
   type ScienceProjectDataCandidate,
-} from "./project-data-discovery";
+} from "agentlas-science";
 import {
   ScienceProjectDataAutoRefreshCoordinator,
   scienceProjectDataRefreshInputFromFilesystem,
-} from "./project-data-auto-refresh";
+} from "agentlas-science";
 import {
   persistPreparedScienceWorkbook,
   type ScienceWorkbookImportInput,
 } from "./workbook-intake-ipc";
-import { prepareScienceWorkbook } from "./workbook-ingestion";
+import { prepareScienceWorkbook } from "agentlas-science";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

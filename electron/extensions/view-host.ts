@@ -21,7 +21,7 @@ import {
   type ScienceRendererRuntimeStatus,
   type ScienceChemistryCommitInput,
   type ScienceMolstarCommitInput,
-} from "../../shared/science-renderer-runtime";
+} from "agentlas-science/dist/contracts/science-renderer-runtime";
 
 interface ActiveScienceRendererView {
   projectId: string;

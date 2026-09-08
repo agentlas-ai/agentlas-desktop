@@ -23,8 +23,8 @@ import {
 import { ProductExtensionInstaller } from "./installer";
 import { downloadAndInstallSciencePackage, type SciencePackageArchiveSpec } from "./downloader";
 import { fetchScienceReleaseCatalog } from "./science-catalog";
-import { ScienceRendererRegistry } from "../science/renderer-registry";
-import type { ScienceRendererBinding, ScienceRendererExecutorBinding } from "../../shared/science-renderer-runtime";
+import { ScienceRendererRegistry } from "agentlas-science";
+import type { ScienceRendererBinding, ScienceRendererExecutorBinding } from "agentlas-science/dist/contracts/science-renderer-runtime";
 
 export const SCIENCE_EXTENSION_ID = "agentlas-science";
 

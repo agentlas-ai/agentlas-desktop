@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { resolveManagedNodeRuntime } from "../runtime/managed-node";
-import type { ResolvedScienceRendererExecutor } from "./renderer-registry";
+import type { ResolvedScienceRendererExecutor } from "agentlas-science";
 
 const MAX_LOG_BYTES = 64 * 1024;
 

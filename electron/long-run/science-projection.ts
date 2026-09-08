@@ -3,7 +3,7 @@ import {
   scienceLongRunGoalId,
   scienceLongRunId,
   type ScienceLoopLongRunProjection,
-} from "../../shared/science-long-run";
+} from "agentlas-science/dist/contracts/science-long-run";
 import { getDb } from "../store/db";
 import {
   applyScienceLongRunProjectionStatus,

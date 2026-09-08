@@ -37,7 +37,8 @@ import {
 } from "./install-identity";
 import { registerIpcHandlers } from "./ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
-import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "./science/project-folder-selection";
+import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
+import { installDesktopScienceHost } from "./science-host";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
@@ -184,29 +185,29 @@ import {
   shutdownScienceRuntimeForAppClose,
   configureScienceServiceAvailability, retryFailedScienceServiceLoad,
   scienceStatisticsMethodCatalogue, createScienceDatasetIngestionService, scienceSchemaVersion,
-} from "./science/lazy-services";
+} from "agentlas-science";
 import type {
   MaterializeScienceEvidenceGraphInferenceInput,
   ProposeScienceEvidenceGraphInferenceInput,
   RefreshScienceEvidenceGraphInput,
   ReviewScienceEvidenceGraphInferenceInput,
-} from "../shared/science-evidence-graph";
-import { scienceLabDecisionProjectionsForProject } from "./science/lazy-services";
-import { registerScienceWorkbookIntakeHandlers } from "./science/workbook-intake-ipc";
-import { registerScienceProjectDataHandlers } from "./science/project-data-ipc";
-import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "./science/lazy-services";
-import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/lazy-services";
+} from "agentlas-science/dist/contracts/science-evidence-graph";
+import { scienceLabDecisionProjectionsForProject } from "agentlas-science";
+import { registerScienceWorkbookIntakeHandlers } from "./science-host/workbook-intake-ipc";
+import { registerScienceProjectDataHandlers } from "./science-host/project-data-ipc";
+import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "agentlas-science";
+import { commitScienceVegaEdit, parseScienceVegaEditInput } from "agentlas-science";
 import {
   renderScienceStatisticsFigurePdf,
   renderScienceStatisticsFigurePng,
   renderScienceStatisticsFigureSvg,
   renderScienceStatisticsFigureSvgPreviewPng,
   renderScienceStatisticsFigureTiff,
-} from "./science/lazy-services";
-import { validateScienceNumericSurfacePngBytes } from "./science/lazy-services";
-import { validateScienceResidueInteraction } from "./science/lazy-services";
-import { draftManuscript } from "./science/lazy-services";
-import { inspectScienceManuscriptDepth } from "./science/lazy-services";
+} from "agentlas-science";
+import { validateScienceNumericSurfacePngBytes } from "agentlas-science";
+import { validateScienceResidueInteraction } from "agentlas-science";
+import { draftManuscript } from "agentlas-science";
+import { inspectScienceManuscriptDepth } from "agentlas-science";
 import type {
   ReviseScienceHypothesisInput,
   ScienceManuscriptBinding,
@@ -240,9 +241,9 @@ import type {
   PresentScienceDecisionInput,
   ReviewScienceAnalysisPlanInput,
   ScienceDecisionRequest,
-} from "../shared/science-contract";
+} from "agentlas-science/dist/contracts/science-contract";
 import type { ProductExtensionPermission } from "../shared/product-extension";
-import type { ScienceComposerStartInput } from "./science/conversation-service";
+import type { ScienceComposerStartInput } from "agentlas-science";
 
 const activeScienceChemistryCommits = new Set<string>();
 configureScienceServiceAvailability(() => {
@@ -259,7 +260,7 @@ import {
   type MountScienceRendererInput,
   type ScienceChemistryCommitInput,
   type ScienceMolstarCommitInput,
-} from "../shared/science-renderer-runtime";
+} from "agentlas-science/dist/contracts/science-renderer-runtime";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -1495,6 +1496,12 @@ app.whenReady().then(async () => {
   }
   startupStage = "store-ready";
   traceStartup("store-ready");
+  /*
+   * 사이언스는 자기 저장소(agentlas-science)에 살고, 이 앱에게 필요한 것을 host 경계로
+   * 요구한다. 저장소가 열린 직후 한 벌 넣어 준다 — 그 뒤 사이언스를 처음 부르는 자리가
+   * 어디든 이미 준비돼 있다.
+   */
+  installDesktopScienceHost();
   // A native update target must reconcile its durable install journal before
   // optional keychain/session restoration. On a locked or headless machine
   // that restoration can be slow, while the update handoff is already
@@ -2005,7 +2012,7 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-loop-input-invalid");
     const record = input as StartScienceLoopSessionInput;
-    const { resolveScienceRuntimeSelection } = await import("./science/runtime-preferences");
+    const { resolveScienceRuntimeSelection } = await import("agentlas-science");
     assertScienceSender(event, envelope, "science:agent-runtime");
     const runtimeSelection = await resolveScienceRuntimeSelection(scienceStore(), record);
     if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
@@ -2095,14 +2102,14 @@ app.whenReady().then(async () => {
   ipcMain.handle("science:runtime:inspect", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = scienceRuntimeInput(envelope);
-    const { inspectScienceRuntime } = await import("./science/runtime-preferences");
+    const { inspectScienceRuntime } = await import("agentlas-science");
     assertScienceSender(event, envelope, "science:agent-runtime");
     return inspectScienceRuntime(scienceStore(), input);
   });
   ipcMain.handle("science:runtime:select", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = scienceRuntimeInput(envelope);
-    const { selectScienceRuntime } = await import("./science/runtime-preferences");
+    const { selectScienceRuntime } = await import("agentlas-science");
     assertScienceSender(event, envelope, "science:agent-runtime");
     return selectScienceRuntime(scienceStore(), input);
   });
@@ -2113,8 +2120,8 @@ app.whenReady().then(async () => {
     const record = input as Record<string, unknown>;
     const projectId = String(record.projectId ?? "");
     const conversationId = String(record.conversationId ?? "");
-    const { normalizeScienceRuntimeSelection } = await import("./science/runtime-selection");
-    const { resolveScienceRuntimeSelection } = await import("./science/runtime-preferences");
+    const { normalizeScienceRuntimeSelection } = await import("agentlas-science");
+    const { resolveScienceRuntimeSelection } = await import("agentlas-science");
     assertScienceSender(event, envelope, "science:agent-runtime");
     const runtimeSelection = normalizeScienceRuntimeSelection(record.runtimeSelection ?? await resolveScienceRuntimeSelection(scienceStore(), { projectId, conversationId }));
     if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
@@ -2352,7 +2359,7 @@ app.whenReady().then(async () => {
     const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
     const allowed = new Set(["requestId", "projectId", "statisticsArtifactId", "statisticsArtifactVersion", "statisticsArtifactContentSha256", "visualizationIndex", "title"]);
     if (!record || Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-statistics-figure-input-invalid");
-    const result = scienceStore().materializeStatisticsFigure(record as unknown as import("../shared/science-contract").MaterializeScienceStatisticsFigureInput);
+    const result = scienceStore().materializeStatisticsFigure(record as unknown as import("agentlas-science/dist/contracts/science-contract").MaterializeScienceStatisticsFigureInput);
     notifyScienceArtifactChanged(String(record.projectId ?? ""), result.artifact);
     return result;
   });
@@ -2364,7 +2371,7 @@ app.whenReady().then(async () => {
     const allowed = new Set(["requestId", "projectId", "statisticsArtifactId", "statisticsArtifactVersion", "statisticsArtifactContentSha256", "sourceArtifactIndex"]);
     if (!record || Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-statistics-numeric-surface-input-invalid");
     const result = scienceStore().materializeStatisticsNumericSurface(
-      record as unknown as import("../shared/science-contract").MaterializeScienceStatisticsNumericSurfaceInput,
+      record as unknown as import("agentlas-science/dist/contracts/science-contract").MaterializeScienceStatisticsNumericSurfaceInput,
     );
     notifyScienceArtifactChanged(String(record.projectId ?? ""), result.artifact);
     return result;
@@ -2393,7 +2400,7 @@ app.whenReady().then(async () => {
       throw new Error("science-numeric-surface-view-state-input-invalid");
     }
     return scienceStore().persistNumericSurfaceViewState(
-      record as unknown as import("../shared/science-numeric-3d").PersistScienceNumericSurfaceViewStateInput,
+      record as unknown as import("agentlas-science/dist/contracts/science-numeric-3d").PersistScienceNumericSurfaceViewStateInput,
     );
   });
   ipcMain.handle("science:artifacts:exportNumericSurfacePng", async (event, envelope: unknown) => {
@@ -2731,7 +2738,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("science:labs:catalog", async (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
-    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const { activeScienceLabCapabilityCatalog } = await import("agentlas-science");
     return activeScienceLabCapabilityCatalog();
   });
   ipcMain.handle("science:labs:decisionProjections", async (event, input: unknown) => {
@@ -2739,7 +2746,7 @@ app.whenReady().then(async () => {
     const projectId = input && typeof input === "object" && "projectId" in input
       ? String((input as { projectId?: unknown }).projectId ?? "")
       : "";
-    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const { activeScienceLabCapabilityCatalog } = await import("agentlas-science");
     const catalog = await activeScienceLabCapabilityCatalog();
     return scienceLabDecisionProjectionsForProject(scienceStore(), projectId, catalog);
   });
@@ -2749,7 +2756,7 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope
       ? (envelope as { input?: unknown }).input
       : null;
-    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const { activeScienceLabCapabilityCatalog } = await import("agentlas-science");
     return inspectScienceEpisodeResultReview(
       scienceStore(),
       await activeScienceLabCapabilityCatalog(),
@@ -2765,7 +2772,7 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope
       ? (envelope as { input?: unknown }).input
       : null;
-    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const { activeScienceLabCapabilityCatalog } = await import("agentlas-science");
     return recordScienceEpisodeResultReview(
       scienceStore(),
       await activeScienceLabCapabilityCatalog(),
@@ -2778,7 +2785,7 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : null;
     if (!record) throw new Error("science-project-lab-binding-input-invalid");
-    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const { activeScienceLabCapabilityCatalog } = await import("agentlas-science");
     const catalog = await activeScienceLabCapabilityCatalog();
     if (!catalog.labs.some((lab) => lab.id === String(record.labId ?? ""))) throw new Error("science-project-lab-definition-not-found");
     return scienceStore().upsertProjectLabBinding(input as UpsertScienceProjectLabBindingInput);

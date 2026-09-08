@@ -6,7 +6,7 @@ import path from "node:path";
 import ts from "typescript";
 
 const root = path.resolve(import.meta.dirname, "..");
-const appSource = fs.readFileSync(path.join(root, "science-extension/ui/app.js"), "utf8");
+const appSource = fs.readFileSync(path.join(root, "node_modules/agentlas-science/ui/app.js"), "utf8");
 const adapterStart = appSource.indexOf("// TABLE_PAYLOAD_ADAPTER_START");
 const adapterEnd = appSource.indexOf("// TABLE_PAYLOAD_ADAPTER_END");
 assert.ok(adapterStart >= 0 && adapterEnd > adapterStart, "table payload adapter markers must exist");
@@ -84,7 +84,7 @@ assert.equal(actualTablePayload(malformedCanonicalColumn).cause, "science-data-t
 assert.match(appSource, /manuscriptTablePreviewMarkup[\s\S]*?const actual = actualTablePayload\(payload\)/u);
 assert.match(appSource, /surface\.dataset\.tablePayloadShape = actual\.sourceShape/u);
 
-const serverSource = fs.readFileSync(path.join(root, "electron/science/tool-control-server.ts"), "utf8");
+const serverSource = fs.readFileSync(path.join(root, "node_modules/agentlas-science/src/tool-control-server.ts"), "utf8");
 const shapeStart = serverSource.indexOf("export function dataTableShape");
 const shapeEnd = serverSource.indexOf("\n}\n\n\n/**", shapeStart) + 2;
 assert.ok(shapeStart >= 0 && shapeEnd > shapeStart, "dataTableShape source must be extractable");

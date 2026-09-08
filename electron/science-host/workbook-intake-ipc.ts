@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import path from "node:path";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
-import { verifyScienceWorkbook } from "../../shared/science-workbook";
-import type { ScienceResearchRun, ScienceSource } from "../../shared/science-contract";
-import type { ScienceStore } from "./store";
-import { prepareScienceWorkbook } from "./workbook-ingestion";
+import { verifyScienceWorkbook } from "agentlas-science";
+import type { ScienceResearchRun, ScienceSource } from "agentlas-science";
+import type { ScienceStore } from "agentlas-science";
+import { prepareScienceWorkbook } from "agentlas-science";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_RE = /^[a-f0-9]{64}$/;
