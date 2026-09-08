@@ -14,7 +14,7 @@ import type {
   OneTrustedImprovementEvidence,
   OneTrustedImprovementTaskEvidence,
 } from "../../shared/one-improvement-proof";
-import type { CanonicalTask, InvocationRunReceipt, RunEventUi } from "../../shared/types";
+import type { CanonicalTask, InvocationRunReceipt, RunEventUi, RuntimeBackend, RuntimeKind } from "../../shared/types";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
@@ -171,6 +171,35 @@ interface TaskForceModelCallReceiptEvent {
   status: TaskForceModelCallStatus;
   agentId: string;
   nodeId: string;
+  runtimeIdentity: string | null;
+}
+
+const TASK_FORCE_RUNTIME_KINDS = ["claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx", "acp", "agentlas"] as const satisfies readonly RuntimeKind[];
+const TASK_FORCE_RUNTIME_BACKENDS = ["anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm", "kimi", "deepseek", "minimax", "xai", "openrouter", "cursor", "agentlas"] as const satisfies readonly RuntimeBackend[];
+
+/** Optional diagnostics are not proof authority. Validate only the known wire
+ * fields, and bind paired calls to the same runtime when that evidence exists. */
+function taskForceRuntimeMetadata(item: Record<string, unknown>, status: TaskForceModelCallStatus): { identity: string | null } | null {
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(item, key);
+  const runtimeKeys = ["runtimeKind", "runtimeBackend", "runtimeSource", "runtimeModel"];
+  let identity: string | null = null;
+  if (runtimeKeys.some(has)) {
+    if (!(TASK_FORCE_RUNTIME_KINDS as readonly unknown[]).includes(item.runtimeKind)) return null;
+    if (has("runtimeBackend") && !(TASK_FORCE_RUNTIME_BACKENDS as readonly unknown[]).includes(item.runtimeBackend)) return null;
+    for (const key of ["runtimeSource", "runtimeModel"]) {
+      if (has(key) && (safeString(item[key], 256) === null || safeString(item[key], 256) !== item[key])) return null;
+    }
+    identity = JSON.stringify(runtimeKeys.map((key) => item[key] ?? null));
+  }
+  if (has("durationMs") && (status === "started" || !Number.isSafeInteger(item.durationMs) || Number(item.durationMs) < 0)) return null;
+  if (has("failureKind") || has("failureSource")) {
+    if (status !== "failed"
+      || typeof item.failureKind !== "string"
+      || !["quota", "auth", "refused", "empty", "exit", "timeout", "unsupported"].includes(item.failureKind)
+      || typeof item.failureSource !== "string"
+      || !["marker", "exit", "heuristic"].includes(item.failureSource)) return null;
+  }
+  return { identity };
 }
 
 function taskForceModelCallReceiptEvent(event: RunEventUi): TaskForceModelCallReceiptEvent | null {
@@ -183,8 +212,12 @@ function taskForceModelCallReceiptEvent(event: RunEventUi): TaskForceModelCallRe
   if (!status) return null;
   const item = payload(event);
   const hasAttempt = Object.prototype.hasOwnProperty.call(item, "attempt");
-  const expectedKeys = ["callRef", "phase", "schemaVersion", "status", ...(hasAttempt ? ["attempt"] : [])].sort();
+  const optionalKeys = ["runtimeKind", "runtimeBackend", "runtimeSource", "runtimeModel", "durationMs", "failureKind", "failureSource"];
+  const expectedKeys = ["callRef", "phase", "schemaVersion", "status", ...(hasAttempt ? ["attempt"] : []),
+    ...optionalKeys.filter((key) => Object.prototype.hasOwnProperty.call(item, key))].sort();
   if (Object.keys(item).sort().join("\u0000") !== expectedKeys.join("\u0000")) return null;
+  const runtimeMetadata = taskForceRuntimeMetadata(item, status);
+  if (!runtimeMetadata) return null;
   const schemaVersion = safeString(item.schemaVersion, 80);
   const callRef = safeString(item.callRef, 96);
   const phase = safeString(item.phase, 32);
@@ -203,7 +236,7 @@ function taskForceModelCallReceiptEvent(event: RunEventUi): TaskForceModelCallRe
     || !nodeId
     || (attempt !== null && (!Number.isSafeInteger(attempt) || attempt < 1 || attempt > 16))
   ) return null;
-  return { event, callRef, phase, attempt, status, agentId, nodeId };
+  return { event, callRef, phase, attempt, status, agentId, nodeId, runtimeIdentity: runtimeMetadata.identity };
 }
 
 function sameTaskForceModelCall(left: TaskForceModelCallReceiptEvent, right: TaskForceModelCallReceiptEvent): boolean {
@@ -211,7 +244,8 @@ function sameTaskForceModelCall(left: TaskForceModelCallReceiptEvent, right: Tas
     && left.phase === right.phase
     && left.attempt === right.attempt
     && left.agentId === right.agentId
-    && left.nodeId === right.nodeId;
+    && left.nodeId === right.nodeId
+    && left.runtimeIdentity === right.runtimeIdentity;
 }
 
 /**
