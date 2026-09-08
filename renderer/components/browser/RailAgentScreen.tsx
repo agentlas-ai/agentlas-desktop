@@ -16,14 +16,17 @@ export function RailAgentScreen({
   active,
   onModeChange,
   ko,
+  chatId,
 }: {
   mode: AgentScreenMode;
   /** 이 화면이 실제로 보이는 동안에만 캡처한다. */
   active: boolean;
   onModeChange: (mode: AgentScreenMode) => void;
   ko: boolean;
+  /** Current task chat. Browser frames must never cross this boundary. */
+  chatId: string | null;
 }) {
-  const screen = useAgentScreen(mode, active, ko);
+  const screen = useAgentScreen(mode, active, ko, chatId);
   return (
     <section className="rail-agent-screen" data-rail-agent-screen="true" aria-label={ko ? "에이전트가 보는 화면" : "Screen visible to the agent"}>
       <header>

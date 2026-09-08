@@ -40,6 +40,9 @@ export interface OneActivityHandoff {
   updatedAt: string;
   delegateObserved: boolean;
   messages: OneActivityHandoffMessage[];
+  /** A worker terminal signal is distinct from an individual tool failure. */
+  workerAgentId?: string;
+  workerTerminalStatus?: "completed" | "failed";
 }
 
 export interface OneActivityTool {
@@ -266,6 +269,14 @@ function mergeHandoffs(
   const observedAgentName = event.agentName?.trim() || undefined;
   const messageTarget = nonEmptyAgentId(message?.toAgentId);
   if (messageTarget && messageTarget !== sourceId) targets.add(messageTarget);
+  if (targets.size === 0 && observedAgentId
+    && (event.done || event.agentLifecycle?.state === "failed" || event.nodeState === "failed")) {
+    for (const edge of current) {
+      if (edge.workerAgentId === observedAgentId) {
+        targets.add(edge.fromAgentId === sourceId ? edge.toAgentId : edge.fromAgentId);
+      }
+    }
+  }
   if (targets.size === 0) {
     if (!observedAgentId || !observedAgentName) return current;
     return current.map((candidate) => ({
@@ -309,15 +320,27 @@ function mergeHandoffs(
       messages.push(matchingMessage);
     }
     const hasDeliveredWorkerMessage = messages.some((candidate) => candidate.direction === "worker-to-orchestrator");
-    const nextStatus: OneHandoffStatus = hasDeliveredWorkerMessage || existing?.status === "completed"
-      ? "completed"
-      : event.tool?.isError
-        ? "failed"
-        : isDelegate
-          ? "running"
-          : event.done === true
-            ? "completed"
-            : existing?.status ?? "running";
+    const workerAgentId = matchingMessage?.direction === "worker-to-orchestrator" ? sourceId
+      : matchingMessage?.direction === "orchestrator-to-worker" ? targetId
+        : existing?.workerAgentId ?? (isDelegate ? targetId : undefined);
+    const workerEvent = workerAgentId === (observedAgentId ?? sourceId);
+    const newWorkerReply = matchingMessage?.direction === "worker-to-orchestrator"
+      && !existing?.messages.some((candidate) => candidate.id === matchingMessage.id);
+    const workerTerminalStatus = workerEvent && (event.agentLifecycle?.state === "failed" || event.nodeState === "failed")
+      ? "failed" as const
+      : workerEvent && (newWorkerReply || event.done && !event.tool?.isError)
+        ? "completed" as const
+        : existing?.workerTerminalStatus;
+    const nextStatus: OneHandoffStatus = workerTerminalStatus
+      ?? (hasDeliveredWorkerMessage || existing?.status === "completed"
+          ? "completed"
+          : event.tool?.isError
+            ? "failed"
+            : isDelegate
+              ? "running"
+              : event.done === true
+                ? "completed"
+                : existing?.status ?? "running");
     const nextHandoff: OneActivityHandoff = {
       id,
       fromAgentId: existing?.fromAgentId ?? sourceId,
@@ -333,6 +356,8 @@ function mergeHandoffs(
       updatedAt: observedAt,
       delegateObserved: Boolean(existing?.delegateObserved || isDelegate),
       messages,
+      ...(workerAgentId ? { workerAgentId } : {}),
+      ...(workerTerminalStatus ? { workerTerminalStatus } : {}),
     };
     next = existing
       ? next.map((candidate) => candidate.id === id ? nextHandoff : candidate)
@@ -545,7 +570,7 @@ export function reduceOneActivity(
       items = upsertItem(items, {
         id,
         kind: "agent",
-        status: event.nodeState === "failed" ? "failed" : event.done ? "completed" : "running",
+        status: event.nodeState === "failed" || event.agentLifecycle?.state === "failed" ? "failed" : event.done ? "completed" : "running",
         observedAt: existing?.observedAt || observedAt,
         agentId,
         ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
@@ -780,6 +805,26 @@ function ledgerBoolean(payload: Record<string, unknown>, key: string): boolean |
   return typeof value === "boolean" ? value : undefined;
 }
 
+/** Restore only the existing typed state contract, never status/error prose. */
+function ledgerAgentState(payload: Record<string, unknown>): Pick<McpInvocationEvent, "agentLifecycle" | "nodeState"> {
+  const state = payload.agentProcessState;
+  const reason = payload.agentProcessReason;
+  const nodeState = payload.nodeState;
+  const lifecycle: McpInvocationEvent["agentLifecycle"] = payload.agentProcessSource === "cli-process"
+    && (state === "running" || state === "idle" || state === "closed" || state === "failed")
+    && (reason === "spawned" || reason === "turn-started" || reason === "turn-complete"
+      || reason === "transport-closed" || reason === "process-exit" || reason === "reaped"
+      || reason === "shutdown" || reason === "evicted" || reason === "error")
+    ? { source: "cli-process" as const, state, reason,
+        ...(ledgerString(payload, "agentProcessRuntime") ? { runtime: ledgerString(payload, "agentProcessRuntime") } : {}) }
+    : undefined;
+  return {
+    ...(lifecycle ? { agentLifecycle: lifecycle } : {}),
+    ...(nodeState === "pending" || nodeState === "running" || nodeState === "done" || nodeState === "failed" || nodeState === "skipped"
+      ? { nodeState } : {}),
+  };
+}
+
 function ledgerStringArray(payload: Record<string, unknown>, key: string): string[] | undefined {
   const value = payload[key];
   if (!Array.isArray(value)) return undefined;
@@ -941,6 +986,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       continue;
     }
     if (row.kind === "mcp_tool-use") {
+      const agentState = ledgerAgentState(payload);
       const toolName = ledgerString(payload, "toolName");
       const toolId = ledgerString(payload, "toolId");
       const delegateTo = ledgerStringArray(payload, "delegateTo");
@@ -971,6 +1017,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         const role = ledgerString(payload, "role");
         apply({
           kind: "tool-use",
+          ...agentState,
           tool: {
             name: toolName,
             ...(toolId ? { id: toolId } : {}),
@@ -991,7 +1038,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         }, row.ts);
         continue;
       }
-      if (delegateTo || agentMessage || done) {
+      if (delegateTo || agentMessage || done || agentState.agentLifecycle || agentState.nodeState) {
         const agentName = ledgerString(payload, "agentName");
         const role = ledgerString(payload, "role");
         const topologyAgentId = ledgerString(payload, "agentNodeId") || row.agentId;
@@ -1001,6 +1048,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
           : undefined;
         apply({
           kind: "tool-use",
+          ...agentState,
           ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
           ...(ledgerString(payload, "runtimeAgentId")
             ? { runtimeAgentId: ledgerString(payload, "runtimeAgentId") }
@@ -1048,6 +1096,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         : undefined;
       apply({
         kind: "thinking",
+        ...ledgerAgentState(payload),
         ...(ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId
           ? { agentId: ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId! } : {}),
         ...(ledgerString(payload, "runtimeModel") || ledgerString(payload, "model")

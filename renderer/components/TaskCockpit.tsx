@@ -6538,6 +6538,7 @@ function ChatPage() {
         minWidth={RIGHT_PANEL_MIN_WIDTH}
         maxWidth={clampRightPanelWidth(RIGHT_PANEL_MAX_WIDTH)}
         defaultWidth={RIGHT_PANEL_DEFAULT_WIDTH}
+        screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
         browserHistoryUrl={workBrowserHistoryUrl}
         result={(

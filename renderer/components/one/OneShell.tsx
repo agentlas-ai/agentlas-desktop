@@ -7909,6 +7909,7 @@ export function OneShell() {
               .then((draft) => setComposer(draft.prompt))
               .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
+          screenChatId={activeThreadChatId}
           browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
           browserHistoryUrl={durableThreadBrowserUrl}
           onBrowserObserved={presentBrowserOutput}

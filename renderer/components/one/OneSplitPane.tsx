@@ -220,6 +220,7 @@ export function OneSplitPane({
             locale={locale}
             visible
             onClose={() => setRailOpen(false)}
+            screenChatId={chatId}
           />
         </div>
       )}

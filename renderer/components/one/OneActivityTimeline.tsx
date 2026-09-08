@@ -1441,6 +1441,7 @@ export function OneActivityArtifactRail({
   onHistoryClear,
   onHistoryAsk,
   onHistoryReviewRecommendation,
+  screenChatId,
   browserScopeKey,
   browserHistoryUrl,
   onBrowserObserved,
@@ -1471,6 +1472,8 @@ export function OneActivityArtifactRail({
   onHistoryClear?: () => void;
   onHistoryAsk?: () => void;
   onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
+  /** Exact current chat used to keep captured agent screens task-scoped. */
+  screenChatId: string | null;
   /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
   browserScopeKey?: string;
   /** Latest proven Browser navigation from this thread's durable run history. */
@@ -2156,6 +2159,7 @@ export function OneActivityArtifactRail({
             active={railView === "screen"}
             onModeChange={setScreenMode}
             ko={locale === "ko"}
+            chatId={screenChatId}
           />
         )}
         {railView === "browser" && <>
