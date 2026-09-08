@@ -6645,54 +6645,17 @@ export function OneShell() {
                 </header>
                 <div className={styles.homeConversation}>
                   <time className={styles.homeDate}>{new Date().toLocaleDateString(appLocale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })}</time>
+                  {/* A new conversation has no task owner. Prior-task decisions
+                      remain in their own threads and the existing notification UI. */}
                   <section className={styles.homeAssistantMessage} aria-labelledby="one-home-message-title">
-                      <span className={styles.homeMessageAuthor}>One</span>
-                      {briefing.kind === "quiet" && !briefing.proactive ? <>
-                        <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
-                        <p>{appLocale === "ko" ? "상주 스태프와 필요한 전문가를 조율하고, 끝난 일과 확인이 필요한 것만 이 대화에 브리핑할게요." : "I’ll coordinate the standing staff and specialists, then brief you here on finished work and anything that needs your attention."}</p>
-                      </> : <>
-                        <small>{briefing.eyebrow}</small>
-                        <strong id="one-home-message-title">{pendingBriefingActionVisible ? briefing.prepared : briefing.title}</strong>
-                        {!pendingBriefingActionVisible && <p>{briefing.body}</p>}
-                        {!pendingBriefingActionVisible && <div className={styles.homeMessageActions}>
-                          {briefing.proactive
-                            ? briefing.proactive.preparedAction.kind === "open_task"
-                              ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : briefing.primaryLabel}</button>
-                              : <>
-                                  <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void reviewPreparedFinding(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.review")}</button>
-                                  <button type="button" className={styles.ghostButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>
-                                </>
-                            : briefing.taskId && <button type="button" className={styles.primaryButton} onClick={() => openTask(briefing.taskId!)}>{briefing.primaryLabel}</button>}
-                          {briefing.proactive
-                            ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
-                            : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); }}>{tFor(appLocale, "one.shell.common.later")}</button>}
-                        </div>}
-                      </>}
-                      {pendingBriefingActionVisible && (
-                        <div className={styles.briefingConfirm} role="group" aria-label={tFor(appLocale, "one.shell.briefing.confirm_title")}>
-                          <p className={styles.briefingConfirmTitle}>{tFor(appLocale, "one.shell.briefing.confirm_title")}</p>
-                          <p className={styles.briefingConfirmBody}>{tFor(appLocale, "one.shell.briefing.confirm_body")}</p>
-                          <div className={styles.homeMessageActions}>
-                            <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void confirmBriefingAction()}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.confirm_accept")}</button>
-                            <button type="button" className={styles.ghostButton} disabled={briefingActionBusy} onClick={() => setPendingBriefingAction(null)}>{tFor(appLocale, "one.shell.briefing.confirm_decline")}</button>
-                          </div>
-                        </div>
-                      )}
+                    <span className={styles.homeMessageAuthor}>One</span>
+                    <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
                   </section>
                   {homeMemoryMapOpen && (
                     <section className={styles.homeMemoryMapPanel} aria-label={appLocale === "ko" ? "One 기억 지도" : "One memory map"}>
                       <OneMemoryMap snapshot={oneMemoryMap ?? EMPTY_ONE_MEMORY_MAP} locale={appLocale} />
                     </section>
                   )}
-                {/* 에이전트 성장 제안 — "배운 걸 반영할까요?" 홈 슬롯(고위험 1건). */}
-                <OneGrowthCard locale={appLocale} />
-                {showWeeklyReflection && oneWeeklyReflection && (
-                  <OneWeeklyReflectionCard
-                    snapshot={oneWeeklyReflection}
-                    locale={appLocale}
-                    onChange={setOneWeeklyReflection}
-                  />
-                )}
                 </div>
               </div>
             ) : (
