@@ -1,0 +1,12 @@
+.root { width: min(920px, 100%); margin: 0 auto 7px; pointer-events: auto; color: var(--ink); }
+.bar { display: flex; align-items: center; gap: 7px; min-height: 32px; font-size: 11px; }
+.bar > strong, .bar > svg, .criteria { flex: 0 0 auto; }
+.label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-deep); }
+.criteria { color: var(--muted-deep); font-size: 10px; }
+.root button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 28px; padding: 4px 7px; border-radius: 6px; font: inherit; color: var(--ink); }
+.root button:hover { background: var(--paper-edge); }
+.root button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.root button:disabled { opacity: 0.5; cursor: default; }
+.error { margin: 0 0 5px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.error > span { display: block; color: var(--muted-deep); }
+@media (max-width: 480px) { .criteria { display: none; } .bar { gap: 4px; } }

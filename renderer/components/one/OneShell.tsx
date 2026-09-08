@@ -2,6 +2,7 @@
 import type { ChatHostNotice } from "../../../shared/types";
 import { normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
+import { OneGoalControls } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { failureMessage, isChatBusyFailure } from "@/lib/invocation-failure";
@@ -558,10 +559,18 @@ type PendingTeamPrompt = {
 
 type OneTurnOverrides = {
   goalMode?: true;
+  /** Renderer intent fence; never passed to Main as authority. */
+  goalControlEpoch?: number;
   planMode?: true;
   sessionRouting?: true;
   fastMode?: true;
 };
+
+function currentOneGoalOverride(overrides: OneTurnOverrides, epoch: number): OneTurnOverrides {
+  if (overrides.goalControlEpoch === epoch) return overrides;
+  const { goalMode: _goal, goalControlEpoch: _epoch, ...remaining } = overrides;
+  return remaining;
+}
 
 type OneAttachmentDraft = {
   id: string;
@@ -1356,6 +1365,7 @@ export function OneShell() {
   }
   const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
   const [turnOverrides, setTurnOverrides] = useState<OneTurnOverrides>({});
+  const goalControlEpochRef = useRef(0);
   const [oneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
   const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
@@ -2894,6 +2904,11 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  // Route identity changes before the selected chat finishes loading. Keep a
+  // Goal-only render fence; the existing selection refs also own handoffs.
+  const goalControlViewKey = `${selectedTaskId ?? ""}:${selectedConversationId ?? ""}:${activeThreadChatId ?? ""}`;
+  const goalControlViewKeyRef = useRef(goalControlViewKey);
+  goalControlViewKeyRef.current = goalControlViewKey;
   useLayoutEffect(() => bindAgentScreenScope(activeThreadChatId), [activeThreadChatId]);
   useEffect(() => {
     oneChatFileGroupsRef.current.clear();
@@ -3923,7 +3938,7 @@ export function OneShell() {
         onePermissionMode: runPermissionMode,
         permissions: executionPermission,
         ...(effectiveRuntimeSelection ? { runtimeSelection: effectiveRuntimeSelection } : {}),
-        ...(options?.overrides?.goalMode ? { goalMode: true } : {}),
+        ...(options?.overrides && currentOneGoalOverride(options.overrides, goalControlEpochRef.current).goalMode ? { goalMode: true } : {}),
         ...(options?.overrides?.planMode ? { planMode: true } : {}),
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
@@ -4238,7 +4253,7 @@ export function OneShell() {
     // composer. Keeping a third scheduling sheet here duplicated that product
     // boundary and made the composer feel like a form.
     const recurrenceSnapshot: OneRecurrenceSelectionV1 | null = null;
-    const overrideSnapshot = { ...turnOverrides };
+    const overrideSnapshot = { ...turnOverrides, goalControlEpoch: goalControlEpochRef.current };
     const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
     const explicitValue = text.trim();
     if (!explicitValue && attachmentSnapshot.length === 0) return;
@@ -4605,7 +4620,7 @@ export function OneShell() {
         if (current === value) return current;
         return `${value}\n${current}`;
       });
-      setTurnOverrides(overrideSnapshot);
+      setTurnOverrides(currentOneGoalOverride(overrideSnapshot, goalControlEpochRef.current));
       setTurnAgentIds(turnAgentIds);
       if (attachmentSnapshot.length > 0) {
         const restored = attachmentSnapshot.map((item) => ({ ...item, previewUrl: null }));
@@ -4750,7 +4765,7 @@ export function OneShell() {
           attachmentDraftsRef.current = restored;
           setAttachmentDrafts(restored);
         }
-        setTurnOverrides(overrideSnapshot);
+        setTurnOverrides(currentOneGoalOverride(overrideSnapshot, goalControlEpochRef.current));
         setTurnAgentIds(turnAgentIds);
       }
       /*
@@ -7206,6 +7221,22 @@ export function OneShell() {
               />
             )}
             <ToolApprovalInline chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
+            {activeThreadChatId && (selectedTaskId
+              ? selected?.taskId === selectedTaskId
+              : selectedConversationId === activeThreadChatId) && <OneGoalControls
+              key={`${selectedTaskId ?? selectedConversationId}:${activeThreadChatId}`}
+              chatId={activeThreadChatId}
+              locale={appLocale === "ko" ? "ko" : "en"}
+              isCurrent={() => !homeTransitionPendingRef.current
+                && goalControlViewKeyRef.current === goalControlViewKey
+                && activeThreadChatIdRef.current === activeThreadChatId
+                && selectedTaskIdRef.current === selectedTaskId
+                && selectedConversationIdRef.current === selectedConversationId}
+              onDeleted={() => {
+                goalControlEpochRef.current += 1;
+                setTurnOverrides((current) => currentOneGoalOverride(current, goalControlEpochRef.current));
+              }}
+            />}
             {armedOneMemoryUseOnce && (
               <div className={styles.oneMemoryUseOnceChip} role="status">
                 <span>{tFor(appLocale, "one.shell.composer.memory_once")}</span>
