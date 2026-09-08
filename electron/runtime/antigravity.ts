@@ -746,7 +746,7 @@ export function antigravityExitFailure(
  * 도구 목록에도 call_mcp_tool · list_resources · read_resource 가 실재한다.
  */
 /**
- * 우리가 전역 설정에 넣은 MCP 서버 키 → 지금 그 서버를 쓰고 있는 실행 수.
+ * 우리가 전역 설정에 넣은 MCP 서버 키 → 지금 그 정확한 transport를 쓰는 실행 수.
  *
  * agy 는 설정 파일이 하나뿐이라 동시 실행이 같은 파일을 공유한다. 계수 없이 정리하면
  * 먼저 끝난 실행이 아직 도는 실행의 도구를 지운다 — 그래프에서 노드 둘이 병렬로 도는
@@ -754,6 +754,20 @@ export function antigravityExitFailure(
  * 프로세스 안 계수로 충분하다.
  */
 const AGY_MCP_REFCOUNT = new Map<string, number>();
+const AGY_MCP_ACTIVE_ENTRIES = new Map<string, AgyMcpServerEntry>();
+let agyMcpMutationTail: Promise<void> = Promise.resolve();
+
+async function withAgyMcpMutationLock<T>(action: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const previous = agyMcpMutationTail;
+  agyMcpMutationTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+  }
+}
 
 export function agyMcpConfigPath(home = os.homedir()): string {
   return path.join(home, ".gemini", "config", "mcp_config.json");
@@ -781,6 +795,27 @@ const AGY_MCP_REPLACEMENTS = new Map<string, AgyMcpReplacement>();
 
 function isAgyMcpEntryEqual(left: AgyMcpServerEntry | undefined, right: AgyMcpServerEntry | undefined): boolean {
   return Boolean(left && right && JSON.stringify(left) === JSON.stringify(right));
+}
+
+function requestedAgyMcpEntry(server: {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}): AgyMcpServerEntry | null {
+  return server.command
+    ? {
+      command: server.command,
+      ...(server.args?.length ? { args: server.args } : {}),
+      ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
+    }
+    : server.url
+      ? {
+        serverUrl: server.url,
+        ...(server.headers && Object.keys(server.headers).length ? { headers: server.headers } : {}),
+      }
+      : null;
 }
 
 /**
@@ -900,36 +935,80 @@ export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): b
  *   cleanup은 우리가 넣거나 교체한 값이 아직 그대로일 때만 수행한다.
  * - 전역 파일이 깨진 JSON 이면 **덮어쓰지 않는다** — 사용자 설정을 지키는 쪽이
  *   이 실행에 도구를 주는 것보다 우선이고, 그 사실을 상태줄로 말한다(정직한 강등).
- * - 동시 agy 실행 둘이 같은 키를 원하는 짧은 경합은 grok 리컨실과 동일하게 남는다.
+ * - 동시 실행은 exact transport entry만 공유한다. 같은 키에 다른 승인 채널을 요청하면
+ *   뒤 실행을 모델 spawn 전에 typed conflict로 끝낸다.
  */
 async function reconcileAgyMcpServers(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
-): Promise<{ cleanup: () => Promise<void> }> {
+): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   if (!mcpConfigPath) return noop;
   let requested: { mcpServers?: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
   try {
     requested = JSON.parse(await fs.readFile(mcpConfigPath, "utf8"));
   } catch {
-    return noop;
+    return {
+      cleanup: async () => {},
+      failure: {
+        kind: "refused",
+        message: "Antigravity MCP transport could not read its authorized run configuration.",
+        runtime: "antigravity",
+        source: "marker",
+        providerCode: "agy_mcp_config_unavailable",
+      },
+    };
   }
   const entries = Object.entries(requested.mcpServers ?? {});
   if (entries.length === 0) return noop;
 
-  const globalPath = agyMcpConfigPath();
-  let parsed: { mcpServers?: Record<string, AgyMcpServerEntry>; [key: string]: unknown };
-  try {
-    parsed = JSON.parse(await fs.readFile(globalPath, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-      parsed = { mcpServers: {} };
-    } else {
-      onStatus("antigravity: existing mcp_config.json is unreadable — running without MCP tools to protect it");
-      return noop;
+  return withAgyMcpMutationLock(async () => {
+
+    const globalPath = agyMcpConfigPath();
+    let parsed: { mcpServers?: Record<string, AgyMcpServerEntry>; [key: string]: unknown };
+    try {
+      parsed = JSON.parse(await fs.readFile(globalPath, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        parsed = { mcpServers: {} };
+      } else {
+        onStatus("antigravity: existing mcp_config.json is unreadable — run stopped before model execution");
+        return {
+          cleanup: async () => {},
+          failure: {
+            kind: "refused",
+            message: "Antigravity MCP transport could not safely reconcile its global configuration.",
+            runtime: "antigravity",
+            source: "marker",
+            providerCode: "agy_mcp_global_config_unavailable",
+          },
+        };
+      }
     }
-  }
-  if (!parsed.mcpServers || typeof parsed.mcpServers !== "object") parsed.mcpServers = {};
+    if (!parsed.mcpServers || typeof parsed.mcpServers !== "object") parsed.mcpServers = {};
+
+  // An agy process reads one global MCP file. Sharing is safe only when the
+  // exact transport entry is already active; a matching key alone can point
+  // at another chat's approval proxy. Refuse the later run before spawning
+  // instead of lending it the first run's authority.
+    for (const [key, server] of entries) {
+    const live = AGY_MCP_REFCOUNT.get(key);
+    if (live === undefined) continue;
+    const requestedEntry = requestedAgyMcpEntry(server);
+    const activeEntry = AGY_MCP_ACTIVE_ENTRIES.get(key);
+    if (requestedEntry && isAgyMcpEntryEqual(activeEntry, requestedEntry)
+      && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) continue;
+    return {
+      cleanup: async () => {},
+      failure: {
+        kind: "refused",
+        message: "Antigravity MCP transport is already in use by a different authorized run.",
+        runtime: "antigravity",
+        source: "marker",
+        providerCode: "agy_mcp_scope_conflict",
+      },
+    };
+    }
 
   const writeGlobal = async (value: typeof parsed): Promise<void> => {
     // 임시 파일 + rename — 시작 중인 다른 agy 가 반쯤 쓰인 파일을 읽지 않게 한다.
@@ -953,6 +1032,15 @@ async function reconcileAgyMcpServers(
 
   const added: string[] = [];
   const stagedEntries = new Map<string, AgyMcpServerEntry>();
+  const previousRefcounts = new Map<string, number | undefined>();
+  const previousActiveEntries = new Map<string, AgyMcpServerEntry | undefined>();
+  const previousReplacements = new Map<string, AgyMcpReplacement | undefined>();
+  const rememberProcessState = (key: string) => {
+    if (previousRefcounts.has(key)) return;
+    previousRefcounts.set(key, AGY_MCP_REFCOUNT.get(key));
+    previousActiveEntries.set(key, AGY_MCP_ACTIVE_ENTRIES.get(key));
+    previousReplacements.set(key, AGY_MCP_REPLACEMENTS.get(key));
+  };
   for (const [key, server] of entries) {
     if (parsed.mcpServers[key]) {
       /*
@@ -972,6 +1060,7 @@ async function reconcileAgyMcpServers(
         && !AGY_MCP_REFCOUNT.has(key)
         && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[key])
       ) {
+        rememberProcessState(key);
         const staged: AgyMcpServerEntry = {
           command: server.command,
           ...(server.args?.length ? { args: server.args } : {}),
@@ -985,51 +1074,73 @@ async function reconcileAgyMcpServers(
         stagedEntries.set(key, staged);
         added.push(key);
         AGY_MCP_REFCOUNT.set(key, 1);
+        AGY_MCP_ACTIVE_ENTRIES.set(key, staged);
         globalDirty = true;
         continue;
       }
       const live = AGY_MCP_REFCOUNT.get(key);
       if (live !== undefined) {
+        rememberProcessState(key);
         AGY_MCP_REFCOUNT.set(key, live + 1);
+        AGY_MCP_ACTIVE_ENTRIES.set(key, parsed.mcpServers[key]);
         stagedEntries.set(key, parsed.mcpServers[key]);
         added.push(key);
       }
       continue;
     }
-    const staged: AgyMcpServerEntry | null = server.command
-      ? {
-        command: server.command,
-        ...(server.args?.length ? { args: server.args } : {}),
-        ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
-      }
-      : server.url
-        ? {
-        serverUrl: server.url,
-        ...(server.headers && Object.keys(server.headers).length ? { headers: server.headers } : {}),
-        }
-        : null;
+    const staged = requestedAgyMcpEntry(server);
     if (!staged) {
       continue;
     }
+    rememberProcessState(key);
     parsed.mcpServers[key] = staged;
     stagedEntries.set(key, staged);
     added.push(key);
     AGY_MCP_REFCOUNT.set(key, (AGY_MCP_REFCOUNT.get(key) ?? 0) + 1);
+    AGY_MCP_ACTIVE_ENTRIES.set(key, staged);
   }
   if (added.length === 0 && !globalDirty) return noop;
   try {
     await writeGlobal(parsed);
   } catch (error) {
-    onStatus(`antigravity: could not stage MCP servers (${error instanceof Error ? error.message : String(error)}) — running without MCP tools`);
-    return noop;
+    for (const key of previousRefcounts.keys()) {
+      const previousRefcount = previousRefcounts.get(key);
+      const previousActive = previousActiveEntries.get(key);
+      const previousReplacement = previousReplacements.get(key);
+      if (previousRefcount === undefined) AGY_MCP_REFCOUNT.delete(key);
+      else AGY_MCP_REFCOUNT.set(key, previousRefcount);
+      if (previousActive === undefined) AGY_MCP_ACTIVE_ENTRIES.delete(key);
+      else AGY_MCP_ACTIVE_ENTRIES.set(key, previousActive);
+      if (previousReplacement === undefined) AGY_MCP_REPLACEMENTS.delete(key);
+      else AGY_MCP_REPLACEMENTS.set(key, previousReplacement);
+    }
+    onStatus(`antigravity: could not stage MCP servers (${error instanceof Error ? error.message : String(error)}) — run stopped before model execution`);
+    return {
+      cleanup: async () => {},
+      failure: {
+        kind: "refused",
+        message: "Antigravity MCP transport could not stage its authorized run configuration.",
+        runtime: "antigravity",
+        source: "marker",
+        providerCode: "agy_mcp_stage_failed",
+      },
+    };
   }
   if (added.length === 0) return noop;
+  let cleaned = false;
   return {
-    cleanup: async () => {
+    cleanup: async () => withAgyMcpMutationLock(async () => {
+      if (cleaned) return;
+      cleaned = true;
+      let current: typeof parsed | null = null;
       try {
         // 실행 중 남이 고쳤을 수 있으니 다시 읽고, 우리가 더한 키만 걷어낸다.
-        const current = JSON.parse(await fs.readFile(globalPath, "utf8")) as typeof parsed;
-        if (!current.mcpServers || typeof current.mcpServers !== "object") return;
+        current = JSON.parse(await fs.readFile(globalPath, "utf8")) as typeof parsed;
+        if (!current.mcpServers || typeof current.mcpServers !== "object") current = null;
+      } catch (error) {
+        console.error("[antigravity] mcp cleanup read failed:", error);
+      }
+      try {
         let dirty = false;
         for (const key of added) {
           const live = (AGY_MCP_REFCOUNT.get(key) ?? 1) - 1;
@@ -1039,29 +1150,31 @@ async function reconcileAgyMcpServers(
             continue;
           }
           AGY_MCP_REFCOUNT.delete(key);
+          AGY_MCP_ACTIVE_ENTRIES.delete(key);
           const staged = stagedEntries.get(key);
           const replacement = AGY_MCP_REPLACEMENTS.get(key);
-          if (!isAgyMcpEntryEqual(current.mcpServers[key], staged)) {
+          if (!current || !isAgyMcpEntryEqual(current.mcpServers![key], staged)) {
             // Another Desktop instance changed the key after us. Never remove
             // or restore a value that this run can no longer identify.
             if (replacement) AGY_MCP_REPLACEMENTS.delete(key);
             continue;
           }
           if (replacement) {
-            current.mcpServers[key] = replacement.previous;
+            current.mcpServers![key] = replacement.previous;
             AGY_MCP_REPLACEMENTS.delete(key);
             dirty = true;
-          } else if (current.mcpServers[key]) {
-            delete current.mcpServers[key];
+          } else if (current.mcpServers![key]) {
+            delete current.mcpServers![key];
             dirty = true;
           }
         }
-        if (dirty) await writeGlobal(current);
+        if (dirty && current) await writeGlobal(current);
       } catch (error) {
         console.error("[antigravity] mcp cleanup failed:", error);
       }
-    },
+    }),
   };
+  });
 }
 
 /**
@@ -1262,6 +1375,7 @@ async function runPreparedAntigravity(
   const mcpReconcile = agyToolsAllowed
     ? await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus)
     : { cleanup: async () => {} };
+  if (mcpReconcile.failure) return { text: "", failure: mcpReconcile.failure };
   try {
     return await runAgyProcess();
   } finally {
