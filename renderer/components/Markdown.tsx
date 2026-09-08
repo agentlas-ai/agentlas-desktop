@@ -1391,7 +1391,9 @@ function localFileRefsFromText(text: string): string[] {
  */
 export function localServerUrlsInText(text: string): string[] {
   const out: string[] = [];
-  const pattern = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d{2,5}))?(?:\/[^\s`'"<>)\]]*)?/gi;
+  // Tool results can contain JSON-escaped newlines. A backslash terminates the
+  // URL; URL() otherwise normalizes `/<backslash>nTest` into a spurious /nTest path.
+  const pattern = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d{2,5}))?(?:\/[^\\\s`'"<>)\]]*)?/gi;
   for (const match of text.matchAll(pattern)) {
     const url = match[0].replace(/[).,;:]+$/, "");
     if (!out.includes(url)) out.push(url);
