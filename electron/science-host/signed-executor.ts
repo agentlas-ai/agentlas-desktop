@@ -82,7 +82,15 @@ function runChild(command: string, args: string[], cwd: string, timeoutMs: numbe
       shell: false,
       detached: true,
       stdio: ["ignore", "ignore", "pipe"],
-      env: { ELECTRON_RUN_AS_NODE: "1", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TMPDIR: cwd },
+      /*
+       * 워커는 별도 프로세스라 호스트가 없다. 사이언스가 자기 위치로 플러그인과 핀 파일을
+       * 찾던 자리가 저장소 분리로 어긋났으므로, 이 앱이 아는 자리를 넘겨 준다.
+       */
+      env: {
+        ELECTRON_RUN_AS_NODE: "1", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TMPDIR: cwd,
+        AGENTLAS_SCIENCE_PLUGIN_ROOT: sciencePluginRootForWorkers(),
+        AGENTLAS_SCIENCE_PLUGIN_PINS: sciencePluginPinsForWorkers(),
+      },
     });
     const pid = child.pid;
     if (!pid) return reject(new Error("science-signed-executor-child-pid-missing"));
@@ -160,4 +168,30 @@ export async function runSignedScienceExecutor(
   } finally {
     fs.rmSync(jobRoot, { recursive: true, force: true });
   }
+}
+
+/** 워커에게 넘길 내장 플러그인 폴더와 핀 파일 자리. 없으면 빈 문자열이라 사이언스가 옛 추측으로 돌아간다. */
+function sciencePluginRootForWorkers(): string {
+  /*
+   * 존재만 보면 안 된다 — dist/electron/plugins 는 컴파일된 코드 폴더라 이름만 같고
+   * 내용이 다르다. 실제 플러그인 묶음이 들어 있는지로 고른다.
+   */
+  const holdsPackages = (dir: string) => {
+    try { return fs.readdirSync(dir).some((entry) => entry.startsWith("agentlas-")); }
+    catch { return false; }
+  };
+  for (const candidate of [
+    path.resolve(__dirname, "..", "..", "plugins"),
+    path.resolve(__dirname, "..", "..", "..", "dist", "plugins"),
+    process.resourcesPath ? path.join(process.resourcesPath, "app.asar.unpacked", "dist", "plugins") : "",
+    path.resolve(__dirname, "..", "plugins"),
+  ]) {
+    if (candidate && holdsPackages(candidate)) return candidate;
+  }
+  return "";
+}
+
+function sciencePluginPinsForWorkers(): string {
+  const candidate = path.resolve(__dirname, "..", "public-plugin-manifest-pins.json");
+  return fs.existsSync(candidate) ? candidate : "";
 }

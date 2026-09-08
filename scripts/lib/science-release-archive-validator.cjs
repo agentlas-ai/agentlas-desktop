@@ -26,8 +26,8 @@ const {
 const {
   isScienceRendererPackManifest,
   validateScienceRendererPackRelease,
-} = require("../../dist/shared/science-renderer-pack.js");
-const { parseScienceServiceDescriptor } = require("../../dist/shared/science-lab-capability.js");
+} = require("../../node_modules/agentlas-science/dist/contracts/science-renderer-pack.js");
+const { parseScienceServiceDescriptor } = require("../../node_modules/agentlas-science/dist/contracts/science-lab-capability.js");
 const {
   assertScienceExtensionReleaseHostCompatibility,
 } = require("../../node_modules/agentlas-science/dist/tool-control-server.js");

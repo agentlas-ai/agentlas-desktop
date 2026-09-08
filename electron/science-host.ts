@@ -9,6 +9,9 @@
  *
  * 부팅 때 한 번 installScienceHost() 를 부르면 그 뒤로는 사이언스가 알아서 쓴다.
  */
+import fs from "node:fs";
+import path from "node:path";
+
 import { installScienceHost } from "agentlas-science";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
@@ -78,6 +81,26 @@ export function installDesktopScienceHost(): void {
     runSignedScienceExecutor,
     renderManuscriptPdf, resolveTectonic,
     readPersistedScienceWorkbook, persistedWorkbookReadback,
+    /*
+     * 내장 플러그인이 어디 있는지. 사이언스가 자기 위치로 추측하던 자리인데, 저장소가
+     * 갈리면서 그 추측이 빗나갔다. 이 앱은 답을 알고 있으므로 알려 준다.
+     */
+    sciencePluginRoot: () => {
+      const packaged = process.resourcesPath
+        ? path.join(process.resourcesPath, "app.asar.unpacked", "dist", "plugins")
+        : null;
+      const compiled = path.resolve(__dirname, "plugins");
+      const source = path.resolve(__dirname, "..", "..", "plugins");
+      for (const candidate of [compiled, source, packaged]) {
+        if (candidate && fs.existsSync(candidate)) return candidate;
+      }
+      return null;
+    },
+    /** 내장 플러그인 매니페스트 핀. 이 앱의 빌드가 만들고 이 앱이 위치를 안다. */
+    sciencePublicPluginPinsPath: () => {
+      const compiled = path.resolve(__dirname, "public-plugin-manifest-pins.json");
+      return fs.existsSync(compiled) ? compiled : null;
+    },
     // 런타임 탐색 — 사이언스는 이것을 동적으로만 부른다
     detectRuntimes: async (...args: unknown[]) => (await import("./runtime/detect")).detectRuntimes(...(args as Parameters<typeof import("./runtime/detect")["detectRuntimes"]>)),
     listRuntimeModels: async (...args: unknown[]) => (await import("./runtime/providers")).listRuntimeModels(...(args as Parameters<typeof import("./runtime/providers")["listRuntimeModels"]>)),

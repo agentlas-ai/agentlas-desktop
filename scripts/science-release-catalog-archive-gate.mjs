@@ -168,7 +168,7 @@ function trustedKeys() {
 async function main() {
   const candidate = await candidateCatalog();
   const catalog = candidate ? candidate.value : await fetchScienceReleaseCatalog(true);
-  const expectedDescriptor = JSON.parse(fs.readFileSync(path.join(root, "science-extension", "service", "descriptor.json"), "utf8"));
+  const expectedDescriptor = JSON.parse(fs.readFileSync(path.join(root, "node_modules", "agentlas-science", "service", "descriptor.json"), "utf8"));
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const result = await verifyScienceReleaseCatalogArchives({
     catalog,

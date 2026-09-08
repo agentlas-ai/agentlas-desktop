@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
-const manifest = require("../shared/science-jbrowse-runtime.json");
+const manifest = require("../node_modules/agentlas-science/src/contracts/science-jbrowse-runtime.json");
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
