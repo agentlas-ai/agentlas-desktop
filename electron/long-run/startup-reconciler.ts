@@ -70,7 +70,9 @@ export interface StartupReconcileEntry {
 export function reconcileHostPausedLongRuns(runIds: readonly string[]): StartupReconcileEntry[] {
   const db = getDb();
   const unsettled = db.prepare(
-    "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')",
+    // Shutdown marks running attempts interrupted but retains uncertainty in
+    // side_effect_state. Looking only at state would incorrectly allow replay.
+    "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
   );
   const entries: StartupReconcileEntry[] = [];
   for (const runId of runIds) {

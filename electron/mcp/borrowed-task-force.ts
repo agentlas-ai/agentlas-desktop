@@ -25,6 +25,7 @@ import type {
 } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RuntimeRole } from "../../shared/runtime-roles";
+import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
@@ -404,6 +405,8 @@ export interface BorrowedTaskForceParams {
   orchestratorAgent: InstalledAgent;
   /** Conversation turns captured before the current user request was stored. */
   priorHistory?: ChatHistoryEntry[];
+  /** Main-owned durable state. Never populated from the renderer request. */
+  goalCheckpoint?: LongRunTaskCheckpoint;
   /** Main-memory-only One snapshot. When present, never reopen package prompt files. */
   orchestratorEffectivePrompt?: string;
   taskForceName?: string;
@@ -3578,13 +3581,14 @@ async function runBorrowedAgentTurn(
         "Respond to the relevant peer evidence in your own result. Do not repeat work that is already verified; challenge or repair anything that is not.",
       ].join("\n")
     : "";
-  const authoritativePacketPrompt = [
+  const authoritativePacketPrompt = (runtime: Pick<RuntimeStatus, "kind">) => [
     packetToPrompt(
       packet,
       stripTaskForceControlEnvelopes(oneAttachmentExecutionPrompt(p.req)),
       workforceResponsibility,
     ),
     peerResultContext,
+    p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtime.kind) : "",
   ].filter(Boolean).join("\n\n");
   const workforceImages = workforceImagesForResponsibility(p, workforceResponsibility);
   const resultMeta = {
@@ -3695,14 +3699,15 @@ async function runBorrowedAgentTurn(
       const teamResult = await runFirmInvocation({
         req: {
           ...p.req,
-          userPrompt: authoritativePacketPrompt,
+          userPrompt: authoritativePacketPrompt(active),
           images: undefined,
           // The nested team is a child execution unit.  Bind the packet's
           // explicit grant instead of letting the parent's permission flow
           // through the recursive call.
           permissions: workerPermission,
         },
-        chat: { id: teamChat.id, projectId: p.chat.projectId, firmId: firm.id },
+        chat: { id: teamChat.id, projectId: p.chat.projectId, firmId: firm.id, goalId: p.chat.goalId },
+        goalCheckpoint: p.goalCheckpoint,
         org: getResolvedOrg(firm),
         ceoAgent,
         active,
@@ -3839,7 +3844,7 @@ async function runBorrowedAgentTurn(
             ].filter(Boolean).join("\n\n"),
             history: [],
             userPrompt: [
-              authoritativePacketPrompt,
+              authoritativePacketPrompt(managerPlanActive),
               repair ? `Prior validation error: ${managerPlanValidationError}` : "",
               "Create the exact declared-worker delegation plan now.",
             ].filter(Boolean).join("\n\n"),
@@ -3989,7 +3994,7 @@ async function runBorrowedAgentTurn(
                 ].filter(Boolean).join("\n\n"),
                 history: [],
                 userPrompt: [
-                  authoritativePacketPrompt,
+                  authoritativePacketPrompt(observedWorkerRuntime),
                   "Team manager plan:",
                   JSON.stringify(parsedManagerPlan),
                   `Your declared worker identity: ${worker.id}`,
@@ -4200,7 +4205,7 @@ async function runBorrowedAgentTurn(
           history: [],
           userPrompt: [
             "Original team input:",
-            authoritativePacketPrompt,
+            authoritativePacketPrompt(managerSynthesisActive),
             "Manager plan:",
             JSON.stringify(parsedManagerPlan),
             "Worker results:",
@@ -4420,7 +4425,7 @@ async function runBorrowedAgentTurn(
             directive,
           ].filter(Boolean).join("\n\n"),
           history: [],
-          userPrompt: authoritativePacketPrompt,
+          userPrompt: authoritativePacketPrompt(observedDirectRuntime),
           images: workforceImages,
           backendLabel: observedDirectPicked.label,
           model: observedDirectRuntime.model ?? undefined,
@@ -4741,6 +4746,9 @@ async function runPlanner(
   controllerRuntime?: RuntimeStatus;
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
+  // This local parameter is model context only. The caller retains the
+  // original history for committed human-approval checks.
+  if (p.chat.goalId) history = [];
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
   const plannerMemory = await taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
   const plannerOntology = p.req.agentAppMode
@@ -4821,9 +4829,11 @@ async function runPlanner(
     {
       systemPrompt,
       history: boundedTaskForceHistory(history),
-      userPrompt: validationError
+      userPrompt: [validationError
         ? `${baseUserPrompt}\n\nSchema repair validation error (sanitized): ${validationError}`
         : baseUserPrompt,
+        p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, plannerRuntime.kind) : "",
+      ].filter(Boolean).join("\n\n"),
       images: p.req.agentAppMode ? undefined : p.req.images,
       backendLabel: plannerPicked.label,
       model: plannerRuntime.model ?? undefined,
@@ -5760,14 +5770,14 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         synthesisOntology?.prompt,
         synthesisMemoryEmitter,
       ].filter(Boolean).join("\n\n"),
-      history: boundedTaskForceHistory(history),
-      userPrompt: overrideUserPrompt ?? buildSynthesisPrompt({
+      history: p.chat.goalId ? [] : boundedTaskForceHistory(history),
+      userPrompt: [overrideUserPrompt ?? buildSynthesisPrompt({
           originalRequest: oneAttachmentExecutionPrompt(p.req),
           planText: plan.text,
           packets: executionPackets,
           results,
           artifacts: [...observedOneArtifacts.values()],
-        }),
+        }), p.goalCheckpoint ? compileLongRunCheckpoint(p.goalCheckpoint, runtimeForCall.kind) : ""].filter(Boolean).join("\n\n"),
       images: synthesisImages,
       backendLabel: pickedForCall.label,
       model: runtimeForCall.model ?? undefined,

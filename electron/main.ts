@@ -3664,6 +3664,15 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[invocation] queued steer recovery failed", error);
   }
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const { resumeSettledGoalCheckpoints } = await import("./long-run/startup-checkpoints");
+      const resumed = resumeSettledGoalCheckpoints(invocationService);
+      if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
+    } catch (error) {
+      console.error("[long-run] checkpoint startup reconciliation failed", error);
+    }
+  }
   try {
     const scienceStatus = scienceExtensionStatus();
     if (scienceStatus.phase === "installed" && scienceStatus.enabled) {

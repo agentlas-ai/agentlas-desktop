@@ -2342,7 +2342,7 @@ export interface BrowserLiveFrame {
   /** The real CDP viewport used for this capture. */
   viewport: BrowserLiveViewport;
   capturedAt: string;
-  error: "browser-offline" | "no-page" | "capture-failed" | null;
+  error: "browser-offline" | "no-page" | "capture-failed" | "task-scope-missing" | "browser-session-unlinked" | null;
 }
 /** A frame pushed by the task-scoped CDP screencast. */
 export interface BrowserLiveStreamFrame extends BrowserLiveFrame {
@@ -7323,6 +7323,8 @@ export interface AgentlasIpc {
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
     /** Capture the current task's already-open page when supplied; never navigates. */
     captureLiveFrame: (preferredUrl?: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveFrame>;
+    /** Main resolves this task's observed browser source from durable tool receipts. */
+    captureTaskFrame: (chatId: string) => Promise<BrowserLiveFrame>;
     /** Start a persistent, task-scoped CDP screencast. It never selects an unrelated tab. */
     startLiveView: (preferredUrl: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveSessionResult>;
     stopLiveView: (sessionId: string) => Promise<{ ok: boolean }>;

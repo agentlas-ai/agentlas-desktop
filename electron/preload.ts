@@ -590,6 +590,7 @@ const api: AgentlasIpc = {
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
     captureLiveFrame: (preferredUrl?: string, viewport?: "desktop" | "phone") =>
       ipcRenderer.invoke("browser:captureLiveFrame", preferredUrl, viewport),
+    captureTaskFrame: (chatId: string) => ipcRenderer.invoke("browser:captureTaskFrame", chatId),
     startLiveView: (preferredUrl: string, viewport?: "desktop" | "phone") =>
       ipcRenderer.invoke("browser:startLiveView", preferredUrl, viewport),
     stopLiveView: (sessionId: string) => ipcRenderer.invoke("browser:stopLiveView", sessionId),

@@ -18,6 +18,7 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
+import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
@@ -140,11 +141,13 @@ const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface FirmRunParams {
   req: McpInvocationRequest;
-  chat: { id: string; projectId: string | null; firmId: string | null };
+  chat: { id: string; projectId: string | null; firmId: string | null; goalId?: string | null };
   org: ResolvedOrg;
   ceoAgent: InstalledAgent;
   /** Conversation turns captured before the current user request was stored. */
   priorHistory?: ChatHistoryEntry[];
+  /** Main-owned durable state, never accepted from the renderer request. */
+  goalCheckpoint?: LongRunTaskCheckpoint;
   active: RuntimeStatus;
   runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
@@ -796,6 +799,25 @@ interface NodeTurn {
   onPartialCheckpoint?: (text: string) => void;
 }
 
+/** Keep the local history available to approval/handoff decisions while the
+ * model continues a durable Goal from host state instead of replaying it.
+ * userPrompt reaches both fresh and resumed native sessions. */
+export function firmRunnerConversation(
+  p: Pick<FirmRunParams, "req" | "chat" | "goalCheckpoint">,
+  turn: Pick<NodeTurn, "history" | "userPrompt">,
+  runtime: Pick<RuntimeStatus, "kind">,
+): Pick<RunnerRequest, "history" | "userPrompt"> {
+  const checkpoint = p.req.agentAppMode ? undefined : p.goalCheckpoint;
+  if (checkpoint && checkpoint.goalId !== p.chat.goalId) {
+    throw new Error("firm_goal_checkpoint_mismatch");
+  }
+  return {
+    history: p.req.agentAppMode || p.chat.goalId ? [] : turn.history,
+    userPrompt: [turn.userPrompt, checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : ""]
+      .filter(Boolean).join("\n\n"),
+  };
+}
+
 /** 노드 1턴 실행 — 프롬프트 조립(노드 프롬프트 + per-agent 메모리 + 위임/메모리 프로토콜),
  *  러너 실행(속성 태깅 스트림), delegation 파싱 + 메모리 큐레이션. */
 async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
@@ -1042,8 +1064,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       return await runtimePicked.runner(
         {
           systemPrompt,
-          history: p.req.agentAppMode ? [] : turn.history,
-          userPrompt: turn.userPrompt,
+          ...firmRunnerConversation(p, turn, runtime),
           images: p.req.agentAppMode ? undefined : turn.withImages ? p.req.images : undefined,
           backendLabel: runtimePicked.label,
           model: runtime.model ?? undefined,

@@ -86,14 +86,11 @@ export async function prepareInvocationAutomaticGoal(input: {
           + `within its granted permission (${input.permission}). Both the folder and the permission are in the run receipt; `
           + "if the evidence shows no out-of-folder writes, this criterion is met." },
         { id: "evidence", text: "Completion is supported by current evidence on the requested output surface; unverified work remains open." },
-        { id: "delivery-validation", text: "Validate the delivered result in the way its user will use it. "
-          + "For an application or interactive UI implementation/change, launch the actual application, inspect its rendered screens, "
-          + "and exercise its core user flows in a browser, simulator, or native runtime. Keep observable tool results or captures "
-          + "of the launch, rendered state, interactions, and outcomes. Source files, successful builds, static analysis, "
-          + "unit/widget tests, and the assistant's report alone do not prove this criterion. Fix observed failures and repeat "
-          + "the affected flows. For non-interactive deliverables, inspect the actual delivered output in its target format instead. "
-          + "An unavailable runtime or missing required access is an unmet prerequisite, not successful validation. "
-          + "Do not publish, spend money, or expand permissions to satisfy this criterion without existing authorization." },
+        { id: "delivery-validation", text: "For apps or interactive UI changes, launch the actual app and exercise core user flows "
+          + "in a browser, simulator, or native runtime. Preserve tool evidence or captures of launch, rendered screens, interactions, "
+          + "and outcomes. Source, build, static analysis, unit/widget tests, or a completion report alone do not pass. "
+          + "Fix failures and repeat. For other outputs inspect the delivered format. Missing runtime/access remains unmet; "
+          + "use only existing permissions." },
       ],
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,
@@ -104,7 +101,7 @@ export async function prepareInvocationAutomaticGoal(input: {
   } catch (error) {
     tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake_unavailable", payload: {
       sourceMessageId: input.sourceMessageId,
-      reason: error instanceof Error && /^auto_goal_[a-z_]+$/.test(error.message) ? error.message : "classification_or_admission_failed",
+      reason: error instanceof Error && /^(?:auto_goal|goal|long_run)_[a-z_]+$/.test(error.message) ? error.message : "classification_or_admission_failed",
     } });
     return null;
   }
@@ -122,7 +119,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
-  const pending = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')").get(run.id) as { n: number };
+  const pending = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')").get(run.id) as { n: number };
   if (pending.n) throw new Error("auto_goal_resume_attempt_unsettled");
   /*
    * An absent limit is no limit, not a spent one.

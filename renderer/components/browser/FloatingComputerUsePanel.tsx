@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { agentScreenChatId, subscribeAgentScreenScope } from "@/lib/agent-screen-scope";
 import { useAgentScreen, AgentScreenCanvas, AgentScreenFooter, type AgentScreenMode } from "./AgentScreenView";
 
 type ViewMode = AgentScreenMode;
@@ -36,7 +37,8 @@ export default function FloatingComputerUsePanel() {
   const panelRef = useRef<HTMLElement | null>(null);
   const drag = useRef<DragState | null>(null);
   // 화면은 이 카드가 열려 있을 때만 잡는다 — 접혀 있으면 캡처도 멈춘다.
-  const screen = useAgentScreen(mode, open, ko);
+  const chatId = useSyncExternalStore(subscribeAgentScreenScope, agentScreenChatId, () => null);
+  const screen = useAgentScreen(mode, open, ko, chatId);
 
   useEffect(() => {
     const onActivity = (event: Event) => {

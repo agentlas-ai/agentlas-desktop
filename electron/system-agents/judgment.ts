@@ -16,6 +16,7 @@
 // is genuinely correct.
 
 import { detectRuntimes } from "../runtime/detect";
+import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
@@ -23,6 +24,36 @@ import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RunnerFailure, RunnerFailureKind } from "../runtime/runner";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
+
+export interface JudgmentRuntimeReceipt {
+  selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model">;
+  route: "explicit_pin" | "orchestrator_pool" | "legacy";
+  fingerprint: string;
+  execution: "invoked" | "cached";
+}
+
+type JudgmentPool = { state: "configured" | "unconfigured" | "unavailable"; selections: RuntimeSelection[]; fingerprint: string };
+function routingFingerprint(selections: RuntimeSelection[]): string {
+  return createHash("sha256").update(JSON.stringify(selections)).digest("hex");
+}
+function readJudgmentPool(): JudgmentPool {
+  try {
+    const { getDb } = require("../store/db") as typeof import("../store/db");
+    const { listModelRoleMembers } = require("../store/model-roles") as typeof import("../store/model-roles");
+    const db = getDb();
+    const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_role_members'").get();
+    if (!exists) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
+    const { n } = db.prepare("SELECT COUNT(*) AS n FROM model_role_members WHERE role = 'orchestrator'").get() as { n: number };
+    if (!n) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
+    const selections = listModelRoleMembers("orchestrator").map((member) => member.selection);
+    // The normal UI reader returns [] on errors. That must not authorize an
+    // escape to every detected provider when a configured pool cannot be read.
+    if (selections.length !== n) throw new Error("judgment_pool_unavailable");
+    return { state: "configured", selections, fingerprint: routingFingerprint(selections) };
+  } catch {
+    return { state: "unavailable", selections: [], fingerprint: "unavailable" };
+  }
+}
 
 /** A wordlist demoted to a hint: "these words *suggest* this label — verify by meaning." */
 export interface JudgeHint<V extends string> {
@@ -56,6 +87,7 @@ export interface JudgeSpec<V extends string> {
 }
 
 export interface Verdict<V extends string> {
+  runtimeReceipt?: JudgmentRuntimeReceipt;
   verdict: V;
   /** 0..1 — the model's own stated confidence, or 0 on fallback. */
   confidence: number;
@@ -74,6 +106,7 @@ export interface Verdict<V extends string> {
  * never a fabricated verdict.
  */
 export interface RequiredVerdict<V extends string> {
+  runtimeReceipt?: JudgmentRuntimeReceipt;
   verdict: V | null;
   confidence: number;
   reason: string;
@@ -159,7 +192,7 @@ function cacheGet<V extends string>(key: string): Verdict<V> | undefined {
   // Refresh recency.
   cache.delete(key);
   cache.set(key, hit);
-  return hit as Verdict<V>;
+  return { ...hit, ...(hit.runtimeReceipt ? { runtimeReceipt: { ...hit.runtimeReceipt, execution: "cached" as const } } : {}) } as Verdict<V>;
 }
 
 function cacheSet(key: string, value: Verdict<string>): void {
@@ -234,7 +267,10 @@ function judgmentCacheKey(kind: string, input: string): string {
 }
 
 function runtimeSelectionCacheScope(selection?: RuntimeSelection): string {
-  if (!selection) return "";
+  if (!selection) {
+    const pool = readJudgmentPool();
+    return pool.state === "unconfigured" ? "" : `\u0000orchestrator-pool:${pool.fingerprint}`;
+  }
   return `\u0000runtime:${JSON.stringify({
     kind: selection.kind,
     backend: selection.backend ?? null,
@@ -359,7 +395,7 @@ export async function callConnectedModelDetailed(opts: {
    * 자세한 배경은 callJudgmentModelDetailed 의 같은 이름 옵션 주석에 있다.
    */
   authoring?: boolean;
-}): Promise<{ text: string | null; failure?: RunnerFailure }> {
+}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt }> {
   return callJudgmentModelDetailed(opts);
 }
 
@@ -399,9 +435,10 @@ async function callJudgmentModelDetailed(opts: {
    * 얻으면 자기가 판정할 대상을 스스로 만들어 낼 수 있다.
    */
   authoring?: boolean;
-}): Promise<{ text: string | null; failure?: RunnerFailure }> {
+}): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt }> {
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
+  let runtimeReceipt: JudgmentRuntimeReceipt | undefined;
   let runtimes: RuntimeStatus[];
   let operationalStoreUnavailable = false;
   try {
@@ -410,26 +447,29 @@ async function callJudgmentModelDetailed(opts: {
     runtimes = [];
     operationalStoreUnavailable = true;
   }
-  const pinnedChoice = opts.runtimeSelection
-    ? selectExactRuntime(runtimes, opts.runtimeSelection)
-    : null;
-  const active = opts.runtimeSelection ? pinnedChoice?.active ?? null : pickActive(runtimes);
-  // Judgment is a lightweight classification of text the user already owns, so
-  // it is not tied to the runtime picked for real work. Try the active runtime
-  // first — that is the user's choice — then any other connected runtime that
-  // can actually prove tool-free isolation.
-  //
-  // This ordering exists because several CLIs refuse isolation outright (Codex
-  // cannot drop delegation authority, Gemini has no verified no-tool mode, Grok
-  // persists history). Binding the judge to the active runtime therefore left
-  // every CLI user with a silently dead judge: the verdict fell back forever,
-  // which is indistinguishable from "the judge decided to be conservative".
+  const pool = opts.runtimeSelection ? null : readJudgmentPool();
+  if (pool?.state === "unavailable") return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_unavailable",
+  } };
+  const pinnedChoice = opts.runtimeSelection ? selectExactRuntime(runtimes, opts.runtimeSelection) : null;
+  const active = opts.runtimeSelection ? pinnedChoice?.active ?? null
+    : pool?.state === "configured" ? null : pickActive(runtimes);
+  // An explicit pin overrides the pool. A configured pool is an authority
+  // boundary, including exact models and priority order; failed isolation or
+  // invalid output can try its next member, never another detected provider.
   const ordered = opts.runtimeSelection
     ? (active ? [active] : [])
-    : [
+    : pool?.state === "configured"
+      ? pool.selections.map((selection) => selectExactRuntime(runtimes, selection)?.active).filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
+      : [
       ...(active ? [active] : []),
       ...runtimes.filter((runtime) => runtime !== active),
     ];
+  const route: JudgmentRuntimeReceipt["route"] = opts.runtimeSelection ? "explicit_pin" : pool?.state === "configured" ? "orchestrator_pool" : "legacy";
+  const fingerprint = opts.runtimeSelection ? routingFingerprint([opts.runtimeSelection]) : pool?.fingerprint ?? "legacy";
+  if (!ordered.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_selected_runtime_unavailable",
+  } };
   if (opts.runtimeSelection) {
     console.info(
       `[judgment-runtime-selection] kind=${opts.runtimeSelection.kind} `
@@ -451,8 +491,16 @@ async function callJudgmentModelDetailed(opts: {
   else opts.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     for (const runtime of ordered) {
+      if (!opts.runtimeSelection && readJudgmentPool().fingerprint !== fingerprint) return { text: null, failure: {
+        kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
+      }, runtimeReceipt };
+      if (controller.signal.aborted) break;
       const picked = pickRunner(runtime);
       if (!picked) continue;
+      runtimeReceipt = { route, fingerprint, execution: "invoked", selection: {
+        kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
+      } };
+      console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       try {
         const result = await awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
@@ -502,7 +550,7 @@ async function callJudgmentModelDetailed(opts: {
           };
           continue;
         }
-        return { text };
+        return { text, runtimeReceipt };
       } catch (error) {
         // Timeout or caller cancellation ends the whole judgment; a runtime that
         // merely cannot isolate just yields to the next candidate.
@@ -516,13 +564,17 @@ async function callJudgmentModelDetailed(opts: {
           runtime: runtime.kind,
           source: "exit",
         };
-        if (controller.signal.aborted) return { text: null, failure: lastFailure };
+        if (controller.signal.aborted) return { text: null, failure: lastFailure, runtimeReceipt };
       }
     }
-    if (!opts.runtimeSelection && operationalStoreUnavailable) {
+    if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
       if (selection && recovery && !controller.signal.aborted) {
+        runtimeReceipt = { route: "legacy", fingerprint: "legacy", execution: "invoked", selection: {
+          kind: selection.kind, backend: selection.backend, source: selection.source, model: selection.model,
+        } };
+        console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         try {
           const result = await awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
@@ -555,7 +607,7 @@ async function callJudgmentModelDetailed(opts: {
                 source: "exit",
               };
             } else {
-              return { text: recoveredText };
+              return { text: recoveredText, runtimeReceipt };
             }
           }
         } catch (error) {
@@ -568,7 +620,7 @@ async function callJudgmentModelDetailed(opts: {
         }
       }
     }
-    return { text: null, ...(lastFailure ? { failure: lastFailure } : {}) };
+    return { text: null, ...(lastFailure ? { failure: lastFailure } : {}), ...(runtimeReceipt ? { runtimeReceipt } : {}) };
   } finally {
     clearTimeout(timeout);
     opts.signal?.removeEventListener("abort", onAbort);
@@ -652,15 +704,18 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
 
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) return fallbackVerdict;
-  const verdict: Verdict<V> = { ...parsed, source: "llm", redactedInput, containedSecret };
+  const verdict: Verdict<V> = { ...parsed, source: "llm", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
   const stored: Verdict<string> = {
     verdict: parsed.verdict,
     confidence: parsed.confidence,
     reason: parsed.reason,
     source: "llm",
+    runtimeReceipt: detailed.runtimeReceipt,
   };
-  cacheSet(cacheKey, stored);
-  durablePut(spec.kind, signature, stored);
+  if (runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) {
+    cacheSet(cacheKey, stored);
+    durablePut(spec.kind, signature, stored);
+  }
   return verdict;
 }
 
@@ -711,15 +766,17 @@ export async function judgeRequired<V extends string>(
   if (text === null) {
     // ★reason을 비우지 않는다 — 소비자(EVAL_UNAVAILABLE 카드 등)가 "왜"를 말할 유일한 통로다.
     const reason = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
-    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret };
+    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
   }
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) {
-    return { verdict: null, confidence: 0, reason: "", source: "unavailable", redactedInput, containedSecret };
+    return { verdict: null, confidence: 0, reason: "", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
   }
-  cacheSet(cacheKey, { ...parsed, source: "llm" });
-  durablePut(spec.kind, signature, { ...parsed, source: "llm" });
-  return { ...parsed, source: "llm", redactedInput, containedSecret };
+  if (runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) {
+    cacheSet(cacheKey, { ...parsed, source: "llm", runtimeReceipt: detailed.runtimeReceipt });
+    durablePut(spec.kind, signature, { ...parsed, source: "llm" });
+  }
+  return { ...parsed, source: "llm", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt };
 }
 
 export interface RequiredActionOption {
@@ -873,8 +930,9 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
   const input = spec.input.length > limit ? spec.input.slice(0, limit) : spec.input;
 
-  const signature = intentSignature(input);
-  const cacheKey = subsetCacheKey(spec.kind, spec.labels, input);
+  const runtimeScope = runtimeSelectionCacheScope();
+  const signature = `${intentSignature(input)}${runtimeScope}`;
+  const cacheKey = `${subsetCacheKey(spec.kind, spec.labels, input)}${runtimeScope}`;
   const cached = subsetCache.get(cacheKey);
   if (cached) {
     subsetCache.delete(cacheKey);
@@ -922,8 +980,10 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const parsed = parseSubset<V>(text, spec.labels);
   if (!parsed) return undecided;
   const verdict: SubsetVerdict<V> = { ...parsed, source: "llm" };
-  subsetCache.set(cacheKey, verdict);
-  durableSubsetPut(spec.kind, signature, verdict);
+  if (runtimeScope === runtimeSelectionCacheScope()) {
+    subsetCache.set(cacheKey, verdict);
+    durableSubsetPut(spec.kind, signature, verdict);
+  }
   if (subsetCache.size > CACHE_MAX) {
     const oldest = subsetCache.keys().next().value;
     if (oldest !== undefined) subsetCache.delete(oldest);
@@ -960,7 +1020,7 @@ export function clearJudgmentCache(): void {
  */
 export function peekJudgment<V extends string>(kind: string, input: string, maxInputChars = MAX_INPUT_CHARS): Verdict<V> | null {
   const text = input.length > maxInputChars ? input.slice(0, maxInputChars) : input;
-  const hit = cacheGet<V>(judgmentCacheKey(kind, text));
+  const hit = cacheGet<V>(`${judgmentCacheKey(kind, text)}${runtimeSelectionCacheScope()}`);
   return hit ?? null;
 }
 
@@ -983,7 +1043,7 @@ export function peekSubsetJudgment<V extends string>(
   maxInputChars = MAX_INPUT_CHARS,
 ): SubsetVerdict<V> | null {
   const text = input.length > maxInputChars ? input.slice(0, maxInputChars) : input;
-  const key = subsetCacheKey(kind, labels, text);
+  const key = `${subsetCacheKey(kind, labels, text)}${runtimeSelectionCacheScope()}`;
   const hit = subsetCache.get(key);
   if (!hit) return null;
   subsetCache.delete(key);
@@ -1131,10 +1191,11 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
   const correctionLines = corrections.map((c) =>
     `- A result like: "${secretValueFloor(c.subjectPreview).redacted.slice(0, 200)}" — the person ruled ${c.correctedVerdict.toUpperCase()}${c.note ? ` (${c.note.slice(0, 150)})` : ""}`);
   // ★교정이 캐시 키에 들어가야 한다 — 아니면 새 교정이 와도 캐시된 옛 판정이 그대로 나온다.
+  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
   const cacheKey = [
     spec.kind,
     spec.salt ?? "",
-    runtimeSelectionCacheScope(spec.runtimeSelection),
+    runtimeScope,
     itemLines.join("\n"),
     correctionLines.join("\n"),
     evidence ?? "",
@@ -1199,7 +1260,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     reasonText: settled.reasonText,
     source: settled.verdict === null ? "unavailable" : "llm",
   };
-  if (settled.verdict !== null) checklistCacheSet(cacheKey, result);
+  if (settled.verdict !== null && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) checklistCacheSet(cacheKey, result);
   return result;
 }
 

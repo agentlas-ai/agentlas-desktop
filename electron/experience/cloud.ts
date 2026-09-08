@@ -343,6 +343,34 @@ export class ExperienceCloudHttpClient {
     }
   }
 
+  /** Read-only canonical identities; package ownership and hash authority still
+   * come from the owner shelf and resolveBase, respectively. */
+  async listAgentDefinitionIdentities(): Promise<Array<{
+    id: string;
+    slug: string;
+    entityKind: "agent" | "team";
+    currentReleaseId: string;
+    state: string;
+  }>> {
+    const response = await this.request("/api/experience/v1/agent-definitions", { method: "GET" });
+    if (!response.ok) throw await errorFromResponse(response);
+    const json = record(await readResponseJson(response));
+    if (!Array.isArray(json.definitions)) throw new Error("Cloud definition inventory schema mismatch.");
+    return json.definitions.map((value) => {
+      const row = record(value);
+      if (row.entityKind !== "agent" && row.entityKind !== "team") {
+        throw new Error("Cloud definition entity kind is invalid.");
+      }
+      return {
+        id: safeRef(row.id, "agentDefinitionId"),
+        slug: String(row.slug ?? ""),
+        entityKind: row.entityKind,
+        currentReleaseId: typeof row.currentReleaseId === "string" ? row.currentReleaseId : "",
+        state: String(row.state ?? ""),
+      };
+    });
+  }
+
   async resolveBase(input: {
     slug?: string;
     cloudId?: string;

@@ -677,6 +677,7 @@ import {
   stopBrowserLiveSessionsForOwner,
 } from "./browser/live-view";
 import { captureComputerUsePreview } from "./computer-use/preview";
+import { captureTaskBrowserFrame } from "./browser/task-frame";
 import {
   archiveAppPackage,
   activateLocalCommerceStack,
@@ -3968,6 +3969,10 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
+  ipcMain.handle("browser:captureTaskFrame", (event, chatId?: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    return captureTaskBrowserFrame(chatId);
+  });
   ipcMain.handle("browser:captureLiveFrame", (event, preferredUrl?: string, viewport?: "desktop" | "phone") => {
     assertTrustedSitePublishIpcSender(event);
     return captureBrowserLiveFrame(

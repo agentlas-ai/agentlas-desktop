@@ -530,7 +530,21 @@ export function reduceAgyLine(
        * ACTIVE에 parameters, DONE에 parameters+output을 준다. 같은 도구 호출의 ACTIVE→DONE은
        * step_index로 이어진다(같은 id로 갱신되게 index를 id에 넣는다).
        */
-      const params = step.tool_info?.parameters;
+      let params = step.tool_info?.parameters;
+      let displayName = name;
+      let envelope: unknown = params;
+      if (name === "call_mcp_tool" && typeof params === "string") {
+        try { envelope = JSON.parse(params); } catch { /* Preserve malformed provider data verbatim. */ }
+      }
+      if (name === "call_mcp_tool" && envelope && typeof envelope === "object" && !Array.isArray(envelope)) {
+        const call = envelope as { ServerName?: unknown; ToolName?: unknown; Arguments?: unknown };
+        if (typeof call.ServerName === "string" && /^[a-zA-Z0-9_-]+$/u.test(call.ServerName)
+          && typeof call.ToolName === "string" && /^[a-zA-Z0-9_-]+$/u.test(call.ToolName)
+          && call.Arguments && typeof call.Arguments === "object" && !Array.isArray(call.Arguments)) {
+          displayName = `mcp__${call.ServerName}__${call.ToolName}`;
+          params = call.Arguments;
+        }
+      }
       const output = step.tool_info?.output;
       const stringify = (value: unknown): string | undefined => {
         if (value === undefined || value === null) return undefined;
@@ -546,7 +560,7 @@ export function reduceAgyLine(
       return {
         activity: `tool:${name}`,
         tool: {
-          name,
+          name: displayName,
           id: `agy-tool:${name}:${typeof stepIndex === "number" ? stepIndex : (step.state ?? "")}`,
           failed: step.state === "ERROR",
           args: stringify(params),

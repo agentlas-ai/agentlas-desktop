@@ -59,6 +59,47 @@ export interface TurnEscalationVerdict {
   basis: ObservedTurn | null;
 }
 
+export type ProjectRosterTaskForceReason =
+  | "explicit-user-solo"
+  | "turn-escalated"
+  | "active-goal"
+  | "no-runnable-roster"
+  | "solo-without-goal";
+
+export interface ProjectRosterTaskForceDecision {
+  run: boolean;
+  reasonCode: ProjectRosterTaskForceReason;
+}
+
+/**
+ * Decide whether a saved project roster may become a real task force this turn.
+ *
+ * A goal is a durable execution commitment, so an admitted automatic goal and an
+ * explicit Goal turn may use the roster even when there is no previous-turn
+ * observation yet. A direct request to stay solo always wins. The caller must
+ * pass the runnable roster count after resolving local agent/team identities;
+ * saved labels alone never authorize a task-force receipt.
+ */
+export function decideProjectRosterTaskForce(input: {
+  turnEscalation: TurnEscalationVerdict;
+  activeGoal: boolean;
+  runnableRosterCount: number;
+}): ProjectRosterTaskForceDecision {
+  if (input.runnableRosterCount <= 0) {
+    return { run: false, reasonCode: "no-runnable-roster" };
+  }
+  if (input.turnEscalation.reasonCode === "explicit-user-solo") {
+    return { run: false, reasonCode: "explicit-user-solo" };
+  }
+  if (input.turnEscalation.level === "team") {
+    return { run: true, reasonCode: "turn-escalated" };
+  }
+  if (input.activeGoal) {
+    return { run: true, reasonCode: "active-goal" };
+  }
+  return { run: false, reasonCode: "solo-without-goal" };
+}
+
 /**
  * 직전 턴을 무겁다고 볼 기준.
  *

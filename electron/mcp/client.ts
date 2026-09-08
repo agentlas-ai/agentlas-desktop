@@ -70,11 +70,17 @@ import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
+import { latestTaskCheckpoint } from "../long-run/checkpoint";
+import { compileLongRunCheckpoint } from "../../shared/long-run-checkpoint";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { oneConfirmedRosterTargetsAreExact } from "../../shared/one-team-preflight";
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
-import { classifyTurnEscalation, describeTurnEscalation } from "../../shared/turn-escalation";
+import { getCargoSource } from "../marketplace";
+import { getSessionCookieHeader, webBaseUrl } from "../auth";
+import { ExperienceCloudHttpClient } from "../experience/cloud";
+import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cloud-roster";
+import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
@@ -659,7 +665,7 @@ export function inferWorkingFolderFromPrompt(
 ): string | null {
   if (opts?.authored === "machine") return null;
   const explicit = prompt.match(
-    /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
+    /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/[^\s`"'<>]+)/i,
   );
   const candidate = cleanPathCandidate(explicit?.[1]);
   if (!candidate) return null;
@@ -3097,6 +3103,9 @@ ${effectiveUserPrompt}`;
     params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
   ) => runBorrowedTaskForceInvocation({
     ...params,
+    // Every early team route crosses this Main-owned boundary. A verifier
+    // retry must reach the planner/workers before the general runner helper.
+    goalCheckpoint: params.chat.goalId ? latestTaskCheckpoint(params.chat.goalId) ?? undefined : undefined,
     ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
     onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
     bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
@@ -3628,49 +3637,85 @@ ${effectiveUserPrompt}`;
    * 곧바로 네트워크로 갔다.
    *
    * 사용자가 이번 턴에 직접 대상을 지목했으면(@ 지목·명시 borrow) 그 지시가 위다.
-   * 난이도가 solo면 팀을 만들지 않는다 — 한 줄 질문에 편성을 붙이는 것이 이 시스템의
-   * 반대 방향 결함이다. */
+   * 평범한 solo 턴에는 팀을 만들지 않는다 — 한 줄 질문에 편성을 붙이는 것이 이 시스템의
+   * 반대 방향 결함이다. 다만 사용자 메시지가 저장된 뒤 실제 Goal로 승인된 턴은 첫 턴에도
+   * 실행 계약이 생겼으므로, 프로젝트 도구를 편성한다. Cloud 행은 소유 선반의
+   * 저장된 exact release를 Core에서 준비한 뒤에만 실행 스펙이 된다. */
+  const rosterSpecs = projectRosterSpecs(
+    projectRosterForTurn.filter((member) => member.source !== "cloud"),
+    {
+      agentById: (id) => {
+        const installed = getAgentById(id);
+        return installed
+          ? {
+              id: installed.id,
+              slug: installed.slug,
+              name: installed.name,
+              userFacing: isUserFacingProjectAgent(installed),
+            }
+          : null;
+      },
+      firmById: (id) => {
+        const firm = getFirm(id);
+        return firm ? { id: firm.id, slug: firm.slug, name: firm.name } : null;
+      },
+    },
+    locale,
+  ) as BorrowedAgentSpec[];
+  const rosterTaskForceDecision = decideProjectRosterTaskForce({
+    turnEscalation,
+    // The durable-message hook above admits automatic Goals and refreshes this
+    // field before routing. Automatic Goal does not rewrite req.goalMode.
+    activeGoal: Boolean(chat.goalId),
+    runnableRosterCount: rosterSpecs.length + projectRosterForTurn.filter((member) => member.source === "cloud").length,
+  });
   const rosterFirstEligible =
     !oneTeamExecutionPolicy &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
     chat.kind !== "division" &&
-    turnEscalation.level !== "solo" &&
+    rosterTaskForceDecision.run &&
     borrowedAgentSlugs.length === 0 &&
     !userNamedTargetsThisTurn &&
     projectRosterForTurn.length > 0;
   if (rosterFirstEligible) {
-    const rosterSpecs = projectRosterSpecs(
-      projectRosterForTurn,
-      {
-        agentById: (id) => {
-          const installed = getAgentById(id);
-          return installed
-            ? {
-                id: installed.id,
-                slug: installed.slug,
-                name: installed.name,
-                userFacing: isUserFacingProjectAgent(installed),
-              }
-            : null;
-        },
-        firmById: (id) => {
-          const firm = getFirm(id);
-          return firm ? { id: firm.id, slug: firm.slug, name: firm.name } : null;
-        },
-      },
-      locale,
-    ) as BorrowedAgentSpec[];
-    if (rosterSpecs.length > 0) {
+    if (rosterSpecs.length > 0 || projectRosterForTurn.some((member) => member.source === "cloud")) {
       try {
         persistUserMessage();
+        const canonicalCloudClient = () => {
+          const cookie = getSessionCookieHeader();
+          if (!cookie) throw new ProjectCloudRosterError("source_unauthorized", "cloud");
+          return new ExperienceCloudHttpClient({ baseUrl: webBaseUrl(), cookieHeader: cookie });
+        };
+        rosterSpecs.push(...await prepareProjectCloudRoster(projectRosterForTurn, {
+          listOwnerCloud: async () => {
+            const source = getCargoSource();
+            if (!source) throw new ProjectCloudRosterError("owner_cloud_unavailable", "cloud");
+            // Use the authenticated source, never the UI's stale/fallback cache.
+            return (await source.listMyCloudPackages()).rows;
+          },
+          listDefinitions: () => canonicalCloudClient().listAgentDefinitionIdentities(),
+          resolveBase: (input) => canonicalCloudClient().resolveBase(input),
+          prepare: async (target) => {
+            const res = await hepCall(`cloud/${target.entityKind}/${target.slug}`, [
+              "Prepare this exact project-designated Cloud release for local execution.",
+            ], { project: workingFolder ?? ".", version: target.packageHash, signal });
+            const [spec] = requireBorrowedAgentSpecs([target.slug], res.json ?? null, {
+              locale,
+              transportOk: res.ok,
+              transportError: res.error || (res.exitCode == null ? "cloud_call_failed" : `cloud_exit_${res.exitCode}`),
+            });
+            if (!spec) throw new BorrowedAgentUnavailableError([target.slug], ["missing_directive"], locale);
+            return spec;
+          },
+        }));
         // 영수증 — 무엇으로 이 등급이 나왔고 누구를 썼는지 남긴다. 이 줄이 없으면
         // "리스트가 안 쓰였다"가 다시 조용해진다.
         sink({
           kind: "tool-use",
           status: locale === "ko"
-            ? `프로젝트 지정 ${rosterSpecs.length}명으로 편성합니다 (난이도 ${describeTurnEscalation(turnEscalation)}).`
-            : `Staffing with ${rosterSpecs.length} project-designated member(s) (escalation ${describeTurnEscalation(turnEscalation)}).`,
+            ? `프로젝트 지정 ${rosterSpecs.length}명으로 편성합니다 (경로 ${rosterTaskForceDecision.reasonCode}; 난이도 ${describeTurnEscalation(turnEscalation)}).`
+            : `Staffing with ${rosterSpecs.length} project-designated member(s) (route ${rosterTaskForceDecision.reasonCode}; escalation ${describeTurnEscalation(turnEscalation)}).`,
         });
         await runBoundTaskForceInvocation({
           req: { ...req, userPrompt: effectiveUserPrompt, borrowAgents: undefined, taskForceTargets: undefined },
@@ -3710,7 +3755,7 @@ ${effectiveUserPrompt}`;
         sink({
           kind: "error",
           error: {
-            code: "project-roster-task-force-failed",
+            code: err instanceof ProjectCloudRosterError ? err.code : "project-roster-task-force-failed",
             message: err instanceof Error ? err.message : String(err),
           },
         });
@@ -3880,7 +3925,8 @@ ${effectiveUserPrompt}`;
             : effectiveUserPrompt;
           await runFirmInvocation({
             req: { ...req, userPrompt: firmUserPrompt },
-            chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId },
+            chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId, goalId: chat.goalId },
+            goalCheckpoint: chat.goalId ? latestTaskCheckpoint(chat.goalId) ?? undefined : undefined,
             org,
             ceoAgent: agent,
             priorHistory,
@@ -4406,13 +4452,15 @@ ${effectiveUserPrompt}`;
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
     const sessionCapableRuntime =
-      active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi";
+      active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity";
     const runnerReq = {
       systemPrompt: sessionCapableRuntime || !turnContext
         ? systemPrompt
         : `${systemPrompt}\n\n${turnContext}`,
       ...(sessionCapableRuntime && turnContext ? { turnContext } : {}),
-      history,
+      // Long-run state comes from the versioned goal and checkpoint. Replaying
+      // the whole chat into a fresh native session is neither recovery nor state.
+      history: activeGoalId ? [] : history,
       userPrompt: runtimeUserPrompt,
       images: req.images,
       backendLabel: picked.label,
@@ -4509,13 +4557,15 @@ ${effectiveUserPrompt}`;
       runtimePicked: { runner: Runner; label: string },
       userPrompt = runtimeUserPrompt,
     ) => {
-      const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi";
+      const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
+      const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
+      const runtimeTurnContext = [turnContext, checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : ""].filter(Boolean).join("\n\n");
       return {
         ...runnerReq,
-        systemPrompt: sessionCapable || !turnContext
+        systemPrompt: sessionCapable || !runtimeTurnContext
           ? systemPrompt
-          : systemPrompt + "\n\n" + turnContext,
-        ...(sessionCapable && turnContext ? { turnContext } : { turnContext: undefined }),
+          : systemPrompt + "\n\n" + runtimeTurnContext,
+        ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
         userPrompt,
         backendLabel: runtimePicked.label,
         model: runtime.model ?? undefined,

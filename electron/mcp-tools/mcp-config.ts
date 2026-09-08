@@ -403,7 +403,12 @@ export function isKeylessPlaywrightMcpDuplicate(server: InstalledMcpServer): boo
   const packageToken = /^@playwright\/mcp(?:@[^\s]+)?$/i;
   const directPackage = args.some((arg) => packageToken.test(arg.trim()));
   const nodePackagePath = args.some((arg) => /(?:^|[\\/])@playwright[\\/]mcp(?:[\\/]|$)/i.test(arg));
-  return command === "npx" || command === "npx.cmd" ? directPackage : nodePackagePath;
+  if (!(command === "npx" || command === "npx.cmd" ? directPackage : nodePackagePath)) return false;
+  // Only an unconfigured duplicate can share the selected canonical browser.
+  // Profiles, endpoints, headers, config files and all other custom arguments
+  // retain their own server identity and launch behavior.
+  return args.every((arg) => arg === "-y" || arg === "--yes" || packageToken.test(arg)
+    || /(?:^|[\\/])@playwright[\\/]mcp[\\/](?:cli|index)\.js$/i.test(arg));
 }
 
 /**
@@ -497,8 +502,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       || scopedCatalogIds?.has("agentlas-browser")
       || scopedServerIds?.has(server.id),
     ));
-  const canonicalizeBrowser = automationBrowserRun
-    && (selectedCanonicalBrowser || selectedKeylessPlaywright);
+  const canonicalizeBrowser = (selectedCanonicalBrowser && !allEnabledServersSelected)
+    || (automationBrowserRun && (selectedCanonicalBrowser || selectedKeylessPlaywright));
   if (canonicalizeBrowser && scopedCatalogIds) scopedCatalogIds.add("agentlas-browser");
   const servers = installedServers.filter((s) => {
     if (!s.enabled) return false;
@@ -519,6 +524,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   );
   const browserAliases = new Map<string, InstalledMcpServer>();
   const serializedServers = servers.filter((server) => {
+    if (!server.catalogId && requiredToolCatalogIds.has(server.id)) return true;
     if (!canonicalBrowserRun || !isKeylessPlaywrightMcpDuplicate(server)) return true;
     // Graph declarations have historically used either the installed row id
     // (custom servers) or the catalog id (official rows). Preserve both

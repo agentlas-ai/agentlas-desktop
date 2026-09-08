@@ -121,12 +121,10 @@ export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "
         "선언된 작업 폴더 밖의 파일을 만들거나 고치지 않고, 부여된 권한 안에서만 실행해야 합니다."
         + " 폴더와 권한은 실행 영수증에 있으며, 폴더 밖 쓰기 증거가 없으면 이 기준은 충족입니다.",
         "변경한 경로의 관련 테스트·타입 검사·빌드가 통과하고 기존 핵심 흐름에 회귀가 없어야 합니다.",
-        "사용자가 결과물을 사용하는 방식으로 검증해야 합니다. 앱이나 상호작용 UI를 구현·변경했다면 실제 앱을 실행하고,"
-        + " 브라우저·시뮬레이터·네이티브 런타임에서 화면을 확인하고 핵심 사용자 흐름을 조작해야 합니다."
-        + " 실행·렌더링·조작·결과의 도구 기록이나 캡처를 남기고, 발견한 실패를 고친 뒤 해당 흐름을 다시 검증합니다."
-        + " 소스·빌드·정적 분석·단위/위젯 테스트·모델의 완료 보고만으로는 충족되지 않습니다."
-        + " 비대화형 산출물은 전달할 실제 형식에서 결과를 확인합니다. 실행 환경이나 필수 접근 권한이 없으면"
-        + " 미충족 선행조건으로 남기며, 검증을 이유로 기존 허가 없이 배포·결제·권한 확대를 해서는 안 됩니다.",
+        "앱이나 상호작용 UI를 구현·변경했다면 실제 앱을 실행하고 브라우저·시뮬레이터·네이티브 런타임에서"
+        + " 핵심 사용자 흐름을 조작해야 합니다. 실행·화면·조작·결과의 도구 기록이나 캡처를 남깁니다."
+        + " 소스·빌드·정적 분석·단위/위젯 테스트·모델의 보고만으로는 충족되지 않습니다. 실패를 고치고 다시 검증합니다."
+        + " 다른 산출물은 전달할 실제 형식에서 확인합니다. 환경이나 접근 권한이 없으면 미충족이며 기존 권한 안에서만 실행합니다.",
         "각 성공 기준에는 재현 가능한 증거가 있어야 하며, 확인하지 못한 항목은 완료로 처리하지 않습니다.",
       ]
     : [
@@ -134,12 +132,10 @@ export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "
         "No file outside the run's declared working folder was created or modified, and the run stayed within its granted"
         + " permission. Both are in the run receipt; if the evidence shows no out-of-folder writes, this criterion is met.",
         "Relevant tests, type checks, and builds for changed paths must pass without regressing the core flow.",
-        "Validate the delivered result as its user will use it. For an application or interactive UI implementation/change,"
-        + " launch the actual application, inspect rendered screens, and exercise core user flows in a browser, simulator, or native runtime."
-        + " Keep observable tool results or captures of launch, rendered state, interactions, and outcomes; fix failures and repeat affected flows."
-        + " Source, builds, static analysis, unit/widget tests, and the assistant's report alone are insufficient."
-        + " For non-interactive deliverables, inspect the actual delivered output in its target format. Missing runtime or required access"
-        + " remains an unmet prerequisite. Do not publish, spend money, or expand permissions without existing authorization.",
+        "For apps or interactive UI changes, launch the actual app and exercise core user flows in a browser, simulator, or native runtime."
+        + " Preserve tool evidence or captures of launch, rendered screens, interactions, and outcomes. Source, build, static analysis,"
+        + " unit/widget tests, or a completion report alone do not pass. Fix failures and repeat. For other outputs inspect the delivered"
+        + " format. Missing runtime/access remains unmet; use only existing permissions.",
         "Every acceptance criterion needs reproducible evidence; unverified items must not be reported as complete.",
       ];
 }

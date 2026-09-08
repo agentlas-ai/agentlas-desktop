@@ -2112,6 +2112,22 @@ function ComposerGoalBar({
         ? "결과를 확인하지 못해 멈춤 — 완료로 볼 근거가 부족합니다"
         : "Stopped because the result could not be verified";
     }
+    if (reason === "verification_failed") {
+      return locale === "ko"
+        ? "성공 기준을 충족하지 못해 멈춤 — 검증 결과를 확인해 주세요"
+        : "Stopped because acceptance criteria were not met — review the verification result";
+    }
+    const verificationReasons: Record<string, [string, string]> = {
+      "verification_repair_stalled": ["수정 후에도 같은 기준을 통과하지 못해 멈춤", "Stopped after repeated repairs did not satisfy the same criteria"],
+      "verification_prerequisite:authentication_required": ["연결된 계정의 인증이 필요해 멈춤", "Stopped because account authentication is required"],
+      "verification_prerequisite:permission_required": ["추가 권한이 필요해 멈춤", "Stopped because additional permission is required"],
+      "verification_prerequisite:entitlement_required": ["계정의 이용 권한이나 크레딧 확인이 필요해 멈춤", "Stopped because account access or credits need attention"],
+      "verification_prerequisite:environment_unavailable": ["필요한 실행 환경을 사용할 수 없어 멈춤", "Stopped because a required environment is unavailable"],
+      "verification_prerequisite:user_stopped": ["사용자 요청으로 멈춤", "Stopped at your request"],
+      "verification_prerequisite:uncertain_side_effect": ["이전 작업의 실행 결과를 확인해야 해 멈춤", "Stopped because an earlier action's outcome needs confirmation"],
+    };
+    const verificationReason = verificationReasons[reason];
+    if (verificationReason) return verificationReason[locale === "ko" ? 0 : 1];
     // 모르는 사유는 지어내지 않고 그대로 보여 준다.
     return locale === "ko" ? `멈춤 — 사유: ${reason}` : `Stopped — reason: ${reason}`;
   };
@@ -2123,6 +2139,8 @@ function ComposerGoalBar({
       : (locale === "ko" ? "일시정지됨" : "Paused"));
   const title = (paused || blocked)
     ? stoppedCopy
+    : runStatus === "verifying"
+      ? (locale === "ko" ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
     : label?.replace(/\s+/g, " ").trim() || (locale === "ko"
       ? "다음 요청으로 목표와 성공 기준을 확정합니다"
       : "Your next request will define the goal and its acceptance criteria");

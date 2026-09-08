@@ -404,14 +404,14 @@ export async function autoSelectMcpTools(input: {
   }
   const installedFingerprint = shortHash(
     initialInstalledServers
-      .map((server) => `${server.id}|${server.catalogId ?? ""}|${server.enabled ? 1 : 0}`)
+      .map((server) => `${server.id}|${server.catalogId ?? ""}|${server.enabled ? 1 : 0}|${server.configurationValid !== false ? 1 : 0}|${isKeylessPlaywrightMcpDuplicate(server) ? 1 : 0}`)
       .sort()
       .join("\n"),
   );
   if (input.bypassSelectionMemo) invalidateMcpSelectionMemo();
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKey = conversationId
-    ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", installedFingerprint].join("\u0000")
+    ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", installedFingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(",")].join("\u0000")
     : "";
   const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}` : "";
   if (memoKey) {
@@ -543,10 +543,24 @@ export async function autoSelectMcpTools(input: {
     origin: "hub" as const,
   }));
 
+  // Offer one optional Browser surface. A vanilla custom Playwright launcher
+  // otherwise wins the same need judgment and opens a second, unlinked page.
+  // Exact assignments and configured servers retain their original identity.
+  const requiredServerIds = new Set(input.requiredToolCatalogIds ?? []);
+  const canonicalBrowserOffered = localCandidates.some((candidate) => candidate.id === "agentlas-browser")
+    || pinnedReasons.has("agentlas-browser");
+  const canonicalBrowserAvailable = canonicalBrowserOffered && initialInstalledServers.some((server) =>
+    server.catalogId === "agentlas-browser" && server.enabled && server.configurationValid !== false,
+  );
+  const optionalBrowserDuplicates = new Set(initialInstalledServers
+    .filter((server) => canonicalBrowserAvailable && !server.catalogId && !requiredServerIds.has(server.id)
+      && isKeylessPlaywrightMcpDuplicate(server))
+    .map((server) => server.id));
+
   // User-registered custom servers are inventory too, so an unconfigured one can be named by
   // the judge instead of prompting for its key on every unrelated run.
   const customCandidates: McpNeedCandidate[] = initialInstalledServers
-    .filter((server) => !server.catalogId)
+    .filter((server) => !server.catalogId && !optionalBrowserDuplicates.has(server.id))
     .map((server) => ({
       id: server.id,
       name: server.nameEn || server.name,
@@ -728,7 +742,9 @@ export async function autoSelectMcpTools(input: {
     || input.requiredToolCatalogIds?.includes("agentlas-browser") === true;
   for (const server of latestInstalledServers) {
     if (server.catalogId) continue;
-    if (canonicalBrowserSelected && isKeylessPlaywrightMcpDuplicate(server)) continue;
+    if (!requiredServerIds.has(server.id)
+      && (canonicalBrowserSelected || optionalBrowserDuplicates.has(server.id))
+      && isKeylessPlaywrightMcpDuplicate(server)) continue;
     if (result.some((tool) => tool.id === server.id)) continue;
     const missingEnv: string[] = [];
     for (const key of server.envKeys) {

@@ -6,7 +6,7 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
 import { detailForUser, failureMessage, isChatBusyFailure, looksLikeMachineText } from "@/lib/invocation-failure";
-import { Suspense, useCallback, useEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import type {
@@ -107,6 +107,7 @@ import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
+import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import {
   appendChatFileMarker,
   chatFileItem,
@@ -1937,6 +1938,7 @@ function ChatPage() {
       : null
     : "";
   const chatId = requestedTaskId ? (validatedTaskChatId ?? "") : queryChatId;
+  useLayoutEffect(() => bindAgentScreenScope(chatId || null), [chatId]);
   const surfaceParam = searchParams.get("surface") ?? "";
   // 홈 composer가 ?prompt=...로 첫 메시지를 실어서 보내면 자동 전송 (한 번만)
   const seedPrompt = searchParams.get("prompt") ?? "";
@@ -2038,10 +2040,18 @@ function ChatPage() {
     setGoalContext(null);
     if (!api || !chatId || !goalId || goalId === "pending") return;
     let cancelled = false;
-    void api.chats.getGoalContext(chatId)
-      .then((context) => { if (!cancelled) setGoalContext(context); })
+    let readVersion = 0;
+    let observedRunId: string | undefined;
+    const refreshGoal = () => {
+      const version = ++readVersion;
+      void api.chats.getGoalContext(chatId)
+      .then((context) => {
+        if (cancelled || version !== readVersion) return;
+        observedRunId = context?.runId;
+        setGoalContext(context);
+      })
       .catch((cause) => {
-        if (cancelled) return;
+        if (cancelled || version !== readVersion) return;
         /*
          * ★"목표가 없다" 와 "목표를 못 읽었다" 는 다르다 (실측 2026-09-08).
          *   예전에는 읽기가 실패해도 그냥 null 을 넣었다. 그러면 대화에 목표 번호가
@@ -2055,7 +2065,14 @@ function ChatPage() {
           ? `목표 상태를 읽지 못했습니다${raw ? `: ${raw}` : ""}. 목표는 그대로 있을 수 있습니다 — 잠시 뒤 다시 열어 확인해 주세요.`
           : `The goal state could not be read${raw ? `: ${raw}` : ""}. The goal may still be set — reopen this chat in a moment to check.`);
       });
-    return () => { cancelled = true; };
+    };
+    // Verification settles after the model's final message. The goal ID can
+    // stay the same while its run becomes blocked or starts a successor.
+    const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity === "long-run" && change.id === observedRunId) refreshGoal();
+    });
+    refreshGoal();
+    return () => { cancelled = true; unsubscribe?.(); };
   }, [chat?.goalId, chat?.id, locale]);
 
   // A Task deep link is authoritative. Resolve it through Main before loading

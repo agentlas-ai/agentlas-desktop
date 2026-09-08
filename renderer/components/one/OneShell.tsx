@@ -7,6 +7,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -14,6 +15,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { flushSync } from "react-dom";
+import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
@@ -2868,6 +2870,7 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  useLayoutEffect(() => bindAgentScreenScope(activeThreadChatId), [activeThreadChatId]);
   useEffect(() => {
     oneChatFileGroupsRef.current.clear();
   }, [activeThreadChatId]);
