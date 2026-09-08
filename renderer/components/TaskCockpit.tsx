@@ -1335,6 +1335,27 @@ function mergeStreamMessageDuplicate(existing: StreamMessage, candidate: StreamM
   };
 }
 
+/** Reattach a Main-owned live run to its existing ledger row. Keep the new
+ * placeholder id because the stream subscription writes to it, and retain
+ * ledger evidence that may be older than the bounded live replay buffer. */
+function attachLiveWorkPlaceholder(current: StreamMessage[], live: StreamMessage): StreamMessage[] {
+  if (!live.runId) return [...current, live];
+  const matches = (message: StreamMessage) => message.role === "agent"
+    && message.unboundRun === true && message.runId === live.runId;
+  const first = current.findIndex(matches);
+  if (first < 0) return [...current, live];
+  let merged = live;
+  for (const prior of current.filter(matches)) {
+    merged = { ...mergeStreamMessageDuplicate(prior, merged), id: live.id,
+      busy: live.busy, streaming: live.streaming, finishedAt: live.finishedAt, unboundRun: undefined };
+  }
+  const latestState = merged.activityRuns?.find((run) => run.runId === live.runId)?.state;
+  if (latestState && latestState.lastSequence >= (merged.activityState?.lastSequence ?? -1)) {
+    merged = { ...merged, activityState: latestState };
+  }
+  return current.flatMap((message, index) => index === first ? [merged] : matches(message) ? [] : [message]);
+}
+
 function dedupeStreamMessages(messages: StreamMessage[]): StreamMessage[] {
   const indexByIdentity = new Map<string, number>();
   const result: StreamMessage[] = [];
@@ -3821,7 +3842,7 @@ function ChatPage() {
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
       const attached = await api.invoke.attach(chatId);
-      if (!cancelled && attached && attached.runId !== lastFinalRunIdRef.current) {
+      if (!cancelled && attached && !runIdRef.current && attached.runId !== lastFinalRunIdRef.current) {
         const placeholderId = uid();
         // 원 실행 시작 시각을 우선 — 재진입 시 상태줄 경과가 0s부터 다시 세지 않게.
         const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
@@ -3829,9 +3850,7 @@ function ChatPage() {
         const reconnectAgent = agents.find((a) => a.id === c.agentId);
         const reconnectAgentName = reconnectAgent ? pickLocalized(reconnectAgent, locale).name : t("chat.assistant_fallback");
         transcriptRevisionRef.current += 1;
-        setMessages((m) => [
-          ...m,
-          {
+        setMessages((m) => attachLiveWorkPlaceholder(m, {
             id: placeholderId,
             role: "agent",
             text: "",
@@ -3848,8 +3867,7 @@ function ChatPage() {
                 createdAt: startedAt,
               },
             ],
-          },
-        ]);
+          }));
         setBusy(true);
         setCancelPending(false);
         runIdRef.current = attached.runId;
@@ -3976,9 +3994,7 @@ function ChatPage() {
           const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
           const reconnectAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
           transcriptRevisionRef.current += 1;
-          setMessages((current) => [
-            ...current,
-            {
+          setMessages((current) => attachLiveWorkPlaceholder(current, {
               id: placeholderId,
               role: "agent",
               text: "",
@@ -3993,8 +4009,7 @@ function ChatPage() {
                 activity: "start",
                 createdAt: startedAt,
               }],
-            },
-          ]);
+            }));
           steerQueueRef.current.shift();
           setQueuedSteers(steerQueueRef.current.map((item) => item.text));
           setBusy(true);
