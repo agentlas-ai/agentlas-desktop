@@ -2489,8 +2489,16 @@ export function OneShell() {
     if (sourceRunId && sourceRunId !== runIdRef.current) return;
     const eventRunId = sourceRunId ?? runIdRef.current;
     if (!chatId || !eventRunId) return;
-    setActivityStateRunId(eventRunId);
+    // React may apply these updaters after navigation or the next run starts.
+    // Settlement clears runId synchronously; the activity owner retains this
+    // exact run until a new invocation or a conversation switch takes over.
+    const ownsQueuedUpdate = () => runChatIdRef.current === chatId
+      && shownThreadChatIdRef.current === chatId
+      && (runIdRef.current === eventRunId
+        || (!runIdRef.current && activityRunIdRef.current === eventRunId));
+    setActivityStateRunId((current) => ownsQueuedUpdate() ? eventRunId : current);
     setActivity((current) => {
+      if (!ownsQueuedUpdate()) return current;
       const base = activityEventRunIdRef.current === eventRunId ? current : initialOneActivityState();
       const next = reduceOneActivity(base, event);
       activityEventRunIdRef.current = eventRunId;
@@ -2533,7 +2541,10 @@ export function OneShell() {
       if (typeof event.delta === "string") streamTextRef.current += event.delta;
       else streamTextRef.current = event.text ?? streamTextRef.current;
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => upsertLiveMessage(current, streamTextRef.current, true).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message));
+      const partialText = streamTextRef.current;
+      setMessages((current) => ownsQueuedUpdate()
+        ? upsertLiveMessage(current, partialText, true).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message)
+        : current);
       /*
        * ★ 답이 흘러나오는 동안에도 화면이 따라 내려간다 (오너 지적 2026-08-24).
        *
@@ -2561,11 +2572,11 @@ export function OneShell() {
       // (measured 2026-08-15: the previous answer vanished while a queued
       // instruction ran, until the history reload brought it back).
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => upsertLiveMessage(current, text, false).map((message) => (
+      setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false).map((message) => (
         message.id === "one-live-response"
           ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
           : message
-      )));
+      )) : current);
       setBusy(false);
       setLiveRunPrompt((current) => current?.runId === settledRunId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === settledRunId ? null : current);
@@ -2587,11 +2598,11 @@ export function OneShell() {
       // Whatever streamed before the failure stays as this run's answer row
       // (Main persists the same partial); an empty live row is dropped so it
       // cannot be mistaken for "the place where it ended".
-      setMessages((current) => current.flatMap((message) => {
+      setMessages((current) => ownsQueuedUpdate() ? current.flatMap((message) => {
         if (message.id !== "one-live-response") return [message];
         if (!message.text.trim()) return [];
         return [{ ...message, id: `one-answer:${settledRunId ?? uid()}`, streaming: false, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }];
-      }));
+      }) : current);
       setBusy(false);
       setLiveRunPrompt((current) => current?.runId === settledRunId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === settledRunId ? null : current);
