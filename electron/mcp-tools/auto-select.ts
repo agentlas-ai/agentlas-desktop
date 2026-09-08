@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { resolveMcpNeeds, type McpNeedCandidate, type ResolvedMcpNeeds } from "./need-resolver";
+import {
+  resolveMcpNeeds,
+  type McpGoalNeedContext,
+  type McpNeedCandidate,
+  type McpRuntimeCapabilities,
+  type ResolvedMcpNeeds,
+} from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
 import { supersededByLivePeer } from "../plugins/builtin";
@@ -27,6 +33,9 @@ export interface ActiveGoalToolScope {
   goalId: string;
   revision: number;
   permission: "read" | "write" | "full";
+  /** Host-read contract fields from the same active revision. */
+  objective?: string;
+  acceptanceCriteria?: readonly string[];
 }
 
 export interface GoalToolSelectionReceipt {
@@ -112,6 +121,8 @@ export interface AutoSelectMcpDependencies {
   resolveNeeds: (input: {
     task: string;
     candidates: McpNeedCandidate[];
+    goal?: McpGoalNeedContext;
+    runtimeCapabilities?: McpRuntimeCapabilities;
     signal?: AbortSignal;
     timeoutMs?: number;
   }) => Promise<ResolvedMcpNeeds>;
@@ -377,6 +388,8 @@ export async function autoSelectMcpTools(input: {
   systemPrompt: string;
   agentName: string;
   workingFolder?: string | null;
+  /** Capabilities proven by Main for this exact invocation. Missing means unknown. */
+  runtimeCapabilities?: McpRuntimeCapabilities;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
   /** Abort the optional tool-need judgment when the parent invocation stops. */
@@ -431,6 +444,9 @@ export async function autoSelectMcpTools(input: {
     });
   }
   const activeGoalScope = input.resolveActiveGoalScope?.() ?? null;
+  const runtimeCapabilities: McpRuntimeCapabilities = {
+    nativeBrowser: input.runtimeCapabilities?.nativeBrowser ?? "unknown",
+  };
   const registryFingerprint = (servers: InstalledMcpServer[]): string => createHash("sha256").update(servers
     .map((server) => JSON.stringify([server.id, server.catalogId, server.enabled, server.configurationValid !== false,
       server.transport, server.command, server.args, server.url, server.envKeys, server.installedAt]))
@@ -440,7 +456,8 @@ export async function autoSelectMcpTools(input: {
   if (input.bypassSelectionMemo) invalidateMcpSelectionMemo();
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
-    ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(",")].join("\u0000")
+    ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
+      fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(",")].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -632,6 +649,11 @@ export async function autoSelectMcpTools(input: {
   const needs = await deps.resolveNeeds({
     task: taskText,
     candidates: needsCandidates,
+    ...(activeGoalScope?.objective && activeGoalScope.acceptanceCriteria ? { goal: {
+      objective: activeGoalScope.objective,
+      acceptanceCriteria: activeGoalScope.acceptanceCriteria,
+    } } : {}),
+    runtimeCapabilities,
     signal: input.signal,
     timeoutMs: 15_000,
   });

@@ -2786,6 +2786,9 @@ ${effectiveUserPrompt}`;
       const autoSelectInput = {
         userPrompt: effectiveUserPrompt,
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
+        // A CLI's name or inherited MCP configuration does not prove a native
+        // browser is available to this invocation or visible in Desktop.
+        runtimeCapabilities: { nativeBrowser: "unknown" as const },
         agentName: agent.nameEn || agent.name,
         workingFolder,
         toolMode: req.toolMode,
@@ -2807,7 +2810,11 @@ ${effectiveUserPrompt}`;
             || !run || !["queued", "running", "waiting_worker", "waiting_tool", "verifying"].includes(run.status)) return null;
           // Permission is this invocation's host-normalized grant. A later
           // invocation with a narrower grant receives a different scope hash.
-          return { goalId, revision: revision.revision, permission: normalizedPermission };
+          return {
+            goalId, revision: revision.revision, permission: normalizedPermission,
+            objective: contract.objective,
+            acceptanceCriteria: contract.acceptanceCriteria,
+          };
         },
         readGoalSelection: (scope: Omit<GoalToolSelectionReceipt, "selectedIds">): string[] => {
           // Only the latest Main receipt in this chat can supply a hint. Searching
@@ -3036,7 +3043,7 @@ ${effectiveUserPrompt}`;
   // project/turn authority remains in Main and is revalidated by ScienceStore.
   if (executionContext?.source === "science") {
     if (!executionContext.science) throw new Error("science-execution-context-missing");
-    const { materializeScienceMcpGrant } = await import("../science/tool-control-server");
+    const { materializeScienceMcpGrant } = await import("agentlas-science");
     // Science turns use the Main-owned catalog as their single tool boundary.
     // Keeping the auto-selected standalone domain servers in the same config
     // creates duplicate tools (for example PBDB's low-level occurrence call
