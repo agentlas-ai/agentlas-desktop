@@ -1,16 +1,6 @@
 "use client";
 
-/**
- * 에이전트가 보고 있는 화면 — 한 벌의 구현.
- *
- * 예전에는 이 화면이 Work 의 떠 있는 카드(FloatingComputerUsePanel)에만 있었다. One 은
- * 같은 것을 결과 레일 **안에** 그리는데 Work 는 레일이 열리지도 않아, 브라우저 도구가 돌면
- * 화면이 창 한가운데 떠 있는 카드로만 나왔다(2026-09-03 실측: 레일 없음, 카드 430×311 at 772,473).
- * 사용자는 띄워 달라고만 했는데 매번 떠다닌다고 보고했다.
- *
- * 그래서 캡처 루프와 캔버스를 여기로 꺼냈다. 레일과 떠 있는 카드가 **같은 코드**를 쓴다 —
- * 두 벌로 갈리면 한쪽만 고쳐지는 자리가 다시 생긴다.
- */
+/** Shared screen capture for the task side panel. Hidden panels do not capture. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
@@ -42,7 +32,8 @@ export function useAgentScreen(mode: AgentScreenMode, enabled: boolean, ko: bool
   const browserFrame = scopedBrowserFrame?.chatId === chatId ? scopedBrowserFrame.frame : null;
   const currentChatId = useRef(chatId);
   currentChatId.current = chatId;
-  const [computerFrame, setComputerFrame] = useState<ComputerUsePreview | null>(null);
+  const [scopedComputerFrame, setScopedComputerFrame] = useState<{ chatId: string | null; frame: ComputerUsePreview } | null>(null);
+  const computerFrame = scopedComputerFrame?.chatId === chatId ? scopedComputerFrame.frame : null;
   const [sourceId, setSourceId] = useState<string | undefined>();
   const [focusBusy, setFocusBusy] = useState(false);
   const [focusNotice, setFocusNotice] = useState<string | null>(null);
@@ -65,11 +56,8 @@ export function useAgentScreen(mode: AgentScreenMode, enabled: boolean, ko: bool
         });
       } else {
         const next = await api.computerUse.capturePreview(sourceId);
-        setComputerFrame((prev) => {
-          if (!next.dataUrl && prev?.dataUrl) return prev;
-          if (prev && prev.dataUrl === next.dataUrl) return prev;
-          return next;
-        });
+        if (currentChatId.current !== chatId) return;
+        setScopedComputerFrame({ chatId, frame: next });
         if (!sourceId && next.selectedSourceId) setSourceId(next.selectedSourceId);
       }
     } catch {

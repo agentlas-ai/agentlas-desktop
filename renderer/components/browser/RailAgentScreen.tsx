@@ -1,13 +1,6 @@
 "use client";
 
-/**
- * 결과 레일 안의 "에이전트가 보는 화면" — One 과 같은 자리에서 같은 모양으로 본다.
- *
- * 브라우저·컴퓨터 도구가 도는 동안 사람이 보고 싶은 것은 지금 무슨 화면을 만지고 있는지다.
- * One 은 그것을 결과 레일 안에 그린다. Work 는 떠 있는 카드로만 그렸다 — 사용자가 띄워
- * 달라고만 했는데 매번 떠다닌다고 보고한 자리다(2026-09-03 실측). 화면 부품은
- * AgentScreenView 한 벌을 떠 있는 카드와 함께 쓴다.
- */
+/** One and Work mount this screen in the shared task side panel. */
 
 import { useAgentScreen, AgentScreenCanvas, AgentScreenFooter, type AgentScreenMode } from "./AgentScreenView";
 
@@ -33,7 +26,7 @@ export function RailAgentScreen({
         <div className="title">
           <span className={`cua-live-dot ${screen.ready ? "ready" : ""}`} aria-hidden="true" />
           <span title={screen.label}>{screen.label}</span>
-          {active && <small>{ko ? "에이전트 조작 중" : "Agent working"}</small>}
+          {active && <small>{ko ? "화면 보기" : "Screen view"}</small>}
         </div>
         <div className="modes">
           <button type="button" className={mode === "browser" ? "selected" : ""} onClick={() => onModeChange("browser")}>
@@ -58,7 +51,7 @@ export function RailAgentScreen({
         .modes button.selected { background: var(--black); color: var(--white); }
         .notice { flex-shrink: 0; min-height: 28px; display: flex; align-items: center; padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); color: var(--muted-deep); font-size: 10px; line-height: 1.35; }
       `}</style>
-      {/* 캔버스·빈 화면·푸터는 떠 있는 카드와 같은 마크업이라 같은 규칙으로 그린다. */}
+      {/* Shared screen canvas and source controls. */}
       <style jsx global>{`
         .rail-agent-screen .cua-canvas { flex: 1; min-height: 0; width: 100%; display: grid; place-items: center; overflow: hidden; border: 0; padding: 0; background: var(--black); cursor: pointer; }
         .rail-agent-screen .cua-canvas:disabled { cursor: wait; opacity: 0.82; }

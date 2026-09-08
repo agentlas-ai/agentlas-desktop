@@ -1,10 +1,10 @@
 .shell {
-  margin-top: 12px;
+  margin-top: 0;
   overflow: hidden;
   border: 1px solid var(--paper-edge);
-  border-radius: 10px;
-  background: var(--black);
-  box-shadow: 0 14px 38px rgb(12 14 12 / 12%);
+  border-radius: 0;
+  background: var(--design-bg, #fff);
+  box-shadow: none;
 }
 
 .shell[data-bare="true"] {
@@ -30,8 +30,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  color: var(--white);
-  background: var(--black);
+  color: var(--design-ink, #202124);
+  background: var(--design-bg, #fff);
   border-bottom: 1px solid rgb(255 255 255 / 10%);
 }
 
@@ -89,7 +89,7 @@
 .message button {
   border: 1px solid rgb(255 255 255 / 13%);
   border-radius: 6px;
-  color: var(--white-soft);
+  color: var(--design-ink, #202124);
   background: rgb(255 255 255 / 6%);
   font: inherit;
   font-size: 10px;
@@ -117,8 +117,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--white-faint);
-  background: var(--black);
+  color: var(--design-muted, #777);
+  background: var(--design-bg, #fff);
   border-bottom: 1px solid rgb(255 255 255 / 8%);
   font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -128,22 +128,15 @@
   height: clamp(320px, 52vh, 560px);
   min-height: 320px;
   isolation: isolate;
-  background:
-    radial-gradient(circle at 35% 25%, rgb(52 211 153 / 8%), transparent 34%),
-    var(--black);
+  background: var(--design-bg, #fff);
 }
 
-/* @design output-surface.v1 — only the host toolbar/status chrome is themed;
-   the live external document inside the native webview is left untouched. */
+/* @design output-surface.v1 — Theme only the host controls; the guest document keeps its own colors. */
 .shell { border-color: var(--design-line); }
-.toolbar { color: var(--design-contrast-ink, var(--white)); background: color-mix(in srgb, var(--design-ink) 92%, var(--design-accent) 8%); }
-.address { color: var(--design-muted); background: color-mix(in srgb, var(--design-ink) 96%, var(--design-bg)); }
-.actions button,
-.message button { border-color: color-mix(in srgb, var(--design-contrast-ink, var(--paper)) 16%, transparent); color: var(--design-contrast-ink, var(--white)); }
-.actions button:hover,
-.actions button:focus-visible,
-.message button:hover,
-.message button:focus-visible { border-color: var(--design-accent); background: var(--design-accent-soft); }
+.toolbar, .address { color: var(--design-ink); background: var(--design-bg); border-color: var(--design-line); }
+.actions button, .message button { border-color: var(--design-line); color: var(--design-ink); background: transparent; }
+.actions button:hover, .actions button:focus-visible,
+.message button:hover, .message button:focus-visible { border-color: var(--design-accent); background: var(--design-accent-soft); }
 
 .message {
   position: absolute;
@@ -156,12 +149,12 @@
   justify-content: center;
   gap: 10px;
   text-align: center;
-  color: var(--white-soft);
+  color: var(--design-ink, #202124);
   font-size: 12px;
 }
 
 .message strong {
-  color: var(--white);
+  color: var(--design-ink, #202124);
   font-size: 13px;
 }
 
@@ -184,8 +177,7 @@
 }
 
 @media (max-width: 700px) {
-  .runtimeLabel,
-  .actions button:last-child { display: none; }
+  .runtimeLabel { display: none; }
   .stage { height: 360px; }
 }
 

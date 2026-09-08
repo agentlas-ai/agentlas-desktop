@@ -21,7 +21,6 @@ import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import { AskUserSheet } from "./AskUserSheet";
 import { ToolApprovalSheet } from "./ToolApprovalSheet";
-import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { WorkFirstRunOnboarding } from "./WorkFirstRunOnboarding";
 import { ScienceInstallExperience } from "./ScienceInstallExperience";
 import { SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
@@ -323,7 +322,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <BrowserActionApprovalSheet />
       <AskUserSheet />
       <ToolApprovalSheet />
-      {showWorkspaceSidebar && <FloatingComputerUsePanel />}
       <BackgroundWorkPill
         jobs={multimodalJobs}
         avoidComposer={pathname.startsWith("/workspace/task")}

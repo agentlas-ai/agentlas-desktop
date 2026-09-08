@@ -11,6 +11,10 @@ type Props = {
   bare?: boolean;
   mode?: "app" | "browser";
   viewId?: string;
+  taskScopeId?: string;
+  active?: boolean;
+  /** Hide the guest on unmount; its task tab owner closes it explicitly. */
+  retainOnUnmount?: boolean;
   onStatus?: (status: WorkLiveViewStatus) => void;
   /** Keep one native WebContentsView while its address changes through navigation controls. */
   stableNavigation?: boolean;
@@ -24,13 +28,17 @@ function nextViewId(): string {
 }
 
 function stateLabel(state: WorkLiveViewState): string {
-  if (state === "ready") return "LIVE";
+  if (state === "ready") return "Loaded";
   if (state === "error") return "OFFLINE";
   if (state === "closed") return "CLOSED";
   return "CONNECTING";
 }
 
-export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode = "app", viewId, onStatus, stableNavigation = false }: Props) {
+export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode = "app", viewId, taskScopeId, active = true, retainOnUnmount = false, onStatus, stableNavigation = false }: Props) {
+  const generationRef = useRef(0);
+  const visibilityRef = useRef(active);
+  visibilityRef.current = active;
+  const syncRef = useRef<(() => void) | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const viewIdRef = useRef(viewId || nextViewId());
   const statusHandlerRef = useRef(onStatus);
@@ -49,9 +57,11 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       return;
     }
     const viewId = viewIdRef.current;
+    const generation = ++generationRef.current;
     let disposed = false;
     let frame = 0;
     let intersecting = true;
+    let lastBounds = "";
 
     const bounds = () => {
       const rect = stage.getBoundingClientRect();
@@ -62,9 +72,15 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
         height: rect.height,
       };
     };
+    const overlaySelector = '[role="dialog"], [aria-modal="true"], [role="menu"], dialog[open]';
     const geometricallyVisible = () => {
       const rect = stage.getBoundingClientRect();
-      return intersecting
+      const covered = Array.from(document.querySelectorAll<HTMLElement>(overlaySelector)).some((overlay) => {
+        const box = overlay.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && getComputedStyle(overlay).visibility !== "hidden"
+          && box.left < rect.right && box.right > rect.left && box.top < rect.bottom && box.bottom > rect.top;
+      });
+      return visibilityRef.current && document.visibilityState === "visible" && !covered && intersecting
         && rect.width >= 120
         && rect.height >= 100
         && rect.bottom > 0
@@ -76,12 +92,27 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         if (disposed) return;
-        const visible = geometricallyVisible() && statusRef.current.state !== "error";
-        void api.setBounds({ viewId, bounds: bounds(), visible });
+        const visible = geometricallyVisible() && statusRef.current.state === "ready";
+        const next = { viewId, taskScopeId, bounds: bounds(), visible };
+        const signature = JSON.stringify(next);
+        if (signature === lastBounds) return;
+        lastBounds = signature;
+        void api.setBounds(next).catch(() => { lastBounds = ""; });
       });
     };
+    syncRef.current = syncBounds;
+    const overlayChanged = (node: Node) => node instanceof Element
+      && (node.matches(overlaySelector) || Boolean(node.querySelector(overlaySelector)));
+    const overlays = new MutationObserver((records) => {
+      if (!visibilityRef.current) return;
+      if (records.some((record) => record.type === "attributes" ? overlayChanged(record.target)
+        : [...record.addedNodes, ...record.removedNodes].some(overlayChanged))) syncBounds();
+    });
+    overlays.observe(document.body, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ["open", "role", "aria-modal", "hidden", "style", "class"] });
+    document.addEventListener("visibilitychange", syncBounds);
     const offStatus = api.onStatus((next) => {
-      if (next.viewId !== viewId || disposed) return;
+      if (next.viewId !== viewId || next.taskScopeId !== taskScopeId || disposed) return;
       statusRef.current = next;
       setStatus(next);
       statusHandlerRef.current?.(next);
@@ -107,14 +138,15 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       viewId,
       url: runtimeUrl,
       bounds: initialBounds,
-      visible: geometricallyVisible(),
+      visible: false,
       mode,
+      taskScopeId,
     }).then((result) => {
       if (disposed) {
-        void api.close(viewId);
+        if (!retainOnUnmount && generationRef.current === generation) void api.close(viewId, taskScopeId);
         return;
       }
-      if (!result.ok) {
+      if (!result.ok && result.reason !== "navigation-superseded") {
         const error = result.reason || "The live app could not be opened.";
         statusRef.current = { viewId, state: "error", url: runtimeUrl, error };
         setStatus(statusRef.current);
@@ -133,27 +165,33 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       disposed = true;
       cancelAnimationFrame(frame);
       offStatus();
+      syncRef.current = null;
+      overlays.disconnect();
+      document.removeEventListener("visibilitychange", syncBounds);
       resize.disconnect();
       intersection.disconnect();
       window.removeEventListener("resize", syncBounds);
       window.removeEventListener("scroll", syncBounds, true);
-      void api.close(viewId);
+      if (retainOnUnmount) void api.setBounds({ viewId, taskScopeId, bounds: bounds(), visible: false });
+      else void api.close(viewId, taskScopeId);
     };
-  }, [mode, runtimeUrl]);
+  }, [mode, runtimeUrl, taskScopeId, retainOnUnmount]);
+
+  useEffect(() => { syncRef.current?.(); }, [active]);
 
   const reload = () => {
     setOpenError(null);
     statusRef.current = { ...statusRef.current, state: "loading", error: undefined };
     setStatus(statusRef.current);
-    void window.agentlas.workLiveView.reload(viewIdRef.current).then(() => {
-      const rect = stageRef.current?.getBoundingClientRect();
-      if (rect) {
-        void window.agentlas.workLiveView.setBounds({
-          viewId: viewIdRef.current,
-          bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-          visible: true,
-        });
-      }
+    void window.agentlas.workLiveView.reload(viewIdRef.current, taskScopeId).then((result) => {
+      if (!result.ok) throw new Error("The app view is no longer available.");
+      syncRef.current?.();
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      statusRef.current = { ...statusRef.current, state: "error", error: message };
+      setStatus(statusRef.current);
+      setOpenError(message);
+      syncRef.current?.();
     });
   };
 
