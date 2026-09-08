@@ -70,6 +70,7 @@ export interface OneActivityItem {
   /** Orchestration node identity; several workers may share one accounting agent. */
   agentId?: string;
   model?: string;
+  observedModel?: string;
   /** True only for an explicit worker terminal envelope, never whole-turn closure. */
   agentTerminalObserved?: boolean;
   message?: string;
@@ -126,7 +127,7 @@ export interface OneActivityState {
   cwd?: string;
   /**
    * Model/runtime label the orchestrator run actually executed with, from the
-   * runtime's own `final` event (ledger: mcp_final payload.model). Display =
+   * runtime's own `final` event (ledger: mcp_final payload.observedModel). Display =
    * execution (contract 7-C-8 / C-D-1) — never the settings' current default.
    */
   model?: string;
@@ -487,6 +488,7 @@ export function reduceOneActivity(
         completedAt: observedAt,
         agentTerminalObserved: true,
         updatedAt: observedAt,
+        ...(event.observedModel?.trim() ? { observedModel: event.observedModel.trim() } : {}),
         ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
       } : item);
   }
@@ -607,6 +609,8 @@ export function reduceOneActivity(
         updatedAt: observedAt,
         agentTerminalObserved: Boolean(event.done || event.nodeState === "failed" || event.agentLifecycle?.state === "failed"),
         ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
+        ...(event.observedModel?.trim() ? { observedModel: event.observedModel.trim() }
+          : existing?.observedModel ? { observedModel: existing.observedModel } : {}),
         ...(event.done ? { completedAt: observedAt } : {}),
         ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
         ...(event.role?.trim() ? { role: event.role.trim() } : {}),
@@ -782,7 +786,7 @@ export function reduceOneActivity(
     // The orchestrator's own final event names what actually ran this turn.
     // Worker events never reach this branch (they end as tool-use rows), so
     // this is the run-level execution model, not a delegate's (C-D-1).
-    if (typeof event.model === "string" && event.model.trim()) model = event.model.trim();
+    if (typeof event.observedModel === "string" && event.observedModel.trim()) model = event.observedModel.trim();
     terminalStatus = "completed";
   } else if (event.kind === "error") {
     // A run the person stopped ends through the same error channel as a
@@ -1004,7 +1008,10 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
       const callPhase = ledgerString(payload, "phase");
       const phase = callPhase === "planner" ? "plan" : callPhase === "worker" ? "delegate" : undefined;
       // A model return is not a validated handoff or a completed worker.
-      // Call-start can add the actual model; only an explicit node done closes it.
+      // Call-start can add the requested model; only an explicit node done closes it.
+      if (phase && row.kind === "task_force_model_call_completed" && ledgerString(payload, "observedModel")) {
+        apply({ kind: "thinking", agentId: row.nodeId, phase, observedModel: ledgerString(payload, "observedModel") }, row.ts);
+      }
       if (phase && row.kind === "task_force_model_call_started") {
         apply({ kind: "thinking", agentId: row.nodeId, phase,
           ...(ledgerString(payload, "runtimeModel") ? { model: ledgerString(payload, "runtimeModel") } : {}),
@@ -1071,6 +1078,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
         apply({
           kind: "tool-use",
           ...agentState,
+          ...(ledgerString(payload, "observedModel") ? { observedModel: ledgerString(payload, "observedModel") } : {}),
           tool: {
             name: toolName,
             ...(toolId ? { id: toolId } : {}),
@@ -1102,6 +1110,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
         apply({
           kind: "tool-use",
           ...agentState,
+          ...(ledgerString(payload, "observedModel") ? { observedModel: ledgerString(payload, "observedModel") } : {}),
           ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
           ...(ledgerString(payload, "runtimeAgentId")
             ? { runtimeAgentId: ledgerString(payload, "runtimeAgentId") }
@@ -1202,16 +1211,19 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
       continue;
     }
     if (row.kind === "mcp_final" || row.kind === "invoke_completed") {
+      // Main may persist settlement immediately before the richer final event.
+      // Do not freeze replay before its actual model receipt is consumed.
+      if (row.kind === "invoke_completed" && events.some((event) => event.kind === "mcp_final" && event.runId === row.runId)) continue;
       const tokenValue = Number(payload.tokens);
       const textLenValue = Number(payload.textLen);
-      const executedModel = ledgerString(payload, "model");
+      const executedModel = ledgerString(payload, "observedModel");
       apply({
         kind: "final",
         ...(Number.isFinite(tokenValue) ? { tokens: tokenValue } : {}),
         ...(Number.isFinite(textLenValue) && textLenValue > 0 ? { textLen: textLenValue } : {}),
-        // 실행 기록의 모델 표기(C-D-1): 원장에 남은 final의 model이 유일한
+        // 실행 기록의 모델 표기(C-D-1): 원장에 남은 final의 observedModel이 유일한
         // "실제 실행" 근거다 — 재방문/재기동 후에도 표시=실행이 유지된다.
-        ...(executedModel ? { model: executedModel } : {}),
+        ...(executedModel ? { observedModel: executedModel } : {}),
       }, row.ts);
       continue;
     }

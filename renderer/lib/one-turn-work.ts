@@ -47,6 +47,7 @@ interface CellBase {
   agent?: string;
   agentId?: string;
   model?: string;
+  observedModel?: string;
   updatedAt?: string;
 }
 
@@ -271,11 +272,12 @@ function classifyTool(item: OneActivityItem, workspacePath: string | null): Clas
 }
 
 /** Identity is scoped to this single invocation projection. Names never join workers. */
-function cellAttribution(item: OneActivityItem): Pick<CellBase, "agent" | "agentId" | "model" | "updatedAt"> {
+function cellAttribution(item: OneActivityItem): Pick<CellBase, "agent" | "agentId" | "model" | "observedModel" | "updatedAt"> {
   return {
     ...(item.agentName?.trim() ? { agent: item.agentName.trim() } : {}),
     ...(item.agentId ? { agentId: item.agentId } : {}),
     ...(item.model ? { model: item.model } : {}),
+    ...(item.observedModel ? { observedModel: item.observedModel } : {}),
     updatedAt: item.updatedAt ?? item.completedAt ?? item.observedAt,
   };
 }
@@ -308,8 +310,8 @@ export function groupOneWorkerWork(cells: readonly OneWorkCell[]): OneWorkerWork
     group.cells.push(cell);
     if (cell.agent) group.name = cell.agent;
     const observed = Date.parse(cell.updatedAt ?? cell.startedAt);
-    if (cell.model && (!modelTimes.has(cell.agentId) || observed >= modelTimes.get(cell.agentId)!)) {
-      group.model = cell.model;
+    if (cell.observedModel && (!modelTimes.has(cell.agentId) || observed >= modelTimes.get(cell.agentId)!)) {
+      group.model = cell.observedModel;
       modelTimes.set(cell.agentId, observed);
     }
     if (Date.parse(cell.updatedAt ?? cell.startedAt) >= Date.parse(group.latest.updatedAt ?? group.latest.startedAt)) group.latest = cell;

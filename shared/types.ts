@@ -4787,6 +4787,8 @@ export interface McpInvocationEvent {
   done?: boolean;
   /** 이 노드가 실행 중인 모델/런타임 라벨(예: "grok-4.3", "claude", "gpt-5") — 트리에 "모델 사용 중" 표시. */
   model?: string;
+  /** Model reported by a completed runner call; never filled from a requested fallback selection. */
+  observedModel?: string;
   /** Main-confirmed runtime selection actually used for this invocation. */
   runtimeSelection?: RuntimeSelection;
   /** Explicit orchestrator/worker envelope; separate from ordinary status prose. */

@@ -420,7 +420,7 @@ function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
       <span aria-hidden="true"><CellIcon cell={latest} /></span>
       <span>{update}</span>
     </span>
-    {group.model && <span className={styles.workerModel} data-worker-model="true">{group.model}</span>}
+    <span className={styles.workerModel} data-worker-model="true">{group.model || (ko ? "실행 모델 미확인" : "Execution model unconfirmed")}</span>
     <span className={styles.workerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
   </>;
   if (onInspectWorker) return (

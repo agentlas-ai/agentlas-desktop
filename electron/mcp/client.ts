@@ -6432,6 +6432,7 @@ ${effectiveUserPrompt}`;
         : {}),
       tokens: finalObservedTokens || undefined,
       model: active.model ?? active.kind,
+      observedModel: result.observedModel,
       modelRole: invocationModelRole,
       ...(durableAssistantEntry?.imageDataUrls?.length
         ? { imageDataUrls: durableAssistantEntry.imageDataUrls }

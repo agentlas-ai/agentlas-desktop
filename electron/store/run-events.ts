@@ -1019,6 +1019,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     modelRole: ev.modelRole,
     agentName: ev.agentName,
     model: ev.model,
+    observedModel: ev.observedModel,
     runtimeKind: ev.runtimeSelection?.kind,
     runtimeBackend: ev.runtimeSelection?.backend,
     runtimeSource: ev.runtimeSelection?.source,

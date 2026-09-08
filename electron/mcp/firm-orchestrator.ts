@@ -1309,7 +1309,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
   // 위임 단계 내내 ▶(실행)으로 유지되어 "끝난 듯 보였다 되돌아오는" 플리커를 막는다.
-  if (phase !== "plan") emit({ kind: "tool-use", done: true });
+  if (phase !== "plan") emit({ kind: "tool-use", done: true,
+    ...(typeof result.observedModel === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(result.observedModel)
+      ? { observedModel: result.observedModel } : {}),
+  });
   return { text: display, delegations, synthesisAllocation, evidence: executionEvidence.finalize() };
 }
 
