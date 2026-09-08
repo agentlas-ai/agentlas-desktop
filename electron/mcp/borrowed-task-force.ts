@@ -1019,6 +1019,16 @@ function recordTaskForceTerminalTurn(
   }
 }
 
+function taskForceObservedModel(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const value = (result as { observedModel?: unknown }).observedModel;
+  // Only the runner's explicit observation is authoritative. Do not infer an
+  // identity from a selected alias, streamed text, or arbitrary usage metadata.
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(value)
+    ? value
+    : null;
+}
+
 async function observeTaskForceModelCall<T>(
   p: BorrowedTaskForceParams,
   input: {
@@ -1050,6 +1060,7 @@ async function observeTaskForceModelCall<T>(
     runtimeBackend: input.runtime.backend,
     runtimeSource: input.runtime.source,
     runtimeModel: input.runtime.model,
+    requestedModel: input.runtime.model ?? null,
     ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
   };
   tryRecordRunEvent({
@@ -1065,6 +1076,7 @@ async function observeTaskForceModelCall<T>(
       await call() as T & { failure?: RunnerFailure },
       input.runtime,
     ) as T;
+    const observedModel = taskForceObservedModel(result);
     const outputTokens = Number((result as { tokens?: unknown })?.tokens);
     if (Number.isInteger(outputTokens) && outputTokens > 0) {
       const modelRole = input.phase === "worker" ? "worker" : "orchestrator";
@@ -1083,7 +1095,9 @@ async function observeTaskForceModelCall<T>(
           invocationId: callRef,
           modelRole,
           provider: input.runtime.backend ?? input.runtime.kind,
-          model: input.runtime.model ?? null,
+          model: observedModel ?? input.runtime.model ?? null,
+          requestedModel: input.runtime.model ?? null,
+          observedModel,
           effort: recordedEffort,
           tokens: outputTokens,
           measurement: "output-only",
@@ -1097,7 +1111,7 @@ async function observeTaskForceModelCall<T>(
       chatId: p.chat.id,
       nodeId: input.nodeId,
       agentId: canonicalAgentId,
-      payload: { ...receiptBase, status: "completed", durationMs: Math.max(0, Date.now() - startedAt) },
+      payload: { ...receiptBase, observedModel, status: "completed", durationMs: Math.max(0, Date.now() - startedAt) },
     });
     return result;
   } catch (error) {
