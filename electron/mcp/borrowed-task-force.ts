@@ -974,6 +974,13 @@ export function taskForceChildPermission(
   // in read mode silently queued an approval against an internal child chat
   // and timed out. This grant is still capped below full and by the host mode.
   if (role === "worker" && (inputType === "implementation" || inputType === "writing" || toolRequired)) return "write";
+  // Ordinary Work runs carry the owner's bounded write grant even when the
+  // planner labels a packet as review or omits workspaceAccess. A review-only
+  // packet may still be the step that must create the requested artifact;
+  // silently downgrading it to read made every specialist inspect an empty
+  // folder and report "no files were created". The host permission remains the
+  // ceiling and pre-approval/agent-app gates above still force read.
+  if (role === "worker" && (host === "write" || host === "full") && !p.req.agentAppMode) return "write";
   return "read";
 }
 
