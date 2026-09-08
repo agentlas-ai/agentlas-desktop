@@ -20,6 +20,14 @@ function WorkerToolOriginal({ item, locale }: { item: OneActivityItem; locale: "
   </details>;
 }
 
+function WorkerRequestOriginal({ text, locale }: { text: string; locale: "ko" | "en" }) {
+  const [open, setOpen] = useState(false);
+  return <details className={styles.workerOriginal} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{locale === "ko" ? "전달받은 요청" : "Received request"}</summary>
+    {open && <pre>{text}</pre>}
+  </details>;
+}
+
 /** Mounted only for the open worker tab; uses the already-loaded exact run. */
 export function OneWorkerPanel({ selection, run, locale, onBack }: {
   selection: OneWorkerPanelSelection;
@@ -38,8 +46,11 @@ export function OneWorkerPanel({ selection, run, locale, onBack }: {
       {feed.length === 0 && <p className={styles.workerPanelEmpty}>{locale === "ko" ? "이 실행의 에이전트 기록이 아직 없습니다." : "No agent activity is available for this run yet."}</p>}
       {feed.length >= ONE_WORKER_FEED_LIMIT && <p className={styles.workerPanelEmpty}>{locale === "ko" ? `최근 ${ONE_WORKER_FEED_LIMIT}개 기록` : `Latest ${ONE_WORKER_FEED_LIMIT} records`}</p>}
       {feed.map((entry) => {
+        if (entry.kind === "message" && entry.message.fromAgentId !== selection.agentId) {
+          return <WorkerRequestOriginal key={entry.id} text={entry.message.text} locale={locale} />;
+        }
         if (entry.kind === "message") return <article key={entry.id} className={styles.workerReport}>
-          <small>{entry.message.fromAgentId === selection.agentId ? (locale === "ko" ? "에이전트 보고" : "Agent report") : (locale === "ko" ? "전달받은 요청" : "Received request")}</small>
+          <small>{locale === "ko" ? "에이전트 보고" : "Agent report"}</small>
           <div>{entry.message.text}</div>
         </article>;
         const state = { items: [entry.item], artifacts: [], sources: [], handoffs: [], lastSequence: 0 };
