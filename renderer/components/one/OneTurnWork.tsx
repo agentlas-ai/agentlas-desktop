@@ -6,6 +6,8 @@ import {
   IconAlertTriangle,
   IconRefresh,
   IconBrain,
+  IconCamera,
+  IconPanelRight,
   IconCheck,
   IconChevronDown,
   IconCode,
@@ -16,7 +18,8 @@ import {
 } from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
-import { McpResultPreview } from "../McpResultPreview";
+import { ToolObservation } from "../ToolObservation";
+import { toolObservationAction } from "@/lib/tool-observation";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -131,8 +134,15 @@ function CellIcon({ cell }: { cell: OneWorkCell }) {
     case "fetch":
       return <IconSearch {...props} />;
     case "run":
-    case "call":
       return <IconCode {...props} />;
+    case "call": {
+      const icon = toolObservationAction(cell.toolName ?? cell.label, cell.label, cell.args, "en").icon;
+      if (icon === "camera") return <IconCamera {...props} />;
+      if (icon === "screen") return <IconPanelRight {...props} />;
+      if (icon === "search") return <IconSearch {...props} />;
+      if (icon === "browser") return <IconNetwork {...props} />;
+      return <IconCode {...props} />;
+    }
     case "edit":
       return <IconEdit {...props} />;
     case "agent":
@@ -318,22 +328,14 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
         />
       );
     case "call": {
-      const body = [cell.detail, cell.args, cell.result].filter(Boolean).join("\n\n");
-      const label = cell.label === CONNECTED_TOOL_LABEL
-        ? (ko ? "연결된 도구 사용" : "Use connected tool")
-        : cell.label;
-      return (
-        <div>
-          <ExpandableRow
-            cell={cell}
-            locale={locale}
-            head={<><strong>{verb}</strong><span className={styles.object}>{label}</span>{statusSuffix(cell, locale)}</>}
-          >
-            {body ? <pre className={styles.output}>{body}</pre> : undefined}
-          </ExpandableRow>
-          <McpResultPreview result={cell.result} toolName={cell.label} locale={locale} compact />
-        </div>
-      );
+      const fallbackLabel = cell.label === CONNECTED_TOOL_LABEL
+        ? (ko ? "연결된 도구 사용" : "Use connected tool") : cell.label;
+      const action = toolObservationAction(cell.toolName ?? cell.label, fallbackLabel, cell.args, locale);
+      return <ExpandableRow cell={cell} locale={locale}
+        head={<><strong>{action.label}</strong>{action.target && <span className={styles.object}>{action.target}</span>}{statusSuffix(cell, locale)}</>}>
+        {(cell.detail || cell.args || cell.result) ? <ToolObservation toolName={cell.toolName ?? cell.label}
+          detail={cell.detail} args={cell.args} result={cell.result} locale={locale} /> : undefined}
+      </ExpandableRow>;
     }
     case "agent":
       return (

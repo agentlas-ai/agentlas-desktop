@@ -1,0 +1,14 @@
+.observation { min-width: 0; display: grid; gap: 8px; color: var(--ink); }
+.images { display: flex; flex-wrap: wrap; gap: 8px; }
+.images figure { margin: 0; max-width: min(280px, 100%); min-width: 0; }
+.images img { display: block; width: auto; max-width: 100%; max-height: 170px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.images figcaption, .block small, .raw small, .note { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.block { min-width: 0; }
+.text, .raw pre { margin: 5px 0 0; padding: 8px 10px; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.55 var(--font-mono, monospace); border-left: 1px solid var(--line); }
+.text span { display: block; min-height: 1em; white-space: pre-wrap; }
+.text span[data-diff="added"] { color: var(--success, var(--ink)); background: color-mix(in srgb, var(--success, var(--ink)) 8%, transparent); }
+.text span[data-diff="removed"] { color: var(--danger, var(--ink)); background: color-mix(in srgb, var(--danger, var(--ink)) 8%, transparent); }
+.raw { min-width: 0; }
+.raw summary { cursor: pointer; font-size: 11px; color: var(--muted); width: fit-content; }
+.raw summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.note { margin: 0; }
