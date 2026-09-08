@@ -695,6 +695,7 @@ function taskForceRecoveryRuntime(
   failed: RuntimeStatus,
   failure: RunnerFailure,
   role: RuntimeRole = "worker",
+  attempted: RuntimeStatus[] = [],
 ): RuntimeStatus | null {
   // Exact prepared Workforce, benchmarks, and Agent Apps are fail-closed
   // contracts. Ordinary One Team model choices are preferences with an
@@ -710,6 +711,7 @@ function taskForceRecoveryRuntime(
   return rolePriorityRuntimes(taskForceCandidateRuntimes(p), role, {
     failedRuntime: failed,
     failure,
+    exclude: attempted,
   })[0] ?? null;
 }
 
@@ -4237,6 +4239,12 @@ async function runBorrowedAgentTurn(
               resolution: workerResolution,
             });
           }
+          p.sink(teamEvent(worker.id, worker.id, {
+            kind: "tool-use", done: true,
+            status: p.locale === "ko" ? `${worker.id} 실행 종료` : `${worker.id} turn finished`,
+            observedModel: taskForceObservedModel(result) ?? undefined,
+            tokens: result.tokens,
+          }));
           return {
             worker,
             ok: true,
@@ -4456,6 +4464,7 @@ async function runBorrowedAgentTurn(
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
           : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
         tokens,
+        observedModel: taskForceObservedModel(managerSynthesis) ?? undefined,
         runtimeSelection: observedRuntimeSelection,
         agentLifecycle: {
           source: "cli-process",
@@ -4681,6 +4690,7 @@ async function runBorrowedAgentTurn(
           ? p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`
           : p.locale === "ko" ? `${spec.name} 미완료` : `${spec.name} incomplete`,
       tokens: result.tokens,
+      observedModel: taskForceObservedModel(result) ?? undefined,
       runtimeSelection: observedRuntimeSelection,
       agentLifecycle: { source: "cli-process", state: "idle", reason: "turn-complete", runtime: observedDirectRuntime.kind },
       agentMessage: {
@@ -5705,37 +5715,47 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   ) => {
     const initialDelegationMessageId = initialDelegationMessageByPacket.get(packet);
     initialDelegationMessageByPacket.delete(packet);
-    let result = await runPacket(packet, peerResults, undefined, initialDelegationMessageId);
+    const failedRuntimes: RuntimeStatus[] = [];
+    let responseRuntime: RuntimeStatus | undefined;
+    const runWithRecovery = async (nextPacket: typeof packet, delegationId?: string) => {
+      let result = await runPacket(nextPacket, peerResults, responseRuntime, delegationId);
+      if (result.ok || p.signal?.aborted) return result;
+      // A typed provider refusal is never an output-format problem. Walk the
+      // remaining worker pool in DB priority order, once per configured member,
+      // instead of retrying the same failed provider or using detection order.
+      while (result.runtimeFailure && result.failedRuntime && !p.signal?.aborted) {
+        if (!failedRuntimes.some((runtime) => sameRuntimeModel(runtime, result.failedRuntime!))) failedRuntimes.push(result.failedRuntime);
+        const recoveryRuntime = taskForceRecoveryRuntime(
+          p,
+          result.failedRuntime,
+          result.runtimeFailure,
+          "worker",
+          failedRuntimes,
+        );
+        if (!recoveryRuntime) return result;
+        p.sink({
+          kind: "tool-use",
+          status: p.locale === "ko"
+            ? `배정된 실행 환경을 사용할 수 없어 워커 우선순위 다음 모델로 이어갑니다. (${result.spec.name})`
+            : `The assigned runtime is unavailable; continuing on the next worker-priority model. (${result.spec.name})`,
+        });
+        const recoveryPacket = {
+          ...nextPacket,
+          context: [
+            ...(nextPacket.context ?? []),
+            p.locale === "ko"
+              ? "이 단계는 이전 런타임에서 이어받은 복구 실행입니다. 공유 실행 작업공간에 남은 기존 작업 디렉터리, 파일, 캡처, manifest와 검증 원장을 먼저 찾아 재사용하세요. 이미 증명된 작업을 처음부터 반복하지 말고, 남은 완료 조건만 수행하세요."
+              : "This is a recovery continuation from a prior runtime. First inspect and reuse the existing task directories, files, captures, manifests, and verification ledgers left in the shared invocation workspace. Do not restart already-proven work; complete only the remaining done-when conditions.",
+          ],
+        };
+        responseRuntime = recoveryRuntime;
+        result = await runPacket(recoveryPacket, peerResults, responseRuntime);
+        if (result.ok) return result;
+      }
+      return result;
+    };
+    let result = await runWithRecovery(packet, initialDelegationMessageId);
     if (result.ok || p.signal?.aborted) return result;
-    // A typed provider refusal is never an output-format problem. Walk the
-    // remaining worker pool in DB priority order, once per configured member,
-    // instead of retrying the same failed provider or using detection order.
-    while (result.runtimeFailure && result.failedRuntime && !p.signal?.aborted) {
-      const recoveryRuntime = taskForceRecoveryRuntime(
-        p,
-        result.failedRuntime,
-        result.runtimeFailure,
-        "worker",
-      );
-      if (!recoveryRuntime) return result;
-      p.sink({
-        kind: "tool-use",
-        status: p.locale === "ko"
-          ? `배정된 실행 환경을 사용할 수 없어 워커 우선순위 다음 모델로 이어갑니다. (${result.spec.name})`
-          : `The assigned runtime is unavailable; continuing on the next worker-priority model. (${result.spec.name})`,
-      });
-      const recoveryPacket = {
-        ...packet,
-        context: [
-          ...(packet.context ?? []),
-          p.locale === "ko"
-            ? "이 단계는 이전 런타임에서 이어받은 복구 실행입니다. 공유 실행 작업공간에 남은 기존 작업 디렉터리, 파일, 캡처, manifest와 검증 원장을 먼저 찾아 재사용하세요. 이미 증명된 작업을 처음부터 반복하지 말고, 남은 완료 조건만 수행하세요."
-            : "This is a recovery continuation from a prior runtime. First inspect and reuse the existing task directories, files, captures, manifests, and verification ledgers left in the shared invocation workspace. Do not restart already-proven work; complete only the remaining done-when conditions.",
-        ],
-      };
-      result = await runPacket(recoveryPacket, peerResults, recoveryRuntime);
-      if (result.ok) return result;
-    }
     if (result.runtimeFailure) return result;
     // A firm or packaged team is already a composite execution graph with its
     // own planner, workers, verifier, and synthesis. Replaying that packet here
@@ -5765,7 +5785,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         `Previous completion report:\n${boundedTaskForceMessage(result.text)}`,
       ],
     };
-    return runPacket(retryPacket, peerResults);
+    // Content repair stays on the provider that actually answered. A failure
+    // here uses the same packet-local exclusion set, never a refused provider.
+    return runWithRecovery(retryPacket);
   };
 
   const results: BorrowedAgentResult[] = new Array(executionPackets.length);
@@ -6625,6 +6647,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     tier: 1,
     phase: "synthesize",
     tokens: final.tokens,
+    observedModel: taskForceObservedModel(final) ?? undefined,
   });
   // final에 종합이 실제로 돈 모델을 싣는다 (표시=실행, C-D-1): 이 값이 원장
   // mcp_final에 남아 작업 로그·세션 시트·run.json의 유일한 실행 모델 근거가 된다.
@@ -6637,6 +6660,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
         : {}),
       tokens: final.tokens,
+      observedModel: taskForceObservedModel(final) ?? undefined,
       model: modelLabel(synthesisActive),
       modelRole: "orchestrator",
     });
