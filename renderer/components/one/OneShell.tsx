@@ -970,29 +970,6 @@ function briefingSourceName(raw: string, locale: "ko" | "en"): string {
   return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
 }
 
-/**
- * A deterministic detector may invite a review, but its raw diagnosis stays
- * Main-only until the read-only One run authors a customer-facing result.
- * This generic card makes the existing prepare/confirm/start path reachable
- * without leaking project paths, automation names, or receipt details.
- */
-function proactiveReviewInvitation(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
-  return {
-    kind: "decision",
-    eyebrow: tFor(locale, "one.shell.briefing.review_safely"),
-    title: tFor(locale, "one.shell.briefing.confirm_title"),
-    body: tFor(locale, "one.shell.briefing.confirm_body"),
-    prepared: tFor(locale, "one.shell.briefing.packet_prepared"),
-    evidence: [],
-    primaryLabel: candidate.preparedAction.kind === "open_project"
-      ? tFor(locale, "one.shell.proactive.action.open_project")
-      : candidate.preparedAction.kind === "open_automation"
-        ? tFor(locale, "one.shell.proactive.action.open_automation")
-        : tFor(locale, "one.shell.proactive.action.open_task"),
-    proactive: candidate,
-  };
-}
-
 function safeBriefingSnapshot(value: OneBriefingSnapshot | null): OneBriefingSnapshot | null {
   if (!value || value.contractVersion !== ONE_BRIEFING_CONTRACT_VERSION) return null;
   if (!Number.isFinite(Date.parse(value.evaluatedAt))) return null;
@@ -5624,22 +5601,14 @@ export function OneShell() {
     [confirmations],
   );
   const reactiveBriefing = useMemo(() => chooseOneBriefing(projections, actionableConfirmations, appLocale), [actionableConfirmations, appLocale, projections]);
-  // Deterministic observations remain private evidence. One may surface them
-  // only after its model has authored the customer-facing diagnosis and action.
-  // Active work already lives in its named teammate channel and organisation
-  // row. A generic floating "View progress" card duplicates that state and
-  // makes One look task/project based, so home only surfaces outcomes,
-  // failures, decisions, and authored proactive briefings.
-  const rawBriefing: DisplayBriefing = useMemo(() => {
-    const visibleReactive = reactiveBriefing.kind === "working"
+  // The empty composer does not recruit the user into a detector-generated
+  // review. Keep actual outcomes, failures, and pending runtime decisions;
+  // active work already has its own conversation and organisation row.
+  const rawBriefing: DisplayBriefing = useMemo(() => (
+    reactiveBriefing.kind === "working"
       ? chooseOneBriefing([], [], appLocale)
-      : reactiveBriefing;
-    // A live decision, failure, or completed outcome remains the foreground
-    // briefing. Only the otherwise-quiet home uses the private candidate to
-    // offer a generic, explicit, read-only review.
-    if (visibleReactive.kind !== "quiet" || !briefingSnapshot?.candidate) return visibleReactive;
-    return proactiveReviewInvitation(briefingSnapshot.candidate, appLocale);
-  }, [appLocale, briefingSnapshot?.candidate, reactiveBriefing]);
+      : reactiveBriefing
+  ), [appLocale, reactiveBriefing]);
   const rawBriefingSignature = useMemo(() => briefingSignature(rawBriefing), [rawBriefing]);
   useEffect(() => {
     const expiresAt = readBriefingDismissal(rawBriefingSignature);
