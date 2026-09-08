@@ -1,3 +1,4 @@
+import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
 import type { ChatHostNotice } from "../../shared/types";
 // 활성 백엔드 → 실제 러너로 라우팅하는 invocation runner.
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
@@ -3771,7 +3772,7 @@ ${effectiveUserPrompt}`;
             const source = getCargoSource();
             if (!source) throw new ProjectCloudRosterError("owner_cloud_unavailable", "cloud");
             // Use the authenticated source, never the UI's stale/fallback cache.
-            return (await source.listMyCloudPackages()).rows;
+            return (await source.listMyCloudPackages(undefined, { signal, requireComplete: true })).rows;
           },
           listDefinitions: () => canonicalCloudClient().listAgentDefinitionIdentities(),
           resolveBase: (input) => canonicalCloudClient().resolveBase(input),
@@ -3829,11 +3830,12 @@ ${effectiveUserPrompt}`;
         });
         return earlyResult();
       } catch (err) {
+        if (signal?.aborted) return earlyResult();
         // 리스트로 실패했다고 조용히 네트워크로 넘어가지 않는다 — 사용자가 지정한
         // 팀이 실패했다는 사실 자체가 결과다.
         sink({
           kind: "error",
-          error: err instanceof ProjectCloudRosterError
+          error: err instanceof ProjectCloudRosterError || err instanceof OwnerCloudShelfIncompleteError
             ? { code: err.code, message: err.message }
             : invocationFailure(req, "project-roster-task-force-failed", err),
         });

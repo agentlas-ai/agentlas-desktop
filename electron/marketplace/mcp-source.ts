@@ -43,6 +43,47 @@ export interface OwnerCloudShelfSnapshot {
   rows: MarketplaceListing[];
 }
 
+export class OwnerCloudShelfIncompleteError extends Error {
+  readonly code = "project-cloud-catalog-incomplete";
+  constructor(
+    readonly listed: number,
+    readonly total: number | null,
+    readonly reason: "http_error" | "request_failed" | "pagination_incomplete",
+    readonly httpStatus?: number,
+  ) {
+    super("project-cloud-catalog-incomplete");
+    this.name = "OwnerCloudShelfIncompleteError";
+  }
+}
+
+class McpSourceHttpError extends Error {
+  constructor(method: string, readonly httpStatus: number) {
+    super(`MCP ${method} ${httpStatus}`);
+    this.name = "McpSourceHttpError";
+  }
+}
+
+function throwIfOwnerReadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("Owner Cloud read cancelled", "AbortError");
+}
+
+function ownerReadRetryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfOwnerReadAborted(signal);
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(new DOMException("Owner Cloud read cancelled", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
 export interface OwnerCloudShelfResult {
   rows: MarketplaceListing[];
   snapshot: OwnerCloudShelfSnapshot;
@@ -926,11 +967,14 @@ export class McpSource implements MarketplaceSource {
 
   constructor(private opts: McpSourceOptions) {}
 
-  private async call<T>(method: string, params?: Record<string, unknown>, timeoutMs = this.opts.timeoutMs ?? 15_000): Promise<T> {
+  private async call<T>(method: string, params?: Record<string, unknown>, timeoutMs = this.opts.timeoutMs ?? 15_000, signal?: AbortSignal): Promise<T> {
     const url = `${this.opts.baseUrl}/tools/call`;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const abort = () => ctrl.abort();
+    signal?.addEventListener("abort", abort, { once: true });
     try {
+      throwIfOwnerReadAborted(signal);
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (this.opts.bearer) headers.authorization = `Bearer ${this.opts.bearer}`;
       // 로그인되어 있으면 세션 cookie를 첨부 — server-side에서 인증된 사용자로 인식
@@ -942,12 +986,14 @@ export class McpSource implements MarketplaceSource {
         body: JSON.stringify({ method, params: { name: method, arguments: params ?? {} } }),
         signal: ctrl.signal,
       });
-      if (!resp.ok) throw new Error(`MCP ${method} ${resp.status}`);
+      if (!resp.ok) throw new McpSourceHttpError(method, resp.status);
       const json = (await resp.json()) as { result?: T; error?: { message: string } };
       if (json.error) throw new Error(`MCP ${method}: ${json.error.message}`);
+      throwIfOwnerReadAborted(signal);
       return json.result as T;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -1184,15 +1230,18 @@ export class McpSource implements MarketplaceSource {
    */
   async listMyCloudPackages(
     known?: OwnerCloudShelfSnapshot,
+    options: { signal?: AbortSignal; requireComplete?: boolean } = {},
   ): Promise<OwnerCloudShelfResult> {
     const rows: MarketplaceListing[] = [];
     const seen = new Set<string>();
     let offset = 0;
     let total: number | null = null;
+    let complete = false;
     for (let page = 0; page < MY_CLOUD_PAGE_BUDGET; page += 1) {
+      throwIfOwnerReadAborted(options.signal);
       let raw: unknown;
       try {
-        raw = await this.call<unknown>("cargo.search_agents", {
+        const args = {
           q: "",
           limit: MY_CLOUD_PAGE_SIZE,
           // 첫 요청에는 offset 을 **붙이지 않는다**. `offset` 은 이 도구에 새로
@@ -1203,8 +1252,27 @@ export class McpSource implements MarketplaceSource {
           mine: true,
           scope: "cloud",
           verbose: true,
-        });
+        };
+        // Execution must not mistake a failed later page for an absent pin.
+        // Retry only this read-only page, at most twice; never restart staffing.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            raw = await this.call<unknown>("cargo.search_agents", args, undefined, options.signal);
+            break;
+          } catch (error) {
+            throwIfOwnerReadAborted(options.signal);
+            if (!options.requireComplete || attempt >= 2 || !(error instanceof McpSourceHttpError)
+              || ![502, 503, 504].includes(error.httpStatus)) throw error;
+            await ownerReadRetryDelay(attempt === 0 ? 250 : 750, options.signal);
+          }
+        }
       } catch (error) {
+        throwIfOwnerReadAborted(options.signal);
+        if (options.requireComplete) {
+          throw new OwnerCloudShelfIncompleteError(rows.length, total,
+            error instanceof McpSourceHttpError ? "http_error" : "request_failed",
+            error instanceof McpSourceHttpError ? error.httpStatus : undefined);
+        }
         // 이어 받다 실패하면 **이미 배운 것은 지키고** 멈춘다. 여기서 그대로
         // 던지면 첫 장까지 함께 사라져, 페이지네이션을 붙인 탓에 목록이 통째로
         // 비는 회귀가 된다.
@@ -1224,7 +1292,10 @@ export class McpSource implements MarketplaceSource {
           ...row,
           source: typeof row.source === "string" && row.source ? row.source : "cloud",
         }));
-      if (batch.length === 0) break;
+      if (batch.length === 0) {
+        complete = total === null || rows.length >= total;
+        break;
+      }
       // 첫 페이지가 곧 변경 탐지기다.
       //
       // 선반이 284건이면 전체 순회는 6번의 왕복이고, 이 목록은 모바일 스냅샷을
@@ -1232,7 +1303,8 @@ export class McpSource implements MarketplaceSource {
       // `total` 과 첫 페이지의 (cloudId, revision) 지문이 있다. 둘 다 그대로면
       // 선반은 바뀌지 않았고, **나머지 5번은 부칠 이유가 없다**. 바뀐 경우에만
       // 끝까지 걷는다.
-      if (page === 0 && known && total !== null && known.total === total) {
+      if (page === 0 && known && total !== null && known.total === total
+        && (!options.requireComplete || known.rows.length >= total)) {
         if (ownerCloudPageFingerprint(batch) === known.fingerprint) {
           return { rows: known.rows, snapshot: known, revalidatedOnly: true };
         }
@@ -1252,14 +1324,23 @@ export class McpSource implements MarketplaceSource {
       if (typeof nextOffset === "number" && Number.isFinite(nextOffset) && nextOffset > offset) {
         offset = nextOffset;
       } else if (typeof nextOffset === "number") {
+        complete = total === null || rows.length >= total;
         break;
       } else if (total !== null && rows.length < total) {
         // nextOffset 을 모르는 서버라도 total 을 알면 창을 직접 민다.
         offset += batch.length;
       } else {
+        complete = total !== null ? rows.length >= total : batch.length < MY_CLOUD_PAGE_SIZE;
         break;
       }
-      if (total !== null && rows.length >= total) break;
+      if (total !== null && rows.length >= total) {
+        complete = true;
+        break;
+      }
+    }
+    throwIfOwnerReadAborted(options.signal);
+    if (options.requireComplete && !complete) {
+      throw new OwnerCloudShelfIncompleteError(rows.length, total, "pagination_incomplete");
     }
     if (total !== null && rows.length < total) {
       console.warn(
