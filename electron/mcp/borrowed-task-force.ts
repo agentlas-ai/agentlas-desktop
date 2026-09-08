@@ -2508,6 +2508,7 @@ export function normalizePacketsForRoster(
   userPrompt: string,
   locale: "ko" | "en" = "en",
   requireWorkspaceAccess = false,
+  semanticSubset = false,
 ): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean; validationErrors: string[]; validationCodes: LocalPlannerValidationCode[] } {
   const bySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const usedAgents = new Set<string>();
@@ -2566,7 +2567,7 @@ export function normalizePacketsForRoster(
       doneWhen: packet.doneWhen.map(stripTaskForceControlEnvelopes).filter(Boolean),
     });
   }
-  const missing = specs.filter((spec) => !usedAgents.has(spec.slug));
+  const missing = semanticSubset ? [] : specs.filter((spec) => !usedAgents.has(spec.slug));
   for (const fallback of buildFallbackPackets(missing, userPrompt, locale)) {
     let stepId = fallback.stepId ?? `${fallback.agent}-1`;
     let suffix = 1;
@@ -3050,6 +3051,7 @@ function buildPlannerSystemPrompt(
   runtimes: RuntimeStatus[],
   requireExactRoster: boolean,
   specs: BorrowedAgentSpec[],
+  semanticSubset = false,
 ): string {
   const responseGuide = locale === "ko"
     ? "Every user-visible brief, expectedOutput, oneReply, context, constraint, and doneWhen sentence must be Korean. Keep only JSON keys, enum literals, stable IDs, and exact source names in English."
@@ -3070,6 +3072,8 @@ function buildPlannerSystemPrompt(
     "First decide what each task-force agent should receive: the input type, input kind, focused brief, required context, expected output, constraints, and done-when conditions.",
     requireExactRoster
       ? "The Workforce roster is frozen: emit exactly one packet for every listed agent. Do not omit, add, duplicate, replace, or rename an agent."
+      : semanticSubset
+      ? "The attached roster is an available capability menu, not a required execution list. Select a non-empty subset of listed members needed for this user request and its remaining completion criteria. On continuation, reuse verified results and assign only missing work or repairs; do not repeat roles merely because they remain attached. Respect an explicit user request for all members to participate. Never add unknown members. Each selected team-orchestrator receives exactly one packet; a selected single agent may repeat only for an explicit dependent revision. Omitted available members did not run and have no success or failure result."
       : "This is a standing One Team room: every selected Taskforce member must receive one initial conversational step. A single-agent member may appear again only in a later step that depends on its earlier result and explicitly requests a revision or follow-up. A team-orchestrator member represents an entire nested team: emit exactly one packet for it, never decompose or repeat its internal roles here; that team's manager owns its internal delegation, review, and revision.",
     requireExactRoster
       ? "The response object must contain exactly packets and synthesis. Every packet must include agent, inputType, inputKind, brief, context, expectedOutput, constraints, doneWhen, allocation, and capabilityBindings."
@@ -4913,6 +4917,10 @@ async function runPlanner(
   controllerRuntime?: RuntimeStatus;
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
+  // The first invocation must staff the attached roster.  On a long-run
+  // continuation, the checkpoint is the authoritative signal that the
+  // planner may select only the roles needed for remaining work.
+  const semanticSubset = Boolean(p.goalCheckpoint) && !p.workforceSelectionReceipt && !p.benchmarkMode && !p.req.agentAppMode;
   // This local parameter is model context only. The caller retains the
   // original history for committed human-approval checks.
   if (p.chat.goalId) history = [];
@@ -4976,6 +4984,7 @@ async function runPlanner(
       plannerCandidateRuntimes,
       Boolean(p.workforceSelectionReceipt),
       specs,
+      semanticSubset,
     ),
     plannerMemory,
     plannerOntology?.prompt,
@@ -5297,7 +5306,7 @@ async function runPlanner(
       agentId: p.orchestratorAgent.id,
     }, "read");
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
-    let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode);
+    let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode, semanticSubset);
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
 
     // One bounded same-model correction is cheaper and substantially safer
@@ -5330,7 +5339,9 @@ async function runPlanner(
         "",
         "## Local Taskforce room-plan repair",
         `The prior plan was rejected: ${validationError}.`,
-        `Return a fresh plan that includes every selected slug: ${specs.map((spec) => spec.slug).join(", ")}. Team-orchestrator slugs must appear exactly once; single-agent slugs may repeat only for an explicit dependent revision or follow-up step.`,
+        semanticSubset
+          ? `Return a valid non-empty subset from these available slugs: ${specs.map((spec) => spec.slug).join(", ")}. Select only remaining work required by the user and checkpoint. Omitted available members require no fallback packet.`
+          : `Return a fresh plan that includes every selected slug: ${specs.map((spec) => spec.slug).join(", ")}. Team-orchestrator slugs must appear exactly once; single-agent slugs may repeat only for an explicit dependent revision or follow-up step.`,
         "Do not repeat host/control envelopes in any visible brief. Keep explicit sequencing in stepId/dependsOn and use oneReply for One's coordination messages.",
       ].join("\n");
       const repairedResult = await invokePlannerWithFallback(
@@ -5346,7 +5357,7 @@ async function runPlanner(
         agentId: p.orchestratorAgent.id,
       }, "read");
       const repairedPlan = parseBorrowedWorkloadPlan(repairedText);
-      const repairedNormalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode);
+      const repairedNormalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode, semanticSubset);
       const selection = selectLocalPlannerRepair({ firstPacketCount: parsedPlan.packets.length,
         firstValidationCodes: normalized.validationCodes, repairedPacketCount: repairedPlan.packets.length });
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
@@ -5380,6 +5391,15 @@ async function runPlanner(
     }
     if (normalized.validationCodes.includes("workspace_access_missing_or_invalid")) {
       throw new Error("local_planner_workspace_access_unresolved");
+    }
+    if (semanticSubset && !normalized.parseSuccess) {
+      throw new Error("local_planner_subset_unresolved");
+    }
+    if (semanticSubset) {
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, kind: "task_force_roster_selection",
+        payload: { availableCount: specs.length, selectedCount: new Set(normalized.packets.map((packet) => packet.agent)).size,
+          packetCount: normalized.packets.length, contract: "semantic-subset" } });
     }
     packets = normalized.packets;
     parseSuccess = normalized.parseSuccess;
@@ -6086,6 +6106,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   let final: Awaited<ReturnType<typeof runSynthesisOn>>;
   let synthesisRuntime = synthesisActive;
   let synthesisRunner = synthesisPicked;
+  const failedSynthesisRuntimes: RuntimeStatus[] = [];
   while (true) {
     try {
       final = await runSynthesisOn(synthesisRuntime, synthesisRunner);
@@ -6093,10 +6114,18 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     } catch (error) {
       const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
       if (!typed) throw error;
-      const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+      if (p.signal?.aborted) throw error;
+      if (!failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, typed.runtime))) {
+        failedSynthesisRuntimes.push(typed.runtime);
+      }
+      const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator", failedSynthesisRuntimes);
       // Fixed contracts or an exhausted ordered pool fail honestly. Ordinary
       // One/Work runs continue on the next configured orchestrator member.
-      if (!recovery) throw error;
+      if (!recovery || failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, recovery))) {
+        throw new TaskForceRuntimeFailureError({ kind: "refused", runtime: typed.runtime.kind,
+          source: "marker", providerCode: "synthesis_runtime_pool_exhausted",
+          message: "No permitted untried synthesis runtime remains." }, typed.runtime);
+      }
       if (oneControllerRuntimePreferred(p)) {
         p.onControllerRuntimeFallback?.(recovery, typed.failure);
       }
