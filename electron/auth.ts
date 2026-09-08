@@ -150,6 +150,40 @@ const TEMPORARY_AUTH_FILE_ERROR_CODES = new Set([
 // callback that could mutate auth state.
 const SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS = 5_000;
 
+type SafeStorageOperation = "availability" | "decrypt" | "encrypt";
+export class NativeSessionStorageError extends Error {
+  constructor(readonly code: "native_storage_timeout" | "native_storage_unsupported" | "native_storage_unavailable", readonly operation: SafeStorageOperation) {
+    super(code);
+    this.name = "NativeSessionStorageError";
+  }
+}
+let safeStorageNativeFlight: Promise<void> | null = null;
+
+/** Serialize OS-backed calls across restore and explicit login. A JS deadline
+ * never cancels the OS call, so its slot stays occupied until native settlement. */
+async function runSafeStorageOperation<T>(operation: SafeStorageOperation, attempt: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS;
+  while (safeStorageNativeFlight) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new NativeSessionStorageError("native_storage_timeout", operation);
+    const waiting = await settleAuthRestoreAttempt(() => safeStorageNativeFlight!, remaining);
+    if (waiting.status !== "fulfilled") throw new NativeSessionStorageError("native_storage_timeout", operation);
+  }
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new NativeSessionStorageError("native_storage_timeout", operation);
+  const flight = Promise.resolve().then(attempt);
+  const tracked = flight.then(() => undefined, () => undefined);
+  safeStorageNativeFlight = tracked;
+  void tracked.then(() => { if (safeStorageNativeFlight === tracked) safeStorageNativeFlight = null; });
+  const result = await settleAuthRestoreAttempt(() => flight, remaining);
+  if (result.status === "timed-out") throw new NativeSessionStorageError("native_storage_timeout", operation);
+  if (result.status === "rejected") throw result.error;
+  return result.value;
+}
+function nativeStorageTimedOut(error: unknown): boolean {
+  return error instanceof NativeSessionStorageError && error.code === "native_storage_timeout";
+}
+
 // Electron's async safeStorage methods run through the shared libuv worker
 // pool. On macOS a locked or slow Keychain can keep the native operation alive
 // after our JavaScript deadline has elapsed. Starting a fresh retry each time
@@ -181,7 +215,18 @@ function sharedSafeStorageAvailabilityAttempt(): Promise<boolean> {
   if (safeStorageAvailabilityConfirmed) return Promise.resolve(true);
   if (safeStorageAvailabilityInFlight) return safeStorageAvailabilityInFlight;
   const generation = safeStorageRecoveryGeneration;
-  const started = Promise.resolve().then(() => electronApi().safeStorage.isAsyncEncryptionAvailable());
+  const started = runSafeStorageOperation("availability", () => {
+    const storage = electronApi().safeStorage;
+    if (typeof storage.isAsyncEncryptionAvailable !== "function") throw new NativeSessionStorageError("native_storage_unsupported", "availability");
+    // Retain a late native refusal even after the caller's deadline expired.
+    return storage.isAsyncEncryptionAvailable().then((available) => {
+      if (!available && generation === safeStorageRecoveryGeneration) safeStorageAvailabilitySuppressed = true;
+      return available;
+    }, (error) => {
+      if (generation === safeStorageRecoveryGeneration) safeStorageAvailabilitySuppressed = true;
+      throw error;
+    });
+  });
   safeStorageAvailabilityInFlight = started;
   void started.then(
     (available) => {
@@ -191,7 +236,8 @@ function sharedSafeStorageAvailabilityAttempt(): Promise<boolean> {
       // unavailable until the user requests another potentially prompting hop.
       safeStorageAvailabilitySuppressed = !available;
     },
-    () => {
+    (error) => {
+      if (nativeStorageTimedOut(error)) return;
       // A native rejection may be a denial or cancellation even when Electron
       // exposes no error code. Never classify it as transient from its prose.
       if (generation === safeStorageRecoveryGeneration) safeStorageAvailabilitySuppressed = true;
@@ -219,7 +265,17 @@ function sharedSafeStorageDecryptAttempt(
     durableIdentity,
     recoveryGeneration: safeStorageRecoveryGeneration,
     // Synchronous native throws follow the same terminal path as rejections.
-    promise: Promise.resolve().then(() => electronApi().safeStorage.decryptStringAsync(ciphertext)),
+    promise: runSafeStorageOperation("decrypt", () => {
+      const storage = electronApi().safeStorage;
+      if (typeof storage.decryptStringAsync !== "function") throw new NativeSessionStorageError("native_storage_unsupported", "decrypt");
+      return storage.decryptStringAsync(ciphertext).then((value) => {
+        if (typeof value?.result !== "string") failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
+        return value;
+      }, (error) => {
+        failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
+        throw error;
+      });
+    }),
     settled: false,
   };
   safeStorageDecryptInFlight = entry;
@@ -228,8 +284,9 @@ function sharedSafeStorageDecryptAttempt(
       entry.settled = true;
       if (typeof value?.result !== "string") failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
     },
-    () => {
+    (error) => {
       entry.settled = true;
+      if (nativeStorageTimedOut(error)) return;
       // Remember late failures too: a timed-out caller may already have left.
       failedAuthCiphertexts.add(authCiphertextFingerprint(durableIdentity));
     },
@@ -324,7 +381,7 @@ async function readStoredSessionCookie(restoreGeneration: number): Promise<Store
   const availability = await settleAuthRestoreAttempt(sharedSafeStorageAvailabilityAttempt);
   if (restoreGeneration !== _sessionGeneration) return { status: "missing" };
   if (safeStorageAvailabilitySuppressed) return { status: "native-unavailable" };
-  if (availability.status === "timed-out") {
+  if (availability.status === "timed-out" || (availability.status === "rejected" && nativeStorageTimedOut(availability.error))) {
     console.warn("[auth] async local session encryption availability timed out");
     return { status: "temporarily-unavailable" };
   }
@@ -342,7 +399,8 @@ async function readStoredSessionCookie(restoreGeneration: number): Promise<Store
     return { status: "temporarily-unavailable" };
   }
   const decrypted = await settleAuthRestoreAttempt(() => decryptAttempt.promise);
-  if (decrypted.status === "timed-out") {
+  if (decrypted.status === "timed-out" || (decrypted.status === "rejected" && nativeStorageTimedOut(decrypted.error))) {
+    if (decryptAttempt.settled) consumeSafeStorageDecryptAttempt(decryptAttempt);
     console.warn("[auth] async local session decryption timed out");
     return { status: "temporarily-unavailable" };
   }
@@ -363,10 +421,18 @@ async function writeStoredSessionCookie(value: string): Promise<void> {
   const { safeStorage } = electronApi();
   let encrypted: string;
   try {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error("safeStorage encryption is not available");
+    // Explicit login may retry a prior native refusal. Never fall back to the
+    // synchronous Keychain API on Main, including while restore is still parked.
+    if (safeStorageAvailabilitySuppressed) safeStorageAvailabilitySuppressed = false;
+    if (!await sharedSafeStorageAvailabilityAttempt()) {
+      throw new NativeSessionStorageError("native_storage_unavailable", "availability");
     }
-    encrypted = safeStorage.encryptString(value).toString("base64");
+    const ciphertext = await runSafeStorageOperation("encrypt", () => {
+      if (typeof safeStorage.encryptStringAsync !== "function") throw new NativeSessionStorageError("native_storage_unsupported", "encrypt");
+      return safeStorage.encryptStringAsync(value);
+    });
+    if (!Buffer.isBuffer(ciphertext) || ciphertext.length === 0) throw new NativeSessionStorageError("native_storage_unavailable", "encrypt");
+    encrypted = ciphertext.toString("base64");
   } catch (error) {
     // An explicit save can be denied too. Keep the old ciphertext and stop
     // automatic restoration from immediately opening another native prompt.
