@@ -590,6 +590,9 @@ function invocationFailure(
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
   const raw = error instanceof Error ? error.message : String(error);
+  if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
+    return { code: error.code, message: raw };
+  }
   const toolFailureCode = classifyToolFailure({ result: raw });
   if (toolFailureCode !== "tool_failed") {
     const locale = pickLocale(req);
@@ -3159,15 +3162,20 @@ ${effectiveUserPrompt}`;
   };
   const runBoundTaskForceInvocation = (
     params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
-  ) => runBorrowedTaskForceInvocation({
-    ...params,
-    // Every early team route crosses this Main-owned boundary. A verifier
-    // retry must reach the planner/workers before the general runner helper.
-    goalCheckpoint: params.chat.goalId ? latestTaskCheckpoint(params.chat.goalId) ?? undefined : undefined,
-    ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
-    onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
-    bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
-  });
+  ) => {
+    // Main preparation can await roster/lease work after the common guard.
+    // Check the prepared scope at this first team dispatch, not each worker.
+    assertMcpGoalSelectionCurrent();
+    return runBorrowedTaskForceInvocation({
+      ...params,
+      // Every early team route crosses this Main-owned boundary. A verifier
+      // retry must reach the planner/workers before the general runner helper.
+      goalCheckpoint: params.chat.goalId ? latestTaskCheckpoint(params.chat.goalId) ?? undefined : undefined,
+      ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
+      onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
+      bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
+    });
+  };
   const workforceProjectDir = workingFolder ?? process.cwd();
   // 프로젝트가 있으면 편성은 프로젝트에 붙는다 — 새 대화를 열어도 팀을 물려받는다.
   const durableWorkforceGoalId = resolveDesktopWorkforceGoalId({
@@ -3204,6 +3212,7 @@ ${effectiveUserPrompt}`;
           reasonCode: "lease-refresh-or-plan-unavailable",
         };
       } else {
+        assertMcpGoalSelectionCurrent();
         const decisionResult = await picked.runner(
           {
             systemPrompt: [
@@ -3439,6 +3448,7 @@ ${effectiveUserPrompt}`;
         }),
         leader: async (turn) => {
           throwIfInvocationAborted(signal, locale);
+          assertMcpGoalSelectionCurrent();
           const result = await pickedForWorkforceLeader.runner(
             {
               systemPrompt: turn.systemPrompt,
@@ -3812,10 +3822,9 @@ ${effectiveUserPrompt}`;
         // 팀이 실패했다는 사실 자체가 결과다.
         sink({
           kind: "error",
-          error: {
-            code: err instanceof ProjectCloudRosterError ? err.code : "project-roster-task-force-failed",
-            message: err instanceof Error ? err.message : String(err),
-          },
+          error: err instanceof ProjectCloudRosterError
+            ? { code: err.code, message: err.message }
+            : invocationFailure(req, "project-roster-task-force-failed", err),
         });
         return earlyResult();
       }
@@ -3866,8 +3875,7 @@ ${effectiveUserPrompt}`;
         signal,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sink({ kind: "error", error: { code: "borrowed-team-failed", message: msg } });
+      sink({ kind: "error", error: invocationFailure(req, "borrowed-team-failed", err) });
     }
     return earlyResult();
   }
@@ -3902,8 +3910,7 @@ ${effectiveUserPrompt}`;
         signal,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sink({ kind: "error", error: { code: "borrowed-task-force-failed", message: msg } });
+      sink({ kind: "error", error: invocationFailure(req, "borrowed-task-force-failed", err) });
     }
     return earlyResult();
   }
@@ -3932,6 +3939,7 @@ ${effectiveUserPrompt}`;
             : "Stormbreaker · starting Goal/UltraCode parallel decomposition with automatic runtime allocation.",
         });
       }
+      assertMcpGoalSelectionCurrent();
       await runSwarmInvocation({
         // Persist the exact user command above, but give workers the actual
         // goal rather than a route slug that could be mistaken for work.
@@ -3963,8 +3971,7 @@ ${effectiveUserPrompt}`;
         stormbreakerHarness: coreHarness,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sink({ kind: "error", error: { code: "swarm-failed", message: msg } });
+      sink({ kind: "error", error: invocationFailure(req, "swarm-failed", err) });
     }
     return earlyResult();
   }
@@ -3981,6 +3988,7 @@ ${effectiveUserPrompt}`;
           const firmUserPrompt = explicitBorrowUserPreamble
             ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
             : effectiveUserPrompt;
+          assertMcpGoalSelectionCurrent();
           await runFirmInvocation({
             req: { ...req, userPrompt: firmUserPrompt },
             chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId, goalId: chat.goalId },
@@ -4864,6 +4872,7 @@ ${effectiveUserPrompt}`;
       && !isUnattendedExecution(executionContext)
       && !automationRuntimePinned
       && !scienceRuntimePinned;
+    let directRuntimeDispatched = false;
     const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
@@ -4973,11 +4982,15 @@ ${effectiveUserPrompt}`;
           selectedRuntimeKey,
           runtimeAttemptReceipt(selectedRuntime, attemptCount),
         );
+        // Only Main's first direct dispatch is admitted here. This is not a
+        // new policy for revoking an already-running provider or recovery pass.
+        if (!directRuntimeDispatched) assertMcpGoalSelectionCurrent();
         const attemptEvents = createAttemptRunnerEvents();
         let result: Awaited<ReturnType<Runner>>;
         try {
           const selected = picked;
           if (!selected) throw new Error("no-runner");
+          directRuntimeDispatched = true;
           result = await selected.runner(requestForRuntime, attemptEvents.events);
         } catch (error) {
           if (!directRuntimeFallbackAllowed || signal?.aborted) throw error;
