@@ -26,6 +26,7 @@ import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
+import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
 
 /**
@@ -305,6 +306,7 @@ export function ChatStream({
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
+  onInspectWorker,
   mediaBasePaths = [],
   workspaceRoot,
   focusMessageId,
@@ -325,6 +327,7 @@ export function ChatStream({
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   /** 멀티모달 설정 화면으로 이동 — 엔진 미연결 CTA 버튼 클릭 시 */
   onOpenMultimodalSetup?: () => void;
+  onInspectWorker?: (runId: string, group: OneWorkerWorkGroup) => void;
   /** 다른 메시지가 실행 중이면 오래된 질문 카드도 전송하지 않는다. */
   interactionBusy?: boolean;
   stopRequested?: boolean;
@@ -508,6 +511,7 @@ export function ChatStream({
               onOpenWorkflow={onOpenWorkflow}
               onAnswerQuestion={onAnswerQuestion}
               onOpenMultimodalSetup={onOpenMultimodalSetup}
+              onInspectWorker={onInspectWorker}
               mediaBasePaths={mediaBasePaths}
             />
           </div>
@@ -867,6 +871,7 @@ const Bubble = memo(function Bubble({
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
+  onInspectWorker,
   mediaBasePaths,
 }: {
   message: StreamMessage;
@@ -879,6 +884,7 @@ const Bubble = memo(function Bubble({
   onOpenWorkflow?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   onOpenMultimodalSetup?: () => void;
+  onInspectWorker?: (runId: string, group: OneWorkerWorkGroup) => void;
   mediaBasePaths: string[];
 }) {
   const { locale } = useT();
@@ -1030,6 +1036,8 @@ const Bubble = memo(function Bubble({
             startedAt={message.startedAt ?? null}
             locale={locale === "ko" ? "ko" : "en"}
             workspacePath={workspaceRootForRun ?? null}
+            onInspectWorker={onInspectWorker && (message.activityRuns?.some((run) => run.runId === runId) || message.runId === runId)
+              ? (group) => onInspectWorker(runId, group) : undefined}
           />
         ))}
         {showWorkActivity && displayText && message.busy && (

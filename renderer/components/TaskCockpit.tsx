@@ -96,6 +96,8 @@ import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
 import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "@/components/one/OneActivityTimeline";
+import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
+import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import oneActivityStyles from "@/components/one/OneActivityTimeline.module.css";
 import {
   initialOneActivityState,
@@ -2279,6 +2281,23 @@ function ChatPage() {
   }, [allGeneratedApps, scaffoldedApps, surface]);
   // 우측 패널 — file / agent / panel 탭을 하나의 rail 안에서 전환한다.
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [workerSelection, setWorkerSelection] = useState<OneWorkerPanelSelection | null>(null);
+  const inspectWorkerPanel = useCallback((runId: string, group: OneWorkerWorkGroup) => {
+    if (!chatId || hydratedChatId !== chatId || !isCurrentChat() || !runId || !group.agentId) return;
+    setWorkerSelection({ chatId, runId, agentId: group.agentId, name: group.name });
+    setRightPanelOpen(true);
+  }, [chatId, hydratedChatId, isCurrentChat]);
+  const workerRun = useMemo<OneWorkerPanelRun | null>(() => {
+    if (!rightPanelOpen || hydratedChatId !== chatId || !workerSelection || workerSelection.chatId !== chatId) return null;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      const exact = message.activityRuns?.find((run) => run.runId === workerSelection.runId);
+      if (exact) return { chatId, runId: exact.runId, state: exact.state };
+      if (!message.activityRuns?.length && message.runId === workerSelection.runId) return { chatId, runId: message.runId, state: workActivityStateFromMessage(message) };
+    }
+    return null;
+  }, [chatId, hydratedChatId, messages, rightPanelOpen, workerSelection]);
+  useEffect(() => { setWorkerSelection(null); }, [chatId]);
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
   const rightPanelPreferredWidthRef = useRef(rightPanelWidth);
@@ -6416,6 +6435,7 @@ function ChatPage() {
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, minWidth: 0, width: "100%", flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <ChatStream
           messages={messages}
+          onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
           agentTone={displayAgent?.tone ?? "blue"}
           emptyDirectory={chatEmptyDirectory}
@@ -6539,6 +6559,9 @@ function ChatPage() {
         activity={workActivity}
         locale={locale === "ko" ? "ko" : "en"}
         visible={rightPanelOpen}
+        workerSelection={workerSelection}
+        workerRun={workerRun}
+        onCloseWorker={() => setWorkerSelection(null)}
         onClose={closeRightPanel}
         width={rightPanelWidth}
         onResize={resizeRightPanel}

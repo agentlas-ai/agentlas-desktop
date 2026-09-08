@@ -57,6 +57,8 @@ import { OneComputerHistory } from "./OneComputerHistory";
 import { McpResultPreview } from "../McpResultPreview";
 import { ChatFileTabs, nextFileTabSelection } from "../ChatFileExperience";
 import { CHAT_FILE_OPEN_EVENT, chatFilesBridge, formatChatFileSize, isChatFileItem, type ChatFileItem } from "@/lib/chat-files";
+import { OneWorkerPanel } from "./OneWorkerPanel";
+import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worker-panel";
 import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
@@ -67,7 +69,7 @@ const ONE_OUTPUT_PREVIEW_HEIGHT_MIN = 160;
 /** 아래 섹션이 최소한 한 줄은 보이도록 남겨 두는 높이. */
 const ONE_OUTPUT_BELOW_MIN = 120;
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "result" | "activity" | "terminal" | "browser" | "screen" | "app";
+type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "app";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
@@ -80,6 +82,7 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
 }
 
 function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
+  if (view === "worker") return locale === "ko" ? "서브에이전트" : "Subagent";
   if (view === "result") return locale === "ko" ? "결과" : "Result";
   if (view === "app") return locale === "ko" ? "앱" : "App";
   if (view === "activity") return locale === "ko" ? "작업" : "Activity";
@@ -1449,7 +1452,13 @@ export function OneActivityArtifactRail({
   resultKey,
   resultKind = "standard",
   appPreview,
+  workerSelection,
+  workerRun,
+  onCloseWorker,
 }: {
+  workerSelection?: OneWorkerPanelSelection | null;
+  workerRun?: OneWorkerPanelRun | null;
+  onCloseWorker?: () => void;
   items: OneActivityArtifact[];
   activity?: OneActivityState;
   locale: "ko" | "en";
@@ -1520,6 +1529,30 @@ export function OneActivityArtifactRail({
       return next;
     });
   }, []);
+  const workerKey = workerSelection?.chatId === screenChatId
+    ? JSON.stringify([workerSelection.chatId, workerSelection.runId, workerSelection.agentId]) : null;
+  const presentedWorkerRef = useRef<string | null>(null);
+  const workerReturnViewRef = useRef<OutputRailView | null>(null);
+  const railViewRef = useRef(railView);
+  railViewRef.current = railView;
+  useEffect(() => {
+    if (workerKey) {
+      if (railViewRef.current !== "worker") workerReturnViewRef.current = railViewRef.current;
+      setOpenTabs((tabs) => tabs.includes("worker") ? tabs : [...tabs, "worker"]);
+      setRailView("worker");
+    } else if (!workerKey && presentedWorkerRef.current) {
+      closeRailTab("worker");
+    }
+    presentedWorkerRef.current = workerKey;
+  }, [workerKey, workerSelection, closeRailTab]);
+  const closeWorkerTab = () => {
+    const next = openTabs.filter((tab) => tab !== "worker");
+    setOpenTabs(next);
+    const previous = workerReturnViewRef.current;
+    setRailView(previous && previous !== "worker" && next.includes(previous)
+      ? previous : next.at(-1) ?? null);
+    onCloseWorker?.();
+  };
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
   const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [resizing, setResizing] = useState(false);
@@ -1786,7 +1819,7 @@ export function OneActivityArtifactRail({
     presentedArtifactIdRef.current = latestArtifactId;
     // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
     // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
-    setRailView((current) => (current === "browser" ? current : "activity"));
+    setRailView((current) => ((current === "browser" || current === "worker") ? current : "activity"));
   }, [latestArtifactId, result]);
   useEffect(() => {
     const latest = mcpResults.at(-1)?.id ?? null;
@@ -1807,7 +1840,7 @@ export function OneActivityArtifactRail({
     // is never the One presentation surface.
     // 브라우저 작업 자체가 결과다 — 탭이 없으면 이때 하나 생긴다.
     setOpenTabs((tabs) => (tabs.includes("browser") ? tabs : [...tabs, "browser"]));
-    setRailView((current) => current === "app" ? current : "browser");
+    setRailView((current) => (current === "app" || current === "worker") ? current : "browser");
     onBrowserObserved?.(preferredBrowserUrl);
   }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
   useEffect(() => {
@@ -1823,7 +1856,7 @@ export function OneActivityArtifactRail({
     // The app itself is the primary output. Open it once when the verified
     // preview becomes reachable, but do not fight a user's later tab choice.
     setOpenTabs((tabs) => (tabs.includes("app") ? tabs : [...tabs, "app"]));
-    setRailView("app");
+    setRailView((current) => current === "worker" ? current : "app");
   }, [appPreview?.appId, appPreview?.url, railView]);
   useEffect(() => {
     if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
@@ -1831,7 +1864,7 @@ export function OneActivityArtifactRail({
     // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser/App 표면 위로는
     // 올라오지 않는다 — 탭만 만들고 보고 있던 것을 빼앗지 않는다.
     setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
-    setRailView((current) => (current === "browser" || current === "app" ? current : "result"));
+    setRailView((current) => (current === "browser" || current === "app" || current === "worker" ? current : "result"));
   }, [result, resultKey]);
   /*
    * 폭을 저 혼자 넓히던 자리(제거, 오너 지시 2026-08-24 "디폴트로 접히고
@@ -2029,7 +2062,7 @@ export function OneActivityArtifactRail({
                 type="button"
                 className={styles.artifactTabClose}
                 aria-label={locale === "ko" ? `${railTabLabel(view, locale)} 닫기` : `Close ${railTabLabel(view, locale)}`}
-                onClick={() => closeRailTab(view)}
+                onClick={() => view === "worker" ? closeWorkerTab() : closeRailTab(view)}
               >
                 <IconClose size={11} />
               </button>
@@ -2095,6 +2128,9 @@ export function OneActivityArtifactRail({
           ? ({ "--one-preview-height": `${previewHeight}px` } as React.CSSProperties)
           : undefined}
       >
+        {railView === "worker" && workerKey && workerSelection && <OneWorkerPanel
+          key={workerKey} selection={workerSelection} run={workerRun ?? null} locale={locale} onBack={closeWorkerTab}
+        />}
         {railView === "result" && (activeChatFile || openedArtifact || result) && <div className={styles.resultView}>
           {chatFileTabs.length > 0 && <ChatFileTabs
             tabs={chatFileTabs.map((file) => ({ id: file.tabId, name: file.name, provenance: file.provenance }))}

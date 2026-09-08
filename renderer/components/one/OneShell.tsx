@@ -167,6 +167,8 @@ import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
+import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
+import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
@@ -1622,6 +1624,21 @@ export function OneShell() {
   const renderedActivityStartedAt = busy && !activeRunOwnsActivity
     ? activeRunStartedAtRef.current
     : runStartedAt;
+  const [workerSelection, setWorkerSelection] = useState<OneWorkerPanelSelection | null>(null);
+  const workerChatId = selected?.chatId ?? conversation?.id ?? null;
+  const inspectWorkerPanel = useCallback((runId: string, group: OneWorkerWorkGroup) => {
+    if (!workerChatId || !runId || !group.agentId) return;
+    setWorkerSelection({ chatId: workerChatId, runId, agentId: group.agentId, name: group.name });
+    setContextRailOpen(true);
+  }, [workerChatId, setContextRailOpen]);
+  const workerRun = useMemo<OneWorkerPanelRun | null>(() => {
+    if (!contextRailOpen || !workerSelection || !workerChatId || workerSelection.chatId !== workerChatId) return null;
+    if (activityChatIdRef.current === workerChatId && activityStateRunId === workerSelection.runId) return { chatId: workerChatId, runId: workerSelection.runId, state: activity };
+    const exact = threadRunsChatIdRef.current === workerChatId
+      ? threadRuns.find((run) => run.runId === workerSelection.runId) : undefined;
+    return exact ? { chatId: workerChatId, runId: exact.runId, state: exact.state } : null;
+  }, [activity, activityStateRunId, contextRailOpen, threadRuns, workerChatId, workerSelection]);
+  useEffect(() => { setWorkerSelection(null); }, [workerChatId]);
   const visibleMessages = messages;
   const liveResponseMounted = messages.some((message) => message.id === "one-live-response");
   const livePromptMounted = Boolean(activeRunPrompt && messages.some((message) => (
@@ -1634,6 +1651,7 @@ export function OneShell() {
     ? (
       <OneTurnWork
         key={`work:live:${activeActivityRunId ?? "pending"}`}
+        onInspectWorker={activeActivityRunId ? (group) => inspectWorkerPanel(activeActivityRunId, group) : undefined}
         state={renderedActivity}
         busy
         startedAt={renderedActivityStartedAt}
@@ -6710,6 +6728,7 @@ export function OneShell() {
                           워커 도구 이벤트는 agentName이 붙어 오므로 행에 발화자가 보인다. */}
                       <OneTurnWork
                         state={block.state}
+                        onInspectWorker={(group) => inspectWorkerPanel(block.runId, group)}
                         busy={false}
                         runStatus={block.status}
                         startedAt={Date.parse(block.startedAt)}
@@ -6851,6 +6870,7 @@ export function OneShell() {
                             {/* 단톡에도 1:1과 같은 도구 호출 로그 표면 (G-4). */}
                             <OneTurnWork
                               state={block.state}
+                              onInspectWorker={(group) => inspectWorkerPanel(block.runId, group)}
                               busy={false}
                               startedAt={Date.parse(block.startedAt)}
                               locale={appLocale}
@@ -7851,6 +7871,9 @@ export function OneShell() {
           activity={activity}
           locale={appLocale}
           visible={Boolean((selected || conversation) && contextRailOpen)}
+          workerSelection={workerSelection}
+          workerRun={workerRun}
+          onCloseWorker={() => setWorkerSelection(null)}
           onAdd={() => attachmentInputRef.current?.click()}
           onClose={() => setContextRailOpen(false)}
           width={contextRailWidth}

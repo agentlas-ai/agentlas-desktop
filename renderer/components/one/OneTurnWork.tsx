@@ -380,11 +380,11 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
 }
 
 /** One invocation's exact node identity; an avatar is a fallback, not a provider logo. */
-function WorkerWorkCard({ group, active, locale, onOpenWorker }: {
+function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
   group: OneWorkerWorkGroup;
   active: boolean;
   locale: "ko" | "en";
-  onOpenWorker?: (group: OneWorkerWorkGroup) => void;
+  onInspectWorker?: (group: OneWorkerWorkGroup) => void;
 }) {
   const ko = locale === "ko";
   const [open, setOpen] = useState(false);
@@ -421,10 +421,10 @@ function WorkerWorkCard({ group, active, locale, onOpenWorker }: {
     {group.model && <span className={styles.workerModel} data-worker-model="true">{group.model}</span>}
     <span className={styles.workerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
   </>;
-  if (onOpenWorker) return (
+  if (onInspectWorker) return (
     <button type="button" className={styles.workerSummary} data-worker-id={group.agentId} data-worker-state={status}
       data-worker-panel="true" title={title} aria-label={`${name}: ${update}${group.model ? ` · ${group.model}` : ""} · ${ko ? "작업자 상세 열기" : "Open worker details"}`}
-      onClick={() => onOpenWorker(group)}>{content}</button>
+      onClick={() => onInspectWorker(group)}>{content}</button>
   );
   return (
     <details className={styles.workerCard} data-worker-id={group.agentId} data-worker-state={status} onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -469,7 +469,7 @@ export function OneTurnWork({
   runStatus,
   onRetry,
   retryDisabled = false,
-  onOpenWorker,
+  onInspectWorker,
 }: {
   state: OneActivityState;
   /** True only for the live run this block belongs to. */
@@ -493,7 +493,7 @@ export function OneTurnWork({
   onRetry?: () => void;
   retryDisabled?: boolean;
   /** Caller binds this exact node group to its own chat and invocation scope. */
-  onOpenWorker?: (group: OneWorkerWorkGroup) => void;
+  onInspectWorker?: (group: OneWorkerWorkGroup) => void;
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
@@ -611,7 +611,7 @@ export function OneTurnWork({
       )}
       {(active || expanded) && workerGroups.length > 0 && (
         <div className={styles.workerList} aria-label={ko ? "작업자별 활동" : "Activity by worker"}>
-          {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onOpenWorker={onOpenWorker} />)}
+          {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onInspectWorker={onInspectWorker} />)}
         </div>
       )}
       {expanded && ungroupedCells.length > 0 && (
