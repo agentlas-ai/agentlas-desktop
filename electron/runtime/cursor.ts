@@ -181,6 +181,14 @@ function eventText(value: unknown): string {
 }
 
 export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
+    // This legacy driver cannot bind the exact per-run native browser safely.
+    // The supported ACP path carries the Main-approved session configuration.
+    throw Object.assign(new Error("native_browser_requires_acp_transport"), {
+      code: "native-browser-legacy-transport-unsupported",
+    });
+  }
+
   // Cursor print mode exposes built-in file/shell tools and currently has no
   // verified zero-tool switch. Browser-originated and restricted invocations
   // must therefore fail before probing or spawning the CLI.

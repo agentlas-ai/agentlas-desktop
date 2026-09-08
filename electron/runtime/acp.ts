@@ -17,6 +17,7 @@
 // real gate lives elsewhere.
 import type { ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
+import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { createHash } from "node:crypto";
 import {
   AcpConnection,
@@ -705,6 +706,35 @@ async function readMcpConfig(mcpConfigPath: string | undefined): Promise<unknown
   }
 }
 
+/** Required native task browser configs are admitted by Main, never by file text. */
+export function prepareNativeAcpMcpBinding(req: RunnerRequest): {
+  fingerprint: string;
+  config: { mcpServers: Record<string, unknown> };
+  assertCurrent: () => void;
+} | null {
+  if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE !== "task") return null;
+  if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
+  req.signal?.throwIfAborted();
+  const rows = preparedMcpBindings(req.mcpConfigPath);
+  if (!rows.some((row) => row.configKey === "agentlas-browser" && row.server.catalogId === "agentlas-browser")) {
+    throw new Error("native_browser_mcp_binding_required");
+  }
+  const mcpServers = Object.fromEntries(rows.map((row) => {
+    const launch = preparedMcpTransport(row, row.server);
+    return [row.configKey, launch.kind === "stdio"
+      ? { command: launch.command, args: launch.args, env: launch.env }
+      : { type: launch.kind, url: launch.url, headers: launch.headers }];
+  }));
+  return {
+    fingerprint: createHash("sha256").update(JSON.stringify(mcpServers)).digest("hex"),
+    config: { mcpServers },
+    assertCurrent: () => {
+      req.signal?.throwIfAborted();
+      for (const row of rows) preparedMcpTransport(row, row.server);
+    },
+  };
+}
+
 /**
  * Cursor's source-owned `auto` row delegates model choice to Cursor itself.
  * It is not a generic alias: every other requested model needs the session's
@@ -781,6 +811,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
    */
   const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
     const locale = pickLocale(req);
+    const nativeMcp = prepareNativeAcpMcpBinding(req);
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
     const cwd = req.cwd ?? agentRunCwd();
     const runEnv = req.env ?? process.env;
@@ -819,6 +850,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         // 권한은 세션 모드로 굳는다(session/set_mode 는 새 세션에서만 고를 수 있다).
         // 권한이 바뀌면 지문이 달라져 그 권한에 맞는 새 세션이 열린다.
         .update(req.permission ?? "")
+        .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
         .update("\0executable\0")
         .update(executableIdentity.fingerprint)
         .digest("hex")
@@ -912,9 +944,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const mcp: AcpMcpTranslation = reusing
         ? { servers: [], unsupported: [], malformed: [] }
         : acpMcpServersFromConfig(
-          await readMcpConfig(req.mcpConfigPath),
+          nativeMcp?.config ?? await readMcpConfig(req.mcpConfigPath),
           agentCaps.mcpCapabilities ?? null,
         );
+      nativeMcp?.assertCurrent();
+      if (nativeMcp && !reusing && !mcp.servers.some((server) => server.name === "agentlas-browser")) {
+        throw new Error("native_browser_mcp_translation_required");
+      }
       if (mcp.servers.length > 0) {
         events.onStatus(locale === "ko" ? `MCP 서버 ${mcp.servers.length}개 연결됨` : `${mcp.servers.length} MCP server(s) attached`);
       }
@@ -954,6 +990,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (!sessionId && resumeSessionId && canLoadSession) {
         client.beginReplay();
         try {
+          nativeMcp?.assertCurrent();
           loaded = await session.conn.request(
             "session/load",
             { sessionId: resumeSessionId, cwd, mcpServers: mcp.servers },
@@ -977,6 +1014,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           : "This runtime does not advertise session resume — starting a fresh session with the conversation re-attached");
       }
       if (!sessionId) {
+        nativeMcp?.assertCurrent();
         created = await session.conn.request("session/new", { cwd, mcpServers: mcp.servers }, { timeoutMs: 60_000, signal: req.signal });
         sessionId = String(created?.sessionId ?? "");
         if (!sessionId) throw new Error("ACP session/new returned no sessionId");
@@ -1059,6 +1097,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           userPrompt,
           schemaFallback,
         ].filter(Boolean).join("\n\n");
+      nativeMcp?.assertCurrent();
       const result = await session.conn.request(
         "session/prompt",
         { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },

@@ -389,6 +389,14 @@ export function isGrokQuotaExhausted(value: string): boolean {
 }
 
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
+    // This legacy driver cannot bind the exact per-run native browser safely.
+    // The supported ACP path carries the Main-approved session configuration.
+    throw Object.assign(new Error("native_browser_requires_acp_transport"), {
+      code: "native-browser-legacy-transport-unsupported",
+    });
+  }
+
   /*
    * ★판정(untrustedNoTools)은 grok 으로도 수행한다 — 단, Agent App 의 무상태 격리는 계속 거절한다.
    *

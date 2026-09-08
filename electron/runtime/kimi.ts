@@ -333,6 +333,14 @@ function runKimiProcess(
 }
 
 export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
+  if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
+    // This legacy driver cannot bind the exact per-run native browser safely.
+    // The supported ACP path carries the Main-approved session configuration.
+    throw Object.assign(new Error("native_browser_requires_acp_transport"), {
+      code: "native-browser-legacy-transport-unsupported",
+    });
+  }
+
   // Kimi prompt mode exposes built-in file/shell tools and currently has no
   // verified zero-tool switch. Do not widen browser or restricted-read authority.
   if (req.browserOnly) {
