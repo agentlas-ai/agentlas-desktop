@@ -1263,6 +1263,9 @@ function historyEntryToStreamMessage(entry: {
     role,
     text: setup.text,
     ...durableIdentity,
+    // History's row id and the live final's durableMessageId identify the
+    // same assistant answer, even if the two reads arrive in either order.
+    durableMessageId: entry.durableMessageId ?? entry.id,
     imageDataUrls: entry.imageDataUrls,
     chatFileGroupIds: parsedFiles.groupIds,
     questions: parsed.questions.length > 0 ? parsed.questions : undefined,
@@ -2146,6 +2149,7 @@ function ChatPage() {
   // an active -> inactive transition for runs it did not start itself.
   const activeChatSeenRef = useRef(false);
   const lastRunIdRef = useRef<string | null>(null);
+  const lastFinalRunIdRef = useRef<string | null>(null);
   // 프롬프트 저장소 seedOnly 프리필 — 자동 전송 없이 입력창에만 채울 텍스트.
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
@@ -3177,10 +3181,11 @@ function ChatPage() {
           }),
         );
       } else if (ev.kind === "final") {
+        lastFinalRunIdRef.current = sourceRunId ?? runIdRef.current;
         pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         transcriptRevisionRef.current += 1;
         setMessages((m) =>
-          m.map((msg) => {
+          dedupeStreamMessages(m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
             const raw = ev.text ?? "";
             const parsed = extractQuestions(raw, msg.id);
@@ -3225,7 +3230,7 @@ function ChatPage() {
               pendingContinuationRunId: undefined,
               pendingContinuationAutoResume: undefined,
             };
-          }),
+          })),
         );
         setBusy(false);
         setCancelPending(false);
@@ -3451,6 +3456,7 @@ function ChatPage() {
     setCancelPending(false);
     runIdRef.current = null;
     lastRunIdRef.current = null;
+    lastFinalRunIdRef.current = null;
     partialTextRef.current = "";
     processedTextLenRef.current = 0;
     runServerUrlsRef.current = [];
@@ -3792,7 +3798,7 @@ function ChatPage() {
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
       const attached = await api.invoke.attach(chatId);
-      if (!cancelled && attached) {
+      if (!cancelled && attached && attached.runId !== lastFinalRunIdRef.current) {
         const placeholderId = uid();
         // 원 실행 시작 시각을 우선 — 재진입 시 상태줄 경과가 0s부터 다시 세지 않게.
         const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
@@ -3827,7 +3833,7 @@ function ChatPage() {
         lastRunIdRef.current = attached.runId;
         const lastStatusRef = { text: "" };
         for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef, attached.runId);
-        subscribeRun(attached.runId, placeholderId, lastStatusRef);
+        if (runIdRef.current === attached.runId) subscribeRun(attached.runId, placeholderId, lastStatusRef);
       }
     })().catch((error) => {
       if (cancelled) return;
@@ -3938,7 +3944,10 @@ function ChatPage() {
         // re-enters the chat.
         if (runIdRef.current) return;
         void api.invoke.attach(chatId).then((attached) => {
-          if (!attached || runIdRef.current) return;
+          // Goal verification keeps the completed run attachable. Replaying
+          // its final into a new placeholder would display the answer twice.
+          // A successor continuation has a different run id and still attaches.
+          if (!attached || runIdRef.current || attached.runId === lastFinalRunIdRef.current) return;
           const placeholderId = uid();
           const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
           const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
@@ -3973,7 +3982,7 @@ function ChatPage() {
           processedTextLenRef.current = 0;
           const lastStatusRef = { text: "" };
           for (const event of attached.events) consumeEventRef.current(event, placeholderId, lastStatusRef, attached.runId);
-          subscribeRun(attached.runId, placeholderId, lastStatusRef);
+          if (runIdRef.current === attached.runId) subscribeRun(attached.runId, placeholderId, lastStatusRef);
         }).catch(() => undefined);
         return;
       }

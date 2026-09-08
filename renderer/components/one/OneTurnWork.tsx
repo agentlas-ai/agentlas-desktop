@@ -25,6 +25,7 @@ import {
 } from "@/lib/one-turn-work";
 import styles from "./OneTurnWork.module.css";
 import { toolFailureCopy } from "@shared/tool-failure";
+import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
 
 /**
  * One assistant turn's process, drawn the way Codex draws it:
@@ -157,6 +158,27 @@ function liveThoughtLabel(cell: OneWorkCell, locale: "ko" | "en"): string {
   return cell.headline ?? (cell.status === "running" ? cellVerb(cell, locale) : "");
 }
 
+function ShellResultFooter({ cell, locale }: {
+  cell: Extract<OneWorkCell, { kind: "run" }>;
+  locale: "ko" | "en";
+}) {
+  const outcome = shellExecutionOutcome(cell);
+  if (outcome === "failed") {
+    return (
+      <span className={styles.failed} data-shell-outcome="failed">
+        {cell.exitCode != null ? `exit ${cell.exitCode} · ` : ""}{locale === "ko" ? "실패" : "Failed"}
+      </span>
+    );
+  }
+  if (outcome === "succeeded") {
+    return <span data-shell-outcome="succeeded"><IconCheck size={11} />{locale === "ko" ? "exit 0 · 성공" : "exit 0 · Success"}</span>;
+  }
+  if (outcome === "cancelled") {
+    return <span className={styles.muted} data-shell-outcome="cancelled">{locale === "ko" ? "취소됨" : "Cancelled"}</span>;
+  }
+  return <span className={styles.muted} data-shell-outcome="response">{locale === "ko" ? "실행 응답" : "Command response"}</span>;
+}
+
 function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
   const ko = locale === "ko";
   const verb = cellVerb(cell, locale);
@@ -235,9 +257,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
               </div>
               <pre className={styles.commandOutput}>{cell.output}</pre>
               <div className={styles.commandPanelFooter}>
-                {cell.status === "failed" || (cell.exitCode != null && cell.exitCode !== 0)
-                  ? <span className={styles.failed}>{locale === "ko" ? "실패" : "Failed"}</span>
-                  : <span><IconCheck size={11} />{locale === "ko" ? "성공" : "Success"}</span>}
+                <ShellResultFooter cell={cell} locale={locale} />
               </div>
             </div>
           ) : undefined}
