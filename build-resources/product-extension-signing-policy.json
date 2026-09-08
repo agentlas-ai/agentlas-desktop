@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "agentlas.product-extension-signing-policy.v1",
+  "keys": {
+    "agentlas-product-extension-release-v1": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhdzhuUqdSa8P+ydZZZ9pgrvoPDLZJq9mBohjEw9qa8g=\n-----END PUBLIC KEY-----\n"
+  }
+}

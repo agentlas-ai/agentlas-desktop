@@ -360,7 +360,14 @@ interface ScienceSuiteActivation {
 }
 
 function remoteCatalogInstallEnabled(): boolean {
-  return app.isPackaged || (!app.isPackaged && process.env.AGENTLAS_SCIENCE_REMOTE_INSTALL_QA === "1");
+  if (app.isPackaged) return true;
+  const override = process.env.AGENTLAS_SCIENCE_REMOTE_INSTALL_QA;
+  if (override === "1") return true;
+  if (override === "0") return false;
+  // A normal development launch installs the same signed catalog as Desktop.
+  // Explicit local packages and loopback fixtures keep their isolated QA path.
+  return !qaRemoteSourceEnabled()
+    && !SCIENCE_SUITE_SPECS.some((spec) => process.env[spec.sourceEnv]?.trim());
 }
 
 async function catalogSuite(): Promise<{
