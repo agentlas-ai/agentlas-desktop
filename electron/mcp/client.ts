@@ -3135,7 +3135,9 @@ ${effectiveUserPrompt}`;
     paths: readonly string[],
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
-    if (req.oneMode !== true || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
+    // Work and One use the same canonical Task output rail. Admission depends
+    // on that exact Task/run binding, not on which product opened the chat.
+    if (req.agentAppMode || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
     return bindOneRuntimeToolArtifacts({
       taskId: canonicalTask.id,
       taskVersion: canonicalTask.version,

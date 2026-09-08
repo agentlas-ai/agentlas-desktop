@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { lstatSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -367,6 +367,21 @@ export function buildAntigravitySpawnArgs(
 }
 
 
+/** Metadata is only a freshness preflight; Main still owns scope and byte sealing. */
+export function freshAgyArtifactPaths(paths: readonly string[], invocationStartedAtMs: number): string[] {
+  if (!Number.isFinite(invocationStartedAtMs)) return [];
+  return paths.filter((candidate) => {
+    if (!path.isAbsolute(candidate) || /[\u0000\r\n]/u.test(candidate)) return false;
+    try {
+      const stat = lstatSync(candidate);
+      return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0
+        && stat.mtimeMs >= invocationStartedAtMs;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * agy stream-json 한 줄을 읽는다 — 순수 함수(게이트가 픽스처 주입).
  * agent_response의 text_delta를 본문으로 누적하고, DONE의 usage를 집계한다.
@@ -412,6 +427,8 @@ export function reduceAgyLine(
     /** `tool_info.output` — DONE 스텝에만 온다. */
     result?: string;
     done: boolean;
+    /** Exact output argument from a successful, known write operation; never prose. */
+    artifactPaths?: string[];
   };
 } {
   let ev: {
@@ -546,6 +563,27 @@ export function reduceAgyLine(
         }
       }
       const output = step.tool_info?.output;
+      let structuredOutput: unknown = output;
+      if (typeof output === "string") {
+        try { structuredOutput = JSON.parse(output); } catch { /* Plain MCP result text remains display-only. */ }
+      }
+      const outputRecord = (name === "call_mcp_tool" || name.startsWith("mcp__"))
+        && structuredOutput && typeof structuredOutput === "object" && !Array.isArray(structuredOutput)
+        ? structuredOutput as Record<string, unknown> : null;
+      const failed = step.state === "ERROR" || step.tool_info?.error != null
+        || outputRecord?.isError === true || outputRecord?.is_error === true
+        || (outputRecord?.error != null && outputRecord.error !== false);
+      const validErrorFlags = !outputRecord || ["isError", "is_error"].every((key) =>
+        !(key in outputRecord) || typeof outputRecord[key] === "boolean");
+      // A completed screenshot writes its exact filename. Do not promote read,
+      // shell, unknown-server, or arbitrary result-link paths into output evidence.
+      const filename = params && typeof params === "object" && !Array.isArray(params)
+        ? (params as Record<string, unknown>).filename : undefined;
+      const artifactPaths = step.state === "DONE" && !failed && validErrorFlags
+        && displayName === "mcp__agentlas-browser__browser_take_screenshot"
+        && typeof filename === "string" && path.isAbsolute(filename)
+        && !/[\u0000\r\n]/u.test(filename) && /\.(?:png|jpe?g)$/iu.test(filename)
+        ? [filename] : [];
       const stringify = (value: unknown): string | undefined => {
         if (value === undefined || value === null) return undefined;
         if (typeof value === "string") return value;
@@ -562,10 +600,11 @@ export function reduceAgyLine(
         tool: {
           name: displayName,
           id: `agy-tool:${name}:${typeof stepIndex === "number" ? stepIndex : (step.state ?? "")}`,
-          failed: step.state === "ERROR",
+          failed,
           args: stringify(params),
           result: done ? (stringify(output) ?? (step.state === "ERROR" ? (step.tool_info?.error?.message ?? "error") : "")) : undefined,
           done,
+          ...(artifactPaths.length > 0 ? { artifactPaths } : {}),
         },
       };
     }
@@ -1162,6 +1201,7 @@ async function runPreparedAntigravity(
 
   function runAgyProcess(): Promise<RunnerResult> {
   return new Promise<RunnerResult>((resolve, reject) => {
+    const invocationStartedAtMs = Date.now();
     // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
     const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
@@ -1236,7 +1276,8 @@ async function runPreparedAntigravity(
         const key = `${step.tool.id}:${step.tool.done ? "done" : "active"}`;
         if (!reportedAgyTools.has(key)) {
           reportedAgyTools.add(key);
-          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, step.tool.id, step.tool.failed);
+          const artifactPaths = freshAgyArtifactPaths(step.tool.artifactPaths ?? [], invocationStartedAtMs);
+          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, step.tool.id, step.tool.failed, artifactPaths);
         }
       }
       /*
