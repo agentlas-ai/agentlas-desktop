@@ -7473,7 +7473,7 @@ export interface AgentlasIpc {
     /** Detach this exact goal; retain chat, files and audit history. */
     deleteGoal: (id: string, goalId: string) => Promise<Chat>;
     /** Explicit resume; uncertain interrupted effects remain blocked. */
-    resumeGoal: (id: string, expectedVersion: number) => Promise<ChatGoalContext | null>;
+    resumeGoal: (id: string, expectedVersion: number, expectedGoalId: string) => Promise<ChatGoalContext | null>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** Set or clear this chat's exact orchestrator runtime without changing role defaults. */

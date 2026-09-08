@@ -4303,9 +4303,11 @@ export function registerIpcHandlers(): void {
     }
     return context;
   });
-  ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number) => {
+  ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {
     const chat = getChat(id);
-    if (!chat?.goalId) return null;
+    if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
+      throw new Error("goal_control_binding_changed");
+    }
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
       throw new TypeError("A current long-run version is required to resume");
     }

@@ -5696,7 +5696,7 @@ function ChatPage() {
   const handleResumeGoal = useCallback(() => {
     if (!chat || !goalContext?.version) return;
     const expectedVersion = goalContext.version;
-    void ipc()?.chats.resumeGoal(chat.id, expectedVersion)
+    void ipc()?.chats.resumeGoal(chat.id, expectedVersion, goalContext.goalId)
       .then((context) => {
         if (context) setGoalContext(context);
       })
