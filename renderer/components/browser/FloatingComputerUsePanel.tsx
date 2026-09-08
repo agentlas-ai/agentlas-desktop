@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { usePathname } from "next/navigation";
 import { ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { agentScreenChatId, subscribeAgentScreenScope } from "@/lib/agent-screen-scope";
@@ -25,6 +26,31 @@ interface DragState extends FloatPosition {
   y: number;
 }
 
+function placeCollapsedTrigger(
+  preferred: FloatPosition,
+  width: number,
+  height: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  footers: Array<Pick<DOMRect, "left" | "right" | "top" | "bottom">>,
+): FloatPosition | null {
+  const gap = 12;
+  if (viewportWidth < width + gap * 2 || viewportHeight < height + gap * 2) return null;
+  const right = Math.min(viewportWidth - width - gap, Math.max(gap, preferred.right));
+  const left = viewportWidth - right - width;
+  let top = viewportHeight - height
+    - Math.min(viewportHeight - height - gap, Math.max(gap, preferred.bottom));
+  // Move above every intersecting composer, including split panes. Never push
+  // the trigger back down onto a terminal action just to keep it visible.
+  for (const footer of [...footers].sort((a, b) => b.top - a.top)) {
+    if (left < footer.right + gap && left + width > footer.left - gap
+      && top < footer.bottom + gap && top + height > footer.top - gap) {
+      top = footer.top - gap - height;
+    }
+  }
+  return top < gap ? null : { right, bottom: viewportHeight - top - height };
+}
+
 export default function FloatingComputerUsePanel() {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -33,12 +59,66 @@ export default function FloatingComputerUsePanel() {
   const [dismissed, setDismissed] = useState(false);
   const [active, setActive] = useState(false);
   const [position, setPosition] = useState<FloatPosition>({ right: 78, bottom: 116 });
+  const [triggerPosition, setTriggerPosition] = useState<FloatPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const pathname = usePathname();
   const finishTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
   const drag = useRef<DragState | null>(null);
   // 화면은 이 카드가 열려 있을 때만 잡는다 — 접혀 있으면 캡처도 멈춘다.
   const chatId = useSyncExternalStore(subscribeAgentScreenScope, agentScreenChatId, () => null);
   const screen = useAgentScreen(mode, open, ko, chatId);
+
+  useLayoutEffect(() => {
+    if (open || dismissed) return;
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    let frame: number | null = null;
+    let disposed = false;
+    let footers: HTMLElement[] = [];
+    const measure = () => {
+      frame = null;
+      if (disposed) return;
+      const rects = footers.filter((footer) => footer.isConnected)
+        .map((footer) => footer.getBoundingClientRect())
+        .filter((rect) => rect.width > 0 && rect.height > 0);
+      const next = placeCollapsedTrigger(position, trigger.offsetWidth, trigger.offsetHeight,
+        window.innerWidth, window.innerHeight, rects);
+      setTriggerPosition((prior) => prior?.right === next?.right && prior?.bottom === next?.bottom ? prior : next);
+    };
+    const schedule = () => {
+      if (!disposed && frame === null) frame = window.requestAnimationFrame(measure);
+    };
+    const resize = new ResizeObserver(schedule);
+    const observeFooters = () => {
+      footers = Array.from(document.querySelectorAll<HTMLElement>(".chat-input-footer"));
+      resize.disconnect();
+      resize.observe(trigger);
+      for (const footer of footers) {
+        resize.observe(footer);
+        if (footer.parentElement) resize.observe(footer.parentElement);
+      }
+    };
+    const containsFooter = (node: Node) => node instanceof Element
+      && (node.matches(".chat-input-footer") || Boolean(node.querySelector(".chat-input-footer")));
+    // Only rescan on composer mount/removal, not on each streamed text update.
+    const mutation = new MutationObserver((records) => {
+      if (!records.some((record) => [...record.addedNodes, ...record.removedNodes].some(containsFooter))) return;
+      observeFooters();
+      schedule();
+    });
+    observeFooters();
+    mutation.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", schedule);
+    measure();
+    return () => {
+      disposed = true;
+      resize.disconnect();
+      mutation.disconnect();
+      window.removeEventListener("resize", schedule);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [open, dismissed, position, pathname, chatId]);
 
   useEffect(() => {
     const onActivity = (event: Event) => {
@@ -114,10 +194,12 @@ export default function FloatingComputerUsePanel() {
   if (!open) {
     return (
       <button
+        ref={triggerRef}
         type="button"
         className="cua-float-trigger titlebar-nodrag"
         onClick={() => setOpen(true)}
-        style={{ right: position.right, bottom: position.bottom }}
+        style={{ right: triggerPosition?.right ?? position.right, bottom: triggerPosition?.bottom ?? position.bottom,
+          visibility: triggerPosition ? "visible" : "hidden" }}
         aria-label={ko ? "컴퓨터 유즈 화면 열기" : "Open Computer Use view"}
       >
         <span className={`cua-trigger-dot ${active ? "active" : ""}`} aria-hidden="true" />
