@@ -26,6 +26,7 @@ import {
   cellVerb,
   cellObject,
   groupOneWorkerWork,
+  workerModelLabel,
   type OneWorkerWorkGroup,
   formatWorkElapsed,
   type OneWorkCell,
@@ -413,7 +414,8 @@ function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
   const tone = Array.from(group.agentId).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % 5;
   const terminalOrRecovery = terminal != null || recovery;
   const update = terminalOrRecovery ? stateLabel : latest.kind === "agent" ? `${phase ? `${phase} · ` : ""}${stateLabel}` : `${stage}${target ? ` · ${target}` : ""}`;
-  const title = [name, group.model, phase, stateLabel, stage, target].filter(Boolean).join(" · ");
+  const modelLabel = workerModelLabel(group, active, locale);
+  const title = [name, modelLabel, phase, stateLabel, stage, target].filter(Boolean).join(" · ");
   const content = <>
     <span className={styles.workerAvatar} data-tone={tone} aria-hidden="true">{Array.from(name.trim())[0]?.toLocaleUpperCase() || "?"}</span>
     <strong className={styles.workerName}>{name}</strong>
@@ -421,12 +423,12 @@ function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
       <span aria-hidden="true"><CellIcon cell={latest} /></span>
       <span>{update}</span>
     </span>
-    <span className={styles.workerModel} data-worker-model="true">{group.model || (ko ? "실행 모델 미확인" : "Execution model unconfirmed")}</span>
+    <span className={styles.workerModel} data-worker-model="true">{modelLabel}</span>
     <span className={styles.workerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
   </>;
   if (onInspectWorker) return (
     <button type="button" className={styles.workerSummary} data-worker-id={group.agentId} data-worker-state={status}
-      data-worker-panel="true" title={title} aria-label={`${name}: ${update}${group.model ? ` · ${group.model}` : ""} · ${ko ? "작업자 상세 열기" : "Open worker details"}`}
+      data-worker-panel="true" title={title} aria-label={`${name}: ${update}${modelLabel ? ` · ${modelLabel}` : ""} · ${ko ? "작업자 상세 열기" : "Open worker details"}`}
       onClick={() => onInspectWorker(group)}>{content}</button>
   );
   return (

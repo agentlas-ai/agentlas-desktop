@@ -297,6 +297,16 @@ export interface OneWorkerWorkGroup {
   lifecycle?: Extract<OneWorkCell, { kind: "agent" }>;
 }
 
+/** A completed observation belongs to history until the current worker call settles. */
+export function workerModelLabel(group: OneWorkerWorkGroup, active: boolean, locale: "ko" | "en"): string {
+  const running = active && group.lifecycle?.status === "running" && !group.lifecycle.terminalObserved;
+  const unknown = locale === "ko" ? "실제 미확인" : "execution unconfirmed";
+  if (running) return group.lifecycle?.model
+    ? `${locale === "ko" ? "요청" : "Requested"}: ${group.lifecycle.model} · ${unknown}`
+    : unknown;
+  return group.model || (locale === "ko" ? "실행 모델 미확인" : "Execution model unconfirmed");
+}
+
 export function groupOneWorkerWork(cells: readonly OneWorkCell[]): OneWorkerWorkGroup[] {
   const groups = new Map<string, OneWorkerWorkGroup>();
   const modelTimes = new Map<string, number>();
