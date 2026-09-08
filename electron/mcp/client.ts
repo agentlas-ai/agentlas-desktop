@@ -1,3 +1,4 @@
+import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
 import { createNativeBrowserRelayGrant, type NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
 import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
 import type { ChatHostNotice } from "../../shared/types";
@@ -1744,6 +1745,11 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  let nativeCaptureBound = false;
+  const publishNativeCapture = createNativeCapturePublisher({
+    task: findCanonicalTaskForChat(chat.id), chatId: chat.id, runId: req.runId ?? "", signal,
+    emit: (event) => { sink(event); nativeCaptureBound = true; },
+  });
   // Freeze conversation state before this turn becomes durable. Every routing
   // decision and model history below must see only earlier turns; otherwise the
   // current request is duplicated as both history and the active user prompt.
@@ -3031,7 +3037,7 @@ ${effectiveUserPrompt}`;
       if (req.chatId && !executionContext && !req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
-          presentation: browserPresentation,
+          presentation: browserPresentation, onScreenshot: publishNativeCapture,
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
       }
       const cfg = await buildMcpConfigFile({
@@ -3128,7 +3134,7 @@ ${effectiveUserPrompt}`;
               if (ids.includes("agentlas-browser")) {
                 grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
                   permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
-                  presentation: browserPresentation });
+                  presentation: browserPresentation, onScreenshot: publishNativeCapture });
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
@@ -3274,7 +3280,6 @@ ${effectiveUserPrompt}`;
    * 결과만 요구한다(위 판정기 주석의 실측 참고).
    */
   const screenCaptureRequired = !req.agentAppMode
-    && !req.oneMode
     && chat.kind !== "division"
     && !naturalLanguageRequiresImageGeneration(req.userPrompt)
     && naturalLanguageRequiresScreenCapture(req.userPrompt);
@@ -6313,7 +6318,7 @@ ${effectiveUserPrompt}`;
       throw new Error("image_tool_unavailable: the generated image was not durably bound");
     }
     // 찍어 달라고 한 실행이 이미지 하나 없이 끝나면, 답이 무슨 말을 했든 사실이 아니다.
-    if (screenCaptureRequired && finalWorkImages.length === 0 && !signal?.aborted) {
+    if (screenCaptureRequired && !nativeCaptureBound && finalWorkImages.length === 0 && !signal?.aborted) {
       throw new Error("screen_capture_unavailable: the requested screen capture was never produced");
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;

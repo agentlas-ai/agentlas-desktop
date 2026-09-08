@@ -21,7 +21,7 @@ import { onHostShutdown } from "../host-lifecycle";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
   closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest } from "../work-live-view";
 
-type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background" };
+type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
 type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void };
 type Lease = { id: string; guests: Map<string, Guest>; socket: RelaySocket | null; connecting: boolean; autoAttach: boolean; current: string | null };
 const reservedGuests = new Set<string>();
@@ -252,7 +252,14 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
           && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc } : undefined);
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc
         || guest.wc.getURL() !== url || image.isEmpty()) throw new Error("native-browser-screenshot-stale");
-      return { data: (params.format === "jpeg" ? image.toJPEG(typeof params.quality === "number" ? Math.max(0, Math.min(100, Math.round(params.quality))) : 80) : image.toPNG()).toString("base64") };
+      const png = image.toPNG();
+      await input.onScreenshot?.({ png, isCurrent: () => current() && leases.get(lease.id) === lease
+        && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc
+        && guest.wc.getURL() === url });
+      if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc || guest.wc.getURL() !== url) {
+        throw new Error("native-browser-capture-stale");
+      }
+      return { data: (params.format === "jpeg" ? image.toJPEG(typeof params.quality === "number" ? Math.max(0, Math.min(100, Math.round(params.quality))) : 80) : png).toString("base64") };
     }
     if (method === "Page.navigate" || method === "Page.reload" || method === "Page.navigateToHistoryEntry"
       || method === "Input.insertText" || (method === "Input.dispatchKeyEvent" && params.type !== "keyUp")
