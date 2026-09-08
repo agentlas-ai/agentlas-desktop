@@ -5,6 +5,7 @@ import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
+import { InactiveToolNotice } from "@/components/InactiveToolNotice";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
@@ -6441,55 +6442,20 @@ function ChatPage() {
         </div>
       )}
 
-      {/* Hub-approval cards render above the shell content, outside the .rd theme
-          scope where --rd-* vars and .btn styling live — without this wrapper the
-          켜기/나중에 buttons fall back to unstyled plain text. */}
-      <div className="rd">
       {pendingHubApprovals.filter((row) => !dismissedHubApprovals.has(row.serverId)).map((row) => (
-        <div key={row.serverId} className="hub-approval-card">
-          <div className="hub-approval-card-title">
-            {`"${row.slug}" 도구가 붙어 있지만 아직 켜지지 않았습니다`}
-          </div>
-          <div className="hub-approval-card-body">
-            이 명령이 이 Mac에서 실행됩니다 — 켜면 다음 대화부터 사용됩니다.
-          </div>
-          <code className="hub-approval-card-command">
-            {[row.command, ...row.args].filter(Boolean).join(" ")}
-          </code>
-          {row.envKeys.length > 0 ? (
-            <div className="hub-approval-card-body">
-              {`켠 뒤 키 입력이 필요합니다: ${row.envKeys.join(", ")}`}
-            </div>
-          ) : null}
-          <div className="hub-approval-card-actions">
-            <button
-              type="button"
-              className="btn sm primary"
-              onClick={() => {
-                const approvalApi = ipc();
-                if (!approvalApi) return;
-                void approvalApi.mcpTools
-                  .setEnabled(row.serverId, true)
-                  .then(() => {
-                    setPendingHubApprovals((rows) => rows.filter((r) => r.serverId !== row.serverId));
-                    void approvalApi.mcpTools.listInstalled().then(setInstalledPlugins).catch(() => undefined);
-                  })
-                  .catch(() => undefined);
-              }}
-            >
-              켜기
-            </button>
-            <button
-              type="button"
-              className="btn sm"
-              onClick={() => setDismissedHubApprovals((prev) => new Set(prev).add(row.serverId))}
-            >
-              나중에
-            </button>
-          </div>
-        </div>
+        <InactiveToolNotice key={row.serverId} name={row.slug} locale={locale}
+          command={[row.command, ...row.args].filter(Boolean).join(" ")} envKeys={row.envKeys}
+          onEnable={() => {
+            const approvalApi = ipc();
+            if (!approvalApi) return;
+            void approvalApi.mcpTools.setEnabled(row.serverId, true).then(() => {
+              setPendingHubApprovals((rows) => rows.filter((r) => r.serverId !== row.serverId));
+              void approvalApi.mcpTools.listInstalled().then(setInstalledPlugins).catch(() => undefined);
+            }).catch(() => undefined);
+          }}
+          onDismiss={() => setDismissedHubApprovals((prev) => new Set(prev).add(row.serverId))}
+        />
       ))}
-      </div>
 
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, minWidth: 0, width: "100%", flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <ChatStream
