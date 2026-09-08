@@ -5,6 +5,7 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
 import { app, net } from "electron";
+import { userDataPath } from "../runtime-paths";
 import type {
   ProductExtensionInstallReceipt,
   ProductExtensionStatus,
@@ -580,7 +581,7 @@ function installer(): ProductExtensionInstaller {
   if (cachedInstaller) return cachedInstaller;
   cachedInstaller = new ProductExtensionInstaller({
     rootDir: scienceExtensionRootDir(),
-    dataRootDir: path.join(app.getPath("userData"), "extensions"),
+    dataRootDir: userDataPath("extensions"),
     desktopVersion: app.getVersion(),
     trustedPublicKeys: trustedPublicKeys(),
   });

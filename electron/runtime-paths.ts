@@ -26,6 +26,16 @@ export function setUserDataDir(dir: string): void {
   if (!value) throw new Error("setUserDataDir: an empty path is not a user data directory");
   if (!path.isAbsolute(value)) throw new Error(`setUserDataDir: expected an absolute path, got ${value}`);
   injectedUserDataDir = value;
+  /*
+   * 사이언스는 이제 자기 저장소에 살고 데이터 폴더를 호스트에게 묻는다. 호스트를 통째로
+   * 설치하지 않는 자리(계약 검사기)는 이 함수만 부르므로, 여기서 그쪽에도 알려 준다.
+   * 사이언스가 아직 설치되지 않은 설치본에서는 조용히 넘어간다.
+   */
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    (require("agentlas-science") as { setScienceUserDataDir?: (dir: string) => void })
+      .setScienceUserDataDir?.(value);
+  } catch { /* 사이언스 없음 */ }
 }
 
 /** 주입된 값이 있는가 — 진단·테스트용. 없다고 Electron 이 없다는 뜻은 아니다. */

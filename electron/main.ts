@@ -119,7 +119,7 @@ import {
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
-import { userDataDir } from "./runtime-paths";
+import { userDataDir, userDataPath } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
 import {
   initializeAppRuntimeCoordinator,
@@ -1875,7 +1875,7 @@ app.whenReady().then(async () => {
     const segments = relativeToHome ? relativeToHome.split(path.sep) : [];
     if (segments.some((segment) => segment.startsWith("."))) throw new Error("science-project-folder-hidden-path");
     if (segments[0] === "Library") throw new Error("science-project-folder-reserved-path");
-    if (inside(path.resolve(app.getPath("userData")), resolved)) throw new Error("science-project-folder-reserved-path");
+    if (inside(path.resolve(userDataPath()), resolved)) throw new Error("science-project-folder-reserved-path");
     const existing = fs.existsSync(resolved) ? fs.lstatSync(resolved) : null;
     if (existing && (existing.isSymbolicLink() || !existing.isDirectory())) {
       throw new Error("science-project-folder-not-a-directory");
@@ -2288,7 +2288,7 @@ app.whenReady().then(async () => {
       throw new Error("science-dataset-path-outside-home");
     }
     if (relativeToHome.split(path.sep).some((segment) => segment.startsWith("."))) throw new Error("science-dataset-path-hidden");
-    if (inside(path.resolve(app.getPath("userData")), resolved)) throw new Error("science-dataset-path-reserved");
+    if (inside(path.resolve(userDataPath()), resolved)) throw new Error("science-dataset-path-reserved");
     if (path.extname(resolved).toLowerCase() !== ".csv") throw new Error("science-dataset-path-not-csv");
     let stat: fs.Stats;
     try { stat = fs.lstatSync(resolved); } catch { throw new Error("science-dataset-path-not-found"); }
