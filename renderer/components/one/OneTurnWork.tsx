@@ -501,13 +501,13 @@ export function OneTurnWork({
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const active = busy || preparing;
-  // Keep live work quiet by default on both One renderers. The latest thought
-  // remains visible; detailed rows are an explicit, user-controlled disclosure.
-  const [expanded, setExpanded] = useState(false);
+  // Show actual tool actions during a run on both One and Work. Raw results
+  // stay collapsed inside each row; the user may still fold the process.
+  const [expanded, setExpanded] = useState(active);
   useEffect(() => {
-    // Collapse at each start/settlement boundary, then preserve an explicit
-    // user expansion while new ledger rows continue to arrive.
-    setExpanded(false);
+    // Open at run start, collapse on settlement, and preserve a manual toggle
+    // while that run receives more events.
+    setExpanded(active);
   }, [active]);
   const liveElapsedMs = useElapsed(startedAt, active);
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
@@ -547,7 +547,9 @@ export function OneTurnWork({
     : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell), [presentation.cells, liveHeadlineCell]);
   // Worker details retain every attributed receipt, including the live headline.
   const workerGroups = useMemo(() => groupOneWorkerWork(presentation.cells), [presentation.cells]);
-  const ungroupedCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId), [visibleCells]);
+  // Attribution must not hide real tool actions behind the worker button.
+  // Only the worker lifecycle cell is represented exclusively by that button.
+  const inlineCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId || cell.kind !== "agent"), [visibleCells]);
   const hasRows = visibleCells.length > 0;
 
   if (!active && !hasRows && !presentation.terminalMessage && !interrupted) {
@@ -616,9 +618,9 @@ export function OneTurnWork({
           {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onInspectWorker={onInspectWorker} />)}
         </div>
       )}
-      {expanded && ungroupedCells.length > 0 && (
+      {expanded && inlineCells.length > 0 && (
         <div className={styles.rows}>
-          {ungroupedCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
+          {inlineCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
         </div>
       )}
       {/* ★ 실패 사유는 접힘과 무관하게 보인다 (2026-08-23).
