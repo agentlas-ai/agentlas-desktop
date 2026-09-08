@@ -1549,6 +1549,8 @@ export async function runMcpInvocation(
   onDurableUserMessage?: (messageId: string) => Promise<void | DurableUserMessageHookBlock>,
   /** Main-only display purpose; no renderer request field can set this. */
   hostNoticePurpose?: ChatHostNotice["purpose"],
+  /** Main-owned invocation surface, independent of the coordinator's inventory visibility. */
+  browserPresentation: "foreground" | "background" = "background",
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -3017,7 +3019,7 @@ ${effectiveUserPrompt}`;
       if (req.chatId && !executionContext && !req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
-          presentation: agent.visibility === "background" || agent.visibility === "private" ? "background" : "foreground",
+          presentation: browserPresentation,
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
       }
       const cfg = await buildMcpConfigFile({
@@ -3114,7 +3116,7 @@ ${effectiveUserPrompt}`;
               if (ids.includes("agentlas-browser")) {
                 grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
                   permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
-                  presentation: agent.visibility === "background" || agent.visibility === "private" ? "background" : "foreground" });
+                  presentation: browserPresentation });
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),

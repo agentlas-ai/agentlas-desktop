@@ -2474,6 +2474,10 @@ export class InvocationService {
         }
       },
       hostNoticePurpose,
+      // User-owned One/Work turns (including automatic Goal continuation) are
+      // foreground work even when their system coordinator is inventory-hidden.
+      // Background divisions and external job contexts keep quiet native grants.
+      chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
     )
       .then((result) => {
         // A compromised runtime must not turn the private attachment staging
