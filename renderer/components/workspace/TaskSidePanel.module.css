@@ -1334,14 +1334,19 @@ button.artifactVisual { cursor: pointer; }
 .appPreviewView > section,
 .browserLive { border: 0; border-radius: 0; box-shadow: none; }
 
-.workerPanel { display: flex; flex-direction: column; min-height: 0; width: 100%; }
+/* Long report tables/code scroll inside their block, never widen the grid
+   track and clip every heading and paragraph at the panel boundary. */
+.artifactRail[data-rail-view="worker"] .artifactList {
+  grid-template-columns: minmax(0, 1fr);
+}
+.workerPanel { display: flex; flex-direction: column; min-height: 0; min-width: 0; max-width: 100%; width: 100%; }
 .workerPanelHeader { display: flex; align-items: center; gap: 10px; padding: 15px 18px; border-bottom: 1px solid var(--paper-edge); position: sticky; top: 0; background: var(--paper); z-index: 1; }
 .workerPanelHeader strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .workerPanelHeader button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--ink-soft); padding: 5px; border-radius: 6px; cursor: pointer; }
 .workerPanelHeader button:hover { background: var(--paper-2); }
 .workerPanelFeed { padding: 12px 18px 28px; min-width: 0; }
 .workerFeedItem { margin: 10px 0; min-width: 0; }
-.workerReport { padding: 14px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.workerReport { min-width: 0; max-width: 100%; padding: 14px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .workerReport small, .workerPanelEmpty { color: var(--muted-deep); font-size: 11px; }
 .workerReport > div { margin-top: 7px; }
 .workerOriginal { margin: 4px 0 10px 23px; font-size: 11px; color: var(--muted-deep); }
