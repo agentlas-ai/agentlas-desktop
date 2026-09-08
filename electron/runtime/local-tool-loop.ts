@@ -125,6 +125,7 @@ export async function loadMainToolInventory(
   /** 멀티모달 슬롯이 그림을 그릴 수 있는가 — 없으면 generate_image 는 목록에 안 뜬다. */
   canGenerateImage: boolean,
   signal?: AbortSignal,
+  browserOnly = false,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
@@ -138,7 +139,7 @@ export async function loadMainToolInventory(
 
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
-  if (workspaceRoot) {
+  if (workspaceRoot && !browserOnly) {
     for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage })) {
       tools.push(def);
       byName.set(def.function.name, {
@@ -155,6 +156,9 @@ export async function loadMainToolInventory(
     signal?.throwIfAborted();
     const key = prepared.configKey;
     const server = prepared.server;
+    // The identity comes from the Main-sealed binding, never a model tool name.
+    // Do not connect unrelated MCP servers in an explicit browser-only run.
+    if (browserOnly && server.catalogId !== "agentlas-browser") continue;
     let status;
     try {
       status = await testServerConnection(server, { timeoutMs: 8_000, signal, prepared });
@@ -284,6 +288,7 @@ export async function prepareMainToolLoop(
           req.unattended !== true && req.noSynchronousAsk !== true,
           imageSlotDiagnosis.state === "ready",
           req.signal,
+          req.browserOnly === true,
         );
       })();
   return {
