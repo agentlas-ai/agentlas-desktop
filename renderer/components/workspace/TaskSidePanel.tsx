@@ -52,14 +52,14 @@ import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detai
 import { parseMcpResult } from "@shared/mcp-result-rendering";
 import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
 import { toolFailureCopy } from "@shared/tool-failure";
-import type { OnePermissionMode } from "./OneComposerControls";
-import { OneComputerHistory } from "./OneComputerHistory";
+import type { OnePermissionMode } from "../one/OneComposerControls";
+import { OneComputerHistory } from "../one/OneComputerHistory";
 import { McpResultPreview } from "../McpResultPreview";
 import { ChatFileTabs, nextFileTabSelection } from "../ChatFileExperience";
 import { CHAT_FILE_OPEN_EVENT, chatFilesBridge, formatChatFileSize, isChatFileItem, type ChatFileItem } from "@/lib/chat-files";
-import { OneWorkerPanel } from "./OneWorkerPanel";
+import { OneWorkerPanel } from "../one/OneWorkerPanel";
 import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worker-panel";
-import styles from "./OneActivityTimeline.module.css";
+import styles from "./TaskSidePanel.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
@@ -1425,37 +1425,7 @@ function OutputDisclosure({
   );
 }
 
-export function OneActivityArtifactRail({
-  items,
-  activity,
-  locale,
-  visible = items.length > 0,
-  onAdd,
-  onClose,
-  width,
-  onResize,
-  onRequestReadableWidth,
-  onRestorePreferredWidth,
-  minWidth = 200,
-  maxWidth = 720,
-  defaultWidth = 324,
-  computerHistory,
-  onHistoryConsent,
-  onHistoryClear,
-  onHistoryAsk,
-  onHistoryReviewRecommendation,
-  screenChatId,
-  browserScopeKey,
-  browserHistoryUrl,
-  onBrowserObserved,
-  result,
-  resultKey,
-  resultKind = "standard",
-  appPreview,
-  workerSelection,
-  workerRun,
-  onCloseWorker,
-}: {
+export type TaskSidePanelProps = {
   workerSelection?: OneWorkerPanelSelection | null;
   workerRun?: OneWorkerPanelRun | null;
   onCloseWorker?: () => void;
@@ -1497,7 +1467,44 @@ export function OneActivityArtifactRail({
   resultKind?: OutputPresentationKind;
   /** A generated web app that is already reachable on its verified preview URL. */
   appPreview?: OneLiveAppPreview | null;
-}) {
+};
+
+/** Task-local view state belongs to this exact thread and chat pair. */
+export function TaskSidePanel(props: TaskSidePanelProps) {
+  return <TaskSidePanelContent key={JSON.stringify([props.browserScopeKey ?? null, props.screenChatId])} {...props} />;
+}
+
+function TaskSidePanelContent({
+  items,
+  activity,
+  locale,
+  visible = items.length > 0,
+  onAdd,
+  onClose,
+  width,
+  onResize,
+  onRequestReadableWidth,
+  onRestorePreferredWidth,
+  minWidth = 200,
+  maxWidth = 720,
+  defaultWidth = 324,
+  computerHistory,
+  onHistoryConsent,
+  onHistoryClear,
+  onHistoryAsk,
+  onHistoryReviewRecommendation,
+  screenChatId,
+  browserScopeKey,
+  browserHistoryUrl,
+  onBrowserObserved,
+  result,
+  resultKey,
+  resultKind = "standard",
+  appPreview,
+  workerSelection,
+  workerRun,
+  onCloseWorker,
+}: TaskSidePanelProps) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   /*
    * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
@@ -1752,7 +1759,7 @@ export function OneActivityArtifactRail({
   useEffect(() => {
     const handleOpen = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
-      if (!isOneArtifactOpenRequest(detail)) return;
+      if (!isOneArtifactOpenRequest(detail) || !screenChatId || detail.binding.chatId !== screenChatId) return;
       (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
       setOpenedArtifact(detail);
       setActiveChatFileTabId(null);
@@ -1760,7 +1767,7 @@ export function OneActivityArtifactRail({
     };
     window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
     return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
-  }, [maxWidth, onRequestReadableWidth, onResize]);
+  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize]);
   useEffect(() => {
     setChatFileTabs([]);
     setActiveChatFileTabId(null);
@@ -1769,7 +1776,7 @@ export function OneActivityArtifactRail({
   useEffect(() => {
     const handleChatFile = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
-      if (!isChatFileItem(detail) || (browserScopeKey && detail.chatId !== browserScopeKey)) return;
+      if (!isChatFileItem(detail) || !screenChatId || detail.chatId !== screenChatId) return;
       (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
       setChatFileTabs((current) => current.some((file) => file.tabId === detail.tabId)
         ? current.map((file) => file.tabId === detail.tabId ? detail : file)
@@ -1781,7 +1788,7 @@ export function OneActivityArtifactRail({
     };
     window.addEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
     return () => window.removeEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
-  }, [browserScopeKey, maxWidth, onRequestReadableWidth, onResize]);
+  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize]);
   const selectChatFileTab = useCallback((id: string) => {
     if (!chatFileTabs.some((file) => file.tabId === id)) return;
     (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
@@ -1800,7 +1807,8 @@ export function OneActivityArtifactRail({
     const handleInAppLink = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
       if (!detail || typeof detail !== "object") return;
-      const candidate = detail as { href?: unknown; fileUrl?: unknown };
+      const candidate = detail as { href?: unknown; fileUrl?: unknown; chatId?: unknown };
+      if (!screenChatId || candidate.chatId !== screenChatId) return;
       const url = typeof candidate.href === "string" && /^https?:\/\//iu.test(candidate.href)
         ? candidate.href
         : typeof candidate.fileUrl === "string" && /^https?:\/\//iu.test(candidate.fileUrl)
@@ -1809,11 +1817,12 @@ export function OneActivityArtifactRail({
       if (!url) return;
       const scope = browserScopeKey ?? "unscoped";
       setBrowserUrlsByScope((current) => current[scope] === url ? current : { ...current, [scope]: url });
+      setOpenTabs((tabs) => tabs.includes("browser") ? tabs : [...tabs, "browser"]);
       setRailView("browser");
     };
     window.addEventListener("agentlas:in-app-linked-file", handleInAppLink);
     return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
-  }, [browserScopeKey]);
+  }, [browserScopeKey, screenChatId]);
   useEffect(() => {
     if (result || !latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
@@ -2078,7 +2087,7 @@ export function OneActivityArtifactRail({
             ><IconPlus size={15} /></button>
             {addMenuOpen && (
               <div className={styles.artifactAddMenu} role="menu">
-                {(["activity", "terminal", "browser"] as const).map((view) => (
+                {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
                   <button
                     key={view}
                     type="button"
@@ -2111,7 +2120,7 @@ export function OneActivityArtifactRail({
               : "A tab appears on its own when something is produced. You can also open one now."}
           </p>
           <div className={styles.artifactEmptyList}>
-            {(["activity", "terminal", "browser"] as const).map((view) => (
+            {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
               <button key={view} type="button" onClick={() => openRailTab(view)}>{railTabLabel(view, locale)}</button>
             ))}
           </div>

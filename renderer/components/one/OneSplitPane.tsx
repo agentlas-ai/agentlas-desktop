@@ -6,7 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
-import { OneActivityArtifactRail } from "./OneActivityTimeline";
+import { TaskSidePanel } from "../workspace/TaskSidePanel";
 import styles from "./OneShell.module.css";
 
 /**
@@ -207,7 +207,7 @@ export function OneSplitPane({
           return (
             <article key={message.id} className={styles.message} data-role={message.role}>
               <div className={styles.messageBody}>
-                <Markdown text={text} messageId={message.id} />
+                <Markdown text={text} messageId={message.id} chatId={chatId} />
               </div>
             </article>
           );
@@ -215,12 +215,13 @@ export function OneSplitPane({
       </div>
       {railOpen && (
         <div className={styles.splitPaneRail}>
-          <OneActivityArtifactRail
+          <TaskSidePanel
             items={artifacts}
             locale={locale}
             visible
             onClose={() => setRailOpen(false)}
             screenChatId={chatId}
+            browserScopeKey={chatId}
           />
         </div>
       )}

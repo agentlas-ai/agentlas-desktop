@@ -163,7 +163,7 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
-import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
+import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { llmLogoSrc } from "@/lib/llm-logo";
@@ -3294,6 +3294,7 @@ export function OneShell() {
   }, [activeThreadChatId]);
 
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
+    if (!activeThreadChatId) return;
     requestReadableContextRailWidth();
     const normalized = (file.path || file.paths?.[0] || file.href || file.name).replace(/\\/g, "/").toLowerCase();
     const matched = runtimeArtifacts.find((artifact) => {
@@ -3309,9 +3310,9 @@ export function OneShell() {
     // Keep an unbound link in the renderer. A future owner can adopt it into
     // the same Outputs rail; no OS-level open fallback is permitted.
     if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: file }));
+      window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: { ...file, chatId: activeThreadChatId } }));
     }
-  }, [requestReadableContextRailWidth, runtimeArtifacts]);
+  }, [activeThreadChatId, requestReadableContextRailWidth, runtimeArtifacts]);
   const openOneChatFile = useCallback(async (file: ChatFileItem) => {
     setContextRailOpen(true);
     requestReadableContextRailWidth();
@@ -7905,7 +7906,7 @@ export function OneShell() {
             />
           </aside>
         )}
-        <OneActivityArtifactRail
+        <TaskSidePanel
           items={runtimeArtifacts}
           activity={activity}
           locale={appLocale}

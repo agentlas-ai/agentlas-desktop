@@ -6,7 +6,7 @@ import { buildOneWorkPresentation, groupOneWorkerWork } from "@/lib/one-turn-wor
 import { oneWorkerPanelFeed, ONE_WORKER_FEED_LIMIT, type OneWorkerPanelRun, type OneWorkerPanelSelection } from "@/lib/one-worker-panel";
 import type { OneActivityItem } from "@/lib/one-activity";
 import { OneWorkerWorkDetails } from "./OneTurnWork";
-import styles from "./OneActivityTimeline.module.css";
+import styles from "../workspace/TaskSidePanel.module.css";
 
 function WorkerToolOriginal({ item, locale }: { item: OneActivityItem; locale: "ko" | "en" }) {
   const [open, setOpen] = useState(false);

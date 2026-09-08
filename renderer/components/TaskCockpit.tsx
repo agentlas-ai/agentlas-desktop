@@ -97,10 +97,10 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
-import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "@/components/one/OneActivityTimeline";
+import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "@/components/workspace/TaskSidePanel";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
-import oneActivityStyles from "@/components/one/OneActivityTimeline.module.css";
+import oneActivityStyles from "@/components/workspace/TaskSidePanel.module.css";
 import {
   initialOneActivityState,
   projectOneActivityFromLedger,
@@ -6594,7 +6594,7 @@ function ChatPage() {
         />
       </div>
       </div>
-      <OneActivityArtifactRail
+      <TaskSidePanel
         key={chatId || "new-task"}
         items={workActivity.artifacts}
         activity={workActivity}

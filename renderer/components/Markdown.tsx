@@ -41,6 +41,7 @@ export interface LinkedFileArtifact {
 }
 
 export function Markdown({
+  chatId,
   text,
   messageId,
   onOpenArtifact,
@@ -48,6 +49,8 @@ export function Markdown({
   onOpenLinkedFile,
   mediaBasePaths = [],
 }: {
+  /** Exact chat scope for links without an owning callback. Unbound links cannot select another task panel. */
+  chatId?: string | null;
   text: string;
   /** 안정적 artifact id 생성용 */
   messageId: string;
@@ -61,6 +64,11 @@ export function Markdown({
   mediaBasePaths?: string[];
 }) {
   const { t } = useT();
+  const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
+    if (onOpenLinkedFile) { onOpenLinkedFile(file); return; }
+    if (!chatId || typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: { ...file, chatId } }));
+  }, [chatId, onOpenLinkedFile]);
   const resolvedMediaBasePaths = useMemo(
     () => mediaBasePathsWithTextHints(text, mediaBasePaths),
     [text, mediaBasePaths],
@@ -71,7 +79,7 @@ export function Markdown({
       {...designOutputSurfaceProps("report")}
       style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
     >
-      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, onOpenLinkedFile, resolvedMediaBasePaths))}
+      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
 }
@@ -1064,12 +1072,8 @@ function renderInlineLink(
       onOpenLinkedFile(linkedFileArtifactFromRef(href, label, mediaBasePaths));
       return;
     }
-    // A renderer without an owner callback must still stay in-app. The
-    // mounted One/Work output owner can adopt this event; there is no Finder,
-    // Quick Look, Chrome, or sibling BrowserWindow fallback.
-    window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", {
-      detail: linkedFileArtifactFromRef(href, label, mediaBasePaths),
-    }));
+    // A link without a scoped owner cannot choose an unrelated task panel.
+    // Keep the default navigation prevented; there is no OS-open fallback.
   };
   return (
     <a

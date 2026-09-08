@@ -11,7 +11,7 @@ const orgChartStyles = readFileSync(resolve(root, "renderer/components/one/OneOr
 const oneShell = readFileSync(resolve(root, "renderer/components/one/OneShell.tsx"), "utf8");
 const oneShellStyles = readFileSync(resolve(root, "renderer/components/one/OneShell.module.css"), "utf8");
 const modalStyles = readFileSync(resolve(root, "renderer/components/one/OneBottomSheet.module.css"), "utf8");
-const activity = readFileSync(resolve(root, "renderer/components/one/OneActivityTimeline.tsx"), "utf8");
+const activity = readFileSync(resolve(root, "renderer/components/workspace/TaskSidePanel.tsx"), "utf8");
 const liveOutputViewer = readFileSync(resolve(root, "renderer/components/LiveOutputViewer.tsx"), "utf8");
 const liveView = readFileSync(resolve(root, "electron/browser/live-view.ts"), "utf8");
 const shared = readFileSync(resolve(root, "shared/types.ts"), "utf8");
@@ -271,7 +271,7 @@ assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("app"\) \? ta
   "a live generated app must open its own tab");
 assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("browser"\) \? tabs : \[\.\.\.tabs, "browser"\]\)\)/,
   "observed browser work must open its own tab");
-assert.match(activity, /\(\["activity", "terminal", "browser"\] as const\)/,
+assert.match(activity, /\(\["activity", "terminal", "browser", "screen"\] as const\)/,
   "Activity, Terminal and Browser must stay reachable from the add-view menu");
 for (const view of ["result", "activity", "terminal", "browser", "app"]) {
   assert.match(activity, new RegExp(`railView === "${view}"`),
