@@ -1,6 +1,7 @@
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
+import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
@@ -938,15 +939,59 @@ export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): b
  * - 동시 실행은 exact transport entry만 공유한다. 같은 키에 다른 승인 채널을 요청하면
  *   뒤 실행을 모델 spawn 전에 typed conflict로 끝낸다.
  */
+/** AGY does not expand shell-style aliases in MCP env overrides. Keep vault
+ * values in the child process environment, never in its shared config file. */
+export function inheritAgyMcpSecretAliases(
+  env: Record<string, string> | undefined,
+  runtimeEnv: NodeJS.ProcessEnv,
+): Record<string, string> | undefined {
+  if (!env) return env;
+  const result = { ...env };
+  for (const [key, value] of Object.entries(result)) {
+    if (!/^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key)) continue;
+    if (value !== `\${${key}}` || !runtimeEnv[key] || runtimeEnv[key] === value) {
+      throw new Error("agy_mcp_secret_binding_unavailable");
+    }
+    delete result[key];
+  }
+  if (result.AGENTLAS_MCP_PROXY_TARGET) {
+    const target = JSON.parse(result.AGENTLAS_MCP_PROXY_TARGET);
+    if (!target || typeof target !== "object" || Array.isArray(target)) {
+      throw new Error("agy_mcp_proxy_target_invalid");
+    }
+    result.AGENTLAS_MCP_PROXY_TARGET = JSON.stringify({ ...target,
+      env: inheritAgyMcpSecretAliases(target.env, runtimeEnv) });
+  }
+  return result;
+}
+
 async function reconcileAgyMcpServers(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
+  runtimeEnv: NodeJS.ProcessEnv = {},
 ): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   if (!mcpConfigPath) return noop;
   let requested: { mcpServers?: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
   try {
+    if (runtimeEnv.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
+      const rows = preparedMcpBindings(mcpConfigPath);
+      if (!rows.some((row) => row.configKey === "agentlas-browser" && row.server.catalogId === "agentlas-browser")) {
+        throw new Error("native_browser_mcp_binding_required");
+      }
+      for (const row of rows) preparedMcpTransport(row, row.server);
+    }
     requested = JSON.parse(await fs.readFile(mcpConfigPath, "utf8"));
+    for (const server of Object.values(requested.mcpServers ?? {})) {
+      const aliases = Object.keys(server.env ?? {}).filter((key) => /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key)).sort();
+      server.env = inheritAgyMcpSecretAliases(server.env, runtimeEnv);
+      if (aliases.length) {
+        // Removing overlays must not make different live grants appear equal
+        // to the global-config concurrency guard. Only a digest is persisted.
+        server.env = { ...server.env, AGENTLAS_MCP_RUN_BINDING: createHash("sha256")
+          .update(JSON.stringify(aliases.map((key) => [key, runtimeEnv[key]]))).digest("hex") };
+      }
+    }
   } catch {
     return {
       cleanup: async () => {},
@@ -1373,10 +1418,14 @@ async function runPreparedAntigravity(
    * 호출을 자동 거부하므로, 서버를 붙여 봐야 "가진 척"만 된다(거짓 표시 금지).
    */
   const mcpReconcile = agyToolsAllowed
-    ? await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus)
+    ? await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env)
     : { cleanup: async () => {} };
   if (mcpReconcile.failure) return { text: "", failure: mcpReconcile.failure };
   try {
+    if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
+      if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
+      for (const row of preparedMcpBindings(req.mcpConfigPath)) preparedMcpTransport(row, row.server);
+    }
     return await runAgyProcess();
   } finally {
     await mcpReconcile.cleanup();
