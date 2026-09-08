@@ -213,18 +213,17 @@ export function OneSplitPane({
           );
         })}
       </div>
-      {railOpen && (
-        <div className={styles.splitPaneRail}>
+        <div className={railOpen ? styles.splitPaneRail : undefined}>
           <TaskSidePanel
             items={artifacts}
             locale={locale}
-            visible
+            visible={railOpen}
             onClose={() => setRailOpen(false)}
+            onBrowserObserved={() => setRailOpen(true)}
             screenChatId={chatId}
             browserScopeKey={chatId}
           />
         </div>
-      )}
       </div>
       <form
         className={styles.splitPaneComposer}

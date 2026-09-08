@@ -256,8 +256,11 @@ assert.match(taskBrowser, /mode="browser" bare stableNavigation retainOnUnmount/
 assert.match(taskBrowser, /createPortal\(header, headerHost\)/);
 assert.doesNotMatch(activity, /function OneBrowserLiveView/);
 assert.match(activity, /browserScopeKey[\s\S]*?browserUrlsByScope/);
-// 1.0.31: 자동 열림은 실측된 currentBrowserUrl 이 아니라 스코프가 고른 preferredBrowserUrl 을 알린다.
-assert.match(activity, /setRailView\("browser"\)[\s\S]*?onBrowserObserved\?\.\(preferredBrowserUrl\)/);
+// A live native browser event reveals its own task; restoring a stored URL
+// must not pretend that the agent has just opened a browser.
+assert.match(activity, /status\.taskScopeId !== screenChatId/);
+assert.match(activity, /openRailTab\("browser"\);\s*nativeBrowserObservedRef\.current\?\.\(status\.url\)/);
+assert.doesNotMatch(activity, /onBrowserObserved\?\.\(preferredBrowserUrl\)/);
 assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
 assert.match(taskBrowser, /status\.taskScopeId !== taskScopeId/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);

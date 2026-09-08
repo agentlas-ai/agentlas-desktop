@@ -736,6 +736,7 @@ function runCodexProcess(
         const isError =
           item.error != null ||
           item.status === "failed" ||
+          (item.type === "mcp_tool_call" && codexMcpResultFailed(item.result)) ||
           (typeof item.exit_code === "number" && item.exit_code !== 0);
         // 도구 이벤트 전에 본문을 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
         if (text) {
@@ -909,6 +910,13 @@ export function codexThreadPolicy(
 }
 
 /** 아이템 하나 → 도구 이벤트. 아는 종류만 옮긴다(모르는 것을 도구라고 부르지 않는다). */
+/** MCP transport completion can still carry an explicit tool-level failure. */
+function codexMcpResultFailed(result: unknown): boolean {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+  const value = result as { isError?: unknown; is_error?: unknown };
+  return value.isError === true || value.is_error === true;
+}
+
 export function codexToolEventFromItem(item: any, completed: boolean): {
   name: string;
   args?: string;
@@ -999,7 +1007,7 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
         name: item.server ? `${item.server}.${item.tool}` : String(item.tool ?? "mcp"),
         args: asText(item.arguments),
         result: completed ? (asText(item.error) ?? asText(item.result) ?? String(item.status ?? "completed")) : undefined,
-        isError: completed && (item.status === "failed" || item.error != null),
+        isError: completed && (item.status === "failed" || item.error != null || codexMcpResultFailed(item.result)),
       };
     case "dynamicToolCall":
       {

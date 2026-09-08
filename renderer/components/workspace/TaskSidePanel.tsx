@@ -858,13 +858,15 @@ function TaskSidePanelContent({
   }, [selectRailView]);
   const nativeBrowserObservedRef = useRef(onBrowserObserved);
   nativeBrowserObservedRef.current = onBrowserObserved;
-  const presentedNativeUrl = useRef<string | null>(null);
+  const presentedNativeTarget = useRef<string | null>(null);
   useEffect(() => {
     if (!screenChatId) return;
     return ipc()?.workLiveView?.onStatus((status) => {
       if (status.taskScopeId !== screenChatId || !status.url || status.url === "about:blank"
-        || (status.state !== "loading" && status.state !== "ready") || presentedNativeUrl.current === status.url) return;
-      presentedNativeUrl.current = status.url;
+        || (status.state !== "loading" && status.state !== "ready")) return;
+      const target = JSON.stringify([status.viewId, status.url]);
+      if (presentedNativeTarget.current === target) return;
+      presentedNativeTarget.current = target;
       openRailTab("browser");
       nativeBrowserObservedRef.current?.(status.url);
     });
@@ -1119,8 +1121,9 @@ function TaskSidePanelContent({
     // 브라우저 작업 자체가 결과다 — 탭이 없으면 이때 하나 생긴다.
     setOpenTabs((tabs) => (tabs.includes("browser") ? tabs : [...tabs, "browser"]));
     setRailView((current) => (current === "app" || current === "worker") ? current : "browser");
-    onBrowserObserved?.(preferredBrowserUrl);
-  }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
+    // Stored URLs restore tabs, but only the scoped live native event above
+    // reveals the panel. Reopening an old conversation is not a new action.
+  }, [browserScopeKey, preferredBrowserUrl]);
   useEffect(() => {
     if (!appPreview?.url) {
       presentedAppTargetRef.current = null;
