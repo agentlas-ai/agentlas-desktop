@@ -197,13 +197,20 @@ function mcpProxySpec(
   if (mcpProxyApprovalPort() <= 0) return null;
   const childPath = path.join(__dirname, "proxy-child.cjs");
   if (!fs.existsSync(childPath)) return null;
+  // The proxy inherits resolved aliases from its own environment. Repeating
+  // ${ALIAS} inside this serialized JSON lets provider string interpolation
+  // corrupt the JSON when a vault value contains quotes or backslashes.
+  // Keep only exact self-references out of the nested overlay; the outer env
+  // and the wrapper's validated target-key mapping retain the same binding.
+  const targetEnv = Object.fromEntries(Object.entries(actual.env).filter(([key, value]) =>
+    !(/^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key) && value === envReference(key))));
   return {
     command: process.execPath,
     args: [childPath],
     env: {
       ELECTRON_RUN_AS_NODE: "1",
       [MCP_PROXY_CONTROL_FILE_ENV]: mcpProxyControlInfoPath(),
-      [MCP_PROXY_TARGET_ENV]: JSON.stringify(actual),
+      [MCP_PROXY_TARGET_ENV]: JSON.stringify({ ...actual, env: targetEnv }),
       [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
       [MCP_PROXY_SESSION_ENV]: JSON.stringify({ ...gate, catalogId }),
       ...(gate.planPath ? { [MCP_PROXY_PLAN_ENV]: gate.planPath } : {}),
