@@ -959,11 +959,13 @@ const api: AgentlasIpc = {
   workLiveView: {
     open: (input) => ipcRenderer.invoke("workLiveView:open", input),
     setBounds: (input) => ipcRenderer.invoke("workLiveView:setBounds", input),
-    reload: (viewId) => ipcRenderer.invoke("workLiveView:reload", viewId),
+    reload: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:reload", viewId, taskScopeId),
     navigate: (input) => ipcRenderer.invoke("workLiveView:navigate", input),
-    goBack: (viewId) => ipcRenderer.invoke("workLiveView:goBack", viewId),
-    goForward: (viewId) => ipcRenderer.invoke("workLiveView:goForward", viewId),
-    close: (viewId) => ipcRenderer.invoke("workLiveView:close", viewId),
+    goBack: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:goBack", viewId, taskScopeId),
+    goForward: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:goForward", viewId, taskScopeId),
+    close: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:close", viewId, taskScopeId),
+    capture: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:capture", viewId, taskScopeId),
+    dispatchInput: (input) => ipcRenderer.invoke("workLiveView:dispatchInput", input),
     onStatus: (handler) => {
       const wrapped = (_event: Electron.IpcRendererEvent, status: Parameters<typeof handler>[0]) => handler(status);
       ipcRenderer.on("workLiveView:status", wrapped);

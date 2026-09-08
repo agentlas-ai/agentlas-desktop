@@ -2,9 +2,11 @@
 //
 // WebContentsView is used instead of iframe so real apps that set
 // frame-ancestors/X-Frame-Options still run in-app. The loaded page receives no
-// Agentlas preload, no Node integration, no Desktop IPC, and no shared cookies.
+// Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
+// the persistent Agentlas native-browser session; app previews remain isolated.
 import { BrowserWindow, WebContentsView } from "electron";
-import type { WorkLiveViewBounds, WorkLiveViewStatus } from "../shared/types";
+import type { WebContents } from "electron";
+import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput } from "../shared/types";
 
 type ActiveWorkView = {
   ownerId: number;
@@ -16,9 +18,37 @@ type ActiveWorkView = {
   send: (status: WorkLiveViewStatus) => void;
   visible: boolean;
   mode: "app" | "browser";
+  taskScopeId?: string;
+  state: WorkLiveViewStatus["state"];
+  navigationEpoch: number;
+  pendingUrl: string;
+  error?: string;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
+export const NATIVE_BROWSER_PARTITION = "persist:agentlas-browser-default";
+export const MAX_NATIVE_BROWSER_TABS_PER_OWNER = 8;
+
+function isCurrent(active: ActiveWorkView): boolean {
+  return activeViews.get(key(active.ownerId, active.viewId)) === active
+    && !active.window.isDestroyed() && !active.view.webContents.isDestroyed();
+}
+
+/** Exact registered guest only. Main's renderer and unrelated CDP targets never qualify. */
+function registeredGuest(ownerId: number, viewId: unknown, taskScopeId?: string): ActiveWorkView | null {
+  const id = sanitizeViewId(viewId);
+  const active = id ? activeViews.get(key(ownerId, id)) : undefined;
+  return active && isCurrent(active) && (active.mode !== "browser" || active.taskScopeId === taskScopeId) ? active : null;
+}
+
+function showOnly(active: ActiveWorkView): void {
+  for (const other of activeViews.values()) {
+    if (other.ownerId !== active.ownerId || other === active) continue;
+    other.visible = false;
+    try { other.view.setVisible(false); } catch {}
+  }
+}
+
 
 function key(ownerId: number, viewId: string): string {
   return `${ownerId}:${viewId}`;
@@ -87,7 +117,16 @@ function sanitizeBounds(bounds: WorkLiveViewBounds, window: BrowserWindow): Work
 }
 
 function emit(active: ActiveWorkView, status: Omit<WorkLiveViewStatus, "viewId">): void {
-  try { active.send({ viewId: active.viewId, ...status }); } catch {}
+  if (status.state !== "closed" && !isCurrent(active)) return;
+  active.state = status.state;
+  if (status.state === "error") active.error = status.error;
+  else if (status.state === "loading" || status.state === "ready") active.error = undefined;
+  try {
+    const history = status.state !== "closed" ? active.view.webContents.navigationHistory : null;
+    active.send({ viewId: active.viewId, taskScopeId: active.taskScopeId,
+      canGoBack: history?.canGoBack() ?? false,
+      canGoForward: history?.canGoForward() ?? false, ...status });
+  } catch {}
 }
 
 function closeActive(active: ActiveWorkView, notify = true): void {
@@ -99,8 +138,9 @@ function closeActive(active: ActiveWorkView, notify = true): void {
   if (notify) emit(active, { state: "closed" });
 }
 
-export function closeWorkLiveView(ownerId: number, viewId: string): { ok: true } {
-  const active = activeViews.get(key(ownerId, viewId));
+export function closeWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active && activeViews.has(key(ownerId, viewId))) return { ok: false };
   if (active) closeActive(active);
   return { ok: true };
 }
@@ -113,15 +153,16 @@ export function closeWorkLiveViewsForOwner(ownerId: number): void {
 
 export function setWorkLiveViewBounds(
   ownerId: number,
-  input: { viewId: string; bounds: WorkLiveViewBounds; visible?: boolean },
+  input: { viewId: string; bounds: WorkLiveViewBounds; visible?: boolean; taskScopeId?: string },
 ): { ok: boolean } {
   const viewId = sanitizeViewId(input?.viewId);
   if (!viewId) return { ok: false };
-  const active = activeViews.get(key(ownerId, viewId));
+  const active = registeredGuest(ownerId, viewId, input.taskScopeId);
   if (!active || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
   try {
     active.visible = input.visible !== false;
-    active.view.setVisible(active.visible);
+    if (active.visible) showOnly(active);
+    active.view.setVisible(active.visible && active.state !== "error");
     active.view.setBounds(sanitizeBounds(input.bounds, active.window));
     return { ok: true };
   } catch {
@@ -129,13 +170,15 @@ export function setWorkLiveViewBounds(
   }
 }
 
-export function reloadWorkLiveView(ownerId: number, viewId: string): { ok: boolean } {
-  const active = activeViews.get(key(ownerId, viewId));
+export function reloadWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.view.webContents.isDestroyed()) return { ok: false };
   try {
-    active.visible = true;
+    active.navigationEpoch += 1;
+    active.pendingUrl = active.view.webContents.getURL();
+    if (active.visible) showOnly(active);
     active.view.setVisible(active.visible);
-    emit(active, { state: "loading", url: active.view.webContents.getURL() });
+    emit(active, { state: "loading", url: active.pendingUrl });
     active.view.webContents.reloadIgnoringCache();
     return { ok: true };
   } catch {
@@ -145,30 +188,33 @@ export function reloadWorkLiveView(ownerId: number, viewId: string): { ok: boole
 
 export async function navigateWorkLiveView(
   ownerId: number,
-  input: { viewId: string; url: string },
+  input: { viewId: string; url: string; taskScopeId?: string },
 ): Promise<{ ok: boolean; url?: string; reason?: string }> {
-  const active = activeViews.get(key(ownerId, input?.viewId));
+  const active = registeredGuest(ownerId, input?.viewId, input?.taskScopeId);
   const target = sanitizeWorkLiveUrl(input?.url);
   if (!active || active.view.webContents.isDestroyed()) return { ok: false, reason: "view-unavailable" };
   if (!target || !permittedNavigation(active, target.toString())) return { ok: false, reason: "navigation-not-allowed" };
   try {
+    const epoch = ++active.navigationEpoch;
+    active.pendingUrl = target.toString();
     emit(active, { state: "loading", url: target.toString() });
     await active.view.webContents.loadURL(target.toString());
-    return { ok: true, url: target.toString() };
+    if (!isCurrent(active) || active.navigationEpoch !== epoch) return { ok: false, reason: "navigation-superseded" };
+    return { ok: active.state !== "error", url: active.view.webContents.getURL() };
   } catch (error) {
     return { ok: false, url: target.toString(), reason: error instanceof Error ? error.message : String(error) };
   }
 }
 
-export function goBackWorkLiveView(ownerId: number, viewId: string): { ok: boolean } {
-  const active = activeViews.get(key(ownerId, viewId));
+export function goBackWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.view.webContents.isDestroyed() || !active.view.webContents.navigationHistory.canGoBack()) return { ok: false };
   active.view.webContents.navigationHistory.goBack();
   return { ok: true };
 }
 
-export function goForwardWorkLiveView(ownerId: number, viewId: string): { ok: boolean } {
-  const active = activeViews.get(key(ownerId, viewId));
+export function goForwardWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.view.webContents.isDestroyed() || !active.view.webContents.navigationHistory.canGoForward()) return { ok: false };
   active.view.webContents.navigationHistory.goForward();
   return { ok: true };
@@ -182,6 +228,7 @@ export async function openWorkLiveView(input: {
   bounds: WorkLiveViewBounds;
   visible?: boolean;
   mode?: "app" | "browser";
+  taskScopeId?: string;
   send: (status: WorkLiveViewStatus) => void;
 }): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }> {
   const viewId = sanitizeViewId(input?.viewId);
@@ -190,11 +237,28 @@ export async function openWorkLiveView(input: {
   if (!url) return { ok: false, viewId, reason: "Only HTTPS or loopback HTTP live apps are allowed." };
   if (input.window.isDestroyed()) return { ok: false, viewId, reason: "window-closed" };
 
-  // A Work panel owns one native surface. Closing the previous one before
-  // opening the next prevents an invisible surface from capturing input.
-  closeWorkLiveViewsForOwner(input.ownerId);
-
-  const partition = `agentlas-work-live-${input.ownerId}-${viewId}`;
+  const mode = input.mode === "browser" ? "browser" : "app";
+  if (mode === "browser" && (typeof input.taskScopeId !== "string" || !/^[A-Za-z0-9_:.-]{8,200}$/.test(input.taskScopeId))) {
+    return { ok: false, viewId, reason: "task-scope-required" };
+  }
+  const existing = registeredGuest(input.ownerId, viewId, input.taskScopeId);
+  if (!existing && activeViews.has(key(input.ownerId, viewId))) return { ok: false, viewId, reason: "task-scope-mismatch" };
+  if (existing) {
+    if (existing.mode !== mode) return { ok: false, viewId, reason: "view-mode-mismatch" };
+    // Remounting the same tab preserves its document, history and storage.
+    existing.send = input.send;
+    setWorkLiveViewBounds(input.ownerId, input);
+    emit(existing, { state: existing.state, url: existing.view.webContents.getURL(),
+      title: existing.view.webContents.getTitle(), error: existing.error });
+    return { ok: true, viewId, url: existing.view.webContents.getURL() };
+  }
+  const owned = [...activeViews.values()].filter((active) => active.ownerId === input.ownerId);
+  if (mode === "browser" && owned.filter((active) => active.mode === "browser").length >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
+    return { ok: false, viewId, reason: "browser-tab-limit" };
+  }
+  // App previews retain their single-view contract; browser tabs survive preview switches.
+  if (mode === "app") for (const active of owned) if (active.mode === "app") closeActive(active);
+  const partition = mode === "browser" ? NATIVE_BROWSER_PARTITION : `agentlas-work-live-${input.ownerId}-${viewId}`;
   const view = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
@@ -216,43 +280,60 @@ export async function openWorkLiveView(input: {
     loopbackPort: loopbackHost(url.hostname) ? url.port || (url.protocol === "https:" ? "443" : "80") : null,
     send: input.send,
     visible: input.visible !== false,
-    mode: input.mode === "browser" ? "browser" : "app",
+    mode,
+    taskScopeId: mode === "browser" ? input.taskScopeId : undefined,
+    state: "opening",
+    navigationEpoch: 0,
+    pendingUrl: url.toString(),
   };
   activeViews.set(key(input.ownerId, viewId), active);
 
   view.setBackgroundColor(active.mode === "browser" ? "#ffffff" : "#111111");
   view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   view.webContents.session.setPermissionCheckHandler(() => false);
-  view.webContents.on("did-start-loading", () => {
-    emit(active, { state: "loading", url: view.webContents.getURL() || url.toString() });
+  view.webContents.on("did-start-navigation", (_event, target, isInPlace, isMainFrame) => {
+    if (!isCurrent(active) || !isMainFrame || isInPlace) return;
+    // Programmatic navigation increments before dispatch. Page-originated navigation
+    // increments here; redirects update the same pending document below.
+    if (active.state !== "loading" || active.pendingUrl !== target) active.navigationEpoch += 1;
+    active.pendingUrl = target;
+    emit(active, { state: "loading", url: target });
+  });
+  view.webContents.on("did-redirect-navigation", (_event, target, _inPlace, isMainFrame) => {
+    if (isCurrent(active) && isMainFrame) active.pendingUrl = target;
   });
   view.webContents.on("did-finish-load", () => {
+    // Electron can still report isLoadingMainFrame() inside did-finish-load.
+    // The completion event is the document receipt; querying that flag here
+    // can strand a successful redirect at loading forever.
+    if (!isCurrent(active) || active.state === "error") return;
     view.setVisible(active.visible);
-    emit(active, {
-      state: "ready",
-      url: view.webContents.getURL(),
-      title: view.webContents.getTitle(),
-    });
+    emit(active, { state: "ready", url: view.webContents.getURL(), title: view.webContents.getTitle() });
+  });
+  view.webContents.on("did-navigate-in-page", (_event, target, isMainFrame) => {
+    if (isCurrent(active) && isMainFrame && active.state === "ready") {
+      emit(active, { state: "ready", url: target, title: view.webContents.getTitle() });
+    }
   });
   view.webContents.on("page-title-updated", (_event, title) => {
-    emit(active, { state: "ready", url: view.webContents.getURL(), title });
+    if (active.state === "ready") emit(active, { state: "ready", url: view.webContents.getURL(), title });
   });
   view.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) return; // ERR_ABORTED from a newer navigation is not a failure.
-    active.visible = false;
+    if (!isCurrent(active) || !isMainFrame || errorCode === -3) return;
+    // A failed older URL must not replace a newer navigation's status.
+    if (validatedURL && active.pendingUrl && validatedURL !== active.pendingUrl) return;
     view.setVisible(false);
-    emit(active, {
-      state: "error",
-      url: validatedURL || url.toString(),
-      error: errorDescription || `Navigation failed (${errorCode}).`,
-    });
+    emit(active, { state: "error", url: validatedURL || active.pendingUrl,
+      error: errorDescription || `Navigation failed (${errorCode}).` });
   });
   view.webContents.on("render-process-gone", (_event, details) => {
-    active.visible = false;
-    try { view.setVisible(false); } catch {}
+    if (!isCurrent(active)) return;
+    view.setVisible(false);
     emit(active, { state: "error", url: view.webContents.getURL(), error: `Web runtime stopped: ${details.reason}` });
   });
   view.webContents.on("unresponsive", () => {
+    if (!isCurrent(active)) return;
+    view.setVisible(false);
     emit(active, { state: "error", url: view.webContents.getURL(), error: "The live app is not responding." });
   });
   view.webContents.on("will-navigate", (event, target) => {
@@ -267,19 +348,26 @@ export async function openWorkLiveView(input: {
   });
 
   input.window.contentView.addChildView(view);
+  if (active.visible) showOnly(active);
   view.setBounds(sanitizeBounds(input.bounds, input.window));
   view.setVisible(active.visible);
   emit(active, { state: "opening", url: url.toString() });
-  input.window.once("closed", () => {
+  const onWindowClosed = () => {
     if (activeViews.get(key(input.ownerId, viewId)) === active) closeActive(active, false);
+  };
+  input.window.once("closed", onWindowClosed);
+  view.webContents.once("destroyed", () => {
+    input.window.removeListener("closed", onWindowClosed);
+    if (activeViews.get(key(input.ownerId, viewId)) === active) closeActive(active);
   });
-
+  const epoch = ++active.navigationEpoch;
+  emit(active, { state: "loading", url: url.toString() });
   try {
     await view.webContents.loadURL(url.toString());
-    return { ok: true, viewId, url: url.toString() };
+    if (!isCurrent(active) || active.navigationEpoch !== epoch) return { ok: false, viewId, reason: "navigation-superseded" };
+    return { ok: active.state !== "error", viewId, url: view.webContents.getURL() };
   } catch (error) {
-    if (activeViews.get(key(input.ownerId, viewId)) === active) {
-      active.visible = false;
+    if (isCurrent(active) && active.navigationEpoch === epoch) {
       try { view.setVisible(false); } catch {}
       emit(active, {
         state: "error",
@@ -294,4 +382,59 @@ export async function openWorkLiveView(input: {
       reason: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+
+/** Public guest input is narrow; no arbitrary JavaScript or CDP method is accepted. */
+export async function dispatchWorkLiveViewInput(ownerId: number, value: { viewId: string; input: WorkLiveViewInput; taskScopeId?: string }): Promise<{ ok: boolean; reason?: string }> {
+  const active = registeredGuest(ownerId, value?.viewId, value?.taskScopeId);
+  if (!active || active.mode !== "browser" || !active.visible || active.state !== "ready") return { ok: false, reason: "guest-unavailable" };
+  const input = value?.input;
+  const wc = active.view.webContents;
+  try {
+    if (input?.kind === "text" && typeof input.text === "string" && input.text.length <= 4096) {
+      await wc.insertText(input.text);
+    } else if (input?.kind === "pointer" && ["move", "down", "up"].includes(input.phase)
+      && Number.isFinite(input.x) && Number.isFinite(input.y)
+      && (input.button === undefined || ["left", "middle", "right"].includes(input.button))) {
+      const bounds = active.view.getBounds();
+      if (input.x < 0 || input.y < 0 || input.x >= bounds.width || input.y >= bounds.height) return { ok: false, reason: "input-outside-guest" };
+      wc.sendInputEvent({ type: input.phase === "move" ? "mouseMove" : input.phase === "down" ? "mouseDown" : "mouseUp",
+        x: Math.round(input.x), y: Math.round(input.y), button: input.button ?? "left", clickCount: 1 });
+    } else if (input?.kind === "key" && ["down", "up"].includes(input.phase)
+      && typeof input.key === "string" && input.key.length > 0 && input.key.length <= 64) {
+      wc.sendInputEvent({ type: input.phase === "down" ? "keyDown" : "keyUp", keyCode: input.key });
+    } else return { ok: false, reason: "invalid-input" };
+    return isCurrent(active) ? { ok: true } : { ok: false, reason: "guest-closed" };
+  } catch { return { ok: false, reason: "input-failed" }; }
+}
+
+export async function captureWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): Promise<{ ok: boolean; dataUrl?: string; reason?: string }> {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || active.state !== "ready") return { ok: false, reason: "guest-unavailable" };
+  const epoch = active.navigationEpoch;
+  try {
+    const image = await active.view.webContents.capturePage();
+    if (!isCurrent(active) || active.navigationEpoch !== epoch || active.state !== "ready") return { ok: false, reason: "guest-changed" };
+    if (image.isEmpty()) return { ok: false, reason: "empty-capture" };
+    return { ok: true, dataUrl: image.toDataURL() };
+  } catch { return { ok: false, reason: "capture-failed" }; }
+}
+
+/** Main-only observation adapter for the next tool layer. No renderer raw-CDP IPC. */
+export async function observeWorkLiveViewGuest(ownerId: number, viewId: string,
+  method: "DOM.getDocument" | "Accessibility.getFullAXTree" | "Page.getLayoutMetrics",
+  taskScopeId?: string,
+): Promise<{ ok: boolean; result?: unknown; reason?: string }> {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || active.state !== "ready") return { ok: false, reason: "guest-unavailable" };
+  if (!["DOM.getDocument", "Accessibility.getFullAXTree", "Page.getLayoutMetrics"].includes(method)) return { ok: false, reason: "command-not-allowed" };
+  const epoch = active.navigationEpoch;
+  const guest: WebContents = active.view.webContents;
+  try {
+    if (!guest.debugger.isAttached()) guest.debugger.attach("1.3");
+    const result: unknown = await guest.debugger.sendCommand(method);
+    return isCurrent(active) && active.navigationEpoch === epoch && active.state === "ready"
+      ? { ok: true, result } : { ok: false, reason: "guest-changed" };
+  } catch { return { ok: false, reason: "observation-failed" }; }
 }

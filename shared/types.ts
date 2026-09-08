@@ -3777,9 +3777,17 @@ export interface WorkLiveViewBounds {
 
 export type WorkLiveViewState = "opening" | "loading" | "ready" | "error" | "closed";
 
+export type WorkLiveViewInput =
+  | { kind: "pointer"; phase: "move" | "down" | "up"; x: number; y: number; button?: "left" | "middle" | "right" }
+  | { kind: "key"; phase: "down" | "up"; key: string }
+  | { kind: "text"; text: string };
+
 export interface WorkLiveViewStatus {
   viewId: string;
+  taskScopeId?: string;
   state: WorkLiveViewState;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   url?: string;
   title?: string;
   error?: string;
@@ -7951,6 +7959,7 @@ export interface AgentlasIpc {
   workLiveView: {
     open: (input: {
       viewId: string;
+      taskScopeId?: string;
       url: string;
       bounds: WorkLiveViewBounds;
       visible?: boolean;
@@ -7958,14 +7967,17 @@ export interface AgentlasIpc {
     }) => Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }>;
     setBounds: (input: {
       viewId: string;
+      taskScopeId?: string;
       bounds: WorkLiveViewBounds;
       visible?: boolean;
     }) => Promise<{ ok: boolean }>;
-    reload: (viewId: string) => Promise<{ ok: boolean }>;
-    navigate: (input: { viewId: string; url: string }) => Promise<{ ok: boolean; url?: string; reason?: string }>;
-    goBack: (viewId: string) => Promise<{ ok: boolean }>;
-    goForward: (viewId: string) => Promise<{ ok: boolean }>;
-    close: (viewId: string) => Promise<{ ok: true }>;
+    reload: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
+    navigate: (input: { viewId: string; url: string; taskScopeId?: string }) => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    goBack: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
+    goForward: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
+    close: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
+    capture: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean; dataUrl?: string; reason?: string }>;
+    dispatchInput: (input: { viewId: string; input: WorkLiveViewInput; taskScopeId?: string }) => Promise<{ ok: boolean; reason?: string }>;
     onStatus: (handler: (status: WorkLiveViewStatus) => void) => () => void;
   };
   /** Local meta-agent factory that materializes domain teams for Agentlas OS. */

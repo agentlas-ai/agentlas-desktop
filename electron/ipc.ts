@@ -702,6 +702,8 @@ import {
   stopAppFactoryLivePreview,
 } from "./app-factory/live-preview";
 import {
+  captureWorkLiveView,
+  dispatchWorkLiveViewInput,
   closeWorkLiveView,
   closeWorkLiveViewsForOwner,
   goBackWorkLiveView,
@@ -6058,6 +6060,7 @@ export function registerIpcHandlers(): void {
   // a different window cannot resize, reload, or close its surface by guessing an id.
   ipcMain.handle("workLiveView:open", async (event, input: {
     viewId: string;
+    taskScopeId?: string;
     url: string;
     bounds: import("../shared/types").WorkLiveViewBounds;
     visible?: boolean;
@@ -6073,9 +6076,10 @@ export function registerIpcHandlers(): void {
       });
     }
     return openWorkLiveView({
+      viewId: input?.viewId, url: input?.url, bounds: input?.bounds,
+      visible: input?.visible, mode: input?.mode, taskScopeId: input?.taskScopeId,
       ownerId,
       window: win,
-      ...input,
       send: (status) => {
         if (!event.sender.isDestroyed()) event.sender.send("workLiveView:status", status);
       },
@@ -6083,31 +6087,40 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("workLiveView:setBounds", (event, input: {
     viewId: string;
+    taskScopeId?: string;
     bounds: import("../shared/types").WorkLiveViewBounds;
     visible?: boolean;
   }) => {
     assertTrustedSitePublishIpcSender(event);
     return setWorkLiveViewBounds(event.sender.id, input);
   });
-  ipcMain.handle("workLiveView:reload", (event, viewId: string) => {
+  ipcMain.handle("workLiveView:reload", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);
-    return reloadWorkLiveView(event.sender.id, viewId);
+    return reloadWorkLiveView(event.sender.id, viewId, taskScopeId);
   });
-  ipcMain.handle("workLiveView:navigate", (event, input: { viewId: string; url: string }) => {
+  ipcMain.handle("workLiveView:navigate", (event, input: { viewId: string; url: string; taskScopeId?: string }) => {
     assertTrustedSitePublishIpcSender(event);
     return navigateWorkLiveView(event.sender.id, input);
   });
-  ipcMain.handle("workLiveView:goBack", (event, viewId: string) => {
+  ipcMain.handle("workLiveView:goBack", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);
-    return goBackWorkLiveView(event.sender.id, viewId);
+    return goBackWorkLiveView(event.sender.id, viewId, taskScopeId);
   });
-  ipcMain.handle("workLiveView:goForward", (event, viewId: string) => {
+  ipcMain.handle("workLiveView:goForward", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);
-    return goForwardWorkLiveView(event.sender.id, viewId);
+    return goForwardWorkLiveView(event.sender.id, viewId, taskScopeId);
   });
-  ipcMain.handle("workLiveView:close", (event, viewId: string) => {
+  ipcMain.handle("workLiveView:close", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);
-    return closeWorkLiveView(event.sender.id, viewId);
+    return closeWorkLiveView(event.sender.id, viewId, taskScopeId);
+  });
+  ipcMain.handle("workLiveView:capture", (event, viewId: string, taskScopeId?: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return captureWorkLiveView(event.sender.id, viewId, taskScopeId);
+  });
+  ipcMain.handle("workLiveView:dispatchInput", (event, input: { viewId: string; input: import("../shared/types").WorkLiveViewInput; taskScopeId?: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return dispatchWorkLiveViewInput(event.sender.id, input);
   });
   ipcMain.handle("appFactory:openLaunchTarget", async (_e, input: AppFactoryRootRequest) => {
     const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
