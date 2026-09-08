@@ -1,15 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
-import { resolveHephaestusSyncLaunch } from "../hephaestus/engine";
+import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 import { hephaestusContextRoot } from "../hephaestus/root";
 
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
 const SLICE_TIMEOUT_MS = 4_000;
-// The slice runs through spawnSync on the main process, so every millisecond
-// here is a frozen UI. Core's passive freshness check walks the whole
+// Core's passive freshness check walks the whole
 // repository — measured on the pilot: 11.0s, i.e. the call could never finish
 // inside SLICE_TIMEOUT_MS and Desktop silently produced no slice at all. Core
 // now accepts a freshness budget and serves the last complete map labelled
@@ -30,6 +30,25 @@ const NON_GIT_IGNORED_DIRS = new Set([
 // avoid a full Core scan on every turn while reopening the refresh gate as soon
 // as tracked or untracked source changes are observed.
 const refreshTriggered = new Map<string, string>();
+const sourceSignatureJobs = new Map<string, SharedJob<string>>();
+const refreshJobs = new Map<string, SharedJob<boolean>>();
+
+type SharedJob<T> = {
+  controller: AbortController;
+  promise: Promise<T>;
+  settled: boolean;
+  waiters: number;
+};
+
+type ProcessResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  aborted: boolean;
+  timedOut: boolean;
+  overflowed: boolean;
+  errorMessage?: string;
+};
 
 type ContextSliceResult = {
   schemaVersion?: string;
@@ -50,16 +69,207 @@ type CodeMapResult = {
   };
 };
 
-function nonGitProjectSourceSignature(projectPath: string): string {
+function abortedProcessResult(): ProcessResult {
+  return {
+    status: null,
+    stdout: "",
+    stderr: "",
+    aborted: true,
+    timedOut: false,
+    overflowed: false,
+  };
+}
+
+function runBoundedProcess(
+  command: string,
+  args: string[],
+  options: {
+    timeoutMs: number;
+    maxBuffer: number;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+    signal?: AbortSignal;
+  },
+): Promise<ProcessResult> {
+  if (options.signal?.aborted) return Promise.resolve(abortedProcessResult());
+  return new Promise((resolve) => {
+    let settled = false;
+    let aborted = false;
+    let timedOut = false;
+    let overflowed = false;
+    let errorMessage: string | undefined;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const child = spawn(command, args, {
+      windowsHide: true,
+      env: options.env,
+      detached: process.platform !== "win32",
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    });
+
+    let hardKillTimer: NodeJS.Timeout | null = null;
+    let forcedSettleTimer: NodeJS.Timeout | null = null;
+    let timeout: NodeJS.Timeout;
+    const onAbort = (): void => {
+      aborted = true;
+      terminate(false);
+    };
+    const finish = (status: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
+      if (forcedSettleTimer) clearTimeout(forcedSettleTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve({
+        status,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        aborted,
+        timedOut,
+        overflowed,
+        ...(errorMessage ? { errorMessage } : {}),
+      });
+    };
+    const terminate = (force: boolean): void => {
+      const leaderRunning = child.exitCode === null && child.signalCode === null;
+      if (process.platform === "win32") {
+        if (force && child.pid) {
+          try {
+            const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+              stdio: "ignore",
+              windowsHide: true,
+            });
+            killer.once("error", () => { /* child.kill fallback below */ });
+            killer.unref();
+          } catch {
+            /* child.kill fallback below */
+          }
+        }
+        if (leaderRunning) {
+          try { child.kill(force ? "SIGKILL" : undefined); } catch { /* best effort */ }
+        }
+      } else if (child.pid) {
+        // The leader may have exited while one of its descendants still owns
+        // our stdout/stderr pipes. The detached process-group id remains the
+        // launch pid, so signal the group even when ChildProcess.exitCode is set.
+        try { process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM"); }
+        catch {
+          if (leaderRunning) {
+            try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch { /* best effort */ }
+          }
+        }
+      }
+      if (!force) {
+        hardKillTimer ??= setTimeout(() => terminate(true), 250);
+        hardKillTimer.unref?.();
+      }
+      forcedSettleTimer ??= setTimeout(() => {
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+        finish(null);
+      }, 1_000);
+      forcedSettleTimer.unref?.();
+    };
+    timeout = setTimeout(() => {
+      timedOut = true;
+      terminate(false);
+    }, options.timeoutMs);
+    timeout.unref?.();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+
+    const collect = (parts: Buffer[], chunk: Buffer | string, currentBytes: number): number => {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = Math.max(0, options.maxBuffer - currentBytes);
+      if (value.length > remaining) {
+        if (remaining > 0) parts.push(value.subarray(0, remaining));
+        overflowed = true;
+        terminate(false);
+        return options.maxBuffer;
+      }
+      parts.push(value);
+      return currentBytes + value.length;
+    };
+    child.stdout?.on("data", (chunk) => { stdoutBytes = collect(stdout, chunk, stdoutBytes); });
+    child.stderr?.on("data", (chunk) => { stderrBytes = collect(stderr, chunk, stderrBytes); });
+    child.once("error", (error) => { errorMessage = error.message; });
+    child.once("close", finish);
+    if (options.input !== undefined) {
+      child.stdin?.on("error", () => { /* close/result owns the failure */ });
+      child.stdin?.end(options.input);
+    }
+  });
+}
+
+function createSharedJob<T>(
+  jobs: Map<string, SharedJob<T>>,
+  key: string,
+  run: (signal: AbortSignal) => Promise<T>,
+): SharedJob<T> {
+  const existing = jobs.get(key);
+  if (existing) return existing;
+  const controller = new AbortController();
+  const job: SharedJob<T> = {
+    controller,
+    promise: Promise.resolve(undefined as T),
+    settled: false,
+    waiters: 0,
+  };
+  job.promise = run(controller.signal).finally(() => {
+    job.settled = true;
+    if (jobs.get(key) === job) jobs.delete(key);
+  });
+  jobs.set(key, job);
+  return job;
+}
+
+async function waitForSharedJob<T>(
+  job: SharedJob<T>,
+  signal: AbortSignal | undefined,
+  abortedValue: T,
+): Promise<T> {
+  if (signal?.aborted) {
+    if (job.waiters === 0 && !job.settled) job.controller.abort();
+    return abortedValue;
+  }
+  job.waiters += 1;
+  let onAbort: (() => void) | undefined;
+  try {
+    if (!signal) return await job.promise;
+    return await Promise.race([
+      job.promise,
+      new Promise<T>((resolve) => {
+        onAbort = () => resolve(abortedValue);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }),
+    ]);
+  } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    job.waiters -= 1;
+    if (job.waiters === 0 && !job.settled) job.controller.abort();
+  }
+}
+
+async function nonGitProjectSourceSignature(
+  projectPath: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const pending = [projectPath];
   const rows: string[] = [];
   let truncated = false;
   while (pending.length > 0 && rows.length < NON_GIT_SIGNATURE_MAX_FILES) {
+    if (signal?.aborted) return "";
     const current = pending.pop();
     if (!current) break;
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(current, { withFileTypes: true })
+      entries = (await fs.promises.readdir(current, { withFileTypes: true }))
         .sort((left, right) => left.name.localeCompare(right.name));
     } catch {
       continue;
@@ -75,11 +285,12 @@ function nonGitProjectSourceSignature(projectPath: string): string {
         continue;
       }
       if (!entry.isFile() || !NON_GIT_SOURCE_RE.test(entry.name)) continue;
+      const relative = path.relative(projectPath, absolute);
       try {
-        const stat = fs.statSync(absolute);
-        rows.push(`${path.relative(projectPath, absolute)}:${stat.size}:${stat.mtimeMs}`);
+        const stat = await fs.promises.stat(absolute);
+        rows.push(`${relative}:${stat.size}:${stat.mtimeMs}`);
       } catch {
-        rows.push(`${path.relative(projectPath, absolute)}:missing`);
+        rows.push(`${relative}:missing`);
       }
     }
   }
@@ -87,15 +298,17 @@ function nonGitProjectSourceSignature(projectPath: string): string {
   return `non-git:${truncated || pending.length > 0 ? "truncated" : "complete"}\n${rows.join("\n")}`;
 }
 
-function contextLaunch(args: string[]): {
+async function contextLaunch(args: string[], signal?: AbortSignal): Promise<{
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
-} | null {
+} | null> {
+  if (signal?.aborted) return null;
   const explicitBin = process.env.HEPHAESTUS_BIN?.trim();
   if (explicitBin) {
     try {
-      fs.accessSync(explicitBin, fs.constants.X_OK);
+      await fs.promises.access(explicitBin, fs.constants.X_OK);
+      if (signal?.aborted) return null;
       return {
         command: explicitBin,
         args: ["context", ...args],
@@ -107,23 +320,30 @@ function contextLaunch(args: string[]): {
   }
   const contextRoot = hephaestusContextRoot();
   if (!contextRoot) return null;
-  return resolveHephaestusSyncLaunch(
+  const launch = await resolveHephaestusStdioLaunch(
     "agentlas_cloud",
     ["context", ...args],
     contextRoot,
+    { includeJudgeRuntime: false },
   );
+  return signal?.aborted || !launch
+    ? null
+    : {
+        ...launch,
+        env: { ...process.env, ...launch.env, ELECTRON_RUN_AS_NODE: "1" },
+      };
 }
 
-function hasCanonicalCodeMap(projectPath: string): boolean {
+async function hasCanonicalCodeMap(projectPath: string): Promise<boolean> {
   try {
     const payload = JSON.parse(
-      fs.readFileSync(
+      await fs.promises.readFile(
         path.join(projectPath, ".agentlas", "code-map", "project-map.json"),
         "utf8",
       ),
     ) as CodeMapResult;
     const manifest = JSON.parse(
-      fs.readFileSync(
+      await fs.promises.readFile(
         path.join(projectPath, ".agentlas", "code-map", "manifest.json"),
         "utf8",
       ),
@@ -151,21 +371,30 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
   }
 }
 
-export function projectSourceSignature(projectPath: string): string {
+async function computeProjectSourceSignature(
+  projectPath: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const parts: string[] = [];
   try {
-    const git = spawnSync(
+    const git = await runBoundedProcess(
       "git",
       ["-C", projectPath, "status", "--porcelain=v1", "--untracked-files=all"],
-      { encoding: "utf8", timeout: 1_500, maxBuffer: 2_000_000, windowsHide: true },
+      { timeoutMs: 1_500, maxBuffer: 2_000_000, signal },
     );
-    if (git.status === 0) {
-      const head = spawnSync(
+    if (signal?.aborted || git.aborted) return "";
+    if (git.status === 0 && !git.timedOut && !git.overflowed) {
+      const head = await runBoundedProcess(
         "git",
         ["-C", projectPath, "rev-parse", "--verify", "HEAD"],
-        { encoding: "utf8", timeout: 1_500, maxBuffer: 64_000, windowsHide: true },
+        { timeoutMs: 1_500, maxBuffer: 64_000, signal },
       );
-      parts.push(head.status === 0 ? `HEAD:${String(head.stdout || "").trim()}` : "HEAD:unborn");
+      if (signal?.aborted || head.aborted) return "";
+      parts.push(
+        head.status === 0 && !head.timedOut && !head.overflowed
+          ? `HEAD:${String(head.stdout || "").trim()}`
+          : "HEAD:unborn",
+      );
       const status = String(git.stdout || "");
       parts.push(status);
       const paths = status.split(/\r?\n/)
@@ -173,27 +402,46 @@ export function projectSourceSignature(projectPath: string): string {
         .filter(Boolean)
         .map((value) => value.includes(" -> ") ? value.slice(value.lastIndexOf(" -> ") + 4) : value)
         .map((value) => value.replace(/^"|"$/g, ""));
-      for (const relative of paths.slice(0, 2_000)) {
-        try {
-          const stat = fs.statSync(path.join(projectPath, relative));
-          parts.push(`${relative}:${stat.size}:${stat.mtimeMs}`);
-        } catch {
-          parts.push(`${relative}:missing`);
-        }
+      const boundedPaths = paths.slice(0, 2_000);
+      for (let offset = 0; offset < boundedPaths.length; offset += 64) {
+        if (signal?.aborted) return "";
+        const rows = await Promise.all(boundedPaths.slice(offset, offset + 64).map(async (relative) => {
+          try {
+            const stat = await fs.promises.stat(path.join(projectPath, relative));
+            return `${relative}:${stat.size}:${stat.mtimeMs}`;
+          } catch {
+            return `${relative}:missing`;
+          }
+        }));
+        parts.push(...rows);
       }
-      const diff = spawnSync(
+      if (signal?.aborted) return "";
+      const diff = await runBoundedProcess(
         "git",
         ["-C", projectPath, "diff", "--numstat", "HEAD", "--"],
-        { encoding: "utf8", timeout: 2_500, maxBuffer: 2_000_000, windowsHide: true },
+        { timeoutMs: 2_500, maxBuffer: 2_000_000, signal },
       );
-      if (diff.status === 0) parts.push(String(diff.stdout || ""));
+      if (signal?.aborted || diff.aborted) return "";
+      if (diff.status === 0 && !diff.timedOut && !diff.overflowed) {
+        parts.push(String(diff.stdout || ""));
+      }
     } else {
-      parts.push(nonGitProjectSourceSignature(projectPath));
+      parts.push(await nonGitProjectSourceSignature(projectPath, signal));
     }
   } catch {
-    parts.push(nonGitProjectSourceSignature(projectPath));
+    parts.push(await nonGitProjectSourceSignature(projectPath, signal));
   }
   return parts.join("\n");
+}
+
+export function projectSourceSignature(
+  projectPath: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const job = createSharedJob(sourceSignatureJobs, projectPath, (jobSignal) => (
+    computeProjectSourceSignature(projectPath, jobSignal)
+  ));
+  return waitForSharedJob(job, signal, "");
 }
 
 /**
@@ -201,38 +449,65 @@ export function projectSourceSignature(projectPath: string): string {
  * canonical v3 manifest and its v2 compatibility map are present. Process creation
  * is not a refresh receipt.
  */
-export function triggerProjectContextMapRefresh(projectPath: string): boolean {
-  if (!verifyActivatedFolderIdentity(projectPath)) return false;
-  const sourceSignature = projectSourceSignature(projectPath);
-  if (refreshTriggered.get(projectPath) === sourceSignature && hasCanonicalCodeMap(projectPath)) return true;
-  const launch = contextLaunch(["refresh", "--project", projectPath]);
-  if (!launch) return false;
-  try {
-    const result = spawnSync(
-      launch.command,
-      launch.args,
-      {
-        encoding: "utf8",
-        timeout: REFRESH_TIMEOUT_MS,
-        maxBuffer: MAX_RESULT_BYTES,
-        windowsHide: true,
-        env: launch.env,
-      },
-    );
-    if (result.status !== 0 || !hasCanonicalCodeMap(projectPath)) {
-      refreshTriggered.delete(projectPath);
-      console.warn(
-        `[memory] context-map refresh failed (${projectPath}): `
-        + `${String(result.stderr || result.error?.message || "invalid canonical map").trim().slice(0, 500)}`,
+export async function triggerProjectContextMapRefresh(
+  projectPath: string,
+  options: { signal?: AbortSignal; sourceSignature?: string } = {},
+): Promise<boolean> {
+  if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return false;
+  const sourceSignature = options.sourceSignature
+    ?? await projectSourceSignature(projectPath, options.signal);
+  if (options.signal?.aborted || !sourceSignature || !verifyActivatedFolderIdentity(projectPath)) return false;
+  if (
+    refreshTriggered.get(projectPath) === sourceSignature
+    && await hasCanonicalCodeMap(projectPath)
+    && !options.signal?.aborted
+    && verifyActivatedFolderIdentity(projectPath)
+  ) return true;
+  const signatureDigest = createHash("sha256").update(sourceSignature).digest("hex");
+  const key = `${projectPath}\0${signatureDigest}`;
+  const job = createSharedJob(refreshJobs, key, async (jobSignal) => {
+    if (jobSignal.aborted || !verifyActivatedFolderIdentity(projectPath)) return false;
+    const launch = await contextLaunch(["refresh", "--project", projectPath], jobSignal);
+    if (!launch || jobSignal.aborted) return false;
+    try {
+      const result = await runBoundedProcess(
+        launch.command,
+        launch.args,
+        {
+          timeoutMs: REFRESH_TIMEOUT_MS,
+          maxBuffer: MAX_RESULT_BYTES,
+          env: launch.env,
+          signal: jobSignal,
+        },
       );
+      if (jobSignal.aborted) return false;
+      const canonical = result.status === 0
+        && !result.timedOut
+        && !result.overflowed
+        && verifyActivatedFolderIdentity(projectPath)
+        && await hasCanonicalCodeMap(projectPath);
+      if (
+        jobSignal.aborted
+        || (canonical && !verifyActivatedFolderIdentity(projectPath))
+      ) return false;
+      if (!canonical) {
+        if (refreshTriggered.get(projectPath) === sourceSignature) refreshTriggered.delete(projectPath);
+        if (!result.aborted) {
+          console.warn(
+            `[memory] context-map refresh failed (${projectPath}): `
+            + `${String(result.stderr || result.errorMessage || "invalid canonical map").trim().slice(0, 500)}`,
+          );
+        }
+        return false;
+      }
+      refreshTriggered.set(projectPath, sourceSignature);
+      return true;
+    } catch {
+      if (refreshTriggered.get(projectPath) === sourceSignature) refreshTriggered.delete(projectPath);
       return false;
     }
-    refreshTriggered.set(projectPath, sourceSignature);
-    return true;
-  } catch {
-    refreshTriggered.delete(projectPath);
-    return false;
-  }
+  });
+  return waitForSharedJob(job, options.signal, false);
 }
 
 /**
@@ -240,11 +515,12 @@ export function triggerProjectContextMapRefresh(projectPath: string): boolean {
  * Claude/Codex adapters, and Workforce. The task travels on stdin so it never
  * appears in a process list or network request.
  */
-export function buildProjectContextSlice(
+export async function buildProjectContextSlice(
   projectPath: string | null,
   taskPrompt: string | undefined,
-  options: { refresh?: boolean } = {},
-): string | null {
+  options: { refresh?: boolean; signal?: AbortSignal; sourceSignature?: string } = {},
+): Promise<string | null> {
+  if (options.signal?.aborted) return null;
   if (!projectPath || !verifyActivatedFolderIdentity(projectPath)) return null;
   const task = String(taskPrompt ?? "").slice(0, MAX_TASK_CHARS);
   if (!task.trim()) return null;
@@ -252,8 +528,14 @@ export function buildProjectContextSlice(
   // turn a question into project-local writes. The caller grants refresh
   // authority explicitly; `slice --no-refresh` then preserves that boundary
   // all the way through Core.
-  if (options.refresh !== false) triggerProjectContextMapRefresh(projectPath);
-  const launch = contextLaunch([
+  if (options.refresh !== false) {
+    await triggerProjectContextMapRefresh(projectPath, {
+      signal: options.signal,
+      sourceSignature: options.sourceSignature,
+    });
+  }
+  if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return null;
+  const launch = await contextLaunch([
     "slice",
     "--project",
     projectPath,
@@ -266,22 +548,29 @@ export function buildProjectContextSlice(
     "--allow-stale",
     "--freshness-budget",
     String(SLICE_FRESHNESS_BUDGET_SECONDS),
-  ]);
+  ], options.signal);
   if (!launch) return null;
   try {
-    const result = spawnSync(
+    const result = await runBoundedProcess(
       launch.command,
       launch.args,
       {
         input: task,
-        encoding: "utf8",
-        timeout: SLICE_TIMEOUT_MS,
+        timeoutMs: SLICE_TIMEOUT_MS,
         maxBuffer: MAX_RESULT_BYTES,
-        windowsHide: true,
         env: launch.env,
+        signal: options.signal,
       },
     );
-    if (result.status !== 0 || !result.stdout) return null;
+    if (
+      options.signal?.aborted
+      || result.aborted
+      || result.timedOut
+      || result.overflowed
+      || result.status !== 0
+      || !result.stdout
+      || !verifyActivatedFolderIdentity(projectPath)
+    ) return null;
     const payload = JSON.parse(result.stdout) as ContextSliceResult;
     if (
       payload.schemaVersion !== "agentlas.context-slice.v1"

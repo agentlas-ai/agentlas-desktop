@@ -4247,7 +4247,7 @@ ${effectiveUserPrompt}`;
     try {
       // `agent` may have changed through auto-routing above. Scope memory to the
       // actual executing agent so another agent's agent_repo never leaks in.
-      const memoryContext = buildMemoryContext(memoryReadPath, agent.id, {
+      const memoryContext = await buildMemoryContext(memoryReadPath, agent.id, {
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
         projectId: invocationProjectId,
@@ -4255,6 +4255,7 @@ ${effectiveUserPrompt}`;
         // code_map / sitemap / memory) actually entered this turn's prompt.
         runId: req.runId ?? null,
         chatId: chat.id,
+        signal,
       });
       if (memoryContext) turnContextParts.push(memoryContext);
       // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
@@ -4285,6 +4286,7 @@ ${effectiveUserPrompt}`;
     } catch (err) {
       console.error("[architecture] buildMemoryContext failed:", err);
     }
+    throwIfInvocationAborted(signal, locale);
   }
   let remoteOperationalSnapshot: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
   if (!req.agentAppMode) {

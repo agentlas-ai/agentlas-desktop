@@ -31,7 +31,6 @@ import {
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 import { listMemoryEpisodesForContext } from "./tickets";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
-import { refreshProjectSitemap } from "./project-files";
 import { looksSecret } from "../../shared/secret-patterns";
 import {
   type ContextSourceName,
@@ -145,13 +144,19 @@ function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
 // skipped forever, and the read failed forever. On this repo that state went
 // unnoticed from Jun 30 until it was measured. Deciding on readability instead
 // means an unusable map repairs itself on the next attach.
-function ensureCodeMap(projectPath: string): void {
+async function ensureCodeMap(
+  projectPath: string,
+  sourceSignature: string,
+  signal?: AbortSignal,
+): Promise<void> {
   try {
+    if (signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return;
     // Core owns the canonical v2 map and fingerprint refresh. A readable seed
     // is not proof of freshness, so trigger Core before accepting it.
-    if (triggerProjectContextMapRefresh(projectPath)) {
+    if (await triggerProjectContextMapRefresh(projectPath, { signal, sourceSignature })) {
       return;
     }
+    if (signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return;
     if (readCodeMapSeed(projectPath)?.schemaVersion === "agentlas.code-map.v2") return;
     if (codeMapFallbackTriggered.has(projectPath)) return;
     const gen = codeMapGenPath();
@@ -159,11 +164,18 @@ function ensureCodeMap(projectPath: string): void {
     codeMapFallbackTriggered.add(projectPath);
     const child = spawn(process.execPath, [gen, projectPath], {
       detached: true,
+      windowsHide: true,
       stdio: "ignore",
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      ...(signal ? { signal } : {}),
+    });
+    child.once("error", () => { codeMapFallbackTriggered.delete(projectPath); });
+    child.once("exit", (code) => {
+      if (code !== 0) codeMapFallbackTriggered.delete(projectPath);
     });
     child.unref();
   } catch {
+    codeMapFallbackTriggered.delete(projectPath);
     /* never block a turn on map generation */
   }
 }
@@ -210,20 +222,104 @@ function summarizeCodeMap(projectPath: string): string | null {
 // the code map.
 const sitemapTriggered = new Map<string, string>();
 
-function ensureSitemap(projectPath: string): void {
-  const sourceSignature = projectSourceSignature(projectPath);
+async function ensureSitemap(
+  projectPath: string,
+  sourceSignature: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!sourceSignature || signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return;
   if (sitemapTriggered.get(projectPath) === sourceSignature) return;
+  let identity: {
+    projectPath: string;
+    projectRealPath: string;
+    projectDev: string;
+    projectIno: string;
+    projectBirthtimeNs: string;
+    memoryRealPath: string;
+    memoryDev: string;
+    memoryIno: string;
+    memoryBirthtimeNs: string;
+  };
+  try {
+    const projectRealPath = await fs.promises.realpath(projectPath);
+    const memoryRealPath = await fs.promises.realpath(path.join(projectRealPath, ".agentlas"));
+    const [projectStat, memoryStat] = await Promise.all([
+      fs.promises.lstat(projectRealPath, { bigint: true }),
+      fs.promises.lstat(memoryRealPath, { bigint: true }),
+    ]);
+    if (
+      signal?.aborted
+      || !projectStat.isDirectory()
+      || !memoryStat.isDirectory()
+      || !verifyActivatedFolderIdentity(projectPath)
+    ) return;
+    identity = {
+      projectPath,
+      projectRealPath,
+      projectDev: String(projectStat.dev),
+      projectIno: String(projectStat.ino),
+      projectBirthtimeNs: String(projectStat.birthtimeNs),
+      memoryRealPath,
+      memoryDev: String(memoryStat.dev),
+      memoryIno: String(memoryStat.ino),
+      memoryBirthtimeNs: String(memoryStat.birthtimeNs),
+    };
+  } catch {
+    return;
+  }
+  let projectFilesModule: string;
+  try {
+    projectFilesModule = require.resolve("./project-files");
+  } catch {
+    return;
+  }
   sitemapTriggered.set(projectPath, sourceSignature);
-  // The refresh walks the project tree synchronously (~200ms on a large repo).
-  // Never make a turn wait for it; this turn reads whatever is on disk now and
-  // the next one picks up the fresh map.
-  setImmediate(() => {
-    try {
-      refreshProjectSitemap(projectPath);
-    } catch {
-      /* never block a turn on sitemap generation */
+  // The refresh walks the project tree synchronously. Run it outside Main so
+  // scheduling it does not merely move the UI stall to the next event-loop turn.
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(
+      process.execPath,
+      [
+        "-e",
+        [
+          "const fs=require('node:fs'),path=require('node:path');",
+          "let raw='';process.stdin.setEncoding('utf8');",
+          "process.stdin.on('data',c=>raw+=c);",
+          "process.stdin.on('end',()=>{try{",
+          "const x=JSON.parse(raw),same=(a,b)=>process.platform==='win32'?path.resolve(a).toLowerCase()===path.resolve(b).toLowerCase():path.resolve(a)===path.resolve(b);",
+          "const root=fs.realpathSync(x.projectPath),memory=fs.realpathSync(path.join(root,'.agentlas'));",
+          "const rs=fs.lstatSync(root,{bigint:true}),ms=fs.lstatSync(memory,{bigint:true});",
+          "const stable=rs.isDirectory()&&ms.isDirectory()&&same(root,x.projectRealPath)&&same(memory,x.memoryRealPath)&&String(rs.dev)===x.projectDev&&String(rs.ino)===x.projectIno&&String(rs.birthtimeNs)===x.projectBirthtimeNs&&String(ms.dev)===x.memoryDev&&String(ms.ino)===x.memoryIno&&String(ms.birthtimeNs)===x.memoryBirthtimeNs;",
+          "if(!stable)process.exit(3);",
+          "const m=require(process.argv[1]),result=m.refreshProjectSitemap(root);process.exit(result?0:2);",
+          "}catch{process.exit(4);}});",
+        ].join(""),
+        projectFilesModule,
+      ],
+      {
+        detached: true,
+        windowsHide: true,
+        stdio: ["pipe", "ignore", "ignore"],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        ...(signal ? { signal } : {}),
+      },
+    );
+  } catch {
+    sitemapTriggered.delete(projectPath);
+    return;
+  }
+  child.once("error", () => {
+    if (sitemapTriggered.get(projectPath) === sourceSignature) sitemapTriggered.delete(projectPath);
+  });
+  child.once("exit", (code) => {
+    if (code !== 0 && sitemapTriggered.get(projectPath) === sourceSignature) {
+      sitemapTriggered.delete(projectPath);
     }
   });
+  child.stdin?.on("error", () => { /* child error/exit resets the refresh gate */ });
+  child.stdin?.end(JSON.stringify(identity));
+  child.unref();
 }
 
 function summarizeSitemap(projectPath: string): string | null {
@@ -600,7 +696,7 @@ function projectPmSection(projectPath: string, taskPrompt?: string): string | nu
  * Returns a memory context block (or empty string). When `projectPath` is set, prefers
  * the folder's curated memory + soul + sitemap; otherwise falls back to global memory.
  */
-export function buildMemoryContext(
+export async function buildMemoryContext(
   projectPath: string | null,
   agentId?: string | null,
   options: {
@@ -610,8 +706,10 @@ export function buildMemoryContext(
     /** When set, records content-free `context_source` markers for each source that entered the prompt. */
     runId?: string | null;
     chatId?: string | null;
+    signal?: AbortSignal;
   } = {},
-): string {
+): Promise<string> {
+  if (options.signal?.aborted) return "";
   const sections: string[] = [];
   // agentId가 주어지면 per-agent 스코프(공유 + 본인 agent_repo만)로 읽어, 각 본부/전문가
   // 세션이 자기 메모리만 보게 한다. 미지정이면 기존 동작(전체) 유지(단일 에이전트 경로).
@@ -654,9 +752,14 @@ export function buildMemoryContext(
     // Core refreshes the canonical Code Map and projects its functional
     // surfaces/dependencies into the Sitemap. Do this before reading either
     // layer so the first writable turn consumes one coherent snapshot.
+    let sourceSignature: string | undefined;
     if (options.materializeCodeMap !== false) {
-      ensureCodeMap(projectPath);
-      ensureSitemap(projectPath);
+      sourceSignature = await projectSourceSignature(projectPath, options.signal);
+      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+      await ensureCodeMap(projectPath, sourceSignature, options.signal);
+      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+      await ensureSitemap(projectPath, sourceSignature, options.signal);
+      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
     }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) {
@@ -674,9 +777,14 @@ export function buildMemoryContext(
       sections.push(codeMap);
       injected.push({ source: "code_map", text: codeMap });
     }
-    const contextSlice = buildProjectContextSlice(projectPath, options.taskPrompt, {
-      refresh: options.materializeCodeMap !== false,
+    const contextSlice = await buildProjectContextSlice(projectPath, options.taskPrompt, {
+      // A writable turn refreshed above with the same source signature. Reusing
+      // it avoids repeating the full Git/status/stat signature in one prompt.
+      refresh: false,
+      signal: options.signal,
+      sourceSignature,
     });
+    if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
     if (contextSlice) {
       sections.push(contextSlice);
       injected.push({ source: "code_map", text: contextSlice });

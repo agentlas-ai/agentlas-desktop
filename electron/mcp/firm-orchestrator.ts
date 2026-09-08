@@ -914,11 +914,13 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
   if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn) {
+    const memorySignal = turn.signal ?? p.signal;
     try {
-      const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
+      const mem = await buildMemoryContext(memoryReadPath, memoryOwnerId, {
         materializeCodeMap: Boolean(activePath),
         taskPrompt: turn.userPrompt,
         projectId: p.chat.projectId ?? null,
+        signal: memorySignal,
       });
       if (mem) systemPrompt += `\n\n${mem}`;
       if (memoryReadPath) {
@@ -930,6 +932,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     } catch {
       // ignore memory failures
     }
+    if (memorySignal?.aborted) throw new Error("Firm turn cancelled");
   }
   const runtimeChoice = p.req.agentAppMode || oneControllerPreferred
     ? null

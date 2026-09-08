@@ -1151,18 +1151,21 @@ async function taskForceMemoryContext(
 ): Promise<string> {
   if (p.req.agentAppMode) return "";
   try {
-    const memory = buildMemoryContext(p.memoryReadPath ?? null, agentId, {
+    const memory = await buildMemoryContext(p.memoryReadPath ?? null, agentId, {
       materializeCodeMap: Boolean(p.memoryCanMaterializeCodeMap),
       taskPrompt: task,
       projectId: p.chat.projectId ?? null,
+      signal: p.signal,
     });
     const ontology = p.memoryReadPath
       ? await queryWorkingFolderOntologyContext(p.memoryReadPath, task, {
           readOnly: taskForceProjectReadOnly(p, permission),
         })
       : null;
+    if (p.signal?.aborted) throw new Error("Task-force turn cancelled");
     return [memory, ontology?.used ? ontology.context : ""].filter(Boolean).join("\n\n");
   } catch {
+    if (p.signal?.aborted) throw new Error("Task-force turn cancelled");
     return "";
   }
 }

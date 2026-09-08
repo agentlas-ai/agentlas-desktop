@@ -477,10 +477,12 @@ export async function runSwarmInvocation(
       task: task.brief || task.title,
       includeOperational: false,
     });
-    const projectContextSlice = buildProjectContextSlice(
+    const projectContextSlice = await buildProjectContextSlice(
       p.workingFolder ?? null,
       task.brief || task.title,
+      { signal: p.signal },
     );
+    if (p.signal?.aborted) throw new Error("Swarm worker cancelled");
     if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
       throw new MobileReadRuntimeBoundaryError(
         "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
@@ -655,10 +657,12 @@ export async function runSwarmInvocation(
       task: goal,
       includeOperational: false,
     });
-    const projectContextSlice = buildProjectContextSlice(
+    const projectContextSlice = await buildProjectContextSlice(
       p.workingFolder ?? null,
       goal,
+      { signal: p.signal },
     );
+    if (p.signal?.aborted) throw new Error("Swarm synthesis cancelled");
     if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
       throw new MobileReadRuntimeBoundaryError(
         "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
