@@ -26,6 +26,13 @@ type Guest = { viewId: string; wc: WebContents; targetId: string; browserContext
 type Lease = { id: string; guests: Map<string, Guest>; socket: RelaySocket | null; connecting: boolean; autoAttach: boolean; current: string | null };
 const reservedGuests = new Set<string>();
 const MAX_SESSIONS = 8;
+/** Preserve host-owned capture diagnostics without leaking arbitrary CDP errors. */
+export function nativeBrowserCommandFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return /^native-browser-(?:capture-(?:unavailable|busy|budget-exceeded|queue-full|stale|timeout|empty)|screenshot-(?:format-unsupported|stale|clip-invalid|beyond-viewport-unsupported)|grant-revoked|target-missing)$/.test(message)
+    ? message : "native-browser-command-failed";
+}
+
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 export interface NativeBrowserRelayGrant {
@@ -301,7 +308,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
         const params = value.params && typeof value.params === "object" && !Array.isArray(value.params) ? value.params as Record<string, unknown> : {};
         const sessionId = typeof value.sessionId === "string" ? value.sessionId : undefined;
         void dispatch(lease, value.method, params, sessionId).then((result) => send(lease, { id: value.id, sessionId, result }))
-          .catch(() => send(lease, { id: value.id, sessionId, error: { code: -32000, message: "native-browser-command-failed" } }));
+          .catch((error) => send(lease, { id: value.id, sessionId, error: { code: -32000, message: nativeBrowserCommandFailure(error) } }));
       });
       ws.once("close", () => releaseLease(lease));
       });

@@ -20,6 +20,7 @@ type ActiveWorkView = {
   send: (status: WorkLiveViewStatus) => void;
   visible: boolean;
   ownerAttached: boolean;
+  hiddenHost?: BaseWindow;
   mode: "app" | "browser";
   taskScopeId?: string;
   state: WorkLiveViewStatus["state"];
@@ -136,13 +137,34 @@ function setOwnerGuestVisible(active: ActiveWorkView, visible: boolean): void {
       active.window.contentView.removeChildView(active.view);
     }
     active.ownerAttached = false;
+    // An unattached view loads with a zero DOM viewport even when its native
+    // bounds are nonzero. Keep task-private browser guests in a never-shown
+    // host, outside the user's native/AX tree, including before first load.
+    if (active.mode === "browser" && isCurrent(active) && active.state !== "error") {
+      const bounds = active.view.getBounds();
+      if (!active.hiddenHost) {
+        active.hiddenHost = new BaseWindow({ show: false, width: bounds.width, height: bounds.height, focusable: false });
+        active.hiddenHost.contentView.addChildView(active.view);
+      }
+      active.hiddenHost.setContentSize(bounds.width, bounds.height);
+      active.view.setVisible(true);
+    } else releaseHiddenGuestHost(active);
     return;
   }
+  releaseHiddenGuestHost(active);
   if (!active.ownerAttached) {
     active.window.contentView.addChildView(active.view);
     active.ownerAttached = true;
   }
   active.view.setVisible(true);
+}
+
+function releaseHiddenGuestHost(active: ActiveWorkView): void {
+  const host = active.hiddenHost;
+  active.hiddenHost = undefined;
+  if (!host) return;
+  try { host.contentView.removeChildView(active.view); } catch {}
+  try { host.destroy(); } catch {}
 }
 
 function showOnly(active: ActiveWorkView): void {
@@ -595,13 +617,18 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
     bounds = active.view.getBounds();
     active.captureRestore = restore;
     signal?.addEventListener("abort", restore, { once: true });
-    if (!active.visible) {
+    if (!active.visible && !active.hiddenHost) {
       // A hidden WebContentsView has no capture surface. Rehost this same view
       // briefly in a never-shown native host; no page or storage is cloned.
       host = new BaseWindow({ show: false, width: bounds.width, height: bounds.height, focusable: false });
       setOwnerGuestVisible(active, false);
       host.contentView.addChildView(active.view);
       active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
+      active.view.setVisible(true);
+    }
+    if (!active.visible && active.hiddenHost) {
+      active.hiddenHost.contentView.removeChildView(active.view);
+      active.hiddenHost.contentView.addChildView(active.view);
       active.view.setVisible(true);
     }
     // Prime the compositor with the unchanged visible viewport before CDP asks
