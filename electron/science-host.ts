@@ -9,6 +9,7 @@
  *
  * 부팅 때 한 번 installScienceHost() 를 부르면 그 뒤로는 사이언스가 알아서 쓴다.
  */
+import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -45,7 +46,6 @@ import {
 } from "./extensions/science";
 
 // OS 권한이 필요해 데스크탑에 남은 넷
-import { runSignedScienceExecutor } from "./science-host/signed-executor";
 import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf";
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
 
@@ -78,7 +78,7 @@ export function installDesktopScienceHost(): void {
     resolveExactVerifiedScienceRendererExecutor,
     resolveExactVerifiedScienceRendererExecutorBinding,
     // OS 권한이 필요한 넷
-    runSignedScienceExecutor,
+    isPackagedHost: () => app.isPackaged,
     renderManuscriptPdf, resolveTectonic,
     readPersistedScienceWorkbook, persistedWorkbookReadback,
     /*
