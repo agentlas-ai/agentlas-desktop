@@ -364,6 +364,8 @@ export interface BorrowedInputPacket {
    */
   requiresApproval?: boolean;
   inputType: string;
+  /** Explicit local planner filesystem intent; strict legacy contracts keep their own ceiling. */
+  workspaceAccess?: "read" | "write";
   inputKind: string;
   brief: string;
   context: string[];
@@ -948,6 +950,7 @@ export function taskForceChildPermission(
   role: "worker" | "orchestrator",
   toolRequired = false,
   preApprovalStage = false,
+  workspaceAccess?: "read" | "write",
 ): RunnerRequest["permission"] {
   const host = p.req.appsGenerateMode ? "read" : p.req.permissions;
   if (host === "read") return "read";
@@ -957,6 +960,9 @@ export function taskForceChildPermission(
   // feasibility/design reviewer from gaining workspace-write authority before
   // the person's committed approval releases the implementation stage.
   if (preApprovalStage) return "read";
+  if (role === "worker" && workspaceAccess) {
+    return workspaceAccess === "write" && (host === "write" || host === "full") && !p.req.agentAppMode ? "write" : "read";
+  }
   // `full` is an explicit owner decision at the One composer.  Preserve its
   // execution intent across ordinary delegated worker packets while still
   // narrowing the child to the selected project directory's write sandbox.
@@ -2022,6 +2028,7 @@ export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
             : {}),
           requiresApproval: obj.requiresApproval === true || obj.requires_approval === true,
           inputType: cleanString(obj.inputType) || cleanString(obj.input_type) || "task-brief",
+          ...(obj.workspaceAccess === "read" || obj.workspaceAccess === "write" ? { workspaceAccess: obj.workspaceAccess } : {}),
           inputKind: cleanString(obj.inputKind) || cleanString(obj.input_kind) || "text",
           brief,
           context: asArray(obj.context).map((v) => cleanString(v)).filter(Boolean),
@@ -2478,7 +2485,7 @@ export function closeTaskForceDeliveryDependencies(
 }
 
 export type LocalPlannerValidationCode = "unknown_agent" | "duplicate_team" | "duplicate_step"
-  | "invalid_dependency" | "dependency_cycle" | "missing_agents" | "no_packets";
+  | "invalid_dependency" | "dependency_cycle" | "missing_agents" | "no_packets" | "workspace_access_missing_or_invalid";
 
 /** A schema retry may not erase the first valid partial assignment merely
  * because the second response contains no usable packets. Missing roles keep
@@ -2500,6 +2507,7 @@ export function normalizePacketsForRoster(
   specs: BorrowedAgentSpec[],
   userPrompt: string,
   locale: "ko" | "en" = "en",
+  requireWorkspaceAccess = false,
 ): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean; validationErrors: string[]; validationCodes: LocalPlannerValidationCode[] } {
   const bySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const usedAgents = new Set<string>();
@@ -2510,6 +2518,12 @@ export function normalizePacketsForRoster(
   const validationErrors: string[] = [];
   const validationCodes = new Set<LocalPlannerValidationCode>();
   for (const packet of packets) {
+    if (requireWorkspaceAccess && packet.workspaceAccess !== "read" && packet.workspaceAccess !== "write") {
+      invalidPacket = true;
+      validationErrors.push(`workspaceAccess must be read or write: ${packet.agent}`);
+      validationCodes.add("workspace_access_missing_or_invalid");
+      continue;
+    }
     if (!bySlug.has(packet.agent)) {
       invalidPacket = true;
       validationErrors.push(`unknown agent: ${packet.agent}`);
@@ -2558,7 +2572,7 @@ export function normalizePacketsForRoster(
     let suffix = 1;
     while (usedStepIds.has(stepId)) stepId = `${fallback.agent}-fallback-${suffix++}`;
     usedStepIds.add(stepId);
-    normalized.push({ ...fallback, stepId });
+    normalized.push({ ...fallback, stepId, ...(requireWorkspaceAccess ? { workspaceAccess: "read" as const } : {}) });
   }
 
   const knownSteps = new Set(normalized.map((packet) => packet.stepId!));
@@ -3042,7 +3056,7 @@ function buildPlannerSystemPrompt(
     : "Use English for every user-visible field and for the JSON keys.";
   const outputContract = requireExactRoster
     ? `End with the same JSON shape and exact frozen roster slugs as this parser-valid contract example, replacing only the semantic packet fields and allocation estimates with your exact decisions:\n${plannerExactShape(runtimes, specs)}`
-    : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"stepId":"<stable-step-id>","dependsOn":["<earlier-step-id>"],"agent":"<slug>","oneReply":"<optional short visible reply One sends after this result>","requiresApproval":false,"inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<short visible instruction One says to this teammate>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"doneWhen":["<checkable completion condition>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
+    : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"stepId":"<stable-step-id>","dependsOn":["<earlier-step-id>"],"agent":"<slug>","oneReply":"<optional short visible reply One sends after this result>","requiresApproval":false,"workspaceAccess":"<read|write>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<short visible instruction One says to this teammate>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"doneWhen":["<checkable completion condition>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
   return [
     orchestratorEffectivePrompt ?? buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
@@ -3083,7 +3097,7 @@ function buildPlannerSystemPrompt(
       : "oneReply may coordinate only the next step. It must never claim that a file was saved, work completed, a tool ran, or a fact was verified; those claims require measured execution evidence and belong in the worker result or synthesis.",
     requireExactRoster
       ? ""
-      : "When a worker must create or update a Markdown/document artifact, use inputType writing and set allocation.requirements.toolRequired to true so the host can grant bounded workspace write access. Planning-only drafts that do not create files stay planning/read-only.",
+      : "Every local packet must declare workspaceAccess exactly read or write. Choose write when the worker must create or modify any file, including tests, JSON, screenshots saved by file tools, or Markdown deliverables. Choose read for research, review, or inspection that returns findings without modifying files. This is filesystem intent, independent of inputType and toolRequired: web research may use tools while remaining read. Host read and pre-approval ceilings still prohibit writes; never require a written artifact under those ceilings.",
     "Keep briefs specific: a researcher should get evidence questions; a builder should get implementation constraints; a reviewer should get acceptance criteria; a writer should get audience/style/output format.",
     "For a review, QA, audit, or verification packet, doneWhen measures whether the required scope was fully examined and the evidence-backed findings were recorded; it must not require zero defects or a clean gate. Put correction of those findings in a later repair/revision packet, and make that packet depend on the review step. A clean final gate belongs after the repair.",
     requireExactRoster
@@ -3589,7 +3603,13 @@ async function runBorrowedAgentTurn(
     "worker",
     packet.allocation.requirements.toolRequired,
     preApprovalStage,
+    packet.workspaceAccess,
   );
+  tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: id,
+    kind: "task_force_workspace_access", payload: { stepId: packet.stepId ?? null,
+      requestedAccess: packet.workspaceAccess ?? null, resolvedPermission: workerPermission,
+      hostPermission: taskForcePermission(p) ?? null, preApprovalStage,
+      contract: packet.workspaceAccess ? "explicit-local" : "legacy-or-prepared" } });
   const capabilityCeiling: WorkerCapabilityInput["ceiling"] = p.req.agentAppMode ? "agent-app"
     : workforceGrant || spec.permissionPolicy || p.workforceSelectionReceipt ? "prepared" : "host";
   const capabilityTask: WorkerCapabilityInput["task"] = {
@@ -5277,7 +5297,7 @@ async function runPlanner(
       agentId: p.orchestratorAgent.id,
     }, "read");
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
-    let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale);
+    let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode);
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
 
     // One bounded same-model correction is cheaper and substantially safer
@@ -5326,7 +5346,7 @@ async function runPlanner(
         agentId: p.orchestratorAgent.id,
       }, "read");
       const repairedPlan = parseBorrowedWorkloadPlan(repairedText);
-      const repairedNormalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale);
+      const repairedNormalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode);
       const selection = selectLocalPlannerRepair({ firstPacketCount: parsedPlan.packets.length,
         firstValidationCodes: normalized.validationCodes, repairedPacketCount: repairedPlan.packets.length });
       tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
@@ -5357,6 +5377,9 @@ async function runPlanner(
       } else {
         plannerInvocationId = firstPlannerInvocationId;
       }
+    }
+    if (normalized.validationCodes.includes("workspace_access_missing_or_invalid")) {
+      throw new Error("local_planner_workspace_access_unresolved");
     }
     packets = normalized.packets;
     parseSuccess = normalized.parseSuccess;
@@ -5589,6 +5612,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           "worker",
           packet.allocation.requirements.toolRequired,
           approvalPartition.gateActive,
+          packet.workspaceAccess,
         ),
         permissionInherited: false,
       },
@@ -5681,6 +5705,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           "worker",
           packet.allocation.requirements.toolRequired,
           approvalPartition.gateActive,
+          packet.workspaceAccess,
         ),
         permissionInherited: false,
       },
