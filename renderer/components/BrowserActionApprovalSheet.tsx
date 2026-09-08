@@ -8,10 +8,8 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
-import { AskCard } from "@/components/AskCard";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
-import { OneBottomSheet } from "@/components/one/OneBottomSheet";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   send: { ko: "메시지 전송", en: "Send message" },
@@ -118,13 +116,7 @@ export function BrowserActionApprovalSheet() {
   const actionName = browserActionName(req.actionType, ko);
   const isPayment = req.actionType === "payment";
   const isUnsafeCode = req.actionType === "unsafe-code";
-  const onePresentation = oneRoute;
   const unsafeCodeDetail = req.summary.replace(/^unsafe-code\s*:\s*/i, "").trim();
-  const oneDescription = isUnsafeCode
-    ? ko
-      ? "페이지 코드는 여러 동작을 한 번에 실행할 수 있습니다. 대상과 코드를 확인한 뒤 이번 한 번만 허용하거나 거부하세요."
-      : "Page code can perform multiple actions at once. Review the target and code, then allow it once or deny it."
-    : req.summary;
 
   /*
    * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
@@ -142,31 +134,23 @@ export function BrowserActionApprovalSheet() {
 
   const content = (
     <>
-      <AskCard
-        title={askTitle}
-        locale={ko ? "ko" : "en"}
-        options={[
-          {
-            id: "once",
-            title: ko ? "한 번만 허용" : "Allow once",
-            note: isUnsafeCode ? (ko ? "아래 코드 내용을 확인해 주세요." : "Review the code below.") : summaryLine,
-            active: true,
-          },
-          ...(req.allowAlways ? [{
-            id: "always",
-            title: ko ? "항상 승인" : "Always allow",
-            note: ko ? "이 사이트의 같은 동작은 다시 묻지 않습니다." : "The same action on this site will not ask again.",
-          }] : []),
-          {
-            id: "deny",
-            title: ko ? "거부" : "Deny",
-            note: safetyNote
-              ?? (ko ? `${remainingSeconds}초 안에 고르지 않으면 거부됩니다 · 대기 ${queue.length}건`
-                     : `Denied automatically in ${remainingSeconds}s · ${queue.length} pending`),
-          },
-        ]}
-        onChoose={(id) => resolve(id as "once" | "always" | "deny")}
-      />
+      <section className="baa-chip" role="alertdialog" aria-live="assertive" aria-label={askTitle}>
+        <div className="baa-chip-copy">
+          <span className="baa-chip-kicker">{ko ? "승인 필요" : "Approval needed"}</span>
+          <strong>{askTitle}</strong>
+          <small>{summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running.")}</small>
+        </div>
+        <div className="baa-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
+          <button type="button" className="baa-chip-once" onClick={() => resolve("once")}>{ko ? "이번만 허용" : "Allow once"}</button>
+          {req.allowAlways && <button type="button" onClick={() => resolve("always")}>{ko ? "항상 허용" : "Always allow"}</button>}
+          <button type="button" className="baa-chip-deny" onClick={() => resolve("deny")}>
+            {ko ? "거부" : "Deny"}
+          </button>
+        </div>
+        <span className="baa-chip-timer">
+          {safetyNote ?? (ko ? `${remainingSeconds}초 안에 선택 · 대기 ${queue.length}건` : `Choose within ${remainingSeconds}s · ${queue.length} pending`)}
+        </span>
+      </section>
       {isUnsafeCode && (
         <details className="baa-code-review">
           <summary>{ko ? "실행할 코드 전체 보기" : "Review full code"}</summary>
@@ -179,177 +163,46 @@ export function BrowserActionApprovalSheet() {
         .baa-code-review pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 12px; line-height: 1.5; }
         .baa-wrap {
           position: fixed;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          display: flex;
-          justify-content: center;
-          padding: 0 16px 20px;
+          left: 50%;
+          bottom: 96px;
+          transform: translateX(-50%);
+          width: min(var(--agentlas-composer-width, 720px), calc(100% - 32px));
           z-index: 90;
           pointer-events: none;
         }
-        .baa {
+        .baa-chip {
           pointer-events: auto;
-          width: var(--popup-3-width);
-          background: var(--rd-bg);
-          color: var(--rd-ink);
-          border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
-          border-radius: 16px;
-          padding: 16px 18px;
-          box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-          animation: baa-in 0.16s ease-out;
-        }
-        @keyframes baa-in {
-          from {
-            transform: translateY(14px);
-            opacity: 0;
-          }
-          to {
-            transform: translateY(0);
-            opacity: 1;
-          }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .baa {
-            animation: none;
-          }
-        }
-        .baa-top {
           display: flex;
           align-items: center;
-          gap: 8px;
-          margin-bottom: 8px;
+          gap: 12px;
+          width: 100%;
+          box-sizing: border-box;
+          padding: 8px 10px 8px 12px;
+          border: 1px solid var(--paper-edge, rgba(25, 31, 36, .14));
+          border-radius: 13px;
+          background: var(--paper, #fff);
+          color: var(--ink, #202428);
+          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
         }
-        .baa-tag {
-          font-size: 11.5px;
-          font-weight: 800;
-          padding: 2px 9px;
-          border-radius: 999px;
-          background: var(--rd-accent);
-          color: var(--white);
-        }
-        .baa-tag.pay {
-          background: var(--rd-err);
-        }
-        .baa-site {
-          font-size: 12px;
-          opacity: 0.6;
-          font-family: ui-monospace, Menlo, monospace;
-        }
-        .baa-summary {
-          font-size: 14px;
-          line-height: 1.5;
-          font-weight: 600;
-          margin-bottom: 4px;
-        }
-        .baa-note {
-          font-size: 12px;
-          opacity: 0.6;
-          margin-bottom: 4px;
-        }
-        .baa-actions {
-          display: flex;
-          gap: 8px;
-          justify-content: flex-end;
-          margin-top: 12px;
-        }
-        .baa-actions button {
-          border-radius: 9px;
-          padding: 8px 15px;
-          font-size: 13px;
-          font-weight: 700;
-          cursor: pointer;
-          border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.14));
-          background: none;
-          color: var(--rd-ink);
-        }
-        .baa-actions .deny {
-          color: var(--rd-err);
-          margin-right: auto;
-        }
-        .baa-actions .always {
-          background: var(--rd-accent);
-          color: var(--white);
-          border-color: transparent;
-        }
-        .baa-one {
-          width: auto;
-          margin: 0;
-          padding: 0;
-          border: 0;
-          border-radius: 0;
-          background: transparent;
-          color: var(--one-sheet-ink);
-          box-shadow: none;
-          animation: none;
-        }
-        .baa-one .baa-tag,
-        .baa-one .baa-summary:not(.code) {
-          display: none;
-        }
-        .baa-one .baa-summary.code {
-          margin: 0 0 14px;
-          padding: 12px 14px;
-          border: 1px solid var(--one-sheet-control-border);
-          border-radius: var(--one-sheet-control-radius);
-          background: var(--one-sheet-card-muted);
-          color: var(--one-sheet-ink);
-          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          font-size: 12px;
-          font-weight: 560;
-          overflow-wrap: anywhere;
-        }
-        .baa-one .baa-top {
-          justify-content: flex-end;
-        }
-        .baa-one .baa-site,
-        .baa-one .baa-note {
-          color: var(--one-sheet-muted);
-          opacity: 1;
-        }
-        .baa-one .baa-actions button {
-          min-height: var(--one-sheet-control-height);
-          border-color: var(--one-sheet-control-border);
-          border-radius: var(--one-sheet-control-radius);
-          color: var(--one-sheet-ink);
-        }
-        .baa-one .baa-actions button:focus-visible {
-          outline: none;
-          box-shadow: var(--one-sheet-focus);
-        }
-        .baa-one .baa-actions .deny {
-          color: var(--one-sheet-danger);
-        }
-        .baa-one .baa-actions .once,
-        .baa-one .baa-actions .always {
-          border-color: var(--one-sheet-primary);
-          background: var(--one-sheet-primary);
-          color: var(--white);
+        .baa-chip-copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
+        .baa-chip-kicker { color: var(--warn, #a26a00); font-size: 9px; font-weight: 800; letter-spacing: .04em; }
+        .baa-chip-copy strong, .baa-chip-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .baa-chip-copy strong { font-size: 11px; font-weight: 720; }
+        .baa-chip-copy small, .baa-chip-timer { color: var(--muted-deep, #667078); font-size: 9px; line-height: 1.3; }
+        .baa-chip-actions { display: flex; flex: 0 1 auto; gap: 5px; align-items: center; }
+        .baa-chip-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--paper-edge-strong, #ccd2d6); border-radius: 9px; background: var(--paper, #fff); color: var(--ink-soft, #374047); font: inherit; font-size: 10px; font-weight: 680; white-space: nowrap; cursor: pointer; }
+        .baa-chip-actions button:hover, .baa-chip-actions button:focus-visible { outline: 2px solid rgba(42, 47, 50, .12); }
+        .baa-chip-actions .baa-chip-once { border-color: var(--black, #202428); background: var(--black, #202428); color: var(--white, #fff); }
+        .baa-chip-actions .baa-chip-deny { border-color: var(--danger-soft, #e9b8b8); color: var(--danger, #9f3030); }
+        .baa-chip-timer { flex: 0 0 auto; white-space: nowrap; }
+        @media (max-width: 700px) {
+          .baa-chip { align-items: stretch; flex-direction: column; gap: 7px; padding: 9px; }
+          .baa-chip-actions { width: 100%; overflow-x: auto; }
+          .baa-chip-timer { white-space: normal; }
         }
       `}</style>
     </>
   );
-
-  if (onePresentation) {
-    return (
-      <OneBottomSheet
-        open
-        onClose={() => resolve("deny")}
-        closeLabel={ko ? "브라우저 작업 거부" : "Deny browser action"}
-        ariaLabelledBy="one-browser-approval-title"
-        dialogRole="alertdialog"
-        closeOnBackdrop={false}
-        closeOnEscape={false}
-        eyebrow={actionName}
-        title={ko ? "이 브라우저 작업을 허용할까요?" : "Allow this browser action?"}
-        titleId="one-browser-approval-title"
-        description={oneDescription}
-      >
-        {content}
-      </OneBottomSheet>
-    );
-  }
-
   return <div className="baa-wrap" role="alertdialog" aria-live="assertive">{content}</div>;
 }
 
