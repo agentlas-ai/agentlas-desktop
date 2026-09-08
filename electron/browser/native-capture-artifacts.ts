@@ -17,10 +17,15 @@ export function createNativeCapturePublisher(input: {
   const retained = new Set<string>();
   let retainedBytes = 0;
   return (capture: { png: Buffer; isCurrent: () => boolean }): void => {
+    // Long runs update Task metadata as workers report. Pin the current
+    // version for this capture, not the version from invocation startup.
+    // The task identity and live relay grant remain the authority boundary.
+    const captureTask = input.task && getCanonicalTask(input.task.id);
     const current = () => {
       const task = input.task && getCanonicalTask(input.task.id);
       return !input.signal?.aborted && capture.isCurrent() && !!input.runId && !!task
-        && task.originChatId === input.chatId && task.version === input.task!.version && task.status !== "archived";
+        && !!captureTask && captureTask.version >= input.task!.version
+        && task.originChatId === input.chatId && task.version === captureTask.version && task.status !== "archived";
     };
     if (!current()) throw new Error("native-browser-capture-stale");
     if (!Buffer.isBuffer(capture.png) || capture.png.length < 24 || capture.png.length > 24 * 1024 * 1024
@@ -50,7 +55,7 @@ export function createNativeCapturePublisher(input: {
     try {
       fs.writeFileSync(file, capture.png, { flag: "wx", mode: 0o600 });
       if (!current()) throw new Error("native-browser-capture-stale");
-      const task = input.task!;
+      const task = captureTask!;
       const artifacts = bindOneRuntimeToolArtifacts({ taskId: task.id, taskVersion: task.version,
         chatId: input.chatId, runId: input.runId, toolId: `native-capture:${randomUUID()}`, paths: [file] });
       if (artifacts.length !== 1) throw new Error("native-browser-capture-unavailable");
