@@ -263,7 +263,7 @@ function buildScienceExtension() {
 
 function stageResearchDirector() {
   fs.cpSync(path.join(root, "plugins", "agentlas-science-research-director"), directorRoot, { recursive: true });
-  const { researchDirectorReleaseDigest } = require(path.join(root, "dist", "node_modules", "agentlas-science", "src", "research-director.js"));
+  const { researchDirectorReleaseDigest } = require(path.join(root, "node_modules", "agentlas-science", "dist", "research-director.js"));
   const manifest = JSON.parse(fs.readFileSync(path.join(directorRoot, "plugin.json"), "utf8"));
   fs.writeFileSync(path.join(directorRoot, ".install.json"), `${JSON.stringify({
     schema: "agentlas.plugin-install/v1",
@@ -455,7 +455,7 @@ async function storeSnapshot(desktop, projectId) {
     const localRequire = process.getBuiltinModule("node:module").createRequire(`${process.cwd()}/package.json`);
     const nodePath = process.getBuiltinModule("node:path");
     const nodeCrypto = localRequire("node:crypto");
-    const { scienceStore } = localRequire(nodePath.join(process.cwd(), "dist", "node_modules", "agentlas-science", "src", "runtime.js"));
+    const { scienceStore } = localRequire(nodePath.join(process.cwd(), "node_modules", "agentlas-science", "dist", "runtime.js"));
     const store = scienceStore();
     const boundedText = (value, maximum) => typeof value === "string" && value.length > 0 ? value.slice(0, maximum) : null;
     const digest = (value) => nodeCrypto.createHash("sha256").update(value).digest("hex");
@@ -1038,7 +1038,7 @@ async function main() {
         try {
           const projectId = globalThis.__agentlasDinosaurQaProjectId;
           if (!projectId) return null;
-          const { scienceStore } = localRequire(nodePath.join(process.cwd(), "dist", "node_modules", "agentlas-science", "src", "runtime.js"));
+          const { scienceStore } = localRequire(nodePath.join(process.cwd(), "node_modules", "agentlas-science", "dist", "runtime.js"));
           const store = scienceStore();
           const conversation = store.listConversations(projectId)[0] || null;
           return conversation ? store.listTurns(projectId, conversation.id).at(-1)?.id || null : null;
