@@ -31,9 +31,20 @@ export function createNativeCapturePublisher(input: {
     const digest = createHash("sha256").update(capture.png).digest("hex");
     if (retained.has(digest)) return;
     if (retainedBytes + capture.png.length > 256 * 1024 * 1024) throw new Error("native-browser-capture-budget-exceeded");
-    const dir = userDataPath("generated-assets", "native-browser");
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    if (fs.realpathSync(dir) !== path.resolve(dir)) throw new Error("native-browser-capture-stale");
+    // Canonicalize the Main-configured profile first: macOS /tmp is a normal
+    // /private/tmp alias. Reject links below that trusted profile, not its OS alias.
+    let dir = fs.realpathSync(userDataPath());
+    for (const segment of ["generated-assets", "native-browser"]) {
+      dir = path.join(dir, segment);
+      try {
+        const stat = fs.lstatSync(dir);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("native-browser-capture-stale");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        fs.mkdirSync(dir, { mode: 0o700 });
+      }
+      if (fs.realpathSync(dir) !== dir) throw new Error("native-browser-capture-stale");
+    }
     const file = path.join(dir, `capture-${randomUUID()}.png`);
     let committed = false;
     try {

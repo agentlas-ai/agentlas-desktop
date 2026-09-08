@@ -1745,11 +1745,6 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
-  let nativeCaptureBound = false;
-  const publishNativeCapture = createNativeCapturePublisher({
-    task: findCanonicalTaskForChat(chat.id), chatId: chat.id, runId: req.runId ?? "", signal,
-    emit: (event) => { sink(event); nativeCaptureBound = true; },
-  });
   // Freeze conversation state before this turn becomes durable. Every routing
   // decision and model history below must see only earlier turns; otherwise the
   // current request is duplicated as both history and the active user prompt.
@@ -3037,7 +3032,7 @@ ${effectiveUserPrompt}`;
       if (req.chatId && !executionContext && !req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
-          presentation: browserPresentation, onScreenshot: publishNativeCapture,
+          presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture),
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
       }
       const cfg = await buildMcpConfigFile({
@@ -3134,7 +3129,7 @@ ${effectiveUserPrompt}`;
               if (ids.includes("agentlas-browser")) {
                 grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
                   permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
-                  presentation: browserPresentation, onScreenshot: publishNativeCapture });
+                  presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture) });
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
@@ -3271,6 +3266,12 @@ ${effectiveUserPrompt}`;
   // asking a conversational turn must not manufacture one. The chat id is the
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
+  let nativeCaptureBound = false;
+  const publishNativeCapture = createNativeCapturePublisher({
+    task: canonicalTask, chatId: chat.id, runId: req.runId ?? "", signal,
+    emit: (event) => { sink(event); nativeCaptureBound = true; },
+  });
+
   const imageGenerationRequired = !req.agentAppMode
     && !req.oneMode
     && chat.kind !== "division"
