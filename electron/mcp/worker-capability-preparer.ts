@@ -18,6 +18,11 @@ interface PreparationDependencies {
   materialize: (input: WorkerCapabilityInput, ids: string[], generation: string) => Promise<WorkerCapabilityLease>;
   receipt: (value: Record<string, unknown>) => void;
 }
+export class WorkerCapabilityMaterializationError extends WorkerCapabilityError {
+  constructor(readonly unavailableIds: readonly string[]) {
+    super("worker-capability-credential-or-server-unavailable");
+  }
+}
 // One bounded asynchronous pool attempt accommodates measured cold CLI judgments.
 export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 90_000;
 const permissionRank = { read: 0, write: 1, full: 2 } as const;
@@ -28,7 +33,7 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
   const expectedScope = scopeKey(deps.scope);
   const selectionMemo = new Map<string, string[]>();
   const emit = (receipt: Record<string, unknown>) => { try { deps.receipt(receipt); } catch { /* Receipt failure cannot widen authority. */ } };
-  const prepare: PrepareWorkerCapabilities = async (input) => {
+  const prepare = async (input: WorkerCapabilityInput, excludedIds: readonly string[] = [], reselection = false): Promise<WorkerCapabilityLease> => {
     const generation = createHash("sha256").update(JSON.stringify([input.workerId, input.attemptId, input.runtime.kind,
       input.runtime.backend, input.runtime.model, input.permission, input.cwd])).digest("hex");
     let inventory: WorkerCapabilityInventory | undefined;
@@ -62,7 +67,7 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
       instruction: "Select only capabilities genuinely required for this worker packet and its completion evidence. Existing tools remain available; do not pad the selection." });
     const memoKey = createHash("sha256").update(JSON.stringify([expectedScope, inventory.fingerprint,
       input.permission, input.cwd, task])).digest("hex");
-    const cachedIds = selectionMemo.get(memoKey);
+    const cachedIds = reselection ? undefined : selectionMemo.get(memoKey);
     let needs: ResolvedMcpNeeds;
     if (cachedIds) {
       needs = { decided: true, needed: [...cachedIds], reason: "same-scope successful selection", omitted: [] };
@@ -80,7 +85,7 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
           timer = setTimeout(() => { controller.abort(); reject(new WorkerCapabilityError("worker-capability-selection-timeout")); },
             WORKER_CAPABILITY_SELECTION_TIMEOUT_MS);
         });
-        needs = await Promise.race([deps.select({ task, candidates: inventory.candidates,
+        needs = await Promise.race([deps.select({ task, candidates: inventory.candidates.filter((candidate) => !excludedIds.includes(candidate.id)),
           goal: { objective: deps.scope.objective ?? "", acceptanceCriteria: deps.scope.acceptanceCriteria ?? [] },
           signal: controller.signal, timeoutMs: WORKER_CAPABILITY_SELECTION_TIMEOUT_MS }), interrupted]);
       } finally {
@@ -96,20 +101,33 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
           elapsedMs: attempt.elapsedMs, runtimeKind: attempt.runtimeReceipt.selection.kind })) ?? [] });
       throw new WorkerCapabilityError("worker-capability-selection-unavailable");
     }
-    if (needs.needed.some((id) => !available.has(id))) throw new WorkerCapabilityError("worker-capability-selection-outside-ceiling");
-    // Cache only a successful in-ceiling judgment, never a failure or a grant.
-    // Every actual attempt still gets fresh transport and current-scope checks.
-    selectionMemo.set(memoKey, [...needs.needed]);
-    while (selectionMemo.size > 64) selectionMemo.delete(selectionMemo.keys().next().value!);
+    if (needs.needed.some((id) => !available.has(id) || excludedIds.includes(id))) throw new WorkerCapabilityError("worker-capability-selection-outside-ceiling");
     const selectedIds = [...new Set([...deps.baselineIds, ...needs.needed])];
     // A complete empty judgment is legitimate; it must not fabricate an MCP grant.
     if (selectedIds.length === 0) {
       emit({ ...base, status: "retained", reasonCode: "no-additional-capability-selected", selectedIds: [] });
       return { runner: {}, assertCurrent, release() {} };
     }
-    const lease = await deps.materialize(input, selectedIds, generation);
+    let lease: WorkerCapabilityLease;
+    try { lease = await deps.materialize(input, selectedIds, generation); }
+    catch (error) {
+      selectionMemo.delete(memoKey);
+      if (error instanceof WorkerCapabilityMaterializationError && !reselection
+        && error.unavailableIds.length > 0
+        && error.unavailableIds.every((id) => selectedIds.includes(id))
+        && !error.unavailableIds.some((id) => deps.baselineIds.includes(id))) {
+        assertCurrent();
+        emit({ ...base, status: "reselecting", reasonCode: "worker-capability-materialization-reselection",
+          evidenceType: "capability-binding-only" });
+        return prepare(input, error.unavailableIds, true);
+      }
+      throw error;
+    }
     try { assertCurrent(); lease.assertCurrent(); }
-    catch (error) { await lease.release(); throw error; }
+    catch (error) { selectionMemo.delete(memoKey); await lease.release(); throw error; }
+    // A selection is reusable only after its transport and scope are validated.
+    selectionMemo.set(memoKey, [...needs.needed]);
+    while (selectionMemo.size > 64) selectionMemo.delete(selectionMemo.keys().next().value!);
     emit({ ...base, status: "prepared", selectedIds,
       addedIds: selectedIds.filter((id) => !deps.baselineIds.includes(id)), evidenceType: "capability-binding-only" });
     return { runner: lease.runner, assertCurrent() { assertCurrent(); lease.assertCurrent(); }, release: lease.release };

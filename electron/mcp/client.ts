@@ -179,7 +179,7 @@ import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate } from "../mcp-tool
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
 import { mcpServerConfigurationDigest, preparedMcpBindings } from "../mcp-tools/prepared-transport";
-import { createWorkerCapabilityPreparer } from "./worker-capability-preparer";
+import { createWorkerCapabilityPreparer, WorkerCapabilityMaterializationError } from "./worker-capability-preparer";
 import { WorkerCapabilityError, type PrepareWorkerCapabilities } from "./worker-capabilities";
 import { browserCdpHostFailureDiagnostic } from "../mcp-tools/browser-cdp-launcher";
 import {
@@ -3138,7 +3138,14 @@ ${effectiveUserPrompt}`;
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
-                throw new WorkerCapabilityError("worker-capability-credential-or-server-unavailable");
+                const unavailableIds = ids.filter((id) => !boundIds.has(id)
+                  || (id === "agentlas-browser" && grant && !childConfig?.nativeBrowserBound));
+                recordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_worker_capability_selection",
+                  payload: { schemaVersion: 1, workerId: input.workerId, attemptId: input.attemptId,
+                    status: "materialization-unavailable", reasonCode: "worker-capability-credential-or-server-unavailable",
+                    unavailableCatalogIds: unavailableIds.filter((id) => MCP_TOOL_CATALOG.some((entry) => entry.id === id)),
+                    unavailableCount: unavailableIds.length, evidenceType: "capability-binding-only" } });
+                throw new WorkerCapabilityMaterializationError(unavailableIds);
               }
               const preparedConfig = childConfig;
               return { runner: { mcpConfigPath: preparedConfig.configPath, mcpAllowedTools: preparedConfig.allowedTools,
