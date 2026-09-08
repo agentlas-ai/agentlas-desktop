@@ -1,3 +1,4 @@
+import type { NativeBrowserCookieImportResult } from "./types";
 // Connect의 "브라우저 자격증명 가져오기" 계약 — 렌더러와 메인이 공유한다.
 //
 // 왜 있는가: 지금까지 사용자는 Connect에서 사이트 주소를 손으로 치고 전용 창에서 하나씩
@@ -98,6 +99,8 @@ export interface BrowserCredentialImportRequest {
 }
 
 export interface BrowserCredentialImportResult {
+  /** Separate destination receipt; source import success is not native-session proof. */
+  nativeSession?: NativeBrowserCookieImportResult;
   ok: boolean;
   suppressionReason?: "development_effect_policy_disabled";
   /** 전용 프로필에 추가되거나 더 최신/읽을 수 있는 암호문으로 교체된 쿠키 행 수. */

@@ -44,7 +44,12 @@ export function getBrowserCredentialConsent(): BrowserCredentialConsent {
   }
 }
 
+let consentRevision = 0;
+/** Main-local epoch also distinguishes revoke/regrant while an import is pending. */
+export function browserCredentialConsentRevision(): number { return consentRevision; }
+
 function writeConsent(next: BrowserCredentialConsent): void {
+  consentRevision += 1;
   setMeta(BROWSER_CREDENTIAL_CONSENT_KEY, JSON.stringify(next));
 }
 
@@ -163,6 +168,9 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
         };
       }
       writeConsent({ ...current, lastSyncedAt: new Date().toISOString() });
+      await (await import("./native-session-cookie-import")).syncConnectBrowserSession({
+        domains: result.linkedSites.filter((site) => !result.requiresLoginSites?.includes(site)),
+      });
       if (result.cookiesAdded > 0) {
         console.log(`[browser-credentials] refreshed ${result.linkedSites.length} site(s), +${result.cookiesAdded} cookies`);
       }

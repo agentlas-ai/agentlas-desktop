@@ -1,4 +1,7 @@
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
 import { session as electronSession } from "electron";
 import type { CookiesSetDetails, Session } from "electron";
 import type { BrowserCdpHostFailureDiagnostic } from "../../shared/types";
@@ -6,12 +9,18 @@ import {
   acquireBrowserCdpLease,
   browserCdpHostFailureDiagnostic,
   browserCdpPort,
+  browserCdpProfilePath,
   browserCdpPortReady,
   ensureBrowserCdpHost,
   reconcileBrowserCdpOwnerWithRetry,
   releaseBrowserCdpLease,
 } from "../mcp-tools/browser-cdp-launcher";
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
+import { browserCredentialConsentRevision } from "./credential-sync";
+import { listBrowserSites } from "../store/browser-vault";
+import { getMeta, setMeta } from "../store/meta";
+import { getDb } from "../store/db";
+import { BROWSER_CREDENTIAL_CONSENT_KEY, type BrowserCredentialConsent } from "../../shared/browser-credentials";
 
 import type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 export type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
@@ -34,12 +43,13 @@ interface CookieWriteSummary {
   observed: number;
   imported: number;
   skipped: NativeBrowserCookieImportResult["skipped"];
+  preserved?: number;
 }
 
 type NativeCookieSession = Pick<Session, "cookies" | "flushStorageData">;
 
 class CookieImportError extends Error {
-  constructor(readonly code: Exclude<NativeBrowserCookieImportCode, "imported" | "partial">) {
+  constructor(readonly code: Exclude<NativeBrowserCookieImportCode, "imported" | "already-migrated" | "partial">, readonly counts?: CookieWriteSummary) {
     super(code);
     this.name = "CookieImportError";
   }
@@ -66,12 +76,13 @@ function result(
   hostFailure?: BrowserCdpHostFailureDiagnostic,
 ): NativeBrowserCookieImportResult {
   return {
-    ok: code === "imported" || code === "partial",
+    ok: code === "imported" || code === "already-migrated" || code === "partial",
     code,
     scope: "cookies-only",
     destinationPartition: NATIVE_BROWSER_PARTITION,
     observed: counts.observed,
     imported: counts.imported,
+    ...(counts.preserved !== undefined ? { preserved: counts.preserved } : {}),
     skipped: counts.skipped,
     ...(hostFailure ? { hostFailure } : {}),
   };
@@ -286,9 +297,11 @@ export async function writeNativeBrowserCookies(
   cookies: readonly CdpCookie[],
   destination: NativeCookieSession,
   nowSeconds = Date.now() / 1_000,
+  connect?: { isCurrent: () => boolean | Promise<boolean>; beginMigration?: () => void },
 ): Promise<CookieWriteSummary> {
   const counts = emptyCounts();
   counts.observed = cookies.length;
+  let begun = false;
   for (const cookie of cookies) {
     const converted = nativeCookieDetails(cookie, nowSeconds);
     if (converted.kind === "skip") {
@@ -296,12 +309,29 @@ export async function writeNativeBrowserCookies(
       continue;
     }
     try {
+      if (connect) {
+        if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
+        const existing = await destination.cookies.get({ name: converted.details.name });
+        if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
+        const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
+        const domain = host(String(cookie.domain));
+        if (existing.some((item) => host(item.domain ?? "") === domain && item.path === converted.details.path)) {
+          counts.preserved = (counts.preserved ?? 0) + 1;
+          continue;
+        }
+      }
+      if (connect && !begun) {
+        connect.beginMigration?.();
+        begun = true;
+      }
       await destination.cookies.set(converted.details);
       counts.imported += 1;
-    } catch {
+    } catch (error) {
+      if (error instanceof CookieImportError) throw error;
       counts.skipped.writeFailed += 1;
     }
   }
+  if (connect && !(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
   if (counts.imported > 0) {
     try { await destination.flushStorageData(); }
     catch { counts.skipped.writeFailed += 1; }
@@ -309,10 +339,10 @@ export async function writeNativeBrowserCookies(
   return counts;
 }
 
-async function importDedicatedBrowserCookiesOnce(
-  authorization: "explicit-user-action",
+async function syncConnectBrowserCookiesOnce(
+  connect: ConnectSessionScope,
 ): Promise<NativeBrowserCookieImportResult> {
-  if (authorization !== "explicit-user-action") return result("authorization-required");
+  if (connect && !(await connect.isCurrent())) return result("authorization-required");
   const port = browserCdpPort();
   let sourcePid: number | null = null;
   let lease: Awaited<ReturnType<typeof acquireBrowserCdpLease>> | null = null;
@@ -333,39 +363,156 @@ async function importDedicatedBrowserCookiesOnce(
     if (owned.state !== "owned" || !owned.pid || owned.pid !== sourcePid) {
       return result("source-ownership-unverified");
     }
-    const cookies = await readDedicatedBrowserCookies(port);
+    const observedCookies = await readDedicatedBrowserCookies(port);
+    if (connect && !(await connect.isCurrent())) return result("authorization-required");
+    const cookies = connect ? observedCookies.filter((cookie) => typeof cookie.domain === "string"
+      && connect.domains.some((domain) => {
+        const host = String(cookie.domain).replace(/^\./u, "").toLowerCase();
+        return host === domain || host.endsWith(`.${domain}`);
+      })) : observedCookies;
     if (cookies.length === 0) return result("source-empty");
     const stillOwned = await reconcileBrowserCdpOwnerWithRetry();
     if (stillOwned.state !== "owned" || stillOwned.pid !== sourcePid) {
       return result("source-ownership-unverified");
     }
     const destination = electronSession.fromPartition(NATIVE_BROWSER_PARTITION);
-    const counts = await writeNativeBrowserCookies(cookies, destination);
+    if (connect && !(await connect.isCurrent())) return result("authorization-required");
+    const sourceCurrent = async () => {
+      if (!(await connect.isCurrent())) return false;
+      try {
+        const marker = JSON.parse(await fs.promises.readFile(path.join(browserCdpProfilePath(), ".agentlas-cdp-owner.json"), "utf8"));
+        return marker.pid === sourcePid && marker.port === port && typeof marker.profile === "string"
+          && path.resolve(marker.profile) === path.resolve(browserCdpProfilePath()) && connect.hasCurrentGrant();
+      } catch { return false; }
+    };
+    if (!(await sourceCurrent())) return result("source-ownership-unverified");
+    const counts = await writeNativeBrowserCookies(cookies, destination, Date.now() / 1000,
+      { isCurrent: sourceCurrent, beginMigration: connect.beginMigration });
+    if (connect && !(await connect.isCurrent())) return result("authorization-required", counts);
     if (counts.imported === 0 && counts.skipped.writeFailed > 0) return result("destination-write-failed", counts);
-    if (counts.imported === 0) return result("no-transferable-cookies", counts);
+    if (counts.imported === 0 && !counts.preserved) return result("no-transferable-cookies", counts);
     const incomplete = counts.skipped.partitioned > 0
       || counts.skipped.invalid > 0
       || counts.skipped.writeFailed > 0;
     return result(incomplete ? "partial" : "imported", counts);
   } catch (error) {
-    return result(error instanceof CookieImportError ? error.code : "source-cookie-read-failed");
+    return result(error instanceof CookieImportError ? error.code : "source-cookie-read-failed", error instanceof CookieImportError ? error.counts : undefined);
   } finally {
     releaseBrowserCdpLease(lease);
   }
 }
 
-let nativeCookieImportFlight: Promise<NativeBrowserCookieImportResult> | null = null;
-
-/** Explicit Main-only bridge from the owned CDP profile into the native browser partition. */
+/** Backward-compatible IPC name; Connect is the sole consent/source pipeline. */
 export function importDedicatedBrowserCookies(input: {
   authorization: "explicit-user-action";
 }): Promise<NativeBrowserCookieImportResult> {
   if (input?.authorization !== "explicit-user-action") return Promise.resolve(result("authorization-required"));
-  if (nativeCookieImportFlight) return nativeCookieImportFlight;
-  const flight = importDedicatedBrowserCookiesOnce(input.authorization);
-  nativeCookieImportFlight = flight;
-  void flight.finally(() => {
-    if (nativeCookieImportFlight === flight) nativeCookieImportFlight = null;
-  });
+  return syncConnectBrowserSession();
+}
+
+type ConnectSessionScope = {
+  identity: string; domains: string[]; markerKeys: Map<string, string>;
+  isCurrent: () => Promise<boolean>; hasCurrentGrant: () => boolean; beginMigration?: () => void;
+};
+const CONNECT_MIGRATION_SCHEMA = "agentlas.native-connect-migration.v1";
+function writeMigrationMarkers(keys: string[], state: "pending" | "completed", partial = false): void {
+  getDb().transaction(() => {
+    for (const key of keys) setMeta(key, JSON.stringify({ schema: CONNECT_MIGRATION_SCHEMA, state, partial }));
+  })();
+}
+
+async function connectSessionScope(requestedDomains?: readonly string[]): Promise<ConnectSessionScope | null> {
+  try {
+    const raw = getMeta(BROWSER_CREDENTIAL_CONSENT_KEY);
+    if (!raw) return null;
+    const consent = JSON.parse(raw) as BrowserCredentialConsent;
+    const iso = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+    if (consent.granted !== true || !iso(consent.grantedAt)
+      || (consent.lastSyncedAt !== null && !iso(consent.lastSyncedAt))
+      || typeof consent.profileId !== "string" || !/^(Google Chrome|Microsoft Edge|Brave|Chromium)::(Default|Profile [0-9]+)$/u.test(consent.profileId)
+      || !Array.isArray(consent.domains) || !consent.domains.length || consent.domains.length > 256
+      || !consent.domains.every((domain) => typeof domain === "string" && domain.length <= 253
+        && /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(domain))) return null;
+    const sites = listBrowserSites();
+    const domains = [...new Set(consent.domains.filter((domain) => (!requestedDomains || requestedDomains.includes(domain)) && /^[a-z0-9.-]+$/u.test(domain)
+      && !domain.startsWith(".") && sites.some((site) => site.site === domain && site.session.status === "valid")))].sort();
+    if (!domains.length) return null;
+    const revision = browserCredentialConsentRevision(), port = browserCdpPort();
+    const configuredProfile = path.resolve(browserCdpProfilePath());
+    const stat = await fs.promises.stat(configuredProfile).catch(() => null);
+    if (stat && !stat.isDirectory()) return null;
+    const profile = stat ? await fs.promises.realpath(configuredProfile) : configuredProfile;
+    const statusCount = getDb().prepare(`SELECT COUNT(*) AS count FROM browser_sessions WHERE status = 'valid' AND site IN (${domains.map(() => "?").join(",")})`);
+    const consentCurrent = () => revision === browserCredentialConsentRevision() && getMeta(BROWSER_CREDENTIAL_CONSENT_KEY) === raw
+      && (statusCount.get(...domains) as { count: number }).count === domains.length;
+    const identity = JSON.stringify({ consent, revision, domains,
+      configuredProfile, profile, device: stat?.dev ?? null, inode: stat?.ino ?? null, port });
+    const hasCurrentGrant = () => consentCurrent() && path.resolve(browserCdpProfilePath()) === configuredProfile && browserCdpPort() === port;
+    const isCurrent = async () => {
+      if (!hasCurrentGrant()) return false;
+      try {
+        const [currentStat, currentPath] = await Promise.all([fs.promises.stat(configuredProfile), fs.promises.realpath(configuredProfile)]);
+        return hasCurrentGrant() && currentStat.isDirectory() && currentStat.dev === stat?.dev && currentStat.ino === stat?.ino && currentPath === profile;
+      } catch { return false; }
+    };
+    if (!consentCurrent()) return null;
+    const destination = electronSession.fromPartition(NATIVE_BROWSER_PARTITION).storagePath;
+    if (!destination) return null;
+    const markerKeys = new Map(domains.map((domain) => [domain, "browser.nativeConnectMigration.v1." + createHash("sha256").update(JSON.stringify({
+      destination, profile, device: stat?.dev ?? null, inode: stat?.ino ?? null,
+      domain,
+    })).digest("hex")]));
+    return { identity, domains, markerKeys, isCurrent, hasCurrentGrant };
+  } catch { return null; }
+}
+
+let connectSessionFlight: Promise<NativeBrowserCookieImportResult> | null = null;
+const connectedScopes = new Map<string, NativeBrowserCookieImportResult>();
+
+/** Reuses only Connect's already imported dedicated profile. No personal-browser discovery. */
+export function syncConnectBrowserSession(input?: { domains: readonly string[]; reason?: "connect-import" | "refresh" }): Promise<NativeBrowserCookieImportResult> {
+  const requestedDomains = input?.domains.slice();
+  const previous = connectSessionFlight ?? Promise.resolve();
+  const flight = previous.catch(() => undefined).then(async () => {
+    const scope = await connectSessionScope(requestedDomains);
+    if (!scope) return result("authorization-required");
+    const profile = browserCdpProfilePath();
+    let hasImportedStore = false;
+    try {
+      const files = [path.join(profile, "Default", "Network", "Cookies"), path.join(profile, "Default", "Cookies")];
+      hasImportedStore = (await Promise.all(files.map((file) => fs.promises.stat(file).catch(() => null)))).some((stat) => stat?.isFile());
+    } catch { return result("source-ownership-unverified"); }
+    if (!hasImportedStore) return result("source-empty");
+    if (!(await scope.isCurrent())) return result("authorization-required");
+    const explicitImport = input?.reason === "connect-import";
+    const pendingDomains: string[] = [];
+    let previousPartial = false;
+    for (const domain of scope.domains) {
+      const saved = getMeta(scope.markerKeys.get(domain)!);
+      if (explicitImport || !saved) { pendingDomains.push(domain); continue; }
+      try {
+        const marker = JSON.parse(saved);
+        if (marker.schema !== CONNECT_MIGRATION_SCHEMA || marker.state !== "completed" || typeof marker.partial !== "boolean") return result("migration-requires-connect");
+        previousPartial ||= marker.partial;
+      } catch { return result("migration-requires-connect"); }
+    }
+    if (!pendingDomains.length) return result(previousPartial ? "partial" : "already-migrated");
+    const prior = connectedScopes.get(scope.identity);
+    if (!explicitImport && prior && await scope.isCurrent()) return prior;
+    const markerKeys = pendingDomains.map((domain) => scope.markerKeys.get(domain)!);
+    const receipt = await syncConnectBrowserCookiesOnce({ ...scope, domains: pendingDomains,
+      beginMigration: () => writeMigrationMarkers(markerKeys, "pending"),
+    });
+    if (receipt.ok && await scope.isCurrent()) {
+      writeMigrationMarkers(markerKeys, "completed", receipt.code === "partial");
+      // Only successful exact-scope reuse is cached. Native cookies persist;
+      // restart revalidates Connect's durable consent and current profile.
+      connectedScopes.clear();
+      connectedScopes.set(scope.identity, receipt);
+    }
+    return receipt;
+  }).catch(() => result("source-cookie-read-failed"));
+  connectSessionFlight = flight;
+  void flight.finally(() => { if (connectSessionFlight === flight) connectSessionFlight = null; }).catch(() => undefined);
   return flight;
 }

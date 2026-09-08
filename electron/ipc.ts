@@ -1,4 +1,4 @@
-import { importDedicatedBrowserCookies } from "./browser/native-session-cookie-import";
+import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { getLongRunByGoalId } from "./store/long-runs";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -664,6 +664,7 @@ import type { BrowserPermissionDecision } from "./browser/connect";
 import { importBrowserCredentials, scanBrowserCredentials } from "./browser/credential-import";
 import {
   browserCredentialConsentIsPending,
+  browserCredentialConsentRevision,
   getBrowserCredentialConsent,
   recordBrowserCredentialConsent,
   refreshBrowserCredentialsIfDue,
@@ -3674,10 +3675,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:importCredentials", async (_e, profileId: string, domains: string[]) => {
     const id = String(profileId || "");
     const list = Array.isArray(domains) ? domains.map(String) : [];
+    const consentRevision = browserCredentialConsentRevision();
     const result = await importBrowserCredentials(id, list);
+    let importedDomains: string[] = [];
     // 사용자가 실제로 가져온 그 선택이 곧 승인이다. 별도 동의 화면을 한 번 더 띄우지 않는다 —
     // 승인은 "묻는 순간"에 한 번(오너결정 2026-08-15), 그 뒤로는 이 집합만 자동 갱신한다.
-    if (result.ok && result.linkedSites.length > 0) {
+    if (result.ok && result.linkedSites.length > 0 && browserCredentialConsentRevision() === consentRevision) {
       // linkedSites 는 정규화된 사이트 문자열이고 스킴이 없을 수 있다("x.com"). new URL 에
       // 그대로 넣으면 던져서 승인 도메인이 통째로 빈 배열이 됐다 — 그러면 승인은 기록되는데
       // 자동 갱신은 영영 아무것도 하지 않는 반쪽 배선이 된다(실측으로 잡음).
@@ -3695,9 +3698,12 @@ export function registerIpcHandlers(): void {
           }
         })
         .filter(Boolean);
-      if (granted.length > 0) recordBrowserCredentialConsent(id, granted);
+      if (granted.length > 0) {
+        recordBrowserCredentialConsent(id, granted);
+        importedDomains = granted;
+      }
     }
-    return result;
+    return result.ok ? { ...result, nativeSession: await syncConnectBrowserSession({ domains: importedDomains, reason: "connect-import" }) } : result;
   });
   ipcMain.handle("browser:credentialConsent", () => ({
     consent: getBrowserCredentialConsent(),

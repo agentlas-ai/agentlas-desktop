@@ -7,7 +7,7 @@
 import { BaseWindow, BrowserWindow, WebContentsView, nativeImage } from "electron";
 import { randomUUID } from "node:crypto";
 import type { WebContents, NativeImage, Rectangle } from "electron";
-import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
+import type { NativeBrowserCookieImportResult, WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
 
 type ActiveWorkView = {
   ownerId: number;
@@ -25,6 +25,7 @@ type ActiveWorkView = {
   pendingUrl: string;
   error?: string;
   captureRestore?: () => void;
+  nativeSession?: NativeBrowserCookieImportResult;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
@@ -69,7 +70,8 @@ function browserTab(active: ActiveWorkView): WorkLiveBrowserTab {
   return { viewId: active.viewId, taskScopeId: active.taskScopeId!, state: active.state, visible: active.visible && active.state === "ready",
     url: active.view.webContents.getURL() || active.pendingUrl, title: active.view.webContents.getTitle(),
     canGoBack: active.view.webContents.navigationHistory.canGoBack(),
-    canGoForward: active.view.webContents.navigationHistory.canGoForward(), error: active.error };
+    canGoForward: active.view.webContents.navigationHistory.canGoForward(), error: active.error,
+    ...(active.nativeSession ? { nativeSession: active.nativeSession } : {}) };
 }
 
 export function listWorkBrowserTabs(ownerId: number, taskScopeId: string): WorkLiveBrowserTab[] {
@@ -81,10 +83,14 @@ export async function createWorkBrowserTab(ownerId: number, taskScopeId: string,
   Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }> {
   const owner = nativeTaskOwners.get(key(ownerId, taskScopeId));
   if (!owner || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
+  const nativeSession = await (await import("./browser/native-session-cookie-import")).syncConnectBrowserSession();
+  const currentOwner = nativeTaskOwners.get(key(ownerId, taskScopeId));
+  if (!currentOwner || currentOwner.window !== owner.window || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
   const viewId = `browser_${randomUUID().replace(/-/g, "")}`;
   const result = await openWorkLiveView({ ...owner, viewId, url, mode: "browser", visible: false,
     bounds: { x: 0, y: 0, width: 1000, height: 750 } });
   const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (active) active.nativeSession = nativeSession;
   return result.ok && active ? { ok: true, tab: browserTab(active) } : { ok: false, reason: result.reason ?? "guest-unavailable" };
 }
 

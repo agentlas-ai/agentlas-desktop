@@ -3784,6 +3784,7 @@ export type WorkLiveViewInput =
 
 type NativeBrowserCookieImportFailureCode =
   | "authorization-required"
+  | "migration-requires-connect"
   | "source-host-unavailable"
   | "source-ownership-unverified"
   | "source-reservation-failed"
@@ -3793,7 +3794,7 @@ type NativeBrowserCookieImportFailureCode =
   | "no-transferable-cookies"
   | "destination-write-failed";
 
-export type NativeBrowserCookieImportCode = "imported" | "partial" | NativeBrowserCookieImportFailureCode;
+export type NativeBrowserCookieImportCode = "imported" | "already-migrated" | "partial" | NativeBrowserCookieImportFailureCode;
 
 export interface NativeBrowserCookieImportResult {
   ok: boolean;
@@ -3803,6 +3804,8 @@ export interface NativeBrowserCookieImportResult {
   destinationPartition: "persist:agentlas-browser-default";
   observed: number;
   imported: number;
+  /** Existing native cookies retained by Connect migration, never overwritten. */
+  preserved?: number;
   skipped: {
     expired: number;
     partitioned: number;
@@ -3815,6 +3818,7 @@ export interface NativeBrowserCookieImportResult {
 
 
 export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
+  nativeSession?: NativeBrowserCookieImportResult;
   /** True only for the currently shown, ready guest. */
   visible?: boolean;
   taskScopeId: string;
