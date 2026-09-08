@@ -23,7 +23,9 @@ export function oneWorkerPanelFeed(selection: OneWorkerPanelSelection, run: OneW
   if (!run || run.chatId !== selection.chatId || run.runId !== selection.runId || !selection.agentId) return [];
   const entries = new Map<string, OneWorkerFeedEntry>();
   for (const item of run.state.items) {
-    if (item.agentId !== selection.agentId) continue;
+    // Public handoff reports are below. Provider reasoning/thinking spans
+    // are not a worker report and must not become a new raw transcript here.
+    if (item.agentId !== selection.agentId || item.kind === "reasoning") continue;
     // The reducer merges lifecycle updates into the original start row. Put
     // a proven worker terminal capsule at its actual update time, not before
     // the tools that ran between start and completion.

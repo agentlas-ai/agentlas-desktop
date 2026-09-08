@@ -674,7 +674,9 @@ export function reduceOneActivity(
       status: event.notice.level === "error" ? "failed" : "info",
       observedAt,
       message: event.notice.message,
-      ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : {}),
+      // A runtime accounting identity alone is not a worker node.
+      ...(event.agentId || (event.agentName?.trim() && event.runtimeAgentId)
+        ? { agentId: event.agentId || event.runtimeAgentId } : {}),
       detail: event.notice.details,
       noticeLevel: event.notice.level,
       ...(event.role?.trim() ? { role: event.role.trim() } : {}),
@@ -1142,6 +1144,10 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         ? rawLevel
         : "info";
       const display = ledgerString(payload, "noticeDisplay");
+      // agent_id may be the enclosing runtime's accounting identity. Only
+      // an explicit topology node or a named legacy actor groups this notice.
+      const noticeAgentId = ledgerString(payload, "agentNodeId") || row.nodeId
+        || (ledgerString(payload, "agentName") ? row.agentId : undefined);
       if (message) {
         apply({
           kind: "notice",
@@ -1153,8 +1159,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
             ...(ledgerString(payload, "noticeDetails") ? { details: ledgerString(payload, "noticeDetails") } : {}),
             ...(display === "row" || display === "divider" ? { display } : {}),
           },
-          ...(ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId
-            ? { agentId: ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId! } : {}),
+          ...(noticeAgentId ? { agentId: noticeAgentId } : {}),
           ...(ledgerString(payload, "agentName") ? { agentName: ledgerString(payload, "agentName") } : {}),
           ...(ledgerString(payload, "role") ? { role: ledgerString(payload, "role") } : {}),
           ...(["plan", "delegate", "synthesize"].includes(ledgerString(payload, "phase") ?? "")
