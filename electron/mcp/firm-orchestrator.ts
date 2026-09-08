@@ -157,6 +157,10 @@ export interface FirmRunParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  /** Main-owned MCP inventory isolation; does not remove permitted builtin tools. */
+  isolatedMcpConfig?: true;
+  /** Explicit Main-owned browser-only execution restriction for delegates. */
+  browserOnly?: true;
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
@@ -1101,6 +1105,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
           agentId: nodeRuntimeId,
           orchestrationAgentId: node.id,
+          isolatedMcpConfig: p.isolatedMcpConfig,
+          browserOnly: turn.runtimeToolsDisabled || controlPlaneTurn ? undefined : p.browserOnly,
           mcpConfigPath: turn.runtimeToolsDisabled || controlPlaneTurn
             ? undefined
             : p.req.agentAppMode

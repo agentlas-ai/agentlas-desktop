@@ -451,6 +451,8 @@ export interface BorrowedTaskForceParams {
   mcpCodexConfigArgs?: string[];
   /** Ignore provider-global MCP/plugin config and admit only Main's exact per-run grant. */
   isolatedMcpConfig?: true;
+  /** Main-authored execution restriction, independent of MCP inventory isolation. */
+  browserOnly?: true;
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
@@ -1353,7 +1355,7 @@ function taskForceRunnerBase(
     mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
     isolatedMcpConfig: p.isolatedMcpConfig,
-    browserOnly: p.isolatedMcpConfig,
+    browserOnly: p.browserOnly,
     env: p.req.agentAppMode
       ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
       : toolsAllowed
@@ -3824,6 +3826,8 @@ async function runBorrowedAgentTurn(
         mcpConfigPath: p.mcpConfigPath,
         mcpAllowedTools: p.mcpAllowedTools,
         mcpCodexConfigArgs: p.mcpCodexConfigArgs,
+        isolatedMcpConfig: p.isolatedMcpConfig,
+        browserOnly: p.browserOnly,
         agentAppMcpRuntimeEnv: p.agentAppMcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: p.onAgentAppMcpRuntimeUnavailable,
         runtimePinHonored: p.runtimePinHonored,

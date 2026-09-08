@@ -2670,6 +2670,10 @@ ${effectiveUserPrompt}`;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
   let isolatedMcpConfig = false;
+  // Selecting an authenticated browser adds a capability; it does not revoke
+  // the file/shell grant needed by mixed implementation and visual QA work.
+  // Only the explicit host-normalized tool mode restricts execution to browser.
+  const browserOnly = req.toolMode === "browser";
   // 커넥터 C38 — 이번 호출에 걸린 도구 중개 관문. 걸지 못했으면 계속 null이고,
   // 그 사실이 그대로 실행 기록으로 나간다(못 막은 것을 막았다고 적지 않는다).
   let toolBroker: MaterializedToolBroker | null = null;
@@ -3224,6 +3228,7 @@ ${effectiveUserPrompt}`;
       // Every early team route crosses this Main-owned boundary. A verifier
       // retry must reach the planner/workers before the general runner helper.
       goalCheckpoint: params.chat.goalId ? latestTaskCheckpoint(params.chat.goalId) ?? undefined : undefined,
+      ...(browserOnly ? { browserOnly: true as const } : {}),
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
       bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
@@ -4059,6 +4064,8 @@ ${effectiveUserPrompt}`;
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,
+            ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
+            ...(browserOnly ? { browserOnly: true as const } : {}),
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
             onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
             onControllerRuntimeFallback: emitControllerRuntimeFallback,
@@ -4594,7 +4601,7 @@ ${effectiveUserPrompt}`;
       signal,
       permission: req.permissions,
       ...(req.simulation === true ? { simulation: true as const } : {}),
-      ...(isolatedMcpConfig ? { browserOnly: true as const } : {}),
+      ...(browserOnly ? { browserOnly: true as const } : {}),
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
       ...(usesMobileDurableDecision(executionContext) ? { noSynchronousAsk: true as const } : {}),
