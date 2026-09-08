@@ -2330,6 +2330,37 @@ export interface BrowserActionLog {
   approval: string | null;
 }
 export type BrowserLiveViewport = "desktop" | "phone";
+export type BrowserCdpHostFailureStage =
+  | "profile"
+  | "existing-host"
+  | "launcher"
+  | "initialize"
+  | "browser-call"
+  | "port-check"
+  | "ownership"
+  | "guardian"
+  | "unknown";
+export type BrowserCdpHostFailureCode =
+  | "profile-unavailable"
+  | "ownership-unverified"
+  | "guardian-unavailable"
+  | "launcher-unavailable"
+  | "launcher-materialize-failed"
+  | "launcher-spawn-failed"
+  | "launcher-exited"
+  | "launcher-timeout"
+  | "launcher-stdin-closed"
+  | "launcher-initialize-failed"
+  | "launcher-browser-call-failed"
+  | "host-not-ready"
+  | "unknown";
+export interface BrowserCdpHostFailureDiagnostic {
+  stage: BrowserCdpHostFailureStage;
+  code: BrowserCdpHostFailureCode;
+  /** Bounded byte count only; stderr content is never retained or exposed. */
+  stderrBytes?: number;
+  stderrTruncated?: boolean;
+}
 export interface BrowserLiveFrame {
   available: boolean;
   dataUrl: string | null;
@@ -2343,6 +2374,8 @@ export interface BrowserLiveFrame {
   viewport: BrowserLiveViewport;
   capturedAt: string;
   error: "browser-offline" | "no-page" | "capture-failed" | "task-scope-missing" | "browser-session-unlinked" | null;
+  /** Machine-readable browser-host failure without raw stderr, argv, or URLs. */
+  hostFailure?: BrowserCdpHostFailureDiagnostic | null;
 }
 /** A frame pushed by the task-scoped CDP screencast. */
 export interface BrowserLiveStreamFrame extends BrowserLiveFrame {

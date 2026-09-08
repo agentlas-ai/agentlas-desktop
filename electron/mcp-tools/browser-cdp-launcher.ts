@@ -10,8 +10,8 @@
 // 개인정보는 플러그인 패키지에 절대 들어가지 않는다. 평소 쓰는 Chrome 프로필을 복사하지 않으며,
 // 사용자가 전용 창에서 직접 로그인한 세션만 ~/.agentlas/chrome-cdp-profile 안에 남는다.
 //
-// 이 파일은 문자열 소스를 ~/.agentlas/agentlas-browser-cdp.mjs 로 물질화(materialize)한다.
-// catalog 엔트리가 `node ~/.agentlas/agentlas-browser-cdp.mjs` 로 실행한다(의존성 0, 순수 node).
+// 이 파일은 문자열 소스를 기본 ~/.agentlas/agentlas-browser-cdp.mjs 로 물질화(materialize)한다.
+// 격리된 개발 실행은 AGENTLAS_CDP_LAUNCHER로 별도 절대 경로를 지정할 수 있다.
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -23,16 +23,27 @@ import {
   resolveAgentlasBrowserRuntime,
   resolveAgentlasBrowserRuntimeExecutable,
 } from "../browser/runtime";
+import type {
+  BrowserCdpHostFailureCode,
+  BrowserCdpHostFailureDiagnostic,
+  BrowserCdpHostFailureStage,
+} from "../../shared/types";
 
 export const BROWSER_CDP_LAUNCHER_BASENAME = "agentlas-browser-cdp.mjs";
+export const BROWSER_CDP_LAUNCHER_PATH_ENV = "AGENTLAS_CDP_LAUNCHER";
 
 /** Exact bundled Playwright MCP entrypoint; never resolve or download at run time. */
 export function playwrightMcpCliPath(): string {
   return path.join(path.dirname(require.resolve("@playwright/mcp")), "cli.js");
 }
 
-/** ~/.agentlas/agentlas-browser-cdp.mjs 절대 경로. */
+/** 기본 런처 또는 명시한 격리 개발 런처의 절대 경로. */
 export function browserCdpLauncherPath(): string {
+  const configured = process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim();
+  if (configured) {
+    if (!path.isAbsolute(configured)) throw new Error("Agentlas browser launcher override must be absolute.");
+    return path.resolve(configured);
+  }
   return path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME);
 }
 
@@ -479,6 +490,55 @@ function uniquePositivePids(values: number[]): number[] {
   return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
 
+function allowedBrowserExecutablePaths(platform = process.platform): Set<string> {
+  const allowed = new Set<string>();
+  for (const candidate of browserCdpExecutableCandidates()) {
+    allowed.add(canonicalProfilePath(candidate, platform));
+    try { allowed.add(canonicalProfilePath(fs.realpathSync(candidate), platform)); } catch { /* missing candidate */ }
+  }
+  return allowed;
+}
+
+/** Parse the bounded pid+executable inventory; command lines are queried only for these candidates. */
+export function darwinBrowserCandidatePids(
+  output: string,
+  executableCandidates = browserCdpExecutableCandidates(),
+): number[] {
+  const allowed = new Set<string>();
+  for (const candidate of executableCandidates) {
+    allowed.add(canonicalProfilePath(candidate, "darwin"));
+    try { allowed.add(canonicalProfilePath(fs.realpathSync(candidate), "darwin")); } catch { /* fixture or missing candidate */ }
+  }
+  const pids: number[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const match = line.match(/^\s*(\d+)\s+(.+?)\s*$/u);
+    if (match && allowed.has(canonicalProfilePath(match[2], "darwin"))) pids.push(Number(match[1]));
+  }
+  return uniquePositivePids(pids);
+}
+
+async function inspectDarwinPids(
+  pids: number[],
+  loopbackByPid?: Map<number, boolean>,
+  strict = false,
+): Promise<BrowserCdpProcessSnapshot[]> {
+  const snapshots: BrowserCdpProcessSnapshot[] = [];
+  for (const pid of uniquePositivePids(pids)) {
+    try {
+      const [commandLine, textFiles] = await Promise.all([
+        execFileText("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="]),
+        execFileText("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"]),
+      ]);
+      const executable = textFiles.split(/\r?\n/u).find((line) => line.startsWith("n"))?.slice(1) ?? "";
+      snapshots.push({ pid, executable, commandLine: commandLine.trim(), loopbackOnly: loopbackByPid?.get(pid) ?? true });
+    } catch (error) {
+      if (strict) throw error;
+      // The candidate exited during the two targeted reads.
+    }
+  }
+  return snapshots;
+}
+
 async function inspectDarwinCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
   const listenerOutput = await execFileText("/usr/sbin/lsof", [
     "-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpn",
@@ -494,20 +554,14 @@ async function inspectDarwinCdpProcesses(port: number): Promise<BrowserCdpProces
     }
   }
   const pids = uniquePositivePids([...addressesByPid.keys()]);
-  const snapshots: BrowserCdpProcessSnapshot[] = [];
+  const loopbackByPid = new Map<number, boolean>();
   for (const pid of pids) {
-    const [commandLine, textFiles] = await Promise.all([
-      execFileText("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="]),
-      execFileText("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"]),
-    ]);
-    const executable = textFiles.split(/\r?\n/u).find((line) => line.startsWith("n"))?.slice(1) ?? "";
     const addresses = addressesByPid.get(pid) ?? [];
-    const loopbackOnly = addresses.length > 0 && addresses.every((address) =>
+    loopbackByPid.set(pid, addresses.length > 0 && addresses.every((address) =>
       address === `127.0.0.1:${port}` || address === `[::1]:${port}` || address === `::1:${port}`,
-    );
-    snapshots.push({ pid, executable, commandLine: commandLine.trim(), loopbackOnly });
+    ));
   }
-  return snapshots;
+  return inspectDarwinPids(pids, loopbackByPid, true);
 }
 
 function linuxListenerInodes(port: number): Map<string, boolean> {
@@ -613,37 +667,21 @@ export function browserCdpProfileRootMatches(
   );
 }
 
-function executableAtCommandStart(commandLine: string): string {
-  const candidates = browserCdpExecutableCandidates().sort((left, right) => right.length - left.length);
-  for (const candidate of candidates) {
-    if (commandLine === candidate || commandLine.startsWith(`${candidate} `)) return candidate;
-    if (commandLine.startsWith(`"${candidate}" `)) return candidate;
-  }
-  return "";
-}
-
 /** Inspect every browser root carrying the exact Agentlas profile+port marker. */
 export async function inspectBrowserCdpProfileRoots(): Promise<BrowserCdpProcessSnapshot[]> {
   const rows: BrowserCdpProcessSnapshot[] = [];
   if (process.platform === "darwin") {
-    const output = await execFileText("/bin/ps", ["-axo", "pid=,command="]);
-    for (const line of output.split(/\r?\n/u)) {
-      const match = line.match(/^\s*(\d+)\s+([\s\S]+)$/u);
-      if (!match) continue;
-      const commandLine = match[2];
-      const snapshot = {
-        pid: Number(match[1]),
-        executable: executableAtCommandStart(commandLine),
-        commandLine,
-        loopbackOnly: true,
-      };
-      if (browserCdpProfileRootMatches(snapshot)) rows.push(snapshot);
-    }
-    return rows;
+    const inventory = await execFileText("/bin/ps", ["-ww", "-axo", "pid=,comm="]);
+    const candidates = await inspectDarwinPids(darwinBrowserCandidatePids(inventory));
+    return candidates.filter((snapshot) => browserCdpProfileRootMatches(snapshot));
   }
   if (process.platform === "win32") {
+    const allowed = [...allowedBrowserExecutablePaths("win32")]
+      .map((candidate) => `'${candidate.replace(/'/gu, "''")}'`)
+      .join(",");
     const script = [
-      "$rows = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('--user-data-dir=') } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; executable = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; loopbackOnly = $true } })",
+      `$allowed = @(${allowed})`,
+      "$rows = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $allowed -contains ([string]$_.ExecutablePath).ToLowerInvariant() } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; executable = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; loopbackOnly = $true } })",
       "$rows | ConvertTo-Json -Compress",
     ].join("; ");
     const output = await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
@@ -659,9 +697,11 @@ export async function inspectBrowserCdpProfileRoots(): Promise<BrowserCdpProcess
       try {
         const pid = Number(entry);
         if (typeof process.getuid === "function" && fs.statSync(`/proc/${pid}`).uid !== process.getuid()) continue;
+        const executable = fs.readlinkSync(`/proc/${pid}/exe`);
+        if (!browserCdpExecutableAllowed(executable, "linux")) continue;
         const snapshot = {
           pid,
-          executable: fs.readlinkSync(`/proc/${pid}/exe`),
+          executable,
           commandLine: fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" "),
           loopbackOnly: true,
         };
@@ -775,6 +815,17 @@ async function waitForBrowserCdpProcessExit(pid: number, timeoutMs: number): Pro
   return !browserCdpProcessIsLive(pid);
 }
 
+async function browserCdpProfileRootStillAttested(pid: number): Promise<boolean> {
+  const owner = readBrowserCdpOwner();
+  if (
+    !owner
+    || owner.pid !== pid
+    || owner.port !== browserCdpPort()
+    || canonicalProfilePath(owner.profile) !== canonicalProfilePath(browserCdpProfilePath())
+  ) return false;
+  return browserCdpProfileRootPidMatches(pid);
+}
+
 /**
  * Browser.close can drop the CDP listener while leaving the macOS browser root
  * alive indefinitely. Once the exact PID has already been ownership-attested
@@ -782,9 +833,11 @@ async function waitForBrowserCdpProcessExit(pid: number, timeoutMs: number): Pro
  */
 async function terminateAttestedBrowserCdpRoot(pid: number): Promise<boolean> {
   if (!browserCdpProcessIsLive(pid)) return true;
-  await terminateBrowserCdpProfileRoot(pid, false);
+  if (!(await browserCdpProfileRootStillAttested(pid))) return false;
+  if (!(await terminateBrowserCdpProfileRoot(pid, false))) return false;
   if (await waitForBrowserCdpProcessExit(pid, 2_000)) return true;
-  await terminateBrowserCdpProfileRoot(pid, true);
+  if (!(await browserCdpProfileRootStillAttested(pid))) return false;
+  if (!(await terminateBrowserCdpProfileRoot(pid, true))) return false;
   return waitForBrowserCdpProcessExit(pid, 2_000);
 }
 
@@ -883,7 +936,19 @@ function cancelAllBrowserCdpLeases(): number {
   return cancelled;
 }
 
-async function terminateBrowserCdpProfileRoot(pid: number, force = false): Promise<void> {
+async function browserCdpProfileRootPidMatches(pid: number): Promise<boolean> {
+  try {
+    return (await inspectBrowserCdpProfileRoots()).some(
+      (root) => root.pid === pid && browserCdpProfileRootMatches(root),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function terminateBrowserCdpProfileRoot(pid: number, force = false): Promise<boolean> {
+  if (!browserCdpProcessIsLive(pid)) return true;
+  if (!(await browserCdpProfileRootPidMatches(pid))) return false;
   try {
     if (process.platform === "win32") {
       await new Promise<void>((resolve) => {
@@ -898,6 +963,7 @@ async function terminateBrowserCdpProfileRoot(pid: number, force = false): Promi
       process.kill(pid, force ? "SIGKILL" : "SIGTERM");
     }
   } catch { /* process already exited */ }
+  return true;
 }
 
 async function waitForBrowserCdpProfileRootsClosed(timeoutMs: number): Promise<BrowserCdpProcessSnapshot[]> {
@@ -1150,7 +1216,28 @@ export interface BrowserCdpHostEnsureResult {
 }
 
 const BROWSER_CDP_HOST_ENSURE_TIMEOUT_MS = 20_000;
+const BROWSER_CDP_BOOTSTRAP_STDERR_LIMIT = 16 * 1024;
 let browserCdpHostEnsureFlight: Promise<BrowserCdpHostEnsureResult> | null = null;
+
+interface BrowserCdpHostFailureDetails extends BrowserCdpHostFailureDiagnostic {
+  stderrBytes?: number;
+  stderrTruncated?: boolean;
+}
+
+export class BrowserCdpHostError extends Error {
+  readonly diagnostic: BrowserCdpHostFailureDetails;
+
+  constructor(stage: BrowserCdpHostFailureStage, code: BrowserCdpHostFailureCode, details: Partial<BrowserCdpHostFailureDetails> = {}) {
+    super(code);
+    this.name = "BrowserCdpHostError";
+    this.diagnostic = { stage, code, ...details };
+  }
+}
+
+export function browserCdpHostFailureDiagnostic(error: unknown): BrowserCdpHostFailureDiagnostic {
+  if (error instanceof BrowserCdpHostError) return { ...error.diagnostic };
+  return { stage: "unknown", code: "unknown" };
+}
 
 type BrowserCdpLauncherMessage = {
   id?: unknown;
@@ -1165,6 +1252,13 @@ type BrowserCdpLauncherMessage = {
  * guardian is rebound to this process before the bootstrap exits.
  */
 async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<void> {
+  let stderrBytes = 0;
+  let stderrTruncated = false;
+  const failure = (stage: BrowserCdpHostFailureStage, code: BrowserCdpHostFailureCode) => new BrowserCdpHostError(
+    stage,
+    code,
+    { stderrBytes, stderrTruncated },
+  );
   const child = spawn(process.execPath, [launcher], {
     env: {
       ...process.env,
@@ -1177,7 +1271,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
       // Electron host below before closing this short-lived MCP client.
       AGENTLAS_CDP_SKIP_GUARDIAN: "1",
     },
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   let settled = false;
   let outputBuffer = "";
@@ -1205,23 +1299,31 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
     }
   };
   child.stdout?.on("data", onOutput);
-  child.once("error", (error) => rejectPending(error instanceof Error ? error : new Error(String(error))));
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const bytes = Buffer.byteLength(chunk);
+    const nextBytes = stderrBytes + bytes;
+    stderrTruncated ||= nextBytes > BROWSER_CDP_BOOTSTRAP_STDERR_LIMIT;
+    stderrBytes = Math.min(BROWSER_CDP_BOOTSTRAP_STDERR_LIMIT, nextBytes);
+  });
+  child.once("error", () => rejectPending(failure("launcher", "launcher-spawn-failed")));
   child.once("exit", (code, signal) => {
-    if (!settled) rejectPending(new Error(`browser-bootstrap-exited:${code ?? signal ?? "unknown"}`));
+    if (!settled) rejectPending(failure("launcher", "launcher-exited"));
   });
 
-  const response = (id: number): Promise<BrowserCdpLauncherMessage> => new Promise((resolve, reject) => {
+  const response = (id: number, stage: BrowserCdpHostFailureStage): Promise<BrowserCdpLauncherMessage> => new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`browser-bootstrap-timeout:${id}`));
+      reject(failure(stage, "launcher-timeout"));
     }, BROWSER_CDP_HOST_ENSURE_TIMEOUT_MS);
     pending.set(id, {
       resolve: (message) => { clearTimeout(timer); resolve(message); },
       reject: (error) => { clearTimeout(timer); reject(error); },
     });
   });
-  const send = (message: Record<string, unknown>): void => {
-    if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("browser-bootstrap-stdin-closed");
+  const send = (message: Record<string, unknown>, stage: BrowserCdpHostFailureStage): void => {
+    if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) {
+      throw failure(stage, "launcher-stdin-closed");
+    }
     child.stdin.write(`${JSON.stringify(message)}\n`);
   };
   const close = async (): Promise<void> => {
@@ -1243,16 +1345,16 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "agentlas-live-view-bootstrap", version: "1" },
-    } });
-    const initialized = await response(1);
-    if (initialized.error) throw new Error("browser-bootstrap-initialize-failed");
-    send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+    } }, "initialize");
+    const initialized = await response(1, "initialize");
+    if (initialized.error) throw failure("initialize", "launcher-initialize-failed");
+    send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, "initialize");
     send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
       name: "browser_tabs",
       arguments: { action: "list" },
-    } });
-    const listed = await response(2);
-    if (listed.error || listed.result?.isError === true) throw new Error("browser-bootstrap-tabs-failed");
+    } }, "browser-call");
+    const listed = await response(2, "browser-call");
+    if (listed.error || listed.result?.isError === true) throw failure("browser-call", "launcher-browser-call-failed");
   } finally {
     await close();
     child.stdout?.removeListener("data", onOutput);
@@ -1260,25 +1362,34 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
 }
 
 async function ensureBrowserCdpHostOnce(): Promise<BrowserCdpHostEnsureResult> {
-  ensureBrowserCdpProfilePrivate();
+  try { ensureBrowserCdpProfilePrivate(); }
+  catch { throw new BrowserCdpHostError("profile", "profile-unavailable"); }
   if (await browserCdpPortReady()) {
     const ownership = await reconcileBrowserCdpOwnerWithRetry();
     if (ownership.state !== "owned" || !ownership.pid) {
-      throw new Error(`browser-cdp-host-unverified:${ownership.state}:${ownership.reason}`);
+      throw new BrowserCdpHostError("existing-host", "ownership-unverified");
     }
-    if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new Error("browser-cdp-guardian-unavailable");
+    if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new BrowserCdpHostError("guardian", "guardian-unavailable");
     return { started: false, pid: ownership.pid };
   }
 
-  const launcher = materializeBrowserCdpLauncher();
-  if (!fs.existsSync(launcher)) throw new Error("browser-cdp-launcher-unavailable");
-  await invokeBrowserTabsListThroughLauncher(launcher);
-  if (!(await browserCdpPortReady())) throw new Error("browser-cdp-host-not-ready");
+  let launcher = "";
+  try { launcher = ensureBrowserCdpLauncherReady(); }
+  catch (error) {
+    if (error instanceof BrowserCdpHostError) throw error;
+    throw new BrowserCdpHostError("launcher", "launcher-materialize-failed");
+  }
+  try { await invokeBrowserTabsListThroughLauncher(launcher); }
+  catch (error) {
+    if (error instanceof BrowserCdpHostError) throw error;
+    throw new BrowserCdpHostError("launcher", "unknown");
+  }
+  if (!(await browserCdpPortReady())) throw new BrowserCdpHostError("port-check", "host-not-ready");
   const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 6, delayMs: 100 });
   if (ownership.state !== "owned" || !ownership.pid) {
-    throw new Error(`browser-cdp-host-unverified:${ownership.state}:${ownership.reason}`);
+    throw new BrowserCdpHostError("ownership", "ownership-unverified");
   }
-  if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new Error("browser-cdp-guardian-unavailable");
+  if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new BrowserCdpHostError("guardian", "guardian-unavailable");
   return { started: true, pid: ownership.pid };
 }
 
@@ -1902,8 +2013,41 @@ async function waitForProcessExit(pid, timeoutMs) {
   }
   return !processIsLive(pid);
 }
+async function inspectProfileRootPid(pid) {
+  try {
+    if (process.platform === 'darwin') {
+      const [commandLine, textFiles] = await Promise.all([
+        execFileText('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command=']),
+        execFileText('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn']),
+      ]);
+      const executableLine = textFiles.split(/\r?\n/).find((line) => line.startsWith('n'));
+      return { pid, executable: executableLine ? executableLine.slice(1) : '', commandLine: commandLine.trim(), loopbackOnly: true };
+    }
+    if (process.platform === 'win32') {
+      const script = '$p = Get-CimInstance Win32_Process -Filter "ProcessId = ' + pid + '"; if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = $true } | ConvertTo-Json -Compress }';
+      const output = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+      return output.trim() ? JSON.parse(output) : null;
+    }
+    if (process.platform === 'linux') {
+      return {
+        pid,
+        executable: fs.readlinkSync('/proc/' + pid + '/exe'),
+        commandLine: fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').filter(Boolean).join(' '),
+        loopbackOnly: true,
+      };
+    }
+  } catch (e) {}
+  return null;
+}
+async function profileRootStillAttested(pid) {
+  const owner = readOwner();
+  if (!owner || owner.pid !== pid || owner.port !== PORT || canonicalProfile(owner.profile) !== canonicalProfile(CDP_PROFILE)) return false;
+  const snapshot = await inspectProfileRootPid(pid);
+  return Boolean(snapshot && processMatches(snapshot));
+}
 async function terminateAttestedBrowserRoot(pid) {
   if (!processIsLive(pid)) return true;
+  if (!(await profileRootStillAttested(pid))) return false;
   try {
     if (process.platform === 'win32') {
       await new Promise((resolve) => execFile('taskkill.exe', ['/PID', String(pid), '/T'], { windowsHide: true, timeout: 3000 }, () => resolve()));
@@ -1912,6 +2056,7 @@ async function terminateAttestedBrowserRoot(pid) {
     }
   } catch (e) {}
   if (await waitForProcessExit(pid, 2000)) return true;
+  if (!(await profileRootStillAttested(pid))) return false;
   try {
     if (process.platform === 'win32') {
       await new Promise((resolve) => execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 3000 }, () => resolve()));
@@ -1936,7 +2081,7 @@ function readCdpTargets() {
     req.on('timeout', () => { req.destroy(); resolve([]); });
   });
 }
-function descendantResourceTotals(rows, rootPid) {
+function descendantProcessIds(rows, rootPid) {
   const wanted = new Set([rootPid]);
   let changed = true;
   while (changed) {
@@ -1945,33 +2090,69 @@ function descendantResourceTotals(rows, rootPid) {
       if (wanted.has(row.ppid) && !wanted.has(row.pid)) { wanted.add(row.pid); changed = true; }
     }
   }
+  return wanted;
+}
+function descendantResourceTotals(rows, rootPid, rendererPids = new Set()) {
+  const wanted = descendantProcessIds(rows, rootPid);
   let rssBytes = 0;
   let renderers = 0;
   for (const row of rows) {
     if (!wanted.has(row.pid)) continue;
     rssBytes += Math.max(0, Number(row.rssBytes) || 0);
-    if (/(?:^|\s)--type=renderer(?:\s|$)/.test(String(row.commandLine || ''))) renderers += 1;
+    if (rendererPids.has(row.pid)) renderers += 1;
   }
   return { rssBytes, renderers };
 }
+async function rendererPidsForDarwin(pids) {
+  const renderers = new Set();
+  const wanted = [...pids].filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (wanted.length === 0) return renderers;
+  try {
+    const output = await execFileText('/bin/ps', ['-ww', '-p', wanted.join(','), '-o', 'pid=,command=']);
+    for (const line of output.split(/\r?\n/)) {
+      const match = line.match(/^\s*(\d+)\s+([\s\S]+)$/);
+      if (match && /(?:^|\s)--type=renderer(?:\s|$)/.test(match[2])) renderers.add(Number(match[1]));
+    }
+  } catch (e) {
+    // A descendant can exit between the process-tree snapshot and this targeted read.
+  }
+  return renderers;
+}
 async function browserProcessResources(rootPid) {
   if (process.platform === 'darwin') {
-    const output = await execFileText('/bin/ps', ['-axo', 'pid=,ppid=,rss=,command=']);
+    const output = await execFileText('/bin/ps', ['-axo', 'pid=,ppid=,rss=']);
     const rows = [];
     for (const line of output.split(/\r?\n/)) {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\s\S]+)$/);
-      if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), rssBytes: Number(match[3]) * 1024, commandLine: match[4] });
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/);
+      if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), rssBytes: Number(match[3]) * 1024 });
     }
-    return descendantResourceTotals(rows, rootPid);
+    const wanted = descendantProcessIds(rows, rootPid);
+    return descendantResourceTotals(rows, rootPid, await rendererPidsForDarwin(wanted));
   }
   if (process.platform === 'win32') {
     const script = [
-      '$rows = @(Get-CimInstance Win32_Process | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; [pscustomobject]@{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; rssBytes = if ($p) { [double]$p.WorkingSet64 } else { 0 }; commandLine = [string]$_.CommandLine } })',
+      '$rows = @(Get-CimInstance Win32_Process | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; [pscustomobject]@{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; rssBytes = if ($p) { [double]$p.WorkingSet64 } else { 0 } } })',
       '$rows | ConvertTo-Json -Compress',
     ].join('; ');
     const output = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
     const parsed = output.trim() ? JSON.parse(output) : [];
-    return descendantResourceTotals(Array.isArray(parsed) ? parsed : [parsed], rootPid);
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    const wanted = descendantProcessIds(rows, rootPid);
+    const renderers = new Set();
+    if (wanted.size > 0) {
+      const wantedLiteral = [...wanted].filter((pid) => Number.isInteger(pid) && pid > 0).join(',');
+      const commandScript = [
+        '$wanted = @(' + wantedLiteral + ')',
+        '$rows = @(Get-CimInstance Win32_Process | Where-Object { $wanted -contains [int]$_.ProcessId } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; commandLine = [string]$_.CommandLine } })',
+        '$rows | ConvertTo-Json -Compress',
+      ].join('; ');
+      const commandOutput = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', commandScript]);
+      const commands = commandOutput.trim() ? JSON.parse(commandOutput) : [];
+      for (const row of (Array.isArray(commands) ? commands : [commands])) {
+        if (/(?:^|\s)--type=renderer(?:\s|$)/.test(String(row.commandLine || ''))) renderers.add(Number(row.pid));
+      }
+    }
+    return descendantResourceTotals(rows, rootPid, renderers);
   }
   if (process.platform === 'linux') {
     const rows = [];
@@ -1986,11 +2167,18 @@ async function browserProcessResources(rootPid) {
         const ppid = Number(fields[1]);
         const status = fs.readFileSync('/proc/' + pid + '/status', 'utf8');
         const rssKb = Number(status.match(/^VmRSS:\s+(\d+)\s+kB$/m)?.[1] || 0);
-        const commandLine = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').filter(Boolean).join(' ');
-        rows.push({ pid, ppid, rssBytes: rssKb * 1024, commandLine });
+        rows.push({ pid, ppid, rssBytes: rssKb * 1024 });
       } catch (e) {}
     }
-    return descendantResourceTotals(rows, rootPid);
+    const wanted = descendantProcessIds(rows, rootPid);
+    const renderers = new Set();
+    for (const pid of wanted) {
+      try {
+        const commandLine = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').filter(Boolean).join(' ');
+        if (/(?:^|\s)--type=renderer(?:\s|$)/.test(commandLine)) renderers.add(pid);
+      } catch (e) {}
+    }
+    return descendantResourceTotals(rows, rootPid, renderers);
   }
   return { rssBytes: 0, renderers: 0 };
 }
@@ -2080,7 +2268,7 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 14;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 15;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
 /** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
@@ -2692,7 +2880,7 @@ export function shouldReplaceBrowserCdpLauncher(
 }
 
 /**
- * 런처 소스를 ~/.agentlas/agentlas-browser-cdp.mjs 로 쓴다(멱등, 내용 바뀌면 갱신).
+ * 런처 소스를 기본 ~/.agentlas 경로 또는 명시한 격리 경로에 쓴다.
  * ensureDefaultMcpPluginsInstalled 에서 부팅 시 호출.
  */
 export function materializeBrowserCdpLauncher(): string {
@@ -2716,7 +2904,24 @@ export function materializeBrowserCdpLauncher(): string {
     }
     fs.writeFileSync(dest, LAUNCHER_SOURCE, "utf8");
   } catch (err) {
-    console.error("[agentlas-browser] materialize failed:", err);
+    console.error("[agentlas-browser]", JSON.stringify({ stage: "launcher", code: "launcher-materialize-failed" }));
+  }
+  return dest;
+}
+
+/**
+ * An explicit QA launcher must be the exact source from this host build. The
+ * production default keeps its cross-writer/non-downgrade policy above.
+ */
+export function ensureBrowserCdpLauncherReady(): string {
+  const dest = materializeBrowserCdpLauncher();
+  if (!fs.statSync(dest, { throwIfNoEntry: false })?.isFile()) {
+    throw new BrowserCdpHostError("launcher", "launcher-unavailable");
+  }
+  if (process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim()) {
+    const expected = resolveLauncherContext().source;
+    const actual = fs.readFileSync(dest, "utf8");
+    if (actual !== expected) throw new BrowserCdpHostError("launcher", "launcher-materialize-failed");
   }
   return dest;
 }

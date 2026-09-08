@@ -41,7 +41,52 @@ import {
 } from "./proxy-channel";
 import { mcpProxyApprovalPort } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
-import { BROWSER_CDP_LAUNCHER_BASENAME } from "./browser-cdp-launcher";
+import {
+  BROWSER_CDP_LAUNCHER_BASENAME,
+  BROWSER_CDP_LAUNCHER_PATH_ENV,
+  browserCdpLauncherPath,
+  browserCdpPort,
+  browserCdpProfilePath,
+  ensureBrowserCdpLauncherReady,
+} from "./browser-cdp-launcher";
+
+export interface AgentlasBrowserCdpRuntimeContract {
+  command: string;
+  args: [string];
+  env: {
+    ELECTRON_RUN_AS_NODE: "1";
+    AGENTLAS_CDP_PROFILE: string;
+    AGENTLAS_CDP_PORT: string;
+  };
+}
+
+/** One source of truth for the host bootstrap and every model MCP child. */
+export function agentlasBrowserCdpRuntimeContract(): AgentlasBrowserCdpRuntimeContract {
+  const launcher = ensureBrowserCdpLauncherReady();
+  return {
+    command: process.execPath,
+    args: [launcher],
+    env: {
+      ELECTRON_RUN_AS_NODE: "1",
+      AGENTLAS_CDP_PROFILE: browserCdpProfilePath(),
+      AGENTLAS_CDP_PORT: String(browserCdpPort()),
+    },
+  };
+}
+
+export function shouldApplyAgentlasBrowserCdpOverride(server: InstalledMcpServer): boolean {
+  const override = process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim();
+  return Boolean(
+    override
+    && server.catalogId === "agentlas-browser"
+    && server.transport === "stdio"
+    && server.command === process.execPath
+    && server.envKeys.length === 0
+    && server.configurationValid !== false
+    && server.args.length === 1
+    && expandHome(server.args[0]) === path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME),
+  );
+}
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -213,6 +258,7 @@ const OPERATIONAL_KEYS = [
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
   "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
+  "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT",
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -586,13 +632,24 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
+      const browserRuntime = shouldApplyAgentlasBrowserCdpOverride(s)
+        ? agentlasBrowserCdpRuntimeContract()
+        : null;
       let command = resolveStdioCommand(s);
       let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       args = argsWithToolGateWorkingFolder(s, args, opts);
+      if (browserRuntime) {
+        // The host-selected path is part of the browser isolation contract.
+        // A QA process can use its own generated launcher without mutating the
+        // production launcher persisted under ~/.agentlas.
+        command = browserRuntime.command;
+        args = browserRuntime.args;
+      }
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? {
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
+              ...(browserRuntime?.env ?? {}),
               // Agent runs render their shared CDP page inside One's Browser
               // rail. Keep the automation host non-windowed; the explicit
               // Browser login action still uses browserOpenLogin's headful

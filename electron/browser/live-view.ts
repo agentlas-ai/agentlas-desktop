@@ -5,6 +5,7 @@ import {
   acquireBrowserCdpLease,
   browserCdpPort,
   browserCdpPortReady,
+  browserCdpHostFailureDiagnostic,
   ensureBrowserCdpHost,
   releaseBrowserCdpLease,
   scheduleBrowserCdpIdleShutdown,
@@ -96,6 +97,14 @@ function unavailable(error: BrowserLiveFrame["error"], viewport: BrowserLiveView
     capturedAt: new Date().toISOString(),
     error,
   };
+}
+
+function unavailableHost(
+  error: BrowserLiveFrame["error"],
+  viewport: BrowserLiveViewport,
+  hostFailure: BrowserLiveFrame["hostFailure"],
+): BrowserLiveFrame {
+  return { ...unavailable(error, viewport), hostFailure };
 }
 
 const SENSITIVE_URL_PARAMETER = /^(?:access_?token|auth|authorization|code|credential|key|password|refresh_?token|secret|signature|sig)$/iu;
@@ -980,10 +989,22 @@ export async function startBrowserLiveSession(
   try {
     const host = await ensureBrowserCdpHost();
     logLiveDiagnostic("cdp-host-ready", { started: host.started, pidPresent: host.pid > 0, viewport: viewportMode });
-  } catch {
+  } catch (error) {
     releaseBrowserCdpLease(lease);
-    logLiveDiagnostic("cdp-unavailable", { error: "browser-offline", viewport: viewportMode });
-    return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+    const hostFailure = browserCdpHostFailureDiagnostic(error);
+    logLiveDiagnostic("cdp-unavailable", {
+      error: "browser-offline",
+      failureStage: hostFailure.stage,
+      failureCode: hostFailure.code,
+      stderrBytes: hostFailure.stderrBytes ?? 0,
+      stderrTruncated: hostFailure.stderrTruncated ?? false,
+      viewport: viewportMode,
+    });
+    return {
+      sessionId: null,
+      interactive: false,
+      frame: unavailableHost("browser-offline", viewportMode, hostFailure),
+    };
   }
   if (!(await browserCdpPortReady())) {
     releaseBrowserCdpLease(lease);
