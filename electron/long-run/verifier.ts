@@ -18,7 +18,6 @@ import {
   transitionLongRun,
 } from "../store/long-runs";
 import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
-import { latestDurableAssistantMessage } from "../store/chats";
 import { getDb } from "../store/db";
 import {
   goalVerificationDisposition,
@@ -306,14 +305,16 @@ export function buildBoundedObservation(input: {
   events: Array<Record<string, unknown>>;
   limit: number;
   workingFolder?: string | null;
+  fullRunSummary?: Record<string, unknown>;
+  fullWriteBoundary?: Record<string, unknown> | null;
 }): string {
   const { receipt, limit } = input;
   const size = (value: unknown) => JSON.stringify(value)?.length ?? 0;
   // The digest counts EVERY observed event; only the raw sample is bounded. That
   // split is what keeps this correct for a run with a million tool calls.
-  const digest = digestEvents(input.events);
+  const digest = input.fullRunSummary ?? digestEvents(input.events);
   // 경계 감사도 집계와 같은 성질이다 — 이벤트 수와 무관하게 크기가 일정하고 항상 실린다.
-  const boundary = auditWriteBoundary(input.events, input.workingFolder ?? null);
+  const boundary = input.fullWriteBoundary !== undefined ? input.fullWriteBoundary : auditWriteBoundary(input.events, input.workingFolder ?? null);
   const events = input.events.slice(-200);
   const assemble = (
     assistantText: string | null,
@@ -325,8 +326,14 @@ export function buildBoundedObservation(input: {
     // is what proves scale: "179 files" survives even when no raw event fits.
     evidenceDigest: digest,
     ...(boundary ? { writeBoundaryAudit: boundary } : {}),
-    durableAssistantResult: input.assistant && assistantText != null
-      ? { ref: input.assistant.ref, createdAt: input.assistant.createdAt, text: assistantText }
+    durableAssistantResult: input.assistant
+      ? { ref: input.assistant.ref, createdAt: input.assistant.createdAt,
+          text: assistantText ?? "",
+          ...(assistantText == null || assistantText.length === 0 ? { textOmittedByBudget: true } : {}),
+          ...(assistantText != null && assistantText.length > 0 && assistantText.length < input.assistant.text.length
+            ? { textTruncatedByBudget: true } : {}),
+          // Existence is durable evidence; completion prose is still only the model's claim.
+          contentKind: "assistant_claim" }
       : null,
     ...(omitted > 0 ? { omittedOlderEvents: omitted } : {}),
     concreteEvents: keptEvents,
@@ -370,7 +377,10 @@ export function buildBoundedObservation(input: {
     receipt,
     evidenceDigest: digest,
     ...(boundary ? { writeBoundaryAudit: boundary } : {}),
-    durableAssistantResult: null,
+    durableAssistantResult: input.assistant
+      ? { ref: input.assistant.ref, createdAt: input.assistant.createdAt,
+          text: "", textOmittedByBudget: true, contentKind: "assistant_claim" }
+      : null,
     omittedOlderEvents: events.length,
     concreteEvents: [],
   });
@@ -414,6 +424,83 @@ function summarizeEvent(event: RunEventUi): Record<string, unknown> {
   };
 }
 
+/** Verifier-only bounded sample plus whole-run failure and write-boundary accounting. */
+export function collectVerifierRunEvents(runId: string, workingFolder: string | null): {
+  events: RunEventUi[]; summary: Record<string, unknown>; writeBoundary: Record<string, unknown> | null;
+} {
+  const head: RunEventUi[] = [], tail: RunEventUi[] = [], artifacts: RunEventUi[] = [], failures: RunEventUi[] = [];
+  const toolCounts = new Map<string, number>(), failureCounts = new Map<string, number>();
+  const failureRefs: string[] = [];
+  let total = 0, concreteCount = 0, results = 0, invalidPayloads = 0;
+  let batch: Array<Record<string, unknown>> = [];
+  let boundary: Record<string, unknown> | null = null;
+  const flush = () => {
+    if (!batch.length) return;
+    const next = auditWriteBoundary(batch, workingFolder);
+    batch = [];
+    if (!next) return;
+    if (!boundary) { boundary = { ...next, counting: "sum-of-batch-observations", coverageScope: "entire-run" }; return; }
+    for (const [key, value] of Object.entries(next)) {
+      if (typeof value === "number") boundary[key] = Number(boundary[key] ?? 0) + value;
+      else if (Array.isArray(value)) boundary[key] = [...new Set([...(Array.isArray(boundary[key]) ? boundary[key] as unknown[] : []), ...value])].slice(0, 8);
+    }
+    if (next.coverage === "partial") boundary.coverage = "partial";
+  };
+  const retain = (list: RunEventUi[], event: RunEventUi, limit: number) => { list.push(event); if (list.length > limit) list.shift(); };
+  for (const row of getDb().prepare("SELECT id, seq, ts, kind, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC").iterate(runId) as Iterable<{id: string; seq: number; ts: string; kind: string; payload_json: string}>) {
+    total += 1;
+    if (!CONCRETE_EVENT_KINDS.has(row.kind)) continue;
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(row.payload_json); } catch { invalidPayloads += 1; continue; }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) { invalidPayloads += 1; continue; }
+    const event = { id: row.id, runId, seq: row.seq, ts: row.ts, kind: row.kind, payload } as RunEventUi;
+    if (!concreteEvent(event)) continue;
+    concreteCount += 1;
+    const tool = typeof payload.toolName === "string" ? payload.toolName : row.kind;
+    toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
+    if (payload.toolResultPreview != null) results += 1;
+    const failure = typeof payload.toolFailureCode === "string" ? payload.toolFailureCode : payload.toolIsError === true ? "unclassified_tool_failure" : null;
+    if (failure) {
+      failureCounts.set(failure, (failureCounts.get(failure) ?? 0) + 1);
+      if (failureRefs.length < 8) failureRefs.push(`event:${row.id}`);
+      retain(failures, event, 24);
+    }
+    if (head.length < 40) head.push(event);
+    retain(tail, event, 120);
+    if (payload.oneArtifacts || payload.toolSourceUrls || payload.surfaceId || row.kind === "invoke_result") retain(artifacts, event, 40);
+    batch.push(summarizeEvent(event));
+    if (batch.length === 200) flush();
+  }
+  flush();
+  const events = [...new Map([...head, ...tail, ...artifacts, ...failures].map((event) => [event.id, event])).values()].sort((a,b) => a.seq - b.seq);
+  if (boundary && invalidPayloads > 0) {
+    (boundary as Record<string, unknown>).coverage = "partial";
+    (boundary as Record<string, unknown>).invalidPayloadEvents = invalidPayloads;
+  }
+  return { events, writeBoundary: boundary, summary: {
+    fullLedgerEvents: total, observedEvents: concreteCount, eventsWithResult: results, invalidPayloadEvents: invalidPayloads,
+    sampledEvents: events.length, omittedFromSample: concreteCount - events.length,
+    sampleStrategy: "bounded-head-tail-artifacts-failures", coverageScope: "entire-run",
+    distinctTools: toolCounts.size, toolCounts: Object.fromEntries([...toolCounts].sort((a,b) => b[1]-a[1]).slice(0,24)),
+    typedFailureCounts: Object.fromEntries(failureCounts), firstFailureRefs: failureRefs,
+    note: "Only the raw event sample is omitted. Failure counts and write-boundary checks cover the entire run; model prose is not verification evidence.",
+  } };
+}
+
+/** Never borrow a newer answer or miss the final beyond a bounded event sample. */
+export function exactRunAssistantResult(chatId: string, runId: string): {
+  id: string; text: string; createdAt: string;
+} | null {
+  const rows = getDb().prepare(`SELECT DISTINCT m.id, m.text, m.created_at
+    FROM run_events e JOIN chat_messages m ON m.id = json_extract(e.payload_json, '$.durableMessageId')
+    WHERE e.run_id = ? AND e.chat_id = ? AND e.kind = 'mcp_final'
+      AND m.chat_id = ? AND m.role = 'assistant' LIMIT 2`)
+    .all(runId, chatId, chatId) as { id: string; text: string; created_at: string }[];
+  if (rows.length !== 1) return null;
+  const row = rows[0];
+  return { id: row.id, text: row.text, createdAt: row.created_at };
+}
+
 /**
  * Collects host-owned, durable evidence only. Model prose is deliberately not
  * a reference: it remains a claim presented to the independent judge.
@@ -450,10 +537,11 @@ export function collectDurableGoalVerificationEvidence(
   // A retry contributes the missing evidence to the same goal. Earlier host
   // observations remain visible, so fixing one criterion does not erase proof
   // of the others. The bounded serializer still controls the final packet.
-  const events = [...priorRunIds.flatMap((id) => listRunEvents(id, 500)), ...listRunEvents(runId, 500)];
-  const concrete = events.filter(concreteEvent);
+  const sampledRuns = [...priorRunIds, runId].map((id) => collectVerifierRunEvents(id, receipt.resultFolder?.trim() || null));
+  const concrete = sampledRuns.flatMap((sample) => sample.events);
+  const currentSample = sampledRuns[sampledRuns.length - 1];
   const durableAssistantResult = receipt.chatId
-    ? latestDurableAssistantMessage(receipt.chatId, receipt.startedAt)
+    ? exactRunAssistantResult(receipt.chatId, runId)
     : null;
   if (concrete.length === 0 && !durableAssistantResult) {
     return {
@@ -500,6 +588,11 @@ export function collectDurableGoalVerificationEvidence(
       // Every concrete event, not a pre-sliced tail: the digest must count what
       // actually happened, and only the raw sample inside is allowed to be bounded.
       events: concrete.map(summarizeEvent),
+      fullRunSummary: { ...currentSample.summary, priorRunSummaries: sampledRuns.slice(0, -1).map((sample) => sample.summary) },
+      fullWriteBoundary: sampledRuns.length === 1 ? currentSample.writeBoundary : {
+        coverageScope: "entire-run", perInvocation: sampledRuns.map((sample) => sample.writeBoundary),
+        note: "Assess every invocation boundary; the latest run cannot erase an earlier violation.",
+      },
       limit: 20_000,
       workingFolder: receipt.resultFolder?.trim() || null,
     }),
