@@ -1771,7 +1771,11 @@ export const runCodex: Runner = async (
   // release-verified switch that removes the collaboration surface, borrowed
   // packages, Agent Apps, and Workforce turns must stop before CLI discovery or
   // process spawn rather than minting a false no-authority receipt.
-  if (req.untrustedNoTools) {
+  // Resident judgment calls are Main-authored, tool-free classification turns.
+  // They do not receive MCP/config grants or a workspace and must be allowed to
+  // use the connected Codex model even though ordinary untrusted Agent App /
+  // Workforce turns remain blocked by the collaboration surface.
+  if (req.untrustedNoTools && !req.judgmentOnly) {
     // 표식을 단다 — 이 거절은 시간이 지나도 풀리지 않는다. codex 만 설치한 사용자는
     // 판정이 필요한 자동화를 하나도 끝낼 수 없으므로, 화면이 "다시 눌러 보세요" 대신
     // "판정할 수 있는 런타임을 하나 연결하세요"라고 말할 수 있어야 한다.
@@ -1829,7 +1833,7 @@ export const runCodex: Runner = async (
   // The exact Main-authored MCP overrides below remain available, so the model
   // can operate the shared Agentlas session without a permission prompt or a
   // second Playwright/Chrome process.
-  const browserOnlyConfigArgs = runReq.browserOnly
+  const browserOnlyConfigArgs = runReq.browserOnly || runReq.judgmentOnly
     ? [
         "-c", "features.shell_tool=false",
         "-c", "features.code_mode=false",
