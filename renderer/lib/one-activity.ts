@@ -1172,6 +1172,10 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
       continue;
     }
     if (row.kind === "mcp_notice") {
+      // Host capture bindings also arrive as notices. Preserve them during
+      // durable catchup even when the notification has no display text.
+      const oneArtifacts = ledgerOneArtifacts(payload)?.filter((artifact) =>
+        artifact.runId === row.runId && artifact.chatId === row.chatId);
       const noticeI18n = ledgerNoticeI18n(payload);
       const message = ledgerString(payload, "noticeMessage") || noticeI18n?.en || noticeI18n?.ko;
       const rawLevel = ledgerString(payload, "noticeLevel");
@@ -1183,12 +1187,13 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
       // an explicit topology node or a named legacy actor groups this notice.
       const noticeAgentId = ledgerString(payload, "agentNodeId") || row.nodeId
         || (ledgerString(payload, "agentName") ? row.agentId : undefined);
-      if (message) {
+      if (message || oneArtifacts?.length) {
         apply({
           kind: "notice",
+          ...(oneArtifacts?.length ? { oneArtifacts } : {}),
           notice: {
             level,
-            message,
+            message: message ?? "",
             ...(ledgerString(payload, "noticeCode") ? { code: ledgerString(payload, "noticeCode") } : {}),
             ...(noticeI18n ? { i18n: noticeI18n } : {}),
             ...(ledgerString(payload, "noticeDetails") ? { details: ledgerString(payload, "noticeDetails") } : {}),
