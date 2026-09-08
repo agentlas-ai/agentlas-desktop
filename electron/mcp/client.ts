@@ -2517,11 +2517,11 @@ ${effectiveUserPrompt}`;
       level: "info",
       code: "runtime-selected",
       message: locale === "ko"
-        ? `이번 실행은 ${runtimeLabel}로 연결되었습니다.`
+        ? `이번 실행은 ${runtimeLabel}을(를) 사용하도록 선택했습니다. 실제 호출 결과를 확인 중입니다.`
         : `This run is connected to ${runtimeLabel}.`,
       i18n: {
-        ko: `이번 실행은 ${runtimeLabel}로 연결되었습니다.`,
-        en: `This run is connected to ${runtimeLabel}.`,
+        ko: `이번 실행은 ${runtimeLabel}을(를) 사용하도록 선택했습니다. 실제 호출 결과를 확인 중입니다.`,
+        en: `This run selected ${runtimeLabel}; the actual invocation result is still being verified.`,
       },
       details: JSON.stringify(confirmedRuntime),
     },
@@ -2919,8 +2919,8 @@ ${effectiveUserPrompt}`;
             level: "warning",
             code: "mcp-selection-undecided",
             message: locale === "ko"
-              ? "이번 실행의 선택형 도구 판정이 완료되지 않았습니다. 현재 설정된 도구와 같은 활성 Goal에서 선택되어 다시 확인된 도구로 진행합니다. 필요한 도구가 없다면 현재 허용된 모델과 도구 설정을 확인해 주세요."
-              : "Optional-tool judgment did not complete for this run. Work continues with configured tools and revalidated selections from the same active Goal. If a required tool is unavailable, check the currently allowed models and tool settings.",
+              ? "선택형 도구 판정이 완료되지 않아 현재 설정된 도구만으로 진행합니다. 실제 사용한 런타임과 도구는 실행 기록에서 확인할 수 있습니다."
+              : "Optional-tool judgment did not complete, so this run continues with configured tools only. Check the execution record for the runtime and tools actually used.",
           },
         });
       }
