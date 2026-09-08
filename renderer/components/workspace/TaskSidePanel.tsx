@@ -23,6 +23,7 @@ import {
   IconShield,
   IconSparkles,
 } from "@/components/Icon";
+import { TaskBrowser } from "@/components/browser/TaskBrowser";
 import { RailAgentScreen } from "@/components/browser/RailAgentScreen";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -38,7 +39,6 @@ import {
 } from "@/lib/output-presentation";
 import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
-import type { BrowserLiveDispatchResult, BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
 import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
@@ -63,11 +63,6 @@ import styles from "./TaskSidePanel.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
-/** 미리보기 ↔ 아래 섹션 분할선의 높이. 없으면 "미리보기가 남는 높이를 전부" 가 기본. */
-const ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY = "agentlas.one.output-preview-height.v1";
-const ONE_OUTPUT_PREVIEW_HEIGHT_MIN = 160;
-/** 아래 섹션이 최소한 한 줄은 보이도록 남겨 두는 높이. */
-const ONE_OUTPUT_BELOW_MIN = 120;
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "app";
 
@@ -90,10 +85,6 @@ function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "screen") return locale === "ko" ? "화면" : "Screen";
   return locale === "ko" ? "브라우저" : "Browser";
 }
-type BrowserLiveInputBody = BrowserLiveInput extends infer Input
-  ? Input extends { sessionId: string } ? Omit<Input, "sessionId"> : never
-  : never;
-
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
   if (typeof window === "undefined") return new Set();
   try {
@@ -110,19 +101,6 @@ function readOutputHistoryHeight(): number {
   if (typeof window === "undefined") return 250;
   const value = Number(window.localStorage.getItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY));
   return Number.isFinite(value) ? Math.min(480, Math.max(150, Math.round(value))) : 250;
-}
-
-/** null = 아직 사용자가 정한 적 없음 → 미리보기가 남는 높이를 전부 먹는다(기본). */
-function readOutputPreviewHeight(): number | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY);
-    if (!raw) return null;
-    const value = Number(raw);
-    return Number.isFinite(value) && value >= ONE_OUTPUT_PREVIEW_HEIGHT_MIN ? Math.round(value) : null;
-  } catch {
-    return null;
-  }
 }
 
 function elapsedLabel(ms: number): string {
@@ -735,664 +713,6 @@ export interface OneLiveAppPreview {
   runtime?: string;
 }
 
-type BrowserShellTab = {
-  id: string;
-  title: string;
-  url: string | null;
-};
-
-function normalizedBrowserAddress(value: string): string | null {
-  const candidate = /^https?:\/\//iu.test(value.trim()) ? value.trim() : `https://${value.trim()}`;
-  try {
-    const parsed = new URL(candidate);
-    if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return null;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-const MAX_BROWSER_LIVE_RETRIES = 5;
-
-function browserLiveErrorCopy(error: Exclude<BrowserLiveFrame["error"], null>, locale: "ko" | "en"): string {
-  if (error === "browser-offline") {
-    return locale === "ko"
-      ? "전용 브라우저가 아직 준비되지 않았습니다. 잠시 후 다시 연결해 주세요."
-      : "The dedicated browser is not ready yet. Try connecting again in a moment.";
-  }
-  if (error === "no-page") {
-    return locale === "ko"
-      ? "이 주소에 연결된 브라우저 화면을 찾지 못했습니다. 다시 연결해 주세요."
-      : "The browser page for this address was not found. Try connecting again.";
-  }
-  return locale === "ko"
-    ? "브라우저 화면을 캡처하지 못했습니다. 다시 연결해 주세요."
-    : "The browser view could not be captured. Try connecting again.";
-}
-
-function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string; previewScopeId?: string }) {
-  const [frame, setFrame] = useState<BrowserLiveFrame | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [liveError, setLiveError] = useState<Exclude<BrowserLiveFrame["error"], null> | null>(null);
-  const [interactive, setInteractive] = useState(false);
-  /*
-   * 로컬 검증 서버 생명주기 — U-D-1/U-D-5.
-   * One이 검증용 임시 서버를 정리한 뒤에도 이 탭은 죽은 127.0.0.1 주소에
-   * LIVE 배지를 유지했고, 만들어진 파일을 인앱에서 다시 볼 길이 없었다.
-   * localPreviewGone 은 매 주기 재평가한다(죽음도 살아남도 낙인이 아니다).
-   */
-  const [localPreviewGone, setLocalPreviewGone] = useState(false);
-  const [filePreview, setFilePreview] = useState<{ name: string; html: string } | null>(null);
-  const [fileCandidate, setFileCandidate] = useState<{ name: string; path: string } | null>(null);
-  const [viewport, setViewport] = useState<"desktop" | "phone">("desktop");
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [actionPending, setActionPending] = useState<string | null>(null);
-  const [actionFeedback, setActionFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
-  const [tabs, setTabs] = useState<BrowserShellTab[]>(() => [{
-    id: "task-output",
-    title: locale === "ko" ? "이 사이트에 연결" : "Connected site",
-    url: preferredUrl ?? null,
-  }]);
-  const [activeTabId, setActiveTabId] = useState("task-output");
-  const [address, setAddress] = useState(preferredUrl ?? "");
-  const tabSequenceRef = useRef(0);
-  const sessionRef = useRef<string | null>(null);
-  const stopFlightRef = useRef<Promise<unknown>>(Promise.resolve());
-  const [retryNonce, setRetryNonce] = useState(0);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const composingRef = useRef(false);
-  const pointerFrameRef = useRef<number | null>(null);
-  const queuedPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
-  const effectiveUrl = activeTab?.url ?? undefined;
-
-  useEffect(() => {
-    if (!preferredUrl) return;
-    setTabs((current) => current.map((tab) => tab.id === "task-output"
-      ? { ...tab, url: preferredUrl }
-      : tab));
-    setActiveTabId("task-output");
-    setAddress(preferredUrl);
-  }, [preferredUrl]);
-
-  useEffect(() => {
-    setAddress(activeTab?.url ?? "");
-    setMenuOpen(false);
-  }, [activeTab?.id, activeTab?.url]);
-
-  useEffect(() => {
-    if (!active) {
-      setFrame(null);
-      setInteractive(false);
-      setLoading(false);
-      setLiveError(null);
-      return;
-    }
-    const bridge = ipc();
-    if (!bridge?.browser?.startLiveView || !bridge.browser.onLiveFrame) return;
-    // A changed task URL invalidates the prior frame immediately. Keeping it
-    // while an exact-target capture fails is how a completed Soulin run leaked
-    // into a later Latchwork task's Browser rail.
-    setFrame(null);
-    setInteractive(false);
-    // Browser output belongs to a Taskforce/thread. With no URL observed for
-    // that scope, showing whichever CDP tab happens to be open would leak an
-    // unrelated job into this room.
-    if (!effectiveUrl) {
-      setLoading(false);
-      return;
-    }
-    let disposed = false;
-    let ownedSession: string | null = null;
-    let retryTimer: number | null = null;
-    let retryAttempt = 0;
-    setLoading(true);
-    setLiveError(null);
-    const unsubscribe = bridge.browser.onLiveFrame((next) => {
-      if (!disposed && next.sessionId === sessionRef.current && next.viewport === viewport) {
-        setFrame(next);
-        setLoading(false);
-        if (next.available) setLiveError(null);
-        else if (next.error) setLiveError(next.error);
-        if (next.url) {
-          setAddress(next.url);
-          setTabs((current) => {
-            const target = current.find((tab) => tab.id === activeTabId);
-            const nextTitle = next.title || target?.title || (locale === "ko" ? "이 사이트에 연결" : "Connected site");
-            if (!target || (target.url === next.url && target.title === nextTitle)) return current;
-            return current.map((tab) => tab.id === activeTabId
-              ? { ...tab, url: next.url, title: nextTitle }
-              : tab);
-          });
-        }
-      }
-    });
-    const scheduleRetry = (error: Exclude<BrowserLiveFrame["error"], null>) => {
-      if (disposed || retryTimer != null) return;
-      if (retryAttempt >= MAX_BROWSER_LIVE_RETRIES) {
-        setLoading(false);
-        setLiveError(error);
-        return;
-      }
-      const delay = Math.min(2_500, 600 + retryAttempt * 400);
-      retryAttempt += 1;
-      retryTimer = window.setTimeout(() => {
-        retryTimer = null;
-        void start();
-      }, delay);
-    };
-    const start = async () => {
-      try {
-        // Page.stopScreencast is target-global. A tab/viewport switch used to
-        // start the replacement session while cleanup of the previous session
-        // was still in flight; the late stop then killed the fresh stream.
-        // Serialize that handoff without blocking React cleanup.
-        await stopFlightRef.current.catch(() => undefined);
-        if (disposed) return;
-        const result = await bridge.browser.startLiveView(effectiveUrl, viewport);
-        if (disposed) {
-          if (result.sessionId) void bridge.browser.stopLiveView(result.sessionId);
-          return;
-        }
-        ownedSession = result.sessionId;
-        sessionRef.current = result.sessionId;
-        setFrame(result.frame);
-        setInteractive(result.interactive);
-        if (result.sessionId && result.frame.available) {
-          retryAttempt = 0;
-          setLiveError(null);
-          setLoading(false);
-          return;
-        }
-        // The tool event can arrive a fraction before the headless CDP host is
-        // ready, and the URL can be identical to a previous run. Neither case
-        // changes React dependencies, so a one-shot attempt strands the rail
-        // empty forever. Retry only the exact attributed URL until its durable
-        // rail target exists.
-        setLoading(true);
-        scheduleRetry(result.frame.error ?? "capture-failed");
-      } catch {
-        if (!disposed) {
-          setFrame(null);
-          setInteractive(false);
-          setLoading(true);
-          scheduleRetry("capture-failed");
-        }
-      }
-    };
-    void start();
-    return () => {
-      disposed = true;
-      if (retryTimer != null) window.clearTimeout(retryTimer);
-      unsubscribe();
-      if (ownedSession) {
-        stopFlightRef.current = bridge.browser.stopLiveView(ownedSession).catch(() => undefined);
-      }
-      if (sessionRef.current === ownedSession) sessionRef.current = null;
-    };
-  }, [active, activeTabId, effectiveUrl, locale, retryNonce, viewport]);
-
-  useEffect(() => () => {
-    if (pointerFrameRef.current != null) window.cancelAnimationFrame(pointerFrameRef.current);
-  }, []);
-
-  // 도달성은 루프백 주소에만 묻되, 렌더러와 같은 오리진일 때만 묻는다.
-  // managed preview/브라우저 target은 다른 포트를 쓰고 CORP: same-origin을
-  // 보낼 수 있으므로, cross-origin HEAD 실패는 정리된 서버의 증거가 아니다.
-  const localOrigin = useMemo(() => {
-    if (!effectiveUrl) return null;
-    try {
-      const parsed = new URL(effectiveUrl);
-      return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(parsed.hostname) ? parsed.origin : null;
-    } catch {
-      return null;
-    }
-  }, [effectiveUrl]);
-
-  useEffect(() => {
-    if (!active || !localOrigin || localOrigin !== window.location.origin) {
-      setLocalPreviewGone(false);
-      return;
-    }
-    let disposed = false;
-    const probe = async () => {
-      // 뒤로 간 창에서까지 묻지 않는다(유휴 비용).
-      if (document.visibilityState === "hidden") return;
-      try {
-        // no-cors: 응답을 읽지 않고 도달성만 본다 — 연결 거부만 reject 된다.
-        await fetch(localOrigin, { method: "HEAD", mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(1_500) });
-        if (!disposed) setLocalPreviewGone(false);
-      } catch {
-        if (!disposed) setLocalPreviewGone(true);
-      }
-    };
-    void probe();
-    const timer = window.setInterval(() => { void probe(); }, 6_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [active, localOrigin]);
-
-  // 서버가 사라졌을 때만 재열람 후보를 찾는다. 경로 권위는 Main(fs 스코프)이다:
-  // 대화 연결 폴더 → 기본 실행 폴더 순서로, 주소의 파일명과 같은 .html 을 먼저 찾고
-  // 없으면 가장 최근에 바뀐 .html 하나를 고른다.
-  useEffect(() => {
-    setFilePreview(null);
-    if (!localPreviewGone || !previewScopeId) {
-      setFileCandidate(null);
-      return;
-    }
-    const bridge = ipc();
-    if (!bridge?.fs?.listDirectory || !bridge.workspace?.defaultRunFolder) return;
-    let cancelled = false;
-    void (async () => {
-      const scope = { kind: "chat-assets", chatId: previewScopeId } as const;
-      const roots: string[] = [];
-      const linked = await bridge.workspace.get(previewScopeId).catch(() => null);
-      if (typeof linked === "string" && linked) roots.push(linked);
-      const fallback = await bridge.workspace.defaultRunFolder().catch(() => null);
-      if (typeof fallback === "string" && fallback && !roots.includes(fallback)) roots.push(fallback);
-      const wantedName = (() => {
-        try {
-          return decodeURIComponent(new URL(effectiveUrl ?? "").pathname.split("/").filter(Boolean).pop() ?? "");
-        } catch {
-          return "";
-        }
-      })();
-      const htmlFiles: Array<{ name: string; path: string; size: number }> = [];
-      for (const root of roots) {
-        const top = await bridge.fs.listDirectory(root, scope).catch(() => null);
-        if (!top?.exists) continue;
-        const dirs: string[] = [];
-        for (const node of top.entries) {
-          if (node.kind === "file" && /\.html?$/i.test(node.name)) htmlFiles.push(node);
-          else if (node.kind === "dir") dirs.push(node.path);
-        }
-        // 한 단계 아래까지만 본다 — 실행 폴더 전체를 걷는 것은 이 배너의 몫이 아니다.
-        for (const dir of dirs.slice(0, 12)) {
-          const sub = await bridge.fs.listDirectory(dir, scope).catch(() => null);
-          for (const node of sub?.entries ?? []) {
-            if (node.kind === "file" && /\.html?$/i.test(node.name)) htmlFiles.push(node);
-          }
-        }
-        if (htmlFiles.length > 0) break;
-      }
-      if (cancelled) return;
-      const exact = wantedName ? htmlFiles.find((file) => file.name === wantedName) : undefined;
-      const pick = exact ?? htmlFiles[0] ?? null;
-      setFileCandidate(pick ? { name: pick.name, path: pick.path } : null);
-    })();
-    return () => { cancelled = true; };
-  }, [localPreviewGone, previewScopeId, effectiveUrl]);
-
-  const openFilePreview = useCallback(async () => {
-    if (!fileCandidate || !previewScopeId) return;
-    const bridge = ipc();
-    if (!bridge?.fs?.readTextFile) return;
-    const preview = await bridge.fs.readTextFile(fileCandidate.path, { kind: "chat-assets", chatId: previewScopeId }).catch(() => null);
-    if (preview && typeof preview.content === "string") setFilePreview({ name: fileCandidate.name, html: preview.content });
-  }, [fileCandidate, previewScopeId]);
-
-  const pointInFrame = (element: HTMLElement, clientX: number, clientY: number) => {
-    const rect = element.getBoundingClientRect();
-    return {
-      x: Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width))),
-      y: Math.min(1, Math.max(0, (clientY - rect.top) / Math.max(1, rect.height))),
-    };
-  };
-  const dispatch = async (
-    input: BrowserLiveInputBody,
-    options: { label?: string; busy?: boolean; quietSuccess?: boolean; quietFailure?: boolean } = {},
-  ): Promise<BrowserLiveDispatchResult | null> => {
-    const sessionId = sessionRef.current;
-    const bridge = ipc();
-    if (!sessionId || !bridge?.browser?.dispatchLiveInput) {
-      if (!options.quietFailure) {
-        setActionFeedback({
-          tone: "error",
-          message: locale === "ko" ? "실시간 브라우저 세션이 끝나 이 작업을 보내지 못했습니다." : "The live browser session ended, so this action was not sent.",
-        });
-      }
-      setInteractive(false);
-      return null;
-    }
-    if (options.busy) setActionPending(options.label ?? "browser-action");
-    try {
-      const result = await bridge.browser.dispatchLiveInput({ ...input, sessionId } as BrowserLiveInput);
-      if (sessionRef.current !== sessionId || result?.ok !== true) {
-        if (!options.quietFailure) {
-          const noHistory = result?.ok === false && result.code === "no_history";
-          setActionFeedback({
-            tone: "error",
-            message: noHistory
-              ? (locale === "ko" ? "이 방향으로 이동할 방문 기록이 없습니다." : "There is no history entry in that direction.")
-              : (locale === "ko" ? "브라우저가 이 작업을 받지 않았습니다. 현재 화면을 확인한 뒤 다시 시도하세요." : "The browser did not accept this action. Check the current page before trying again."),
-          });
-        }
-        if (
-          sessionRef.current !== sessionId
-          || (result?.ok === false && result.code === "session_missing")
-        ) setInteractive(false);
-        return result ?? null;
-      }
-      if (!options.quietSuccess) {
-        setActionFeedback({
-          tone: "success",
-          message: locale === "ko" ? `${options.label ?? "브라우저 작업"}을(를) 전달했습니다.` : `${options.label ?? "Browser action"} was accepted.`,
-        });
-      }
-      return result;
-    } catch {
-      if (!options.quietFailure) {
-        setActionFeedback({
-          tone: "error",
-          message: locale === "ko" ? "브라우저 작업의 결과를 확인하지 못했습니다. 현재 프레임이 바뀌는지 확인하고 반복하지 마세요." : "The browser action outcome could not be verified. Check whether the frame changes before repeating it.",
-        });
-      }
-      return null;
-    } finally {
-      if (options.busy) setActionPending(null);
-    }
-  };
-  const modifierMask = (event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
-    (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
-
-  const currentFrame = frame?.viewport === viewport ? frame : null;
-  /*
-   * 우리가 껐다는 걸 아는 주소에서는 스트림 화면을 그리지 않는다 (오너 관측 2026-08-25).
-   *
-   * 프레임은 "사진"일 뿐이라, 임시 서버가 죽은 뒤에도 스트림은 계속 찍힌다 — 그리고 그
-   * 사진의 내용이 크롬 자체의 오류 페이지("사이트에 연결할 수 없음 / localhost에서 연결을
-   * 거부했습니다 / ERR_CONNECTION_REFUSED / [세부정보][새로고침]") 였다. 우리 화면 자리에
-   * 남의 오류 프레임이 그대로 뜬 것이다. 바로 위 배너에 "정리되었습니다" 라고 우리가 이미
-   * 적어 놓고서. available 은 "프레임이 있다" 는 사실이지 "보여줄 만하다" 는 뜻이 아니다.
-   */
-  const available = Boolean(currentFrame?.available && currentFrame.dataUrl) && !localPreviewGone;
-  const addTab = () => {
-    const id = `browser-tab-${++tabSequenceRef.current}`;
-    setTabs((current) => [...current, {
-      id,
-      title: locale === "ko" ? "새 탭" : "New tab",
-      url: null,
-    }]);
-    setActiveTabId(id);
-    setFrame(null);
-    setInteractive(false);
-  };
-  const closeTab = (id: string) => {
-    const index = tabs.findIndex((tab) => tab.id === id);
-    if (index < 0) return;
-    if (tabs.length === 1) {
-      const blank = { ...tabs[0], title: locale === "ko" ? "새 탭" : "New tab", url: null };
-      setTabs([blank]);
-      setActiveTabId(blank.id);
-      return;
-    }
-    const next = tabs.filter((tab) => tab.id !== id);
-    // Keep related tab + selection updates in the same event batch. Calling a
-    // state setter from inside another state updater left React free to replay
-    // the updater and strand activeTabId on the deleted tab, so its live CDP
-    // session never reconnected after closing a new tab.
-    setTabs(next);
-    if (activeTabId === id) setActiveTabId(next[Math.min(index, next.length - 1)].id);
-  };
-  const runNavigationAction = async (action: "back" | "forward" | "reload") => {
-    const labels = action === "back"
-      ? { ko: "뒤로 이동", en: "Back" }
-      : action === "forward"
-        ? { ko: "앞으로 이동", en: "Forward" }
-        : { ko: "새로고침", en: "Reload" };
-    const result = await dispatch(
-      { kind: "navigation", action },
-      { label: labels[locale], busy: true },
-    );
-    if (result?.ok && result.finalUrl) {
-      const finalUrl = result.finalUrl;
-      setAddress(finalUrl);
-      setTabs((current) => current.map((tab) => tab.id === activeTabId
-        ? { ...tab, url: finalUrl, title: new URL(finalUrl).hostname }
-        : tab));
-    }
-  };
-  const navigateFromAddress = async () => {
-    const url = normalizedBrowserAddress(address);
-    if (!url || !activeTab) {
-      setActionFeedback({ tone: "error", message: locale === "ko" ? "열 수 있는 http 또는 https 주소를 입력하세요." : "Enter a valid http or https address." });
-      return;
-    }
-    const sessionId = sessionRef.current;
-    const bridge = ipc();
-    if (sessionId && bridge?.browser?.dispatchLiveInput) {
-      const actualAddress = currentFrame?.url ?? activeTab.url ?? "";
-      const receipt = await dispatch(
-        { kind: "navigation", action: "navigate", url },
-        { label: locale === "ko" ? "주소 열기" : "Open address", busy: true },
-      );
-      if (receipt?.ok) {
-        const settledUrl = receipt.finalUrl ?? url;
-        setAddress(settledUrl);
-        setTabs((current) => current.map((tab) => tab.id === activeTab.id
-          ? { ...tab, url: settledUrl, title: new URL(settledUrl).hostname }
-          : tab));
-      } else {
-        setAddress(actualAddress);
-      }
-      return;
-    }
-    setTabs((current) => current.map((tab) => tab.id === activeTab.id
-      ? { ...tab, url, title: new URL(url).hostname }
-      : tab));
-    setAddress(url);
-    setFrame(null);
-    setInteractive(false);
-    setActionFeedback({ tone: "success", message: locale === "ko" ? "새 주소를 여는 중입니다." : "Opening the new address." });
-  };
-
-  const copyAddress = async () => {
-    if (!effectiveUrl || actionPending) return;
-    setActionPending("copy-address");
-    try {
-      await navigator.clipboard.writeText(effectiveUrl);
-      setActionFeedback({ tone: "success", message: locale === "ko" ? "주소를 복사했습니다." : "Address copied." });
-      setMenuOpen(false);
-    } catch {
-      setActionFeedback({ tone: "error", message: locale === "ko" ? "주소를 복사하지 못했습니다. 주소창에서 직접 선택해 복사하세요." : "The address could not be copied. Select it directly in the address bar." });
-    } finally {
-      setActionPending(null);
-    }
-  };
-
-  return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport} data-interactive={interactive ? "true" : "false"}>
-    {/*
-      * 탭이 하나뿐일 때는 이 줄이 바깥 패널의 "브라우저" 탭과 같은 말을 두 번
-      * 한다. 그동안 머리가 세 겹(패널 탭 + 브라우저 탭 + 주소줄)이었다.
-      * 탭이 둘 이상일 때만 줄을 세우고, 새 탭과 LIVE 표시는 주소줄로 옮겼다.
-      */}
-    {tabs.length > 1 && <div className={styles.browserTabBar}>
-      <div className={styles.browserTabs} role="tablist" aria-label={locale === "ko" ? "브라우저 탭" : "Browser tabs"}>
-        {tabs.map((tab) => <div
-          key={tab.id}
-          className={styles.browserTab}
-          data-selected={tab.id === activeTabId ? "true" : undefined}
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab.id === activeTabId}
-            className={styles.browserTabSelect}
-            onClick={() => setActiveTabId(tab.id)}
-          ><IconNetwork size={12} /><span>{tab.title}</span></button>
-          <button
-            type="button"
-            className={styles.browserTabClose}
-            aria-label={locale === "ko" ? `${tab.title} 탭 닫기` : `Close ${tab.title} tab`}
-            onClick={() => closeTab(tab.id)}
-          ><IconClose size={10} /></button>
-        </div>)}
-      </div>
-      <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>
-      {interactive && !localPreviewGone && <span className={styles.browserLiveBadge}><i />LIVE</span>}
-      {localPreviewGone && <span className={styles.browserLiveBadge} data-gone="true"><i />{locale === "ko" ? "정리됨" : "Cleaned up"}</span>}
-    </div>}
-    <div className={styles.browserNavigationBar}>
-      <button type="button" onClick={() => void runNavigationAction("back")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
-      <button type="button" onClick={() => void runNavigationAction("forward")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "앞으로" : "Forward"}><IconChevronRight size={14} /></button>
-      <button type="button" onClick={() => void runNavigationAction("reload")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "새로고침" : "Reload"}><IconRefresh size={13} /></button>
-      <form className={styles.browserAddressForm} onSubmit={(event) => { event.preventDefault(); void navigateFromAddress(); }}>
-        <IconNetwork size={12} />
-        <input
-          /* 초점 링은 감싼 주소줄(.browserAddressForm:focus-within)이 그린다. */
-          data-focus-ring="wrapper"
-          value={address}
-          onChange={(event) => setAddress(event.target.value)}
-          aria-label={locale === "ko" ? "주소" : "Address"}
-          placeholder={locale === "ko" ? "검색하거나 주소 입력" : "Search or enter address"}
-          spellCheck={false}
-        />
-      </form>
-      {tabs.length <= 1 && <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>}
-      {tabs.length <= 1 && interactive && !localPreviewGone && <span className={styles.browserLiveBadge}><i />LIVE</span>}
-      {tabs.length <= 1 && localPreviewGone && <span className={styles.browserLiveBadge} data-gone="true"><i />{locale === "ko" ? "정리됨" : "Cleaned up"}</span>}
-      <div className={styles.browserMenuAnchor}>
-        <button type="button" aria-label={locale === "ko" ? "브라우저 메뉴" : "Browser menu"} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={15} /></button>
-        {menuOpen && <div className={styles.browserMenu} role="menu">
-          <button type="button" role="menuitem" onClick={() => { setViewport("desktop"); setMenuOpen(false); }} data-selected={viewport === "desktop" ? "true" : undefined}>{locale === "ko" ? "웹 화면" : "Web viewport"}<small>1280×800</small></button>
-          <button type="button" role="menuitem" onClick={() => { setViewport("phone"); setMenuOpen(false); }} data-selected={viewport === "phone" ? "true" : undefined}>{locale === "ko" ? "휴대폰 화면" : "Phone viewport"}<small>390×844</small></button>
-          <span />
-          <button type="button" role="menuitem" disabled={!effectiveUrl || actionPending !== null} onClick={() => void copyAddress()}>{actionPending === "copy-address" ? (locale === "ko" ? "복사 중…" : "Copying…") : (locale === "ko" ? "주소 복사" : "Copy address")}</button>
-          <button type="button" role="menuitem" onClick={() => { closeTab(activeTabId); setMenuOpen(false); }}>{locale === "ko" ? "탭 닫기" : "Close tab"}</button>
-        </div>}
-      </div>
-    </div>
-    {actionFeedback && <div className={styles.browserActionNotice} data-tone={actionFeedback.tone} role={actionFeedback.tone === "error" ? "alert" : "status"}>{actionFeedback.message}</div>}
-    {/* 아래 빈 상태가 같은 사실과 같은 행동을 이미 가운데에 크게 말하고 있을 때는 배너를
-        띄우지 않는다 — 같은 버튼이 한 화면에 두 번 나오던 것. */}
-    {localPreviewGone && (available || filePreview) && <div className={styles.browserGoneNotice} role="status">
-      <span>
-        <strong>{locale === "ko" ? "미리보기 임시 서버가 정리되었습니다" : "The temporary preview server was cleaned up"}</strong>
-        <small>{locale === "ko"
-          ? "One이 검증을 마치고 서버를 종료해 이 주소는 더 열리지 않습니다."
-          : "One shut the server down after verifying, so this address no longer loads."}</small>
-      </span>
-      {filePreview
-        ? <button type="button" onClick={() => setFilePreview(null)}>{locale === "ko" ? "브라우저 화면 보기" : "Show browser view"}</button>
-        : fileCandidate && <button type="button" onClick={() => void openFilePreview()}>{locale === "ko" ? `만든 파일 미리보기 (${fileCandidate.name})` : `Preview the built file (${fileCandidate.name})`}</button>}
-    </div>}
-    {filePreview
-      ? <div className={styles.browserFilePreview} data-mode={viewport}>
-          {/* 정리된 서버 대신 디스크의 산출물을 그대로 연다 — 웹 One 미리보기와 같은
-              srcDoc 방식(원격 로드 없음), 스크립트만 허용한 sandbox. */}
-          <iframe srcDoc={filePreview.html} sandbox="allow-scripts" title={filePreview.name} />
-        </div>
-      : available
-      // eslint-disable-next-line @next/next/no-img-element
-      ? <div className={styles.browserViewport} data-mode={viewport}>
-          <div
-            className={styles.browserStreamInput}
-            role="application"
-            aria-label={interactive
-              ? (locale === "ko" ? "실시간 브라우저. 클릭, 스크롤, 키보드 입력 가능" : "Live browser. Click, scroll, and type here")
-              : (locale === "ko" ? "브라우저 화면. 실시간 조작 세션 없음" : "Browser view. No live interaction session")}
-            onPointerDown={(event) => {
-              if (!interactive) return;
-              event.currentTarget.setPointerCapture(event.pointerId);
-              inputRef.current?.focus({ preventScroll: true });
-              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              void dispatch({ kind: "pointer", phase: "down", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 }, { label: locale === "ko" ? "클릭" : "Click", quietSuccess: true });
-            }}
-            onPointerUp={(event) => {
-              if (!interactive) return;
-              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              void dispatch({ kind: "pointer", phase: "up", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 }, { label: locale === "ko" ? "클릭" : "Click", quietSuccess: true });
-            }}
-            onPointerMove={(event) => {
-              if (!interactive) return;
-              queuedPointerRef.current = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              if (pointerFrameRef.current != null) return;
-              pointerFrameRef.current = window.requestAnimationFrame(() => {
-                pointerFrameRef.current = null;
-                const point = queuedPointerRef.current;
-                if (point) void dispatch({ kind: "pointer", phase: "move", ...point }, { quietSuccess: true, quietFailure: true });
-              });
-            }}
-            onWheel={(event) => {
-              if (!interactive) return;
-              event.preventDefault();
-              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              void dispatch({ kind: "wheel", ...point, deltaX: event.deltaX, deltaY: event.deltaY }, { label: locale === "ko" ? "스크롤" : "Scroll", quietSuccess: true });
-            }}
-            onContextMenu={(event) => event.preventDefault()}
-            onKeyDown={(event) => {
-              if (!interactive) return;
-              if (composingRef.current || event.nativeEvent.isComposing) return;
-              event.preventDefault();
-              const modifiers = modifierMask(event);
-              void (async () => {
-                const down = await dispatch({ kind: "key", phase: "down", key: event.key, code: event.code, modifiers }, { label: locale === "ko" ? "키 입력" : "Key input", quietSuccess: true });
-                if (down?.ok) await dispatch({ kind: "key", phase: "up", key: event.key, code: event.code, modifiers }, { label: locale === "ko" ? "키 입력" : "Key input", quietSuccess: true });
-              })();
-            }}
-            onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={(event) => {
-              composingRef.current = false;
-              if (interactive && event.data) void dispatch({ kind: "text", text: event.data }, { label: locale === "ko" ? "텍스트 입력" : "Text input", quietSuccess: true });
-            }}
-            onPaste={(event) => {
-              event.preventDefault();
-              const text = event.clipboardData.getData("text/plain");
-              if (interactive && text) void dispatch({ kind: "text", text }, { label: locale === "ko" ? "붙여넣기" : "Paste", quietSuccess: true });
-            }}
-          >
-            <img src={currentFrame!.dataUrl!} draggable={false} alt={currentFrame?.title || (locale === "ko" ? "인앱 브라우저 라이브 화면" : "Live in-app browser view")} />
-            <textarea ref={inputRef} className={styles.browserInputCapture} aria-label={locale === "ko" ? "브라우저 키보드 입력" : "Browser keyboard input"} value="" onChange={() => undefined} />
-          </div>
-        </div>
-      : <div className={styles.browserEmpty}>
-          <IconPanelRight size={22} />
-          {/*
-            * 도달 불가일 때 남의 오류 화면 문구를 흉내 내지 않는다 (오너 관측 2026-08-25).
-            * 예전 문구 "이 사이트에 연결할 수 없습니다 / 연결 상태를 확인한 뒤 새로고침해
-            * 주세요" 는 크롬 오류 페이지의 문장 그대로였다 — 우리 화면 자리에 남의 오류가
-            * 뜬 것처럼 보였을 뿐 아니라, 우리가 스스로 끈 서버에 대고 "연결 상태를 확인"
-            * 하라고 시켜서 사용자가 고칠 수 없는 일을 하게 만든다. 정리된 것을 이미 아는
-            * 화면이므로(localPreviewGone) 그 사실과 다음 행동을 말한다.
-            */}
-          {loading ? <>
-            <strong>{locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…"}</strong>
-            <small>{locale === "ko" ? "실제 페이지를 인앱 브라우저에 연결하고 있습니다." : "Connecting the real page to the in-app browser."}</small>
-            <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />
-          </> : liveError ? <>
-            <strong>{locale === "ko" ? "브라우저 화면을 불러오지 못했습니다" : "The browser view could not be loaded"}</strong>
-            <small>{browserLiveErrorCopy(liveError, locale)}</small>
-            <button type="button" onClick={() => {
-              setFrame(null);
-              setInteractive(false);
-              setLiveError(null);
-              setLoading(true);
-              setRetryNonce((value) => value + 1);
-            }}>{locale === "ko" ? "다시 연결" : "Connect again"}</button>
-          </> : localPreviewGone ? <>
-            <strong>{locale === "ko" ? "미리보기를 정리했습니다" : "The preview was cleaned up"}</strong>
-            <small>{locale === "ko"
-              ? "One이 확인을 마치고 임시 서버를 껐습니다. 만든 파일은 그대로 있습니다."
-              : "One finished checking and shut the temporary server down. The files it built are still there."}</small>
-            {fileCandidate && <button type="button" onClick={() => void openFilePreview()}>
-              {locale === "ko" ? `만든 파일 열기 (${fileCandidate.name})` : `Open the built file (${fileCandidate.name})`}
-            </button>}
-          </> : effectiveUrl ? <>
-            <strong>{locale === "ko" ? "이 주소는 지금 열리지 않습니다" : "This address isn't answering"}</strong>
-            <small>{locale === "ko"
-              ? "서버가 꺼져 있거나 아직 준비 중입니다. 주소창의 새로고침으로 다시 시도할 수 있습니다."
-              : "The server is off or still starting. Reload from the address bar to try again."}</small>
-          </> : <>
-            <strong>{locale === "ko" ? "새 탭" : "New tab"}</strong>
-            <small>{locale === "ko" ? "주소창에 사이트 주소를 입력하세요." : "Enter a site in the address bar."}</small>
-          </>}
-        </div>}
-  </section>;
-}
-
 function OutputDisclosure({
   section,
   label,
@@ -1471,6 +791,11 @@ export type TaskSidePanelProps = {
 
 /** Task-local view state belongs to this exact thread and chat pair. */
 export function TaskSidePanel(props: TaskSidePanelProps) {
+  useEffect(() => {
+    if (!props.screenChatId) return;
+    // Register the exact task owner even while its browser tab is folded.
+    void ipc()?.workLiveView?.listTabs({ taskScopeId: props.screenChatId }).catch(() => undefined);
+  }, [props.screenChatId]);
   return <TaskSidePanelContent key={JSON.stringify([props.browserScopeKey ?? null, props.screenChatId])} {...props} />;
 }
 
@@ -1513,6 +838,8 @@ function TaskSidePanelContent({
    */
   const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [browserHeaderHost, setBrowserHeaderHost] = useState<HTMLDivElement | null>(null);
+  const [browserNewTabRequest, setBrowserNewTabRequest] = useState(0);
   const [railView, setRailView] = useState<OutputRailView | null>(null);
   /*
    * 브라우저와 앱은 좁은 칸에서 아무것도 못 읽는다(실측 324px 에서 페이지가
@@ -1529,6 +856,19 @@ function TaskSidePanelContent({
     setOpenTabs((tabs) => (tabs.includes(view) ? tabs : [...tabs, view]));
     selectRailView(view);
   }, [selectRailView]);
+  const nativeBrowserObservedRef = useRef(onBrowserObserved);
+  nativeBrowserObservedRef.current = onBrowserObserved;
+  const presentedNativeUrl = useRef<string | null>(null);
+  useEffect(() => {
+    if (!screenChatId) return;
+    return ipc()?.workLiveView?.onStatus((status) => {
+      if (status.taskScopeId !== screenChatId || !status.url || status.url === "about:blank"
+        || (status.state !== "loading" && status.state !== "ready") || presentedNativeUrl.current === status.url) return;
+      presentedNativeUrl.current = status.url;
+      openRailTab("browser");
+      nativeBrowserObservedRef.current?.(status.url);
+    });
+  }, [screenChatId, openRailTab]);
   const closeRailTab = useCallback((view: OutputRailView) => {
     setOpenTabs((tabs) => {
       const next = tabs.filter((tab) => tab !== view);
@@ -1583,77 +923,6 @@ function TaskSidePanelContent({
     setHistoryHeight(next);
     try { window.localStorage.setItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
   };
-  /**
-   * 미리보기 ↔ 아래 섹션 분할선 (오너 요구 2026-08-25).
-   * 어포던스·키보드·저장 계약은 위 기록 패널 높이 드래그와 동형이다. 차이는 하나 —
-   * 여기서는 "정한 적 없음"(null) 이 유효한 상태이고, 그때 미리보기가 남는 높이를
-   * 전부 먹는다. 두 번 클릭하면 그 기본으로 되돌아간다.
-   */
-  const [previewHeight, setPreviewHeight] = useState<number | null>(readOutputPreviewHeight);
-  const [previewResizing, setPreviewResizing] = useState(false);
-  const previewResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
-  const livePaneRef = useRef<HTMLDivElement | null>(null);
-  const liveListRef = useRef<HTMLDivElement | null>(null);
-  const clampPreviewHeight = (value: number) => {
-    const available = liveListRef.current?.clientHeight ?? 0;
-    const ceiling = available > 0
-      ? Math.max(ONE_OUTPUT_PREVIEW_HEIGHT_MIN, available - ONE_OUTPUT_BELOW_MIN)
-      : Number.MAX_SAFE_INTEGER;
-    return Math.min(ceiling, Math.max(ONE_OUTPUT_PREVIEW_HEIGHT_MIN, Math.round(value)));
-  };
-  const commitPreviewHeight = (value: number | null) => {
-    const next = value === null ? null : clampPreviewHeight(value);
-    setPreviewHeight(next);
-    try {
-      if (next === null) window.localStorage.removeItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY);
-      else window.localStorage.setItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY, String(next));
-    } catch { /* persistence is best effort */ }
-  };
-  /** 드래그를 시작한 순간의 실제 높이 — null(자동 채움) 상태에서도 이어서 끌 수 있어야 한다. */
-  const measuredPreviewHeight = () => previewHeight ?? livePaneRef.current?.clientHeight ?? ONE_OUTPUT_PREVIEW_HEIGHT_MIN;
-  const previewSplitHandle = (
-    <div
-      className={styles.previewSplitHandle}
-      role="separator"
-      aria-orientation="horizontal"
-      aria-label={locale === "ko" ? "미리보기 높이 조절" : "Resize preview"}
-      aria-valuemin={ONE_OUTPUT_PREVIEW_HEIGHT_MIN}
-      aria-valuenow={Math.round(measuredPreviewHeight())}
-      tabIndex={0}
-      data-resizing={previewResizing ? "true" : "false"}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        previewResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: measuredPreviewHeight() };
-        event.currentTarget.setPointerCapture(event.pointerId);
-        setPreviewResizing(true);
-        event.preventDefault();
-      }}
-      onPointerMove={(event) => {
-        const drag = previewResizeRef.current;
-        if (!drag || drag.pointerId !== event.pointerId) return;
-        setPreviewHeight(clampPreviewHeight(drag.startHeight + (event.clientY - drag.startY)));
-      }}
-      onPointerUp={(event) => {
-        if (previewResizeRef.current?.pointerId !== event.pointerId) return;
-        previewResizeRef.current = null;
-        setPreviewResizing(false);
-        commitPreviewHeight(measuredPreviewHeight());
-      }}
-      onPointerCancel={() => {
-        previewResizeRef.current = null;
-        setPreviewResizing(false);
-      }}
-      onDoubleClick={() => commitPreviewHeight(null)}
-      onKeyDown={(event) => {
-        if (event.key === "ArrowUp") commitPreviewHeight(measuredPreviewHeight() - 16);
-        else if (event.key === "ArrowDown") commitPreviewHeight(measuredPreviewHeight() + 16);
-        else if (event.key === "Home") commitPreviewHeight(ONE_OUTPUT_PREVIEW_HEIGHT_MIN);
-        else if (event.key === "End") commitPreviewHeight(null);
-        else return;
-        event.preventDefault();
-      }}
-    />
-  );
   const agents = useMemo(() => {
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
@@ -1956,7 +1225,7 @@ function TaskSidePanelContent({
    * 나가도 화면이 흔들리지 않는다. 세로 드래그와 동시에 일어날 수 없으므로
    * 표식은 하나로 충분하다.
    */
-  const rowResizing = previewResizing || historyResizing;
+  const rowResizing = historyResizing;
   useEffect(() => {
     if (!rowResizing) return;
     const root = document.documentElement;
@@ -2056,7 +1325,7 @@ function TaskSidePanelContent({
       )}
       <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
         <div className={styles.artifactTabList}>
-          {openTabs.map((view) => (
+          {openTabs.filter((view) => view !== "browser" || !screenChatId).map((view) => (
             <span key={view} className={styles.artifactTab} data-active={railView === view ? "true" : "false"}>
               <button
                 type="button"
@@ -2077,6 +1346,7 @@ function TaskSidePanelContent({
               </button>
             </span>
           ))}
+          <div ref={setBrowserHeaderHost} className={styles.browserTabHost} />
           <span className={styles.artifactAddWrap}>
             <button
               type="button"
@@ -2092,8 +1362,8 @@ function TaskSidePanelContent({
                     key={view}
                     type="button"
                     role="menuitem"
-                    disabled={openTabs.includes(view)}
-                    onClick={() => { setAddMenuOpen(false); openRailTab(view); }}
+                    disabled={view !== "browser" && openTabs.includes(view)}
+                    onClick={() => { setAddMenuOpen(false); if (view === "browser") setBrowserNewTabRequest((value) => value + 1); openRailTab(view); }}
                   >
                     {railTabLabel(view, locale)}
                   </button>
@@ -2121,7 +1391,7 @@ function TaskSidePanelContent({
           </p>
           <div className={styles.artifactEmptyList}>
             {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
-              <button key={view} type="button" onClick={() => openRailTab(view)}>{railTabLabel(view, locale)}</button>
+              <button key={view} type="button" onClick={() => { if (view === "browser") setBrowserNewTabRequest((value) => value + 1); openRailTab(view); }}>{railTabLabel(view, locale)}</button>
             ))}
           </div>
         </div>
@@ -2129,13 +1399,7 @@ function TaskSidePanelContent({
       <div className={styles.artifactContentStack}>
       <div
         className={styles.artifactList}
-        ref={liveListRef}
-        /* 분할선이 있는 뷰(브라우저)에서 사용자가 높이를 정했을 때만 고정한다 — 앱 뷰는
-           아래에 맞바꿀 섹션이 없어 분할선을 달지 않는다. */
-        data-preview-fixed={railView === "browser" && previewHeight != null ? "true" : undefined}
-        style={railView === "browser" && previewHeight != null
-          ? ({ "--one-preview-height": `${previewHeight}px` } as React.CSSProperties)
-          : undefined}
+
       >
         {railView === "worker" && workerKey && workerSelection && <OneWorkerPanel
           key={workerKey} selection={workerSelection} run={workerRun ?? null} locale={locale} onBack={closeWorkerTab}
@@ -2178,6 +1442,9 @@ function TaskSidePanelContent({
               />
             ))}
           </OutputDisclosure>}
+          {sources.length > 0 && <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
+            {sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
+          </OutputDisclosure>}
           <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
             {agents.length === 0
               ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 하위 에이전트 없음" : "No subagents used"}</p>
@@ -2207,21 +1474,13 @@ function TaskSidePanelContent({
             chatId={screenChatId}
           />
         )}
-        {railView === "browser" && <>
-          <div className={styles.livePane} ref={livePaneRef}>
-            <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} previewScopeId={browserScopeKey} />
-          </div>
-          {previewSplitHandle}
-          <div className={styles.liveBelow}>
-            <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
-              {sources.length === 0
-                ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
-                : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
-            </OutputDisclosure>
-          </div>
-        </>}
+        {openTabs.includes("browser") && <div className={styles.browserPane} hidden={railView !== "browser"}>
+          {screenChatId ? <TaskBrowser key={screenChatId} active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} taskScopeId={screenChatId}
+            headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
+            : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
+        </div>}
         {railView === "app" && appPreview && appViewId && (
-          <div className={styles.livePane} ref={livePaneRef}>
+          <div className={styles.livePane}>
             <div {...designOutputSurfaceProps("web", styles.appPreviewView)} data-one-live-app="true" data-app-id={appPreview.appId}>
               <LiveDeviceMockup
                 url={appPreview.url}

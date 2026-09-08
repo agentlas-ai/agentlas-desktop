@@ -6614,6 +6614,7 @@ function ChatPage() {
         screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
         browserHistoryUrl={workBrowserHistoryUrl}
+        onBrowserObserved={() => openPanelTab("panel")}
         result={(
           <WorkRailResult
             artifact={artifact}

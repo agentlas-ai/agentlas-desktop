@@ -1341,3 +1341,8 @@ button.artifactVisual { cursor: pointer; }
 .workerOriginal { margin: 4px 0 10px 23px; font-size: 11px; color: var(--muted-deep); }
 .workerOriginal summary { cursor: pointer; padding: 4px 0; }
 .workerOriginal pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 10px; border-radius: 7px; background: var(--paper-2); color: var(--ink); font-size: 11px; line-height: 1.55; }
+
+/* Browser pages share the same header strip as files, tools and subagents. */
+.browserTabHost { display:contents; }
+.browserPane { display:flex; flex:1; min-height:0; flex-direction:column; }
+.browserPane[hidden] { display:none; }

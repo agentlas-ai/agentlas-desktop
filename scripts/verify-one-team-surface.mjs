@@ -12,6 +12,7 @@ const oneShell = readFileSync(resolve(root, "renderer/components/one/OneShell.ts
 const oneShellStyles = readFileSync(resolve(root, "renderer/components/one/OneShell.module.css"), "utf8");
 const modalStyles = readFileSync(resolve(root, "renderer/components/one/OneBottomSheet.module.css"), "utf8");
 const activity = readFileSync(resolve(root, "renderer/components/workspace/TaskSidePanel.tsx"), "utf8");
+const taskBrowser = readFileSync(resolve(root, "renderer/components/browser/TaskBrowser.tsx"), "utf8");
 const liveOutputViewer = readFileSync(resolve(root, "renderer/components/LiveOutputViewer.tsx"), "utf8");
 const liveView = readFileSync(resolve(root, "electron/browser/live-view.ts"), "utf8");
 const shared = readFileSync(resolve(root, "shared/types.ts"), "utf8");
@@ -247,19 +248,20 @@ assert.match(oneShellStyles, /width:\s*min\(var\(--one-rail-width,\s*\d+px\), ca
 // Browser evidence can be inspected as both a normal web viewport and a real
 // responsive phone capture. Phone mode must always clear CDP emulation again.
 assert.match(shared, /BrowserLiveViewport\s*=\s*"desktop"\s*\|\s*"phone"/);
-// The native-style browser can navigate away from the task's first observed
-// URL, so the live target must follow the active tab's effective URL. Session
-// cleanup is serialized before this call to avoid a late stop killing the new
-// tab or viewport stream.
-assert.match(activity, /await stopFlightRef\.current\.catch\(\(\) => undefined\)[\s\S]*?startLiveView\(effectiveUrl, viewport\)/);
-assert.match(activity, /dispatchLiveInput\(\{ \.\.\.input, sessionId \}/);
+// Native tabs use the Main registry and exact task/view identity. A closed
+// or folded panel detaches its guest instead of killing a later tab's stream.
+assert.match(taskBrowser, /api\.listTabs\(\{ taskScopeId \}\)/);
+assert.match(taskBrowser, /workLiveView\.navigate\(\{ viewId: tabId, taskScopeId, url \}\)/);
+assert.match(taskBrowser, /mode="browser" bare stableNavigation retainOnUnmount/);
+assert.match(taskBrowser, /createPortal\(header, headerHost\)/);
+assert.doesNotMatch(activity, /function OneBrowserLiveView/);
 assert.match(activity, /browserScopeKey[\s\S]*?browserUrlsByScope/);
 // 1.0.31: 자동 열림은 실측된 currentBrowserUrl 이 아니라 스코프가 고른 preferredBrowserUrl 을 알린다.
 assert.match(activity, /setRailView\("browser"\)[\s\S]*?onBrowserObserved\?\.\(preferredBrowserUrl\)/);
 assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
-assert.match(activity, /setFrame\(null\)[\s\S]*?if \(!effectiveUrl\)/);
+assert.match(taskBrowser, /status\.taskScopeId !== taskScopeId/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);
-assert.match(activity, /data-mode=\{viewport\}/);
+assert.match(activity, /<TaskBrowser key=\{screenChatId\}/);
 /*
  * 오너 지시 2026-08-24: 탭은 고정 목록이 아니다. 계약은 "다섯 보기가 모두
  * 도달 가능하다" 이지, "다섯 개가 언제나 떠 있다" 가 아니다. 결과와 앱은
