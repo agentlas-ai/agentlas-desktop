@@ -84,7 +84,7 @@ import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
 import { backfillLegacyLocalRouteDefinitionHashes } from "./agents/routes";
 import { dedupeLocalInstalledAgents } from "./store/agent-dedupe";
-import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
+import { reconcileExistingCuratedMemoryCandidatesAtStartup } from "./experience/store";
 import { migrateRegisteredAgents } from "./architecture/agent-migrations";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
@@ -1101,6 +1101,9 @@ app.on("activate", () => {
 let quitCleanupDone = false;
 let quitCleanupPromise: Promise<void> | null = null;
 let quitServicesStopPromise: Promise<void> | null = null;
+let legacyLearningTimer: NodeJS.Timeout | null = null;
+let legacyLearningController: AbortController | null = null;
+let legacyLearningJob: Promise<void> | null = null;
 let systemShutdownInProgress = false;
 let systemShutdownResetTimer: NodeJS.Timeout | null = null;
 let daemonMobileBridgeClaimed = false;
@@ -1143,6 +1146,9 @@ async function stopDesktopOwnedMobileBridge(): Promise<void> {
 function stopQuitServices(): Promise<void> {
   if (quitServicesStopPromise) return quitServicesStopPromise;
   shellReadyForWindows = false;
+  if (legacyLearningTimer) clearTimeout(legacyLearningTimer);
+  legacyLearningTimer = null;
+  legacyLearningController?.abort(new Error("legacy_learning_shutdown"));
   try { stopAutomationScheduler(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
@@ -1160,6 +1166,7 @@ function stopQuitServices(): Promise<void> {
   disposeMobileBridgeStateChange = null;
 
   quitServicesStopPromise = Promise.all([
+    legacyLearningJob?.catch(() => {}),
     import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
     import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
     import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
@@ -3456,25 +3463,27 @@ app.whenReady().then(async () => {
   // 유지보수다. 창 생성 앞에서 콜드 스타트를 수 초 늘리고 있었으므로 창이 뜬 뒤로
   // 미룬다(runDeferredLegacyLearningReconciliation). 멱등이라 이번 실행에서
   // 못 돌면 다음 실행이 이어받는다.
-  const runDeferredLegacyLearningReconciliation = () => {
+  const runDeferredLegacyLearningReconciliation = async (signal: AbortSignal) => {
     // ★ 단계마다 따로 감싼다. 예전에는 전부 한 try 안이었고 catch 가 삼켰다 — 앞 단계
     //   하나가 던지면 그 뒤가 통째로 안 돌았다. 특히 `migrateRegisteredAgents` 는 업데이트가
     //   등록된 모든 에이전트에 도달하는 유일한 통로라, 조용히 죽으면 새 아키텍처가 영영
     //   닿지 않는다(실측 2026-08-26). 한 단계의 실패가 나머지를 막지 않아야 한다.
-    const step = <T,>(name: string, run: () => T): T | null => {
+    const step = async <T,>(name: string, run: () => T | Promise<T>): Promise<T | null> => {
+      signal.throwIfAborted();
       try {
-        return run();
+        return await run();
       } catch (err) {
+        if (signal.aborted) throw err;
         console.error(`[experience] ${name} 단계 실패 (나머지는 계속 진행):`, err);
         return null;
       }
     };
     try {
-      const definitions = step("route-definition-backfill", backfillLegacyLocalRouteDefinitionHashes)
+      const definitions = await step("route-definition-backfill", backfillLegacyLocalRouteDefinitionHashes)
         ?? { updated: 0, failed: 0 };
-      const duplicates = step("dedupe-local-agents", dedupeLocalInstalledAgents)
+      const duplicates = await step("dedupe-local-agents", dedupeLocalInstalledAgents)
         ?? { groups: 0, merged: 0 };
-      const experience = step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidates())
+      const experience = await step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidatesAtStartup(2_000, { signal }))
         ?? { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
       /*
        * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
@@ -3483,7 +3492,7 @@ app.whenReady().then(async () => {
        * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
        * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
        */
-      const migrated = step("architecture-migrations", migrateRegisteredAgents) ?? { stepsRun: 0 };
+      const migrated = await step("architecture-migrations", migrateRegisteredAgents) ?? { stepsRun: 0 };
       if (migrated.stepsRun > 0) {
         console.log("[architecture] migrated registered agents", migrated);
       }
@@ -3501,6 +3510,7 @@ app.whenReady().then(async () => {
         });
       }
     } catch (err) {
+      if (signal.aborted) return;
       console.error("[experience] legacy learning reconciliation failed:", err);
     }
   };
@@ -3534,7 +3544,13 @@ app.whenReady().then(async () => {
   // 누가 어떤 버전을 쓰는지 서버가 알게 한다(1.0.31·32 크래시 때 영향 범위를 셀 수 없었다).
   startInstallBeacon(installIdentity.channel);
   // 창이 뜨고 초기 렌더러 IPC가 가라앉은 뒤에 레거시 정합을 돌린다.
-  setTimeout(runDeferredLegacyLearningReconciliation, 3_000);
+  legacyLearningController = new AbortController();
+  legacyLearningTimer = setTimeout(() => {
+    legacyLearningTimer = null;
+    const controller = legacyLearningController;
+    if (!controller || controller.signal.aborted || quitServicesStopPromise) return;
+    legacyLearningJob = runDeferredLegacyLearningReconciliation(controller.signal);
+  }, 3_000);
   startOneBriefingScheduler();
   startOneTeamNotificationBridge();
   startRunAlertBridge();

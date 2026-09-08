@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
+import { setImmediate as yieldToMain } from "node:timers/promises";
 import type {
   ExperienceCandidateCaptureInput,
   ExperienceCandidateRecord,
@@ -1281,6 +1282,51 @@ function requestContextFromMemory(raw: string | null): AutoExperienceIntakeInput
  * records blocked/skipped reasons without content, and never promotes, uploads,
  * purchases or attaches a chip.
  */
+type CuratedMemoryReconciliationResult = {
+  scanned: number;
+  candidateCreated: number;
+  blocked: number;
+  skipped: number;
+  deferred: number;
+};
+
+// Keep each intake, including its candidate/receipt transaction, synchronous.
+// Both callers share the same privacy, identity and duplicate checks.
+function reconcileCuratedMemoryRow(memory: MemoryProjectionRow, result: CuratedMemoryReconciliationResult): void {
+  if (!memory.agent_id) return;
+  result.scanned += 1;
+  try {
+    const agent = getAgentById(memory.agent_id);
+    const requestContext = requestContextFromMemory(memory.context_json);
+    const input: AutoExperienceIntakeInput = {
+      memory: {
+        id: memory.id,
+        kind: memory.kind,
+        content: memory.content,
+        confidence: memory.confidence === "high" || memory.confidence === "low" ? memory.confidence : "medium",
+        sensitivity: memory.sensitivity as AutoExperienceIntakeInput["memory"]["sensitivity"],
+        requestContext,
+      },
+      agentId: memory.agent_id,
+      projectId: memory.project_id,
+      projectPath: memory.project_path,
+      environment: { platform: process.platform, arch: process.arch, runtimeKind: "agentlas-desktop" },
+      basePackageHash: agent ? effectiveExperienceBaseHash(agent) : null,
+      taskHint: requestContext?.userIntent ?? requestContext?.triggerTerms?.join(" ") ?? null,
+    };
+    autoIntakeCuratedMemory(input);
+    const receipt = getDb().prepare(
+      "SELECT status FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
+    ).get(memory.agent_id, autoIntakeSourceMemoryHash(input)) as { status?: string } | undefined;
+    if (receipt?.status === "candidate-created") result.candidateCreated += 1;
+    else if (receipt?.status === "blocked") result.blocked += 1;
+    else if (receipt?.status === "skipped") result.skipped += 1;
+    else result.deferred += 1;
+  } catch {
+    result.deferred += 1;
+  }
+}
+
 export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000, options: { agentId?: string } = {}): {
   scanned: number;
   candidateCreated: number;
@@ -1303,40 +1349,50 @@ export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000, opt
   ).all(only, only, limit) as MemoryProjectionRow[];
   const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
 
-  for (const memory of rows) {
-    if (!memory.agent_id) continue;
-    result.scanned += 1;
-    try {
-      const agent = getAgentById(memory.agent_id);
-      const requestContext = requestContextFromMemory(memory.context_json);
-      const input: AutoExperienceIntakeInput = {
-        memory: {
-          id: memory.id,
-          kind: memory.kind,
-          content: memory.content,
-          confidence: memory.confidence === "high" || memory.confidence === "low" ? memory.confidence : "medium",
-          sensitivity: memory.sensitivity as AutoExperienceIntakeInput["memory"]["sensitivity"],
-          requestContext,
-        },
-        agentId: memory.agent_id,
-        projectId: memory.project_id,
-        projectPath: memory.project_path,
-        environment: { platform: process.platform, arch: process.arch, runtimeKind: "agentlas-desktop" },
-        basePackageHash: agent ? effectiveExperienceBaseHash(agent) : null,
-        taskHint: requestContext?.userIntent ?? requestContext?.triggerTerms?.join(" ") ?? null,
-      };
-      autoIntakeCuratedMemory(input);
-      const receipt = getDb().prepare(
-        "SELECT status FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
-      ).get(memory.agent_id, autoIntakeSourceMemoryHash(input)) as { status?: string } | undefined;
-      if (receipt?.status === "candidate-created") result.candidateCreated += 1;
-      else if (receipt?.status === "blocked") result.blocked += 1;
-      else if (receipt?.status === "skipped") result.skipped += 1;
-      else result.deferred += 1;
-    } catch {
-      result.deferred += 1;
+  for (const memory of rows) reconcileCuratedMemoryRow(memory, result);
+  return result;
+}
+
+/** Startup-only sweep: release Main between bounded batches. Snapshot IDs,
+ * never memory bodies or agent/base identities, across event-loop turns. */
+export async function reconcileExistingCuratedMemoryCandidatesAtStartup(
+  limitValue = 2_000,
+  options: { agentId?: string; signal?: AbortSignal } = {},
+): Promise<CuratedMemoryReconciliationResult> {
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
+  const only = typeof options.agentId === "string" && options.agentId.trim() ? options.agentId.trim() : null;
+  const ids = getDb().prepare(
+    `SELECT id FROM memory_entries
+      WHERE agent_id IS NOT NULL AND superseded_at IS NULL
+        AND (? IS NULL OR agent_id = ?)
+      ORDER BY created_at ASC, id ASC LIMIT ?`,
+  ).all(only, only, limit) as Array<{ id: string }>;
+  const readCurrent = getDb().prepare(
+    `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
+            sensitivity, context_json, superseded_at
+       FROM memory_entries WHERE id = ? AND agent_id IS NOT NULL
+        AND superseded_at IS NULL AND (? IS NULL OR agent_id = ?)`,
+  );
+  const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
+  let batchStarted = performance.now();
+  let batchRows = 0;
+  for (let index = 0; index < ids.length; index += 1) {
+    signal?.throwIfAborted();
+    // A user may delete/supersede a Memory or replace an agent while we yield.
+    // Read fresh content and resolve the exact current base inside this turn.
+    const memory = readCurrent.get(ids[index].id, only, only) as MemoryProjectionRow | undefined;
+    if (memory) reconcileCuratedMemoryRow(memory, result);
+    batchRows += 1;
+    if (index + 1 < ids.length && (batchRows >= 32 || performance.now() - batchStarted >= 8)) {
+      await yieldToMain(undefined, { signal });
+      signal?.throwIfAborted();
+      batchRows = 0;
+      batchStarted = performance.now();
     }
   }
+  signal?.throwIfAborted();
   return result;
 }
 
