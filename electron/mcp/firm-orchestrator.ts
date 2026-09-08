@@ -1,3 +1,4 @@
+import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
 //   본부(division)는 지속 세션(숨김 sub-chat, 히스토리·메모리 유지), 전문가는 1회성 worker.
@@ -140,6 +141,9 @@ function cleanAgentAppControlBlocks(text: string): string {
 const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface FirmRunParams {
+  prepareWorkerCapabilities?: PrepareWorkerCapabilities;
+  workerCapabilityTask?: WorkerCapabilityInput["task"];
+  workerCapabilityCeiling?: WorkerCapabilityInput["ceiling"];
   req: McpInvocationRequest;
   chat: { id: string; projectId: string | null; firmId: string | null; goalId?: string | null };
   org: ResolvedOrg;
@@ -1068,7 +1072,17 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     runtimePicked: { runner: Runner; label: string },
   ): Promise<RunnerResult> => {
     try {
-      return await runtimePicked.runner(
+      const capabilityAttemptId = `firm-worker:${node.id}:${randomUUID()}`;
+      const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? runtimePicked.runner
+        : workerCapabilityRunner(p.prepareWorkerCapabilities, {
+          workerId: node.id, attemptId: capabilityAttemptId, agentId: node.agentId ?? undefined, agentName: node.name,
+          task: { ...p.workerCapabilityTask, brief: turn.userPrompt, doneWhen: p.workerCapabilityTask?.doneWhen ?? [] },
+          runtime, ceiling: p.req.agentAppMode ? "agent-app" : p.workerCapabilityCeiling ?? "host",
+        }, runtimePicked.runner, (code) => {
+          tryRecordRunEvent({ runId: p.req.runId ?? p.chat.id, chatId: p.chat.id, agentId: node.id,
+            kind: "worker_capability_preparation", payload: { code, attemptId: capabilityAttemptId } });
+        });
+      return await workerRunner(
         {
           systemPrompt,
           ...firmRunnerConversation(p, turn, runtime),
@@ -1163,7 +1177,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         },
       );
     } catch (error) {
-      if ((turn.signal ?? p.signal)?.aborted) throw error;
+      if (error instanceof WorkerCapabilityError || (turn.signal ?? p.signal)?.aborted) throw error;
       return { text: "", failure: runnerFailureFromError(error, runtime.kind) };
     }
   };

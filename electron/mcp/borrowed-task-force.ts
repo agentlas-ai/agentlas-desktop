@@ -1,3 +1,4 @@
+import { workerCapabilityRunner, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // Borrowed Hub task-force orchestration.
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
 // input packets, runs each borrowed agent as an isolated BYOM local sub-run, then
@@ -409,6 +410,8 @@ export interface WorkforcePlannerBenchmarkAttemptEvidence {
 }
 
 export interface BorrowedTaskForceParams {
+  /** Main prepares an independent capability lease at each actual worker dispatch. */
+  prepareWorkerCapabilities?: PrepareWorkerCapabilities;
   req: McpInvocationRequest;
   chat: Chat;
   orchestratorAgent: InstalledAgent;
@@ -3583,6 +3586,15 @@ async function runBorrowedAgentTurn(
     packet.allocation.requirements.toolRequired,
     preApprovalStage,
   );
+  const capabilityCeiling: WorkerCapabilityInput["ceiling"] = p.req.agentAppMode ? "agent-app"
+    : workforceGrant || spec.permissionPolicy || p.workforceSelectionReceipt ? "prepared" : "host";
+  const capabilityTask: WorkerCapabilityInput["task"] = {
+    brief: packet.brief, doneWhen: packet.doneWhen, expectedOutput: packet.expectedOutput, constraints: packet.constraints,
+  };
+  const capabilityEvidence = (workerId: string, attemptId: string) => (code: string) => {
+    tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+      agentId: workerId, kind: "worker_capability_preparation", payload: { code, attemptId, ceiling: capabilityCeiling } });
+  };
   const runnerBase = taskForceRunnerBase(
     p,
     workerPermission,
@@ -3804,6 +3816,9 @@ async function runBorrowedAgentTurn(
         p.sink({ ...event, ...attributed });
       };
       const teamResult = await runFirmInvocation({
+        prepareWorkerCapabilities: p.prepareWorkerCapabilities,
+        workerCapabilityTask: capabilityTask,
+        workerCapabilityCeiling: capabilityCeiling,
         req: {
           ...p.req,
           userPrompt: authoritativePacketPrompt(active),
@@ -4087,13 +4102,17 @@ async function runBorrowedAgentTurn(
               observedWorkerFailureCount = 2;
               observedWorkerEscalationAttempt = 1;
             }
-            const invokeWorkerAttempt = () => observeTaskForceModelCall(p, {
+            const invokeWorkerAttempt = () => workerCapabilityRunner(p.prepareWorkerCapabilities, {
+              workerId: `${id}:hub-team:${worker.id}`, attemptId: observedWorkerInvocationId,
+              agentName: worker.id, task: { ...capabilityTask, brief: parsedManagerPlan?.delegationBriefs.find((entry) => entry.workerId === worker.id)?.brief || packet.brief },
+              runtime: observedWorkerRuntime, ceiling: capabilityCeiling,
+            }, (request, events) => observeTaskForceModelCall(p, {
               nodeId: `${id}:hub-team:${worker.id}`,
               phase: role === "worker" ? "worker" : "worker-escalation",
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => observedWorkerPicked.runner(
+            }, () => observedWorkerPicked.runner(request, events)), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 systemPrompt: [
                   buildBorrowedAgentSystemPrompt(workerSpec, packagePermission),
@@ -4139,7 +4158,7 @@ async function runBorrowedAgentTurn(
                   }));
                 },
               },
-            ));
+            );
             let attemptResult: RunnerResult | null = null;
             while (!attemptResult) {
               try {
@@ -4519,13 +4538,16 @@ async function runBorrowedAgentTurn(
         observedDirectFailureCount = 2;
         observedDirectEscalationAttempt = 1;
       }
-      const attemptResult = await observeTaskForceModelCall(p, {
+      const attemptResult = await workerCapabilityRunner(p.prepareWorkerCapabilities, {
+        workerId: id, attemptId: observedDirectInvocationId, agentId: installedAgent?.id ?? p.chat.agentId ?? undefined,
+        agentName: spec.name, task: capabilityTask, runtime: observedDirectRuntime, ceiling: capabilityCeiling,
+      }, (request, events) => observeTaskForceModelCall(p, {
         nodeId: id,
         phase: role === "worker" ? "worker" : "worker-escalation",
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => observedDirectPicked.runner(
+      }, () => observedDirectPicked.runner(request, events)), capabilityEvidence(id, observedDirectInvocationId))(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(spec, packagePermission),
@@ -4578,7 +4600,7 @@ async function runBorrowedAgentTurn(
             }));
           },
         },
-      ));
+      );
       observedDirectResult = attemptResult;
       return requireTaskForceRunnerSuccess(attemptResult, observedDirectRuntime);
     });
