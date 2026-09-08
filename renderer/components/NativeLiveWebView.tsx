@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { WorkLiveViewState, WorkLiveViewStatus } from "@/lib/types";
 import styles from "./NativeLiveWebView.module.css";
+
+// Native guests sit above the renderer DOM. Their hide/cleanup requests must be
+// dispatched before a replacement surface paints; SSR has no native guest.
+const useNativeViewLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 type Props = {
   url: string;
@@ -49,7 +53,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
   const [status, setStatus] = useState<WorkLiveViewStatus>(statusRef.current);
   const [openError, setOpenError] = useState<string | null>(null);
 
-  useEffect(() => {
+  useNativeViewLayoutEffect(() => {
     const api = window.agentlas?.workLiveView;
     const stage = stageRef.current;
     if (!api || !stage) {
@@ -209,7 +213,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
     };
   }, [mode, runtimeUrl, taskScopeId, retainOnUnmount]);
 
-  useEffect(() => { syncRef.current?.(); }, [active]);
+  useNativeViewLayoutEffect(() => { syncRef.current?.(); }, [active]);
 
   const reload = () => {
     setOpenError(null);
