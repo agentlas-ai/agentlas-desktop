@@ -498,7 +498,9 @@ async function createTransport(
   server: InstalledMcpServer,
   resolved: Record<string, string>,
   runtimeRootOverride?: string | null,
+  signal?: AbortSignal,
 ): Promise<CreatedTransport> {
+  signal?.throwIfAborted();
   if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
     throw new Error("Agentlas System Time MCP launch contract is invalid");
   }
@@ -509,9 +511,10 @@ async function createTransport(
     if (!server.command) throw new Error("stdio server has no command");
     // uvx 로 도는 공식 벤더 서버가 13개다. uv 는 이 앱이 마련해 준다 — 사용자가 따로
     // 깔아 두지 않았다는 이유로 그 13개가 전부 죽으면 안 된다(withUvxPath 안의 사유 참조).
-    const baseEnv = withUvxPath(
+    const baseEnv = await withUvxPath(
       server.command,
       withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }),
+      { signal },
     );
     const stdioEnv = Object.fromEntries(
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -548,6 +551,7 @@ async function createTransport(
         if (typeof value === "string") stdioEnv[key] = value;
       }
     }
+    signal?.throwIfAborted();
     const transport = new StdioClientTransport({
       command,
       args,
@@ -569,18 +573,25 @@ async function createTransport(
   return { transport, runtimeRoot: null };
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
-  let timer: NodeJS.Timeout;
+async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void, signal?: AbortSignal): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  let detach = () => {};
   const timeout = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(new Error("MCP tool call aborted"));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    detach = () => signal?.removeEventListener("abort", onAbort);
+    if (signal?.aborted) { onAbort(); return; }
     timer = setTimeout(() => {
-      onTimeout();
       reject(new Error(`timed out after ${Math.round(ms / 1000)}s`));
+      onTimeout();
     }, ms);
   });
   try {
+    // Register both outcomes even for an already-aborted preparation.
     return await Promise.race([p, timeout]);
   } finally {
-    clearTimeout(timer!);
+    if (timer) clearTimeout(timer);
+    detach();
   }
 }
 
@@ -591,6 +602,7 @@ async function withAbortSignal<T>(
 ): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) {
+    void promise.catch(() => {});
     onAbort();
     throw new Error("MCP tool call aborted");
   }
@@ -632,54 +644,41 @@ async function closeMcpProbeBounded(client: Client, transport: Transport | null)
 /** 한 서버에 붙어 tools/list 해보고 상태 반환. 연결은 즉시 닫는다(테스트 전용). */
 export async function testServerConnection(
   server: InstalledMcpServer,
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<McpServerStatus> {
   const checkedAt = new Date().toISOString();
-  const { resolved, missing } = await resolveEnv(server.envKeys);
-
-  // 필수 env가 비어 있으면 굳이 spawn하지 않고 막힌 상태로 반환.
-  if (missing.length > 0) {
-    return { id: server.id, connected: false, tools: [], error: null, missingEnv: missing, checkedAt };
-  }
-
-  const client = new Client(
-    { name: "agentlas-desktop", version: electronAppVersion() },
-    { capabilities: {} },
-  );
-
+  const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
+  const controller = new AbortController();
+  const client = new Client({ name: "agentlas-desktop", version: electronAppVersion() }, { capabilities: {} });
   let transport: Transport | null = null;
+  let resolved: Record<string, string> = {};
+  let missing: string[] = [];
+  const stop = () => { controller.abort(); void transport?.close().catch(() => {}); };
   try {
-    transport = (await createTransport(server, resolved)).transport;
-
-    const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
-    const tools = await withTimeout(
-      (async () => {
-        await client.connect(transport);
-        const res = await client.listTools();
-        return res.tools;
-      })(),
-      timeoutMs,
-      () => {
-        void transport?.close().catch(() => {});
-      },
-    );
-
+    const tools = await withAbortSignal(withTimeout((async () => {
+      if (options?.signal?.aborted) stop();
+      controller.signal.throwIfAborted();
+      const environment = await resolveEnv(server.envKeys);
+      resolved = environment.resolved;
+      missing = environment.missing;
+      controller.signal.throwIfAborted();
+      if (missing.length > 0) return [];
+      transport = (await createTransport(server, resolved, undefined, controller.signal)).transport;
+      controller.signal.throwIfAborted();
+      await client.connect(transport);
+      controller.signal.throwIfAborted();
+      const result = await client.listTools();
+      controller.signal.throwIfAborted();
+      return result.tools;
+    })(), timeoutMs, stop, controller.signal), options?.signal, stop);
     await closeMcpProbeBounded(client, transport);
-    return { id: server.id, connected: true, tools, error: null, missingEnv: [], checkedAt };
+    return { id: server.id, connected: missing.length === 0, tools, error: null, missingEnv: missing, checkedAt };
   } catch (err) {
+    stop();
     await closeMcpProbeBounded(client, transport);
     const rawMessage = err instanceof Error ? err.message : String(err);
-    const message = server.catalogId === OPENCRAB_CATALOG_ID
-      ? "OpenCrab connection failed"
-      : redactResolvedSecrets(rawMessage, resolved);
-    return {
-      id: server.id,
-      connected: false,
-      tools: [],
-      error: message.slice(0, 300),
-      missingEnv: missing,
-      checkedAt,
-    };
+    const message = server.catalogId === OPENCRAB_CATALOG_ID ? "OpenCrab connection failed" : redactResolvedSecrets(rawMessage, resolved);
+    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt };
   }
 }
 
@@ -711,12 +710,10 @@ async function callServerToolContentInternal(
 ): Promise<McpToolContentResult | null> {
   let resolved: Record<string, string> = {};
   let client: Client | null = null;
+  const preparation = new AbortController();
+  const stop = () => { preparation.abort(); void client?.close().catch(() => {}); };
   const boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
   try {
-    const environment = await resolveEnv(server.envKeys);
-    resolved = environment.resolved;
-    if (environment.missing.length > 0) return null; // 자격증명 미충족 — 폴 스킵(needsCredential UI가 안내).
-
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
       toolName.startsWith("workforce.");
     const timeoutCeiling = workforceCall ? WORKFORCE_TOOL_TIMEOUT_MAX_MS : CONNECT_TIMEOUT_MS;
@@ -724,6 +721,12 @@ async function callServerToolContentInternal(
     const maxTextChars = resolveMcpToolTextLimit(options?.maxTextChars);
     const result = await withAbortSignal(withTimeout(
       (async () => {
+        if (options?.signal?.aborted) stop();
+        preparation.signal.throwIfAborted();
+        const environment = await resolveEnv(server.envKeys);
+        resolved = environment.resolved;
+        preparation.signal.throwIfAborted();
+        if (environment.missing.length > 0) return null;
         if (options?.runtimePin && !workforceCall) {
           throw new Error("Runtime transaction pins are supported only for Agentlas Workforce calls");
         }
@@ -749,10 +752,12 @@ async function callServerToolContentInternal(
             { capabilities: {} },
           );
           client = activeClient;
-          const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot);
+          const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal);
+          preparation.signal.throwIfAborted();
           const transport = created.transport;
           instrumentMcpToolCallTransport(transport, boundaryState);
           await activeClient.connect(transport);
+          preparation.signal.throwIfAborted();
 
           if (server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
             const inventory = await activeClient.listTools();
@@ -835,6 +840,7 @@ async function callServerToolContentInternal(
             }
           }
 
+          preparation.signal.throwIfAborted();
           const res = (await activeClient.callTool({ name: toolName, arguments: args })) as {
             content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
           };
@@ -862,15 +868,13 @@ async function callServerToolContentInternal(
         throw new Error(`Agentlas OS runtime could not provide MCP tool: ${toolName}`);
       })(),
       timeoutMs,
-      () => {
-        void client?.close().catch(() => {});
-      },
-    ), options?.signal, () => {
-      void client?.close().catch(() => {});
-    });
+      stop,
+      preparation.signal,
+    ), options?.signal, stop);
     return result;
   } catch (err) {
-    await (client as Client | null)?.close().catch(() => {});
+    stop();
+    if (client) await closeMcpProbeBounded(client, null);
     const rawMessage = err instanceof Error ? err.message : String(err);
     const mcpCode = err instanceof McpError ? err.code : null;
     const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);

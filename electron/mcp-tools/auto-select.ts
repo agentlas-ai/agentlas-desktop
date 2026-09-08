@@ -113,7 +113,7 @@ export interface AutoSelectMcpDependencies {
   listInstalledServers: () => InstalledMcpServer[];
   installFromCatalog: (catalogId: string) => InstalledMcpServer;
   readEnvVar: (key: string) => Promise<string | null>;
-  testServerConnection: (server: InstalledMcpServer) => Promise<{
+  testServerConnection: (server: InstalledMcpServer, signal?: AbortSignal) => Promise<{
     connected: boolean;
     missingEnv: string[];
   }>;
@@ -180,10 +180,12 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
   // The browser host may need to open Chrome and attach over CDP on its first
   // run. Three seconds was shorter than a warm local probe and made clean
   // installs look unavailable before the bundled host could answer tools/list.
-  testServerConnection: (server) => testServerConnection(server, {
-    timeoutMs: server.catalogId === "agentlas-browser" || server.catalogId === "playwright"
-      ? 20_000
-      : 3_000,
+  testServerConnection: (server, signal) => testServerConnection(server, {
+    signal,
+    // A missing uv runtime is provisioned inside this same cancellable deadline.
+    timeoutMs: server.command === "uvx" || server.command === "uv"
+      ? 45_000
+      : server.catalogId === "agentlas-browser" || server.catalogId === "playwright" ? 20_000 : 3_000,
   }),
   resolveNeeds: resolveMcpNeeds,
 };
@@ -787,7 +789,7 @@ export async function autoSelectMcpTools(input: {
       }
     }
     try {
-      const status = await deps.testServerConnection(server);
+      const status = await deps.testServerConnection(server, input.signal);
       if (status.missingEnv.length > 0) {
         return { ...base, installed: false, missingEnv: [...new Set(status.missingEnv)].sort(), state: "missing-key" };
       }
@@ -859,7 +861,7 @@ export async function autoSelectMcpTools(input: {
     if (state === "ready" && (!server.enabled || server.configurationValid === false)) state = "disabled";
     if (state === "ready") {
       try {
-        const status = await deps.testServerConnection(server);
+        const status = await deps.testServerConnection(server, input.signal);
         if (status.missingEnv.length > 0) {
           missingEnv.push(...status.missingEnv.filter((key) => !missingEnv.includes(key)));
           state = "missing-key";

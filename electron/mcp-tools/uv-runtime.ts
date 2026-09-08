@@ -22,7 +22,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { detachedSpawnOpts, killCliTree } from "../runtime/exec";
 import { optionalElectronAppPath } from "../runtime-paths";
 
 /** 우리가 마련한 uv 가 사는 곳. 사용자 홈 밑, 우리 이름 아래. */
@@ -63,53 +64,134 @@ function uvxOnPath(searchPath: string): boolean {
 }
 
 let installAttempted = false;
+type InstallJob = { controller: AbortController; promise: Promise<string | null>; waiters: Set<symbol> };
+let installJob: InstallJob | null = null;
 
-/**
- * uvx 가 없으면 번들 파이썬으로 한 번 설치한다. 성공하면 그 bin 디렉터리를 돌려준다.
- *
- * 돌려주는 값은 **PATH 에 앞세울 디렉터리**이거나 null 이다. null 은 "마련하지 못했다"는
- * 뜻이고, 그때는 원래대로 사용자 PATH 에 기대는 것 말고 할 수 있는 일이 없다 — 조용히
- * 성공한 척하지 않는다.
- */
-export function ensureUvx(currentPath: string): string | null {
-  if (uvxOnPath(currentPath)) return null; // 이미 있다. 우리 것을 끼워 넣지 않는다.
-  if (exists(path.join(uvBinDir(), process.platform === "win32" ? "uvx.exe" : "uvx"))) {
-    return uvBinDir();
-  }
-  if (installAttempted) return null; // 한 번 실패했으면 서버를 띄울 때마다 재시도하지 않는다.
-  installAttempted = true;
+export interface UvxPreparationOptions { signal?: AbortSignal; timeoutMs?: number }
 
-  const python = bundledPython();
-  if (!python) return null;
+function aborted(): Error { return new Error("uv_bootstrap_aborted"); }
+
+function preparedUvxBin(): string | null {
+  const executable = process.platform === "win32" ? "uvx.exe" : "uvx";
+  // Pre-existing installations keep their original authority. New jobs never
+  // write to this legacy directory before completing.
+  if (exists(path.join(uvBinDir(), executable))) return uvBinDir();
   try {
-    fs.mkdirSync(uvHome(), { recursive: true });
-    const result = spawnSync(
-      python,
-      ["-m", "pip", "install", "--quiet", "--upgrade", "--target", uvHome(), "uv"],
-      { encoding: "utf8", timeout: 5 * 60 * 1000 },
-    );
-    if (result.status !== 0) {
-      console.warn("[uv] could not provision uv:", (result.stderr || "").split("\n")[0]);
-      return null;
-    }
-  } catch (error) {
-    console.warn("[uv] could not provision uv:", error instanceof Error ? error.message : error);
-    return null;
-  }
-  return exists(path.join(uvBinDir(), process.platform === "win32" ? "uvx.exe" : "uvx"))
-    ? uvBinDir()
-    : null;
+    const receiptPath = path.join(uvHome(), "prepared.json");
+    if (fs.statSync(receiptPath).size > 1_024) return null;
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as { directory?: unknown };
+    if (typeof receipt.directory !== "string" || !/^runtime-[A-Za-z0-9_-]+$/.test(receipt.directory)) return null;
+    const directory = path.join(uvHome(), receipt.directory);
+    const bin = path.join(directory, "bin");
+    if (!fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink()) return null;
+    const stat = fs.lstatSync(path.join(bin, executable));
+    return stat.isFile() && !stat.isSymbolicLink() ? bin : null;
+  } catch { return null; }
 }
 
-/**
- * uvx 로 도는 서버를 띄우기 직전에 PATH 를 보강한다. uvx 를 쓰지 않는 명령에는 아무 일도
- * 하지 않는다 — 설치 비용을 그 서버들에까지 물리지 않기 위해서다.
- */
-export function withUvxPath(command: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+async function installUvx(signal: AbortSignal): Promise<string | null> {
+  const python = bundledPython();
+  if (!python) return null;
+  await fs.promises.mkdir(uvHome(), { recursive: true });
+  if (signal.aborted) throw aborted();
+  let ownedDirectory = await fs.promises.mkdtemp(path.join(uvHome(), ".install-"));
+  const receiptTemp = `${ownedDirectory}.json`;
+  let published = false;
+  try {
+    if (signal.aborted) throw aborted();
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(python,
+        ["-m", "pip", "install", "--quiet", "--upgrade", "--target", ownedDirectory, "uv"],
+        { stdio: "ignore", windowsHide: true, ...detachedSpawnOpts() });
+      let stopped = false;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        if (process.platform === "win32" && child.pid && child.exitCode == null) {
+          // Only this still-owned installer child, never an inventory-selected PID.
+          const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+          killer.once("error", () => { try { child.kill(); } catch {} });
+        } else killCliTree(child, 500);
+      };
+      signal.addEventListener("abort", stop, { once: true });
+      if (signal.aborted) stop();
+      const cleanup = () => signal.removeEventListener("abort", stop);
+      child.once("error", (error) => { cleanup(); reject(signal.aborted ? aborted() : error); });
+      child.once("close", (status) => { cleanup(); resolve(status); });
+    });
+    if (signal.aborted) throw aborted();
+    if (code !== 0) { console.warn("[uv] provisioning failed", { code }); return null; }
+    const executable = path.join(ownedDirectory, "bin", process.platform === "win32" ? "uvx.exe" : "uvx");
+    const stat = await fs.promises.lstat(executable);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const destination = path.join(uvHome(), `runtime-${path.basename(ownedDirectory).slice(".install-".length)}`);
+    if (signal.aborted) throw aborted();
+    await fs.promises.rename(ownedDirectory, destination);
+    ownedDirectory = destination;
+    await fs.promises.writeFile(receiptTemp, JSON.stringify({ directory: path.basename(destination) }), { flag: "wx", mode: 0o600 });
+    if (signal.aborted) throw aborted();
+    // A complete pip exit plus validated executable is atomically published.
+    await fs.promises.rename(receiptTemp, path.join(uvHome(), "prepared.json"));
+    published = true;
+    return path.join(destination, "bin");
+  } finally {
+    await fs.promises.rm(receiptTemp, { force: true }).catch(() => {});
+    if (!published) await fs.promises.rm(ownedDirectory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Async single flight: cancelling one caller never cancels another live waiter. */
+export async function ensureUvx(currentPath: string, options: UvxPreparationOptions = {}): Promise<string | null> {
+  if (options.signal?.aborted) throw aborted();
+  if (uvxOnPath(currentPath)) return null;
+  // Do not consume a partially installed executable while pip is still running.
+  if (installJob?.controller.signal.aborted) {
+    throw new Error("uv_bootstrap_stopping");
+  }
+  if (!installJob) {
+    const prepared = preparedUvxBin();
+    if (prepared) return prepared;
+    if (installAttempted) return null;
+    const controller = new AbortController();
+    const job: InstallJob = { controller, waiters: new Set(), promise: Promise.resolve(null) };
+    installJob = job;
+    job.promise = installUvx(controller.signal).catch((error) => {
+      if (controller.signal.aborted) throw error;
+      console.warn("[uv] provisioning unavailable");
+      return null;
+    }).finally(() => {
+      if (!controller.signal.aborted) installAttempted = true;
+      if (installJob === job) installJob = null;
+    });
+  }
+  const job = installJob;
+  const token = Symbol();
+  job.waiters.add(token);
+  let timer: NodeJS.Timeout | undefined;
+  let detach = () => {};
+  const cancelled = new Promise<never>((_, reject) => {
+    const stop = () => reject(aborted());
+    options.signal?.addEventListener("abort", stop, { once: true });
+    detach = () => options.signal?.removeEventListener("abort", stop);
+    timer = setTimeout(() => reject(new Error("uv_bootstrap_timeout")), Math.max(1, Math.min(options.timeoutMs ?? 45_000, 45_000)));
+    if (options.signal?.aborted) stop();
+  });
+  try { return await Promise.race([job.promise, cancelled]); }
+  finally {
+    if (timer) clearTimeout(timer);
+    detach();
+    job.waiters.delete(token);
+    if (installJob === job && job.waiters.size === 0) job.controller.abort();
+  }
+}
+
+/** Only uv/uvx commands pay the asynchronous bootstrap cost. */
+export async function withUvxPath(command: string, env: NodeJS.ProcessEnv, options: UvxPreparationOptions = {}): Promise<NodeJS.ProcessEnv> {
+  if (options.signal?.aborted) throw aborted();
   if (command !== "uvx" && command !== "uv") return env;
   const key = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
   const current = env[key] ?? "";
-  const dir = ensureUvx(current);
+  const dir = await ensureUvx(current, options);
   if (!dir) return env;
   return { ...env, [key]: [dir, current].filter(Boolean).join(path.delimiter) };
 }
