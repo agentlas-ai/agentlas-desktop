@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { judgeRequired, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
+import { judgeRequiredBatch, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
 import type { RunEventUi } from "../../shared/types";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { shellWrittenPaths } from "../../shared/shell-written-paths";
@@ -765,10 +765,12 @@ export async function verifyGoalCompletionClaim(input: {
   const judgeInputCeiling = 28_000;
   try {
     const recoveryOverride = hostRecoveryOverride(run.id, input.invocationRunId);
-    const verdicts: JudgedCriterion[] = durableEvidence.ready
-      ? await Promise.all(run.acceptanceCriteria.map(async (criterion, criterionIndex) => {
-      const judged = await judgeRequired<CriterionJudgeLabel>({
-        kind: `long-run-criterion:${run.id}:${criterionIndex}`,
+    // All criteria share this host-owned revision and evidence snapshot. One
+    // batch avoids repeating the packet and competing for local inference slots.
+    const judgments = durableEvidence.ready
+      ? await judgeRequiredBatch<CriterionJudgeLabel>({
+        kind: `long-run-criteria:${run.id}:${goalRevision}`,
+        items: run.acceptanceCriteria.map((criterion, index) => ({ id: `criterion:${index}`, criterion })),
         question: "Does the observed evidence prove this exact acceptance criterion, and if it fails, what typed recovery applies?",
         labels: [
           "passed",
@@ -780,7 +782,7 @@ export async function verifyGoalCompletionClaim(input: {
           "failed_unknown",
           "inconclusive",
         ],
-        input: `CRITERION: ${criterion}\n\n${observation}`,
+        input: observation,
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
@@ -794,11 +796,13 @@ export async function verifyGoalCompletionClaim(input: {
         ].join(" "),
         signal: controller.signal,
         scanSecrets: true,
-        // judgeRequired defaults to MAX_INPUT_CHARS = 8,000 and silently slices.
-        // The claim alone used to fill that, so the host observation never arrived.
+        // Preserve full criteria, then the host observation before model prose.
+        // The batch shares one bounded packet across every criterion.
         maxInputChars: judgeInputCeiling,
         timeoutMs: 60_000,
-      });
+      }) : null;
+    const verdicts: JudgedCriterion[] = judgments
+      ? judgments.map((judged, criterionIndex) => {
       let result = criterionFromJudge(
         criterionIndex,
         judged.verdict,
@@ -812,7 +816,7 @@ export async function verifyGoalCompletionClaim(input: {
         ...result,
         judgmentRuntimeReceipt: judged.runtimeReceipt,
       };
-      }))
+      })
       : run.acceptanceCriteria.map((_, criterionIndex) => ({
           criterionIndex,
           verdict: "inconclusive" as const,
