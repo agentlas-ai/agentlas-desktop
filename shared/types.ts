@@ -3818,7 +3818,6 @@ export interface NativeBrowserCookieImportResult {
 
 
 export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
-  nativeSession?: NativeBrowserCookieImportResult;
   /** True only for the currently shown, ready guest. */
   visible?: boolean;
   taskScopeId: string;
@@ -3826,6 +3825,8 @@ export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
 }
 
 export interface WorkLiveViewStatus {
+  /** Cookie transfer receipt for this URL only; unrelated sites remain in Main. */
+  nativeSession?: NativeBrowserCookieImportResult;
   viewId: string;
   taskScopeId?: string;
   state: WorkLiveViewState;

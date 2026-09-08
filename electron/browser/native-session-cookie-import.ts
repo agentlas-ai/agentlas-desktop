@@ -499,14 +499,30 @@ export function syncConnectBrowserSession(input?: { domains: readonly string[]; 
     if (!pendingDomains.length) return result(previousPartial ? "partial" : "already-migrated");
     const prior = connectedScopes.get(scope.identity);
     if (!explicitImport && prior && await scope.isCurrent()) return prior;
-    const markerKeys = pendingDomains.map((domain) => scope.markerKeys.get(domain)!);
-    const receipt = await syncConnectBrowserCookiesOnce({ ...scope, domains: pendingDomains,
-      beginMigration: () => writeMigrationMarkers(markerKeys, "pending"),
-    });
+    const counts = emptyCounts();
+    let failure: NativeBrowserCookieImportResult | undefined;
+    let partial = previousPartial;
+    for (const domain of pendingDomains) {
+      const markerKeys = [scope.markerKeys.get(domain)!];
+      const receipt = await syncConnectBrowserCookiesOnce({ ...scope, domains: [domain],
+        beginMigration: () => writeMigrationMarkers(markerKeys, "pending"),
+      });
+      counts.observed += receipt.observed;
+      counts.imported += receipt.imported;
+      counts.preserved = (counts.preserved ?? 0) + (receipt.preserved ?? 0);
+      for (const kind of ["expired", "partitioned", "invalid", "writeFailed"] as const) counts.skipped[kind] += receipt.skipped[kind];
+      if (receipt.ok && await scope.isCurrent()) {
+        writeMigrationMarkers(markerKeys, "completed", receipt.code === "partial");
+        partial ||= receipt.code === "partial";
+      } else {
+        failure ??= receipt.ok ? result("authorization-required") : receipt;
+        if (!(await scope.isCurrent())) break;
+      }
+    }
+    const receipt = failure ? result(failure.code, counts, failure.hostFailure) : result(partial ? "partial" : "imported", counts);
     if (receipt.ok && await scope.isCurrent()) {
-      writeMigrationMarkers(markerKeys, "completed", receipt.code === "partial");
-      // Only successful exact-scope reuse is cached. Native cookies persist;
-      // restart revalidates Connect's durable consent and current profile.
+      // Only successful exact-scope reuse is cached. Each durable marker records
+      // its own site's result, never the aggregate outcome of another site.
       connectedScopes.clear();
       connectedScopes.set(scope.identity, receipt);
     }
@@ -515,4 +531,15 @@ export function syncConnectBrowserSession(input?: { domains: readonly string[]; 
   connectSessionFlight = flight;
   void flight.finally(() => { if (connectSessionFlight === flight) connectSessionFlight = null; }).catch(() => undefined);
   return flight;
+}
+
+/** Synchronize every consented site, retaining independent receipts for native tabs. */
+export async function syncConnectBrowserSessionsByDomain(): Promise<Map<string, NativeBrowserCookieImportResult>> {
+  const scope = await connectSessionScope();
+  const receipts = new Map<string, NativeBrowserCookieImportResult>();
+  if (!scope) return receipts;
+  for (const domain of scope.domains) {
+    receipts.set(domain, await syncConnectBrowserSession({ domains: [domain] }));
+  }
+  return receipts;
 }

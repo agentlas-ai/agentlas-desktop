@@ -30,7 +30,6 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  const [loginNotice, setLoginNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -38,6 +37,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const menuButton = useRef<HTMLButtonElement>(null);
   const createInFlight = useRef(false);
   const current = tabs.find((tab) => tab.id === selectedId) ?? tabs[0];
+  const loginNotice = browserLoginImportNotice(current?.status.nativeSession, ko);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const mounted = useRef(false);
@@ -94,7 +94,6 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       if (disposed) return;
       if (!result.ok) { setNotice(result.reason || (ko ? "이 작업의 브라우저에 연결하지 못했습니다." : "Could not connect this task browser.")); return; }
       setConnected(true);
-      setLoginNotice(browserLoginImportNotice([...result.tabs].reverse().find((tab) => tab.nativeSession)?.nativeSession, ko));
       for (const tab of result.tabs) if (tab.taskScopeId === taskScopeId && !closed.has(tab.viewId)) knownTabs.current.add(tab.viewId);
       setTabs((current) => {
         const merged = new Map(result.tabs.filter((tab) => tab.taskScopeId === taskScopeId && !closed.has(tab.viewId))
@@ -109,7 +108,6 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
           const created = await api.createTab({ taskScopeId, url: preferredUrl });
           if (!disposed && created.tab) {
             acceptStatus(created.tab);
-            setLoginNotice(browserLoginImportNotice(created.tab.nativeSession, ko));
           }
           else if (!disposed && !created.ok) setNotice(created.reason ?? "Browser unavailable");
         } finally {
@@ -139,7 +137,6 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       if (result.tab) {
         acceptStatus(result.tab);
         setSelectedId(result.tab.viewId);
-        setLoginNotice(browserLoginImportNotice(result.tab.nativeSession, ko));
       }
       else if (!result.ok) setNotice(result.reason ?? (ko ? "탭을 열지 못했습니다." : "Could not open a tab."));
     } catch { if (mounted.current) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }

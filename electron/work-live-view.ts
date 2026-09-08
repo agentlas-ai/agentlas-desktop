@@ -1,3 +1,4 @@
+import { nativeSessionForUrl } from "./browser/native-session-status";
 // Sandboxed native live web surface for Work.
 //
 // WebContentsView is used instead of iframe so real apps that set
@@ -25,7 +26,7 @@ type ActiveWorkView = {
   pendingUrl: string;
   error?: string;
   captureRestore?: () => void;
-  nativeSession?: NativeBrowserCookieImportResult;
+  nativeSessions?: Map<string, NativeBrowserCookieImportResult>;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
@@ -71,7 +72,7 @@ function browserTab(active: ActiveWorkView): WorkLiveBrowserTab {
     url: active.view.webContents.getURL() || active.pendingUrl, title: active.view.webContents.getTitle(),
     canGoBack: active.view.webContents.navigationHistory.canGoBack(),
     canGoForward: active.view.webContents.navigationHistory.canGoForward(), error: active.error,
-    ...(active.nativeSession ? { nativeSession: active.nativeSession } : {}) };
+    nativeSession: nativeSessionForUrl(active.nativeSessions, active.view.webContents.getURL() || active.pendingUrl) };
 }
 
 export function listWorkBrowserTabs(ownerId: number, taskScopeId: string): WorkLiveBrowserTab[] {
@@ -83,14 +84,17 @@ export async function createWorkBrowserTab(ownerId: number, taskScopeId: string,
   Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }> {
   const owner = nativeTaskOwners.get(key(ownerId, taskScopeId));
   if (!owner || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
-  const nativeSession = await (await import("./browser/native-session-cookie-import")).syncConnectBrowserSession();
+  const nativeSessions = await (await import("./browser/native-session-cookie-import")).syncConnectBrowserSessionsByDomain();
   const currentOwner = nativeTaskOwners.get(key(ownerId, taskScopeId));
   if (!currentOwner || currentOwner.window !== owner.window || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
   const viewId = `browser_${randomUUID().replace(/-/g, "")}`;
   const result = await openWorkLiveView({ ...owner, viewId, url, mode: "browser", visible: false,
     bounds: { x: 0, y: 0, width: 1000, height: 750 } });
   const active = registeredGuest(ownerId, viewId, taskScopeId);
-  if (active) active.nativeSession = nativeSession;
+  if (active) {
+    active.nativeSessions = nativeSessions;
+    emit(active, { state: active.state, url: active.view.webContents.getURL() || active.pendingUrl });
+  }
   return result.ok && active ? { ok: true, tab: browserTab(active) } : { ok: false, reason: result.reason ?? "guest-unavailable" };
 }
 
@@ -207,7 +211,8 @@ function emit(active: ActiveWorkView, status: Omit<WorkLiveViewStatus, "viewId">
     const history = status.state !== "closed" ? active.view.webContents.navigationHistory : null;
     active.send({ viewId: active.viewId, taskScopeId: active.taskScopeId,
       canGoBack: history?.canGoBack() ?? false,
-      canGoForward: history?.canGoForward() ?? false, ...status });
+      canGoForward: history?.canGoForward() ?? false, ...status,
+      nativeSession: nativeSessionForUrl(active.nativeSessions, status.url || active.view.webContents.getURL() || active.pendingUrl) });
   } catch {}
 }
 
