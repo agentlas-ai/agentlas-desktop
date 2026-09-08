@@ -169,6 +169,7 @@ import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/re
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
+import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown } from "../runtime/runtime-cooldown";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
@@ -2859,6 +2860,9 @@ ${effectiveUserPrompt}`;
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
       };
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
+      const keyConfigurationRevision = getEnvConfigurationRevision();
+      const keyUserMessageId = persistedUserMessageId
+        ?? [...priorHistory].reverse().find((message) => message.role === "user")?.id;
       // ── 실행 전 API 키 요청 게이트 (대화형 렌더러 런 전용) ──────────────
       // matched 도구가 missing-key면 렌더러 시트(mcp-key-request 이벤트)로 키를
       // 요청하고 제한 시간만큼만 기다린다. 값은 렌더러가 기존 env:set으로 vault에
@@ -2871,6 +2875,14 @@ ${effectiveUserPrompt}`;
         // 화면이 없으므로 제외 — 모바일 런이 120초 헛대기하는 일이 없어야 한다.
         interactive: !executionContext && !req.agentAppMode && !workspaceBinding,
         context: selectedContext,
+        ...(selectedContext.goalSelectionScope && keyUserMessageId ? { goalScope: {
+          ...selectedContext.goalSelectionScope,
+          userMessageId: keyUserMessageId,
+          configurationRevision: keyConfigurationRevision,
+          automaticContinuation: promptIsSystemAuthored,
+          isCurrent: () => getEnvConfigurationRevision() === keyConfigurationRevision
+            && selectedContext.goalSelectionIsCurrent?.() === true,
+        } } : {}),
         sink,
         signal,
         // 키가 저장된 뒤의 재선택은 세상이 바뀐 시점이다 — 메모를 버리고 처음부터 다시 고른다.

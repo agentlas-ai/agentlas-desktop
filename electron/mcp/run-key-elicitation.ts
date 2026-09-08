@@ -42,6 +42,42 @@ interface PendingElicitation {
 
 const pendingByRunId = new Map<string, PendingElicitation>();
 
+/** Main-authored, value-free identity; never accept this scope from model text. */
+export interface GoalKeyElicitationScope {
+  goalId: string;
+  revision: number;
+  scopeHash: string;
+  userMessageId: string;
+  configurationRevision: number;
+  automaticContinuation: boolean;
+  isCurrent: () => boolean;
+}
+interface DeferredKeyReceipt {
+  outcome: "declined" | "timeout";
+  expiresAt: number;
+  isCurrent: () => boolean;
+}
+const deferredKeys = new Map<string, DeferredKeyReceipt>();
+const DEFERRED_KEY_TTL_MS = 30 * 60_000;
+let deferredKeyCleanup: ReturnType<typeof setInterval> | undefined;
+function scopeIsCurrent(scope: { isCurrent: () => boolean }): boolean {
+  try { return scope.isCurrent(); } catch { return false; }
+}
+function pruneDeferredKeys(): void {
+  for (const [key, receipt] of deferredKeys) {
+    if (receipt.expiresAt <= Date.now() || !scopeIsCurrent(receipt)) deferredKeys.delete(key);
+  }
+  if (!deferredKeys.size && deferredKeyCleanup) {
+    clearInterval(deferredKeyCleanup);
+    deferredKeyCleanup = undefined;
+  }
+}
+function deferredKeyIdentity(scope: GoalKeyElicitationScope, request: McpRunKeyRequest): string {
+  return JSON.stringify([scope.goalId, scope.revision, scope.scopeHash, scope.userMessageId,
+    scope.configurationRevision, request.tools.map((tool) => [tool.id, tool.envKeys.map((entry) => entry.key).sort()])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+}
+
 /** Structured, value-free key request for the renderer sheet. Null when every
  *  matched tool already has its credentials. */
 export function buildRunKeyRequest(
@@ -182,6 +218,8 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
   signal?: AbortSignal;
   /** Re-runs auto-selection after keys were saved; may throw (kept fail-open). */
   reselect: () => Promise<TContext>;
+  /** Main validates active Goal, actual user turn, registry and credential revision. */
+  goalScope?: GoalKeyElicitationScope;
 }): Promise<RunKeyElicitationGateResult<TContext>> {
   const skipped: RunKeyElicitationGateResult<TContext> = {
     context: opts.context,
@@ -191,12 +229,35 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
   if (!opts.interactive || !opts.runId) return skipped;
   const request = buildRunKeyRequest(opts.runId, opts.context.tools);
   if (!request) return skipped;
+  pruneDeferredKeys();
+  const scope = opts.goalScope;
+  const identity = scope?.userMessageId && scopeIsCurrent(scope) ? deferredKeyIdentity(scope, request) : null;
+  const prior = identity && scope?.automaticContinuation && !opts.signal?.aborted
+    ? deferredKeys.get(identity) : undefined;
+  if (prior) {
+    return { context: opts.context, outcome: prior.outcome,
+      fallbackPrompt: buildDeclinedKeyFallbackPrompt(request.tools, prior.outcome) };
+  }
   const outcome = await awaitRunKeyElicitation({
     runId: opts.runId,
     request,
     sink: opts.sink,
     signal: opts.signal,
   });
+  // Abort currently settles the UI promise as declined; it is never a user's
+  // credential decision and must not suppress a future request.
+  if (identity && scope && !opts.signal?.aborted && scopeIsCurrent(scope)) {
+    if (outcome === "provided") deferredKeys.delete(identity);
+    else {
+      deferredKeys.delete(identity);
+      deferredKeys.set(identity, { outcome, expiresAt: Date.now() + DEFERRED_KEY_TTL_MS, isCurrent: scope.isCurrent });
+      while (deferredKeys.size > 128) deferredKeys.delete(deferredKeys.keys().next().value!);
+      if (!deferredKeyCleanup) {
+        deferredKeyCleanup = setInterval(pruneDeferredKeys, 30_000);
+        deferredKeyCleanup.unref?.();
+      }
+    }
+  }
   if (outcome === "provided") {
     let refreshed = opts.context;
     try {

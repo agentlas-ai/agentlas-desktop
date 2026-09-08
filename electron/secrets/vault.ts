@@ -340,6 +340,9 @@ export async function ensureApiKeyDescriptor(
 }
 
 // ── 글로벌 env (외부 통합 API 키) ───────────────────────────
+let envConfigurationRevision = 0;
+/** Value-free process-local epoch for optional credential prompt invalidation. */
+export function getEnvConfigurationRevision(): number { return envConfigurationRevision; }
 function envAccount(key: string): string {
   return `${ENV_PREFIX}${key}`;
 }
@@ -350,10 +353,12 @@ export async function setEnvVar(key: string, value: string): Promise<void> {
   const trimmedValue = value.trim();
   if (!trimmedValue) {
     await deletePassword(envAccount(trimmedKey));
+    envConfigurationRevision += 1;
     if (envKeyCache) envKeyCache = envKeyCache.filter((item) => item !== trimmedKey);
     return;
   }
   await setPassword(envAccount(trimmedKey), trimmedValue);
+  envConfigurationRevision += 1;
   if (envKeyCache && !envKeyCache.includes(trimmedKey)) envKeyCache = [...envKeyCache, trimmedKey].sort();
 }
 
@@ -364,6 +369,7 @@ export async function hasEnvVar(key: string): Promise<boolean> {
 
 export async function deleteEnvVar(key: string): Promise<void> {
   await deletePassword(envAccount(key));
+  envConfigurationRevision += 1;
   if (envKeyCache) envKeyCache = envKeyCache.filter((item) => item !== key);
 }
 
