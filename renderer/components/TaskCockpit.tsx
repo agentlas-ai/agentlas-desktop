@@ -6493,6 +6493,7 @@ function ChatPage() {
 
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, minWidth: 0, width: "100%", flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <ChatStream
+          artifactChatId={chatId || undefined}
           messages={messages}
           onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
@@ -6616,6 +6617,7 @@ function ChatPage() {
       <TaskSidePanel
         key={chatId || "new-task"}
         items={workActivity.artifacts}
+        onRequestOpen={() => openPanelTab("panel")}
         activity={workActivity}
         locale={locale === "ko" ? "ko" : "en"}
         visible={rightPanelOpen}

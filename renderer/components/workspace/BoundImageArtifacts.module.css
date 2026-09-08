@@ -1,0 +1,6 @@
+.list { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; margin: 10px 0; }
+.image { display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 180px; max-width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: inherit; cursor: zoom-in; overflow: hidden; text-align: left; }
+.image img { display: block; width: 100%; height: 140px; object-fit: contain; border-radius: 5px; }
+.label { font-size: 11px; overflow-wrap: anywhere; }
+
+.pages { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 11px; }

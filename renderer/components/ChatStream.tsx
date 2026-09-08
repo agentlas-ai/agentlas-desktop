@@ -314,6 +314,7 @@ export function ChatStream({
   onAnswerQuestion,
   onOpenMultimodalSetup,
   onInspectWorker,
+  artifactChatId,
   mediaBasePaths = [],
   workspaceRoot,
   focusMessageId,
@@ -335,6 +336,7 @@ export function ChatStream({
   /** 멀티모달 설정 화면으로 이동 — 엔진 미연결 CTA 버튼 클릭 시 */
   onOpenMultimodalSetup?: () => void;
   onInspectWorker?: (runId: string, group: OneWorkerWorkGroup) => void;
+  artifactChatId?: string;
   /** 다른 메시지가 실행 중이면 오래된 질문 카드도 전송하지 않는다. */
   interactionBusy?: boolean;
   stopRequested?: boolean;
@@ -519,6 +521,7 @@ export function ChatStream({
               onAnswerQuestion={onAnswerQuestion}
               onOpenMultimodalSetup={onOpenMultimodalSetup}
               onInspectWorker={onInspectWorker}
+              artifactChatId={artifactChatId}
               mediaBasePaths={mediaBasePaths}
             />
           </div>
@@ -879,6 +882,7 @@ const Bubble = memo(function Bubble({
   onAnswerQuestion,
   onOpenMultimodalSetup,
   onInspectWorker,
+  artifactChatId,
   mediaBasePaths,
 }: {
   message: StreamMessage;
@@ -892,6 +896,7 @@ const Bubble = memo(function Bubble({
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   onOpenMultimodalSetup?: () => void;
   onInspectWorker?: (runId: string, group: OneWorkerWorkGroup) => void;
+  artifactChatId?: string;
   mediaBasePaths: string[];
 }) {
   const { locale } = useT();
@@ -1036,6 +1041,7 @@ const Bubble = memo(function Bubble({
           <OneTurnWork
             key={`work:${runId}`}
             state={state}
+            artifactScope={artifactChatId ? { chatId: artifactChatId, runId } : undefined}
             busy={Boolean(message.busy && index === workActivities.length - 1)}
             startedAt={message.startedAt ?? null}
             locale={locale === "ko" ? "ko" : "en"}

@@ -1650,6 +1650,7 @@ export function OneShell() {
         key={`work:live:${activeActivityRunId ?? "pending"}`}
         onInspectWorker={activeActivityRunId ? (group) => inspectWorkerPanel(activeActivityRunId, group) : undefined}
         state={renderedActivity}
+        artifactScope={(selected?.chatId ?? conversation?.id) && activeActivityRunId ? { chatId: (selected?.chatId ?? conversation?.id)!, runId: activeActivityRunId } : undefined}
         busy
         startedAt={renderedActivityStartedAt}
         locale={appLocale}
@@ -6701,6 +6702,7 @@ export function OneShell() {
                           워커 도구 이벤트는 agentName이 붙어 오므로 행에 발화자가 보인다. */}
                       <OneTurnWork
                         state={block.state}
+                        artifactScope={activeThreadChatId ? { chatId: activeThreadChatId, runId: block.runId } : undefined}
                         onInspectWorker={(group) => inspectWorkerPanel(block.runId, group)}
                         busy={false}
                         runStatus={block.status}
@@ -6847,6 +6849,7 @@ export function OneShell() {
                             {/* 단톡에도 1:1과 같은 도구 호출 로그 표면 (G-4). */}
                             <OneTurnWork
                               state={block.state}
+                        artifactScope={activeThreadChatId ? { chatId: activeThreadChatId, runId: block.runId } : undefined}
                               onInspectWorker={(group) => inspectWorkerPanel(block.runId, group)}
                               busy={false}
                               startedAt={Date.parse(block.startedAt)}
@@ -7861,6 +7864,7 @@ export function OneShell() {
         )}
         <TaskSidePanel
           items={runtimeArtifacts}
+          onRequestOpen={presentRichOutputRail}
           activity={activity}
           locale={appLocale}
           visible={Boolean((selected || conversation) && contextRailOpen)}

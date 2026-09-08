@@ -1,5 +1,7 @@
 "use client";
 
+import { BoundImageArtifacts } from "./BoundImageArtifacts";
+import { scopedBoundImages } from "@/lib/bound-image-artifacts";
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -772,6 +774,7 @@ export type TaskSidePanelProps = {
   onHistoryAsk?: () => void;
   onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
   /** Exact current chat used to keep captured agent screens task-scoped. */
+  onRequestOpen?: () => void;
   screenChatId: string | null;
   /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
   browserScopeKey?: string;
@@ -819,6 +822,7 @@ function TaskSidePanelContent({
   onHistoryAsk,
   onHistoryReviewRecommendation,
   screenChatId,
+  onRequestOpen,
   browserScopeKey,
   browserHistoryUrl,
   onBrowserObserved,
@@ -993,6 +997,8 @@ function TaskSidePanelContent({
   }, [activity?.items]);
   const [screenMode, setScreenMode] = useState<"browser" | "computer">("computer");
 
+  const boundImages = scopedBoundImages(items, screenChatId);
+  const fileArtifacts = items.filter((item) => item.kind !== "image");
   const latestArtifactId = items.at(-1)?.id ?? null;
   const activeChatFile = chatFileTabs.find((file) => file.tabId === activeChatFileTabId) ?? null;
   const openedArtifactKind = openedArtifact ? outputPresentationKindForName(openedArtifact.label) : "standard";
@@ -1041,13 +1047,15 @@ function TaskSidePanelContent({
       const detail = (event as CustomEvent<unknown>).detail;
       if (!isOneArtifactOpenRequest(detail) || !screenChatId || detail.binding.chatId !== screenChatId) return;
       (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
+      onRequestOpen?.();
+      setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
       setOpenedArtifact(detail);
       setActiveChatFileTabId(null);
       setRailView("result");
     };
     window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
     return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
-  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize]);
+  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize, onRequestOpen]);
   useEffect(() => {
     setChatFileTabs([]);
     setActiveChatFileTabId(null);
@@ -1104,12 +1112,13 @@ function TaskSidePanelContent({
     return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
   }, [browserScopeKey, screenChatId]);
   useEffect(() => {
-    if (result || !latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
+    if (!latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
+    setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
     // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
     // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
-    setRailView((current) => ((current === "browser" || current === "worker") ? current : "activity"));
-  }, [latestArtifactId, result]);
+    setRailView((current) => (items.at(-1)?.kind === "image" || current === "browser" || current === "app" || current === "worker") ? current : "activity");
+  }, [latestArtifactId, result, items]);
   useEffect(() => {
     const latest = mcpResults.at(-1)?.id ?? null;
     if (!latest || presentedMcpResultIdRef.current === latest) return;
@@ -1447,7 +1456,7 @@ function TaskSidePanelContent({
         {railView === "worker" && workerKey && workerSelection && <OneWorkerPanel
           key={workerKey} selection={workerSelection} run={workerRun ?? null} locale={locale} onBack={closeWorkerTab}
         />}
-        {railView === "result" && (activeChatFile || openedArtifact || result) && <div className={styles.resultView}>
+        {railView === "result" && (activeChatFile || openedArtifact || result || boundImages.length > 0) && <div className={styles.resultView}>
           {chatFileTabs.length > 0 && <ChatFileTabs
             tabs={chatFileTabs.map((file) => ({ id: file.tabId, name: file.name, provenance: file.provenance }))}
             activeId={activeChatFileTabId}
@@ -1464,14 +1473,14 @@ function TaskSidePanelContent({
             <button type="button" className={styles.artifactBackButton} onClick={() => { setOpenedArtifact(null); onRestorePreferredWidth?.(); }}>
               <IconArrowLeft size={13} /> {locale === "ko" ? "결과로 돌아가기" : "Back to result"}
             </button>
-            <ArtifactOpenViewer target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560} />
+            <ArtifactOpenViewer key={JSON.stringify(openedArtifact.binding)} target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560} />
           </>}
-          {!activeChatFile && !openedArtifact && result}
+          {!activeChatFile && !openedArtifact && <><BoundImageArtifacts items={boundImages} chatId={screenChatId} locale={locale} />{result}</>}
         </div>}
         {railView === "activity" && <>
-          <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
-            {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-            {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
+          <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={fileArtifacts.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
+            {fileArtifacts.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
+            {fileArtifacts.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
           </OutputDisclosure>
           {mcpResults.length > 0 && <OutputDisclosure section="mcp" label={locale === "ko" ? "MCP 결과" : "MCP results"} count={mcpResults.length} expanded={sectionExpanded("mcp")} onToggle={toggleSection}>
             {mcpResults.map((item) => (

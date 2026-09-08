@@ -32,6 +32,7 @@ import {
   type OneWorkPresentation,
 } from "@/lib/one-turn-work";
 import styles from "./OneTurnWork.module.css";
+import { BoundImageArtifacts } from "../workspace/BoundImageArtifacts";
 import { toolFailureCopy } from "@shared/tool-failure";
 import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
 
@@ -463,6 +464,7 @@ export function OneTurnWorkDividers({ presentation }: { presentation: OneWorkPre
 
 export function OneTurnWork({
   state,
+  artifactScope,
   busy,
   preparing = false,
   startedAt,
@@ -474,6 +476,7 @@ export function OneTurnWork({
   onInspectWorker,
 }: {
   state: OneActivityState;
+  artifactScope?: { chatId: string; runId: string };
   /** True only for the live run this block belongs to. */
   busy: boolean;
   /** Main preflight before a run id exists — no rows yet, just the live headline. */
@@ -547,7 +550,7 @@ export function OneTurnWork({
   const inlineCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId || cell.kind !== "agent"), [visibleCells]);
   const hasRows = visibleCells.length > 0;
 
-  if (!active && !hasRows && !presentation.terminalMessage && !interrupted) {
+  if (!active && !hasRows && !presentation.terminalMessage && !interrupted && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -679,6 +682,7 @@ export function OneTurnWork({
         locale={locale}
       />
     ))}
+    {artifactScope && <BoundImageArtifacts items={state.artifacts} chatId={artifactScope.chatId} runId={artifactScope.runId} locale={locale} />}
     <OneTurnWorkDividers presentation={presentation} />
     </>
   );
