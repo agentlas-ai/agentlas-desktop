@@ -165,9 +165,6 @@ for (const gate of selected) {
    * 아닌 **패키지 이름**일 것, 그리고 그 패키지가 진짜 저장소 의존으로 실재할 것. 오타나
    * 없는 패키지는 그대로 실패한다.
    */
-  if (process.env.AGENTLAS_GATE_DEBUG && result.status !== 0) {
-    try { fs.appendFileSync("/tmp/gate-debug.txt", `\n===== ${gate} (status ${result.status}) =====\n${output}\n`); } catch (e) { console.error("dbg", e); }
-  }
   const bareMissing = snapshot && output.match(/Cannot find module '([^'./@][^']*|@[^/']+\/[^']+)'/);
   if (bareMissing) {
     const pkg = bareMissing[1].split("/").slice(0, bareMissing[1].startsWith("@") ? 2 : 1).join("/");
