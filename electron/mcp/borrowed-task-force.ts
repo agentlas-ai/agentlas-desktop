@@ -1013,10 +1013,15 @@ async function observeTaskForceModelCall<T>(
   // Avoid an `sk-` substring in this opaque value: the generic ledger secret
   // scrubber intentionally redacts anything shaped like an OpenAI key.
   const callRef = `one-model-call:${randomUUID()}`;
+  const startedAt = Date.now();
   const receiptBase = {
     schemaVersion: TASK_FORCE_MODEL_CALL_RECEIPT_SCHEMA,
     callRef,
     phase: input.phase,
+    runtimeKind: input.runtime.kind,
+    runtimeBackend: input.runtime.backend,
+    runtimeSource: input.runtime.source,
+    runtimeModel: input.runtime.model,
     ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
   };
   tryRecordRunEvent({
@@ -1064,7 +1069,7 @@ async function observeTaskForceModelCall<T>(
       chatId: p.chat.id,
       nodeId: input.nodeId,
       agentId: canonicalAgentId,
-      payload: { ...receiptBase, status: "completed" },
+      payload: { ...receiptBase, status: "completed", durationMs: Math.max(0, Date.now() - startedAt) },
     });
     return result;
   } catch (error) {
@@ -1074,7 +1079,14 @@ async function observeTaskForceModelCall<T>(
       chatId: p.chat.id,
       nodeId: input.nodeId,
       agentId: canonicalAgentId,
-      payload: { ...receiptBase, status: "failed" },
+      payload: { ...receiptBase, status: p.signal?.aborted ? "cancelled" : "failed",
+        durationMs: Math.max(0, Date.now() - startedAt),
+        // Only a returned typed failure is evidence of its cause. Never parse
+        // an exception or persist its message as diagnostic authority.
+        ...(error instanceof TaskForceRuntimeFailureError ? {
+          failureKind: error.failure.kind, failureSource: error.failure.source,
+        } : {}),
+      },
     });
     recordTaskForceTerminalTurn(p, {
       ...input,
@@ -2398,12 +2410,15 @@ export function closeTaskForceDeliveryDependencies(
   });
 }
 
+export type LocalPlannerValidationCode = "unknown_agent" | "duplicate_team" | "duplicate_step"
+  | "invalid_dependency" | "dependency_cycle" | "missing_agents" | "no_packets";
+
 export function normalizePacketsForRoster(
   packets: BorrowedInputPacket[],
   specs: BorrowedAgentSpec[],
   userPrompt: string,
   locale: "ko" | "en" = "en",
-): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean; validationErrors: string[] } {
+): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean; validationErrors: string[]; validationCodes: LocalPlannerValidationCode[] } {
   const bySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const usedAgents = new Set<string>();
   const usedStepIds = new Set<string>();
@@ -2411,10 +2426,12 @@ export function normalizePacketsForRoster(
   const normalized: BorrowedInputPacket[] = [];
   let invalidPacket = false;
   const validationErrors: string[] = [];
+  const validationCodes = new Set<LocalPlannerValidationCode>();
   for (const packet of packets) {
     if (!bySlug.has(packet.agent)) {
       invalidPacket = true;
       validationErrors.push(`unknown agent: ${packet.agent}`);
+      validationCodes.add("unknown_agent");
       continue;
     }
     const ordinal = (countsByAgent.get(packet.agent) ?? 0) + 1;
@@ -2429,12 +2446,14 @@ export function normalizePacketsForRoster(
     if (spec.entityKind === "team" && ordinal > 1) {
       invalidPacket = true;
       validationErrors.push(`team target must appear exactly once: ${packet.agent}`);
+      validationCodes.add("duplicate_team");
       continue;
     }
     const stepId = cleanString(packet.stepId) || `${packet.agent}-${ordinal}`;
     if (usedStepIds.has(stepId)) {
       invalidPacket = true;
       validationErrors.push(`duplicate stepId: ${stepId}`);
+      validationCodes.add("duplicate_step");
       continue;
     }
     usedStepIds.add(stepId);
@@ -2467,6 +2486,7 @@ export function normalizePacketsForRoster(
     if (accepted.length !== requested.length) {
       invalidPacket = true;
       validationErrors.push(`invalid dependency for ${packet.stepId}`);
+      validationCodes.add("invalid_dependency");
     }
     packet.dependsOn = [...new Set(accepted)];
   }
@@ -2489,6 +2509,7 @@ export function normalizePacketsForRoster(
   if (completed.size !== normalized.length) {
     invalidPacket = true;
     validationErrors.push("dependency cycle");
+    validationCodes.add("dependency_cycle");
     for (const packet of normalized) {
       if (!completed.has(packet.stepId!)) packet.dependsOn = [];
     }
@@ -2497,11 +2518,14 @@ export function normalizePacketsForRoster(
   const fallbackUsed = missing.length > 0 || packets.length === 0;
   if (missing.length > 0) validationErrors.push(`missing agents: ${missing.map((spec) => spec.slug).join(", ")}`);
   if (packets.length === 0) validationErrors.push("no packets");
+  if (missing.length > 0) validationCodes.add("missing_agents");
+  if (packets.length === 0) validationCodes.add("no_packets");
   return {
     packets: closeTaskForceDeliveryDependencies(normalized),
     parseSuccess: packets.length > 0 && !invalidPacket && !fallbackUsed,
     fallbackUsed,
     validationErrors,
+    validationCodes: [...validationCodes],
   };
 }
 
@@ -4901,11 +4925,14 @@ async function runPlanner(
         if (oneControllerRuntimePreferred(p)) {
           p.onControllerRuntimeFallback?.(recovery, typed.failure);
         }
+        const fallbackMessage = p.locale === "ko"
+          ? `계획 모델 전환 · ${modelLabel(typed.runtime)} → ${modelLabel(recovery)}`
+          : `Planning model changed · ${modelLabel(typed.runtime)} → ${modelLabel(recovery)}`;
         p.sink({
-          kind: "tool-use",
-          status: p.locale === "ko"
-            ? "계획에 사용한 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
-            : "The planning runtime is unavailable; continuing on the next orchestrator-priority model.",
+          kind: "notice",
+          notice: { code: "task-force-planner-runtime-fallback", level: "info", display: "row", message: fallbackMessage },
+          model: recovery.model ?? undefined,
+          runtimeSelection: { kind: recovery.kind, backend: recovery.backend, source: recovery.source, model: recovery.model ?? undefined },
           agentId: orchestratorId,
           agentName: orchestratorName,
           role: "orchestrator",
@@ -4916,6 +4943,12 @@ async function runPlanner(
         plannerPicked = sameRuntime(recovery, p.active)
           ? p.picked
           : pickRunner(recovery) ?? p.picked;
+        // Update this planning node's displayed model immediately. This is
+        // not the root invocation's saved/default runtime selection.
+        p.sink({ kind: "thinking", agentId: orchestratorId, agentName: orchestratorName,
+          role: "orchestrator", tier: 1, phase: "plan", model: recovery.model ?? undefined,
+          runtimeSelection: { kind: recovery.kind, backend: recovery.backend, source: recovery.source, model: recovery.model ?? undefined },
+        });
       }
     }
   };
@@ -5124,6 +5157,23 @@ async function runPlanner(
     // teammate. This is local Taskforce planning only; strict Workforce keeps
     // its separate schema-repair contract above.
     if (!normalized.parseSuccess && !p.signal?.aborted) {
+      const repairReceipt = {
+        phase: "planner", attempt: 1, status: "rejected", sameModelRetry: true,
+        validationCodes: normalized.validationCodes,
+        runtimeKind: plannerRuntime.kind, runtimeBackend: plannerRuntime.backend,
+        runtimeSource: plannerRuntime.source, runtimeModel: plannerRuntime.model,
+      };
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, agentId: p.orchestratorAgent.id,
+        kind: "task_force_planner_schema_attempt", payload: repairReceipt });
+      p.sink({ kind: "notice", agentId: orchestratorId, agentName: orchestratorName,
+        role: "orchestrator", tier: 1, phase: "plan",
+        notice: { code: "task-force-planner-schema-repair", level: "info", display: "row",
+          message: p.locale === "ko" ? `계획 검증 실패 · ${modelLabel(plannerRuntime)}에서 계획 수정 중`
+            : `Plan validation failed · repairing with ${modelLabel(plannerRuntime)}`,
+          details: normalized.validationCodes.join(", "),
+        },
+      });
       plannerInvocationId = `${plannerInvocationBaseId}:room-plan-repair:${randomUUID()}`;
       const validationError = normalized.validationErrors.join("; ") || "the plan did not cover the selected room";
       const repairSystemPrompt = [
@@ -5148,6 +5198,13 @@ async function runPlanner(
       }, "read");
       const repairedPlan = parseBorrowedWorkloadPlan(repairedText);
       normalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale);
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_planner_schema_attempt",
+        payload: { ...repairReceipt, attempt: 2, status: normalized.parseSuccess ? "accepted" : "rejected",
+          validationCodes: normalized.validationCodes, sameModelRetry: true,
+          runtimeKind: plannerRuntime.kind, runtimeBackend: plannerRuntime.backend,
+          runtimeSource: plannerRuntime.source, runtimeModel: plannerRuntime.model },
+      });
       plannerText = repairedText;
       synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
       result = repairedResult;
@@ -5192,6 +5249,8 @@ async function runPlanner(
     });
     throw new Error("workforce_planner_parse_failed: benchmark mode forbids fallback packets");
   }
+  p.sink({ kind: "thinking", done: true, agentId: orchestratorId, agentName: orchestratorName,
+    role: "orchestrator", tier: 1, phase: "plan", model: plannerRuntime.model ?? undefined });
   p.sink({
     kind: "tool-use",
     status:

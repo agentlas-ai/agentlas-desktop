@@ -2650,6 +2650,10 @@ function ChatPage() {
           ...message,
           ...(sourceRunId ? { runId: sourceRunId } : {}),
           activityState: next,
+          // Hydration adds activityRuns, which ChatStream renders before the
+          // compatibility activityState. Advance that same run on live events.
+          ...(message.activityRuns?.length ? { activityRuns: message.activityRuns.map((run) =>
+            run.runId === (sourceRunId ?? message.runId) ? { ...run, state: next } : run) } : {}),
         };
       }));
       // Main persists terminal answers before publishing `final`, but a

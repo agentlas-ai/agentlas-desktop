@@ -377,7 +377,7 @@ export function buildOneWorkPresentation(
           id: item.id,
           status: itemStatus(item),
           startedAt: item.observedAt,
-          name: item.agentName?.trim() || (locale === "ko" ? "에이전트" : "Agent"),
+          name: [item.agentName?.trim() || (locale === "ko" ? "에이전트" : "Agent"), item.model].filter(Boolean).join(" · "),
           ...(item.role?.trim() ? { role: item.role.trim() } : {}),
           ...(item.phase ? { phase: item.phase } : {}),
         });
@@ -523,7 +523,11 @@ export function cellVerb(cell: OneWorkCell, locale: "ko" | "en"): string {
     case "call":
       return running ? (ko ? "호출하는 중" : "Calling") : (ko ? "호출함" : "Called");
     case "agent":
-      return running ? (ko ? "위임 진행 중" : "Delegating") : (ko ? "위임함" : "Delegated");
+      if (cell.status === "failed") return ko ? "단계 실패" : "Step failed";
+      if (cell.status === "cancelled") return ko ? "단계 취소" : "Step cancelled";
+      if (cell.phase === "plan") return running ? (ko ? "계획 중" : "Planning") : (ko ? "계획 완료" : "Planned");
+      if (cell.phase === "synthesize") return running ? (ko ? "결과 종합 중" : "Synthesizing") : (ko ? "결과 종합 완료" : "Synthesized");
+      return running ? (ko ? "작업자 실행 중" : "Worker running") : (ko ? "작업자 완료" : "Worker completed");
     case "answer":
       return running ? (ko ? "답변 작성 중" : "Writing") : (ko ? "답변 작성함" : "Wrote the answer");
     case "notice":

@@ -61,6 +61,9 @@ export interface OneActivityItem {
   agentName?: string;
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
+  /** Orchestration node identity; several workers may share one accounting agent. */
+  agentId?: string;
+  model?: string;
   message?: string;
   failureCode?: ToolFailureCode;
   detail?: string;
@@ -419,6 +422,19 @@ export function reduceOneActivity(
   let handoffs = state.handoffs;
   let terminalStatus: OneActivityState["terminalStatus"] = undefined;
 
+  // A node finishing is independent of the envelope kind. Worker completion
+  // often arrives on a tool-use with no tool, before the overall run ends.
+  const topologyAgentId = event.agentId || event.runtimeAgentId;
+  if (event.done && topologyAgentId) {
+    items = items.map((item) => item.kind === "agent" && item.agentId === topologyAgentId
+      && (!event.phase || item.phase === event.phase) ? {
+        ...item,
+        status: event.tool?.isError || event.agentLifecycle?.state === "failed" || event.nodeState === "failed" ? "failed" : "completed",
+        completedAt: observedAt,
+        ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
+      } : item);
+  }
+
   // Delegation and worker-message envelopes are orthogonal to the event kind
   // (`firm-orchestrator` emits them on tool-use), so project them before the
   // ordinary activity branches. This keeps the existing runtime contract and
@@ -523,13 +539,16 @@ export function reduceOneActivity(
       (event.agentId || event.runtimeAgentId || event.agentName)
       && (event.phase !== undefined || (event.tier ?? 1) > 1)
     ) {
-      const agentId = event.runtimeAgentId || event.agentId || event.agentName || `agent-${sequence}`;
+      const agentId = event.agentId || event.runtimeAgentId || event.agentName || `agent-${sequence}`;
       const id = `agent:${agentId}:${event.phase || "work"}`;
+      const existing = items.find((item) => item.id === id);
       items = upsertItem(items, {
         id,
         kind: "agent",
-        status: event.done ? "completed" : "running",
-        observedAt,
+        status: event.nodeState === "failed" ? "failed" : event.done ? "completed" : "running",
+        observedAt: existing?.observedAt || observedAt,
+        agentId,
+        ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
         ...(event.done ? { completedAt: observedAt } : {}),
         ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
         ...(event.role?.trim() ? { role: event.role.trim() } : {}),
@@ -883,6 +902,18 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
   const cancelledRun = events.some((row) => row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted");
   for (const row of events) {
     const payload = row.payload ?? {};
+    if (row.kind.startsWith("task_force_model_call_") && row.nodeId) {
+      const callPhase = ledgerString(payload, "phase");
+      const phase = callPhase === "planner" ? "plan" : callPhase === "worker" ? "delegate" : undefined;
+      // A model return is not a validated handoff or a completed worker.
+      // Call-start can add the actual model; only an explicit node done closes it.
+      if (phase && row.kind === "task_force_model_call_started") {
+        apply({ kind: "thinking", agentId: row.nodeId, phase,
+          ...(ledgerString(payload, "runtimeModel") ? { model: ledgerString(payload, "runtimeModel") } : {}),
+        }, row.ts);
+      }
+      continue;
+    }
     if (row.kind === "invoke_started") {
       const permission = ledgerPermission(payload.permissions);
       const selectedPermissionMode = ledgerPermissionMode(payload.onePermissionMode);
@@ -917,6 +948,10 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       const toolIsError = ledgerBoolean(payload, "toolIsError") === true;
       const toolSourceUrls = ledgerHttpsUrls(payload, "toolSourceUrls");
       const oneArtifacts = ledgerOneArtifacts(payload);
+      const topologyAgentId = ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId;
+      const done = ledgerBoolean(payload, "done");
+      const rawPhase = ledgerString(payload, "phase");
+      const phase = rawPhase === "plan" || rawPhase === "delegate" || rawPhase === "synthesize" ? rawPhase : undefined;
       if (toolName) {
         // A ledger row that carries a result preview is a completion even when
         // the tool id was never observed (single-event runners like agy DONE).
@@ -945,7 +980,9 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
             ...(toolFailureCode ? { failureCode: toolFailureCode } : {}),
             ...(toolSourceUrls ? { sourceUrls: toolSourceUrls } : {}),
           },
-          ...(row.agentId ? { agentId: row.agentId } : {}),
+          ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
+          ...(phase ? { phase } : {}),
+          ...(done ? { done: true } : {}),
           ...(agentName ? { agentName } : {}),
           ...(role ? { role } : {}),
           ...(oneArtifacts ? { oneArtifacts } : {}),
@@ -954,7 +991,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         }, row.ts);
         continue;
       }
-      if (delegateTo || agentMessage) {
+      if (delegateTo || agentMessage || done) {
         const agentName = ledgerString(payload, "agentName");
         const role = ledgerString(payload, "role");
         const topologyAgentId = ledgerString(payload, "agentNodeId") || row.agentId;
@@ -971,6 +1008,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
           ...(agentName ? { agentName } : {}),
           ...(role ? { role } : {}),
           ...(phase ? { phase } : {}),
+          ...(done ? { done: true } : {}),
           ...(delegateTo ? { delegateTo } : {}),
           ...(agentMessage ? { agentMessage } : {}),
         }, row.ts);
@@ -1010,7 +1048,11 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         : undefined;
       apply({
         kind: "thinking",
-        ...(row.agentId ? { agentId: row.agentId } : {}),
+        ...(ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId
+          ? { agentId: ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId! } : {}),
+        ...(ledgerString(payload, "runtimeModel") || ledgerString(payload, "model")
+          ? { model: ledgerString(payload, "runtimeModel") || ledgerString(payload, "model") } : {}),
+        ...(ledgerBoolean(payload, "done") ? { done: true } : {}),
         ...(agentName ? { agentName } : {}),
         ...(role ? { role } : {}),
         ...(phase ? { phase } : {}),

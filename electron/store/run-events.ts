@@ -999,6 +999,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     runtimeLongContext: ev.runtimeSelection?.longContext,
     runtimeEffort: ev.runtimeSelection?.effort,
     nodeState: ev.nodeState,
+    done: ev.done,
     surfaceId: ev.surfaceId,
     oneArtifacts: ev.oneArtifacts,
     toolName: ev.tool?.name,
