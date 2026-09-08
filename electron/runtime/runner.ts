@@ -599,6 +599,10 @@ export interface RunnerFailure {
    * 화면은 단정 대신 완곡하게 말하고, 원문은 저널에 보존해야 한다.
    */
   source: "marker" | "exit" | "heuristic";
+  /** Provider-owned machine code, accepted only after a runner validates and bounds it. */
+  providerCode?: string;
+  /** Exact child exit status when the runner observed one; null/unknown is omitted. */
+  exitCode?: number;
   /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. */
   retryAfterHint?: string;
 }

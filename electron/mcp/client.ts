@@ -2516,7 +2516,7 @@ ${effectiveUserPrompt}`;
   const oneControllerFallbackEligible = req.oneMode === true && runtimeResolution.pinHonored;
   const emitControllerRuntimeFallback = (
     fallback: RuntimeStatus,
-    failure: Pick<RunnerFailure, "kind" | "runtime" | "retryAfterHint"> | null,
+    failure: Pick<RunnerFailure, "kind" | "runtime" | "source" | "providerCode" | "exitCode" | "retryAfterHint"> | null,
   ): void => {
     if (!oneControllerFallbackEligible) return;
     const nextSelection: RuntimeSelection = {
@@ -2578,6 +2578,9 @@ ${effectiveUserPrompt}`;
           to: nextSelection,
           reason: failure?.kind ?? "unavailable-before-run",
           runtime: failure?.runtime ?? null,
+          failureSource: failure?.source ?? null,
+          providerCode: failure?.providerCode ?? null,
+          exitCode: failure?.exitCode ?? null,
           retryAfterHint: failure?.retryAfterHint ?? null,
           // 저장된 선택은 건드리지 않는다 — 폴백은 이번 실행에만 적용된다.
           savedSelectionChanged: false,
@@ -5064,6 +5067,11 @@ ${effectiveUserPrompt}`;
               from: { kind: active.kind, backend: active.backend, model: active.model ?? null },
               to: { kind: fallback.kind, backend: fallback.backend, model: fallback.model ?? null },
               reason: failed.kind,
+              runtime: failed.runtime,
+              failureSource: failed.source,
+              providerCode: failed.providerCode ?? null,
+              exitCode: failed.exitCode ?? null,
+              retryAfterHint: failed.retryAfterHint ?? null,
             }),
           });
         }

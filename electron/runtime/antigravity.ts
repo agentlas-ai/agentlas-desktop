@@ -405,6 +405,8 @@ export function reduceAgyLine(
     /** result 이벤트의 status/error — 표식이지 문구 판별이 아니다. */
     resultStatus?: string;
     resultError?: string;
+    resultErrorCode?: string;
+    resultRetryAfterHint?: string;
   },
 ): {
   delta?: string;
@@ -447,7 +449,19 @@ export function reduceAgyLine(
        * 이 칸을 안 읽어서 사용자는 `Antigravity CLI exit 1` 만 봤다 — 언제 풀리는지도,
        * 무엇이 문제인지도 없이. 런타임이 이유를 말했는데 우리가 버린 자리다.
        */
-      error?: string;
+      error?: string | {
+        message?: unknown;
+        code?: unknown;
+        error_code?: unknown;
+        errorCode?: unknown;
+        retry_after?: unknown;
+        retryAfter?: unknown;
+      };
+      /** Optional provider-owned machine fields. Unknown or malformed values are ignored. */
+      error_code?: unknown;
+      errorCode?: unknown;
+      retry_after?: unknown;
+      retryAfter?: unknown;
     };
     step_update?: {
       conversation_id?: string;
@@ -481,8 +495,22 @@ export function reduceAgyLine(
   if (ev.event === "result" && ev.result) {
     if (typeof ev.result.response === "string") state.finalResponse = ev.result.response;
     if (typeof ev.result.status === "string") state.resultStatus = ev.result.status;
+    const structuredError = ev.result.error && typeof ev.result.error === "object" && !Array.isArray(ev.result.error)
+      ? ev.result.error
+      : undefined;
     // 런타임이 말한 사유를 그대로 들고 간다 — 이것이 있으면 그것이 곧 실패 표식이다.
-    if (typeof ev.result.error === "string" && ev.result.error.trim()) state.resultError = ev.result.error.trim();
+    const errorMessage = typeof ev.result.error === "string" ? ev.result.error : structuredError?.message;
+    if (typeof errorMessage === "string" && errorMessage.trim()) state.resultError = errorMessage.trim();
+    const errorCode = normalizeAntigravityFailureCode(
+      ev.result.error_code ?? ev.result.errorCode
+      ?? structuredError?.code ?? structuredError?.error_code ?? structuredError?.errorCode,
+    );
+    const retryAfterHint = normalizeAntigravityRetryAfter(
+      ev.result.retry_after ?? ev.result.retryAfter
+      ?? structuredError?.retry_after ?? structuredError?.retryAfter,
+    );
+    if (errorCode) state.resultErrorCode = errorCode;
+    if (retryAfterHint) state.resultRetryAfterHint = retryAfterHint;
     /*
      * ★거부는 문구가 아니라 **필드**로 잡는다 (실측 2026-09-07, agy 1.1.27).
      *
@@ -634,18 +662,59 @@ export function buildAgyPromptBootstrap(promptFile: string): string {
 
 
 /**
- * agy 가 `result.error` 로 말한 사유를 실패 종류로 옮긴다 — **순수 함수**.
- *
- * 여기서 문구를 보는 것은 runtime-refusal.ts 의 휴리스틱과 다르다: 이건 "산출물인가
- * 고지문인가"를 추측하는 것이 아니라, 런타임이 **오류 칸에 넣은 문장**을 우리 어휘로
- * 옮기는 것뿐이다. 분류가 틀려도 사유 원문은 그대로 사용자에게 간다(정보 손실 없음).
+ * agy 의 구조화된 provider code를 실패 종류로 옮긴다 — **순수 함수**.
+ * `result.error`는 사용자가 읽을 사유로만 보존하며 분류 근거로 쓰지 않는다.
  */
-export function antigravityFailureKind(error: string): RunnerFailureKind {
-  const text = String(error || "");
-  if (/\bquota\b|\busage limit\b|\brate.?limit/i.test(text)) return "quota";
-  if (/\b(sign ?in|log ?in|unauthorized|forbidden|credential|token)\b/i.test(text)) return "auth";
-  if (/\btimed? ?out\b|\btimeout\b/i.test(text)) return "timeout";
-  return "refused";
+const AGY_MACHINE_CODE_RE = /^(?:[A-Z][A-Z0-9_.:-]{0,63}|[1-9][0-9]{2})$/u;
+
+/** Preserve only bounded provider-owned codes; never promote an error sentence into a code. */
+export function normalizeAntigravityFailureCode(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const code = String(value).trim().toUpperCase();
+  return AGY_MACHINE_CODE_RE.test(code) ? code : undefined;
+}
+
+/** Keep an ISO or compact relative retry hint only when it arrived in its own provider field. */
+export function normalizeAntigravityRetryAfter(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 86_400) {
+    return `in ${value}s`;
+  }
+  if (typeof value !== "string") return undefined;
+  const hint = value.trim();
+  if (!hint || hint.length > 80 || /[\r\n\u0000]/u.test(hint)) return undefined;
+  if (/^(?:in\s+)?(?:(?:\d{1,2})h)?(?:(?:\d{1,3})m)?(?:(?:\d{1,5})s)?$/iu.test(hint)
+    && /\d/u.test(hint)) {
+    return hint.startsWith("in ") ? hint : `in ${hint}`;
+  }
+  const parsed = Date.parse(hint);
+  return Number.isFinite(parsed) && /T/u.test(hint) ? new Date(parsed).toISOString() : undefined;
+}
+
+/** Classify only exact machine codes. A provider error field without one remains refused. */
+export function antigravityFailureKind(_error: string, providerCode?: string): RunnerFailureKind {
+  switch (normalizeAntigravityFailureCode(providerCode)) {
+    case "429":
+    case "RESOURCE_EXHAUSTED":
+    case "QUOTA_EXCEEDED":
+    case "RATE_LIMITED":
+    case "RATE_LIMIT_EXCEEDED":
+      return "quota";
+    case "401":
+    case "UNAUTHENTICATED":
+    case "AUTHENTICATION_REQUIRED":
+    case "INVALID_CREDENTIALS":
+      return "auth";
+    case "408":
+    case "DEADLINE_EXCEEDED":
+    case "TIMEOUT":
+    case "TIMED_OUT":
+      return "timeout";
+    case "UNIMPLEMENTED":
+    case "UNSUPPORTED_CLIENT":
+      return "unsupported";
+    default:
+      return "refused";
+  }
 }
 
 /** Antigravity exit 0 완주의 실패 판별 — 순수 함수(게이트가 픽스처 주입). */
@@ -1254,6 +1323,8 @@ async function runPreparedAntigravity(
       conversationId?: string;
       resultStatus?: string;
       resultError?: string;
+      resultErrorCode?: string;
+      resultRetryAfterHint?: string;
     } = { text: "", inputTokens: 0, outputTokens: 0 };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
@@ -1402,7 +1473,7 @@ async function runPreparedAntigravity(
         // 판정 근거는 새로 만들지 않는다 — 도구를 열었는지는 이미 agyToolsAllowed 가 안다.
         const structural = !agyToolsAllowed;
         /*
-         * ★런타임이 이유를 말했으면 그 말이 곧 실패다 — 우리가 다시 추측하지 않는다.
+         * ★런타임이 오류 필드를 보냈으면 실패다. 종류는 별도 machine code로만 고른다.
          *
          * 실측 2026-09-07 (agy 1.1.27, 할당량 소진):
          *   {"event":"result","status":"ERROR","response":"",
@@ -1410,14 +1481,22 @@ async function runPreparedAntigravity(
          * 그리고 프로세스는 exit 1 로 끝나고 stderr 는 **비어 있다.** 이 칸을 안 읽던
          * 동안 사용자가 본 것은 `Antigravity CLI exit 1` 한 줄뿐이었다 — 무엇이
          * 문제인지도, 25분 뒤면 풀린다는 것도 없이. 다시 눌러도 같은 줄만 나온다.
-         * 이건 marker 다(문구 판별이 아니라 런타임이 채운 필드).
+         * 오류 필드 자체는 marker다. code가 없으면 사유 문구를 추측하지 않고 refused로 남긴다.
          */
-        const runtimeSaidWhy = agyState.resultError
+        const hasRuntimeFailureMarker = Boolean(
+          agyState.resultError
+          || agyState.resultErrorCode
+          || (agyState.resultRetryAfterHint && agyState.resultStatus?.toUpperCase() === "ERROR"),
+        );
+        const runtimeSaidWhy = hasRuntimeFailureMarker
           ? {
-            kind: antigravityFailureKind(agyState.resultError),
-            message: agyState.resultError,
+            kind: antigravityFailureKind(agyState.resultError ?? "", agyState.resultErrorCode),
+            message: agyState.resultError ?? "Antigravity reported a structured provider failure.",
             runtime: "antigravity" as const,
             source: "marker" as const,
+            ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
+            ...(agyState.resultRetryAfterHint ? { retryAfterHint: agyState.resultRetryAfterHint } : {}),
+            exitCode: 0,
           }
           : undefined;
         const failure = runtimeSaidWhy ?? (!trimmed && denied.length > 0
@@ -1472,30 +1551,38 @@ async function runPreparedAntigravity(
             }
             : {}),
         });
-      } else if (agyState.resultError) {
+      } else if (agyState.resultError || agyState.resultErrorCode
+        || (agyState.resultRetryAfterHint && agyState.resultStatus?.toUpperCase() === "ERROR")) {
         /*
          * ★exit != 0 이어도 런타임이 이유를 말했으면 그 이유가 결과다.
          *
          * 실측(할당량 소진): exit 1 · stderr 비어 있음 · result.error 에만 사유.
          * 예전에는 여기서 `Antigravity CLI exit 1` 로 던져 사유가 통째로 사라졌다.
-         * 실패 표식으로 돌려주면 소비자가 "왜"와 "언제 풀리는지"를 보여줄 수 있고,
-         * 재시도 판단도 종류(quota/auth/timeout)로 할 수 있다.
+         * 실패 표식으로 돌려주되, 재시도 종류는 별도 provider code가 있을 때만 구체화한다.
          */
         resolve({
           text: "",
           failure: {
-            kind: antigravityFailureKind(agyState.resultError),
-            message: agyState.resultError,
+            kind: antigravityFailureKind(agyState.resultError ?? "", agyState.resultErrorCode),
+            message: agyState.resultError ?? "Antigravity reported a structured provider failure.",
             runtime: "antigravity",
             source: "marker",
+            ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
+            ...(agyState.resultRetryAfterHint ? { retryAfterHint: agyState.resultRetryAfterHint } : {}),
+            ...(typeof code === "number" ? { exitCode: code } : {}),
           },
         });
       } else {
-        reject(
-          new Error(
-            `Antigravity CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`,
-          ),
-        );
+        resolve({
+          text: "",
+          failure: {
+            kind: "exit",
+            message: "Antigravity exited without a structured provider failure.",
+            runtime: "antigravity",
+            source: "exit",
+            ...(typeof code === "number" ? { exitCode: code } : {}),
+          },
+        });
       }
     });
   });
