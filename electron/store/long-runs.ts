@@ -1520,6 +1520,13 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
   const now = new Date().toISOString();
   db.transaction(() => {
     for (const row of rows) {
+      // A durable user stop is never converted into an automatic host resume.
+      const userControl = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user' ORDER BY seq DESC LIMIT 1")
+        .get(row.id) as { payload_json: string } | undefined;
+      const control = userControl ? JSON.parse(userControl.payload_json) : null;
+      const action = control?.action ?? control?.command;
+      const userPause = row.status === "pausing" && action === "pause";
+      const userDelete = row.status === "cancelling";
       db.prepare(
         `UPDATE long_run_worker_attempts
          SET state = 'interrupted',
@@ -1539,18 +1546,23 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
       ).run(now, row.id);
       db.prepare(
         `UPDATE long_runs
-         SET status = 'paused', pause_reason = ?, paused_at = ?, updated_at = ?,
+         SET status = ?, pause_reason = ?, paused_at = ?, completed_at = ?, updated_at = ?,
              app_instance_id = COALESCE(?, app_instance_id), version = version + 1
          WHERE id = ?`,
-      ).run(reason === "app-quit" ? "app_closed" : "crash_recovery", now, now, appInstanceId ?? null, row.id);
+      ).run(userDelete ? "cancelled" : "paused", userDelete ? null : userPause ? "user" : reason === "app-quit" ? "app_closed" : "crash_recovery",
+        userDelete ? null : now, userDelete ? now : null, now, appInstanceId ?? null, row.id);
+      if (userDelete) {
+        db.prepare("UPDATE chat_goal_contracts SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?) AND status IN ('active','blocked')").run(now, now, row.id);
+        db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?)").run(now, row.id);
+      }
       appendEventInDb({
         runId: row.id,
         kind: reason === "app-quit" ? "run.paused_app_closed" : "run.recovered_after_host_exit",
         actorKind: "host",
         payload: {
           from: row.status,
-          to: "paused",
-          pauseReason: reason === "app-quit" ? "app_closed" : "crash_recovery",
+          to: userDelete ? "cancelled" : "paused",
+          pauseReason: userDelete ? null : userPause ? "user" : reason === "app-quit" ? "app_closed" : "crash_recovery",
           automaticResume: false,
         },
         at: now,

@@ -7468,7 +7468,11 @@ export interface AgentlasIpc {
     getGoalContext: (id: string) => Promise<ChatGoalContext | null>;
     /** 첫 Goal 요청으로만 goal 계약을 정의한다. 활성 goal은 후속 채팅/steering으로 덮어쓰지 않는다. */
     defineGoal: (id: string, objective: string, locale?: "ko" | "en") => Promise<ChatGoalContext | null>;
-    /** Explicit manual resume. App-close/crash recovery never dispatches on startup. */
+    /** Stop execution and automatic continuation while retaining this exact goal. */
+    pauseGoal: (id: string, goalId: string) => Promise<ChatGoalContext | null>;
+    /** Detach this exact goal; retain chat, files and audit history. */
+    deleteGoal: (id: string, goalId: string) => Promise<Chat>;
+    /** Explicit resume; uncertain interrupted effects remain blocked. */
     resumeGoal: (id: string, expectedVersion: number) => Promise<ChatGoalContext | null>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;

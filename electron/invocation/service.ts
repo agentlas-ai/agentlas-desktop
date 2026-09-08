@@ -12,6 +12,7 @@ import {
   registerDurableInvocationStart,
 } from "../runtime/invocation-lifecycle";
 import {
+  appendLongRunEvent,
   bindLongRunWorker,
   getLongRunByGoalId,
   listLongRunTasks,
@@ -63,6 +64,7 @@ import {
 } from "../store/run-events";
 import { getProject } from "../store/projects";
 import { getDb } from "../store/db";
+import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import {
   beginQueuedSteerDrain,
   cancelQueuedSteersForChat,
@@ -79,6 +81,7 @@ import {
   listChatMessages,
   repairRootChatSurfaceController,
   setChatGoalBinding,
+  setChatContinuousMode,
 } from "../store/chats";
 import {
   ensureCanonicalTaskForChat,
@@ -937,6 +940,10 @@ export class InvocationService {
     const storedChat = getChat(req.chatId);
     if (!storedChat) throw new Error("Chat not found");
     const chat = repairRootChatSurfaceController(storedChat);
+    const boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+    if (boundGoal && ["paused", "pausing", "cancelling", "cancelled"].includes(boundGoal.status)) {
+      throw new Error("goal_explicit_resume_required");
+    }
     const mobileOneBoundary = workspaceBinding?.source === "mobile-one";
     // A One turn may also arrive from the paired Telegram channel. Both remote
     // One boundaries keep One mode; only the Mobile one may carry a team
@@ -2304,6 +2311,8 @@ export class InvocationService {
              */
             void this.offerPermissionEscalation({
               chatId: runReq.chatId,
+              goalId: projectionGoalId ?? null,
+              signal: controller.signal,
               agentId: record.actualAgentId,
               oneMode: requestedOneMode,
               locale: pickLocale(runReq),
@@ -2507,7 +2516,7 @@ export class InvocationService {
                *
                * The goal being verified is named by the claim. That is the identity to act on.
                */
-              if (controller.signal.aborted) return;
+              if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
               const verifiedGoalId = completionClaim.goalId!;
               if (verification?.disposition === "completed") {
                 completeChatGoalContract(verifiedGoalId, "completed");
@@ -2718,12 +2727,23 @@ export class InvocationService {
    */
   private async offerPermissionEscalation(input: {
     chatId: string;
+    goalId: string | null;
+    signal: AbortSignal;
     agentId?: string;
     oneMode: boolean;
     locale: "ko" | "en";
   }): Promise<void> {
     const arbiter = getRuntimeToolPermissionArbiter();
     if (!arbiter) return; // 물을 관문이 없으면 승격도 없다 — fail-closed.
+    const controlEpoch = (): number | null => {
+      try {
+        return input.goalId ? (getDb().prepare(
+          "SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = (SELECT id FROM long_runs WHERE goal_id = ?) AND kind = 'run.user_control' AND actor_kind = 'user'",
+        ).get(input.goalId) as { seq: number }).seq : 0;
+      } catch { return null; }
+    };
+    const originalControlEpoch = controlEpoch();
+    if (originalControlEpoch === null) return;
     let allowed = false;
     try {
       allowed = (await arbiter({
@@ -2739,7 +2759,12 @@ export class InvocationService {
     } catch {
       return; // 중재자 실패는 거부다 — 실패가 승격이 되면 관문이 아니다.
     }
-    if (!allowed) return;
+    if (!allowed || input.signal.aborted || controlEpoch() !== originalControlEpoch) return;
+    if (input.goalId) {
+      const current = getLongRunByGoalId(input.goalId);
+      if (getChat(input.chatId)?.goalId !== input.goalId || !current
+        || ["paused", "pausing", "cancelling", "cancelled", "completed", "failed", "blocked"].includes(current.status)) return;
+    }
     const continuation = input.locale === "ko"
       ? "전체 액세스가 승인되었다. 방금 권한이 없어 멈춘 작업을 이어서 완료하라."
       : "Full access has been approved. Continue and finish the work that was blocked by the read-only permission.";
@@ -2772,6 +2797,66 @@ export class InvocationService {
     } catch { /* Requested stop remains durable and non-admitting. */ }
   }
 
+  /** Main owns stop intent before aborting any native work. The identity guard
+   * prevents a stale control from stopping a replacement goal in this chat. */
+  pauseGoal(chatId: string, expectedGoalId: string): void {
+    this.stopGoal(chatId, expectedGoalId, "pause");
+  }
+
+  deleteGoal(chatId: string, expectedGoalId: string): void {
+    this.stopGoal(chatId, expectedGoalId, "delete");
+  }
+
+  private stopGoal(chatId: string, expectedGoalId: string, action: "pause" | "delete"): void {
+    const chat = getChat(chatId);
+    if (!expectedGoalId || chat?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
+    const run = getLongRunByGoalId(expectedGoalId);
+    if (run && (run.rootChatId !== chatId || run.surface === "science")) throw new Error("goal_control_scope_mismatch");
+    if (!run && action === "pause") throw new Error("goal_control_not_started");
+    const records = [...new Map([...this.pendingGoalVerifications, ...this.activeRuns.entries()])]
+      .filter(([, record]) => record.chatId === chatId);
+    try {
+      getDb().transaction(() => {
+        if (getChat(chatId)?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
+        if (run) {
+          appendLongRunEvent({ runId: run.id, kind: "run.user_control", actorKind: "user",
+            payload: { action, chatId, goalId: expectedGoalId } });
+          let current = getLongRunByGoalId(expectedGoalId)!;
+          if (!["completed", "failed", "cancelled"].includes(current.status)) {
+            if (action === "delete") {
+              if (!["draft", "paused", "blocked", "cancelling"].includes(current.status)) {
+                current = transitionLongRun({ runId: current.id, to: "cancelling", actorKind: "user", reason: "user", expectedVersion: current.version });
+              }
+              transitionLongRun({ runId: current.id, to: "cancelled", actorKind: "user", reason: "user", expectedVersion: current.version });
+            } else if (!["paused", "blocked", "cancelling"].includes(current.status)) {
+              if (["draft", "queued"].includes(current.status)) {
+                transitionLongRun({ runId: current.id, to: "paused", actorKind: "user", reason: "user", expectedVersion: current.version });
+              } else {
+                current = transitionLongRun({ runId: current.id, to: "pausing", actorKind: "user", reason: "user", expectedVersion: current.version });
+                if (!records.length) transitionLongRun({ runId: current.id, to: "paused", actorKind: "host", reason: "user", expectedVersion: current.version });
+              }
+            }
+          }
+        }
+        const continuation = findAutomationByGoalId(expectedGoalId);
+        if (continuation?.enabled) toggleAutomation(continuation.id, false);
+        cancelQueuedSteersForChat(chatId);
+        if (action === "delete") {
+          completeChatGoalContract(expectedGoalId, "cancelled");
+          setChatGoalBinding(chatId, null);
+          setChatContinuousMode(chatId, false);
+        }
+      })();
+    } finally {
+      // Even a storage failure must not keep the live invocation running.
+      this.steerQueues.delete(chatId);
+      for (const [runId, record] of records) {
+        record.automaticGoalId ??= run?.goalId;
+        this.cancelWithReason(runId, new Error(action === "pause" ? "goal_paused_by_user" : "goal_deleted_by_user"));
+      }
+    }
+  }
+
   cancel(runId: string): "requested" | "already-requested" | "not-found" {
     return this.cancelWithReason(runId, new Error("stopped_by_user"));
   }
@@ -2781,7 +2866,7 @@ export class InvocationService {
     reason: Error,
   ): "requested" | "already-requested" | "not-found" {
     const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId);
-    if (record?.automaticGoalId) {
+    if (record?.automaticGoalId && !["goal_paused_by_user", "goal_deleted_by_user"].includes(reason.message)) {
       try {
         const goal = getLongRunByGoalId(record.automaticGoalId);
         if (goal && !["completed", "failed", "cancelled", "cancelling", "paused"].includes(goal.status)) {
@@ -2796,7 +2881,9 @@ export class InvocationService {
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
       this.steerQueues.delete(record.chatId);
-      cancelQueuedSteersForChat(record.chatId);
+      try { cancelQueuedSteersForChat(record.chatId); } catch {
+        // Persistence failure must never prevent the actual stop signal.
+      }
     }
     let result = this.activeRuns.requestCancelWithReason(runId, reason);
     if (result === "not-found" && record && this.pendingGoalVerifications.has(runId)) {

@@ -5647,7 +5647,17 @@ function ChatPage() {
   }, [submitOrQueue]);
   const handleToggleGoal = useCallback(() => {
     if (!chat) return;
-    const next = !chat.goalId;
+    if (chat.goalId) {
+      void ipc()?.chats.deleteGoal(chat.id, chat.goalId).then((updated) => {
+        if (updated) setChat(updated);
+        setGoalContext(null);
+      }).catch((cause) => {
+        void ipc()?.chats.getGoalContext(chat.id).then(setGoalContext);
+        setSessionNotice(failureMessage(cause));
+      });
+      return;
+    }
+    const next = true;
     const previous = chat;
     setGoalContext(null);
     setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
@@ -5658,6 +5668,15 @@ function ChatPage() {
         if (!updated?.goalId) setGoalContext(null);
       })
       .catch(() => setChat(previous));
+  }, [chat]);
+  const handlePauseGoal = useCallback(() => {
+    if (!chat?.goalId) return;
+    void ipc()?.chats.pauseGoal(chat.id, chat.goalId)
+      .then((context) => setGoalContext(context))
+      .catch((cause) => {
+        void ipc()?.chats.getGoalContext(chat.id).then(setGoalContext);
+        setSessionNotice(failureMessage(cause));
+      });
   }, [chat]);
   const handleResumeGoal = useCallback(() => {
     if (!chat || !goalContext?.version) return;
@@ -5678,7 +5697,9 @@ function ChatPage() {
          */
         const raw = failureMessage(cause);
         const ko = locale === "ko";
-        const explained = /auto_goal_resume_chat_busy/.test(raw)
+        const explained = /auto_goal_resume_attempt_unsettled/.test(raw)
+          ? (ko ? "중단된 작업의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The interrupted action's outcome needs confirmation first. Your goal and work history are preserved.")
+          : /auto_goal_resume_chat_busy/.test(raw)
           ? (ko
             ? "이 대화가 아직 앞 요청을 돌리는 중입니다. 그 실행이 끝난 뒤 다시 이어가 주세요."
             : "This chat is still running an earlier request. Resume again once it finishes.")
@@ -6552,6 +6573,7 @@ function ChatPage() {
           goalPauseReason={goalContext?.pauseReason}
           goalBlockedReason={goalContext?.blockedReason}
           onResumeGoal={handleResumeGoal}
+          onPauseGoal={handlePauseGoal}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

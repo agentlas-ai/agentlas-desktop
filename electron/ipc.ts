@@ -1,3 +1,4 @@
+import { getLongRunByGoalId } from "./store/long-runs";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, shell } from "electron";
@@ -419,7 +420,6 @@ import {
 } from "./store/chats";
 import { listChatFileSnapshot, persistChatFileSnapshot, readChatFileSnapshotForExternalOpen } from "./store/chat-message-attachments";
 import {
-  completeGoalLedgerGoal,
   deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
   getGoalLedgerGoal,
@@ -4224,7 +4224,7 @@ export function registerIpcHandlers(): void {
    * ③ continuousMode 자동 ON(완성까지 계속 도는 루프가 기본).
    * 끄기(칩 ×)는 단순 off가 아니라 **명시적 목표 종료**다: 원장 cancelled, 이
    * goal의 연속실행 자동화 정확히 한 행 비활성화, 바인딩 해제.
-   * 원장 호출은 fail-soft(런타임 없으면 조용히 생략)이며 UI 응답을 막지 않는다.
+   * 종료는 Main이 원장·계약·바인딩을 함께 닫고 실제 실행도 중단한다.
    */
   ipcMain.handle("chats:setGoalMode", (_e, id: string, enabled: boolean) => {
     const chat = getChat(id);
@@ -4233,27 +4233,30 @@ export function registerIpcHandlers(): void {
       const task = getCanonicalTaskForChat(id);
       // 프로젝트 대화의 목표는 프로젝트에 붙는다. 여기서 대화 단위로 파생해 두면
       // 실행 경로가 프로젝트 편성을 물려받으려 해도 이 값이 먼저 이겨서 무효가 된다.
-      const goalId = chat.goalId ?? resolveDesktopWorkforceGoalId({
+      const previousGoalId = chat.goalId ?? resolveDesktopWorkforceGoalId({
         projectId: chat.projectId,
         taskId: task?.id,
         chatId: id,
       });
+      const priorRun = getLongRunByGoalId(previousGoalId);
+      const goalId = !chat.goalId && priorRun
+        ? `goal:desktop:${randomUUID()}` : previousGoalId;
       setChatGoalBinding(id, goalId);
       setChatContinuousMode(id, true);
       // Binding is not definition. The next explicit Goal-mode request owns
       // the objective; a chat title is only navigation copy and must never
       // become (or later overwrite) the user's durable goal.
     } else if (chat.goalId) {
-      const continuation = findAutomationByGoalId(chat.goalId);
-      if (continuation?.enabled) toggleAutomation(continuation.id, false);
-      void completeGoalLedgerGoal({
-        goalId: chat.goalId,
-        status: "cancelled",
-        reason: "user-ended-goal-chip",
-        projectDir: getChatWorkingFolder(id),
-      });
-      setChatGoalBinding(id, null);
+      invocationService.deleteGoal(id, chat.goalId);
     }
+    return getChat(id);
+  });
+  ipcMain.handle("chats:pauseGoal", (_e, id: string, goalId: string) => {
+    invocationService.pauseGoal(id, goalId);
+    return getGoalLedgerGoal(goalId, getChatWorkingFolder(id));
+  });
+  ipcMain.handle("chats:deleteGoal", (_e, id: string, goalId: string) => {
+    invocationService.deleteGoal(id, goalId);
     return getChat(id);
   });
   ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
@@ -4266,6 +4269,7 @@ export function registerIpcHandlers(): void {
     if (!chat?.goalId) return null;
     const projectDir = getChatWorkingFolder(id);
     const existing = await getGoalLedgerGoal(chat.goalId, projectDir);
+    if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
     // An active contract with criteria is immutable. Ordinary chat and
     // steering can never call this endpoint to silently replace it.
     if (existing?.status === "active" && existing.acceptanceCriteria.length > 0) return existing;
@@ -4306,12 +4310,16 @@ export function registerIpcHandlers(): void {
       throw new TypeError("A current long-run version is required to resume");
     }
     const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
     if (!context || context.version !== expectedVersion) {
       throw new Error("long_run_resume_version_conflict");
     }
+    if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
+    const unsettled = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')")
+      .get(context.runId) as { n: number };
+    if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
     const continuation = findAutomationByGoalId(chat.goalId);
     if (!continuation) {
-      if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
       const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);
       try {
         confirmDesktopLongRunResumeDispatched(queued.id);
@@ -4326,6 +4334,11 @@ export function registerIpcHandlers(): void {
     try {
       if (!continuation.enabled) toggleAutomation(continuation.id, true);
       const { enqueueAutomationRunNow } = await import("./automation-scheduler");
+      const current = getLongRunByGoalId(chat.goalId);
+      if (getChat(id)?.goalId !== chat.goalId || current?.id !== queued.id
+        || current.version !== queued.version || current.status !== "queued") {
+        throw new Error("goal_control_binding_changed");
+      }
       const accepted = enqueueAutomationRunNow(continuation.id);
       if (!accepted.accepted) throw new Error("long_run_resume_dispatch_rejected");
       confirmDesktopLongRunResumeDispatched(queued.id);

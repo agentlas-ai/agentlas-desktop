@@ -97,6 +97,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconTrash,
   IconFileUp,
   IconFolder,
   IconKey,
@@ -314,6 +315,7 @@ function ChatInputComponent({
   goalPauseReason,
   goalBlockedReason,
   onResumeGoal,
+  onPauseGoal,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -368,6 +370,7 @@ function ChatInputComponent({
   goalPauseReason?: string | null;
   goalBlockedReason?: string | null;
   onResumeGoal?: () => void;
+  onPauseGoal?: () => void;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -1480,6 +1483,7 @@ function ChatInputComponent({
           pauseReason={goalPauseReason}
           blockedReason={goalBlockedReason}
           onResume={onResumeGoal}
+          onPause={onPauseGoal}
           onEndGoal={() => toggleGoalMode(false)}
         />
       )}
@@ -2071,6 +2075,7 @@ function ComposerGoalBar({
   pauseReason,
   blockedReason,
   onResume,
+  onPause,
   onEndGoal,
 }: {
   label?: string;
@@ -2080,6 +2085,7 @@ function ComposerGoalBar({
   /** 막힌 이유 — 저장소에는 있는데 화면까지 오지 않던 값이다. */
   blockedReason?: string | null;
   onResume?: () => void;
+  onPause?: () => void;
   onEndGoal: () => void;
 }) {
   const { locale } = useT();
@@ -2098,6 +2104,7 @@ function ComposerGoalBar({
    *   보여 준다(그래야 물어볼 수 있다). 이유 자체가 없으면 없다고 말한다.
    */
   const paused = runStatus === "paused";
+  const pausing = runStatus === "pausing";
   const blocked = runStatus === "blocked" || runStatus === "failed";
   const knownReason = (reason: string | null | undefined): string | null => {
     if (!reason) return null;
@@ -2137,7 +2144,7 @@ function ComposerGoalBar({
         ? "멈췄는데 이유가 기록되지 않았습니다. 같은 내용을 다시 보내면 이어서 진행합니다."
         : "It stopped and no reason was recorded. Send the same request again to continue.")
       : (locale === "ko" ? "일시정지됨" : "Paused"));
-  const title = (paused || blocked)
+  const title = pausing ? (locale === "ko" ? "실행을 멈추는 중 · 목표는 보존됩니다" : "Stopping execution · goal preserved") : (paused || blocked)
     ? stoppedCopy
     : runStatus === "verifying"
       ? (locale === "ko" ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
@@ -2155,6 +2162,13 @@ function ComposerGoalBar({
           {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
         </span>
       )}
+      {onPause && runStatus && !["paused", "pausing", "blocked", "failed", "completed", "cancelled", "cancelling"].includes(runStatus) && (
+        <button type="button" onClick={onPause} data-chat-goal-pause="true"
+          aria-label={locale === "ko" ? "목표 일시정지" : "Pause goal"}
+          title={locale === "ko" ? "실행과 자동 이어가기를 멈추고 목표를 보존합니다" : "Stop execution and automatic continuation; keep the goal"}>
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
+        </button>
+      )}
       {paused && onResume && (
         <button
           type="button"
@@ -2169,10 +2183,10 @@ function ComposerGoalBar({
       <button
         type="button"
         onClick={onEndGoal}
-        aria-label={locale === "ko" ? "목표 종료" : "End goal"}
-        title={locale === "ko" ? "목표 종료" : "End goal"}
+        aria-label={locale === "ko" ? "목표 삭제" : "Delete goal"}
+        title={locale === "ko" ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
       >
-        <IconClose size={12} />
+        <IconTrash size={12} />
       </button>
     </div>
   );
