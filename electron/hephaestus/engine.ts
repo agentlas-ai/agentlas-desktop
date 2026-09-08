@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
+import { resolveManagedNodeRuntimeAsync } from "../runtime/managed-node";
 import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
 import { optionalElectronAppPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
@@ -342,6 +343,10 @@ export async function resolveHephaestusStdioLaunch(
  * usable while this detached worker runs or when the machine is offline.
  */
 export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
+  // Prewarm the exact packaged Node receipt outside Electron Main even when
+  // update checks are disabled. Later provider discovery and CLI launches use
+  // the process cache instead of hashing the full runtime tree on first Work.
+  await resolveManagedNodeRuntimeAsync();
   if (
     process.env.HEPHAESTUS_AUTO_UPDATE === "0" ||
     process.env.HEPHAESTUS_UPDATE_CHECK === "0"

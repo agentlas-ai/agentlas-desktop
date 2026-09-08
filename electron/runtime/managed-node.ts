@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -121,6 +122,55 @@ const EXPECTED_PERSISTENT_KEYS = [
 
 let cached: ManagedNodeResolution | null = null;
 
+const ASYNC_VERIFY_CHILD_ARG = "--agentlas-verify-managed-node-runtime";
+const ASYNC_VERIFY_SCHEMA = "agentlas.managed-node-verification.v1";
+const ASYNC_VERIFY_TIMEOUT_MS = 15_000;
+const ASYNC_VERIFY_OUTPUT_LIMIT = 8 * 1024;
+const activeAsyncVerificationChildren = new Set<ChildProcess>();
+let asyncVerificationTail: Promise<void> = Promise.resolve();
+
+interface RuntimePathIdentity {
+  realPath: string;
+  dev: string;
+  ino: string;
+  size: string;
+  mtimeNs: string;
+  ctimeNs: string;
+  birthtimeNs: string;
+  kind: "directory" | "file";
+}
+
+interface RuntimeRootIdentity {
+  root: RuntimePathIdentity;
+  manifest: RuntimePathIdentity;
+  node: RuntimePathIdentity;
+  npmCli: RuntimePathIdentity;
+}
+
+interface AsyncVerificationReceipt {
+  schemaVersion: typeof ASYNC_VERIFY_SCHEMA;
+  resolution: ManagedNodeResolution;
+}
+
+type AsyncVerificationStatus =
+  | "verified"
+  | "rejected"
+  | "cancelled"
+  | "timed_out"
+  | "unavailable"
+  | "invalid_receipt"
+  | "output_overflow";
+
+interface AsyncVerificationResult {
+  status: AsyncVerificationStatus;
+  resolution: ManagedNodeResolution;
+}
+
+export interface ResolveManagedNodeRuntimeAsyncOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 function sha256File(file: string): string {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
@@ -167,6 +217,37 @@ function isInside(candidate: string, root: string): boolean {
     !relative.startsWith(`..${path.sep}`) &&
     !path.isAbsolute(relative)
   );
+}
+
+function pathIdentity(filePath: string, kind: RuntimePathIdentity["kind"]): RuntimePathIdentity {
+  const stat = fs.lstatSync(filePath, { bigint: true });
+  if (stat.isSymbolicLink() || (kind === "directory" ? !stat.isDirectory() : !stat.isFile())) {
+    throw new Error("managed Node runtime identity is not a regular path");
+  }
+  return {
+    realPath: fs.realpathSync(filePath),
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    size: String(stat.size),
+    mtimeNs: String(stat.mtimeNs),
+    ctimeNs: String(stat.ctimeNs),
+    birthtimeNs: String(stat.birthtimeNs),
+    kind,
+  };
+}
+
+function managedNodeRootIdentity(root: string, platform: NodeJS.Platform): RuntimeRootIdentity {
+  const layout = expectedLayout(platform);
+  return {
+    root: pathIdentity(root, "directory"),
+    manifest: pathIdentity(path.join(root, "agentlas-node-runtime.json"), "file"),
+    node: pathIdentity(path.join(root, ...layout.node.split("/")), "file"),
+    npmCli: pathIdentity(path.join(root, ...layout.npmCli.split("/")), "file"),
+  };
+}
+
+function managedNodeRootIdentityEqual(left: RuntimeRootIdentity, right: RuntimeRootIdentity): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function candidateRoots(): string[] {
@@ -359,6 +440,18 @@ function materializePersistentNode(
   }
 }
 
+function resolveManagedNodeRuntimeRoot(
+  root: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  persistentParent?: string,
+): ManagedNodeResolution {
+  const verified = validateManagedNodeRuntimeRoot(root, platform, arch);
+  return verified.ok
+    ? materializePersistentNode(verified.runtime, platform, arch, persistentParent)
+    : verified;
+}
+
 /** Contract-test seam with an explicit temporary destination; production resolution never calls this export. */
 export function materializeManagedNodeRuntimeForTests(
   packagedRoot: string,
@@ -366,10 +459,7 @@ export function materializeManagedNodeRuntimeForTests(
   platform: NodeJS.Platform,
   arch: string,
 ): ManagedNodeResolution {
-  const verified = validateManagedNodeRuntimeRoot(packagedRoot, platform, arch);
-  return verified.ok
-    ? materializePersistentNode(verified.runtime, platform, arch, persistentParent)
-    : verified;
+  return resolveManagedNodeRuntimeRoot(packagedRoot, platform, arch, persistentParent);
 }
 
 /** Resolve, verify, and stabilize the immutable Node+npm runtime shipped with Agentlas. */
@@ -377,12 +467,12 @@ export function resolveManagedNodeRuntime(): ManagedNodeResolution {
   if (cached) return cached;
   const failures: string[] = [];
   for (const root of candidateRoots()) {
-    const verified = validateManagedNodeRuntimeRoot(root);
-    if (verified.ok) {
-      cached = materializePersistentNode(verified.runtime, process.platform, process.arch);
+    const resolution = resolveManagedNodeRuntimeRoot(root, process.platform, process.arch);
+    if (resolution.ok) {
+      cached = resolution;
       return cached;
     }
-    failures.push(verified.reason);
+    failures.push(resolution.reason);
   }
   cached = {
     ok: false,
@@ -391,6 +481,317 @@ export function resolveManagedNodeRuntime(): ManagedNodeResolution {
   return cached;
 }
 
+function expectedResolvedNodePath(
+  root: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  materializePersistent: boolean,
+): string | null {
+  const layout = expectedLayout(platform);
+  if (platform !== "win32" || !materializePersistent) return path.join(root, ...layout.node.split("/"));
+  const locked = LOCKED_NODE_ASSETS[`${platform}:${arch}`];
+  if (!locked) return null;
+  return path.join(
+    os.homedir(),
+    ".agentlas",
+    "runtime",
+    "node",
+    `v${MANAGED_NODE_VERSION}-${arch}-${locked.runtimeTreeSha256.slice(0, 16)}`,
+    "node.exe",
+  );
+}
+
+function parseAsyncVerificationReceipt(
+  raw: string,
+  expectedRoot: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  materializePersistent: boolean,
+): AsyncVerificationResult | null {
+  try {
+    const value = JSON.parse(raw) as Partial<AsyncVerificationReceipt>;
+    const expectedNode = expectedResolvedNodePath(expectedRoot, platform, arch, materializePersistent);
+    const expectedNpmCli = path.join(expectedRoot, ...expectedLayout(platform).npmCli.split("/"));
+    if (
+      !value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join("\0") !== ["resolution", "schemaVersion"].join("\0") ||
+      value.schemaVersion !== ASYNC_VERIFY_SCHEMA ||
+      !value.resolution || typeof value.resolution !== "object" || Array.isArray(value.resolution)
+    ) return null;
+    const resolution = value.resolution;
+    if (typeof resolution.ok !== "boolean") return null;
+    if (!resolution.ok) {
+      if (
+        Object.keys(resolution).sort().join("\0") !== ["ok", "reason"].join("\0") ||
+        typeof resolution.reason !== "string" || resolution.reason.length < 1 || resolution.reason.length > 240
+      ) return null;
+      return { status: "rejected", resolution: { ok: false, reason: resolution.reason } };
+    }
+    if (
+      Object.keys(resolution).sort().join("\0") !== ["ok", "runtime"].join("\0") ||
+      !resolution.runtime || typeof resolution.runtime !== "object" || Array.isArray(resolution.runtime) ||
+      Object.keys(resolution.runtime).sort().join("\0") !== ["node", "npmCli", "root", "version"].join("\0") ||
+      resolution.runtime.root !== expectedRoot ||
+      resolution.runtime.version !== MANAGED_NODE_VERSION ||
+      !expectedNode ||
+      path.resolve(resolution.runtime.node) !== path.resolve(expectedNode) ||
+      path.resolve(resolution.runtime.npmCli) !== path.resolve(expectedNpmCli)
+    ) return null;
+    return {
+      status: "verified",
+      resolution: {
+        ok: true,
+        runtime: {
+          root: resolution.runtime.root,
+          node: resolution.runtime.node,
+          npmCli: resolution.runtime.npmCli,
+          version: resolution.runtime.version,
+        },
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function terminateAsyncVerificationChild(child: ChildProcess): void {
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  const hardKill = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    }
+  }, 250);
+  hardKill.unref();
+}
+
+function verifyManagedNodeRuntimeRootInChild(
+  root: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  materializePersistent: boolean,
+  options: ResolveManagedNodeRuntimeAsyncOptions,
+): Promise<AsyncVerificationResult> {
+  if (options.signal?.aborted) {
+    return Promise.resolve({
+      status: "cancelled",
+      resolution: { ok: false, reason: "managed Node runtime verification cancelled" },
+    });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let output = "";
+    let overflowed = false;
+    let stopResult: AsyncVerificationResult | null = null;
+    let child: ChildProcess;
+    let timeout: NodeJS.Timeout;
+    let forcedSettle: NodeJS.Timeout | null = null;
+    const finish = (result: AsyncVerificationResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (forcedSettle) clearTimeout(forcedSettle);
+      options.signal?.removeEventListener("abort", onAbort);
+      activeAsyncVerificationChildren.delete(child);
+      resolve(result);
+    };
+    const stop = (result: AsyncVerificationResult) => {
+      if (settled || stopResult) return;
+      stopResult = result;
+      terminateAsyncVerificationChild(child);
+      forcedSettle = setTimeout(() => finish(result), 1_000);
+      forcedSettle.unref();
+    };
+    const onAbort = () => {
+      stop({
+        status: "cancelled",
+        resolution: { ok: false, reason: "managed Node runtime verification cancelled" },
+      });
+    };
+    try {
+      child = spawn(process.execPath, [__filename, ASYNC_VERIFY_CHILD_ARG], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch {
+      resolve({
+        status: "unavailable",
+        resolution: { ok: false, reason: "managed Node runtime verifier could not start" },
+      });
+      return;
+    }
+    activeAsyncVerificationChildren.add(child);
+    timeout = setTimeout(() => {
+      stop({
+        status: "timed_out",
+        resolution: { ok: false, reason: "managed Node runtime verification timed out" },
+      });
+    }, Math.max(25, Math.min(60_000, Math.trunc(options.timeoutMs ?? ASYNC_VERIFY_TIMEOUT_MS))));
+    timeout.unref();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      if (overflowed) return;
+      output += chunk;
+      if (Buffer.byteLength(output, "utf8") > ASYNC_VERIFY_OUTPUT_LIMIT) {
+        overflowed = true;
+        output = "";
+        stop({
+          status: "output_overflow",
+          resolution: { ok: false, reason: "managed Node runtime verifier returned too much data" },
+        });
+      }
+    });
+    child.once("error", () => finish({
+      status: "unavailable",
+      resolution: { ok: false, reason: "managed Node runtime verifier could not start" },
+    }));
+    child.once("close", (code) => {
+      if (settled) return;
+      if (stopResult) {
+        finish(stopResult);
+        return;
+      }
+      if (overflowed) {
+        finish({
+          status: "output_overflow",
+          resolution: { ok: false, reason: "managed Node runtime verifier returned too much data" },
+        });
+        return;
+      }
+      const parsed = code === 0
+        ? parseAsyncVerificationReceipt(output, root, platform, arch, materializePersistent)
+        : null;
+      finish(parsed ?? {
+        status: "invalid_receipt",
+        resolution: { ok: false, reason: "managed Node runtime verifier returned an invalid receipt" },
+      });
+    });
+    child.stdin?.on("error", () => { /* close/error owns the typed result */ });
+    child.stdin?.end(JSON.stringify({ root, platform, arch, materializePersistent }));
+  });
+}
+
+/**
+ * Verify the packaged runtime outside Electron Main, then bind the receipt to
+ * the same root/manifest/entrypoint identities observed before and after the
+ * child. Production never accepts an environment-selected trust root.
+ */
+async function resolveManagedNodeRuntimeAsyncOnce(
+  options: ResolveManagedNodeRuntimeAsyncOptions = {},
+): Promise<ManagedNodeResolution> {
+  if (cached) return cached;
+  if (options.signal?.aborted) return { ok: false, reason: "managed Node runtime verification cancelled" };
+  const failures: string[] = [];
+  for (const root of candidateRoots()) {
+    if (options.signal?.aborted) return { ok: false, reason: "managed Node runtime verification cancelled" };
+    let before: RuntimeRootIdentity;
+    try {
+      before = managedNodeRootIdentity(root, process.platform);
+    } catch {
+      failures.push("managed Node manifest is missing or invalid");
+      continue;
+    }
+    const attempt = await verifyManagedNodeRuntimeRootInChild(root, process.platform, process.arch, true, options);
+    if (attempt.status === "cancelled") return attempt.resolution;
+    if (attempt.status === "timed_out") return attempt.resolution;
+    if (attempt.status !== "verified" && attempt.status !== "rejected") return attempt.resolution;
+    if (!attempt.resolution.ok) {
+      failures.push(attempt.resolution.reason);
+      continue;
+    }
+    try {
+      if (!managedNodeRootIdentityEqual(before, managedNodeRootIdentity(root, process.platform))) {
+        return { ok: false, reason: "managed Node runtime identity changed during verification" };
+      }
+    } catch {
+      return { ok: false, reason: "managed Node runtime identity changed during verification" };
+    }
+    cached = attempt.resolution;
+    return cached;
+  }
+  cached = { ok: false, reason: failures[0] ?? "managed Node runtime was not bundled" };
+  return cached;
+}
+
+function enqueueAsyncVerification(work: () => Promise<ManagedNodeResolution>): Promise<ManagedNodeResolution> {
+  const result = asyncVerificationTail.then(work, work);
+  asyncVerificationTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+export function resolveManagedNodeRuntimeAsync(
+  options: ResolveManagedNodeRuntimeAsyncOptions = {},
+): Promise<ManagedNodeResolution> {
+  return enqueueAsyncVerification(() => resolveManagedNodeRuntimeAsyncOnce(options));
+}
+
+/** Contract-test seam: production callers cannot choose a trust root. */
+export function validateManagedNodeRuntimeRootAsyncForTests(
+  root: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  options: ResolveManagedNodeRuntimeAsyncOptions = {},
+): Promise<ManagedNodeResolution> {
+  return enqueueAsyncVerification(async () => {
+    if (options.signal?.aborted) return { ok: false, reason: "managed Node runtime verification cancelled" };
+    let before: RuntimeRootIdentity;
+    try {
+      before = managedNodeRootIdentity(root, platform);
+    } catch {
+      return { ok: false, reason: "managed Node manifest is missing or invalid" };
+    }
+    const attempt = await verifyManagedNodeRuntimeRootInChild(root, platform, arch, false, options);
+    if (!attempt.resolution.ok) return attempt.resolution;
+    try {
+      if (!managedNodeRootIdentityEqual(before, managedNodeRootIdentity(root, platform))) {
+        return { ok: false, reason: "managed Node runtime identity changed during verification" };
+      }
+    } catch {
+      return { ok: false, reason: "managed Node runtime identity changed during verification" };
+    }
+    return attempt.resolution;
+  });
+}
+
+export function managedNodeRuntimeVerificationChildCountForTests(): number {
+  return activeAsyncVerificationChildren.size;
+}
+
 export function clearManagedNodeRuntimeCacheForTests(): void {
   cached = null;
+}
+
+if (require.main === module && process.argv[2] === ASYNC_VERIFY_CHILD_ARG) {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: string) => {
+    input += chunk;
+    if (Buffer.byteLength(input, "utf8") > ASYNC_VERIFY_OUTPUT_LIMIT) process.exit(2);
+  });
+  process.stdin.on("end", () => {
+    try {
+      const value = JSON.parse(input) as {
+        root?: unknown;
+        platform?: unknown;
+        arch?: unknown;
+        materializePersistent?: unknown;
+      };
+      if (
+        !value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).sort().join("\0") !== ["arch", "materializePersistent", "platform", "root"].join("\0") ||
+        typeof value.root !== "string" || !path.isAbsolute(value.root) ||
+        typeof value.platform !== "string" || typeof value.arch !== "string" ||
+        typeof value.materializePersistent !== "boolean"
+      ) process.exit(2);
+      const resolution = value.materializePersistent
+        ? resolveManagedNodeRuntimeRoot(value.root, value.platform as NodeJS.Platform, value.arch)
+        : validateManagedNodeRuntimeRoot(value.root, value.platform as NodeJS.Platform, value.arch);
+      const receipt: AsyncVerificationReceipt = { schemaVersion: ASYNC_VERIFY_SCHEMA, resolution };
+      process.stdout.write(JSON.stringify(receipt), () => process.exit(0));
+    } catch {
+      process.exit(2);
+    }
+  });
 }
