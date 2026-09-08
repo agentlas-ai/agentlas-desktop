@@ -49,7 +49,7 @@ export function DashboardProjects() {
       const agentCount = Array.isArray(project.agentPool)
         ? project.agentPool.filter((member) => isUserFacingProjectPoolMember(member, agents)).length
         : 0;
-      return <button type="button" key={project.id} onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}><span data-active={active.length > 0 ? "true" : "false"} /><div><strong>{project.name}</strong><small>{latest ? taskTitleForDisplay(latest.title, ko) : (ko ? "아직 작업 없음" : "No tasks yet")}</small></div><em>{active.length > 0 ? `${active.length}${ko ? "개 진행" : " active"}` : `${agentCount}${ko ? "명" : ` agent${agentCount === 1 ? "" : "s"}`}`}</em></button>;
+      return <button type="button" key={project.id} onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}><span data-active={active.length > 0 ? "true" : "false"} /><div><strong>{project.name}</strong><small>{latest ? taskTitleForDisplay(latest.title, ko) : (ko ? "아직 작업 없음" : "No tasks yet")}</small></div><em>{active.length > 0 ? (ko ? `미완료 ${active.length}개` : `${active.length} unfinished`) : `${agentCount}${ko ? "명" : ` agent${agentCount === 1 ? "" : "s"}`}`}</em></button>;
     })}</div>
     {loadFailed
       ? <p role="alert" className="dashboard-projects-empty">{ko
