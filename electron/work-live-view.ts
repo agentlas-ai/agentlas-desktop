@@ -4,9 +4,9 @@
 // frame-ancestors/X-Frame-Options still run in-app. The loaded page receives no
 // Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
 // the persistent Agentlas native-browser session; app previews remain isolated.
-import { BrowserWindow, WebContentsView } from "electron";
+import { BaseWindow, BrowserWindow, WebContentsView } from "electron";
 import { randomUUID } from "node:crypto";
-import type { WebContents } from "electron";
+import type { WebContents, NativeImage, Rectangle } from "electron";
 import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
 
 type ActiveWorkView = {
@@ -24,6 +24,7 @@ type ActiveWorkView = {
   navigationEpoch: number;
   pendingUrl: string;
   error?: string;
+  captureRestore?: () => void;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
@@ -109,6 +110,7 @@ function registeredGuest(ownerId: number, viewId: unknown, taskScopeId?: string)
 function showOnly(active: ActiveWorkView): void {
   for (const other of activeViews.values()) {
     if (other.ownerId !== active.ownerId || other === active) continue;
+    other.captureRestore?.();
     other.visible = false;
     try { other.view.setVisible(false); } catch {}
   }
@@ -195,6 +197,7 @@ function emit(active: ActiveWorkView, status: Omit<WorkLiveViewStatus, "viewId">
 }
 
 function closeActive(active: ActiveWorkView, notify = true): void {
+  active.captureRestore?.();
   activeViews.delete(key(active.ownerId, active.viewId));
   try {
     if (!active.window.isDestroyed()) active.window.contentView.removeChildView(active.view);
@@ -231,6 +234,7 @@ export function setWorkLiveViewBounds(
   const active = registeredGuest(ownerId, viewId, input.taskScopeId);
   if (!active || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
   try {
+    active.captureRestore?.();
     active.visible = input.visible !== false;
     if (active.visible) showOnly(active);
     active.view.setVisible(active.visible && active.state !== "error");
@@ -245,6 +249,7 @@ export function reloadWorkLiveView(ownerId: number, viewId: string, taskScopeId?
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.view.webContents.isDestroyed()) return { ok: false };
   try {
+    active.captureRestore?.();
     active.navigationEpoch += 1;
     active.pendingUrl = active.view.webContents.getURL();
     if (active.visible) showOnly(active);
@@ -266,6 +271,7 @@ export async function navigateWorkLiveView(
   if (!active || active.view.webContents.isDestroyed()) return { ok: false, reason: "view-unavailable" };
   if (!target || !permittedNavigation(active, target.toString())) return { ok: false, reason: "navigation-not-allowed" };
   try {
+    active.captureRestore?.();
     const epoch = ++active.navigationEpoch;
     active.pendingUrl = target.toString();
     emit(active, { state: "loading", url: target.toString() });
@@ -364,6 +370,7 @@ export async function openWorkLiveView(input: {
   view.webContents.session.setPermissionCheckHandler(() => false);
   view.webContents.on("did-start-navigation", (_event, target, isInPlace, isMainFrame) => {
     if (!isCurrent(active) || !isMainFrame || isInPlace) return;
+    active.captureRestore?.();
     // Programmatic navigation increments before dispatch. Page-originated navigation
     // increments here; redirects update the same pending document below.
     if (active.state !== "loading" || active.pendingUrl !== target) active.navigationEpoch += 1;
@@ -476,16 +483,104 @@ export async function dispatchWorkLiveViewInput(ownerId: number, value: { viewId
   } catch { return { ok: false, reason: "input-failed" }; }
 }
 
+const guestCaptureQueues = new WeakMap<WebContents, Promise<void>>();
+const guestCaptureCounts = new WeakMap<WebContents, number>();
+
+/** Main-only pixels from the exact guest, including when its task panel is hidden. */
+export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string,
+  rect?: Rectangle, signal?: AbortSignal): Promise<NativeImage> {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || active.state !== "ready") throw new Error("native-browser-capture-unavailable");
+  const wc = active.view.webContents;
+  const epoch = active.navigationEpoch;
+  const initialBounds = active.view.getBounds();
+  const initiallyVisible = active.visible;
+  const count = guestCaptureCounts.get(wc) ?? 0;
+  if (count >= 4) throw new Error("native-browser-capture-queue-full");
+  guestCaptureCounts.set(wc, count + 1);
+  const previous = guestCaptureQueues.get(wc) ?? Promise.resolve();
+  let finish!: () => void;
+  const completion = new Promise<void>((resolve) => { finish = resolve; });
+  const queued = previous.catch(() => {}).then(() => completion);
+  guestCaptureQueues.set(wc, queued);
+  await previous.catch(() => {});
+  let host: BaseWindow | undefined;
+  let restored = false;
+  let invalidated = false;
+  let bounds: Rectangle = { x: 0, y: 0, width: 1, height: 1 };
+  const current = () => !invalidated && !signal?.aborted && isCurrent(active) && active.navigationEpoch === epoch && active.state === "ready"
+    && active.visible === initiallyVisible && active.view.getBounds().width === initialBounds.width && active.view.getBounds().height === initialBounds.height;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    invalidated = true;
+    if (active.captureRestore === restore) active.captureRestore = undefined;
+    if (host) {
+      try { host.contentView.removeChildView(active.view); } catch {}
+      if (isCurrent(active)) {
+        try {
+          active.window.contentView.addChildView(active.view);
+          active.view.setBounds(bounds);
+          active.view.setVisible(active.visible && active.state === "ready");
+        } catch {}
+      }
+      try { host.destroy(); } catch {}
+    }
+  };
+  try {
+    if (!current()) throw new Error("native-browser-capture-stale");
+    bounds = active.view.getBounds();
+    active.captureRestore = restore;
+    signal?.addEventListener("abort", restore, { once: true });
+    if (!active.visible) {
+      // A hidden WebContentsView has no capture surface. Rehost this same view
+      // briefly in a never-shown native host; no page or storage is cloned.
+      host = new BaseWindow({ show: false, width: bounds.width, height: bounds.height, focusable: false });
+      active.window.contentView.removeChildView(active.view);
+      host.contentView.addChildView(active.view);
+      active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
+      active.view.setVisible(true);
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const image = await Promise.race([
+          wc.capturePage(rect, { stayHidden: true, stayAwake: true }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("native-browser-capture-timeout")), 2000); }),
+        ]);
+        if (!current()) throw new Error("native-browser-capture-stale");
+        if (image.isEmpty()) throw new Error("native-browser-capture-empty");
+        return image;
+      } catch {
+        if (!current()) throw new Error("native-browser-capture-stale");
+        if (attempt === 1) throw new Error("native-browser-capture-unavailable");
+      } finally { if (timer) clearTimeout(timer); }
+      await new Promise<void>((resolve) => setTimeout(resolve, 16));
+      if (!current()) throw new Error("native-browser-capture-stale");
+    }
+    throw new Error("native-browser-capture-unavailable");
+  } finally {
+    signal?.removeEventListener("abort", restore);
+    restore();
+    finish();
+    const remaining = (guestCaptureCounts.get(wc) ?? 1) - 1;
+    if (remaining) guestCaptureCounts.set(wc, remaining); else guestCaptureCounts.delete(wc);
+    if (guestCaptureQueues.get(wc) === queued) guestCaptureQueues.delete(wc);
+  }
+}
+
 export async function captureWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): Promise<{ ok: boolean; dataUrl?: string; reason?: string }> {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.mode !== "browser" || active.state !== "ready") return { ok: false, reason: "guest-unavailable" };
   const epoch = active.navigationEpoch;
   try {
-    const image = await active.view.webContents.capturePage();
+    const image = await captureNativeBrowserGuest(ownerId, active.taskScopeId!, viewId);
     if (!isCurrent(active) || active.navigationEpoch !== epoch || active.state !== "ready") return { ok: false, reason: "guest-changed" };
     if (image.isEmpty()) return { ok: false, reason: "empty-capture" };
     return { ok: true, dataUrl: image.toDataURL() };
-  } catch { return { ok: false, reason: "capture-failed" }; }
+  } catch {
+    return { ok: false, reason: !isCurrent(active) || active.navigationEpoch !== epoch ? "guest-changed" : "capture-failed" };
+  }
 }
 
 /** Main-only observation adapter for the next tool layer. No renderer raw-CDP IPC. */
@@ -498,10 +593,19 @@ export async function observeWorkLiveViewGuest(ownerId: number, viewId: string,
   if (!["DOM.getDocument", "Accessibility.getFullAXTree", "Page.getLayoutMetrics"].includes(method)) return { ok: false, reason: "command-not-allowed" };
   const epoch = active.navigationEpoch;
   const guest: WebContents = active.view.webContents;
+  let attachedHere = false;
+  const detached = () => { attachedHere = false; };
   try {
-    if (!guest.debugger.isAttached()) guest.debugger.attach("1.3");
+    if (guest.debugger.isAttached()) return { ok: false, reason: "guest-debugger-busy" };
+    guest.debugger.attach("1.3");
+    attachedHere = true;
+    guest.debugger.on("detach", detached);
     const result: unknown = await guest.debugger.sendCommand(method);
     return isCurrent(active) && active.navigationEpoch === epoch && active.state === "ready"
       ? { ok: true, result } : { ok: false, reason: "guest-changed" };
   } catch { return { ok: false, reason: "observation-failed" }; }
+  finally {
+    guest.debugger.removeListener("detach", detached);
+    if (attachedHere) { try { guest.debugger.detach(); } catch {} }
+  }
 }

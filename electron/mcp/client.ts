@@ -1,3 +1,4 @@
+import { createNativeBrowserRelayGrant, type NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
 import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
 import type { ChatHostNotice } from "../../shared/types";
 // 활성 백엔드 → 실제 러너로 라우팅하는 invocation runner.
@@ -1544,6 +1545,8 @@ export async function runMcpInvocation(
   hostNoticePurpose?: ChatHostNotice["purpose"],
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
+  let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
+  try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
   // Keep usage and replay attribution aligned with the runtime that actually
@@ -2997,7 +3000,16 @@ ${effectiveUserPrompt}`;
       // Hub/credential setup may await user or network work. Re-check the
       // selected server bindings before materializing their runtime config.
       assertMcpGoalSelectionCurrent();
+      // Interactive One/Work browser tools and the shared sidebar use the same
+      // Main-registered chat guest. Unattended and Agent App browser profiles
+      // keep their existing independent lifecycle.
+      if (req.chatId && !executionContext && !req.agentAppMode &&
+        (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
+        nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
+          permission: normalizedPermission, signal: signal ?? new AbortController().signal });
+      }
       const cfg = await buildMcpConfigFile({
+        ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant, configKey: `native-browser-${req.runId}` } : {}),
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
         // 그래프가 선으로 이어 선언한 도구는 자동 선택 결과와 **함께** 켠다.
         // 선언은 사용자가 화면에 그려 넣은 것이라, 선택기가 안 골랐다고 빠지면
@@ -3036,6 +3048,7 @@ ${effectiveUserPrompt}`;
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
         mcpRuntimeEnv = cfg.runtimeEnv;
+        if (nativeBrowserGrant && !cfg.nativeBrowserBound) { nativeBrowserGrant.release(); nativeBrowserGrant = undefined; }
         // 관문이 좁힐 이름은 config key에서 나온다(`mcp__<key>__*`). 커널은 catalog id로
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
@@ -3114,6 +3127,10 @@ ${effectiveUserPrompt}`;
     : runnerEnv.env;
   throwIfInvocationAborted(signal, locale);
   if (mcpRuntimeEnv && !req.agentAppMode) Object.assign(runnerEnv.env, mcpRuntimeEnv);
+  if (nativeBrowserGrant && mcpConfigPath) {
+    runnerEnv.env.AGENTLAS_NATIVE_BROWSER_SCOPE = "task";
+    orchestrationRunnerEnv.AGENTLAS_NATIVE_BROWSER_SCOPE = "task";
+  }
   // Runtime detection/routing can take time. Check the capability again at the
   // last shared point before any direct, group, firm, swarm, or borrowed runner
   // can start. A deleted/replaced directory cannot inherit the earlier check.
@@ -6359,5 +6376,8 @@ ${effectiveUserPrompt}`;
     }
     sink({ kind: "error", error: invocationFailure(req, "runner-failed", err) });
     return earlyResult();
+  }
+  } finally {
+    nativeBrowserGrant?.release();
   }
 }

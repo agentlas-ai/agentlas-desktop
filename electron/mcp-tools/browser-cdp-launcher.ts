@@ -2332,6 +2332,42 @@ import path from 'node:path';
 import http from 'node:http';
 
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
+const NATIVE_ENDPOINT = process.env.AGENTLAS_NATIVE_BROWSER_ENDPOINT || '';
+const NATIVE_TOKEN = process.env.AGENTLAS_NATIVE_BROWSER_TOKEN || '';
+let nativeLeaseEndpoint = '';
+function nativeRequest(endpoint, method) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(endpoint); } catch { reject(new Error('native-browser-endpoint-invalid')); return; }
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password || !/^[a-f0-9]{64}$/.test(NATIVE_TOKEN)) {
+      reject(new Error('native-browser-endpoint-invalid')); return;
+    }
+    let settled = false;
+    let response = null;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (error) { response?.destroy(); req.destroy(); reject(new Error(error)); }
+      else resolve(value);
+    };
+    const req = http.request(url, { method, headers: { authorization: 'Bearer ' + NATIVE_TOKEN }, timeout: 2500 }, (res) => {
+      response = res;
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; if (body.length > 1048576) finish('native-browser-response-limit'); });
+      res.on('aborted', () => finish('native-browser-response-aborted'));
+      res.on('error', () => finish('native-browser-response-unavailable'));
+      res.on('end', () => {
+        if (res.statusCode !== 200) { finish('native-browser-grant-unavailable'); return; }
+        try { finish(null, JSON.parse(body)); } catch { finish('native-browser-response-invalid'); }
+      });
+    });
+    const deadline = setTimeout(() => finish('native-browser-request-timeout'), 2500);
+    req.on('error', () => finish('native-browser-transport-unavailable'));
+    req.on('timeout', () => finish('native-browser-request-timeout'));
+    req.end();
+  });
+}
 const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
 const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
 const LEASE_DIR = path.join(CDP_PROFILE, ${JSON.stringify(BROWSER_CDP_LEASE_DIRNAME)});
@@ -2472,6 +2508,7 @@ async function ensureChrome() {
 ${BROWSER_APPROVAL_CLASSIFIER_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
 function readCdpPageUrl() {
+  if (NATIVE_ENDPOINT) return nativeRequest(nativeLeaseEndpoint + '/json/list', 'GET').then(extractCdpPageUrl, () => '');
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port: PORT, path: '/json/list', timeout: 1200 }, (res) => {
       let body = '';
@@ -2541,6 +2578,11 @@ async function main() {
   let browserReadyPromise = null;
   const releaseLeaseOnce = () => {
     closing = true;
+    if (nativeLeaseEndpoint) {
+      const endpoint = nativeLeaseEndpoint;
+      nativeLeaseEndpoint = '';
+      void nativeRequest(endpoint, 'DELETE').catch(() => {});
+    }
     if (!leaseFile) return;
     const currentLease = leaseFile;
     leaseFile = null;
@@ -2552,6 +2594,7 @@ async function main() {
   // Chrome here created about:blank and a browser root every health-check cycle.
   // Acquire a lease and launch the browser only for the first real browser call.
   const ensureBrowserForTool = () => {
+    if (NATIVE_ENDPOINT) return closing ? Promise.reject(new Error('native-browser-client-closed')) : Promise.resolve();
     if (browserReadyPromise) return browserReadyPromise;
     const flight = (async () => {
       const acquiredLease = await acquireLease('mcp');
@@ -2576,15 +2619,20 @@ async function main() {
   };
   // 스크린샷 정본을 os.tmpdir() 기본 출력(리핑됨 + 앱이 서빙 불가) 대신
   // ~/.agentlas/captures/browser 에 남긴다 — 채팅 마크다운 이미지가 렌더되는 경로.
+  if (NATIVE_ENDPOINT) {
+    const lease = await nativeRequest(NATIVE_ENDPOINT + '/session', 'POST');
+    if (!lease || typeof lease.endpoint !== 'string' || !lease.endpoint.startsWith(NATIVE_ENDPOINT + '/session/')) throw new Error('native-browser-lease-invalid');
+    nativeLeaseEndpoint = lease.endpoint;
+  }
   const OUTPUT_DIR = path.join(os.homedir(), '.agentlas', 'captures', 'browser');
   const child = spawn(process.execPath, [
     PLAYWRIGHT_MCP_CLI,
-    '--cdp-endpoint', 'http://127.0.0.1:' + PORT,
+    '--cdp-endpoint', nativeLeaseEndpoint || 'http://127.0.0.1:' + PORT,
     '--output-dir', OUTPUT_DIR,
     '--output-max-size', '268435456',
   ], {
     stdio: ['pipe', 'pipe', 'inherit'],
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(nativeLeaseEndpoint ? { PLAYWRIGHT_MCP_CDP_HEADERS: 'Authorization: Bearer ' + NATIVE_TOKEN } : {}) },
   });
   child.on('error', (e) => {
     releaseLeaseOnce();

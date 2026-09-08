@@ -772,6 +772,15 @@ export type Runner = (
   events: RunnerEvents,
 ) => Promise<RunnerResult>;
 
+/** Display guidance only: this marker never grants tools, credentials or authority. */
+export function withNativeBrowserGuidance(runner: Runner): Runner {
+  return (req, events) => {
+    if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE !== "task" || !req.mcpConfigPath) return runner(req, events);
+    const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared native browser tabs and login session. Use those tools for browser interaction, accessibility snapshots and screenshots shown in the task sidebar. A provider's separate built-in browser is a different session and is not evidence from this shared task browser. Existing approval and cancellation rules still apply. [/Host browser target]";
+    return runner({ ...req, turnContext: [req.turnContext, guidance].filter(Boolean).join("\n\n") }, events);
+  };
+}
+
 /** 에이전트가 사용자에게 옵션 질문을 emit할 수 있는 프로토콜 — renderer/lib/ask-question.ts의 파서와 짝.
  *  로케일 무관, 영어로 — 모델은 항상 영어 docstring을 잘 따른다.
  *  토큰을 아끼기 위해 짧게. */

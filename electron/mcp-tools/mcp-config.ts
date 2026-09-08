@@ -74,11 +74,9 @@ export function agentlasBrowserCdpRuntimeContract(): AgentlasBrowserCdpRuntimeCo
   };
 }
 
-export function shouldApplyAgentlasBrowserCdpOverride(server: InstalledMcpServer): boolean {
-  const override = process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim();
+function isCanonicalAgentlasBrowserLauncher(server: InstalledMcpServer): boolean {
   return Boolean(
-    override
-    && server.catalogId === "agentlas-browser"
+    server.catalogId === "agentlas-browser"
     && server.transport === "stdio"
     && server.command === process.execPath
     && server.envKeys.length === 0
@@ -86,6 +84,10 @@ export function shouldApplyAgentlasBrowserCdpOverride(server: InstalledMcpServer
     && server.args.length === 1
     && expandHome(server.args[0]) === path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME),
   );
+}
+
+export function shouldApplyAgentlasBrowserCdpOverride(server: InstalledMcpServer): boolean {
+  return Boolean(process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim() && isCanonicalAgentlasBrowserLauncher(server));
 }
 
 function expandHome(arg: string): string {
@@ -124,6 +126,8 @@ function pushCodexConfig(args: string[], key: string, prop: string, value: strin
 }
 
 export interface McpConfigResult {
+  /** True only after exact canonical native browser credentials were bound. */
+  nativeBrowserBound?: true;
   configPath: string;
   /** ["mcp__playwright", ...] — write/full 권한에서 --allowedTools 자동 승인용. */
   allowedTools: string[];
@@ -138,6 +142,8 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Main-only, run-scoped native guest grant; token remains in runtime secret aliases. */
+  nativeBrowser?: { endpoint: string; token: string };
   /** Playwright MCP persistent profile key. Used by automations to avoid sharing the interactive browser profile lock. */
   browserProfileKey?: string;
   /** When present, serialize only these selected catalog ids for the current run. */
@@ -258,7 +264,7 @@ const OPERATIONAL_KEYS = [
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
   "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
-  "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT",
+  "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT",
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -589,6 +595,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
   const runtimeEnv: Record<string, string> = {};
+  let nativeBrowserBound = false;
   const includedServerIds: string[] = [];
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let mcpChildWrapper: string | null = null;
@@ -632,7 +639,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
-      const browserRuntime = shouldApplyAgentlasBrowserCdpOverride(s)
+      const browserRuntime = (shouldApplyAgentlasBrowserCdpOverride(s) || (opts?.nativeBrowser && isCanonicalAgentlasBrowserLauncher(s)))
         ? agentlasBrowserCdpRuntimeContract()
         : null;
       let command = resolveStdioCommand(s);
@@ -650,6 +657,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           ? {
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
               ...(browserRuntime?.env ?? {}),
+              ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
               // Agent runs render their shared CDP page inside One's Browser
               // rail. Keep the automation host non-windowed; the explicit
               // Browser login action still uses browserOpenLogin's headful
@@ -677,6 +685,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const alias = mcpRuntimeSecretAlias(key, envKey);
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
+      }
+      if (browserRuntime && s.catalogId === "agentlas-browser" && opts?.nativeBrowser) {
+        const alias = mcpRuntimeSecretAlias(key, "AGENTLAS_NATIVE_BROWSER_TOKEN");
+        secretAliases.AGENTLAS_NATIVE_BROWSER_TOKEN = alias;
+        runtimeEnv[alias] = opts.nativeBrowser.token;
+        nativeBrowserBound = true;
       }
       const aliases = Object.values(secretAliases);
       if (
@@ -865,5 +879,5 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   if (Object.keys(mcpServers).length === 0) return null;
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
-  return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers };
+  return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}) };
 }

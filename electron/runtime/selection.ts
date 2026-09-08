@@ -35,7 +35,7 @@ import { agentActivityKey, registerAgentResidency, touchAgentResidency } from ".
 import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
-import type { Runner, RunnerFailure } from "./runner";
+import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
 import { peekProviderUsedPercent } from "../usage";
 import { listModelRoleMembers } from "../store/model-roles";
 
@@ -208,6 +208,11 @@ export function effortForSelectedModel(
 }
 
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
+  const selected = pickRunnerWithoutHostGuidance(active);
+  return selected ? { ...selected, runner: withNativeBrowserGuidance(selected.runner) } : null;
+}
+
+function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner; label: string } | null {
   if (isRuntimeCredentialUnavailable(active)) {
     return {
       label: `BYOK · ${active.backend}`,
