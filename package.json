@@ -401,7 +401,7 @@
     "@vitejs/plugin-react": "6.0.1",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
-    "electron": "^43.1.0",
+    "electron": "^43.4.1",
     "electron-builder": "^26.15.6",
     "flint-chart": "0.5.1",
     "indigo-ketcher": "^1.45.1",
