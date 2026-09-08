@@ -4,7 +4,7 @@
 // frame-ancestors/X-Frame-Options still run in-app. The loaded page receives no
 // Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
 // the persistent Agentlas native-browser session; app previews remain isolated.
-import { BaseWindow, BrowserWindow, WebContentsView } from "electron";
+import { BaseWindow, BrowserWindow, WebContentsView, nativeImage } from "electron";
 import { randomUUID } from "node:crypto";
 import type { WebContents, NativeImage, Rectangle } from "electron";
 import type { WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
@@ -94,6 +94,15 @@ export function nativeBrowserGuest(ownerId: number, taskScopeId: string, viewId:
   return active?.mode === "browser" ? active.view.webContents : null;
 }
 
+
+/** Main-owned viewport includes native scrollbars, unlike CDP visualViewport. */
+export function nativeBrowserGuestViewport(ownerId: number, taskScopeId: string, viewId: string): { width: number; height: number } | null {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (active?.mode !== "browser") return null;
+  const bounds = active.view.getBounds();
+  const zoom = active.view.webContents.getZoomFactor();
+  return { width: bounds.width / zoom, height: bounds.height / zoom };
+}
 
 function isCurrent(active: ActiveWorkView): boolean {
   return activeViews.get(key(active.ownerId, active.viewId)) === active
@@ -485,13 +494,29 @@ export async function dispatchWorkLiveViewInput(ownerId: number, value: { viewId
 
 const guestCaptureQueues = new WeakMap<WebContents, Promise<void>>();
 const guestCaptureCounts = new WeakMap<WebContents, number>();
+const pendingDocumentCaptures = new WeakSet<WebContents>();
+
+/** Main-only document capture; no renderer request can supply debugger authority. */
+export type NativeBrowserDocumentCapture = {
+  kind: "document";
+  clip: Rectangle;
+  isAuthorized: () => boolean;
+};
+const MAX_CAPTURE_DIMENSION = 32_768;
+const MAX_CAPTURE_PIXELS = 32_000_000;
 
 /** Main-only pixels from the exact guest, including when its task panel is hidden. */
 export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string,
-  rect?: Rectangle, signal?: AbortSignal): Promise<NativeImage> {
+  rect?: Rectangle, signal?: AbortSignal, document?: NativeBrowserDocumentCapture): Promise<NativeImage> {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.mode !== "browser" || active.state !== "ready") throw new Error("native-browser-capture-unavailable");
   const wc = active.view.webContents;
+  if (pendingDocumentCaptures.has(wc)) throw new Error("native-browser-capture-busy");
+  if (document && (document.kind !== "document" || typeof document.isAuthorized !== "function"
+    || !Object.values(document.clip).every((value) => typeof value === "number" && Number.isFinite(value))
+    || document.clip.x < 0 || document.clip.y < 0 || document.clip.width < 1 || document.clip.height < 1
+    || document.clip.width > MAX_CAPTURE_DIMENSION || document.clip.height > MAX_CAPTURE_DIMENSION
+    || document.clip.width * document.clip.height > MAX_CAPTURE_PIXELS)) throw new Error("native-browser-capture-budget-exceeded");
   const epoch = active.navigationEpoch;
   const initialBounds = active.view.getBounds();
   const initiallyVisible = active.visible;
@@ -508,7 +533,7 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
   let restored = false;
   let invalidated = false;
   let bounds: Rectangle = { x: 0, y: 0, width: 1, height: 1 };
-  const current = () => !invalidated && !signal?.aborted && isCurrent(active) && active.navigationEpoch === epoch && active.state === "ready"
+  const current = () => !invalidated && !signal?.aborted && (!document || document.isAuthorized()) && isCurrent(active) && active.navigationEpoch === epoch && active.state === "ready"
     && active.visible === initiallyVisible && active.view.getBounds().width === initialBounds.width && active.view.getBounds().height === initialBounds.height;
   const restore = () => {
     if (restored) return;
@@ -529,6 +554,7 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
   };
   try {
     if (!current()) throw new Error("native-browser-capture-stale");
+    if (pendingDocumentCaptures.has(wc)) throw new Error("native-browser-capture-busy");
     bounds = active.view.getBounds();
     active.captureRestore = restore;
     signal?.addEventListener("abort", restore, { once: true });
@@ -541,6 +567,9 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
       active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
       active.view.setVisible(true);
     }
+    // Prime the compositor with the unchanged visible viewport before CDP asks
+    // for offscreen pixels. Resizing or scrolling here would alter the page.
+    let primed: NativeImage | undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -550,7 +579,9 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
         ]);
         if (!current()) throw new Error("native-browser-capture-stale");
         if (image.isEmpty()) throw new Error("native-browser-capture-empty");
-        return image;
+        if (!document) return image;
+        primed = image;
+        break;
       } catch {
         if (!current()) throw new Error("native-browser-capture-stale");
         if (attempt === 1) throw new Error("native-browser-capture-unavailable");
@@ -558,7 +589,49 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
       await new Promise<void>((resolve) => setTimeout(resolve, 16));
       if (!current()) throw new Error("native-browser-capture-stale");
     }
-    throw new Error("native-browser-capture-unavailable");
+    if (!document || !primed) throw new Error("native-browser-capture-unavailable");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const capture = async () => {
+        if (!current()) throw new Error("native-browser-capture-stale");
+        const ratio = await wc.debugger.sendCommand("Runtime.evaluate", {
+          expression: "window.devicePixelRatio", returnByValue: true,
+        });
+        if (!current()) throw new Error("native-browser-capture-stale");
+        const dpr: unknown = ratio?.result?.value;
+        if (typeof dpr !== "number" || !Number.isFinite(dpr) || dpr <= 0 || dpr > 8
+          || Math.ceil(document.clip.width * dpr) > MAX_CAPTURE_DIMENSION
+          || Math.ceil(document.clip.height * dpr) > MAX_CAPTURE_DIMENSION
+          || Math.ceil(document.clip.width * dpr) * Math.ceil(document.clip.height * dpr) > MAX_CAPTURE_PIXELS) {
+          throw new Error("native-browser-capture-budget-exceeded");
+        }
+        const result = await wc.debugger.sendCommand("Page.captureScreenshot", {
+          format: "png", fromSurface: true, captureBeyondViewport: true,
+          clip: { ...document.clip, scale: 1 },
+        });
+        if (!current()) throw new Error("native-browser-capture-stale");
+        if (typeof result?.data !== "string" || result.data.length > MAX_CAPTURE_PIXELS * 6) throw new Error("native-browser-capture-budget-exceeded");
+        // Inspect the fixed PNG header before native decoding allocates pixels.
+        const header = Buffer.from(result.data.slice(0, 44), "base64");
+        if (header.length < 24 || header.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") throw new Error("native-browser-capture-empty");
+        const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
+        if (!width || !height || width > MAX_CAPTURE_DIMENSION || height > MAX_CAPTURE_DIMENSION
+          || width * height > MAX_CAPTURE_PIXELS) throw new Error("native-browser-capture-budget-exceeded");
+        const image = nativeImage.createFromBuffer(Buffer.from(result.data, "base64"));
+        if (image.isEmpty()) throw new Error("native-browser-capture-empty");
+        const size = image.getSize();
+        if (size.width > MAX_CAPTURE_DIMENSION || size.height > MAX_CAPTURE_DIMENSION
+          || size.width * size.height > MAX_CAPTURE_PIXELS) throw new Error("native-browser-capture-budget-exceeded");
+        return image;
+      };
+      // CDP cannot cancel an already submitted capture. A timeout restores the
+      // host immediately, but blocks another capture until that command settles.
+      pendingDocumentCaptures.add(wc);
+      const flight = capture().finally(() => pendingDocumentCaptures.delete(wc));
+      return await Promise.race([flight, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("native-browser-capture-timeout")), 2000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
   } finally {
     signal?.removeEventListener("abort", restore);
     restore();

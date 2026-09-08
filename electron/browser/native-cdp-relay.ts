@@ -19,7 +19,7 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
 import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
-  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest } from "../work-live-view";
+  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport } from "../work-live-view";
 
 type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal };
 type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; detach: () => void };
@@ -210,22 +210,30 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     }
     lease.current = guest.targetId;
     if (method === "Page.captureScreenshot" && sessionId === guest.sessionId) {
-      // Electron's capturePage owns the hidden guest capturer lifecycle. Raw
-      // CDP screenshots can wait forever on an unattached WebContentsView.
+      // Both viewport and document pixels use the same guarded hidden-host
+      // lifecycle; raw CDP on an unattached guest can wait indefinitely.
       if (params.format !== undefined && params.format !== "png" && params.format !== "jpeg") throw new Error("native-browser-screenshot-format-unsupported");
       const url = guest.wc.getURL();
       const metrics = await guest.wc.debugger.sendCommand("Page.getLayoutMetrics");
       const viewport = metrics.cssVisualViewport ?? metrics.visualViewport;
+      const viewportSize = nativeBrowserGuestViewport(owner.ownerId, input.chatId, guest.viewId);
+      if (!viewportSize) throw new Error("native-browser-screenshot-stale");
       const clip = params.clip as { x?: unknown; y?: unknown; width?: unknown; height?: unknown; scale?: unknown } | undefined;
       let rect: { x: number; y: number; width: number; height: number } | undefined;
+      let documentClip: { x: number; y: number; width: number; height: number } | undefined;
       if (clip) {
         const values = [clip.x, clip.y, clip.width, clip.height];
         if (!values.every((value) => typeof value === "number" && Number.isFinite(value)) || (clip.scale !== undefined && clip.scale !== 1)) throw new Error("native-browser-screenshot-clip-invalid");
         rect = { x: Math.round(Number(clip.x) - viewport.pageX), y: Math.round(Number(clip.y) - viewport.pageY), width: Math.round(Number(clip.width)), height: Math.round(Number(clip.height)) };
-        // Never label viewport pixels as a full document or an unrelated crop.
-        if (rect.x < 0 || rect.y < 0 || rect.width < 1 || rect.height < 1 || rect.x + rect.width > Math.ceil(viewport.clientWidth) || rect.y + rect.height > Math.ceil(viewport.clientHeight)) throw new Error("native-browser-screenshot-beyond-viewport-unsupported");
+        if (Number(clip.x) < 0 || Number(clip.y) < 0 || rect.width < 1 || rect.height < 1) throw new Error("native-browser-screenshot-clip-invalid");
+        if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > Math.ceil(viewportSize.width) || rect.y + rect.height > Math.ceil(viewportSize.height)) {
+          if (params.captureBeyondViewport === false) throw new Error("native-browser-screenshot-beyond-viewport-unsupported");
+          documentClip = { x: Number(clip.x), y: Number(clip.y), width: Number(clip.width), height: Number(clip.height) };
+        }
       }
-      const image = await captureNativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId, rect, input.signal);
+      const image = await captureNativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId, documentClip ? undefined : rect, input.signal,
+        documentClip ? { kind: "document", clip: documentClip, isAuthorized: () => current() && leases.get(lease.id) === lease
+          && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc } : undefined);
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc
         || guest.wc.getURL() !== url || image.isEmpty()) throw new Error("native-browser-screenshot-stale");
       return { data: (params.format === "jpeg" ? image.toJPEG(typeof params.quality === "number" ? Math.max(0, Math.min(100, Math.round(params.quality))) : 80) : image.toPNG()).toString("base64") };
