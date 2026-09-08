@@ -433,7 +433,7 @@ export function buildOneWorkPresentation(
           startedAt: item.observedAt,
           ...cellAttribution(item),
           name: [item.agentName?.trim() || (locale === "ko" ? "에이전트" : "Agent"), item.model].filter(Boolean).join(" · "),
-          ...(item.role?.trim() ? { role: item.role.trim() } : {}),
+          ...(item.role?.trim() && item.role.trim() !== item.agentName?.trim() ? { role: item.role.trim() } : {}),
           ...(item.phase ? { phase: item.phase } : {}),
           terminalObserved: item.agentTerminalObserved === true,
         });
@@ -584,6 +584,13 @@ export function cellVerb(cell: OneWorkCell, locale: "ko" | "en"): string {
     case "call":
       return running ? (ko ? "호출하는 중" : "Calling") : (ko ? "호출함" : "Called");
     case "agent":
+      // A whole-run final closes pending display rows too. Only the worker's
+      // own typed terminal receipt can say that this agent finished.
+      if (!running && !cell.terminalObserved) {
+        if (cell.phase === "plan") return ko ? "계획 기록" : "Planning activity";
+        if (cell.phase === "synthesize") return ko ? "종합 기록" : "Synthesis activity";
+        return ko ? "작업자 실행 기록" : "Worker activity";
+      }
       if (cell.status === "failed") return ko ? "단계 실패" : "Step failed";
       if (cell.status === "cancelled") return ko ? "단계 취소" : "Step cancelled";
       if (cell.phase === "plan") return running ? (ko ? "계획 중" : "Planning") : (ko ? "계획 완료" : "Planned");

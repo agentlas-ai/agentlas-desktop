@@ -24,7 +24,12 @@ export function oneWorkerPanelFeed(selection: OneWorkerPanelSelection, run: OneW
   const entries = new Map<string, OneWorkerFeedEntry>();
   for (const item of run.state.items) {
     if (item.agentId !== selection.agentId) continue;
-    entries.set(`activity:${item.id}`, { kind: "activity", id: `activity:${item.id}`, at: item.observedAt, item });
+    // The reducer merges lifecycle updates into the original start row. Put
+    // a proven worker terminal capsule at its actual update time, not before
+    // the tools that ran between start and completion.
+    const at = item.kind === "agent" && item.agentTerminalObserved
+      ? item.completedAt ?? item.updatedAt ?? item.observedAt : item.observedAt;
+    entries.set(`activity:${item.id}`, { kind: "activity", id: `activity:${item.id}`, at, item });
   }
   for (const edge of run.state.handoffs) {
     for (const message of edge.messages) {

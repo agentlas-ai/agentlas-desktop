@@ -677,6 +677,9 @@ export function reduceOneActivity(
       ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : {}),
       detail: event.notice.details,
       noticeLevel: event.notice.level,
+      ...(event.role?.trim() ? { role: event.role.trim() } : {}),
+      ...(event.phase ? { phase: event.phase } : {}),
+      ...(event.model || event.runtimeSelection?.model ? { model: event.model || event.runtimeSelection?.model } : {}),
       ...(event.notice.display ? { noticeDisplay: event.notice.display } : {}),
       ...(event.notice.i18n?.ko?.trim() && event.notice.i18n?.en?.trim()
         ? { noticeI18n: { ko: event.notice.i18n.ko.trim(), en: event.notice.i18n.en.trim() } }
@@ -1150,7 +1153,14 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
             ...(ledgerString(payload, "noticeDetails") ? { details: ledgerString(payload, "noticeDetails") } : {}),
             ...(display === "row" || display === "divider" ? { display } : {}),
           },
-          ...(row.agentId ? { agentId: row.agentId } : {}),
+          ...(ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId
+            ? { agentId: ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId! } : {}),
+          ...(ledgerString(payload, "agentName") ? { agentName: ledgerString(payload, "agentName") } : {}),
+          ...(ledgerString(payload, "role") ? { role: ledgerString(payload, "role") } : {}),
+          ...(["plan", "delegate", "synthesize"].includes(ledgerString(payload, "phase") ?? "")
+            ? { phase: ledgerString(payload, "phase") as "plan" | "delegate" | "synthesize" } : {}),
+          ...(ledgerString(payload, "runtimeModel") || ledgerString(payload, "model")
+            ? { model: ledgerString(payload, "runtimeModel") || ledgerString(payload, "model") } : {}),
         }, row.ts);
       }
       continue;
