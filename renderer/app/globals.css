@@ -11369,16 +11369,13 @@ button[data-toggle-state="on"] {
   align-items: flex-start;
   gap: 8px;
   min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 9px;
-  background: var(--paper-2);
+  padding: 4px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   font-size: 12.5px;
   line-height: 1.55;
 }
-.agentlas-chat-notice-error { border-color: rgba(176, 67, 58, 0.32); }
-.agentlas-chat-notice-warning { border-color: rgba(154, 103, 0, 0.3); }
-.agentlas-chat-notice-success { border-color: rgba(47, 125, 79, 0.28); }
 .agentlas-chat-notice-icon {
   flex-shrink: 0;
   width: 14px;
@@ -11404,10 +11401,10 @@ button[data-toggle-state="on"] {
 }
 .agentlas-chat-notice-details {
   margin: 2px 0 0;
-  padding: 8px 10px;
-  border-radius: 7px;
-  background: var(--paper);
-  border: 1px solid var(--paper-edge);
+  padding: 4px 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
   color: var(--ink-soft);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;

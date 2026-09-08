@@ -898,27 +898,21 @@ const Bubble = memo(function Bubble({
   // hook-order crash exactly at that transition.
   const workspaceRootForRun = useContext(WorkspaceRootContext);
   const workActivity = useMemo(() => workActivityStateFromMessage(message), [message]);
-  /*
-   * Which engine ran is host status, not conversation content.
-   *
-   * Every notice already becomes a row inside the work block, which collapses when the turn ends.
-   * Rendering the same rows again as standalone cards meant "This run is connected to ..." stayed
-   * pinned under the answer forever, once per turn, pushing the thing the person actually asked for
-   * up and out of the way. Warnings and errors still get a card, because those are things to act on.
-   */
-  const persistentNotices = useMemo(
-    () => (message.notices ?? []).filter((notice) => {
-      if (notice.level === "error" || notice.level === "warning") return true;
-      return notice.code !== "runtime-selected" && notice.code !== "runtime-fallback";
-    }),
-    [message.notices],
-  );
   const workActivities = useMemo(
     () => message.activityRuns?.length
       ? message.activityRuns.map((run) => ({ runId: run.runId, state: run.state }))
       : [{ runId: message.runId ?? message.id, state: workActivity }],
     [message.activityRuns, message.id, message.runId, workActivity],
   );
+  // Activity notices belong under the work heading. Keep a separate plain
+  // row only for an actionable sign-in, a context boundary, or a notice that
+  // is absent from the canonical activity projection.
+  const persistentNotices = (message.notices ?? []).filter((notice) =>
+    notice.code === "runtime-signed-out" || notice.display === "divider"
+    || (!message.busy && (notice.level === "warning" || notice.level === "error"))
+    || !workActivities.some(({ state }) => state.items.some((item) =>
+      item.kind === "notice" && item.message === notice.message
+      && (item.detail ?? "") === (notice.details ?? ""))));
   if (message.role === "user") {
     // 질문 시트 배치 답장(스캐폴드 "질문:/선택:/답변:")은 어시스턴트 턴의 인용 카드가
     // 이미 질문+답을 보여준다 — 영상처럼 원문 버블은 숨긴다(첨부 이미지가 있으면 유지).
@@ -1047,6 +1041,13 @@ const Bubble = memo(function Bubble({
               ? (group) => onInspectWorker(runId, group) : undefined}
           />
         ))}
+        {persistentNotices.length > 0 && (
+          <div className="agentlas-chat-notices">
+            {persistentNotices.map((notice) => (
+              <ChatNoticeRow key={notice.id} notice={notice} />
+            ))}
+          </div>
+        )}
         {showWorkActivity && displayText && message.busy && (
           <LiveOutputPanel
             text={displayText}
@@ -1120,13 +1121,6 @@ const Bubble = memo(function Bubble({
                   onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
                 />
               ))}
-          </div>
-        )}
-        {persistentNotices.length > 0 && (
-          <div className="agentlas-chat-notices">
-            {persistentNotices.map((notice) => (
-              <ChatNoticeRow key={notice.id} notice={notice} />
-            ))}
           </div>
         )}
         {message.needsMultimodalSetup && !message.busy && (
