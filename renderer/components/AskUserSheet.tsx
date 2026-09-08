@@ -84,9 +84,8 @@ export function AskUserSheet() {
     };
   }, [req]);
 
-  if (!req) return null;
-
   const answer = async (value: string | null) => {
+    if (!req) return;
     const requestId = req.requestId;
     if (!liveRequestsRef.current.has(requestId) || attemptsRef.current.has(requestId)) return;
     const attempt = Symbol(requestId);
@@ -119,7 +118,7 @@ export function AskUserSheet() {
   };
 
   const dismiss = () => {
-
+    if (!req) return;
     // Closing stays available even while an acknowledgement is in flight.
     // Never send a competing decline for an already-submitted answer.
     if (!attemptsRef.current.has(req.requestId)) void answer(null);
@@ -136,6 +135,7 @@ export function AskUserSheet() {
    *   모달은 어디서나 같은 방법으로 닫혀야 한다.
    */
   useEffect(() => {
+    if (!req) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
       event.stopPropagation();
@@ -143,7 +143,8 @@ export function AskUserSheet() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [dismiss]);
+  }, [dismiss, req]);
+  if (!req) return null;
   const currentSubmission = submission?.requestId === req.requestId ? submission : null;
   const updateDraft = (value: string) => {
     setDraftValue(value);
