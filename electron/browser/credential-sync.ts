@@ -14,6 +14,7 @@ import {
 } from "../../shared/browser-credentials";
 import { getMeta, setMeta } from "../store/meta";
 import { importBrowserCredentials, listDiscoverableProfiles, scanBrowserCredentials } from "./credential-import";
+import { registrableDomain } from "../../shared/registrable-domain";
 
 /** 자동 갱신 주기. 쿠키 만료보다 짧게, 그러나 매 실행마다 파일을 뒤지지 않을 만큼 길게. */
 const REFRESH_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
@@ -31,12 +32,31 @@ export function getBrowserCredentialConsent(): BrowserCredentialConsent {
   if (!raw) return { ...EMPTY_CONSENT };
   try {
     const parsed = JSON.parse(raw) as Partial<BrowserCredentialConsent>;
+    const canonicalDate = (value: unknown): value is string => typeof value === "string"
+      && Number.isFinite(Date.parse(value))
+      && new Date(value).toISOString() === value;
+    const canonicalProfile = typeof parsed.profileId === "string"
+      && /^(Google Chrome|Microsoft Edge|Brave|Chromium)::(Default|Profile [0-9]+)$/u.test(parsed.profileId);
+    const canonicalDomains = Array.isArray(parsed.domains)
+      && parsed.domains.length > 0
+      && parsed.domains.length <= 256
+      && new Set(parsed.domains).size === parsed.domains.length
+      && parsed.domains.every((domain) => typeof domain === "string"
+        && domain.length <= 253
+        && registrableDomain(domain) === domain);
+    if (parsed.granted !== true
+      || !canonicalDate(parsed.grantedAt)
+      || (parsed.lastSyncedAt !== null && !canonicalDate(parsed.lastSyncedAt))
+      || !canonicalProfile
+      || !canonicalDomains) {
+      return { ...EMPTY_CONSENT };
+    }
     return {
-      granted: Boolean(parsed.granted),
-      grantedAt: typeof parsed.grantedAt === "string" ? parsed.grantedAt : null,
-      domains: Array.isArray(parsed.domains) ? parsed.domains.filter((d) => typeof d === "string") : [],
-      lastSyncedAt: typeof parsed.lastSyncedAt === "string" ? parsed.lastSyncedAt : null,
-      profileId: typeof parsed.profileId === "string" ? parsed.profileId : null,
+      granted: true,
+      grantedAt: parsed.grantedAt,
+      domains: [...parsed.domains!],
+      lastSyncedAt: parsed.lastSyncedAt ?? null,
+      profileId: parsed.profileId!,
     };
   } catch {
     // 깨진 기록을 "승인됨"으로 읽는 쪽이 훨씬 나쁘다 — 승인 없음으로 떨어뜨린다.
