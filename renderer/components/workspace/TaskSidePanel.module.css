@@ -234,7 +234,7 @@
      outside handle was clipped by the rail's overflow and left only a few
      unreliable pixels for the pointer. */
   left: 0;
-  width: 24px;
+  width: 12px;
   padding: 0;
   border: 0;
   cursor: col-resize;
@@ -1195,6 +1195,9 @@ button.artifactVisual { cursor: pointer; }
    비용만 내고 얻는 게 없다. */
 .artifactRail[data-resizing="true"] {
   will-change: width;
+  transition: none;
+  animation: none;
+  --one-motion-panel: 0ms;
 }
 
 /* 손잡이는 다가가면 배어 나온다 — 항상 떠 있지 않다(레퍼런스 f14 엔 없고
@@ -1242,6 +1245,9 @@ button.artifactVisual { cursor: pointer; }
 .artifactRail {
   border: 0;
   border-left: 1px solid var(--paper-3);
+  /* Keep native guest surfaces and tab buttons outside the resize hit target. */
+  padding-left: 12px;
+  box-sizing: border-box;
   border-radius: 0;
   box-shadow: none;
 }

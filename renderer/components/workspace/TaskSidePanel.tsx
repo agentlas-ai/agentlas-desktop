@@ -1152,6 +1152,16 @@ function TaskSidePanelContent({
    */
   useEffect(() => {
     if (!onResize) return;
+    let resizeFrame = 0;
+    let pendingWidth: number | null = null;
+    let pendingDrag: typeof resizeRef.current = null;
+    const flushWidth = () => {
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+      if (pendingWidth !== null && pendingDrag === resizeRef.current) onResize(pendingWidth);
+      pendingWidth = null;
+      pendingDrag = null;
+    };
     const move = (event: PointerEvent) => {
       const drag = resizeRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
@@ -1164,13 +1174,22 @@ function TaskSidePanelContent({
       // Once the grip reaches the minimum, keep tracking the pointer beyond the
       // panel. Releasing near the window edge collapses instead of leaving an
       // awkward sliver that cannot be resized reliably.
-      onResize(ready ? minWidth : Math.min(maxWidth, Math.max(minWidth, Math.round(rawWidth))));
+      pendingWidth = ready ? minWidth : Math.min(maxWidth, Math.max(minWidth, Math.round(rawWidth)));
+      pendingDrag = drag;
+      if (!resizeFrame) resizeFrame = requestAnimationFrame(flushWidth);
       event.preventDefault();
     };
     const finish = (event: PointerEvent) => {
       const drag = resizeRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
       const shouldCollapse = event.type === "pointerup" && drag.rawWidth <= collapseThreshold;
+      if (event.type === "pointerup" && !shouldCollapse) flushWidth();
+      else {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = 0;
+        pendingWidth = null;
+        pendingDrag = null;
+      }
       resizeRef.current = null;
       setResizing(false);
       setCollapseReady(false);
@@ -1186,6 +1205,7 @@ function TaskSidePanelContent({
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
     return () => {
+      cancelAnimationFrame(resizeFrame);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
@@ -1294,8 +1314,13 @@ function TaskSidePanelContent({
       {onResize && (
         // Drag the left edge to resize (owner request 2026-08-16). Keyboard:
         // ←/→ move 16px, Home widens, End collapses, double-click resets.
-        <button
-          type="button"
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-orientation="vertical"
+          aria-valuemin={minWidth}
+          aria-valuemax={maxWidth}
+          aria-valuenow={Math.round(width ?? defaultWidth)}
           className={styles.artifactResizeHandle}
           aria-label={locale === "ko" ? "출력 패널 너비 조절" : "Resize output panel"}
           title={locale === "ko" ? "드래그하거나 화살표 키로 너비 조절" : "Drag or use arrow keys to resize"}
@@ -1305,11 +1330,17 @@ function TaskSidePanelContent({
             event.currentTarget.focus({ preventScroll: true });
             const startWidth = width ?? defaultWidth;
             resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, rawWidth: startWidth };
+            try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Window tracking remains available. */ }
             setResizing(true);
             setCollapseReady(false);
             event.preventDefault();
+            event.stopPropagation();
           }}
-          onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
+          onLostPointerCapture={() => {
+            resizeRef.current = null;
+            setResizing(false);
+            setCollapseReady(false);
+          }}
           onDoubleClick={() => onResize(defaultWidth)}
           onKeyDown={(event) => {
             const current = width ?? defaultWidth;

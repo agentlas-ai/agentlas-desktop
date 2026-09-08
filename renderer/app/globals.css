@@ -710,6 +710,11 @@ a:hover {
 }
 
 /* 누를 수 있으면 손가락 커서가 뜬다 — 이것도 화면마다 빠져 있었다. */
+html[data-one-output-resizing="true"] * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 :where(button, [role="button"], [role="tab"], [role="menuitem"], [role="option"], summary):not(:disabled):not([aria-disabled="true"]) {
   cursor: pointer;
 }
