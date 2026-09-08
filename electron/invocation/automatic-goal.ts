@@ -86,6 +86,14 @@ export async function prepareInvocationAutomaticGoal(input: {
           + `within its granted permission (${input.permission}). Both the folder and the permission are in the run receipt; `
           + "if the evidence shows no out-of-folder writes, this criterion is met." },
         { id: "evidence", text: "Completion is supported by current evidence on the requested output surface; unverified work remains open." },
+        { id: "delivery-validation", text: "Validate the delivered result in the way its user will use it. "
+          + "For an application or interactive UI implementation/change, launch the actual application, inspect its rendered screens, "
+          + "and exercise its core user flows in a browser, simulator, or native runtime. Keep observable tool results or captures "
+          + "of the launch, rendered state, interactions, and outcomes. Source files, successful builds, static analysis, "
+          + "unit/widget tests, and the assistant's report alone do not prove this criterion. Fix observed failures and repeat "
+          + "the affected flows. For non-interactive deliverables, inspect the actual delivered output in its target format instead. "
+          + "An unavailable runtime or missing required access is an unmet prerequisite, not successful validation. "
+          + "Do not publish, spend money, or expand permissions to satisfy this criterion without existing authorization." },
       ],
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,
