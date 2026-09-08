@@ -858,18 +858,27 @@ function TaskSidePanelContent({
   }, [selectRailView]);
   const nativeBrowserObservedRef = useRef(onBrowserObserved);
   nativeBrowserObservedRef.current = onBrowserObserved;
-  const presentedNativeTarget = useRef<string | null>(null);
+  const [presentedBrowser, setPresentedBrowser] = useState<{ viewId: string; id: string }>();
   useEffect(() => {
     if (!screenChatId) return;
-    return ipc()?.workLiveView?.onStatus((status) => {
-      if (status.taskScopeId !== screenChatId || !status.url || status.url === "about:blank"
-        || (status.state !== "loading" && status.state !== "ready")) return;
-      const target = JSON.stringify([status.viewId, status.url]);
-      if (presentedNativeTarget.current === target) return;
-      presentedNativeTarget.current = target;
-      openRailTab("browser");
-      nativeBrowserObservedRef.current?.(status.url);
+    let disposed = false;
+    let latestPresentation: string | null = null;
+    const api = ipc();
+    const off = api?.workLiveView?.onStatus((status) => {
+      const presentation = status.presentation;
+      if (status.taskScopeId !== screenChatId || !presentation?.id || !presentation.runId
+        || !status.url || status.state === "closed" || latestPresentation === presentation.id) return;
+      latestPresentation = presentation.id;
+      // Main's live invocation is authoritative, including nested worker actions.
+      // Never reopen another run's historical tab or a completed/cancelled run.
+      void api.invoke.attach(screenChatId, { includeEvents: false }).then((attached) => {
+        if (disposed || latestPresentation !== presentation.id || attached?.runId !== presentation.runId || !status.url) return;
+        setPresentedBrowser({ viewId: status.viewId, id: presentation.id });
+        openRailTab("browser");
+        nativeBrowserObservedRef.current?.(status.url);
+      }).catch(() => undefined);
     });
+    return () => { disposed = true; off?.(); };
   }, [screenChatId, openRailTab]);
   const closeRailTab = useCallback((view: OutputRailView) => {
     setOpenTabs((tabs) => {
@@ -1510,7 +1519,7 @@ function TaskSidePanelContent({
         )}
         {openTabs.includes("browser") && <div className={styles.browserPane} hidden={railView !== "browser"}>
           {screenChatId ? <TaskBrowser key={screenChatId} active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} taskScopeId={screenChatId}
-            headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
+            presentation={presentedBrowser} headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
             : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
         </div>}
         {railView === "app" && appPreview && appViewId && (

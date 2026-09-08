@@ -3825,6 +3825,8 @@ export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
 }
 
 export interface WorkLiveViewStatus {
+  /** Main-issued foreground AI action; navigation status alone is not presentation authority. */
+  presentation?: { id: string; runId: string };
   /** Cookie transfer receipt for this URL only; unrelated sites remain in Main. */
   nativeSession?: NativeBrowserCookieImportResult;
   viewId: string;
@@ -8089,7 +8091,7 @@ export interface AgentlasIpc {
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */
     activeChats: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트 + 시작 시각. 없으면 null. */
-    attach: (chatId: string) => Promise<{
+    attach: (chatId: string, options?: { includeEvents?: boolean }) => Promise<{
       runId: string;
       events: McpInvocationEvent[];
       startedAt?: string;

@@ -1023,7 +1023,7 @@ const api: AgentlasIpc = {
     clearHistory: (chatId: string) =>
       ipcRenderer.invoke("invoke:clearHistory", chatId),
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
-    attach: (chatId: string) => ipcRenderer.invoke("invoke:attach", chatId),
+    attach: (chatId: string, options?: { includeEvents?: boolean }) => ipcRenderer.invoke("invoke:attach", chatId, options),
     receipt: (runId: string) => ipcRenderer.invoke("invoke:receipt", runId),
     workerReport: (scope) => ipcRenderer.invoke("invoke:workerReport", scope),
     latestReceipt: (chatId: string) => ipcRenderer.invoke("invoke:latestReceipt", chatId),

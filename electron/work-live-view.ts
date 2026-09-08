@@ -245,6 +245,14 @@ function closeActive(active: ActiveWorkView, notify = true): void {
   if (notify) emit(active, { state: "closed" });
 }
 
+/** Presentation does not mutate guest ownership, input, or background visibility. */
+export function presentNativeBrowserGuest(ownerId: number, taskScopeId: string, runId: string, viewId: string): void {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || !runId) return;
+  emit(active, { state: active.state, url: active.view.webContents.getURL() || "about:blank",
+    presentation: { id: randomUUID(), runId } });
+}
+
 export function closeWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active && activeViews.has(key(ownerId, viewId))) return { ok: false };

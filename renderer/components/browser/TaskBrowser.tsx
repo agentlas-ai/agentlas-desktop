@@ -21,9 +21,9 @@ function navigationUrl(input: string): string | null {
 }
 
 /** Main owns the tabs. One, Work and their tools attach to the same scoped guests. */
-export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0 }: {
+export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0, presentation }: {
   taskScopeId: string; preferredUrl?: string; locale: "ko" | "en"; active?: boolean;
-  headerHost?: HTMLElement | null; onActivate?: () => void; newTabRequest?: number;
+  headerHost?: HTMLElement | null; onActivate?: () => void; newTabRequest?: number; presentation?: { viewId: string; id: string };
 }) {
   const ko = locale === "ko";
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
@@ -49,6 +49,13 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const observedUrl = useRef(preferredUrl);
   const knownTabs = useRef(new Set<string>());
 
+  const consumedPresentation = useRef<string | null>(null);
+  useEffect(() => {
+    if (!presentation || consumedPresentation.current === presentation.id
+      || !tabs.some((tab) => tab.id === presentation.viewId)) return;
+    consumedPresentation.current = presentation.id;
+    setSelectedId(presentation.viewId);
+  }, [presentation, tabs.length]);
   useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
   useEffect(() => {
     if (!menuOpen) return;

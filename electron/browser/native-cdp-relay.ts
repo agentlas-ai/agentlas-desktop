@@ -19,10 +19,10 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
 import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
-  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport } from "../work-live-view";
+  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest } from "../work-live-view";
 
-type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal };
-type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; detach: () => void };
+type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background" };
+type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void };
 type Lease = { id: string; guests: Map<string, Guest>; socket: RelaySocket | null; connecting: boolean; autoAttach: boolean; current: string | null };
 const reservedGuests = new Set<string>();
 const MAX_SESSIONS = 8;
@@ -154,6 +154,14 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     if (available) await addGuest(lease, available.viewId);
     else await createGuest(lease);
   };
+  const presentAction = (guest: Guest) => {
+    if (!current() || input.presentation === "background") return;
+    const now = Date.now(), previous = guest.lastPresentationAt;
+    guest.lastPresentationAt = now;
+    // One gesture/type burst presents once; a later action resumes the panel.
+    if (previous !== undefined && now - previous < 1000) return;
+    presentNativeBrowserGuest(owner.ownerId, input.chatId, input.runId, guest.viewId);
+  };
   const dispatch = async (lease: Lease, method: string, params: Record<string, unknown>, sessionId?: string): Promise<unknown> => {
     if (!current()) throw new Error("native-browser-grant-revoked");
     if (!sessionId) {
@@ -173,6 +181,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       }
       if (method === "Target.createTarget") {
         const guest = await createGuest(lease, typeof params.url === "string" ? params.url : "about:blank");
+        presentAction(guest);
         return { targetId: guest.targetId };
       }
       if (method === "Target.closeTarget") {
@@ -238,6 +247,9 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
         || guest.wc.getURL() !== url || image.isEmpty()) throw new Error("native-browser-screenshot-stale");
       return { data: (params.format === "jpeg" ? image.toJPEG(typeof params.quality === "number" ? Math.max(0, Math.min(100, Math.round(params.quality))) : 80) : image.toPNG()).toString("base64") };
     }
+    if (method === "Page.navigate" || method === "Page.reload" || method === "Page.navigateToHistoryEntry"
+      || method === "Input.insertText" || (method === "Input.dispatchKeyEvent" && params.type !== "keyUp")
+      || (method === "Input.dispatchMouseEvent" && (params.type === "mousePressed" || params.type === "mouseWheel"))) presentAction(guest);
     const result = await guest.wc.debugger.sendCommand(method, params, sessionId === guest.sessionId ? undefined : sessionId);
     if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc) throw new Error("native-browser-grant-revoked");
     if (method === "Input.dispatchMouseEvent" && sessionId === guest.sessionId &&

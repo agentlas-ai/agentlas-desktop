@@ -3007,6 +3007,7 @@ ${effectiveUserPrompt}`;
       if (req.chatId && !executionContext && !req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
+          presentation: agent.visibility === "background" || agent.visibility === "private" ? "background" : "foreground",
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
       }
       const cfg = await buildMcpConfigFile({

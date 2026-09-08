@@ -3039,13 +3039,13 @@ export class InvocationService {
     return true;
   }
 
-  attach(chatId: string): InvocationAttachResult | null {
+  attach(chatId: string, options?: { includeEvents?: boolean }): InvocationAttachResult | null {
     let found: InvocationAttachResult | null = null;
     for (const [runId, record] of new Map([...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
       if (record.chatId === chatId) {
         found = {
           runId,
-          events: record.events.slice(),
+          events: options?.includeEvents === false ? [] : record.events.slice(),
           startedAt: record.startedAt,
           queuedSteers: (this.steerQueues.get(chatId) ?? []).map((queued, index) => ({
             text: queued.request.userPrompt,

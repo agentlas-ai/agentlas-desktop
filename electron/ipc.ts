@@ -6445,7 +6445,8 @@ export function registerIpcHandlers(): void {
       invocationService.unsteer(req.chatId, req.position, req.text),
   );
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
-  ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));
+  ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) =>
+    invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
   ipcMain.handle("invoke:workerReport", (_event, scope) => getWorkerReport(scope));
   ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
