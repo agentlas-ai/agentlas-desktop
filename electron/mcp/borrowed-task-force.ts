@@ -55,6 +55,7 @@ import {
   createUntrustedRuntimeFailure,
   UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
 } from "../runtime/untrusted-error";
+import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { tryRecordRunEvent } from "../store/run-events";
@@ -208,6 +209,14 @@ export class TaskForceRuntimeFailureError extends Error {
     this.failure = { ...failure };
     this.runtime = { ...runtime };
   }
+}
+
+export function taskForceFailureFromError(error: unknown, runtime: RuntimeStatus): RunnerFailure {
+  if (isJudgmentRefusal(error)) {
+    return { kind: "refused", runtime: runtime.kind, source: "marker",
+      providerCode: error.code, message: error.message };
+  }
+  return runnerFailureFromError(error, runtime.kind);
 }
 
 export function requireTaskForceRunnerSuccess<T extends { failure?: RunnerFailure }>(
@@ -699,6 +708,25 @@ function taskForceRecoveryRuntime(
   })[0] ?? null;
 }
 
+/** Change only the no-tools planning provider after its pre-dispatch refusal.
+ * Prepared releases, permissions, and worker runtime allocation stay pinned. */
+export function taskForcePlannerRecoveryRuntime(
+  p: BorrowedTaskForceParams,
+  failed: RuntimeStatus,
+  failure: RunnerFailure,
+  attempted: RuntimeStatus[],
+): RuntimeStatus | null {
+  if (p.signal?.aborted || p.benchmarkMode || p.req.agentAppMode) return null;
+  if (p.workforceSelectionReceipt) {
+    if (failure.kind !== "refused" || failure.source !== "marker"
+      || failure.providerCode !== "runtime_cannot_judge"
+      || !taskForceOrchestratorBoundary(p, uniqSpecs(p.taskForceSpecs)).untrustedNoTools) return null;
+  }
+  return rolePriorityRuntimes(taskForceCandidateRuntimes(p), "orchestrator", {
+    failedRuntime: failed, failure, exclude: attempted,
+  })[0] ?? null;
+}
+
 function cleanString(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number") return String(value);
@@ -1073,6 +1101,8 @@ async function observeTaskForceModelCall<T>(
     });
     return result;
   } catch (error) {
+    const failure = error instanceof TaskForceRuntimeFailureError
+      ? error.failure : isJudgmentRefusal(error) ? taskForceFailureFromError(error, input.runtime) : null;
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
       kind: "task_force_model_call_failed",
@@ -1083,8 +1113,8 @@ async function observeTaskForceModelCall<T>(
         durationMs: Math.max(0, Date.now() - startedAt),
         // Only a returned typed failure is evidence of its cause. Never parse
         // an exception or persist its message as diagnostic authority.
-        ...(error instanceof TaskForceRuntimeFailureError ? {
-          failureKind: error.failure.kind, failureSource: error.failure.source,
+        ...(failure ? {
+          failureKind: failure.kind, failureSource: failure.source, failureCode: failure.providerCode,
         } : {}),
       },
     });
@@ -1098,7 +1128,7 @@ async function observeTaskForceModelCall<T>(
     // strict callers still fail closed in taskForceRecoveryRuntime.
     if (!p.signal?.aborted && !(error instanceof TaskForceRuntimeFailureError)) {
       throw new TaskForceRuntimeFailureError(
-        runnerFailureFromError(error, input.runtime.kind),
+        taskForceFailureFromError(error, input.runtime),
         input.runtime,
       );
     }
@@ -4935,6 +4965,7 @@ async function runPlanner(
     },
   );
 
+  const attemptedPlannerRuntimes: RuntimeStatus[] = [];
   const invokePlannerWithFallback = async (
     invocationId: string,
     systemPrompt: string,
@@ -4953,7 +4984,8 @@ async function runPlanner(
       } catch (error) {
         const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
         if (!typed) throw error;
-        const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+        attemptedPlannerRuntimes.push(typed.runtime);
+        const recovery = taskForcePlannerRecoveryRuntime(p, typed.runtime, typed.failure, attemptedPlannerRuntimes);
         if (!recovery) throw error;
         if (oneControllerRuntimePreferred(p)) {
           p.onControllerRuntimeFallback?.(recovery, typed.failure);
