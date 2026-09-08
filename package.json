@@ -173,6 +173,7 @@
     "qa:keyboard-shortcuts": "node scripts/qa-keyboard-shortcuts.cjs",
     "qa:stop-path": "node scripts/qa-stop-path.cjs",
     "qa:many-rows": "node scripts/qa-many-rows.cjs",
+    "qa:language-switch": "node scripts/qa-language-switch.cjs",
     "qa:run-failure-ux": "node scripts/qa-run-failure-ux.cjs",
     "test:modals-have-a-way-out": "node scripts/modals-have-a-way-out-contract.cjs",
     "test:engine-text-not-on-screen": "node scripts/engine-text-does-not-reach-the-screen-contract.cjs",
