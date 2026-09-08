@@ -1,3 +1,4 @@
+import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 // Claude Code CLI — 감지 + 실호출.
 // 사용자의 Claude Pro/Max 구독으로 돌아간다 (PRD §3.1 6-A).
 //
@@ -894,6 +895,8 @@ const runClaudeTurn = async (
     browserOnly: runReq.browserOnly, untrustedNoTools: runReq.untrustedNoTools,
   });
   const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed];
+  recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
+    untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
   // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
@@ -1434,6 +1437,7 @@ const runClaudeTurn = async (
       }
       if (agentAppMcpInitFailed) return;
       const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
+      if (isAgentAppMcpInit) recordClaudeCapabilityInit(ev.tools);
       if (
         hasExactUntrustedMcpGrant &&
         !runReq.agentAppMcpFallbackAttempted &&

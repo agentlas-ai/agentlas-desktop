@@ -1,3 +1,4 @@
+import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
 import { workerCapabilityRunner, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // Borrowed Hub task-force orchestration.
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
@@ -1080,7 +1081,8 @@ async function observeTaskForceModelCall<T>(
   });
   try {
     const result = requireTaskForceRunnerSuccess(
-      await call() as T & { failure?: RunnerFailure },
+      await withRuntimeCapabilityReceipt({ runId: p.req.runId ?? `task-force:${p.chat.id}`,
+        chatId: p.chat.id, nodeId: input.nodeId, callRef, agentId: canonicalAgentId }, call) as T & { failure?: RunnerFailure },
       input.runtime,
     ) as T;
     const observedModel = taskForceObservedModel(result);
