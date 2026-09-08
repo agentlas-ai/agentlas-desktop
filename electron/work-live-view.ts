@@ -21,6 +21,7 @@ type ActiveWorkView = {
   visible: boolean;
   ownerAttached: boolean;
   hiddenHost?: BaseWindow;
+  ownerBounds?: Rectangle;
   mode: "app" | "browser";
   taskScopeId?: string;
   state: WorkLiveViewStatus["state"];
@@ -141,17 +142,19 @@ function setOwnerGuestVisible(active: ActiveWorkView, visible: boolean): void {
     // bounds are nonzero. Keep task-private browser guests in a never-shown
     // host, outside the user's native/AX tree, including before first load.
     if (active.mode === "browser" && isCurrent(active) && active.state !== "error") {
-      const bounds = active.view.getBounds();
+      const bounds = active.ownerBounds ?? active.view.getBounds();
       if (!active.hiddenHost) {
         active.hiddenHost = new BaseWindow({ show: false, width: bounds.width, height: bounds.height, focusable: false });
         active.hiddenHost.contentView.addChildView(active.view);
       }
+      active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
       active.hiddenHost.setContentSize(bounds.width, bounds.height);
       active.view.setVisible(true);
     } else releaseHiddenGuestHost(active);
     return;
   }
   releaseHiddenGuestHost(active);
+  if (active.ownerBounds) active.view.setBounds(active.ownerBounds);
   if (!active.ownerAttached) {
     active.window.contentView.addChildView(active.view);
     active.ownerAttached = true;
@@ -306,7 +309,8 @@ export function setWorkLiveViewBounds(
     active.captureRestore?.();
     active.visible = input.visible !== false;
     if (active.visible) showOnly(active);
-    active.view.setBounds(sanitizeBounds(input.bounds, active.window));
+    active.ownerBounds = sanitizeBounds(input.bounds, active.window);
+    active.view.setBounds(active.ownerBounds);
     setOwnerGuestVisible(active, active.visible && active.state !== "error");
     return { ok: true };
   } catch {
@@ -496,7 +500,8 @@ export async function openWorkLiveView(input: {
   });
 
   if (active.visible) showOnly(active);
-  view.setBounds(sanitizeBounds(input.bounds, input.window));
+  active.ownerBounds = sanitizeBounds(input.bounds, input.window);
+  view.setBounds(active.ownerBounds);
   setOwnerGuestVisible(active, active.visible);
   emit(active, { state: "opening", url: url.toString() });
   ensureOwnerCleanup(input.ownerId, input.window);
