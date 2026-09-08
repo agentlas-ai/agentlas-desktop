@@ -19,6 +19,7 @@ type ActiveWorkView = {
   loopbackPort: string | null;
   send: (status: WorkLiveViewStatus) => void;
   visible: boolean;
+  ownerAttached: boolean;
   mode: "app" | "browser";
   taskScopeId?: string;
   state: WorkLiveViewStatus["state"];
@@ -126,12 +127,30 @@ function registeredGuest(ownerId: number, viewId: unknown, taskScopeId?: string)
   return active && isCurrent(active) && (active.mode !== "browser" || active.taskScopeId === taskScopeId) ? active : null;
 }
 
+/** Hidden native views must leave the owner's native/AX tree, not merely stop
+ * painting. The WebContents remains alive for its exact task's background run. */
+function setOwnerGuestVisible(active: ActiveWorkView, visible: boolean): void {
+  if (!visible) {
+    active.view.setVisible(false);
+    if (active.ownerAttached && !active.window.isDestroyed()) {
+      active.window.contentView.removeChildView(active.view);
+    }
+    active.ownerAttached = false;
+    return;
+  }
+  if (!active.ownerAttached) {
+    active.window.contentView.addChildView(active.view);
+    active.ownerAttached = true;
+  }
+  active.view.setVisible(true);
+}
+
 function showOnly(active: ActiveWorkView): void {
   for (const other of activeViews.values()) {
     if (other.ownerId !== active.ownerId || other === active) continue;
     other.captureRestore?.();
     other.visible = false;
-    try { other.view.setVisible(false); } catch {}
+    try { setOwnerGuestVisible(other, false); } catch {}
   }
 }
 
@@ -220,7 +239,7 @@ function closeActive(active: ActiveWorkView, notify = true): void {
   active.captureRestore?.();
   activeViews.delete(key(active.ownerId, active.viewId));
   try {
-    if (!active.window.isDestroyed()) active.window.contentView.removeChildView(active.view);
+    setOwnerGuestVisible(active, false);
   } catch {}
   try { active.view.webContents.close(); } catch {}
   if (notify) emit(active, { state: "closed" });
@@ -257,8 +276,8 @@ export function setWorkLiveViewBounds(
     active.captureRestore?.();
     active.visible = input.visible !== false;
     if (active.visible) showOnly(active);
-    active.view.setVisible(active.visible && active.state !== "error");
     active.view.setBounds(sanitizeBounds(input.bounds, active.window));
+    setOwnerGuestVisible(active, active.visible && active.state !== "error");
     return { ok: true };
   } catch {
     return { ok: false };
@@ -273,7 +292,7 @@ export function reloadWorkLiveView(ownerId: number, viewId: string, taskScopeId?
     active.navigationEpoch += 1;
     active.pendingUrl = active.view.webContents.getURL();
     if (active.visible) showOnly(active);
-    active.view.setVisible(active.visible);
+    setOwnerGuestVisible(active, active.visible);
     emit(active, { state: "loading", url: active.pendingUrl });
     active.view.webContents.reloadIgnoringCache();
     return { ok: true };
@@ -377,6 +396,7 @@ export async function openWorkLiveView(input: {
     loopbackPort: loopbackHost(url.hostname) ? url.port || (url.protocol === "https:" ? "443" : "80") : null,
     send: input.send,
     visible: input.visible !== false,
+    ownerAttached: false,
     mode,
     taskScopeId: mode === "browser" ? input.taskScopeId : undefined,
     state: "opening",
@@ -405,7 +425,7 @@ export async function openWorkLiveView(input: {
     // The completion event is the document receipt; querying that flag here
     // can strand a successful redirect at loading forever.
     if (!isCurrent(active) || active.state === "error") return;
-    view.setVisible(active.visible);
+    setOwnerGuestVisible(active, active.visible);
     emit(active, { state: "ready", url: view.webContents.getURL(), title: view.webContents.getTitle() });
   });
   view.webContents.on("did-navigate-in-page", (_event, target, isMainFrame) => {
@@ -420,18 +440,18 @@ export async function openWorkLiveView(input: {
     if (!isCurrent(active) || !isMainFrame || errorCode === -3) return;
     // A failed older URL must not replace a newer navigation's status.
     if (validatedURL && active.pendingUrl && validatedURL !== active.pendingUrl) return;
-    view.setVisible(false);
+    setOwnerGuestVisible(active, false);
     emit(active, { state: "error", url: validatedURL || active.pendingUrl,
       error: errorDescription || `Navigation failed (${errorCode}).` });
   });
   view.webContents.on("render-process-gone", (_event, details) => {
     if (!isCurrent(active)) return;
-    view.setVisible(false);
+    setOwnerGuestVisible(active, false);
     emit(active, { state: "error", url: view.webContents.getURL(), error: `Web runtime stopped: ${details.reason}` });
   });
   view.webContents.on("unresponsive", () => {
     if (!isCurrent(active)) return;
-    view.setVisible(false);
+    setOwnerGuestVisible(active, false);
     emit(active, { state: "error", url: view.webContents.getURL(), error: "The live app is not responding." });
   });
   view.webContents.on("will-navigate", (event, target) => {
@@ -445,10 +465,9 @@ export async function openWorkLiveView(input: {
     return { action: "deny" };
   });
 
-  input.window.contentView.addChildView(view);
   if (active.visible) showOnly(active);
   view.setBounds(sanitizeBounds(input.bounds, input.window));
-  view.setVisible(active.visible);
+  setOwnerGuestVisible(active, active.visible);
   emit(active, { state: "opening", url: url.toString() });
   ensureOwnerCleanup(input.ownerId, input.window);
   view.webContents.once("destroyed", () => {
@@ -462,7 +481,7 @@ export async function openWorkLiveView(input: {
     return { ok: active.state !== "error", viewId, url: view.webContents.getURL() };
   } catch (error) {
     if (isCurrent(active) && active.navigationEpoch === epoch) {
-      try { view.setVisible(false); } catch {}
+      try { setOwnerGuestVisible(active, false); } catch {}
       emit(active, {
         state: "error",
         url: url.toString(),
@@ -555,9 +574,8 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
       try { host.contentView.removeChildView(active.view); } catch {}
       if (isCurrent(active)) {
         try {
-          active.window.contentView.addChildView(active.view);
           active.view.setBounds(bounds);
-          active.view.setVisible(active.visible && active.state === "ready");
+          setOwnerGuestVisible(active, active.visible && active.state === "ready");
         } catch {}
       }
       try { host.destroy(); } catch {}
@@ -573,7 +591,7 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
       // A hidden WebContentsView has no capture surface. Rehost this same view
       // briefly in a never-shown native host; no page or storage is cloned.
       host = new BaseWindow({ show: false, width: bounds.width, height: bounds.height, focusable: false });
-      active.window.contentView.removeChildView(active.view);
+      setOwnerGuestVisible(active, false);
       host.contentView.addChildView(active.view);
       active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
       active.view.setVisible(true);
