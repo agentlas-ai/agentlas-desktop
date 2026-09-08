@@ -1449,7 +1449,17 @@ function taskForceOrchestratorBoundary(
     restrictedReadBoundary?: boolean;
     untrustedNoTools?: boolean;
   };
-  const untrustedNoTools = taskForceControlPlaneNeedsZeroAuthority({
+  const ordinaryHostWork = !p.req.agentAppMode
+    && !p.restrictedReadBoundary
+    && !inheritedBoundary.restrictedReadBoundary
+    && !inheritedBoundary.untrustedNoTools
+    && !p.workforceSelectionReceipt;
+  // Ordinary Work planning is a host-owned control turn: it has no workspace,
+  // MCP grant, or external authority, so AGY can safely return a text plan even
+  // when the attached roster contains borrowed package rows. Strict Agent App,
+  // Workforce, and restricted-read callers retain the measured zero-authority
+  // boundary and fail closed on runtimes that cannot prove it.
+  const untrustedNoTools = ordinaryHostWork ? false : taskForceControlPlaneNeedsZeroAuthority({
     agentAppMode: p.req.agentAppMode,
     restrictedReadBoundary: p.restrictedReadBoundary || inheritedBoundary.restrictedReadBoundary,
     untrustedNoTools: inheritedBoundary.untrustedNoTools,
