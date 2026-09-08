@@ -1,4 +1,4 @@
-import type { AgentMessageDirection, McpInvocationEvent, RunEventUi } from "@shared/types";
+import type { AgentMessageDirection, InvocationRunReceipt, McpInvocationEvent, RunEventUi } from "@shared/types";
 import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
 
@@ -986,7 +986,7 @@ function ledgerNoticeI18n(payload: Record<string, unknown>): { ko: string; en: s
 }
 
 /** Rebuild the latest Activity from Main's redacted append-only run ledger. */
-export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityState {
+export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: InvocationRunReceipt | null): OneActivityState {
   let state = initialOneActivityState();
   let projectedSequence = 0;
   const observedToolIds = new Set<string>();
@@ -1224,6 +1224,26 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
           message: ledgerString(payload, "errorMessage") || (cancelled ? "Run cancelled" : "Run stopped"),
         },
       }, row.ts);
+    }
+  }
+  // The bounded event page can omit the terminal row. Main's exact-run
+  // receipt supplies lifecycle facts without expanding the page or inventing
+  // outcomes for individual tools/workers whose completion rows are absent.
+  if (receipt?.runId && events.every((row) => row.runId === receipt.runId
+    && (!row.chatId || row.chatId === receipt.chatId))) {
+    const startedMs = Date.parse(receipt.startedAt);
+    const finishedMs = receipt.finishedAt ? Date.parse(receipt.finishedAt) : NaN;
+    const status: OneActivityStatus = receipt.status === "interrupted" ? "cancelled" : receipt.status;
+    if (Number.isFinite(startedMs)) {
+      const settled = status === "completed" || status === "failed" || status === "cancelled";
+      const measured = settled && Number.isFinite(finishedMs) && finishedMs >= startedMs;
+      const previous = state.items.find((item) => item.kind === "run");
+      const { durationMs: _duration, completedAt: _completed, ...detail } = previous ?? {};
+      const lifecycle: OneActivityItem = {
+        ...detail, id: "run:lifecycle", kind: "run", status, observedAt: receipt.startedAt,
+        ...(measured ? { completedAt: receipt.finishedAt, durationMs: finishedMs - startedMs } : {}),
+      };
+      state = { ...state, items: [...state.items.filter((item) => item.kind !== "run"), lifecycle] };
     }
   }
   return state;

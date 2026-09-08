@@ -2470,7 +2470,7 @@ export function OneShell() {
       setThreadRuns(projectThreadRuns(chatTimeline));
     }
     if (ledgerEvents.length === 0) return;
-    const restoredActivity = projectOneActivityFromLedger(ledgerEvents);
+    const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt);
     cacheOneActivity(chatId, restoredActivity);
     activityEventRunIdRef.current = latestReceipt.runId;
     setActivityStateRunId(latestReceipt.runId);
@@ -2805,7 +2805,7 @@ export function OneShell() {
       const durableActivityStillOwnsScreen = !activityRunIdRef.current
         || activityRunIdRef.current === durableReceipt?.runId;
       if (!liveRunOwnsThread && !attachment && durableActivityStillOwnsScreen && ledgerEvents.length > 0) {
-        const restoredActivity = projectOneActivityFromLedger(ledgerEvents);
+        const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt);
         activityEventRunIdRef.current = durableReceipt?.runId ?? null;
         setActivityStateRunId(durableReceipt?.runId ?? null);
         setActivity(restoredActivity);

@@ -1705,7 +1705,7 @@ function workActivitiesByMessageFromTimeline(
   for (const run of runs) {
     // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
     // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
-    const state = projectOneActivityFromLedger(run.events);
+    const state = projectOneActivityFromLedger(run.events, run.receipt);
     const steps = mcpStepsFromLedger(run.events, 0);
     if (!hasOneActivityEvidence(state) && steps.length === 0) continue;
     const durableAssistantId = durableAssistantMessageIdFromRun(run.events);

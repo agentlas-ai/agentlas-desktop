@@ -32,7 +32,7 @@ export function projectThreadRuns(
       startedAt: entry.receipt.startedAt,
       ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
       status: entry.receipt.status,
-      state: projectOneActivityFromLedger(entry.events),
+      state: projectOneActivityFromLedger(entry.events, entry.receipt),
     }))
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }

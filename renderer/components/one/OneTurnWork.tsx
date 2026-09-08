@@ -513,14 +513,9 @@ export function OneTurnWork({
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
   // 종료 줄을 쓸 주체가 없으므로, "종료 이벤트가 없다"는 사실 자체가 유일한 증거다.
   const interrupted = !active && runStatus === "interrupted";
-  /*
-   * ★못 잰 시간을 지어내지 않는다. 끝나지 않은 실행에는 종료 시각이 없어서, 시작 시각부터
-   * "지금"까지를 재면 질문한 지 오래될수록 숫자가 계속 자란다 — 실측에서 20초쯤 돌다 멈춘
-   * 실행이 "1시간 26분 동안 작업"으로 보였다. 실제로 얼마나 돌았는지는 아무도 모르므로
-   * 시간 칸을 비우고, 대신 답을 못 받았다는 사실만 적는다.
-   */
-  const settledMs = presentation.durationMs
-    ?? (startedAt != null && !active && !interrupted ? liveElapsedMs : undefined);
+  // Only active runs use a wall clock. Settled rows require a measured,
+  // immutable lifecycle duration; revisiting a task must not add idle time.
+  const settledMs = active ? liveElapsedMs : presentation.durationMs;
   const recordedRows = presentation.cells.length > 0;
   const headline = preparing && !recordedRows
     ? (ko ? "준비하는 중" : "Preparing")
