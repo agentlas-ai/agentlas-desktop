@@ -1827,6 +1827,19 @@ async function runPreparedAntigravity(
   }
 };
 
+/** A configured tool surface must not silently become an answer-only read run. */
+export function antigravityReadToolFailure(req: RunnerRequest): RunnerFailure | undefined {
+  if (req.permission !== "read" || req.browserOnly
+    || (!req.mcpConfigPath && !req.mcpAllowedTools?.length)) return undefined;
+  return {
+    kind: "refused", runtime: "antigravity", source: "marker",
+    providerCode: "agy_read_tools_unsupported",
+    message: req.locale === "ko"
+      ? "Antigravity의 현재 헤드리스 실행은 읽기 권한을 유지하며 선택된 도구를 사용할 수 없습니다. 같은 읽기 권한을 지원하는 허용된 런타임이 필요합니다."
+      : "Antigravity cannot use the configured tools while preserving read permission in this headless runtime. Use an allowed runtime supporting the same read scope.",
+  };
+}
+
 export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -1849,6 +1862,8 @@ export const runAntigravity: Runner = async (
       "Antigravity is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
     );
   }
+  const readToolFailure = antigravityReadToolFailure(req);
+  if (readToolFailure) return { text: "", failure: readToolFailure };
   const bin = await getBin({ source: req.runtimeSource });
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
   const executableIdentity = observeCliExecutableIdentity({
