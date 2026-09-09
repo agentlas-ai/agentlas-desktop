@@ -36,6 +36,7 @@ type OneVoiceInputHelpProps = {
   locale: "ko" | "en";
   composerRef: RefObject<HTMLTextAreaElement | null>;
   disabled?: boolean;
+  surface?: "one" | "work";
 };
 
 type DictationPlatform = "mac" | "windows" | "other";
@@ -55,7 +56,7 @@ function dictationPlatform(): DictationPlatform {
  * an Agentlas recording feature. This control focuses the real composer and
  * explains the verified OS shortcut without claiming that One is listening.
  */
-export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: OneVoiceInputHelpProps) {
+export function OneVoiceInputHelp({ locale, composerRef, disabled = false, surface = "one" }: OneVoiceInputHelpProps) {
   const platform = useMemo(dictationPlatform, []);
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -130,7 +131,9 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
           <strong id={titleId}>{tFor(locale, "one.voice.panel_title")}</strong>
           <p id={instructionId}>{instruction}</p>
           <small id={privacyId}>
-            {voiceCopy(locale, "one.voice.privacy")}
+            {surface === "work"
+              ? (locale === "ko" ? "Work는 여기서 마이크를 켜거나 음성 파일을 저장하지 않습니다. 받아쓴 텍스트를 확인한 뒤 직접 보내세요." : "Work does not turn on the microphone or save audio here. Review the dictated text before sending it yourself.")
+              : voiceCopy(locale, "one.voice.privacy")}
           </small>
           <button type="button" onClick={closeToComposer}>
             {voiceCopy(locale, "one.voice.return_composer")}

@@ -7,6 +7,7 @@
 //
 // 모드 토글은 V0 UI만 (실제 동작은 V1): plan/goal/permission이 invocation payload로 전달.
 "use client";
+import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ImageAttachment,
@@ -2027,6 +2028,7 @@ function ChatInputComponent({
                       />
                     </button>
                   )}
+                  <OneVoiceInputHelp locale={locale === "ko" ? "ko" : "en"} composerRef={textareaRef} disabled={disabled} surface="work" />
                   <button
                     type="button"
                     className="chat-input-send-button"
