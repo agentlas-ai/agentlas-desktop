@@ -277,10 +277,14 @@ function permissionArgs(
     // their own machine — a network-blind agent is a dead automation, not safety.
     return ["--sandbox", "workspace-write", ...CODEX_WORKSPACE_WRITE_CONFIG_ARGS];
   }
-  // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
-  // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
-  //  `unexpected argument` 로 exit 2.) read 권한은 도구를 안 쓰는 대화 모드라 read-only.
-  return ["--sandbox", "read-only"];
+  const args = ["--sandbox", "read-only"];
+  if (reviewer === "auto_review") {
+    // `--approve-for-me` is workspace-write-only. Read-only workers still
+    // need Codex's on-request policy so MCP calls can reach the configured
+    // automatic reviewer without changing the filesystem ceiling.
+    args.push("-c", `approval_policy="on-request"`);
+  }
+  return args;
 }
 
 function resumePermissionArgs(
@@ -303,7 +307,9 @@ function resumePermissionArgs(
   if (permission === "write") {
     return ["-c", `sandbox_mode="workspace-write"`, ...CODEX_WORKSPACE_WRITE_CONFIG_ARGS];
   }
-  return ["-c", `sandbox_mode="read-only"`];
+  const args = ["-c", `sandbox_mode="read-only"`];
+  if (reviewer === "auto_review") args.push("-c", `approval_policy="on-request"`);
+  return args;
 }
 
 /**

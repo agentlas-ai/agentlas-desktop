@@ -1393,8 +1393,9 @@ function taskForceRunnerBase(
     // Keep Codex in `on-request`: `never` means "decline anything that would
     // ask", not "approve without another prompt". The automatic reviewer plus
     // Agentlas' write-boundary arbiter accepts in-scope browser/tool calls while
-    // the typed workspace-write sandbox remains rooted to this exact cwd.
-    approvalsReviewer: autoReviewApprovals && permission !== "read" ? "auto_review" : "user",
+    // the typed sandbox remains rooted to this exact cwd (read-only workers
+    // retain read-only access while writable workers retain workspace-write).
+    approvalsReviewer: autoReviewApprovals ? "auto_review" : "user",
     restrictedReadBoundary: p.restrictedReadBoundary,
     mcpConfigPath: agentAppAllowedTools ? p.mcpConfigPath : toolsAllowed ? p.mcpConfigPath : undefined,
     mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
@@ -1412,6 +1413,20 @@ function taskForceRunnerBase(
       ? p.onAgentAppMcpRuntimeUnavailable
       : undefined,
   };
+}
+
+function readQaAutoReviewAllowed(
+  p: BorrowedTaskForceParams,
+  packet: BorrowedInputPacket,
+  workerPermission: RunnerRequest["permission"],
+  preApprovalStage: boolean,
+): boolean {
+  return packet.workspaceAccess === "read"
+    && workerPermission === "read"
+    && taskForcePermission(p) === "full"
+    && !p.req.agentAppMode
+    && !preApprovalStage
+    && !p.restrictedReadBoundary;
 }
 
 /** Planning and synthesis are control-plane turns. They already receive the
@@ -3712,7 +3727,7 @@ async function runBorrowedAgentTurn(
   const runnerBase = taskForceRunnerBase(
     p,
     workerPermission,
-    workerPermission !== "read",
+    workerPermission !== "read" || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
   );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
   const agentRuntimeChoice = installedAgent && !p.workforceSelectionReceipt && !p.req.agentAppMode
