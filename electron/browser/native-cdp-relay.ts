@@ -29,7 +29,7 @@ const MAX_SESSIONS = 8;
 /** Preserve host-owned capture diagnostics without leaking arbitrary CDP errors. */
 export function nativeBrowserCommandFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
-  return /^native-browser-(?:capture-(?:unavailable|busy|budget-exceeded|queue-full|stale|timeout|empty)|screenshot-(?:format-unsupported|stale|clip-invalid|beyond-viewport-unsupported)|grant-revoked|target-missing)$/.test(message)
+  return /^native-browser-(?:capture-(?:unavailable|busy|budget-exceeded|queue-full|stale(?:-task)?|timeout|empty)|screenshot-(?:format-unsupported|stale|clip-invalid|beyond-viewport-unsupported)|grant-revoked|target-missing)$/.test(message)
     ? message : "native-browser-command-failed";
 }
 
