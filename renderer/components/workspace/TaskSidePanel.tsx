@@ -951,6 +951,7 @@ function TaskSidePanelContent({
   const mcpResults = useMemo(
     () => (activity?.items ?? []).filter((item) => (
       item.kind === "tool"
+      && item.tool?.isError !== true
       && typeof item.tool?.result === "string"
       && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0
     )).slice(-8),
