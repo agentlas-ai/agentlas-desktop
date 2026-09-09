@@ -11,12 +11,16 @@ import { computerUseControlInfoPath } from "./channel";
 import {
   invokeNativeInputDriver,
   nativeInputDriverAvailable,
+  type NativeAppObservation,
+  type NativeElementReference,
   type NativeInputAction,
   type NativeInputResult,
 } from "./native-driver";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
+const MAX_OBSERVATIONS = 32;
+const OBSERVATION_TTL_MS = 2 * 60 * 1000;
 
 interface AuditRow {
   at: string;
@@ -42,6 +46,54 @@ const sourceGeometries = new Map<string, {
   frameHeight: number;
   bounds: { x: number; y: number; width: number; height: number };
 }>();
+const observations = new Map<string, {
+  app: string;
+  expiresAt: number;
+  refs: NativeElementReference[];
+}>();
+
+function pruneObservations(now = Date.now()): void {
+  for (const [id, observation] of observations) {
+    if (observation.expiresAt <= now) observations.delete(id);
+  }
+}
+
+function makeObservationCapacity(): void {
+  while (observations.size >= MAX_OBSERVATIONS) {
+    const oldest = observations.keys().next().value as string | undefined;
+    if (!oldest) break;
+    observations.delete(oldest);
+  }
+}
+
+function serializeObservation(app: string, observation: NativeAppObservation): Record<string, unknown> {
+  pruneObservations();
+  makeObservationCapacity();
+  const observationId = randomUUID();
+  const elementIndexByPath = new Map(observation.elements.map((element, index) => [element.ref.path.join("/"), index]));
+  observations.set(observationId, {
+    app,
+    expiresAt: Date.now() + OBSERVATION_TTL_MS,
+    refs: observation.elements.map((element) => element.ref),
+  });
+  return {
+    ok: true,
+    observationId,
+    capturedAt: observation.capturedAt,
+    app: observation.app,
+    truncated: observation.truncated,
+    elements: observation.elements.map(({ ref, ...element }, element_index) => {
+      const parentPath = ref.path.slice(0, -1).join("/");
+      const parent_element_index = ref.path.length > 0 ? elementIndexByPath.get(parentPath) : undefined;
+      return {
+        element_index,
+        depth: ref.path.length,
+        ...(parent_element_index !== undefined ? { parent_element_index } : {}),
+        ...element,
+      };
+    }),
+  };
+}
 
 function writeJson(res: http.ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, {
@@ -113,6 +165,10 @@ function safeString(value: unknown, max: number): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
 }
 
+function boundedString(value: unknown, max: number): string | null {
+  return typeof value === "string" && value.length <= max ? value : null;
+}
+
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -120,6 +176,20 @@ function finiteNumber(value: unknown): number | null {
 function boundedInteger(value: unknown, min: number, max: number, fallback: number): number | null {
   if (value === undefined) return fallback;
   return Number.isInteger(value) && Number(value) >= min && Number(value) <= max ? Number(value) : null;
+}
+
+async function observeApp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const app = safeString(body.app, 160);
+  const maxDepth = boundedInteger(body.maxDepth, 1, 32, 24);
+  const maxNodes = boundedInteger(body.maxNodes, 1, 300, 200);
+  if (!app) return { ok: false, error: "invalid-app", message: "app is required and must be under 160 characters." };
+  if (maxDepth === null || maxNodes === null) {
+    return { ok: false, error: "invalid-arguments", message: "maxDepth or maxNodes is outside the supported range." };
+  }
+  const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes });
+  recordAudit("observeApp", result);
+  if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
+  return serializeObservation(app, result.observation);
 }
 
 function sourceGeometry(sourceId: string | null): {
@@ -170,13 +240,29 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
   if (body.app !== undefined && !appName) {
     return { ok: false, error: "invalid-app", message: "app must be under 160 characters." };
   }
+  let observedElement: { observationId: string; ref: NativeElementReference } | null = null;
+  if (action === "elementAction") {
+    const observationId = safeString(body.observationId, 64);
+    const elementIndex = boundedInteger(body.element_index, 0, 299, -1);
+    pruneObservations();
+    const observation = observationId ? observations.get(observationId) : undefined;
+    if (!observationId || elementIndex === null || elementIndex < 0 || !observation) {
+      return { ok: false, error: "invalid-observation", message: "Observe the app again and use an element index from that observation." };
+    }
+    if (observation.app !== appName) {
+      return { ok: false, error: "observation-app-mismatch", message: "The observation belongs to a different app." };
+    }
+    const ref = observation.refs[elementIndex];
+    if (!ref) return { ok: false, error: "invalid-element-index", message: "The element index is not present in this observation." };
+    observedElement = { observationId, ref };
+  }
   let targetPid: number | undefined;
   if (appName && action !== "focusApp" && action !== "listApps" && action !== "status") {
     const focused = await invokeNativeInputDriver({ action: "focusApp", app: appName });
     recordAudit("focusApp", focused);
     if (!focused.ok) return focused;
     if (typeof focused.pid === "number" && Number.isInteger(focused.pid) && focused.pid > 0) targetPid = focused.pid;
-    await new Promise((resolve) => setTimeout(resolve, 280));
+    if (action !== "elementAction") await new Promise((resolve) => setTimeout(resolve, 280));
   }
 
   let request: NativeInputAction | null = null;
@@ -232,6 +318,45 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       break;
     }
     case "selectText": request = { action: "selectText", targetPid }; break;
+    case "elementAction": {
+      const operation = body.operation;
+      if (!observedElement) return { ok: false, error: "invalid-observation", message: "Observe the app again." };
+      if (operation !== "click" && operation !== "secondaryAction" && operation !== "setValue" && operation !== "selectText") {
+        return { ok: false, error: "invalid-element-operation", message: "The requested element operation is unsupported." };
+      }
+      const actionName = body.actionName === undefined ? undefined : safeString(body.actionName, 120) ?? undefined;
+      const valueCandidate = body.value === undefined ? undefined : boundedString(body.value, 16 * 1024);
+      const value = valueCandidate === null ? undefined : valueCandidate;
+      const selectedText = body.text === undefined ? undefined : safeString(body.text, 16 * 1024) ?? undefined;
+      const prefixCandidate = body.prefix === undefined ? undefined : boundedString(body.prefix, 500);
+      const suffixCandidate = body.suffix === undefined ? undefined : boundedString(body.suffix, 500);
+      const prefix = prefixCandidate === null ? undefined : prefixCandidate;
+      const suffix = suffixCandidate === null ? undefined : suffixCandidate;
+      const selectionType = body.selectionType === undefined ? undefined : body.selectionType;
+      if (body.actionName !== undefined && !actionName) return { ok: false, error: "invalid-arguments", message: "actionName was rejected." };
+      if (valueCandidate === null) return { ok: false, error: "invalid-arguments", message: "value was rejected." };
+      if (body.text !== undefined && !selectedText) return { ok: false, error: "invalid-arguments", message: "text was rejected." };
+      if (prefixCandidate === null) return { ok: false, error: "invalid-arguments", message: "prefix was rejected." };
+      if (suffixCandidate === null) return { ok: false, error: "invalid-arguments", message: "suffix was rejected." };
+      if (selectionType !== undefined && selectionType !== "text" && selectionType !== "cursor_before" && selectionType !== "cursor_after") {
+        return { ok: false, error: "invalid-arguments", message: "selectionType was rejected." };
+      }
+      request = {
+        action: "elementAction",
+        operation,
+        ref: observedElement.ref,
+        ...(actionName ? { actionName } : {}),
+        ...(value !== undefined ? { value } : {}),
+        ...(selectedText ? { text: selectedText } : {}),
+        ...(prefix !== undefined ? { prefix } : {}),
+        ...(suffix !== undefined ? { suffix } : {}),
+        ...(selectionType ? { selectionType } : {}),
+      };
+      // Every supported element operation can mutate state. Consume the opaque
+      // observation before dispatch so retries cannot replay a stale element.
+      observations.delete(observedElement.observationId);
+      break;
+    }
     case "key": {
       const key = safeString(body.key, 32);
       const modifiers = body.modifiers === undefined ? [] : body.modifiers;
@@ -261,6 +386,9 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     }
     return { ok: false, error: "invalid-arguments", message: "Computer Use action arguments were rejected." };
   }
+  // App labels can alias the same process (localized name, bundle id, pid).
+  // Conservatively invalidate every host observation after any mutation.
+  if (action !== "status" && action !== "listApps" && action !== "move") observations.clear();
   const result = await invokeNativeInputDriver(request);
   recordAudit(action, result, action === "typeText" && typeof body.text === "string" ? body.text.length : undefined);
   return result;
@@ -360,6 +488,14 @@ export function startComputerUseControlServer(): Promise<number> {
           });
           return;
         }
+        if (req.url === "/observe") {
+          const execute = actionQueue.then(() => observeApp(body), () => observeApp(body));
+          actionQueue = execute.then(() => undefined, () => undefined);
+          void execute.then((result) => writeJson(res, result.ok ? 200 : 409, result), () => {
+            writeJson(res, 500, { ok: false, error: "observe-failed" });
+          });
+          return;
+        }
         if (req.url === "/action") {
           const execute = actionQueue.then(() => runAction(body), () => runAction(body));
           actionQueue = execute.then(() => undefined, () => undefined);
@@ -407,5 +543,6 @@ export function stopComputerUseControlServer(): void {
   token = "";
   auditRows.length = 0;
   sourceGeometries.clear();
+  observations.clear();
   try { fs.rmSync(computerUseControlInfoPath(), { force: true }); } catch { /* ignore */ }
 }

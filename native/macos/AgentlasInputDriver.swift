@@ -1,5 +1,7 @@
 import AppKit
 import ApplicationServices
+import CryptoKit
+import Darwin
 import Foundation
 
 // AgentlasInputDriver is deliberately a small, single-request executable.
@@ -306,6 +308,166 @@ func raiseApplicationWindow(pid: pid_t) {
     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
 }
 
+func runningApplication(_ target: String) -> NSRunningApplication? {
+    let needle = target.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    let requestedPid: pid_t? = {
+        guard needle.hasPrefix("pid:"), let value = Int32(needle.dropFirst(4)), value > 0 else { return nil }
+        return value
+    }()
+    return NSWorkspace.shared.runningApplications.first { app in
+        guard !app.isTerminated && app.activationPolicy != .prohibited else { return false }
+        if let requestedPid { return app.processIdentifier == requestedPid }
+        let name = (app.localizedName ?? "").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let bundle = (app.bundleIdentifier ?? "").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        return name == needle || bundle == needle || name.contains(needle)
+    }
+}
+
+func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success else { return nil }
+    return raw as? String
+}
+
+func boolAttribute(_ element: AXUIElement, _ attribute: String) -> Bool? {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success else { return nil }
+    return (raw as? NSNumber)?.boolValue
+}
+
+func childrenOf(_ element: AXUIElement) -> [AXUIElement] {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw) == .success,
+          let values = raw as? [AXUIElement] else { return [] }
+    return values
+}
+
+func frameOf(_ element: AXUIElement) -> CGRect? {
+    var rawPosition: CFTypeRef?
+    var rawSize: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &rawPosition) == .success,
+          AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &rawSize) == .success,
+          let rawPosition, let rawSize,
+          CFGetTypeID(rawPosition) == AXValueGetTypeID(), CFGetTypeID(rawSize) == AXValueGetTypeID() else { return nil }
+    var point = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(rawPosition as! AXValue, .cgPoint, &point),
+          AXValueGetValue(rawSize as! AXValue, .cgSize, &size) else { return nil }
+    return CGRect(origin: point, size: size)
+}
+
+func exposedActions(_ element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success, let names else { return [] }
+    return (names as NSArray).compactMap { $0 as? String }.prefix(40).map { $0 }
+}
+
+func elementFingerprint(_ element: AXUIElement) -> String {
+    let frame = frameOf(element)
+    let components: [String] = [
+        stringAttribute(element, kAXRoleAttribute) ?? "",
+        stringAttribute(element, kAXSubroleAttribute) ?? "",
+        stringAttribute(element, kAXIdentifierAttribute) ?? "",
+        stringAttribute(element, kAXTitleAttribute) ?? "",
+        stringAttribute(element, kAXDescriptionAttribute) ?? "",
+        frame.map { "\($0.origin.x),\($0.origin.y),\($0.size.width),\($0.size.height)" } ?? ""
+    ]
+    let digest = SHA256.hash(data: Data(components.joined(separator: "\u{1f}").utf8))
+    return digest.map { String(format: "%02x", $0) }.joined()
+}
+
+func processStartMilliseconds(_ pid: pid_t) -> Int64? {
+    var info = proc_bsdinfo()
+    let expected = Int32(MemoryLayout<proc_bsdinfo>.size)
+    let copied = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, expected)
+    guard copied == expected else { return nil }
+    return Int64(info.pbi_start_tvsec) * 1000 + Int64(info.pbi_start_tvusec) / 1000
+}
+
+func nativeReference(app: NSRunningApplication, path: [Int], element: AXUIElement) -> [String: Any] {
+    let bundleIdentifier: String = app.bundleIdentifier ?? ""
+    return ["pid": Int(app.processIdentifier), "bundleIdentifier": bundleIdentifier,
+     "processStartMs": processStartMilliseconds(app.processIdentifier) ?? -1,
+     "path": path, "fingerprint": elementFingerprint(element)]
+}
+
+func boundedObservedString(_ value: String?, maxBytes: Int, remainingBytes: inout Int) -> String? {
+    guard let value, remainingBytes > 0 else { return nil }
+    let limit = min(maxBytes, remainingBytes)
+    var result = ""
+    var used = 0
+    for character in value {
+        let bytes = String(character).utf8.count
+        if used + bytes > limit { break }
+        result.append(character)
+        used += bytes
+    }
+    remainingBytes -= used
+    return result
+}
+
+func observedNode(app: NSRunningApplication, element: AXUIElement, path: [Int], remainingTextBytes: inout Int) -> [String: Any] {
+    let role = stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
+    let subrole = stringAttribute(element, kAXSubroleAttribute)
+    var node: [String: Any] = ["ref": nativeReference(app: app, path: path, element: element),
+                               "role": role, "actions": exposedActions(element)]
+    if let value = boundedObservedString(subrole, maxBytes: 160, remainingBytes: &remainingTextBytes) { node["subrole"] = value }
+    if let value = boundedObservedString(stringAttribute(element, kAXTitleAttribute), maxBytes: 500, remainingBytes: &remainingTextBytes) { node["title"] = value }
+    if let value = boundedObservedString(stringAttribute(element, kAXDescriptionAttribute), maxBytes: 500, remainingBytes: &remainingTextBytes) { node["description"] = value }
+    if subrole != kAXSecureTextFieldSubrole && role != "AXSecureTextField",
+       let value = boundedObservedString(stringAttribute(element, kAXValueAttribute), maxBytes: 500, remainingBytes: &remainingTextBytes) { node["value"] = value }
+    if let value = boolAttribute(element, kAXEnabledAttribute) { node["enabled"] = value }
+    if let value = boolAttribute(element, kAXFocusedAttribute) { node["focused"] = value }
+    if let frame = frameOf(element) {
+        node["frame"] = ["x": frame.origin.x, "y": frame.origin.y, "width": frame.size.width, "height": frame.size.height]
+    }
+    return node
+}
+
+func resolveReference(_ raw: Any?) -> AXUIElement? {
+    guard let ref = raw as? [String: Any], let pidNumber = ref["pid"] as? NSNumber,
+          let bundle = ref["bundleIdentifier"] as? String, let startNumber = ref["processStartMs"] as? NSNumber,
+          let path = ref["path"] as? [NSNumber], path.count <= 32,
+          let fingerprint = ref["fingerprint"] as? String, fingerprint.count == 64 else { return nil }
+    let pid = pid_t(pidNumber.int32Value)
+    guard pid > 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
+          (app.bundleIdentifier ?? "") == bundle,
+          let liveStart = processStartMilliseconds(pid), liveStart == startNumber.int64Value else { return nil }
+    var element = AXUIElementCreateApplication(pid)
+    for component in path {
+        let index = component.intValue
+        let children = childrenOf(element)
+        guard index >= 0, index < children.count else { return nil }
+        element = children[index]
+    }
+    return elementFingerprint(element) == fingerprint ? element : nil
+}
+
+func matchingTextRange(value: String, text: String, prefix: String?, suffix: String?) -> NSRange? {
+    let source = value as NSString
+    let targetLength = (text as NSString).length
+    guard targetLength > 0 else { return nil }
+    var matches: [NSRange] = []
+    var search = NSRange(location: 0, length: source.length)
+    while search.length >= targetLength {
+        let found = source.range(of: text, options: [], range: search)
+        if found.location == NSNotFound { break }
+        let prefixMatches = prefix.map { candidate -> Bool in
+            let length = (candidate as NSString).length
+            return found.location >= length && source.substring(with: NSRange(location: found.location - length, length: length)) == candidate
+        } ?? true
+        let suffixMatches = suffix.map { candidate -> Bool in
+            let length = (candidate as NSString).length
+            let start = found.location + found.length
+            return start + length <= source.length && source.substring(with: NSRange(location: start, length: length)) == candidate
+        } ?? true
+        if prefixMatches && suffixMatches { matches.append(found) }
+        let next = found.location + max(found.length, 1)
+        search = NSRange(location: next, length: source.length - next)
+    }
+    return matches.count == 1 ? matches[0] : nil
+}
+
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard !input.isEmpty, input.count <= maxInputBytes else {
     failure("invalid-request", message: "Input must be a non-empty JSON object under 128 KiB.", exitCode: 64)
@@ -343,18 +505,7 @@ case "focusApp":
     guard let target = request["app"] as? String, !target.isEmpty, target.count <= 160 else {
         failure("invalid-app", message: "app must be a non-empty string under 160 characters.", exitCode: 64)
     }
-    let needle = target.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-    let requestedPid: pid_t? = {
-        guard needle.hasPrefix("pid:"), let value = Int32(needle.dropFirst(4)), value > 0 else { return nil }
-        return value
-    }()
-    let match = NSWorkspace.shared.runningApplications.first { app in
-        guard !app.isTerminated && app.activationPolicy != .prohibited else { return false }
-        if let requestedPid { return app.processIdentifier == requestedPid }
-        let name = (app.localizedName ?? "").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        let bundle = (app.bundleIdentifier ?? "").folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        return name == needle || bundle == needle || name.contains(needle)
-    }
+    let match = runningApplication(target)
     guard let match else { failure("app-not-found", message: "No running application matched the requested app name, bundle identifier, or pid.", exitCode: 69) }
     let activated = match.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     if activated {
@@ -362,6 +513,122 @@ case "focusApp":
         raiseApplicationWindow(pid: match.processIdentifier)
     }
     respond(["ok": activated, "app": match.localizedName ?? target, "pid": Int(match.processIdentifier)])
+
+case "observeApp":
+    ensureAccessibility()
+    guard let target = request["app"] as? String, !target.isEmpty, target.count <= 160,
+          let app = runningApplication(target) else {
+        failure("app-not-found", message: "No running application matched the requested app name, bundle identifier, or pid.", exitCode: 69)
+    }
+    let maxDepth = integer(request, "maxDepth") ?? 24
+    let maxNodes = integer(request, "maxNodes") ?? 200
+    guard (1...32).contains(maxDepth), (1...300).contains(maxNodes) else {
+        failure("invalid-observation-bounds", message: "maxDepth must be 1...32 and maxNodes must be 1...300.", exitCode: 64)
+    }
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    // Electron/Chromium may leave its semantic tree dormant until an
+    // accessibility client explicitly requests manual accessibility.
+    _ = AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    // A single unresponsive attribute must not consume the entire bounded
+    // observation. Chromium descendants inherit this application timeout.
+    AXUIElementSetMessagingTimeout(root, 0.05)
+    guard let processStartMs = processStartMilliseconds(app.processIdentifier) else {
+        failure("process-identity-unavailable", message: "The application process identity could not be verified.")
+    }
+    var queue: [(AXUIElement, [Int], Int)] = [(root, [], 0)]
+    var nodes: [[String: Any]] = []
+    var cursor = 0
+    var truncated = false
+    var remainingTextBytes = 48 * 1024
+    let deadline = Date().addingTimeInterval(2.5)
+    while cursor < queue.count && nodes.count < maxNodes && Date() < deadline {
+        let (element, path, depth) = queue[cursor]
+        cursor += 1
+        nodes.append(observedNode(app: app, element: element, path: path, remainingTextBytes: &remainingTextBytes))
+        if depth < maxDepth {
+            let indexedChildren = childrenOf(element).enumerated().map { ($0.offset, $0.element) }
+            let prioritizedChildren = depth == 0 ? indexedChildren.sorted { left, right in
+                func priority(_ element: AXUIElement) -> Int {
+                    let role = stringAttribute(element, kAXRoleAttribute)
+                    if role == kAXWindowRole && boolAttribute(element, kAXFocusedAttribute) == true { return 0 }
+                    if role == kAXWindowRole { return 1 }
+                    if role == kAXMenuBarRole { return 3 }
+                    return 2
+                }
+                return priority(left.1) < priority(right.1)
+            } : indexedChildren
+            for (index, child) in prioritizedChildren {
+                if queue.count >= maxNodes { truncated = true; break }
+                queue.append((child, path + [index], depth + 1))
+            }
+        } else if !childrenOf(element).isEmpty { truncated = true }
+    }
+    if cursor < queue.count || Date() >= deadline { truncated = true }
+    let appName: String = app.localizedName ?? target
+    let bundleIdentifier: String = app.bundleIdentifier ?? ""
+    respond(["ok": true, "observation": [
+        "capturedAt": ISO8601DateFormatter().string(from: Date()),
+        "app": ["name": appName, "pid": Int(app.processIdentifier),
+                "bundleIdentifier": bundleIdentifier, "processStartMs": processStartMs],
+        "elements": nodes, "truncated": truncated
+    ]])
+
+case "elementAction":
+    ensureAccessibility()
+    guard let operation = request["operation"] as? String,
+          let element = resolveReference(request["ref"]) else {
+        failure("stale-element-reference", message: "The observed element no longer matches the running application. Observe again before acting.", exitCode: 65)
+    }
+    switch operation {
+    case "click":
+        guard exposedActions(element).contains(kAXPressAction) else {
+            failure("element-action-unavailable", message: "The element does not expose AXPress.", exitCode: 65)
+        }
+        guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
+            failure("element-action-failed", message: "macOS rejected AXPress for the element.")
+        }
+        respond(["ok": true, "operation": operation, "actionName": kAXPressAction])
+    case "setValue":
+        guard let value = request["value"] as? String, value.utf8.count <= 16 * 1024 else {
+            failure("invalid-text", message: "value must be a string at most 16 KiB.", exitCode: 64)
+        }
+        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success else {
+            failure("element-action-failed", message: "macOS rejected AXValue for the element.")
+        }
+        respond(["ok": true, "operation": operation, "characters": value.count])
+    case "secondaryAction":
+        guard let actionName = request["actionName"] as? String, actionName.count <= 160,
+              exposedActions(element).contains(actionName) else {
+            failure("element-action-unavailable", message: "actionName must exactly match an action exposed by the observed element.", exitCode: 65)
+        }
+        guard AXUIElementPerformAction(element, actionName as CFString) == .success else {
+            failure("element-action-failed", message: "macOS rejected the requested accessibility action.")
+        }
+        respond(["ok": true, "operation": operation, "actionName": actionName])
+    case "selectText":
+        guard let text = request["text"] as? String, !text.isEmpty, text.utf8.count <= 16 * 1024,
+              let selectionType = request["selectionType"] as? String,
+              ["text", "cursor_before", "cursor_after"].contains(selectionType),
+              let value = stringAttribute(element, kAXValueAttribute),
+              let match = matchingTextRange(value: value, text: text, prefix: request["prefix"] as? String,
+                                            suffix: request["suffix"] as? String) else {
+            failure("text-match-not-unique", message: "The requested text and context must identify exactly one substring in the editable value.", exitCode: 65)
+        }
+        var range: CFRange
+        switch selectionType {
+        case "cursor_before": range = CFRange(location: match.location, length: 0)
+        case "cursor_after": range = CFRange(location: match.location + match.length, length: 0)
+        default: range = CFRange(location: match.location, length: match.length)
+        }
+        guard let rangeValue = AXValueCreate(.cfRange, &range),
+              AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success else {
+            failure("element-action-failed", message: "macOS rejected AXSelectedTextRange for the element.")
+        }
+        respond(["ok": true, "operation": operation, "selectionType": selectionType,
+                 "location": range.location, "length": range.length])
+    default:
+        failure("invalid-element-operation", message: "operation must be click, setValue, secondaryAction, or selectText.", exitCode: 64)
+    }
 
 case "move":
     ensureAccessibility()

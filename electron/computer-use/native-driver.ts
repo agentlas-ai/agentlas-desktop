@@ -21,12 +21,54 @@ export type NativeInputAction =
   | { action: "scroll"; deltaX?: number; deltaY?: number }
   | { action: "typeText"; text: string; targetPid?: number }
   | { action: "selectText"; targetPid?: number }
+  | { action: "observeApp"; app: string; maxDepth?: number; maxNodes?: number }
+  | {
+      action: "elementAction";
+      operation: "click" | "setValue" | "secondaryAction" | "selectText";
+      ref: NativeElementReference;
+      value?: string;
+      actionName?: string;
+      text?: string;
+      prefix?: string;
+      suffix?: string;
+      selectionType?: "text" | "cursor_before" | "cursor_after";
+    }
   | { action: "key"; key: string; modifiers?: string[]; repeat?: number };
+
+export interface NativeElementReference {
+  pid: number;
+  bundleIdentifier: string;
+  processStartMs: number;
+  /** Exact AX child-index path, bounded to 32 components and kept private by the control server. */
+  path: number[];
+  fingerprint: string;
+}
+
+export interface NativeObservedElement {
+  ref: NativeElementReference;
+  role: string;
+  subrole?: string;
+  title?: string;
+  description?: string;
+  value?: string;
+  frame?: { x: number; y: number; width: number; height: number };
+  enabled?: boolean;
+  focused?: boolean;
+  actions: string[];
+}
+
+export interface NativeAppObservation {
+  capturedAt: string;
+  app: { name: string; pid: number; bundleIdentifier: string; processStartMs: number };
+  elements: NativeObservedElement[];
+  truncated: boolean;
+}
 
 export interface NativeInputResult {
   ok: boolean;
   error?: string;
   message?: string;
+  observation?: NativeAppObservation;
   [key: string]: unknown;
 }
 
