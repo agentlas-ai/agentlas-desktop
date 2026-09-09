@@ -17,7 +17,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
-import { withCliPath } from "../runtime/exec";
+import { isCurrentElectronExecutable, withCliPath } from "../runtime/exec";
 import { withUvxPath } from "./uv-runtime";
 import {
   OPENCRAB_CATALOG_ID,
@@ -485,6 +485,16 @@ interface CreatedTransport {
   runtimeRoot: string | null;
 }
 
+function stdioEnvironmentForCommand(
+  command: string,
+  base: Record<string, string>,
+): Record<string, string> {
+  return {
+    ...base,
+    ...(isCurrentElectronExecutable(command) ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+  };
+}
+
 export interface McpRuntimePin {
   runtimeRoot: string | null;
   runtimeVersion: string | null;
@@ -511,7 +521,10 @@ async function createTransport(
       preparedMcpTransport(prepared, server);
       Object.assign(resolved, launch.env);
       return { transport: new StdioClientTransport({ command: launch.command, args: launch.args,
-        env: { ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")), ...launch.env }, stderr: "ignore" }) as unknown as Transport, runtimeRoot: launch.runtimeRoot };
+        env: stdioEnvironmentForCommand(launch.command, {
+          ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+          ...launch.env,
+        }), stderr: "ignore" }) as unknown as Transport, runtimeRoot: launch.runtimeRoot };
     }
     Object.assign(resolved, launch.headers, { __preparedEndpoint: launch.url });
     const init = { requestInit: { headers: launch.headers },
@@ -577,7 +590,7 @@ async function createTransport(
       // Any stdio server using this executable must run as Node, including
       // workspace-preview and future built-ins. Enforce after resolved env so
       // a missing/overridden flag cannot start another Desktop application.
-      env: { ...stdioEnv, ...resolved, ...(command === process.execPath ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
+      env: stdioEnvironmentForCommand(command, { ...stdioEnv, ...resolved }),
       stderr: "ignore",
     }) as unknown as Transport;
     return { transport, runtimeRoot };
