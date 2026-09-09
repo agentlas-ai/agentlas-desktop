@@ -394,7 +394,13 @@ function rulesForScope(scope: FsReadScope): RootRule[] {
   }
   if (scope.kind === "chat-assets") {
     const workspace = chatWorkspaceRule(scope.chatId);
-    return [...(workspace ? [workspace] : []), ...generatedRootRules()];
+    return [
+      ...(workspace ? [workspace] : []),
+      ...generatedRootRules(),
+      // Native CLI captures use the same Main-owned store already admitted by
+      // the local-file renderer. Task artifact binding must admit it too.
+      { path: captureArtifactsRoot(), mode: "tree", canonical: true },
+    ];
   }
   return [];
 }

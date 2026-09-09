@@ -529,6 +529,7 @@ function runCodexProcess(
     // so the started and completed notifications update one Activity row.
     const responseTools = new Map<string, { name: string; args?: string }>();
     const settledResponseToolIds = new Set<string>();
+    const itemCapturePaths = new Map<string, string[]>();
     // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
     // 단일 open/close 플래그다(깊이 카운터가 아니다): 이 구간은 진짜 `reasoning`
     // 아이템으로도 열리고, reasoning 아이템을 전혀 내보내지 않는 codex 빌드에서는
@@ -764,6 +765,17 @@ function runCodexProcess(
           item.status === "failed" ||
           (item.type === "mcp_tool_call" && codexMcpResultFailed(item.result)) ||
           (typeof item.exit_code === "number" && item.exit_code !== 0);
+        // exec emits native MCP results through item.completed as well as
+        // response_item. Persist images before the UI preview is truncated in
+        // either transport; a replay must reuse the original capture receipt.
+        let artifactPaths: string[] | undefined;
+        if (ev.type === "item.completed" && item.type === "mcp_tool_call" && !isError) {
+          artifactPaths = item.id ? itemCapturePaths.get(item.id) : undefined;
+          if (!artifactPaths) {
+            artifactPaths = codexInlineCapturePaths(name, resultPayload);
+            if (item.id) itemCapturePaths.set(item.id, artifactPaths);
+          }
+        }
         // 도구 이벤트 전에 본문을 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
         if (text) {
           events.onPartial(text);
@@ -775,6 +787,7 @@ function runCodexProcess(
           resultText,
           item.id,
           isError,
+          artifactPaths,
         );
       } else if (ev.type === "turn.completed") {
         closeThinking();
