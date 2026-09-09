@@ -677,6 +677,22 @@ function ChatFileOpenViewer({ file, locale, onExpand }: { file: ChatFileItem; lo
   </div>;
 }
 
+/**
+ * A browser navigation can legitimately end at a deep app route, but a tool
+ * may also navigate to an implementation asset while inspecting a page. The
+ * latter must not become the Browser rail's app URL: loading `/src/main.js`
+ * as a document produces a misleading blank/offline preview.
+ */
+function isBrowserDocumentUrl(value: string): value is string {
+  try {
+    const parsed = new URL(value);
+    if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return false;
+    return !/\.(?:m?js|cjs|css|map|json|wasm|png|jpe?g|gif|webp|svg|ico|avif|woff2?|ttf|otf|mp[34]|webm|zip)$/iu.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
   for (const item of [...items].reverse()) {
     if (item.kind !== "tool" || !item.tool?.args || item.tool.isError) continue;
@@ -694,8 +710,7 @@ export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
     try {
       const value = JSON.parse(item.tool.args) as { url?: unknown };
       if (typeof value.url !== "string") continue;
-      const parsed = new URL(value.url);
-      if (/^https?:$/u.test(parsed.protocol) && !parsed.username && !parsed.password) return parsed.toString();
+      if (isBrowserDocumentUrl(value.url)) return new URL(value.url).toString();
     } catch {
       // Tool arguments are untrusted runtime text. Invalid JSON/URLs are not a browser source.
     }
