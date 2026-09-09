@@ -19,6 +19,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import net from "node:net";
 import {
   callControlSocket,
   defaultControlSocketPath,
@@ -49,6 +50,8 @@ export interface EnsureDaemonOptions {
   parentPid?: number;
   /** The already-resolved identity of this Desktop install. */
   installIdentity?: InstallIdentity;
+  /** Upper bound for the spawned helper to establish its control socket. */
+  startupTimeoutMs?: number;
 }
 
 export type EnsureDaemonStatus =
@@ -56,7 +59,7 @@ export type EnsureDaemonStatus =
   | { status: "already-running"; pid: number; version: string }
   | { status: "spawned"; pid: number | null; version: string }
   | { status: "respawned"; pid: number | null; previousVersion: string }
-  | { status: "failed"; reason: string };
+  | { status: "failed"; reason: string; mobileBridgeFallbackSafe?: boolean };
 
 interface DaemonPing {
   ok?: boolean;
@@ -202,7 +205,7 @@ async function waitForSpawnedDaemonReadiness(
         return "exited";
       }
       const ping = await pingDaemon(socketPath, Math.min(800, Math.max(250, deadline - Date.now())));
-      if (ping?.ok) return "ready";
+      if (ping?.ok && ping.pid === spawned.pid) return "ready";
       if (exited || spawned.child.exitCode !== null || spawned.child.signalCode !== null) {
         return "exited";
       }
@@ -213,6 +216,37 @@ async function waitForSpawnedDaemonReadiness(
     spawned.child.removeListener("exit", markExited);
     spawned.child.removeListener("error", markExited);
   }
+}
+
+/** A failed ping can mean a live server with a broken optional service. Only
+ * connection refusal/absence proves that no helper owns the socket. */
+async function controlSocketIsAbsent(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect(socketPath);
+    const finish = (absent: boolean) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(absent);
+    };
+    const timer = setTimeout(() => finish(false), 1_000);
+    socket.once("connect", () => finish(false));
+    socket.once("error", (error: NodeJS.ErrnoException) =>
+      finish(error.code === "ENOENT" || error.code === "ECONNREFUSED"));
+  });
+}
+
+/** A timed-out helper may still finish booting later. Stop our exact child and
+ * prove its exit before allowing Desktop to open a fallback listener. */
+async function stopUnreadyDaemon(spawned: SpawnedDaemon): Promise<boolean> {
+  const exited = () => spawned.child.exitCode !== null || spawned.child.signalCode !== null;
+  if (exited()) return true;
+  spawned.child.kill("SIGTERM");
+  for (let attempt = 0; attempt < 30 && !exited(); attempt += 1) await sleep(100);
+  if (!exited()) {
+    spawned.child.kill("SIGKILL");
+    for (let attempt = 0; attempt < 20 && !exited(); attempt += 1) await sleep(100);
+  }
+  return exited();
 }
 
 /**
@@ -259,11 +293,13 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
         return { status: "failed", reason: `old daemon (v${daemonVersion}) did not shut down` };
       }
       const spawned = spawnDaemonForDesktop(opts);
-      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath);
-      if (readiness === "exited") {
+      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, opts.startupTimeoutMs);
+      if (readiness !== "ready") {
+        const stopped = await stopUnreadyDaemon(spawned);
         return {
           status: "failed",
-          reason: `daemon exited before control socket became ready (pid ${spawned.pid ?? "?"})`,
+          reason: `daemon_${readiness}_before_control_ready:pid=${spawned.pid ?? "?"}`,
+          mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath),
         };
       }
       log(`[daemon] respawned v${opts.appVersion} (pid ${spawned.pid ?? "?"})`);
@@ -275,11 +311,14 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
     const readiness = await waitForSpawnedDaemonReadiness(
       spawned,
       socketPath,
+      opts.startupTimeoutMs,
     );
-    if (readiness === "exited") {
+    if (readiness !== "ready") {
+      const stopped = await stopUnreadyDaemon(spawned);
       return {
         status: "failed",
-        reason: `daemon exited before control socket became ready (pid ${pid ?? "?"})`,
+        reason: `daemon_${readiness}_before_control_ready:pid=${pid ?? "?"}`,
+        mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath),
       };
     }
     log(`[daemon] spawned v${opts.appVersion} (pid ${pid ?? "?"})`);

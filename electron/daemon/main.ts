@@ -101,6 +101,14 @@ let mobileBridgeLeaseOwnerPid: number | null = null;
 let mobileBridgeLeaseWatch: NodeJS.Timeout | null = null;
 let mobileBridgeStartPromise: Promise<void> | null = null;
 let mobileBridgeRecoveryFailureLogged = false;
+let mobileBridgeRuntime: typeof import("../mobile-bridge/runtime") | null = null;
+let mobileBridgeLeaseTail: Promise<unknown> = Promise.resolve();
+
+function serializeMobileBridgeLease<T>(action: () => Promise<T>): Promise<T> {
+  const result = mobileBridgeLeaseTail.then(action, action);
+  mobileBridgeLeaseTail = result.catch(() => {});
+  return result;
+}
 
 function processIsAlive(pid: number): boolean {
   try {
@@ -115,8 +123,9 @@ function startDaemonMobileBridge(): Promise<void> {
   if (mobileBridgeLeaseOwnerPid !== null) return Promise.resolve();
   if (mobileBridgeStartPromise) return mobileBridgeStartPromise;
   mobileBridgeStartPromise = (async () => {
-    const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } =
-      await import("../mobile-bridge/runtime");
+    const runtime = await import("../mobile-bridge/runtime");
+    mobileBridgeRuntime = runtime;
+    const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } = runtime;
     // The owner can change while the dynamic import is resolving. Never race a
     // late daemon start against a Desktop that already received the lease.
     if (mobileBridgeLeaseOwnerPid !== null || mobileBridgeRuntimeStatus().running) return;
@@ -157,8 +166,10 @@ function ensureMobileBridgeLeaseWatch(): void {
 async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
   if (method === "daemon.ping") {
     const { openedStorePath } = await import("../store/db");
-    const { mobileBridgeRuntimeStatus } = await import("../mobile-bridge/runtime");
-    const mobileBridge = mobileBridgeRuntimeStatus();
+    // Control-plane health cannot depend on optional GUI-backed services.
+    // In Electron's Node mode importing those services may fail before a
+    // listener exists; that must not hide an otherwise healthy daemon.
+    const mobileBridge = mobileBridgeRuntime?.mobileBridgeRuntimeStatus();
     return {
       ok: true,
       version: daemonVersion(),
@@ -177,15 +188,18 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       mobileBridge: {
         owner: mobileBridgeLeaseOwnerPid === null ? "daemon" : "desktop",
         ownerPid: mobileBridgeLeaseOwnerPid ?? process.pid,
-        running: mobileBridge.running,
-        endpoint: mobileBridge.endpoint,
+        running: mobileBridge?.running ?? false,
+        endpoint: mobileBridge?.endpoint ?? null,
       },
     };
   }
-  if (method === "mobileBridge.claim") {
+  if (method === "mobileBridge.claim") return serializeMobileBridgeLease(async () => {
     const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
     if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1 || !processIsAlive(ownerPid)) {
       throw new Error("mobileBridge.claim requires a live owner pid");
+    }
+    if (desktopParentPid !== null && ownerPid !== desktopParentPid) {
+      throw new Error("mobile_bridge_parent_mismatch");
     }
     const existingOwner = mobileBridgeLeaseOwnerPid;
     if (existingOwner !== null && existingOwner !== ownerPid && processIsAlive(existingOwner)) {
@@ -193,10 +207,12 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     }
     mobileBridgeLeaseOwnerPid = ownerPid;
     ensureMobileBridgeLeaseWatch();
-    const { mobileBridgeRuntimeStatus, stopAgentlasMobileBridge } =
-      await import("../mobile-bridge/runtime");
     try {
-      await stopAgentlasMobileBridge();
+      // Reserve ownership before awaiting startup. A delayed import/start may
+      // finish after this RPC arrives; stop its actual listener before replying.
+      // An import failure means there is no daemon listener to stop.
+      await mobileBridgeStartPromise?.catch(() => {});
+      await mobileBridgeRuntime?.stopAgentlasMobileBridge();
     } catch (error) {
       // A failed claim must not strand ownership on a live Desktop that never
       // received the lease. Roll back first; the watcher provides further
@@ -210,10 +226,10 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     return {
       ok: true,
       ownerPid,
-      daemonBridgeRunning: mobileBridgeRuntimeStatus().running,
+      daemonBridgeRunning: mobileBridgeRuntime?.mobileBridgeRuntimeStatus().running ?? false,
     };
-  }
-  if (method === "mobileBridge.release") {
+  });
+  if (method === "mobileBridge.release") return serializeMobileBridgeLease(async () => {
     const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
     if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1) {
       throw new Error("mobileBridge.release requires an owner pid");
@@ -224,7 +240,7 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     mobileBridgeLeaseOwnerPid = null;
     await startDaemonMobileBridge();
     return { ok: true, ownerPid: null };
-  }
+  });
   if (method === "agents.residency") {
     /*
      * ★상주 관측 — "앱이 켜져 있는 동안 유지된다"를 **실측 가능한 사실**로 만든다.
@@ -365,6 +381,11 @@ export async function startDaemon(): Promise<void> {
     throw new Error("Desktop parent exited before agentlasd startup");
   }
 
+  // Desktop owns the authenticated mobile authority from boot. Reserving its
+  // lease avoids opening an unauthenticated listener in the headless helper,
+  // and avoids loading GUI-only modules merely to hand ownership to Desktop.
+  mobileBridgeLeaseOwnerPid = desktopParentPid;
+
   // Unlike the GUI process, this Electron child cannot read app.asar metadata
   // through `app.getAppPath()`. The Desktop parent passes its already-resolved
   // immutable identity over the private child environment. Configure it before
@@ -425,8 +446,11 @@ export async function startDaemon(): Promise<void> {
     controlSocket = socket;
     console.log(`[agentlasd] control socket: ${socket.address}`);
   } catch (error) {
-    // 소켓이 없으면 터미널이 예전처럼 자기 안에서 코어를 돌린다 — 느릴 뿐 막히지 않는다.
+    // A duplicate helper must not continue and compete for the bridge or
+    // shared lifecycle state after losing the control-socket ownership race.
     console.error("[agentlasd] control socket failed to start:", error);
+    performShutdown("control socket unavailable");
+    throw error;
   }
 
   try {
