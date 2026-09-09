@@ -913,19 +913,25 @@ function runCodexProcess(
  *
  * ★approvalPolicy: read/write 는 `on-request` 다 — 이것이 이번 작업의 요지다. codex 는
  * 지금까지 헤드리스라 실행 **전에** 물어볼 수 없었고(post-denial 만 가능), 이제 서버가
- * 우리에게 물어본다. full 은 예전 `--dangerously-bypass-approvals-and-sandbox` 와 같게
- * `never` 다 — 사용자가 이미 경계를 내려놓은 모드다.
+ * 우리에게 물어본다. full 은 기본적으로 예전 `--dangerously-bypass-approvals-and-sandbox` 와
+ * 같게 `never` 다. 단, Main이 명시한 `auto_review` reviewer는 MCP 승인 prompt를 Codex의
+ * 내부 위험 검토 경로로 보내야 하므로 `on-request`를 사용한다.
  */
 export function codexThreadPolicy(
   permission: RunnerRequest["permission"],
   cwd = agentRunCwd(),
+  approvalsReviewer: RunnerRequest["approvalsReviewer"] = "user",
 ): {
   sandbox: string;
   approvalPolicy: string;
   sandboxPolicy: Record<string, unknown>;
 } {
   if (permission === "full") {
-    return { sandbox: "danger-full-access", approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+    return {
+      sandbox: "danger-full-access",
+      approvalPolicy: approvalsReviewer === "auto_review" ? "on-request" : "never",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    };
   }
   if (permission === "write") {
     const writableRoot = path.resolve(cwd);
@@ -1110,10 +1116,10 @@ async function runCodexResidentTurn(input: {
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
-  const policy = codexThreadPolicy(req.permission, cwd);
+  const approvalsReviewer = req.approvalsReviewer ?? "user";
+  const policy = codexThreadPolicy(req.permission, cwd, approvalsReviewer);
   const requestedConfigDigest = inspectCodexWorkforceGrant(req, mcpArgs);
   let workforceObservation: CodexWorkforceObservation | null = null;
-  const approvalsReviewer = req.approvalsReviewer ?? "user";
   const imageDiagnosis = req.untrustedNoTools || req.restrictedReadBoundary || req.judgmentOnly
     ? null
     : await multimodalImageSlotDiagnosis();
