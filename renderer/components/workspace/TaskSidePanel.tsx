@@ -842,6 +842,7 @@ function TaskSidePanelContent({
    */
   const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [browserHeaderHost, setBrowserHeaderHost] = useState<HTMLDivElement | null>(null);
   const [browserNewTabRequest, setBrowserNewTabRequest] = useState(0);
   const [railView, setRailView] = useState<OutputRailView | null>(null);
@@ -1321,6 +1322,13 @@ function TaskSidePanelContent({
   if (!visible) return null;
   return (
     <aside
+      onKeyDownCapture={(event) => {
+        if (event.key !== "Escape" || !addMenuOpen) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setAddMenuOpen(false);
+        addMenuButtonRef.current?.focus();
+      }}
       {...designOutputSurfaceProps(designSurfaceKindForOutput(activeOutputKind), styles.artifactRail)}
       aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"}
       data-one-runtime-artifacts="true"
@@ -1402,6 +1410,7 @@ function TaskSidePanelContent({
           <span className={styles.artifactAddWrap}>
             <button
               type="button"
+              ref={addMenuButtonRef}
               aria-label={locale === "ko" ? "보기 추가" : "Add view"}
               aria-haspopup="menu"
               aria-expanded={addMenuOpen}
