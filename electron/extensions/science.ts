@@ -39,7 +39,7 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<{
 }> = [
   {
     id: SCIENCE_EXTENSION_ID,
-    version: "0.1.1",
+    version: "0.1.6",
     displayName: "Science Workspace",
     description: "Projects, literature, evidence graphs, statistics, and research writing",
     packageBytes: 11_000_000,
