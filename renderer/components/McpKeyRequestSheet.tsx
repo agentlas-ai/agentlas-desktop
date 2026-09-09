@@ -1,5 +1,7 @@
 "use client";
 
+import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
+
 // 실행 전 API 키 요청 바텀시트 — 에이전트가 작업 중 PayPal/Klaviyo 같은 툴에
 // 키가 필요하다고 판단하면 메인이 mcp-key-request 이벤트를 보내 이 시트가 뜬다.
 //  - 입력값은 기존 env.set(키체인 vault)으로만 저장한다. mcp:supplyRunKeys IPC는
@@ -364,7 +366,9 @@ export function McpKeyRequestSheet({
   );
 
   return (
+    <ComposerDecisionPortal enabled={presentation === "one"}>
     <div
+      data-composer-decision-card="true"
       className="mkr-wrap"
       role="alertdialog"
       aria-live="assertive"
@@ -372,5 +376,6 @@ export function McpKeyRequestSheet({
     >
       {content}
     </div>
+    </ComposerDecisionPortal>
   );
 }

@@ -1,5 +1,7 @@
 "use client";
 
+import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
+
 // 에이전트의 **동기 질문** 시트 — 도구가 답을 기다리는 질문이다.
 //
 // 기존 ChatQuestionSheet 는 `<<agentlas-ask>>` 펜스를 그린다: 답이 다음 채팅 메시지로
@@ -158,7 +160,9 @@ export function AskUserSheet() {
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
   return (
+    <ComposerDecisionPortal enabled={oneRoute}>
     <div
+      data-composer-decision-card="true"
       className={`aus ${oneRoute ? "aus-one" : ""}`}
       role="dialog"
       aria-modal="false"
@@ -322,5 +326,6 @@ export function AskUserSheet() {
         }
       `}</style>
     </div>
+    </ComposerDecisionPortal>
   );
 }

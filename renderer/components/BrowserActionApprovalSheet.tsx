@@ -1,5 +1,7 @@
 "use client";
 
+import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
+
 // 경량 승인 바텀시트 — 되돌릴 수 없는 브라우저 행동(전송·게시·삭제·결제) 전에 뜬다.
 // 기존 ChatQuestionSheet 대비 최소 UI: 한 줄 설명 + [한 번만] [항상 승인] [거부].
 //  - 현재 이 시트에 도달하는 건 결제(payment)/임의코드(unsafe-code)뿐이고 둘 다 allowAlways=false라
@@ -203,7 +205,7 @@ export function BrowserActionApprovalSheet() {
       `}</style>
     </>
   );
-  return <div className="baa-wrap" role="alertdialog" aria-live="assertive">{content}</div>;
+  return <ComposerDecisionPortal enabled={oneRoute}><div className="baa-wrap" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">{content}</div></ComposerDecisionPortal>;
 }
 
 function browserActionName(actionType: string, ko: boolean): string {

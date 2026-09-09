@@ -7256,6 +7256,7 @@ export function OneShell() {
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
               />
             )}
+            <div className={styles.composerDecisions} data-one-composer-decisions="true" />
             <ToolApprovalInline chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
               ? selected?.taskId === selectedTaskId
