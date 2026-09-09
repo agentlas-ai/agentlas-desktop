@@ -126,9 +126,13 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   messages: Object.freeze({
     blocks: (projectId: string, messageId: string) => ipcRenderer.invoke("science:messageBlocks:list", { extensionId, projectId, messageId }),
     citations: (projectId: string, messageId: string) => ipcRenderer.invoke("science:citations:listForMessage", { extensionId, projectId, messageId }),
+    // 대화 하나를 여는 데 필요한 블록·인용·근거를 한 번에 받는다.
+    evidenceMany: (projectId: string, messageIds: string[]) =>
+      ipcRenderer.invoke("science:messages:evidenceMany", { extensionId, projectId, messageIds }),
   }),
   evidence: Object.freeze({
     get: (projectId: string, evidenceId: string) => ipcRenderer.invoke("science:evidence:get", { extensionId, projectId, evidenceId }),
+    getMany: (projectId: string, evidenceIds: string[]) => ipcRenderer.invoke("science:evidence:getMany", { extensionId, projectId, evidenceIds }),
   }),
   evidenceGraph: Object.freeze({
     get: (projectId: string) => ipcRenderer.invoke("science:evidenceGraph:get", { extensionId, projectId }),
@@ -143,6 +147,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:sources:list", { extensionId, projectId }),
     get: (projectId: string, sourceId: string) => ipcRenderer.invoke("science:sources:get", { extensionId, projectId, sourceId }),
     getVersion: (projectId: string, sourceVersionId: string) => ipcRenderer.invoke("science:sources:get", { extensionId, projectId, sourceVersionId }),
+    // 목록의 행들을 한 번에 확인해 받는다. 한 건씩 부르면 왕복 수가 곧 대기 시간이 된다.
+    getMany: (projectId: string, sourceIds: string[]) => ipcRenderer.invoke("science:sources:getMany", { extensionId, projectId, sourceIds }),
   }),
   datasets: Object.freeze({
     importCsv: (input: unknown) => ipcRenderer.invoke("science:datasets:importCsv", { extensionId, input }),
@@ -163,6 +169,7 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   runs: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:runs:list", { extensionId, projectId }),
     get: (projectId: string, runId: string) => ipcRenderer.invoke("science:runs:get", { extensionId, projectId, runId }),
+    getMany: (projectId: string, runIds: string[]) => ipcRenderer.invoke("science:runs:getMany", { extensionId, projectId, runIds }),
   }),
   artifacts: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:artifacts:list", { extensionId, projectId }),
@@ -173,6 +180,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     forMessage: (projectId: string, conversationId: string, messageId: string) => ipcRenderer.invoke("science:artifacts:listForMessage", { extensionId, projectId, conversationId, messageId }),
     eventsForMessage: (projectId: string, conversationId: string, messageId: string) => ipcRenderer.invoke("science:artifactEvents:listForMessage", { extensionId, projectId, conversationId, messageId }),
     resolveConversationRoute: (projectId: string, conversationId: string, messageId: string, artifactId: string, artifactVersion: number) => ipcRenderer.invoke("science:artifacts:resolveConversationRoute", { extensionId, projectId, conversationId, messageId, artifactId, artifactVersion }),
+    forMessages: (projectId: string, targets: Array<{ conversationId: string; messageId: string }>) =>
+      ipcRenderer.invoke("science:artifacts:listForMessages", { extensionId, projectId, targets }),
     forLab: (projectId: string, labId: string) => ipcRenderer.invoke("science:artifacts:listForLab", { extensionId, projectId, labId }),
     preview: (projectId: string, artifactId: string, artifactVersion: number) => ipcRenderer.invoke("science:artifacts:preview", { extensionId, projectId, artifactId, artifactVersion }),
     capture: (input: unknown) => ipcRenderer.invoke("science:artifacts:capture", { extensionId, input }),
@@ -211,6 +220,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   }),
   validations: Object.freeze({
     list: (projectId: string, artifactId: string, artifactVersion?: number) => ipcRenderer.invoke("science:artifactValidations:list", { extensionId, projectId, artifactId, artifactVersion }),
+    listMany: (projectId: string, targets: Array<{ artifactId: string; artifactVersion?: number }>) =>
+      ipcRenderer.invoke("science:artifactValidations:listMany", { extensionId, projectId, targets }),
     closure: (projectId: string, receiptId: string) => ipcRenderer.invoke("science:artifactValidations:closure", { extensionId, projectId, receiptId }),
     validate: (input: unknown) => ipcRenderer.invoke("science:artifactValidations:validate", { extensionId, input }),
   }),

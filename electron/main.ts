@@ -2152,6 +2152,7 @@ app.whenReady().then(async () => {
           loopSessionId: result.session.id,
           expectedLoopVersion: result.session.version,
           expectedLoopStateSha256: result.session.stateSha256,
+          locale: record.locale,
         });
         const current = store.getLoopSessionForProject(record.projectId, result.session.id);
         return { ...result, session: current ?? result.session };
@@ -2267,11 +2268,50 @@ app.whenReady().then(async () => {
     const messageId = input && typeof input === "object" && "messageId" in input ? String((input as { messageId?: unknown }).messageId ?? "") : "";
     return scienceStore().listCitationsForMessageForProject(projectId, messageId);
   });
+  /*
+   * 대화 하나를 여는 데 필요한 것을 **한 번에** 답한다: 말풍선마다의 블록·인용, 그리고 그
+   * 인용들이 가리키는 근거 구간.
+   *
+   * 예전에는 말풍선마다 블록 1회 + 인용 1회를 부르고, 그 안에서 인용 하나마다 근거를 또
+   * 불렀다. 85개짜리 대화에서 170회가 넘고 한 번이 약 180ms 다. 대화가 길수록 여는 시간이
+   * 길어져서, 오래 붙든 연구일수록 열기 힘들어지는 구조였다.
+   *
+   * 근거 구간은 중복을 제거해 담는다 -- 여러 인용이 같은 구간을 가리키는 일이 흔하다.
+   */
+  ipcMain.handle("science:messages:evidenceMany", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const messageIds = Array.isArray(record.messageIds) ? record.messageIds.map((id) => String(id ?? "")) : [];
+    const store = scienceStore();
+    const spans = new Map<string, unknown>();
+    const rows = messageIds.map((messageId) => {
+      if (!messageId) return { messageId, blocks: [], citations: [] };
+      const citations = store.listCitationsForMessageForProject(projectId, messageId) ?? [];
+      for (const citation of citations as Array<{ evidenceSpanId?: string }>) {
+        const spanId = citation?.evidenceSpanId;
+        if (!spanId || spans.has(spanId)) continue;
+        const span = store.getEvidenceSpanForProject(projectId, spanId);
+        if (span) spans.set(spanId, span);
+      }
+      return { messageId, blocks: store.listMessageBlocksForProject(projectId, messageId) ?? [], citations };
+    });
+    return { rows, spans: [...spans.values()] };
+  });
   ipcMain.handle("science:evidence:get", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
     const evidenceId = input && typeof input === "object" && "evidenceId" in input ? String((input as { evidenceId?: unknown }).evidenceId ?? "") : "";
     return scienceStore().getEvidenceSpanForProject(projectId, evidenceId);
+  });
+  /* 인용마다 한 번씩 묻던 근거 구간. 말풍선마다 여러 개라 위의 것과 곱해진다. */
+  ipcMain.handle("science:evidence:getMany", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const evidenceIds = Array.isArray(record.evidenceIds) ? record.evidenceIds.map((id) => String(id ?? "")) : [];
+    const store = scienceStore();
+    return evidenceIds.map((evidenceId) => (evidenceId ? store.getEvidenceSpanForProject(projectId, evidenceId) : null));
   });
   ipcMain.handle("science:evidenceGraph:get", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -2327,6 +2367,31 @@ app.whenReady().then(async () => {
       return source && (!sourceId || source.id === sourceId) ? source : null;
     }
     return scienceStore().getSourceForProject(projectId, sourceId);
+  });
+  /*
+   * 화면이 목록을 받은 뒤 **한 건씩** 다시 읽어 확인하던 자리. 확인 자체는 옳다 — 목록 행은
+   * 투영이고, 프로젝트 범위 단건 읽기라야 그 출처가 지금 판으로도 이 프로젝트에 붙어 있음이
+   * 증명된다. 문제는 그 증명을 오가는 횟수였다.
+   *
+   * 실측(출처 188건): 목록 한 번 92ms, 그 뒤 단건 읽기 188번 47,134ms. 확인은 여기 안에서
+   * 그대로 하고, 오가는 것만 한 번으로 줄인다. 하는 일과 판정은 전과 같다.
+   */
+  ipcMain.handle("science:sources:getMany", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const sourceIds = Array.isArray(record.sourceIds) ? record.sourceIds.map((id) => String(id ?? "")) : [];
+    const store = scienceStore();
+    // 순서를 지킨다 — 화면이 목록 순서와 짝지어 읽는다. 못 찾은 자리는 null 로 남아 "미해결"이 된다.
+    return sourceIds.map((sourceId) => (sourceId ? store.getSourceForProject(projectId, sourceId) : null));
+  });
+  ipcMain.handle("science:runs:getMany", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const runIds = Array.isArray(record.runIds) ? record.runIds.map((id) => String(id ?? "")) : [];
+    const store = scienceStore();
+    return runIds.map((runId) => (runId ? store.getResearchRunForProject(projectId, runId) : null));
   });
   ipcMain.handle("science:datasets:importCsv", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
@@ -2777,6 +2842,26 @@ app.whenReady().then(async () => {
       String(record.projectId ?? ""), String(record.conversationId ?? ""), String(record.messageId ?? ""),
     );
   });
+  /*
+   * 대화를 열 때 말풍선 하나마다 물어보던 자리. 85개짜리 대화에서 한 건 181ms × 85 = 15.4초다.
+   * 대화가 길수록 여는 시간이 그만큼 길어진다 -- 오래 한 연구일수록 열기 힘들어지는 셈이었다.
+   */
+  ipcMain.handle("science:artifacts:listForMessages", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const targets = Array.isArray(record.targets) ? record.targets : [];
+    const store = scienceStore();
+    return targets.map((entry) => {
+      const target = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+      const messageId = String(target.messageId ?? "");
+      if (!messageId) return { messageId, contexts: [] };
+      return {
+        messageId,
+        contexts: store.listArtifactContextsForMessage(projectId, String(target.conversationId ?? ""), messageId),
+      };
+    });
+  });
   ipcMain.handle("science:artifactEvents:listForMessage", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
@@ -3120,6 +3205,31 @@ app.whenReady().then(async () => {
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
     return scienceStore().listArtifactValidationReceipts(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
+  });
+  /*
+   * 결과·그림 화면은 산출물마다 검증 기록을 따로 물었다. 62건짜리 프로젝트에서 그 화면을
+   * 여는 데 33초가 걸렸고, 느리다는 이유로 조회 상한까지 걸려 있어서 상한을 넘은 산출물은
+   * 화면에 "검증 상태를 확인하지 않았습니다"로 남았다 — 느림이 그대로 빈칸이 된 셈이다.
+   * 한 번에 물으면 기다림도 상한도 필요 없어진다. 읽는 내용과 판정은 그대로다.
+   */
+  ipcMain.handle("science:artifactValidations:listMany", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const targets = Array.isArray(record.targets) ? record.targets : [];
+    const store = scienceStore();
+    return targets.map((entry) => {
+      const target = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+      const artifactId = String(target.artifactId ?? "");
+      const artifactVersion = target.artifactVersion === undefined ? undefined : Number(target.artifactVersion);
+      if (!artifactId) return { artifactId, receipts: [], error: "science-artifact-id-missing" };
+      try {
+        return { artifactId, receipts: store.listArtifactValidationReceipts(projectId, artifactId, artifactVersion), error: "" };
+      } catch (error) {
+        // 한 건이 실패해도 나머지는 그대로 온다 — 예전 한 건씩 부르던 길과 같은 성질이다.
+        return { artifactId, receipts: [], error: String((error as Error)?.message ?? error) };
+      }
+    });
   });
   ipcMain.handle("science:artifactValidations:closure", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");

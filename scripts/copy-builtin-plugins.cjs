@@ -21,7 +21,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-astronomy": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-comparative-genomics": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-browser": ["plugin.json"],
-  "agentlas-computer-use": ["plugin.json"],
+  "agentlas-computer-use": ["README.md", "plugin.json"],
   "agentlas-earth-science": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-economic-data": ["README.md", "bin", "capabilities.json", "package.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-materials-science": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],

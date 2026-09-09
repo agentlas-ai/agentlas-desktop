@@ -5294,7 +5294,19 @@ async function runPlanner(
           executionContext,
           specs,
           plannerInvocationId,
-          packets: parsed.packets,
+          packets: parsed.packets.map((packet) => ({
+            ...packet,
+            gatePermission: taskForceChildPermission(
+              p,
+              packet.inputType,
+              "worker",
+              (packet.capabilityBindings?.length ?? 0) > 0,
+              false,
+              packet.workspaceAccess,
+            ),
+          })),
+          gateChatId: p.chat.id,
+          ...(p.req.simulation === true ? { gateSimulation: true as const } : {}),
           signal: p.signal,
         });
         const audit: WorkforcePlannerSchemaAttempt = {

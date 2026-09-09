@@ -63,6 +63,8 @@ export interface PreparedWorkforceToolMenu {
   entries: WorkforceToolMenuEntry[];
   /** Private host mapping. It is never included in Hub MCP arguments. */
   runtimeVersions: Record<string, string | null>;
+  /** Main-private runtime kind lookup for binding each worker's per-call gate. */
+  runtimeKinds: Record<string, string>;
 }
 
 export interface WorkforceToolInventory {
@@ -225,16 +227,19 @@ function workforceRuntimeInventory(runtimes: RuntimeStatus[]): {
   /** Host-authority rows may use Main's actual in-process tool dispatcher. */
   hostBrokerRuntimeIds: string[];
   runtimeVersions: Record<string, string | null>;
+  runtimeKinds: Record<string, string>;
 } {
   const legacyRuntimeIds: string[] = [];
   const hostNativeRuntimeIds: string[] = [];
   const hostBrokerRuntimeIds: string[] = [];
   const runtimeVersions: Record<string, string | null> = {};
+  const runtimeKinds: Record<string, string> = {};
   runtimes.forEach((runtime, index) => {
     // Keep the planner's runtime-N coordinates tied to its original candidate
     // list. Filtering eligibility must never renumber model-selection slots.
     const runtimeId = `runtime-${index + 1}`;
     runtimeVersions[runtimeId] = runtime.version ?? null;
+    runtimeKinds[runtimeId] = runtime.kind;
     if (runtime.kind === "claude-code") {
       legacyRuntimeIds.push(runtimeId);
       hostNativeRuntimeIds.push(runtimeId);
@@ -260,7 +265,7 @@ function workforceRuntimeInventory(runtimes: RuntimeStatus[]): {
       hostBrokerRuntimeIds.push(runtimeId);
     }
   });
-  return { legacyRuntimeIds, hostNativeRuntimeIds, hostBrokerRuntimeIds, runtimeVersions };
+  return { legacyRuntimeIds, hostNativeRuntimeIds, hostBrokerRuntimeIds, runtimeVersions, runtimeKinds };
 }
 
 async function probeWithAbort(
@@ -312,6 +317,7 @@ export async function prepareWorkforceToolMenu(input: {
       observedAt,
       entries: [],
       runtimeVersions: runtimeInventory.runtimeVersions,
+      runtimeKinds: runtimeInventory.runtimeKinds,
     };
   }
 
@@ -418,6 +424,7 @@ export async function prepareWorkforceToolMenu(input: {
     observedAt,
     entries,
     runtimeVersions: runtimeInventory.runtimeVersions,
+    runtimeKinds: runtimeInventory.runtimeKinds,
   };
 }
 
@@ -526,7 +533,10 @@ export async function finalizeWorkforceCapabilityBinding(input: {
   executionContext: WorkforceExecutionContext;
   specs: WorkforceToolRosterSpec[];
   plannerInvocationId: string;
-  packets: Array<{ agent: string; allocation: { runtimeId?: string }; capabilityBindings?: WorkforcePlannerCapabilityBinding[] }>;
+  packets: Array<{ agent: string; allocation: { runtimeId?: string }; capabilityBindings?: WorkforcePlannerCapabilityBinding[];
+    gatePermission?: "read" | "write" | "full" }>;
+  gateChatId: string;
+  gateSimulation?: true;
   signal?: AbortSignal;
 }): Promise<FinalizedWorkforceCapabilityBinding> {
   if (!ID_RE.test(input.plannerInvocationId)) throw new Error("workforce_capability_planner_invocation_invalid");
@@ -595,11 +605,25 @@ export async function finalizeWorkforceCapabilityBinding(input: {
       let canonicalConfigSha256: string | null = null;
       let cleanup = () => {};
       if (grantedToolIds.length > 0) {
+        const packet = input.packets.find((candidate) => candidate.agent === input.specs.find((spec) =>
+          spec.routeLabel === `workforce:${row.slotId}` && spec.agentReleaseId === row.agentReleaseId)?.slug);
+        const runtimeKind = input.menu.runtimeKinds[row.runtimeId];
+        if (!packet?.gatePermission || !runtimeKind || !input.gateChatId.trim()) {
+          throw new Error("workforce_tool_gate_scope_missing");
+        }
         const config = await buildMcpConfigFile({
           serverIds,
           skipDefaultSeed: true,
           configKey: `workforce-${randomUUID()}`,
           workingFolder: input.projectDir,
+          toolGate: {
+            runtime: runtimeKind,
+            sessionKey: `${runtimeKind}:${input.gateChatId}`,
+            permission: packet.gatePermission,
+            ...(input.projectDir ? { cwd: input.projectDir } : {}),
+            chatId: input.gateChatId,
+            ...(input.gateSimulation ? { simulation: true as const } : {}),
+          },
         });
         if (!config || JSON.stringify([...config.includedServerIds].sort()) !== JSON.stringify(serverIds)) {
           throw new Error("workforce_tool_grant_config_incomplete");

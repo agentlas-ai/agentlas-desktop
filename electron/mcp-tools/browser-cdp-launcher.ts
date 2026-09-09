@@ -2318,8 +2318,18 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 15;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 16;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
+
+const UNIFIED_CUA_BOOTSTRAP_SOURCE = String.raw`
+globalThis.cua = Object.freeze({
+  getState: () => agentlas.invoke('root','getState',[]),
+  getTab: (id) => Object.freeze({ id, snapshot:()=>agentlas.invoke('tab:'+id,'snapshot',[]), screenshot:(o={})=>agentlas.invoke('tab:'+id,'screenshot',[o]), focus:()=>agentlas.invoke('tab:'+id,'focus',[]), close:()=>agentlas.invoke('tab:'+id,'close',[]), navigate:(u)=>agentlas.invoke('tab:'+id,'navigate',[u]), back:()=>agentlas.invoke('tab:'+id,'back',[]), click:(t)=>agentlas.invoke('tab:'+id,'click',[t]), typeText:(t,x,o={})=>agentlas.invoke('tab:'+id,'typeText',[t,x,o]), pressKey:(k)=>agentlas.invoke('tab:'+id,'pressKey',[k]) }),
+  getApp: (id) => Object.freeze({ id, snapshot:(o={})=>agentlas.invoke('app:'+id,'snapshot',[o]), observe:(o={})=>agentlas.invoke('app:'+id,'observe',[o]), screenshot:(o={})=>agentlas.invoke('app:'+id,'screenshot',[o]), focus:()=>agentlas.invoke('app:'+id,'focus',[]), click:(p,o={})=>agentlas.invoke('app:'+id,'click',[p,o]), drag:(a,b,o={})=>agentlas.invoke('app:'+id,'drag',[a,b,o]), scroll:(y,x=0)=>agentlas.invoke('app:'+id,'scroll',[y,x]), typeText:(x)=>agentlas.invoke('app:'+id,'typeText',[x]), pressKey:(k,o={})=>agentlas.invoke('app:'+id,'pressKey',[k,o]), setValue:(x,p)=>agentlas.invoke('app:'+id,'setValue',p===undefined?[x]:[x,p]), clickElement:(t)=>agentlas.invoke('app:'+id,'clickElement',[t]), performElementAction:(t,a)=>agentlas.invoke('app:'+id,'performElementAction',[t,a]), setElementValue:(t,x)=>agentlas.invoke('app:'+id,'setElementValue',[t,x]), selectElementText:(t,x,o={})=>agentlas.invoke('app:'+id,'selectElementText',[t,x,o]) }),
+  createBrowserTab: (browser,url,options={}) => agentlas.invoke('root','createBrowserTab',[browser,url,options]),
+  diff: (before,after) => agentlas.invoke('root','diff',[before,after]),
+});
+return true;`;
 
 /** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
 export function readLauncherContractVersion(source: string): number | null {
@@ -2368,6 +2378,10 @@ export function hasUsableLauncherRuntimeBindings(source: string): boolean {
 function createLauncherSource(
   CURRENT_BROWSER_RUNTIME: ReturnType<typeof resolveAgentlasBrowserRuntime>,
 ): string {
+  const externalRuntimeModule = (relativeFromMcpTools: string): string => {
+    const compiled = path.join(__dirname, relativeFromMcpTools);
+    return compiled.split(path.sep).map((segment) => segment === "app.asar" ? "app.asar.unpacked" : segment).join(path.sep);
+  };
   const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
 // @agentlas-browser-cdp-contract ${BROWSER_CDP_LAUNCHER_CONTRACT}
 // @agentlas-browser-cdp-writer ${BROWSER_CDP_LAUNCHER_WRITER}
@@ -2380,6 +2394,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const NATIVE_ENDPOINT = process.env.AGENTLAS_NATIVE_BROWSER_ENDPOINT || '';
@@ -2442,6 +2458,10 @@ const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '1').toLowerCase() 
 const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
 const APPROVAL_FILE = process.env.${BROWSER_APPROVAL_FILE_ENV} || '';
 const PLAYWRIGHT_MCP_CLI = ${JSON.stringify(playwrightMcpCliPath())};
+const QUICKJS_ENGINE_MODULE = ${JSON.stringify(externalRuntimeModule("../computer-use/unified/quickjs-engine.js"))};
+const UNIFIED_CUA_ADAPTER_MODULE = ${JSON.stringify(externalRuntimeModule("../computer-use/unified/adapter.js"))};
+const UNIFIED_CUA_NATIVE_GATE_MODULE = ${JSON.stringify(externalRuntimeModule("../computer-use/unified/native-gate.js"))};
+const UNIFIED_CUA_BOOTSTRAP_SOURCE = ${JSON.stringify(UNIFIED_CUA_BOOTSTRAP_SOURCE)};
 const BROWSER_RUNTIME_EXE = ${JSON.stringify(CURRENT_BROWSER_RUNTIME?.executable ?? "")};
 const LEGACY_BROWSER_EXES = ${JSON.stringify(legacySystemBrowserExecutableCandidates())};
 const log = (...a) => console.error('[agentlas-browser]', ...a);
@@ -2622,6 +2642,11 @@ const SKILL_TOOLS = [
   { name: 'browser_skill_save', description: 'Save the actions performed so far in this session as a reusable skill. Use after successfully completing a task (e.g. an Instagram upload) so it can be replayed deterministically next time.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Skill name, e.g. "instagram-upload"' }, description: { type: 'string' } }, required: ['name'] } },
   { name: 'browser_skill_replay', description: 'Replay a previously saved skill by name — re-runs its recorded action sequence deterministically (no reasoning needed).', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
 ];
+const UNIFIED_CUA_TOOL = {
+  name: 'browser_cua_repl',
+  description: 'Run JavaScript in a persistent run-scoped isolate; return the final value. Global cua API: await cua.getState(); cua.getTab(id).snapshot/focus/close/navigate(url)/back/click({element,ref})/typeText({element,ref},text)/pressKey(key); await cua.createBrowserTab("iab",url); cua.getApp(name).observe/snapshot/screenshot/focus/click({x,y,sourceId})/drag/scroll/typeText/pressKey/setValue, plus clickElement({observationId,elementIndex}), setElementValue, performElementAction, selectElementText. Native element observations are single-mutation and must be refreshed. globalThis values persist between calls. Native methods exist only when cua-driver was selected for this same run.',
+  inputSchema: { type: 'object', properties: { code: { type: 'string', minLength: 1, maxLength: 65536 }, timeout_ms: { type: 'integer', minimum: 250, maximum: 120000 } }, required: ['code'], additionalProperties: false },
+};
 function skillPath(name) { return path.join(SKILLS_DIR, String(name).replace(/[^a-zA-Z0-9._-]/g, '_') + '.json'); }
 function listSkills() { try { return fs.readdirSync(SKILLS_DIR).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch (e) { return []; } }
 function saveSkill(name, steps, description) {
@@ -2784,11 +2809,175 @@ async function main() {
   };
 
   // 내부에서 child 에 tools/call 을 보내고 응답을 받는다(replay 용).
-  const callChild = (name, args) => new Promise((resolve) => {
+  const callChild = (name, args, signal) => new Promise((resolve) => {
     const id = 'agx-' + (++internalSeq);
-    waiters.set(id, resolve);
+    const cancel = () => {
+      if (!waiters.delete(id)) return;
+      forwardRaw(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: 'cancelled' } }));
+      resolve({ error: { message: 'unified-cua-cancelled' } });
+    };
+    if (signal?.aborted) { resolve({ error: { message: 'unified-cua-cancelled' } }); return; }
+    signal?.addEventListener('abort', cancel, { once: true });
+    waiters.set(id, (value) => { signal?.removeEventListener('abort', cancel); resolve(value); });
     forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: normalizeToolArguments(name, args) } }));
   });
+
+  let unifiedCuaEngine = null;
+  let unifiedCuaEnginePromise = null;
+  let unifiedCuaApi = null;
+  const unifiedSignalContext = new AsyncLocalStorage();
+  let unifiedNativeGate = null;
+  const unifiedEvaluations = new Map();
+  const unifiedTabTargets = new Map();
+  const unifiedAppTargets = new Map();
+  const nativeControlRequest = (route, body, signal) => new Promise((resolve, reject) => {
+    const file = process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE || '';
+    if (!file || !path.isAbsolute(file)) { reject(new Error('unified-cua-native-not-selected')); return; }
+    let info;
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 8192 || (process.platform !== 'win32' && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && stat.uid !== process.getuid())))) throw new Error();
+      info = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!info || info.schemaVersion !== 1 || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || typeof info.token !== 'string' || !/^[0-9a-f-]{36}$/i.test(info.token)) throw new Error();
+    } catch { reject(new Error('unified-cua-native-capability-invalid')); return; }
+    const bytes = Buffer.from(JSON.stringify(body), 'utf8');
+    let response = null;
+    const req = http.request({ host: '127.0.0.1', port: info.port, path: route, method: 'POST', headers: {
+      authorization: 'Bearer ' + info.token, 'content-type': 'application/json', 'content-length': String(bytes.length),
+    }, timeout: 12000 }, (res) => {
+      response = res; let data = '';
+      res.on('data', (chunk) => { data += chunk; if (data.length > 6 * 1024 * 1024) req.destroy(new Error('unified-cua-native-response-limit')); });
+      res.on('end', () => { try { const value = JSON.parse(data); value && value.ok ? resolve(value) : reject(new Error(String(value && (value.message || value.error) || 'unified-cua-native-failed'))); } catch { reject(new Error('unified-cua-native-response-invalid')); } });
+    });
+    const cancel = () => req.destroy(new Error('unified-cua-cancelled'));
+    signal?.addEventListener('abort', cancel, { once: true });
+    req.on('close', () => signal?.removeEventListener('abort', cancel));
+    req.on('error', reject); req.on('timeout', () => req.destroy(new Error('unified-cua-native-timeout'))); req.end(bytes);
+  });
+  const nativeToolCall = async (name, args, signal) => {
+    if (signal?.aborted) throw new Error('unified-cua-cancelled');
+    if (!unifiedNativeGate) throw new Error('unified-cua-native-gate-unavailable');
+    await unifiedNativeGate.authorize(name, signal);
+    if (name === 'list_apps') return nativeControlRequest('/action', { action: 'listApps' }, signal);
+    if (name === 'focus_app') return nativeControlRequest('/action', { action: 'focusApp', app: args.app }, signal);
+    if (name === 'get_screen') {
+      const capture = await nativeControlRequest('/capture', args.source_id ? { sourceId: args.source_id } : {}, signal);
+      if (capture && capture.preview && typeof capture.preview === 'object') {
+        const preview = { ...capture.preview };
+        const match = typeof preview.dataUrl === 'string' ? preview.dataUrl.match(/^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/) : null;
+        const images = unifiedSignalContext.getStore()?.images;
+        if (match && images && images.length < 2) images.push({ type: 'image', mimeType: 'image/' + match[1], data: match[2] });
+        delete preview.dataUrl;
+        return { ...capture, preview };
+      }
+      return capture;
+    }
+    if (name === 'get_app_state') return nativeControlRequest('/observe', { app: args.app, maxDepth: args.maxDepth, maxNodes: args.maxNodes }, signal);
+    const element = args.observation_id !== undefined || args.element_index !== undefined;
+    if (element) {
+      const operations = { click: 'click', perform_secondary_action: 'secondaryAction', set_value: 'setValue', select_text: 'selectText' };
+      if (!operations[name]) throw new Error('unified-cua-native-operation-denied');
+      return nativeControlRequest('/action', { action: 'elementAction', app: args.app, observationId: args.observation_id,
+        element_index: args.element_index, operation: operations[name], actionName: args.action, value: args.text,
+        text: args.text, prefix: args.prefix, suffix: args.suffix, selectionType: args.selection_type || 'text' }, signal);
+    }
+    if (name === 'set_value') {
+      if (args.x !== undefined || args.y !== undefined) {
+        if (!Number.isFinite(args.x) || !Number.isFinite(args.y)) throw new Error('unified-cua-native-invalid-point');
+        await nativeControlRequest('/action', { action: 'click', app: args.app, sourceId: args.source_id, x: args.x, y: args.y, button: 'left', clickCount: 1 }, signal);
+      }
+      await nativeControlRequest('/action', { action: 'selectText', app: args.app }, signal);
+      return args.text === ''
+        ? nativeControlRequest('/action', { action: 'key', app: args.app, key: 'BACKSPACE', modifiers: [], repeat: 1 }, signal)
+        : nativeControlRequest('/action', { action: 'typeText', app: args.app, text: args.text }, signal);
+    }
+    const actions = { click: 'click', double_click: 'click', drag: 'drag', scroll: 'scroll', type_text: 'typeText', press_key: 'key' };
+    const action = actions[name];
+    if (!action) throw new Error('unified-cua-native-operation-denied');
+    return nativeControlRequest('/action', { action, app: args.app, sourceId: args.source_id, x: args.x, y: args.y,
+      from_x: args.from_x, from_y: args.from_y, to_x: args.to_x, to_y: args.to_y, deltaX: args.delta_x, deltaY: args.delta_y,
+      text: args.text, key: args.key, modifiers: args.modifiers, repeat: args.repeat, button: args.button,
+      clickCount: name === 'double_click' ? 2 : 1, durationMs: args.duration_ms }, signal);
+  };
+  const ensureUnifiedCua = async () => {
+    if (unifiedCuaEngine) return unifiedCuaEngine;
+    if (unifiedCuaEnginePromise) return unifiedCuaEnginePromise;
+    unifiedCuaEnginePromise = (async () => {
+    const [{ QuickJsEngine }, { createUnifiedComputerUse }, { createNativeCuaToolGate }] = await Promise.all([
+      import(pathToFileURL(QUICKJS_ENGINE_MODULE).href), import(pathToFileURL(UNIFIED_CUA_ADAPTER_MODULE).href), import(pathToFileURL(UNIFIED_CUA_NATIVE_GATE_MODULE).href),
+    ]);
+    if (process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
+      let session;
+      try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { throw new Error('unified-cua-native-gate-unavailable'); }
+      unifiedNativeGate = createNativeCuaToolGate({ controlFile: process.env.AGENTLAS_UNIFIED_CUA_GATE_CONTROL || '',
+        serverKey: process.env.AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY || '', session,
+        ...(process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN ? { planPath: process.env.AGENTLAS_UNIFIED_CUA_GATE_PLAN } : {}) });
+    }
+    unifiedCuaApi = createUnifiedComputerUse({
+      browser: { browserId: 'iab', call: async (name, args, signal) => {
+        const denied = await gate(name, args, signal);
+        if (denied) throw new Error('browser-approval-' + denied);
+        const response = await callChild(name, args, signal);
+        if (response && response.error) throw new Error(String(response.error.message || 'browser-call-failed'));
+        const toolFailed = response && response.result && response.result.isError;
+        if (!toolFailed && RECORDABLE.has(name)) recording.push({ name, arguments: normalizeToolArguments(name, args) });
+        const images = unifiedSignalContext.getStore()?.images;
+        if (images && response && response.result && Array.isArray(response.result.content)) {
+          for (const item of response.result.content) {
+            if (images.length >= 2) break;
+            if (item && item.type === 'image' && (item.mimeType === 'image/png' || item.mimeType === 'image/jpeg') && typeof item.data === 'string') images.push(item);
+          }
+        }
+        return response && response.result;
+      } },
+      ...(process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE ? { native: { platform: process.platform, call: nativeToolCall } } : {}),
+      signal: () => unifiedSignalContext.getStore()?.signal,
+    });
+    const invoke = async (target, method, args, signal) => {
+      if (signal?.aborted) throw new Error('unified-cua-cancelled');
+      const inherited = unifiedSignalContext.getStore();
+      return unifiedSignalContext.run({ signal, images: inherited?.images || [] }, async () => {
+      const values = Array.isArray(args) ? args : [];
+      let receiver;
+      if (target === 'root') receiver = unifiedCuaApi;
+      else if (typeof target === 'string' && target.startsWith('tab:')) {
+        receiver = unifiedTabTargets.get(target);
+        if (!receiver) { receiver = unifiedCuaApi.getTab(target.slice(4), { browser: 'iab' }); unifiedTabTargets.set(target, receiver); }
+      }
+      else if (typeof target === 'string' && target.startsWith('app:')) {
+        receiver = unifiedAppTargets.get(target);
+        if (!receiver) { receiver = unifiedCuaApi.getApp(target.slice(4)); unifiedAppTargets.set(target, receiver); }
+      }
+      else throw new Error('unified-cua-target-denied');
+      const allowed = target === 'root' ? new Set(['getState','createBrowserTab','diff']) : target.startsWith('tab:')
+        ? new Set(['snapshot','screenshot','focus','close','navigate','back','click','typeText','pressKey'])
+        : new Set(['snapshot','observe','screenshot','focus','click','drag','scroll','typeText','pressKey','setValue','clickElement','performElementAction','setElementValue','selectElementText']);
+      if (!allowed.has(method) || typeof receiver[method] !== 'function') throw new Error('unified-cua-method-denied');
+      const value = await receiver[method](...values);
+      if (method === 'close' || method === 'createBrowserTab') unifiedTabTargets.clear();
+      return method === 'createBrowserTab' ? { id: value.id, browserId: value.browserId } : value;
+      });
+    };
+    unifiedCuaEngine = await QuickJsEngine.create({ invoke });
+    await unifiedCuaEngine.evaluate(UNIFIED_CUA_BOOTSTRAP_SOURCE);
+    return unifiedCuaEngine;
+    })();
+    try { return await unifiedCuaEnginePromise; }
+    finally { unifiedCuaEnginePromise = null; }
+  };
+  const unifiedCuaMcpResult = (value, retainedImages = []) => {
+    const content = retainedImages.slice(0, 2);
+    if (value && typeof value === 'object' && value.preview && typeof value.preview.dataUrl === 'string') {
+      const match = value.preview.dataUrl.match(/^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/);
+      const metadata = { ...value, preview: { ...value.preview } };
+      delete metadata.preview.dataUrl;
+      if (match) content.push({ type: 'image', mimeType: 'image/' + match[1], data: match[2] });
+      content.push({ type: 'text', text: JSON.stringify(metadata) });
+      return { content };
+    }
+    content.push({ type: 'text', text: JSON.stringify(value) });
+    return { content };
+  };
 
   const doReplay = async (name, replyId) => {
     const skill = loadSkill(name);
@@ -2811,6 +3000,9 @@ async function main() {
     if (!line.trim()) { forwardRaw(line); return; }
     let msg; try { msg = JSON.parse(line); } catch (e) { forwardRaw(line); return; }
     const cancelledId = cancelledRequestId(msg);
+    if (cancelledId != null && unifiedEvaluations.has(cancelledId)) {
+      unifiedEvaluations.get(cancelledId).abort(); unifiedEvaluations.delete(cancelledId); return;
+    }
     if (cancelledId != null && gateLifecycle.cancel(cancelledId)) {
       log('cancelled approval-gated browser action before forwarding', String(cancelledId));
       return;
@@ -2827,6 +3019,26 @@ async function main() {
       if (name === 'browser_skill_save') {
         try { const doc = saveSkill(args.name, recording.slice(), args.description); writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Saved skill "' + doc.name + '" with ' + doc.steps.length + ' steps → ' + skillPath(doc.name) }] } }); }
         catch (e) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Save failed: ' + String(e) }], isError: true } }); }
+        return;
+      }
+      if (name === 'browser_cua_repl') {
+        const controller = new AbortController(); unifiedEvaluations.set(msg.id, controller);
+        const retainedImages = [];
+        void ensureBrowserForTool()
+          .then(() => {
+            if (closing || controller.signal.aborted) throw new Error('unified-cua-cancelled');
+            return ensureUnifiedCua();
+          })
+          .then((engine) => {
+            if (controller.signal.aborted) throw new Error('unified-cua-cancelled');
+            return unifiedSignalContext.run({ signal: controller.signal, images: retainedImages },
+              () => engine.evaluate(args.code, { timeoutMs: args.timeout_ms, signal: controller.signal }));
+          })
+          .then((value) => { if (!controller.signal.aborted) writeClient({ jsonrpc: '2.0', id: msg.id, result: unifiedCuaMcpResult(value, retainedImages) }); })
+          .catch((error) => {
+            if (!controller.signal.aborted) writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: String(error && error.message || error).slice(0, 500) }], isError: true } });
+          })
+          .finally(() => { controller.abort(); unifiedEvaluations.delete(msg.id); });
         return;
       }
       void ensureBrowserForTool().then(() => {
@@ -2873,7 +3085,7 @@ async function main() {
     // tools/list 응답 → 스킬 툴 주입.
     if (msg && msg.result && Array.isArray(msg.result.tools)) {
       const have = new Set(msg.result.tools.map((t) => t.name));
-      for (const st of SKILL_TOOLS) if (!have.has(st.name)) msg.result.tools.push(st);
+      for (const st of [...SKILL_TOOLS, UNIFIED_CUA_TOOL]) if (!have.has(st.name)) msg.result.tools.push(st);
       writeClient(msg); return;
     }
     writeOutput(line);
@@ -2891,13 +3103,17 @@ async function main() {
   });
   process.stdin.on('end', () => {
     gateLifecycle.cancelAll();
+    for (const controller of unifiedEvaluations.values()) controller.abort(); unifiedEvaluations.clear();
     closing = true;
+    if (unifiedCuaEngine) { try { unifiedCuaEngine.dispose(); } catch {} unifiedCuaEngine = null; unifiedCuaApi = null; }
     safeEnd(child.stdin, 'playwright stdin');
     const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (e) {} }, 1500);
     timer.unref();
   });
   const stopForSignal = (exitCode) => {
     gateLifecycle.cancelAll();
+    for (const controller of unifiedEvaluations.values()) controller.abort(); unifiedEvaluations.clear();
+    if (unifiedCuaEngine) { try { unifiedCuaEngine.dispose(); } catch {} unifiedCuaEngine = null; unifiedCuaApi = null; }
     safeEnd(child.stdin, 'playwright stdin');
     try { child.kill('SIGTERM'); } catch (e) {}
     releaseLeaseOnce();

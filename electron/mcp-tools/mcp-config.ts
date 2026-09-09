@@ -582,6 +582,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     canonicalizeBrowser &&
     servers.some((server) => server.catalogId === "agentlas-browser"),
   );
+  const canonicalComputerUseServer = servers.find((server) =>
+    server.catalogId === "cua-driver" && isCanonicalComputerUseMcpServer(server));
+  const canonicalComputerUseSelected = Boolean(canonicalComputerUseServer);
   const browserAliases = new Map<string, InstalledMcpServer>();
   const serializedServers = servers.filter((server) => {
     if (!server.catalogId && requiredToolCatalogIds.has(server.id)) return true;
@@ -718,6 +721,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
               ...(browserRuntime?.env ?? {}),
               ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
+              ...(canonicalComputerUseSelected ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() } : {}),
+              ...(canonicalComputerUseSelected && opts?.toolGate && mcpProxyApprovalPort() > 0 ? {
+                AGENTLAS_UNIFIED_CUA_GATE_CONTROL: mcpProxyControlInfoPath(),
+                AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY: mcpConfigKey(canonicalComputerUseServer!),
+                AGENTLAS_UNIFIED_CUA_GATE_SESSION: JSON.stringify({ ...opts.toolGate, catalogId: "cua-driver" }),
+                ...(opts.toolGate.planPath ? { AGENTLAS_UNIFIED_CUA_GATE_PLAN: opts.toolGate.planPath } : {}),
+              } : {}),
               // Agent runs render their shared CDP page inside One's Browser
               // rail. Keep the automation host non-windowed; the explicit
               // Browser login action still uses browserOpenLogin's headful
@@ -777,10 +787,17 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // launch contract. Bypass the mutable per-run wrapper so no pathname is
         // re-opened between Agent App validation and runtime spawn.
         const inlineEnv = { ELECTRON_RUN_AS_NODE: "1", ...builtInEnv };
-        mcpServers[key] = { command: process.execPath, args, env: inlineEnv };
-        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
-        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
-        pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(inlineEnv));
+        const direct = { command: process.execPath, args, env: inlineEnv };
+        const isComputerUse = isAuthenticComputerUseMcpLaunch(command, args);
+        const proxied = isComputerUse ? mcpProxySpec(key, direct, opts, s.catalogId) : null;
+        if (isComputerUse && opts?.toolGate && !proxied) {
+          throw new Error("computer-use-tool-gate-unavailable");
+        }
+        const launch = proxied ?? direct;
+        mcpServers[key] = launch;
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(launch.command));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(launch.args));
+        pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(launch.env));
       } else {
         mcpChildWrapper ??= ensureMcpChildEnvWrapper(dir);
         const wrapperArgs = [

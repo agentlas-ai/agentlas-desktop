@@ -20,7 +20,7 @@ export interface ToolCallResult {
  * obtains a broader grant, or bypasses an approval decision.
  */
 export interface ScopedToolTransport {
-  call(tool: string, args: Readonly<Record<string, unknown>>): Promise<ToolCallResult | unknown>;
+  call(tool: string, args: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<ToolCallResult | unknown>;
 }
 
 export interface BrowserTransport extends ScopedToolTransport {
@@ -35,6 +35,7 @@ export interface UnifiedComputerUseOptions {
   browser?: BrowserTransport;
   native?: NativeTransport;
   now?: () => Date;
+  signal?: AbortSignal | (() => AbortSignal | undefined);
 }
 
 export interface BrowserTabDescriptor {
@@ -43,7 +44,6 @@ export interface BrowserTabDescriptor {
   title?: string;
   url?: string;
   active?: boolean;
-  raw?: unknown;
 }
 
 export interface NativeAppDescriptor {
@@ -52,12 +52,11 @@ export interface NativeAppDescriptor {
   bundleId?: string;
   pid?: number;
   active?: boolean;
-  raw?: unknown;
 }
 
 export interface UnifiedState {
   capturedAt: string;
-  browsers: Array<{ id: string; tabs: BrowserTabDescriptor[]; raw?: unknown }>;
+  browsers: Array<{ id: string; tabs: BrowserTabDescriptor[] }>;
   apps: NativeAppDescriptor[];
 }
 
@@ -90,9 +89,24 @@ export interface ScreenPoint {
   sourceId?: string;
 }
 
+export interface NativeElementTarget {
+  observationId: string;
+  elementIndex: number;
+}
+
+export interface NativeAppObservation {
+  observationId: string;
+  capturedAt?: string;
+  app?: unknown;
+  truncated?: boolean;
+  elements: Array<Record<string, unknown> & { element_index: number }>;
+}
+
 export interface BrowserElementTarget {
   element: string;
-  ref: string;
+  /** Exact snapshot reference; `ref` is accepted as the concise CUA spelling. */
+  ref?: string;
+  target?: string;
 }
 
 export interface BrowserTabTarget {
@@ -114,7 +128,9 @@ export interface NativeAppTarget {
   readonly kind: "native-app";
   readonly id: string;
   readonly app: string;
-  snapshot(options?: { sourceId?: string }): Promise<TargetSnapshot>;
+  snapshot(options?: { maxDepth?: number; maxNodes?: number }): Promise<TargetSnapshot>;
+  observe(options?: { maxDepth?: number; maxNodes?: number }): Promise<NativeAppObservation>;
+  screenshot(options?: { sourceId?: string }): Promise<unknown>;
   focus(): Promise<unknown>;
   click(point: ScreenPoint, options?: { button?: "left" | "right" | "middle"; count?: 1 | 2 }): Promise<unknown>;
   drag(from: ScreenPoint, to: ScreenPoint, options?: { durationMs?: number; button?: "left" | "right" | "middle" }): Promise<unknown>;
@@ -122,6 +138,14 @@ export interface NativeAppTarget {
   typeText(text: string): Promise<unknown>;
   pressKey(key: string, options?: { modifiers?: Array<"command" | "shift" | "option" | "control" | "fn">; repeat?: number }): Promise<unknown>;
   setValue(text: string, point?: ScreenPoint): Promise<unknown>;
+  clickElement(target: NativeElementTarget): Promise<unknown>;
+  performElementAction(target: NativeElementTarget, action: string): Promise<unknown>;
+  setElementValue(target: NativeElementTarget, text: string): Promise<unknown>;
+  selectElementText(target: NativeElementTarget, text: string, options?: {
+    prefix?: string;
+    suffix?: string;
+    selectionType?: "text" | "cursor_before" | "cursor_after";
+  }): Promise<unknown>;
 }
 
 export interface UnifiedComputerUse {

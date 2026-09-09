@@ -72,14 +72,24 @@ const AGENTLAS_BROWSER_READ_TOOLS = new Set([
   "browser_skill_list",
 ]);
 
+// Native observation calls cannot change host state. Keep this list exact;
+// focus, pointer, keyboard, scroll and element actions remain mutating.
+const AGENTLAS_COMPUTER_USE_READ_TOOLS = new Set([
+  "computer_status",
+  "list_apps",
+  "get_screen",
+  "get_app_state",
+]);
+
 export function mcpToolIsMutating(input: {
   catalogId?: string | null;
   toolName: string;
 }): boolean {
-  return !(
-    input.catalogId === "agentlas-browser"
-    && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName)
-  );
+  const browserRead = input.catalogId === "agentlas-browser"
+    && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName);
+  const nativeRead = input.catalogId === "cua-driver"
+    && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
+  return !(browserRead || nativeRead);
 }
 
 /**

@@ -36,6 +36,10 @@ const point = {
   app: { type: "string", minLength: 1, maxLength: 160 },
 };
 const exact = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
+const element = {
+  observation_id: { type: "string", minLength: 1, maxLength: 64 },
+  element_index: { type: "integer", minimum: 0, maximum: 299 },
+};
 const tools = [
   {
     name: "computer_status",
@@ -54,8 +58,8 @@ const tools = [
   },
   {
     name: "get_app_state",
-    description: "Focus an optional running app, then capture the current display for visual state inspection. The capture is also saved to disk; the JSON metadata's savedPath is its absolute file path. To show the capture in your chat answer, embed exactly that path as a markdown image. Never invent a screenshot file path.",
-    inputSchema: exact({ app: point.app, source_id: point.source_id }, ["app"]),
+    description: "Read the app accessibility tree and observation-scoped element indices. Prefer element actions; reobserve after every mutation or stale reference. Set screenshot=true for visual fallback; screenshots use display coordinates.",
+    inputSchema: exact({ app: point.app, source_id: point.source_id, screenshot: { type: "boolean" }, maxDepth: { type: "integer", minimum: 1, maximum: 32 }, maxNodes: { type: "integer", minimum: 1, maximum: 300 } }, ["app"]),
   },
   {
     name: "focus_app",
@@ -69,8 +73,8 @@ const tools = [
   },
   {
     name: "click",
-    description: "Click x,y in the latest screenshot coordinate space.",
-    inputSchema: exact({ ...point, button: { type: "string", enum: ["left", "right", "middle"] } }, ["app", "x", "y"]),
+    description: "Press an observed accessibility element, or click screenshot x,y as a fallback. Supply observation_id and element_index together for element actions.",
+    inputSchema: exact({ ...point, ...element, button: { type: "string", enum: ["left", "right", "middle"] } }, ["app"]),
   },
   {
     name: "double_click",
@@ -79,8 +83,8 @@ const tools = [
   },
   {
     name: "perform_secondary_action",
-    description: "Right-click x,y to open the contextual/secondary action menu.",
-    inputSchema: exact(point, ["app", "x", "y"]),
+    description: "Perform an exact action exposed by the observed element, or right-click screenshot x,y.",
+    inputSchema: exact({ ...point, ...element, action: { type: "string", maxLength: 120 } }, ["app"]),
   },
   {
     name: "drag",
@@ -118,15 +122,15 @@ const tools = [
   },
   {
     name: "select_text",
-    description: "Select all text in the currently focused editable field using Command+A.",
-    inputSchema: exact({ app: point.app }, ["app"]),
+    description: "Select an unambiguous substring in an observed editable element, using optional prefix/suffix. Without an element, select all in the focused field.",
+    inputSchema: exact({ app: point.app, ...element, text: { type: "string", maxLength: 16384 }, prefix: { type: "string", maxLength: 500 }, suffix: { type: "string", maxLength: 500 }, selection_type: { type: "string", enum: ["text", "cursor_before", "cursor_after"] } }, ["app"]),
   },
   {
     name: "set_value",
     description: "Optionally click a field, select its existing value, and type replacement Unicode text.",
     inputSchema: exact({
-      text: { type: "string", minLength: 1, maxLength: 16384 },
-      x: point.x, y: point.y, source_id: point.source_id, app: point.app,
+      text: { type: "string", minLength: 0, maxLength: 16384 },
+      x: point.x, y: point.y, source_id: point.source_id, app: point.app, ...element,
     }, ["app", "text"]),
   },
 ];
@@ -203,7 +207,7 @@ function actionBody(action, args) {
 // 입력·클릭류는 app 이 있어야만 실행되고, 그러면 control-server 가 pid 기반
 // 재포커스로 대상 신원을 보장한다. 관측(get_screen/scroll/move)은 자유다.
 const IDENTITY_REQUIRED_ACTIONS = new Set([
-  "typeText", "key", "selectText", "click", "drag",
+  "typeText", "key", "selectText", "click", "drag", "elementAction",
 ]);
 async function callAction(body) {
   if (IDENTITY_REQUIRED_ACTIONS.has(body.action) && !body.app) {
@@ -245,12 +249,34 @@ async function handle(request) {
   if (name === "list_apps") return callAction({ action: "listApps" });
   if (name === "get_screen") return capture(args);
   if (name === "get_app_state") {
-    if (args.app) {
+    if (args.screenshot) {
       const focused = await controlRequest("/action", { action: "focusApp", app: args.app });
       if (!focused || !focused.ok) return errorResult(focused);
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
-    return capture(args);
+    const observed = await controlRequest("/observe", { app: args.app, maxDepth: args.maxDepth, maxNodes: args.maxNodes }, 12000);
+    if (!observed || !observed.ok) return errorResult(observed);
+    const state = textResult(observed);
+    if (args.screenshot) {
+      const screen = await capture(args);
+      if (screen.isError) {
+        state.content.push({ type: "text", text: JSON.stringify({ screenshot: {
+          ok: false,
+          error: screen.content && screen.content[0] && screen.content[0].text || "capture-failed",
+        } }) });
+      } else {
+        state.content.push(...screen.content);
+      }
+    }
+    return state;
+  }
+  const hasElement = args.element_index !== undefined || args.observation_id !== undefined;
+  if (hasElement) {
+    if (!Number.isInteger(args.element_index) || typeof args.observation_id !== "string") return errorResult({ message: "Provide both observation_id and element_index from get_app_state." });
+    const operation = { click: "click", perform_secondary_action: "secondaryAction", select_text: "selectText", set_value: "setValue" }[name];
+    if (!operation) return errorResult({ message: "This tool does not support accessibility element actions." });
+    if (name === "click" && args.button && args.button !== "left") return errorResult({ message: "Use an exposed secondary action or screenshot coordinates for non-left clicks." });
+    return callAction({ action: "elementAction", app: args.app, observationId: args.observation_id, element_index: args.element_index, operation, actionName: args.action, value: args.text, text: args.text, prefix: args.prefix, suffix: args.suffix, selectionType: args.selection_type || "text" });
   }
   if (name === "focus_app") return callAction({ action: "focusApp", app: args.app });
   if (name === "move_mouse") return callAction({ ...actionBody("move", args), x: args.x, y: args.y });
