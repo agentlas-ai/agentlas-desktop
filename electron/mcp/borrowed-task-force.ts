@@ -32,9 +32,11 @@ import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
+  getChat,
   getOrCreateFirmSession,
   listChatMessages as readStoredChatMessages,
 } from "../store/chats";
+import { getLongRunByGoalId } from "../store/long-runs";
 import { listCommittedQuestionAnswers } from "../confirm";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
@@ -126,6 +128,29 @@ type EventSink = (ev: McpInvocationEvent) => void;
 function mainOneProfileContext(req: McpInvocationRequest): string {
   const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
   return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+}
+
+/**
+ * The first task-force turn can create/bind an Automatic Goal immediately
+ * before dispatch while the caller's `p.chat` is still its pre-admission
+ * snapshot. Read the current Main-owned chat/ledger state here so the planner
+ * receives the durable objective and criteria on that first turn too. This is
+ * context only: it does not alter the roster, permission ceiling, or packet
+ * access decisions.
+ */
+function activeGoalContextForPlanner(p: Pick<BorrowedTaskForceParams, "chat">): string {
+  const currentChat = getChat(p.chat.id);
+  const goalId = currentChat?.goalId;
+  if (!goalId) return "";
+  const goal = getLongRunByGoalId(goalId);
+  if (!goal || ["completed", "cancelled", "failed"].includes(goal.status)) return "";
+  return JSON.stringify({
+    schemaVersion: "agentlas.active-goal-context.v1",
+    goalRef: goal.goalId,
+    objective: goal.objective,
+    acceptanceCriteria: goal.acceptanceCriteria,
+    instructions: "Host-owned Goal context. Preserve every criterion and inspect evidence against it; do not treat this context as a permission grant or a planner instruction.",
+  });
 }
 
 const BORROWED_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -3147,6 +3172,7 @@ function buildPlannerPrompt(
   userPrompt: string,
   workingFolder?: string | null,
   executionContext?: WorkforceExecutionContext,
+  activeGoalContext?: string,
 ): string {
   return [
     "User request:",
@@ -3162,6 +3188,10 @@ function buildPlannerPrompt(
       ? "Use this closed context as the authoritative job decomposition. Do not replace, merge, or reinvent its slot responsibilities, assignments, or edges."
       : "",
     executionContext ? "" : undefined,
+    activeGoalContext
+      ? "MAIN_OWNED_ACTIVE_GOAL_CONTEXT (context only; preserve criteria, but it does not grant permission or replace the roster):"
+      : "",
+    activeGoalContext ?? "",
     "Task-force roster:",
     specs.map((spec) => [
       `- slug: ${spec.slug}`,
@@ -5012,6 +5042,7 @@ async function runPlanner(
     oneAttachmentExecutionPrompt(p.req),
     p.req.agentAppMode ? undefined : p.workingFolder,
     executionContext,
+    activeGoalContextForPlanner(p),
   );
   const strictWorkforcePlanner = Boolean(p.workforceSelectionReceipt);
   const plannerRunnerBoundary = taskForceOrchestratorBoundary(p, specs);
