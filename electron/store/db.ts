@@ -93,6 +93,90 @@ export function storeSchemaRefusalMessage(found: number, dbPath: string): string
  * 15s is a ceiling that is essentially never reached rather than added latency.
  */
 const STORE_BUSY_TIMEOUT_MS = 15_000;
+const STORE_MIGRATION_LOCK_WAIT_MS = 30_000;
+const STORE_MIGRATION_LOCK_POLL_MS = 25;
+
+function sleepSynchronously(milliseconds: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+function storeMigrationOwnerAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM");
+  }
+}
+
+/**
+ * Serialize the owner-side WAL conversion and migration ladder before opening
+ * the SQLite handle. SQLite's busy handler cannot make two deferred migration
+ * transactions safe: both readers can hold a snapshot that the other writer
+ * needs to invalidate, so one is rejected immediately to avoid deadlock.
+ *
+ * The lock is an intentionally narrow boot lease. It is released as soon as
+ * initStore finishes; ordinary Desktop/terminal writes continue to use the
+ * SQLite busy timeout. A dead owner can be reclaimed, while a live or unknown
+ * owner is never removed merely because startup is slow.
+ */
+function acquireStoreMigrationLock(dbPath: string): () => void {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) return () => {};
+  const lockPath = `${dbPath}.migration.lock`;
+  const startedAt = Date.now();
+  const owner = JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), nonce: randomUUID() });
+
+  while (Date.now() - startedAt < STORE_MIGRATION_LOCK_WAIT_MS) {
+    try {
+      const handle = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeSync(handle, owner, 0, "utf8");
+        fs.fsyncSync(handle);
+      } catch (error) {
+        try { fs.closeSync(handle); } catch { /* best effort */ }
+        try { fs.rmSync(lockPath, { force: true }); } catch { /* best effort */ }
+        throw error;
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.closeSync(handle); } catch { /* best effort */ }
+        try { fs.rmSync(lockPath, { force: true }); } catch { /* best effort */ }
+      };
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+      if (code !== "EEXIST") throw error;
+
+      let ownerPid: number | null = null;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown };
+        if (Number.isSafeInteger(parsed.pid) && Number(parsed.pid) > 1) ownerPid = Number(parsed.pid);
+      } catch {
+        // A process can die between creating the lock and writing its owner.
+        // Keep an unreadable, recent lock until the initializer has had time
+        // to finish; an old one is reclaimed below.
+      }
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(lockPath).mtimeMs; } catch { continue; }
+      const ownerIsDead = ownerPid !== null && !storeMigrationOwnerAlive(ownerPid);
+      const ownerUnknownAndStale = ownerPid === null && Date.now() - mtimeMs >= STORE_MIGRATION_LOCK_WAIT_MS;
+      if (ownerIsDead || ownerUnknownAndStale) {
+        try { fs.rmSync(lockPath, { force: true }); } catch { /* another opener may have reclaimed it */ }
+        continue;
+      }
+      sleepSynchronously(STORE_MIGRATION_LOCK_POLL_MS);
+    }
+  }
+
+  throw new Error(
+    `store_migration_lock_timeout: another Agentlas process is still upgrading ${path.basename(dbPath)}. `
+    + "Close the other Agentlas process and retry.",
+  );
+}
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -1279,10 +1363,12 @@ let _openedStorePath: string | null = null;
 export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
   const migrationRole = resolveMigrationRole(options);
+  let releaseMigrationLock: (() => void) | null = null;
   try {
   const dbPath = resolveStorePath();
   _openedStorePath = dbPath;
   preparePrivateStorePath(dbPath);
+  if (migrationRole === "owner") releaseMigrationLock = acquireStoreMigrationLock(dbPath);
   _db = new Database(dbPath);
   // ★busy_timeout 이 journal_mode 보다 **먼저** 와야 한다 (2026-08-18 실측).
   // `journal_mode = WAL` 은 파일에 배타 락을 잡는다. busy_timeout 이 아직 0이면
@@ -6179,6 +6265,8 @@ export function initStore(options: StoreInitOptions = {}): void {
     _db = null;
     _postContinuityRepairsDeferred = false;
     throw error;
+  } finally {
+    releaseMigrationLock?.();
   }
 }
 
