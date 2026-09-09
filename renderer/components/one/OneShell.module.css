@@ -1477,10 +1477,6 @@
      second time collapsed the conversation into one-character lines. */
   .workspace[data-context-rail="true"] .scroll { width: 100%; }
   .workspace[data-context-rail="true"] .composerDock { right: 0; }
-  .body[data-task-active="true"] .composer,
-  .body[data-task-active="true"] .steeringQueue,
-  .body[data-task-active="true"] .decisionInline,
-  .body[data-task-active="true"] .oneTurnAgentChips { width: min(1040px, 100%); }
 }
 
 .decisionCard {
@@ -1497,7 +1493,7 @@
   /* 불투명한 흰 바탕은 상수가 아니라 테마 토큰으로 낸다 — 상수 흰색 위에 테마
      글자색(--ink)이 오면 다크에서 흰 상자 + 흰 글자가 된다(오너 실사용 2026-09-07). */
   position: relative;
-  width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   margin: 0 auto 7px;
   border: 1px solid var(--paper-edge-strong);
   border-radius: 13px;
@@ -1824,6 +1820,7 @@
 }
 
 .composerDock {
+  --one-composer-width: 720px;
   position: absolute;
   z-index: 30;
   left: 0;
@@ -1837,7 +1834,7 @@
 .steeringQueue {
   /* 불투명한 흰 바탕은 상수가 아니라 테마 토큰으로 낸다 — 상수 흰색 위에 테마
      글자색(--ink)이 오면 다크에서 흰 상자 + 흰 글자가 된다(오너 실사용 2026-09-07). */
-  width: min(720px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   min-height: 38px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1866,7 +1863,7 @@
 }
 
 .steeringDraft {
-  width: min(720px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   min-height: 42px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto 32px;
@@ -1933,7 +1930,7 @@
   z-index: 4;
   left: 50%;
   bottom: 20px;
-  width: min(920px, calc(100% - 48px));
+  width: min(var(--one-composer-width, 720px), calc(100% - 48px));
   min-height: 76px;
   transform: translateX(-50%);
   display: grid;
@@ -1949,7 +1946,7 @@
 
 .attachmentTray,
 .attachmentError {
-  width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   margin: 0 auto 7px;
   pointer-events: auto;
 }
@@ -2018,8 +2015,8 @@
 }
 
 .oneMemoryUseOnceChip {
-  width: fit-content;
-  max-width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
+  max-width: min(var(--one-composer-width, 720px), 100%);
   min-height: 34px;
   display: flex;
   align-items: center;
@@ -2052,7 +2049,7 @@
 .oneMemoryUseOnceChip button:focus-visible { background: var(--paper-3); outline: 2px solid var(--ok-soft); }
 
 .composer {
-  width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   min-height: 120px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2212,7 +2209,7 @@
 .composerPopoverToggle[data-on="true"] > span { transform: translateX(14px); }
 
 .oneTurnAgentChips {
-  width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2379,7 +2376,7 @@
 }
 
 .composerNote {
-  width: min(920px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
   margin: 7px auto 0;
   color: var(--muted-deep);
   font-size: 9px;
@@ -3374,7 +3371,7 @@
 .body[data-task-active="true"] .decisionInline,
 .decisionInline,
 .composer {
-  width: min(720px, 100%);
+  width: min(var(--one-composer-width, 720px), 100%);
 }
 
 .composer {

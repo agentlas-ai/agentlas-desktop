@@ -19,7 +19,11 @@ const css = readFileSync(path.join(root, "renderer/components/one/OneShell.modul
 // ── A. 컴포저 스택은 같은 폭 규칙을 공유한다 ───────────────────────────────
 const STACK = [".composer", ".steeringQueue", ".oneTurnAgentChips", ".attachmentTray", ".attachmentError"];
 // 폭을 좁히는 선택자 묶음을 찾아, 컴포저가 들어간 묶음에는 나머지도 전부 들어 있어야 한다.
-const narrowing = [...css.matchAll(/([^{}]*\.composer[^{}]*)\{\s*width:\s*min\(720px/g)].map((m) => m[1]);
+const narrowing = [...css.matchAll(/([^{}]*\.composer[^{}]*)\{\s*width:\s*min\(var\(--one-composer-width, 720px\), 100%\)/g)]
+  .map((m) => m[1]).filter((selector) => selector.includes('[data-task-active="true"]'));
+assert.match(css, /\.composerDock\s*\{\s*--one-composer-width:\s*720px;/, "the shared composer width must be defined on the stack owner");
+const goalCss = readFileSync(path.join(root, "renderer/components/one/OneGoalControls.module.css"), "utf8");
+assert.match(goalCss, /width:\s*min\(var\(--one-composer-width, 720px\), 100%\)/, "the goal bar must use the same width as the composer stack");
 assert.ok(narrowing.length > 0, "the composer must still have a narrowed width rule to compare against");
 for (const selector of narrowing) {
   for (const member of STACK) {
