@@ -30,6 +30,10 @@ on:
         description: "Immutable workflow commit that supplies release-only verification code"
         required: true
         type: string
+    secrets:
+      AGENTLAS_DESKTOP_RELEASE_TOKEN:
+        description: "Scoped GitHub token for the pinned private Science dependency"
+        required: true
 
 permissions:
   contents: read
@@ -132,8 +136,55 @@ jobs:
       - name: Ensure embedded engine (Hephaestus)
         run: npm run ensure:engine
 
+      - name: Checkout pinned private release verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: agentlas-ai/agentlas-science
+          ref: da893984b3ab0254e55557734c1010f3d3ba3935
+          token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          path: .release-private-verification
+          sparse-checkout: release-verification/desktop
+          persist-credentials: false
+
+      - name: Install hash-bound private verification files
+        shell: bash
+        run: |
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "da893984b3ab0254e55557734c1010f3d3ba3935"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const source = '.release-private-verification/release-verification/desktop';
+          const manifest = JSON.parse(fs.readFileSync(path.join(source, 'manifest.json'), 'utf8'));
+          if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
+          const seen = new Set();
+          for (const entry of manifest.files) {
+            if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
+            seen.add(entry.path);
+            const bytes = fs.readFileSync(path.join(source, entry.path));
+            if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
+            fs.mkdirSync(path.dirname(entry.path), { recursive: true });
+            fs.writeFileSync(entry.path, bytes);
+          }
+          console.log(`Installed ${seen.size} private verification files from the pinned release`);
+          NODE
+
       - name: Install dependencies
-        run: npm ci --no-audit
+        shell: bash
+        env:
+          AGENTLAS_SCIENCE_GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        run: |
+          git_config="$RUNNER_TEMP/agentlas-science-gitconfig"
+          trap 'rm -f "$git_config"' EXIT
+          test -n "$AGENTLAS_SCIENCE_GITHUB_TOKEN"
+          umask 077
+          cat > "$git_config" <<EOF
+          [url "https://x-access-token:${AGENTLAS_SCIENCE_GITHUB_TOKEN}@github.com/agentlas-ai/agentlas-science.git"]
+              insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
+              insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
+              insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+          EOF
+          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
 
       - name: Fetch SHA-256-pinned standalone Python for the package
         run: npm run fetch:python
@@ -256,8 +307,55 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb xauth dbus-x11
 
+      - name: Checkout pinned private release verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: agentlas-ai/agentlas-science
+          ref: da893984b3ab0254e55557734c1010f3d3ba3935
+          token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          path: .release-private-verification
+          sparse-checkout: release-verification/desktop
+          persist-credentials: false
+
+      - name: Install hash-bound private verification files
+        shell: bash
+        run: |
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "da893984b3ab0254e55557734c1010f3d3ba3935"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const source = '.release-private-verification/release-verification/desktop';
+          const manifest = JSON.parse(fs.readFileSync(path.join(source, 'manifest.json'), 'utf8'));
+          if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
+          const seen = new Set();
+          for (const entry of manifest.files) {
+            if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
+            seen.add(entry.path);
+            const bytes = fs.readFileSync(path.join(source, entry.path));
+            if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
+            fs.mkdirSync(path.dirname(entry.path), { recursive: true });
+            fs.writeFileSync(entry.path, bytes);
+          }
+          console.log(`Installed ${seen.size} private verification files from the pinned release`);
+          NODE
+
       - name: Install updater E2E dependencies
-        run: npm ci --no-audit
+        shell: bash
+        env:
+          AGENTLAS_SCIENCE_GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        run: |
+          git_config="$RUNNER_TEMP/agentlas-science-gitconfig"
+          trap 'rm -f "$git_config"' EXIT
+          test -n "$AGENTLAS_SCIENCE_GITHUB_TOKEN"
+          umask 077
+          cat > "$git_config" <<EOF
+          [url "https://x-access-token:${AGENTLAS_SCIENCE_GITHUB_TOKEN}@github.com/agentlas-ai/agentlas-science.git"]
+              insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
+              insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
+              insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+          EOF
+          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
 
       - name: Configure Linux updater relaunch sandbox
         if: runner.os == 'Linux'
