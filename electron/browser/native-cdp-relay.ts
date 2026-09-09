@@ -33,6 +33,34 @@ export function nativeBrowserCommandFailure(error: unknown): string {
     ? message : "native-browser-command-failed";
 }
 
+async function waitForStableNativeBrowserViewport(
+  ownerId: number,
+  taskScopeId: string,
+  viewId: string,
+  guest: Guest,
+  current: () => boolean,
+  signal: AbortSignal,
+): Promise<void> {
+  let previous = nativeBrowserGuestViewport(ownerId, taskScopeId, viewId);
+  if (!previous) throw new Error("native-browser-screenshot-stale");
+  let stableSamples = 0;
+  // Opening the Browser rail resizes the native guest through a
+  // ResizeObserver. Wait for that transition to settle before pinning the
+  // screenshot's URL/viewport, while retaining the later stale checks.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (signal.aborted || !current() || nativeBrowserGuest(ownerId, taskScopeId, guest.viewId) !== guest.wc) {
+      throw new Error("native-browser-screenshot-stale");
+    }
+    const next = nativeBrowserGuestViewport(ownerId, taskScopeId, viewId);
+    if (!next) throw new Error("native-browser-screenshot-stale");
+    if (next.width === previous.width && next.height === previous.height) stableSamples += 1;
+    else { previous = next; stableSamples = 0; }
+    if (stableSamples >= 2) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 16));
+  }
+  throw new Error("native-browser-screenshot-stale");
+}
+
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 export interface NativeBrowserRelayGrant {
@@ -229,6 +257,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       // Both viewport and document pixels use the same guarded hidden-host
       // lifecycle; raw CDP on an unattached guest can wait indefinitely.
       if (params.format !== undefined && params.format !== "png" && params.format !== "jpeg") throw new Error("native-browser-screenshot-format-unsupported");
+      await waitForStableNativeBrowserViewport(owner.ownerId, input.chatId, guest.viewId, guest, current, input.signal);
       const url = guest.wc.getURL();
       const metrics = await guest.wc.debugger.sendCommand("Page.getLayoutMetrics");
       const viewport = metrics.cssVisualViewport ?? metrics.visualViewport;
