@@ -752,6 +752,15 @@ const singleInstanceLockPromise = initialSingleInstanceLock
       const retry = (): void => {
         if (app.requestSingleInstanceLock({ startupIntent: "update-relaunch" })) {
           traceUpdaterStartup("single-instance-lock-acquired-after-retry");
+          // On macOS Electron can acquire the lock after a rejected first
+          // attempt without ever emitting ready. Start a fresh process after
+          // this owner exits so the replacement can complete native startup.
+          if (process.platform === "darwin") {
+            traceUpdaterStartup("single-instance-lock-relaunch-after-retry");
+            app.relaunch();
+            app.exit(0);
+            return;
+          }
           resolve(true);
           return;
         }
