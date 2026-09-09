@@ -1715,6 +1715,10 @@ export function OneShell() {
   const runIdRef = useRef<string | null>(null);
   const runTaskIdRef = useRef<string | null>(null);
   const runChatIdRef = useRef<string | null>(null);
+  // Only the stop notice for this exact run may be cleared by terminal
+  // reconciliation; unrelated action notices must survive.
+  const cancelNoticeRunIdRef = useRef<string | null>(null);
+  const cancelNoticeTextRef = useRef<string | null>(null);
   /** One handoff has no separate cancel authority; interrupt uses the same
    * Main-owned invocation cancel path as the composer Stop action. */
   const cancelActiveRun = useCallback((reason: string) => {
@@ -1728,6 +1732,12 @@ export function OneShell() {
         : "The work could not be stopped because Desktop is unavailable. The run is still active.");
       return;
     }
+    const stopNotice = appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…";
+    // Claim the notice before crossing IPC. Main may publish a terminal event
+    // synchronously while cancel() is still waiting for its acknowledgement.
+    cancelNoticeRunIdRef.current = runId;
+    cancelNoticeTextRef.current = stopNotice;
+    setActionNotice(stopNotice);
     void api.invoke.cancel(runId).then((receipt) => {
       if (
         receipt?.runId !== runId
@@ -1738,15 +1748,20 @@ export function OneShell() {
       // Main accepted the terminal action. The run remains visibly busy until
       // its terminal event arrives, but directions Main just discarded must
       // disappear from the local queue now.
+      if (runIdRef.current !== runId || cancelNoticeRunIdRef.current !== runId) return;
       pendingSteersRef.current = [];
       setQueuedSteers([]);
-      setActionNotice(appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…");
     }).catch(() => {
       // Rejection means nothing was cancelled; preserve the active run and its
       // queued directions instead of leaving a false stopped/pending screen.
-      setActionNotice(appLocale === "ko"
+      if (cancelNoticeRunIdRef.current !== runId) return;
+      const notice = cancelNoticeTextRef.current;
+      cancelNoticeRunIdRef.current = null;
+      cancelNoticeTextRef.current = null;
+      const rejection = appLocale === "ko"
         ? "작업 중단 요청이 거절되었습니다. 실행과 대기 중 지시는 그대로입니다. 다시 시도해 주세요."
-        : "The stop request was rejected. The run and queued directions are unchanged; try again.");
+        : "The stop request was rejected. The run and queued directions are unchanged; try again.";
+      setActionNotice((current) => current === notice ? rejection : current);
     });
   }, [appLocale]);
   /*
@@ -2565,6 +2580,12 @@ export function OneShell() {
     }
     if (event.kind === "final") {
       const settledRunId = eventRunId;
+      if (cancelNoticeRunIdRef.current === settledRunId) {
+        const notice = cancelNoticeTextRef.current;
+        cancelNoticeRunIdRef.current = null;
+        cancelNoticeTextRef.current = null;
+        setActionNotice((current) => current === notice ? null : current);
+      }
       setKeyRequestSheet(null);
       const text = event.text ?? streamTextRef.current;
       // Commit the streamed answer under its own id. Leaving it as the shared
@@ -2592,6 +2613,12 @@ export function OneShell() {
     }
     if (event.kind === "error") {
       const settledRunId = eventRunId;
+      if (cancelNoticeRunIdRef.current === settledRunId) {
+        const notice = cancelNoticeTextRef.current;
+        cancelNoticeRunIdRef.current = null;
+        cancelNoticeTextRef.current = null;
+        setActionNotice((current) => current === notice ? null : current);
+      }
       setKeyRequestSheet(null);
       // Failure evidence is persisted by Main and consumed by One's recovery
       // judgment. It never becomes transcript copy in the renderer.
@@ -2697,6 +2724,13 @@ export function OneShell() {
     }
     unsubscribeRunRef.current?.();
     unsubscribeRunRef.current = null;
+    const detachedRunId = runIdRef.current;
+    if (detachedRunId && cancelNoticeRunIdRef.current === detachedRunId) {
+      const notice = cancelNoticeTextRef.current;
+      cancelNoticeRunIdRef.current = null;
+      cancelNoticeTextRef.current = null;
+      setActionNotice((current) => current === notice ? null : current);
+    }
     runIdRef.current = null;
     activityRunIdRef.current = null;
     activityEventRunIdRef.current = null;
@@ -3517,6 +3551,12 @@ export function OneShell() {
           idleCheck = setTimeout(() => {
             idleCheck = null;
             if (runIdRef.current !== missedRunId || runChatIdRef.current !== chatId) return;
+            if (cancelNoticeRunIdRef.current === missedRunId) {
+              const notice = cancelNoticeTextRef.current;
+              cancelNoticeRunIdRef.current = null;
+              cancelNoticeTextRef.current = null;
+              setActionNotice((current) => current === notice ? null : current);
+            }
             runIdRef.current = null;
             setBusy(false);
             unsubscribeRunRef.current?.();
@@ -3604,6 +3644,12 @@ export function OneShell() {
         unsubscribeRunRef.current = null;
         setBusy(false);
         setKeyRequestSheet(null);
+        if (cancelNoticeRunIdRef.current === expectedRunId) {
+          const notice = cancelNoticeTextRef.current;
+          cancelNoticeRunIdRef.current = null;
+          cancelNoticeTextRef.current = null;
+          setActionNotice((current) => current === notice ? null : current);
+        }
         void settleRun(chatId, runTaskIdRef.current, expectedRunId);
       } catch {
         // This is a recovery safety net. Preserve the visible run and retry on
@@ -3990,6 +4036,12 @@ export function OneShell() {
       }
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
+      if (cancelNoticeRunIdRef.current === runId) {
+        const notice = cancelNoticeTextRef.current;
+        cancelNoticeRunIdRef.current = null;
+        cancelNoticeTextRef.current = null;
+        setActionNotice((current) => current === notice ? null : current);
+      }
       runIdRef.current = null;
       setLiveRunPrompt((current) => current?.runId === runId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === runId ? null : current);
@@ -5196,6 +5248,13 @@ export function OneShell() {
     // thread's stop/busy affordance onto the empty home composer.
     unsubscribeRunRef.current?.();
     unsubscribeRunRef.current = null;
+    const leavingRunId = runIdRef.current;
+    if (leavingRunId && cancelNoticeRunIdRef.current === leavingRunId) {
+      const notice = cancelNoticeTextRef.current;
+      cancelNoticeRunIdRef.current = null;
+      cancelNoticeTextRef.current = null;
+      setActionNotice((current) => current === notice ? null : current);
+    }
     runIdRef.current = null;
     runChatIdRef.current = null;
     runTaskIdRef.current = null;
