@@ -382,6 +382,11 @@ export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boo
     return false;
   }
 
+  console.error("[launch] relaunch-request", JSON.stringify({
+    reason: "updater-bootstrap-recovery",
+    pid: process.pid,
+    ppid: process.ppid,
+  }));
   console.error("[updater] post-update startup failed; clearing the pending install and relaunching once");
   app.relaunch();
   return true;

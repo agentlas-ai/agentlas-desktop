@@ -341,7 +341,10 @@ assert.equal(direct.toolId, ${JSON.stringify(stringValue(tool.id) || "tool")});
 
 const cli = spawnSync(process.execPath, ["src/tool.mjs", JSON.stringify(sample)], {
   cwd: new URL("..", import.meta.url),
-  encoding: "utf8"
+  encoding: "utf8",
+  // The generated smoke test may run from Agentlas' Electron host. Force the
+  // executable into Node mode so validation never opens a second GUI window.
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
 });
 assert.equal(cli.status, 0, cli.stderr || cli.stdout);
 assert.match(cli.stdout, /"ok": true/);

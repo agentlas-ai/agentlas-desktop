@@ -160,7 +160,14 @@ process.stdin.on("end", () => { go().catch(fail); });
     const child = execFile(
       process.execPath,
       ["-e", script, keytarPath, op, service, account],
-      { timeout: keychainCallTimeoutMs(), killSignal: "SIGKILL", maxBuffer: 1024 * 1024 },
+      {
+        timeout: keychainCallTimeoutMs(),
+        killSignal: "SIGKILL",
+        maxBuffer: 1024 * 1024,
+        // process.execPath is Electron in the packaged app. Without this
+        // flag a headless keychain request opens another Agentlas window.
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      },
       (error, stdout) => {
         if (error) {
           resolve({ error: error.killed ? "timed out" : (error.message || "child failed") });

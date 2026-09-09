@@ -22,6 +22,9 @@ import path from "node:path";
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const LOG_FILE = "main.log";
 const PREVIOUS_LOG_FILE = "main.previous.log";
+const LAUNCH_TRACE_FILE = "launches.log";
+const PREVIOUS_LAUNCH_TRACE_FILE = "launches.previous.log";
+const MAX_LAUNCH_TRACE_BYTES = 512 * 1024;
 
 type ConsoleMethod = "log" | "info" | "warn" | "error";
 
@@ -122,6 +125,84 @@ function formatArgument(value: unknown): string {
     return JSON.stringify(value) ?? String(value);
   } catch {
     return String(value);
+  }
+}
+
+function safeLaunchArgs(): string[] {
+  const sensitiveFlags = new Set([
+    "--prompt", "-p", "--message", "--system-prompt", "--api-key", "--token", "--cookie",
+  ]);
+  const result: string[] = [];
+  let redactNext = false;
+  for (const raw of process.argv.slice(1).slice(0, 24)) {
+    const value = String(raw);
+    if (redactNext) {
+      result.push("<redacted>");
+      redactNext = false;
+      continue;
+    }
+    if (value === "-e" || value === "--eval") {
+      result.push(value);
+      redactNext = true;
+      continue;
+    }
+    if (sensitiveFlags.has(value)) {
+      result.push(value);
+      redactNext = true;
+      continue;
+    }
+    if (value.startsWith("agentlas://")) {
+      result.push("agentlas://<redacted>");
+      continue;
+    }
+    const display = value.length > 160 ? `${value.slice(0, 157)}...` : value;
+    // Paths identify the entry point without persisting a user's workspace path.
+    result.push(display.includes(path.sep) ? path.basename(display) : display);
+  }
+  return result;
+}
+
+function launchTraceSnapshot(): Record<string, unknown> {
+  const envKeys = Object.keys(process.env);
+  const processWithType = process as NodeJS.Process & { type?: string };
+  return {
+    pid: process.pid,
+    ppid: process.ppid,
+    exec: path.basename(process.execPath),
+    processType: processWithType.type ?? "node",
+    packaged: Boolean(app.isPackaged),
+    defaultApp: Boolean(process.defaultApp),
+    electronRunAsNode: process.env.ELECTRON_RUN_AS_NODE === "1"
+      ? "1"
+      : (process.env.ELECTRON_RUN_AS_NODE ? "other" : "unset"),
+    spawnMarker: envKeys.some((key) => key.startsWith("AGENTLAS_SPAWN_MARKER")),
+    headless: process.argv.includes("--headless-automations") || process.argv.includes("--graph-surface"),
+    args: safeLaunchArgs(),
+  };
+}
+
+/**
+ * A startup record is kept separately from the regular console mirror. It is
+ * written synchronously so a short-lived accidental GUI child still leaves
+ * its pid/parent/argv and Node-mode evidence even if stdout disappears.
+ */
+function writeLaunchTrace(directory: string): string | null {
+  const file = path.join(directory, LAUNCH_TRACE_FILE);
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    if (fs.existsSync(file) && fs.statSync(file).size >= MAX_LAUNCH_TRACE_BYTES) {
+      const previous = path.join(directory, PREVIOUS_LAUNCH_TRACE_FILE);
+      fs.rmSync(previous, { force: true });
+      fs.renameSync(file, previous);
+    }
+    fs.appendFileSync(
+      file,
+      `${new Date().toISOString()} [launch] ${JSON.stringify(launchTraceSnapshot())}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    return file;
+  } catch {
+    return null;
   }
 }
 
@@ -252,7 +333,9 @@ export function initFileLogging(): string | null {
         }
       };
     }
+    const launchTrace = writeLaunchTrace(directory);
     console.info(`[logging] main process log: ${file}`);
+    console.info("[launch] startup", JSON.stringify(launchTraceSnapshot()), launchTrace ? `trace=${launchTrace}` : "trace=unavailable");
     return file;
   } catch {
     return null;

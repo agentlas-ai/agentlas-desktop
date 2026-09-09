@@ -4273,7 +4273,11 @@ async function runAction(args) {
     const child = spawn(process.execPath, [launcher], {
       cwd: root,
       detached: true,
-      stdio: "ignore"
+      stdio: "ignore",
+      // Provider launchers are scripts, even when the host executable is
+      // Electron. Keep this detached child headless and do not relaunch the
+      // Agentlas GUI for every provider session.
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     });
     child.unref();
     return { ...base, dryRun: false, launched: true, pid: child.pid };

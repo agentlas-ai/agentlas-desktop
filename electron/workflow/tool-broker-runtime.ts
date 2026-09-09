@@ -52,6 +52,20 @@ function brokerDir(runId: string, nodeId: string): string {
   return path.join(base, `${nodeId.replace(/[^A-Za-z0-9_-]/g, "_")}`);
 }
 
+function shellCommandArg(value: string): string {
+  if (process.platform === "win32") return JSON.stringify(value);
+  if (/^[A-Za-z0-9_./:=@,+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** Render a hook command that cannot accidentally enter Electron's GUI. */
+function nodeHookCommand(script: string, planPath: string): string {
+  const command = [process.execPath, script, planPath].map(shellCommandArg).join(" ");
+  return process.platform === "win32"
+    ? `set "ELECTRON_RUN_AS_NODE=1" && ${command}`
+    : `ELECTRON_RUN_AS_NODE=1 ${command}`;
+}
+
 /** 훅 스크립트의 위치. 개발(dist 미빌드 아님)과 패키지 모두 같은 경로 규칙을 쓴다. */
 export function brokerHookScriptPath(): string {
   return path.join(__dirname, "tool-broker-hook.js");
@@ -89,7 +103,7 @@ export function materializeToolBroker(
   }
 
   fs.writeFileSync(planPath, JSON.stringify(plan), "utf8");
-  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${JSON.stringify(planPath)}`;
+  const command = nodeHookCommand(script, planPath);
   const hookBlock = {
     hooks: {
       PreToolUse: [

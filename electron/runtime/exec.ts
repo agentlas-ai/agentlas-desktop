@@ -104,16 +104,57 @@ export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...base, [pathKey]: merged.join(sep) };
 }
 
+/**
+ * Electron's executable is also the bundled Node runtime.  Any child that
+ * invokes that executable must opt into Node mode or macOS/Windows starts a
+ * second Agentlas GUI window instead of running the requested script.
+ *
+ * Keep this check path-based (including symlinks) and only apply it to the
+ * current Electron binary. Provider CLIs must retain their caller environment.
+ */
+export function isCurrentElectronExecutable(command: string): boolean {
+  if (!process.versions.electron || !command) return false;
+  try {
+    const current = fs.realpathSync(process.execPath);
+    const candidate = fs.realpathSync(path.isAbsolute(command) ? command : path.resolve(command));
+    return process.platform === "win32"
+      ? current.toLowerCase() === candidate.toLowerCase()
+      : current === candidate;
+  } catch {
+    const current = path.resolve(process.execPath);
+    const candidate = path.resolve(command);
+    return process.platform === "win32"
+      ? current.toLowerCase() === candidate.toLowerCase()
+      : current === candidate;
+  }
+}
+
+/** Environment for a CLI child, with a hard Node-mode guard for self-spawns. */
+export function envForCli(command: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = withCliPath(base);
+  if (isCurrentElectronExecutable(command)) env.ELECTRON_RUN_AS_NODE = "1";
+  return env;
+}
+
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */
 export function spawnCli(
   command: string,
   args: string[],
   options: SpawnOptions,
 ): ChildProcess {
+  const env = envForCli(command, options.env ?? process.env);
+  if (isCurrentElectronExecutable(command)) {
+    console.info("[runtime-spawn-self]", JSON.stringify({
+      parentPid: process.pid,
+      command: path.basename(command),
+      electronRunAsNode: env.ELECTRON_RUN_AS_NODE === "1",
+      argsCount: args.length,
+    }));
+  }
   return crossSpawn(command, args, {
     ...options,
     env: {
-      ...withCliPath(options.env ?? process.env),
+      ...env,
       // 우리가 띄운 트리라는 표식 — ps 로 사람이 식별하고, 고아 수거(spawn-registry)의
       // 부가 증거가 된다. 손자(MCP/빌드)에도 상속되므로 트리 전체가 표식을 가진다.
       [AGENTLAS_SPAWN_MARKER_ENV]: `agentlas:${process.pid}`,
@@ -269,7 +310,7 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<string 
     try {
       child = crossSpawn(command, ["--version"], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: withCliPath(process.env),
+        env: envForCli(command),
         detached: process.platform !== "win32",
       });
     } catch {
