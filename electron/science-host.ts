@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { installScienceHost } from "agentlas-science";
+import type { ScienceMcpPreparedRegistration } from "agentlas-science";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
 import { resolveManagedNodeRuntime } from "./runtime/managed-node";
@@ -30,6 +31,8 @@ import { captureScienceInvocationBinding } from "./invocation/workspace-binding"
 import { RUNTIME_BACKEND_SET } from "../shared/runtime-backends";
 import { RUNTIME_KIND_SET } from "../shared/runtime-kinds";
 import { productExtensionSignedPayload } from "../shared/product-extension";
+import type { InstalledMcpServer } from "../shared/types";
+import { registerPreparedMcpConfig } from "./mcp-tools/prepared-transport";
 
 /*
  * 사이언스 화면 묶음을 검증해 주는 쪽은 확장 설치기다. 사이언스가 그 판정을 되묻기
@@ -51,6 +54,42 @@ import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./scien
 
 let installed = false;
 
+/**
+ * Science's package owns the loopback grant, while Desktop Main owns the
+ * prepared-transport admission registry. Keep the bridge here so a renderer
+ * or an extension cannot mint a prepared binding by itself.
+ */
+function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration): void {
+  const server: InstalledMcpServer = {
+    id: input.configKey,
+    catalogId: input.configKey,
+    name: "Agentlas Science",
+    nameEn: "Agentlas Science",
+    transport: "stdio",
+    command: input.command,
+    args: [...input.args],
+    url: null,
+    // Prepared transports do not resolve credentials through the global
+    // registry. Their exact values stay in the Main-only WeakMap created by
+    // registerPreparedMcpConfig.
+    envKeys: [],
+    configurationValid: true,
+    enabled: true,
+    installedAt: new Date().toISOString(),
+  };
+  registerPreparedMcpConfig({
+    path: input.path,
+    servers: [{
+      configKey: input.configKey,
+      server,
+      transport: { command: input.command, args: [...input.args], env: { ...input.env } },
+      runtimeRoot: null,
+    }],
+    runtimeEnv: {},
+    isCurrent: input.isCurrent,
+  });
+}
+
 /** 부팅에서 한 번만 부른다. 두 번 불러도 안전하다. */
 export function installDesktopScienceHost(): void {
   if (installed) return;
@@ -70,6 +109,7 @@ export function installDesktopScienceHost(): void {
     // 플랫폼
     userDataPath, currentUiLocale, productExtensionSignedPayload,
     RUNTIME_BACKEND_SET, RUNTIME_KIND_SET,
+    registerScienceMcpPreparedConfig,
     // 확장 검증
     activeScienceExtension,
     resolveVerifiedScienceRenderer,
