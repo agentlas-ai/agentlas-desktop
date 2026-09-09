@@ -497,10 +497,16 @@ export function scrubLegacyRunEventSecrets(): number {
       }
     }
   };
+  // This is a maintenance write that can run while the daemon is reading the
+  // shared WAL. A deferred transaction would read first and then try to
+  // upgrade to a writer; under contention SQLite can reject that upgrade
+  // immediately because the reader/writer pair could deadlock, even with a
+  // busy timeout configured. Acquire the writer reservation before the first
+  // SELECT so the configured timeout can do its job.
   db.transaction(() => {
     scrubTable("run_events");
     scrubTable("failure_events");
-  })();
+  }).immediate();
   return changed;
 }
 

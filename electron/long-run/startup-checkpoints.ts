@@ -26,7 +26,16 @@ export interface CheckpointStartupResult {
  * reconciled. A host pause between settled turns is resumable; an unknown
  * native side effect or newer user direction is not permission to replay. */
 export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispatcher): CheckpointStartupResult[] {
-  assertDesktopLongRunAdmissionOpen();
+  try {
+    assertDesktopLongRunAdmissionOpen();
+  } catch (error) {
+    // A quit/update handoff can close the coordinator between the startup
+    // bootstrap stages and this optional recovery pass. There is no work to
+    // admit after that boundary, so treat it as an expected no-op instead of
+    // surfacing a second Electron startup error.
+    if (error instanceof Error && error.message === "desktop_long_run_admission_closed") return [];
+    throw error;
+  }
   const appInstanceId = desktopAppInstanceId();
   const results: CheckpointStartupResult[] = [];
   // Include clean-shutdown pauses: they were already paused before boot and
