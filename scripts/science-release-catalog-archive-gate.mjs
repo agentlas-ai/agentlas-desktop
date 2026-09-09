@@ -29,7 +29,7 @@ const CANDIDATE_URL_ENV = "AGENTLAS_SCIENCE_RELEASE_CATALOG_URL";
 const CANDIDATE_SHA_ENV = "AGENTLAS_SCIENCE_RELEASE_CATALOG_SHA256";
 const MAX_CATALOG_BYTES = 128 * 1024;
 const CATALOG_REQUEST_TIMEOUT_MS = 15_000;
-const CANDIDATE_PATH = /^\/agentlas-ai\/agentlas-desktop-releases\/releases\/download\/science-v\d+\.\d+\.\d+\/science-catalog\.json$/u;
+const CANDIDATE_PATH = /^\/agentlas-ai\/(?:agentlas-science-releases|agentlas-desktop-releases)\/releases\/download\/science-v\d+\.\d+\.\d+\/science-catalog\.json$/u;
 const TRUSTED_CATALOG_REDIRECT_HOSTS = new Set([
   "github.com",
   "objects.githubusercontent.com",
