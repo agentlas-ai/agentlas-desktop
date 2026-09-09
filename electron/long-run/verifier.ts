@@ -52,6 +52,9 @@ const CONCRETE_EVENT_KINDS = new Set([
   "mcp_surface",
   "one_surface_snapshot",
   "artifact_verification",
+  // Host-owned receipt for a delegated worker. This is evidence of the
+  // requested delegation lifecycle, not the worker's self-reported prose.
+  "task_force_execution_receipt",
 ]);
 
 function boundedJson(value: unknown, limit = 1_800): string {
@@ -524,6 +527,14 @@ function summarizeEvent(event: RunEventUi): Record<string, unknown> {
     "oneArtifacts",
     "surfaceId",
     "resultFolder",
+    "schemaVersion",
+    "plannerParseSuccess",
+    "fallbackUsed",
+    "childInvocationIds",
+    "childReleaseIds",
+    "synthesisStatus",
+    "verifierStatus",
+    "verifierIssues",
   ];
   const payload: Record<string, unknown> = {};
   for (const key of keys) {

@@ -143,12 +143,15 @@ export async function prepareInvocationAutomaticGoal(input: {
           originalRequest: source.text,
           locale: "en",
         }) },
-        { id: "evidence", text: "Completion is supported by current evidence on the requested output surface; unverified work remains open." },
-        { id: "delivery-validation", text: "For apps or interactive UI changes, launch the actual app and exercise core user flows "
-          + "in a browser, simulator, or native runtime. Preserve tool evidence or captures of launch, rendered screens, interactions, "
-          + "and outcomes. Source, build, static analysis, unit/widget tests, or a completion report alone do not pass. "
-          + "Fix failures and repeat. For other outputs inspect the delivered format. Missing runtime/access remains unmet; "
-          + "use only existing permissions." },
+        { id: "evidence", text: "Completion is supported by current host-owned evidence on the requested output surface; unverified work remains open. "
+          + "For a delegated tool-only runtime or observation request, include a successful host tool receipt and a host-owned delegation "
+          + "execution receipt when delegation was requested; worker or model prose alone is not evidence." },
+        { id: "delivery-validation", text: "Only when the request asks to create, change, deliver, or perform actual screen QA of an app or interactive UI, "
+          + "launch the actual app and exercise core user flows in a browser, simulator, or native runtime. Preserve tool evidence or captures "
+          + "of launch, rendered screens, interactions, and outcomes. Source, build, static analysis, unit/widget tests, or a completion report "
+          + "alone do not pass. Fix failures and repeat. A tool-only runtime or observation request does not require app launch or screen QA; "
+          + "its requested operation must instead be proved by the host receipts above. For other outputs inspect the delivered format. "
+          + "Missing runtime/access remains unmet; use only existing permissions." },
       ],
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,
