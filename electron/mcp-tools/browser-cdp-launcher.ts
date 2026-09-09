@@ -1285,7 +1285,11 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
       AGENTLAS_CDP_PROFILE: browserCdpProfilePath(),
       AGENTLAS_CDP_PORT: String(browserCdpPort()),
       AGENTLAS_CDP_HEADLESS: process.env.AGENTLAS_CDP_HEADLESS ?? "1",
-      AGENTLAS_CDP_AUTO_STOP: "1",
+      // This short-lived bootstrap must leave the host alive for the Electron
+      // process to attest and adopt it after the MCP child exits. AUTO_STOP=1
+      // schedules the child's idle reaper when its temporary lease is released,
+      // racing the ownership check and deleting the owner marker before adopt.
+      AGENTLAS_CDP_AUTO_STOP: "0",
       // The bootstrap owns no live-view lease. Rebind the exact browser to the
       // Electron host below before closing this short-lived MCP client.
       AGENTLAS_CDP_SKIP_GUARDIAN: "1",
