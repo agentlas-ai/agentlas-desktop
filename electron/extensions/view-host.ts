@@ -4,6 +4,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { app, BrowserWindow, nativeImage, nativeTheme, screen, WebContentsView } from "electron";
 import type { Rectangle } from "electron";
 import { onAskUserLifecycle, submitAskUserAnswer } from "../confirm/ask-user";
+import {
+  getToolApprovalResolution,
+  listPendingToolApprovals,
+  onToolApprovalRequested,
+  onToolApprovalResolved,
+} from "../runtime/tool-approval";
 import { productExtensionSignedPayload, type ProductExtensionPermission, type ProductExtensionViewBounds, type ProductExtensionViewStatus } from "../../shared/product-extension";
 import { activeScienceExtension, SCIENCE_EXTENSION_ID } from "./science";
 import {
@@ -73,10 +79,50 @@ interface ActiveScienceView {
   send: (status: ProductExtensionViewStatus) => void;
   askUserDispose: (() => void) | null;
   askUserRequestIds: Set<string>;
+  toolApprovalWatchChatId: string | null;
   renderer: ActiveScienceRendererView | null;
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
+const scienceToolApprovalChatByRequestId = new Map<string, string>();
+
+/*
+ * Science is a WebContentsView, not one of the Desktop BrowserWindows that receive
+ * the general runtime approval broadcast. Forward only the conversation currently
+ * watched by a Science guest; sending the global queue here would leak another
+ * product's tool details across the extension boundary.
+ */
+let scienceToolApprovalForwardingInstalled = false;
+function installScienceToolApprovalForwarding(): void {
+  if (scienceToolApprovalForwardingInstalled) return;
+  scienceToolApprovalForwardingInstalled = true;
+  onToolApprovalRequested((request) => {
+    const chatId = request.chatId;
+    if (!chatId) return;
+    for (const active of activeViews.values()) {
+      if (active.toolApprovalWatchChatId !== chatId || active.view.webContents.isDestroyed()) continue;
+      scienceToolApprovalChatByRequestId.set(request.id, chatId);
+      try { active.view.webContents.send("science:toolApprovalRequest", request); } catch { /* guest may be closing */ }
+    }
+    while (scienceToolApprovalChatByRequestId.size > 500) {
+      const oldest = scienceToolApprovalChatByRequestId.keys().next();
+      if (oldest.done) break;
+      scienceToolApprovalChatByRequestId.delete(oldest.value);
+    }
+  });
+  onToolApprovalResolved((requestId) => {
+    const chatId = scienceToolApprovalChatByRequestId.get(requestId);
+    if (!chatId) return;
+    scienceToolApprovalChatByRequestId.delete(requestId);
+    const receipt = getToolApprovalResolution(requestId);
+    for (const active of activeViews.values()) {
+      if (active.toolApprovalWatchChatId !== chatId || active.view.webContents.isDestroyed()) continue;
+      try { active.view.webContents.send("science:toolApprovalResolution", receipt); } catch { /* guest may be closing */ }
+    }
+  });
+}
+
+installScienceToolApprovalForwarding();
 
 function safeBounds(bounds: ProductExtensionViewBounds, window: BrowserWindow): ProductExtensionViewBounds {
   const content = window.getContentBounds();
@@ -183,6 +229,18 @@ export function sendScienceTurnEventToView(senderId: number, event: unknown): bo
   if (!active || active.view.webContents.isDestroyed()) return false;
   active.view.webContents.send("science:turnEvent", event);
   return true;
+}
+
+export function setScienceToolApprovalWatch(senderId: number, chatId: string | null): { ok: true } {
+  const active = activeViewForSender(senderId);
+  if (!active) throw new Error("science-extension-sender-not-authorized");
+  active.toolApprovalWatchChatId = chatId;
+  if (chatId) {
+    for (const request of listPendingToolApprovals()) {
+      if (request.chatId === chatId) scienceToolApprovalChatByRequestId.set(request.id, chatId);
+    }
+  }
+  return { ok: true };
 }
 
 export function assertScienceExtensionViewPermission(senderId: number, permission: ProductExtensionPermission): void {
@@ -768,6 +826,7 @@ export async function openScienceExtensionView(input: {
     send: input.send,
     askUserDispose: null,
     askUserRequestIds: new Set(),
+    toolApprovalWatchChatId: null,
     renderer: null,
   };
   activeViews.set(input.ownerId, active);

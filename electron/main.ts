@@ -171,6 +171,7 @@ import {
   notifyScienceChemistryCommitted,
   notifyScienceArtifactChanged,
   sendScienceTurnEventToView,
+  setScienceToolApprovalWatch,
 } from "./extensions/view-host";
 import {
   closeScienceStore,
@@ -243,7 +244,19 @@ import type {
   ScienceDecisionRequest,
 } from "agentlas-science/dist/contracts/science-contract";
 import type { ProductExtensionPermission } from "../shared/product-extension";
+import { toolApprovalActionId } from "../shared/tool-approval-action";
+import type { ToolApprovalDecision } from "../shared/types";
 import type { ScienceComposerStartInput } from "agentlas-science";
+import {
+  getToolApprovalResolution,
+  listPendingToolApprovals,
+  resolveToolApproval,
+} from "./runtime/tool-approval";
+import {
+  grantChatAlwaysApproval,
+  isChatAlwaysApproved,
+  revokeChatAlwaysApproval,
+} from "./store/capability-grants";
 
 const activeScienceChemistryCommits = new Set<string>();
 configureScienceServiceAvailability(() => {
@@ -1705,6 +1718,79 @@ app.whenReady().then(async () => {
     assertScienceExtensionViewPermission(event.sender.id, permission);
     return status;
   };
+  const scienceToolApprovalChatId = (value: unknown): string => {
+    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-chat-invalid");
+    return value;
+  };
+  const scienceToolApprovalProjectId = (value: unknown): string => {
+    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-project-invalid");
+    return value;
+  };
+  const scienceToolApprovalRequestId = (value: unknown): string => {
+    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-request-invalid");
+    return value;
+  };
+  const scienceToolApprovalDecision = (value: unknown): ToolApprovalDecision => {
+    if (value === "allow_once" || value === "allow_session" || value === "allow_always" || value === "deny") return value;
+    throw new Error("science-tool-approval-decision-invalid");
+  };
+  const scienceToolApprovalState = (event: Electron.IpcMainInvokeEvent, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown; chatId?: unknown } : {};
+    const projectId = scienceToolApprovalProjectId(input.projectId);
+    const chatId = scienceToolApprovalChatId(input.chatId);
+    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
+    setScienceToolApprovalWatch(event.sender.id, chatId);
+    return {
+      projectId,
+      chatId,
+      alwaysApproved: isChatAlwaysApproved(chatId),
+      pending: listPendingToolApprovals().filter((request) => request.chatId === chatId),
+    };
+  };
+  ipcMain.handle("science:toolApprovals:state", scienceToolApprovalState);
+  ipcMain.handle("science:toolApprovals:setAlwaysApproved", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown; chatId?: unknown; enabled?: unknown } : {};
+    const projectId = scienceToolApprovalProjectId(input.projectId);
+    const chatId = scienceToolApprovalChatId(input.chatId);
+    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
+    const enabled = input.enabled === true;
+    if (enabled) {
+      grantChatAlwaysApproval(chatId, "science-dropdown");
+      // A dropdown change can happen while a live chip is already waiting. Resolve those
+      // exact requests after the durable chat grant is stored so the running tool is not left
+      // hanging behind a control that now says "always approve".
+      for (const request of listPendingToolApprovals()) {
+        if (request.chatId !== chatId) continue;
+        resolveToolApproval(request.id, "allow_session", toolApprovalActionId(request.id, "allow_session"));
+      }
+    } else {
+      revokeChatAlwaysApproval(chatId);
+    }
+    setScienceToolApprovalWatch(event.sender.id, chatId);
+    return {
+      projectId,
+      chatId,
+      alwaysApproved: isChatAlwaysApproved(chatId),
+      pending: listPendingToolApprovals().filter((request) => request.chatId === chatId),
+    };
+  });
+  ipcMain.handle("science:toolApprovals:resolve", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const wrapped = envelope && typeof envelope === "object" ? envelope as { input?: unknown } : {};
+    const input = wrapped.input && typeof wrapped.input === "object" ? wrapped.input as { projectId?: unknown; chatId?: unknown; requestId?: unknown; decision?: unknown } : {};
+    const projectId = scienceToolApprovalProjectId(input.projectId);
+    const chatId = scienceToolApprovalChatId(input.chatId);
+    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
+    const requestId = scienceToolApprovalRequestId(input.requestId);
+    const decision = scienceToolApprovalDecision(input.decision);
+    const pending = listPendingToolApprovals().find((request) => request.id === requestId);
+    if (pending && pending.chatId !== chatId) throw new Error("science-tool-approval-chat-mismatch");
+    return pending
+      ? resolveToolApproval(requestId, decision, toolApprovalActionId(requestId, decision))
+      : getToolApprovalResolution(requestId);
+  });
   ipcMain.handle("science:askUser:list", (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     return listPendingAskUserRequests().filter((request) => request.askedBy === "agentlas-science");

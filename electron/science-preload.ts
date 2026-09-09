@@ -19,6 +19,21 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
       return () => ipcRenderer.removeListener("science:askUser", listener);
     },
   }),
+  toolApprovals: Object.freeze({
+    state: (projectId: string, chatId: string | null) => ipcRenderer.invoke("science:toolApprovals:state", { extensionId, projectId, chatId }),
+    setAlwaysApproved: (projectId: string, chatId: string, enabled: boolean) => ipcRenderer.invoke("science:toolApprovals:setAlwaysApproved", { extensionId, projectId, chatId, enabled }),
+    resolve: (input: unknown) => ipcRenderer.invoke("science:toolApprovals:resolve", { extensionId, input }),
+    onRequest: (callback: (request: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, request: unknown) => callback(request);
+      ipcRenderer.on("science:toolApprovalRequest", listener);
+      return () => ipcRenderer.removeListener("science:toolApprovalRequest", listener);
+    },
+    onResolution: (callback: (receipt: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, receipt: unknown) => callback(receipt);
+      ipcRenderer.on("science:toolApprovalResolution", listener);
+      return () => ipcRenderer.removeListener("science:toolApprovalResolution", listener);
+    },
+  }),
   rendererPacks: Object.freeze({
     list: () => ipcRenderer.invoke("science:rendererPacks:list", { extensionId }),
   }),

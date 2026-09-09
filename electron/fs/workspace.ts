@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import { existsSync, Stats } from "node:fs";
 import path from "node:path";
 import type { FsPathGrant, FsReadScope } from "../../shared/types";
-import { grantPath, resolveFsReadPath, resolveMainOwnedReadPath } from "./access";
+import { FsAccessDeniedError, grantPath, resolveFsReadPath, resolveMainOwnedReadPath } from "./access";
 
 const TEXT_PREVIEW_MAX = 256 * 1024;
 const TEXT_EXT = new Set([
@@ -56,6 +56,16 @@ export interface TextFilePreview {
   size: number;
   /** 텍스트가 아니라고 판정되면 content=''; reason 필드에 사유 */
   reason?: "binary" | "too-large" | "not-text-ext" | "missing" | "not-a-file" | "not-read";
+}
+
+function missingTextPreview(absPath: string): TextFilePreview {
+  return {
+    path: typeof absPath === "string" && path.isAbsolute(absPath) ? path.resolve(absPath) : "",
+    content: "",
+    truncated: false,
+    size: 0,
+    reason: "missing",
+  };
 }
 
 function isHiddenName(name: string): boolean {
@@ -172,7 +182,13 @@ async function readTextFilePreviewResolved(resolved: string): Promise<TextFilePr
   if (!isTextLike(path.basename(resolved))) {
     return { path: resolved, content: "", truncated: false, size: stat.size, reason: "not-text-ext" };
   }
-  const handle = await fs.open(resolved, "r");
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(resolved, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return missingTextPreview(resolved);
+    throw error;
+  }
   let buf: Buffer;
   try {
     const readSize = Math.min(stat.size, TEXT_PREVIEW_MAX);
@@ -193,7 +209,17 @@ async function readTextFilePreviewResolved(resolved: string): Promise<TextFilePr
 }
 
 export async function readTextFilePreview(absPath: string, scope: FsReadScope): Promise<TextFilePreview> {
-  return readTextFilePreviewResolved(resolveFsReadPath(absPath, scope));
+  try {
+    return await readTextFilePreviewResolved(resolveFsReadPath(absPath, scope));
+  } catch (error) {
+    // Stale transcript links are expected after an output is cleaned up. Keep the
+    // capability boundary strict for every other error, but return the same typed
+    // missing state the resolved reader already uses for a file that vanishes mid-read.
+    if (error instanceof FsAccessDeniedError && error.message === "The requested path does not exist.") {
+      return missingTextPreview(absPath);
+    }
+    throw error;
+  }
 }
 
 export async function readTextFilePreviewFromMainRoot(absPath: string, mainRoot: string): Promise<TextFilePreview> {
