@@ -284,6 +284,16 @@ export { currentUiLocale } from "./ui-locale";
  */
 installStdioErrorGuard();
 
+// MCP helpers use this executable as a Node host. If a caller loses the Node
+// flag, Electron otherwise ignores the inline program and boots the product.
+// Refuse that launch before identity, stores, update recovery, or windows run.
+if (app.isPackaged && process.argv.slice(1).some((arg) =>
+  arg === "-e" || arg === "--eval" || arg === "-p" || arg === "--print"
+  || arg.startsWith("--eval=") || arg.startsWith("--print="))) {
+  console.error("[startup] node-helper-requires-run-as-node");
+  app.exit(78);
+}
+
 const isDev = process.env.NODE_ENV === "development";
 const ipcMain = developmentIpcBoundary(electronIpcMain);
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
@@ -546,6 +556,7 @@ let lastStartupNavigationFailure: {
   target: string;
 } | null = null;
 let shellReadyForWindows = false;
+let restoreMobileBridgeOwnership: (() => Promise<void>) | null = null;
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
 
@@ -713,7 +724,7 @@ function stopOneBriefingScheduler(): void {
   oneBriefingInterval = null;
 }
 
-const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
+const allowMultiInstance = !app.isPackaged && process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
 // AppImageUpdater relaunches the replacement with no `--updated` argument.
 // Use our durable install state as the cross-platform authority, otherwise the
 // replacement mistakes itself for an ordinary second launch, exits before
@@ -730,7 +741,7 @@ traceUpdaterStartup("before-single-instance-lock");
 // Recovery markers authorize a bounded wait, never bypassing the lock. A
 // marker can outlive an update and is visible to every concurrent launch.
 const initialSingleInstanceLock = allowMultiInstance
-  || app.requestSingleInstanceLock();
+  || app.requestSingleInstanceLock({ startupIntent: isPackagedUpdateRelaunch ? "update-relaunch" : "open" });
 const singleInstanceLockPromise = initialSingleInstanceLock
   ? Promise.resolve(true)
   : !isPackagedUpdateRelaunch
@@ -739,7 +750,7 @@ const singleInstanceLockPromise = initialSingleInstanceLock
       const deadline = Date.now() + UPDATE_RELAUNCH_LOCK_TIMEOUT_MS;
       traceUpdaterStartup("single-instance-lock-waiting");
       const retry = (): void => {
-        if (app.requestSingleInstanceLock()) {
+        if (app.requestSingleInstanceLock({ startupIntent: "update-relaunch" })) {
           traceUpdaterStartup("single-instance-lock-acquired-after-retry");
           resolve(true);
           return;
@@ -807,7 +818,9 @@ app.on("open-url", (event, url) => {
   routeAgentlasDeepLink(url);
 });
 
-app.on("second-instance", (_event, argv) => {
+app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
+  // Update lock retries must not repeatedly bring the old window to front.
+  if ((additionalData as { startupIntent?: string } | undefined)?.startupIntent === "update-relaunch") return;
   // Windows/Linux 는 두 번째 인스턴스의 argv 에 URL 을 실어 보낸다.
   const link = argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://"));
   if (link) routeAgentlasDeepLink(link);
@@ -1311,7 +1324,7 @@ app.whenReady().then(async () => {
   // A failed handoff exits explicitly after the bounded retry instead of
   // leaving a live target PID with an install journal that can never clear.
   if (!await singleInstanceLockPromise) {
-    console.error("[agentlas] packaged update relaunch could not acquire the single-instance lock");
+    console.info("[agentlas] another instance owns the single-instance lock; exiting");
     app.exit(0);
     return;
   }
@@ -1598,7 +1611,14 @@ app.whenReady().then(async () => {
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
-  ipcMain.handle("mobileBridge:retry", () => retryAgentlasMobileBridge());
+  ipcMain.handle("mobileBridge:retry", async () => {
+    if (!mobileBridgeRuntimeStatus().running) {
+      if (!restoreMobileBridgeOwnership) throw new Error("mobile-bridge-startup-not-ready");
+      await restoreMobileBridgeOwnership();
+      return mobileBridgeRuntimeStatus();
+    }
+    return retryAgentlasMobileBridge();
+  });
   ipcMain.handle("mobileBridge:revokeDevice", (_event, deviceId: unknown) => {
     if (typeof deviceId !== "string" || !/^device_[a-f0-9]{32}$/.test(deviceId)) {
       return { ok: false };
@@ -3757,7 +3777,7 @@ app.whenReady().then(async () => {
    * listener for the same user-data and whichever process wrote endpoint.json
    * last silently redirected newly paired phones away from the other one.
    */
-  const daemonStartupPromise = import("./daemon/app-launcher")
+  const ensureDesktopDaemon = () => import("./daemon/app-launcher")
     .then(async (module) => {
       const outcome = await module.ensureDaemonRunning({
         userDataDir: userDataDir(),
@@ -3791,6 +3811,7 @@ app.whenReady().then(async () => {
       console.error("[daemon] launcher wiring failed:", error);
       return null;
     });
+  let daemonStartupPromise = ensureDesktopDaemon();
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
@@ -3800,12 +3821,15 @@ app.whenReady().then(async () => {
     let claimed = false;
     try {
       if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
+      if (!daemon) throw new Error("mobile-bridge-daemon-state-unavailable");
+      if (daemon.outcome.status === "failed" && !daemon.outcome.mobileBridgeFallbackSafe) {
+        throw new Error(`mobile-bridge-daemon-not-ready: ${daemon.outcome.reason}`);
+      }
       if (daemon && daemon.outcome.status !== "disabled" && daemon.outcome.status !== "failed") {
         claimed = await daemon.module.claimDaemonMobileBridge(userDataDir(), process.pid);
         if (!claimed) {
-          // The daemon still owns a healthy listener. Opening a fallback here
-          // would recreate the two-authority split; leave Mobile service on the
-          // daemon and expose the failed handoff instead.
+          // A failed RPC does not prove a healthy daemon listener. Ownership
+          // is unknown, so opening a second listener would risk split ownership.
           throw new Error("Agentlas daemon did not grant Mobile Bridge ownership");
         }
         daemonMobileBridgeClaimed = true;
@@ -3830,6 +3854,14 @@ app.whenReady().then(async () => {
     }
   };
   let explicitBridgeRestore: Promise<void> | null = null;
+  restoreMobileBridgeOwnership = () => {
+    if (explicitBridgeRestore) return explicitBridgeRestore;
+    daemonStartupPromise = ensureDesktopDaemon();
+    const started = startMobileBridgeAfterAuth(true);
+    explicitBridgeRestore = started;
+    void started.finally(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
+    return started;
+  };
   disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
     if (!shellReadyForWindows || !sessionSnapshot.signedIn || !getAuthSession().signedIn) return;
     reconcileMobileBridgeDevicesForAccount(userDataDir());

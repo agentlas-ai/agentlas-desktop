@@ -1,5 +1,5 @@
 import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
-import { createNativeBrowserRelayGrant, type NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
+import type { NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
 import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
 import type { ChatHostNotice } from "../../shared/types";
 // 활성 백엔드 → 실제 러너로 라우팅하는 invocation runner.
@@ -3061,6 +3061,9 @@ ${effectiveUserPrompt}`;
       // keep their existing independent lifecycle.
       if (req.chatId && !executionContext && !req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
+        // The daemon imports this client too. Load Electron's native views only
+        // for a real interactive browser grant, never during headless startup.
+        const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
         nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
           presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture),
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
@@ -3168,6 +3171,7 @@ ${effectiveUserPrompt}`;
             };
             try {
               if (ids.includes("agentlas-browser")) {
+                const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
                 grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
                   permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
                   presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture) });
