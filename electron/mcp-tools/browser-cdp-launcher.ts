@@ -173,14 +173,41 @@ export function browserCdpCommandFlag(commandLine: string, flag: string): string
   return value || null;
 }
 
+/**
+ * The shared launcher can intentionally remain bound to a healthy packaged
+ * Desktop while a development Desktop is running. In that case the browser
+ * process has the packaged launcher's executable path, while this process's
+ * runtime resolver points at build-resources. Accept that exact binding only
+ * from the installed Agentlas launcher itself; arbitrary launcher paths must
+ * never widen ownership.
+ */
+function installedBrowserCdpRuntimeExecutable(): string | null {
+  try {
+    const source = fs.readFileSync(browserCdpLauncherPath(), "utf8");
+    if (readLauncherWriter(source) !== "agentlas-desktop") return null;
+    const contract = readLauncherContractVersion(source);
+    if (contract === null || contract > BROWSER_CDP_LAUNCHER_CONTRACT) return null;
+    const binding = readLauncherRuntimeBindings(source)?.browserRuntimeExe;
+    return binding
+      && path.isAbsolute(binding)
+      && fs.statSync(binding, { throwIfNoEntry: false })?.isFile()
+      ? binding
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function browserCdpExecutableCandidates(
   platform = process.platform,
   home = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const dedicated = platform === process.platform ? resolveAgentlasBrowserRuntimeExecutable() : null;
+  const installed = platform === process.platform ? installedBrowserCdpRuntimeExecutable() : null;
   return [
     ...(dedicated ? [dedicated] : []),
+    ...(installed && installed !== dedicated ? [installed] : []),
     // Legacy paths are identification-only so an old Agentlas process can be
     // migrated safely. resolveChromeExe() never chooses one for a new launch.
     ...legacySystemBrowserExecutableCandidates(platform, home, env),
