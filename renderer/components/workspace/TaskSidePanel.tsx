@@ -687,7 +687,8 @@ function isBrowserDocumentUrl(value: string): value is string {
   try {
     const parsed = new URL(value);
     if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return false;
-    return !/\.(?:m?js|cjs|css|map|json|wasm|png|jpe?g|gif|webp|svg|ico|avif|woff2?|ttf|otf|mp[34]|webm|zip)$/iu.test(parsed.pathname);
+    const pathname = decodeURIComponent(parsed.pathname);
+    return !/\.(?:m?js|cjs|css|map|json|wasm|png|jpe?g|gif|webp|svg|ico|avif|woff2?|ttf|otf|mp[34]|webm|zip)$/iu.test(pathname);
   } catch {
     return false;
   }
