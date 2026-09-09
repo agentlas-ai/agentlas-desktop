@@ -99,7 +99,7 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
-import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "@/components/workspace/TaskSidePanel";
+import { isBrowserDocumentUrl, TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "@/components/workspace/TaskSidePanel";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import oneActivityStyles from "@/components/workspace/TaskSidePanel.module.css";
@@ -111,7 +111,6 @@ import {
 } from "@/lib/one-activity";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
-import { NativeLiveWebView } from "@/components/NativeLiveWebView";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import {
@@ -773,7 +772,27 @@ function WorkRailResult({
   onSelectExternalWindow?: (sourceId: string) => void;
   externalCaptureState?: ExternalCaptureState;
 }) {
-  if (artifact || surface) {
+  const liveSurfaceUrl = surface?.manifest.app?.deployment?.previewUrl;
+  const hasLiveSurface = Boolean(
+    surface?.liveAppId
+      || (typeof liveSurfaceUrl === "string" && liveSurfaceUrl.trim()),
+  );
+  if (hasLiveSurface) {
+    // A generated app is a Browser target. Keep a co-produced static artifact
+    // in Result, but never mount the localhost app there.
+    if (artifact) {
+      return (
+        <WorkbenchPanel
+          embedded
+          artifact={artifact}
+          surface={null}
+          onSurfaceAction={onSurfaceAction}
+          onSurfaceStatePatch={onSurfaceStatePatch}
+          onClose={onClose}
+        />
+      );
+    }
+  } else if (artifact || surface) {
     return (
       <WorkbenchPanel
         embedded
@@ -805,7 +824,10 @@ function WorkRailResult({
     );
   }
   if (preview.viewerKind === "browser") {
-    return <NativeLiveWebView url={preview.browserUrl || preview.fileUrl} title={preview.name} runtimeLabel={preview.live ? "watched" : "web"} />;
+    // HTTP(S) pages belong in the shared Browser tab. A local file is still a
+    // file result and falls through to the explicit unsupported-file surface.
+    const target = preview.browserUrl || preview.fileUrl;
+    if (isBrowserDocumentUrl(target)) return null;
   }
   if (isCodeArtifactName(preview.name) && preview.content) {
     return <CodeIdeViewer path={preview.path} name={preview.name} locale={locale} initialContent={preview.content} fill />;
@@ -6601,6 +6623,7 @@ function ChatPage() {
         screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
         browserHistoryUrl={workBrowserHistoryUrl}
+        browserPreviewUrl={mediaPreview?.viewerKind === "browser" ? mediaPreview.browserUrl : undefined}
         onBrowserObserved={() => openPanelTab("panel")}
         result={(
           <WorkRailResult

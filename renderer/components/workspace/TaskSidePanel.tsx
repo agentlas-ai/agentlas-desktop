@@ -31,7 +31,6 @@ import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
-import { LiveDeviceMockup } from "@/components/LiveDeviceMockup";
 import { ipc } from "@/lib/ipc";
 import {
   isWideOutputKind,
@@ -66,14 +65,13 @@ import styles from "./TaskSidePanel.module.css";
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "app";
+type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "browser") return <IconNetwork size={12} />;
   if (view === "screen") return <IconPanelRight size={12} />;
   if (view === "terminal") return <IconCode size={12} />;
-  if (view === "app") return <IconPanelRight size={12} />;
   if (view === "result") return <IconCheck size={12} />;
   return <IconSparkles size={12} />;
 }
@@ -81,7 +79,6 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
 function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "worker") return locale === "ko" ? "서브에이전트" : "Subagent";
   if (view === "result") return locale === "ko" ? "결과" : "Result";
-  if (view === "app") return locale === "ko" ? "앱" : "App";
   if (view === "activity") return locale === "ko" ? "작업" : "Activity";
   if (view === "terminal") return locale === "ko" ? "터미널" : "Terminal";
   if (view === "screen") return locale === "ko" ? "화면" : "Screen";
@@ -683,7 +680,7 @@ function ChatFileOpenViewer({ file, locale, onExpand }: { file: ChatFileItem; lo
  * latter must not become the Browser rail's app URL: loading `/src/main.js`
  * as a document produces a misleading blank/offline preview.
  */
-function isBrowserDocumentUrl(value: string): value is string {
+export function isBrowserDocumentUrl(value: string): value is string {
   try {
     const parsed = new URL(value);
     if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return false;
@@ -796,6 +793,8 @@ export type TaskSidePanelProps = {
   browserScopeKey?: string;
   /** Latest proven Browser navigation from this thread's durable run history. */
   browserHistoryUrl?: string;
+  /** Browser URL carried by the current result preview; live URLs belong in Browser. */
+  browserPreviewUrl?: string;
   /** Present the scoped Browser rail when this thread observes a real navigation. */
   onBrowserObserved?: (url: string) => void;
   /** The structured/live result retained in both chat and this in-app rail. */
@@ -841,6 +840,7 @@ function TaskSidePanelContent({
   onRequestOpen,
   browserScopeKey,
   browserHistoryUrl,
+  browserPreviewUrl,
   onBrowserObserved,
   result,
   resultKey,
@@ -869,7 +869,7 @@ function TaskSidePanelContent({
    */
   const selectRailView = useCallback((view: OutputRailView) => {
     setRailView(view);
-    if (view !== "browser" && view !== "app") return;
+    if (view !== "browser") return;
     const readable = Math.min(maxWidth, 560);
     (onRequestReadableWidth ?? onResize)?.(Math.max(width ?? defaultWidth, readable));
   }, [defaultWidth, maxWidth, onRequestReadableWidth, onResize, width]);
@@ -943,7 +943,6 @@ function TaskSidePanelContent({
   const [chatFileTabs, setChatFileTabs] = useState<ChatFileItem[]>([]);
   const [activeChatFileTabId, setActiveChatFileTabId] = useState<string | null>(null);
   const presentedBrowserTargetRef = useRef<string | null>(null);
-  const presentedAppTargetRef = useRef<string | null>(null);
   const presentedResultKeyRef = useRef<string | null>(null);
   const presentedArtifactIdRef = useRef<string | null>(null);
   const presentedMcpResultIdRef = useRef<string | null>(null);
@@ -988,9 +987,6 @@ function TaskSidePanelContent({
       ? current
       : { ...current, [browserScopeKey]: currentBrowserUrl });
   }, [browserScopeKey, currentBrowserUrl]);
-  const preferredBrowserUrl = currentBrowserUrl
-    ?? browserHistoryUrl
-    ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
   /*
    * ★에이전트가 화면을 몰고 있으면 그 화면을 보여 준다 (실측 2026-09-08).
    *
@@ -1021,6 +1017,20 @@ function TaskSidePanelContent({
   const activeChatFile = chatFileTabs.find((file) => file.tabId === activeChatFileTabId) ?? null;
   const openedArtifactKind = openedArtifact ? outputPresentationKindForName(openedArtifact.label) : "standard";
   const latestArtifactKind = outputPresentationKindForName(items.at(-1)?.label);
+  const appPreviewBrowserUrl = appPreview?.url && isBrowserDocumentUrl(appPreview.url)
+    ? new URL(appPreview.url).toString()
+    : undefined;
+  const resultBrowserUrl = browserPreviewUrl && isBrowserDocumentUrl(browserPreviewUrl)
+    ? new URL(browserPreviewUrl).toString()
+    : undefined;
+  // Live app URLs are browser output. Keep the most recent task navigation as
+  // a fallback for ordinary browser work, while a verified app preview wins so
+  // it cannot be rendered again inside Result.
+  const preferredBrowserUrl = appPreviewBrowserUrl
+    ?? resultBrowserUrl
+    ?? currentBrowserUrl
+    ?? browserHistoryUrl
+    ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
   const activeOutputKind: OutputPresentationKind = appPreview
     ? "web"
     : openedArtifactKind !== "standard"
@@ -1038,17 +1048,11 @@ function TaskSidePanelContent({
     ? `chat-file:${activeChatFile.tabId}`
     : openedArtifact
     ? `artifact:${openedArtifact.binding.runId}:${openedArtifact.binding.artifactRef}`
-    : appPreview
-      ? `app:${appPreview.appId}:${appPreview.url}`
     : preferredBrowserUrl
       ? `browser:${preferredBrowserUrl}`
       : resultKey
         ? `result:${resultKey}`
         : `kind:${activeOutputKind}`;
-  const appViewId = useMemo(
-    () => appPreview ? `one_app_${appPreview.appId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60)}` : undefined,
-    [appPreview?.appId],
-  );
   useEffect(() => {
     if (!computerToolActive) return;
     setOpenTabs((tabs) => (tabs.includes("screen") ? tabs : [...tabs, "screen"]));
@@ -1135,14 +1139,14 @@ function TaskSidePanelContent({
     setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
     // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
     // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
-    setRailView((current) => (items.at(-1)?.kind === "image" || current === "browser" || current === "app" || current === "worker") ? current : "activity");
+    setRailView((current) => (items.at(-1)?.kind === "image" || current === "browser" || current === "worker") ? current : "activity");
   }, [latestArtifactId, result, items]);
   useEffect(() => {
     const latest = mcpResults.at(-1)?.id ?? null;
     if (!latest || presentedMcpResultIdRef.current === latest) return;
     presentedMcpResultIdRef.current = latest;
     setOpenTabs((tabs) => (tabs.includes("activity") ? tabs : [...tabs, "activity"]));
-    // Keep a user-selected Result/Browser/App view stable; otherwise expose
+    // Keep a user-selected Result/Browser view stable; otherwise expose
     // the new MCP result in the activity tab as soon as the rail is opened.
     setRailView((current) => current ?? "activity");
   }, [mcpResults]);
@@ -1156,32 +1160,17 @@ function TaskSidePanelContent({
     // is never the One presentation surface.
     // 브라우저 작업 자체가 결과다 — 탭이 없으면 이때 하나 생긴다.
     setOpenTabs((tabs) => (tabs.includes("browser") ? tabs : [...tabs, "browser"]));
-    setRailView((current) => (current === "app" || current === "worker") ? current : "browser");
+    setRailView((current) => (current === "worker") ? current : "browser");
     // Stored URLs restore tabs, but only the scoped live native event above
     // reveals the panel. Reopening an old conversation is not a new action.
   }, [browserScopeKey, preferredBrowserUrl]);
   useEffect(() => {
-    if (!appPreview?.url) {
-      presentedAppTargetRef.current = null;
-      setOpenTabs((tabs) => tabs.filter((tab) => tab !== "app"));
-      if (railView === "app") setRailView(null);
-      return;
-    }
-    const targetKey = `${appPreview.appId}\u0000${appPreview.url}`;
-    if (presentedAppTargetRef.current === targetKey) return;
-    presentedAppTargetRef.current = targetKey;
-    // The app itself is the primary output. Open it once when the verified
-    // preview becomes reachable, but do not fight a user's later tab choice.
-    setOpenTabs((tabs) => (tabs.includes("app") ? tabs : [...tabs, "app"]));
-    setRailView((current) => current === "worker" ? current : "app");
-  }, [appPreview?.appId, appPreview?.url, railView]);
-  useEffect(() => {
     if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
     presentedResultKeyRef.current = resultKey;
-    // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser/App 표면 위로는
+    // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser 표면 위로는
     // 올라오지 않는다 — 탭만 만들고 보고 있던 것을 빼앗지 않는다.
     setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
-    setRailView((current) => (current === "browser" || current === "app" || current === "worker" ? current : "result"));
+    setRailView((current) => (current === "browser" || current === "worker" ? current : "result"));
   }, [result, resultKey]);
   /*
    * 폭을 저 혼자 넓히던 자리(제거, 오너 지시 2026-08-24 "디폴트로 접히고
@@ -1557,20 +1546,6 @@ function TaskSidePanelContent({
             presentation={presentedBrowser} headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
             : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
         </div>}
-        {railView === "app" && appPreview && appViewId && (
-          <div className={styles.livePane}>
-            <div {...designOutputSurfaceProps("web", styles.appPreviewView)} data-one-live-app="true" data-app-id={appPreview.appId}>
-              <LiveDeviceMockup
-                url={appPreview.url}
-                title={appPreview.title}
-                runtimeLabel={appPreview.runtime ?? "managed preview"}
-                locale={locale}
-                viewId={appViewId}
-                onClose={onClose}
-              />
-            </div>
-          </div>
-        )}
       </div>
       {(railView === "activity" || railView === "terminal") && <><div
         className={styles.artifactHistoryResizeHandle}

@@ -267,18 +267,20 @@ assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.ta
 assert.match(activity, /<TaskBrowser key=\{screenChatId\}/);
 /*
  * 오너 지시 2026-08-24: 탭은 고정 목록이 아니다. 계약은 "다섯 보기가 모두
- * 도달 가능하다" 이지, "다섯 개가 언제나 떠 있다" 가 아니다. 결과와 앱은
- * 실제로 생길 때 탭이 되고, 나머지는 + 로 연다.
+ * 도달 가능하다" 이지, "네 개가 언제나 떠 있다" 가 아니다. 결과와 Browser는
+ * 실제로 생길 때 탭이 되고, 나머지는 + 로 연다. 생성된 앱은 Browser URL이다.
  */
 assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("result"\) \? tabs : \[\.\.\.tabs, "result"\]\)\)/,
   "a produced result must open its own tab");
-assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("app"\) \? tabs : \[\.\.\.tabs, "app"\]\)\)/,
-  "a live generated app must open its own tab");
 assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("browser"\) \? tabs : \[\.\.\.tabs, "browser"\]\)\)/,
   "observed browser work must open its own tab");
 assert.match(activity, /\(\["activity", "terminal", "browser", "screen"\] as const\)/,
   "Activity, Terminal and Browser must stay reachable from the add-view menu");
-for (const view of ["result", "activity", "terminal", "browser", "app"]) {
+assert.doesNotMatch(activity, /type OutputRailView[^\n]*\| "app"|data-one-live-app|railView === "app"/,
+  "the shared output rail must not expose a separate live app result tab");
+assert.match(activity, /const appPreviewBrowserUrl[\s\S]*const resultBrowserUrl[\s\S]*const preferredBrowserUrl = appPreviewBrowserUrl/,
+  "generated app URLs must route through the shared Browser tab");
+for (const view of ["result", "activity", "terminal", "browser"]) {
   assert.match(activity, new RegExp(`railView === "${view}"`),
     `the output rail must still render the ${view} view`);
 }
