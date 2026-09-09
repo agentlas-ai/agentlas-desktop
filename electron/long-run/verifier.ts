@@ -265,9 +265,9 @@ function isReadOnlySimpleShellCommand(command: string): boolean {
   if (executable === "rg") {
     // Static search only. In particular, --pre can execute an arbitrary filter.
     if (words.some((word) => word === "--pre" || word.startsWith("--pre=") || word === "--command" || word === "--replace")) return false;
-    return words.length >= 1 && words.every((word) => (
-      !word.startsWith("-") || /^-(?:n|i|F)$/u.test(word) || word.startsWith("--glob=")
-    ));
+    return words.length >= 1 && words.every((word, index) => (
+      !word.startsWith("-") || /^-(?:n|i|F|C\d+)$/u.test(word) || word === "-C" || word.startsWith("--glob=")
+    )) && !words.some((word, index) => word === "-C" && !/^\d+$/u.test(words[index + 1] ?? ""));
   }
   return false;
 }
@@ -275,37 +275,44 @@ function isReadOnlySimpleShellCommand(command: string): boolean {
 function isReadOnlyShellCommand(command: string): boolean {
   const unwrapped = unwrapShellCommand(command);
   if (!unwrapped || shellWrittenPaths(unwrapped).length > 0) return false;
-  const pipeline: string[] = [];
-  let part = "";
-  let quote: "'" | '"' | null = null;
-  for (let index = 0; index < unwrapped.length; index += 1) {
-    const char = unwrapped[index];
-    if (char === "'" || char === '"') {
-      quote = quote === char ? null : quote ?? char;
+  const split = (input: string, clauses: boolean): { parts: string[]; operators: string[] } | null => {
+    const parts: string[] = [], operators: string[] = [];
+    let part = "", quote: "'" | '"' | null = null;
+    for (let index = 0; index < input.length; index += 1) {
+      const char = input[index];
+      if (char === "'" || char === '"') { quote = quote === char ? null : quote ?? char; part += char; continue; }
+      if (char === "\\") {
+        const next = input[index + 1];
+        if (quote === "'" || !next) { part += char; continue; }
+        if (quote === '"' && '"$`<>&|;\n\r'.includes(next)) return null;
+        if (!quote && '<>&|;\n\r'.includes(next)) return null;
+        part += char + next; index += 1; continue;
+      }
+      if (quote) {
+        if (char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">") return null;
+        part += char; continue;
+      }
+      if (char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">" || char === "\n" || char === "\r") return null;
+      if (clauses && char === ";") { parts.push(part.trim()); operators.push(";"); part = ""; continue; }
+      if (clauses && char === "|" && input[index + 1] === "|") { parts.push(part.trim()); operators.push("||"); part = ""; index += 1; continue; }
+      if (clauses && char === "&") return null;
+      if (!clauses && char === "|") { parts.push(part.trim()); operators.push("|"); part = ""; continue; }
       part += char;
-      continue;
     }
-    if (char === "\\") {
-      const next = unwrapped[index + 1];
-      if (quote === "'" || !next) { part += char; continue; }
-      if (quote === '"' && '"$`<>&|;\n\r'.includes(next)) return false;
-      if (!quote && '<>&|;\n\r'.includes(next)) return false;
-      part += char + next;
-      index += 1;
-      continue;
-    }
-    if (quote) {
-      if (char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">") return false;
-      part += char;
-      continue;
-    }
-    if (char === ";" || char === "&" || char === "\n" || char === "\r" || char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">") return false;
-    if (char === "|") { pipeline.push(part.trim()); part = ""; continue; }
-    part += char;
+    if (quote) return null;
+    parts.push(part.trim());
+    return { parts, operators };
+  };
+  const clauses = split(unwrapped, true);
+  if (!clauses) return false;
+  for (let index = 0; index < clauses.parts.length; index += 1) {
+    const clause = clauses.parts[index];
+    if (clause === "true" && clauses.operators[index - 1] === "||") continue;
+    const pipeline = split(clause, false);
+    if (!pipeline || !pipeline.parts.every((segment) => isReadOnlySimpleShellCommand(segment))) return false;
+    if (clauses.operators[index] === "||" && clauses.parts[index + 1] !== "true") return false;
   }
-  if (quote) return false;
-  pipeline.push(part.trim());
-  return pipeline.every((segment) => isReadOnlySimpleShellCommand(segment));
+  return true;
 }
 
 export function auditWriteBoundary(
@@ -329,6 +336,13 @@ export function auditWriteBoundary(
     const result = typeof payload.toolResultPreview === "string" ? payload.toolResultPreview : null;
     const detail = normalizeToolCall({ name, args: args as string | Record<string, unknown>, result, cwd: root });
     const outsideReferences = outsideAbsolutePaths(args, root);
+    if (name === "agentlas-browser.browser_find") {
+      const browserFindArgs = parsedToolArgs(args);
+      if (Object.keys(browserFindArgs).length === 1 && typeof browserFindArgs.regex === "string") {
+        for (const candidate of outsideReferences) readOnlyOutsideReferences.add(candidate);
+        continue;
+      }
+    }
     if (detail.type === "read" || detail.type === "list" || detail.type === "search") {
       for (const candidate of outsideReferences) readOnlyOutsideReferences.add(candidate);
       continue;
