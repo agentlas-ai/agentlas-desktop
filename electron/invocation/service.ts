@@ -14,14 +14,17 @@ import {
 import {
   appendLongRunEvent,
   bindLongRunWorker,
+  getLongRun,
   getLongRunByGoalId,
   listLongRunTasks,
+  resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun,
 } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { claimCheckpointContinuation, latestTaskCheckpoint } from "../long-run/checkpoint";
@@ -942,9 +945,45 @@ export class InvocationService {
     const storedChat = getChat(req.chatId);
     if (!storedChat) throw new Error("Chat not found");
     const chat = repairRootChatSurfaceController(storedChat);
-    const boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+    let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
     if (boundGoal && ["paused", "pausing", "cancelling", "cancelled"].includes(boundGoal.status)) {
       throw new Error("goal_explicit_resume_required");
+    }
+    /*
+     * A blocked goal is a recoverable verification stop, so a person's next
+     * local turn is allowed to provide the missing evidence. The old path
+     * admitted that turn and created worker attempts while leaving the run in
+     * `blocked`; requestLongRunVerification then (correctly) refused to move
+     * it into `verifying`, making every retry look busy but unable to finish.
+     *
+     * Reopen the durable run before dispatching the new provider turn. Keep the
+     * same guards as the explicit Resume action: only the root Desktop chat
+     * may do this, and an uncertain/running attempt must never be replayed.
+     * The CAS in resumeLongRunByUser makes two concurrent user sends safe.
+     * Queueing here is completed below, immediately before the durable prompt
+     * is handed to the provider, so the run cannot remain queued after a
+     * successful invocation start.
+     */
+    const localUserTurn = req.promptOrigin !== "system"
+      && !workspaceBinding
+      && !executionContext
+      && req.agentAppMode !== true;
+    let blockedGoalReactivation: { runId: string; version: number } | null = null;
+    if (boundGoal?.status === "blocked" && localUserTurn) {
+      if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
+        throw new Error("goal_control_scope_mismatch");
+      }
+      const unsettled = getDb().prepare(
+        "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
+      ).get(boundGoal.id) as { n: number };
+      if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
+      const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
+        || (boundGoal.budget.maxCostUsd != null && boundGoal.costUsedUsd >= boundGoal.budget.maxCostUsd)
+        || (boundGoal.budget.wallclockDeadline != null
+          && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
+      if (budgetExhausted) throw new Error("auto_goal_budget_exhausted");
+      blockedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version };
+      boundGoal = resumeLongRunByUser(boundGoal.id, desktopAppInstanceId(), boundGoal.version);
     }
     const mobileOneBoundary = workspaceBinding?.source === "mobile-one";
     // A One turn may also arrive from the paired Telegram channel. Both remote
@@ -2349,6 +2388,21 @@ export class InvocationService {
           kind: "invoke_prompt_bound",
           payload: { promptMessageId: sourceMessageId },
         });
+        if (blockedGoalReactivation) {
+          const current = getLongRun(blockedGoalReactivation.runId);
+          if (current?.status === "queued" && current.version === boundGoal?.version) {
+            transitionLongRun({
+              runId: current.id,
+              to: "running",
+              actorKind: "host",
+              reason: "blocked-goal-user-dispatch",
+              appInstanceId: desktopAppInstanceId(),
+              expectedVersion: current.version,
+            });
+            blockedGoalReactivation = null;
+            refreshGoalProjection();
+          }
+        }
         // Only ordinary local, user-authored root-chat work enters automatic
         // Goal. Science and remote/automation authority keep their own adapters.
         if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
