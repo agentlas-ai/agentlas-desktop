@@ -1171,6 +1171,10 @@ async function runCodexResidentTurn(input: {
   const messages = new Map<string, string>();
   const startedTools = new Set<string>();
   const dynamicToolArtifactPaths = new Map<string, string[]>();
+  // Resident app-server MCP completions can be replayed by the session
+  // transport. Keep the capture receipt keyed by the provider item id so the
+  // same inline image is saved and bound at most once per turn.
+  const mcpToolArtifactPaths = new Map<string, string[]>();
   let thinkingOpen = false;
   let thinkingStartedAt = 0;
   let estChars = 0;
@@ -1307,9 +1311,16 @@ async function runCodexResidentTurn(input: {
           closeThinking();
           if (bodyText()) emitPartial(true);
           const itemId = String(item.id ?? "");
-          const artifactPaths = item?.type === "dynamicToolCall"
+          let artifactPaths = item?.type === "dynamicToolCall"
             ? dynamicToolArtifactPaths.get(itemId)
             : tool.artifactPaths;
+          if (item?.type === "mcpToolCall" && !tool.isError) {
+            artifactPaths = mcpToolArtifactPaths.get(itemId);
+            if (!artifactPaths) {
+              artifactPaths = codexInlineCapturePaths(tool.name, item.result);
+              mcpToolArtifactPaths.set(itemId, artifactPaths);
+            }
+          }
           events.onTool?.(
             tool.name,
             tool.args,
