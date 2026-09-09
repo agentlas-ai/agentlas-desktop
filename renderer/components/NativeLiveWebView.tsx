@@ -106,7 +106,12 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       const signature = JSON.stringify(next);
       if (signature === lastBounds) return;
       lastBounds = signature;
-      void api.setBounds(next).catch(() => { if (lastBounds === signature) lastBounds = ""; });
+      void api.setBounds(next).then((result) => {
+        // Main can reject a stale owner/guest attachment without rejecting the
+        // IPC promise. Let the next authoritative status retry the same
+        // geometry; otherwise a failed visible=true handoff is cached forever.
+        if (!result?.ok && lastBounds === signature) lastBounds = "";
+      }).catch(() => { if (lastBounds === signature) lastBounds = ""; });
     };
     const readyToDisplay = () => statusRef.current.state === "ready"
       || (receivedReady && statusRef.current.state === "loading");
@@ -153,6 +158,11 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       statusHandlerRef.current?.(next);
       if (next.state === "error") setOpenError(next.error || "The live app could not be loaded.");
       else if (next.state === "ready") setOpenError(null);
+      // Native showOnly()/reparenting can detach a guest without changing its
+      // URL or DOM geometry. Ready/loading receipts are the bounded, event
+      // driven reattachment points; inactive tabs still publish visible=false
+      // through syncBounds and therefore cannot fight the selected tab.
+      if (next.state === "ready" || next.state === "loading" || next.presentation) lastBounds = "";
       syncBounds();
     });
     const resize = new ResizeObserver(syncBounds);
