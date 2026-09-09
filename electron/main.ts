@@ -768,6 +768,17 @@ const singleInstanceLockPromise = initialSingleInstanceLock
       setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS);
     });
 if (initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-acquired");
+// On macOS a rejected second instance may never reach `ready`, so the
+// app.whenReady() callback below cannot be responsible for terminating it.
+// This also closes the bounded updater-relaunch retry if it exhausts before
+// Electron becomes ready. app.exit() avoids running startup cleanup against
+// stores and services that this rejected process never initialized.
+void singleInstanceLockPromise.then((acquired) => {
+  if (acquired) return;
+  traceUpdaterStartup("single-instance-lock-rejected");
+  console.info("[agentlas] another instance owns the single-instance lock; exiting");
+  app.exit(0);
+});
 
 /*
  * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
@@ -1321,13 +1332,10 @@ app.whenReady().then(async () => {
   // Native installers can launch the replacement before the old process has
   // released Electron's single-instance lock. Do not run migrations, updater
   // reconciliation, or window startup until the replacement owns that lock.
-  // A failed handoff exits explicitly after the bounded retry instead of
-  // leaving a live target PID with an install journal that can never clear.
-  if (!await singleInstanceLockPromise) {
-    console.info("[agentlas] another instance owns the single-instance lock; exiting");
-    app.exit(0);
-    return;
-  }
+  // Rejected instances are terminated by the Promise handler above because
+  // Electron may never resolve ready for them. Keep startup gated here so no
+  // store, updater, daemon, or window work begins without lock ownership.
+  if (!await singleInstanceLockPromise) return;
   if (!initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-ready");
   if (developmentEffectsSuppressed()) {
     // Apply before the first real window, including renderer fetches and HMR.
