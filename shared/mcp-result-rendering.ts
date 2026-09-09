@@ -119,6 +119,35 @@ function dataUrl(mime: string | undefined, value: unknown): string | null {
   return encoded ? `data:${mime};base64,${encoded}` : null;
 }
 
+/**
+ * Native computer-use screenshots may omit MCP's optional mimeType field. Do
+ * not guess from a filename or a prose hint: decode only the bounded base64
+ * prefix and accept the four image signatures already allowed by the UI.
+ */
+function inferInlineImageMime(value: unknown): "image/jpeg" | "image/png" | "image/gif" | "image/webp" | undefined {
+  const encoded = canonicalBase64(nonEmptyString(value) ?? "");
+  if (!encoded) return undefined;
+  const bytes: number[] = [];
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let index = 0; index + 3 < encoded.length && bytes.length < 12; index += 4) {
+    const a = alphabet.indexOf(encoded[index]);
+    const b = alphabet.indexOf(encoded[index + 1]);
+    const c = encoded[index + 2] === "=" ? 0 : alphabet.indexOf(encoded[index + 2]);
+    const d = encoded[index + 3] === "=" ? 0 : alphabet.indexOf(encoded[index + 3]);
+    if (a < 0 || b < 0 || c < 0 || d < 0) return undefined;
+    bytes.push((a << 2) | (b >> 4));
+    if (encoded[index + 2] !== "=") bytes.push(((b & 15) << 4) | (c >> 2));
+    if (encoded[index + 3] !== "=") bytes.push(((c & 3) << 6) | d);
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 8 && bytes.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index])) return "image/png";
+  if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46
+    && bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return "image/gif";
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+  return undefined;
+}
+
 function parseJsonCandidate(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const text = value.trim();
@@ -196,15 +225,16 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     sawStructuredSignal = true;
   };
 
-  const addInline = (mime: string | undefined, encoded: unknown, label: string, hint: string, id: string) => {
-    const src = dataUrl(mime, encoded);
+  const addInline = (mime: string | undefined, encoded: unknown, label: string, hint: string, id: string, inferMime = false) => {
+    const effectiveMime = mime ?? (inferMime && hint === "image" ? inferInlineImageMime(encoded) : undefined);
+    const src = dataUrl(effectiveMime, encoded);
     if (!src) {
       if (nonEmptyString(encoded)) warnings.push(`${label}: inline media was not safely bounded`);
       return;
     }
-    const kind = mediaKind(mime, undefined, hint);
+    const kind = mediaKind(effectiveMime, undefined, hint);
     if (!kind) return;
-    push({ id, kind, label, mimeType: mime ?? "application/octet-stream", source: "inline", src }, `media:${src.slice(0, 120)}`);
+    push({ id, kind, label, mimeType: effectiveMime ?? "application/octet-stream", source: "inline", src }, `media:${src.slice(0, 120)}`);
     sawStructuredSignal = true;
   };
 
@@ -229,7 +259,9 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     const item = record(value);
     if (!item || depth > MAX_WALK_DEPTH) return;
     const type = nonEmptyString(item.type)?.toLowerCase();
-    const mime = safeMime(item.mimeType ?? item.mime_type ?? item.mediaType ?? item.media_type ?? item.contentType ?? item.content_type);
+    const rawMime = item.mimeType ?? item.mime_type ?? item.mediaType ?? item.media_type ?? item.contentType ?? item.content_type;
+    const mime = safeMime(rawMime);
+    const mimeWasDeclared = rawMime !== undefined && rawMime !== null;
     const label = displayLabel(item.name ?? item.filename ?? item.fileName ?? item.title, type === "image" ? "Image" : type === "video" ? "Video" : type === "audio" ? "Audio" : "MCP result");
     if (type === "text") {
       const text = nonEmptyString(item.text);
@@ -243,7 +275,7 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     if (type === "image" || type === "video" || type === "audio") {
       const src = safeUrl(item.url ?? item.uri ?? item.href);
       if (src) addUrl(src, mime ?? `${type}/*`, label, type, `media:${path}`);
-      else addInline(mime ?? `${type}/*`, item.data ?? item.blob ?? item.base64, label, type, `media:${path}`);
+      else addInline(mime, item.data ?? item.blob ?? item.base64, label, type, `media:${path}`, !mimeWasDeclared);
       return;
     }
     if (type === "resource_link") {
