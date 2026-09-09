@@ -161,7 +161,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = fs.readFileSync(path.join(source, entry.path));
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             fs.mkdirSync(path.dirname(entry.path), { recursive: true });
             fs.writeFileSync(entry.path, bytes);
@@ -332,7 +332,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = fs.readFileSync(path.join(source, entry.path));
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             fs.mkdirSync(path.dirname(entry.path), { recursive: true });
             fs.writeFileSync(entry.path, bytes);
