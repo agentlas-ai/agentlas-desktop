@@ -776,7 +776,7 @@ export type Runner = (
 export function withNativeBrowserGuidance(runner: Runner): Runner {
   return (req, events) => {
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE !== "task" || !req.mcpConfigPath) return runner(req, events);
-    const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared native browser tabs and login session. Use those tools for browser interaction, accessibility snapshots and screenshots shown in the task sidebar. A provider's separate built-in browser is a different session and is not evidence from this shared task browser. Existing approval and cancellation rules still apply. [/Host browser target]";
+    const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared native browser tabs and login session. Use those tools for browser interaction, accessibility snapshots and screenshots shown in the task sidebar. A provider's separate built-in browser is a different session and is not evidence from this shared task browser. For a worker handoff, report the verified page URL and how to reach the running app; provider-native browser/tab IDs belong to their original session and must not be reused by another worker. The next worker should inspect its own available tabs or open the URL in its authorized browser session. Keep the app server available through verification and report an unreachable URL as unfinished work. Existing approval and cancellation rules still apply. [/Host browser target]";
     return runner({ ...req, turnContext: [req.turnContext, guidance].filter(Boolean).join("\n\n") }, events);
   };
 }
