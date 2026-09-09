@@ -16,8 +16,10 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
+import { userDataPath } from "../runtime-paths";
 import {
   legacySystemBrowserExecutableCandidates,
   resolveAgentlasBrowserRuntime,
@@ -31,6 +33,7 @@ import type {
 
 export const BROWSER_CDP_LAUNCHER_BASENAME = "agentlas-browser-cdp.mjs";
 export const BROWSER_CDP_LAUNCHER_PATH_ENV = "AGENTLAS_CDP_LAUNCHER";
+const BROWSER_CDP_SCOPED_LAUNCHER_DIRNAME = "browser-launchers";
 
 /** Exact bundled Playwright MCP entrypoint; never resolve or download at run time. */
 export function playwrightMcpCliPath(): string {
@@ -45,6 +48,22 @@ export function browserCdpLauncherPath(): string {
     return path.resolve(configured);
   }
   return path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME);
+}
+
+/**
+ * Resolve a run-owned launcher without consulting the mutable shared launcher.
+ * The digest keeps config keys (which may contain punctuation) out of the
+ * pathname and prevents distinct run scopes from normalizing to one file.
+ */
+export function browserCdpLauncherPathForScope(scope: string): string {
+  const normalized = scope.trim();
+  if (!normalized) throw new Error("Agentlas browser launcher scope must not be empty.");
+  const digest = createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32);
+  return userDataPath(
+    "mcp",
+    BROWSER_CDP_SCOPED_LAUNCHER_DIRNAME,
+    `agentlas-browser-cdp-${digest}.mjs`,
+  );
 }
 
 /** 전용 CDP 크롬 프로필 경로(MCP 런처와 로그인 창이 공유). */
@@ -2943,11 +2962,27 @@ export function shouldReplaceBrowserCdpLauncher(
  * 런처 소스를 기본 ~/.agentlas 경로 또는 명시한 격리 경로에 쓴다.
  * ensureDefaultMcpPluginsInstalled 에서 부팅 시 호출.
  */
-export function materializeBrowserCdpLauncher(): string {
-  const dest = browserCdpLauncherPath();
+export function materializeBrowserCdpLauncher(scope?: string): string {
+  const normalizedScope = scope?.trim() || null;
+  const dest = normalizedScope ? browserCdpLauncherPathForScope(normalizedScope) : browserCdpLauncherPath();
   try {
     const context = resolveLauncherContext();
     const LAUNCHER_SOURCE = context.source;
+    if (normalizedScope) {
+      // Native browser runs own their launcher source. Never follow a
+      // symlink here: a stale or hostile scoped path must not redirect a
+      // write into the shared production launcher.
+      const existingEntry = fs.lstatSync(dest, { throwIfNoEntry: false });
+      if (existingEntry?.isSymbolicLink()) return dest;
+      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+      const existing = existingEntry?.isFile() ? fs.readFileSync(dest, "utf8") : null;
+      // A run scope is single-use. Do not rewrite an existing scoped file if
+      // the source changed; ensureBrowserCdpLauncherReady will fail closed and
+      // the caller can allocate a fresh run scope.
+      if (existing === null) fs.writeFileSync(dest, LAUNCHER_SOURCE, { encoding: "utf8", mode: 0o700 });
+      try { fs.chmodSync(dest, 0o700); } catch { /* best-effort on non-POSIX filesystems */ }
+      return dest;
+    }
     const shouldReplaceBrowserCdpLauncher = (existing: string | null): boolean =>
       shouldReplaceBrowserCdpLauncherWithContext(existing, context.isPackaged, LAUNCHER_SOURCE);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -2992,12 +3027,14 @@ export function materializeBrowserCdpLauncher(): string {
  * An explicit QA launcher must be the exact source from this host build. The
  * production default keeps its cross-writer/non-downgrade policy above.
  */
-export function ensureBrowserCdpLauncherReady(): string {
-  const dest = materializeBrowserCdpLauncher();
-  if (!fs.statSync(dest, { throwIfNoEntry: false })?.isFile()) {
+export function ensureBrowserCdpLauncherReady(scope?: string): string {
+  const normalizedScope = scope?.trim() || null;
+  const dest = materializeBrowserCdpLauncher(normalizedScope ?? undefined);
+  const entry = fs.lstatSync(dest, { throwIfNoEntry: false });
+  if (!entry?.isFile() || entry.isSymbolicLink()) {
     throw new BrowserCdpHostError("launcher", "launcher-unavailable");
   }
-  if (process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim()) {
+  if (normalizedScope || process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim()) {
     const expected = resolveLauncherContext().source;
     const actual = fs.readFileSync(dest, "utf8");
     if (actual !== expected) throw new BrowserCdpHostError("launcher", "launcher-materialize-failed");
