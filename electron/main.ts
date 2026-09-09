@@ -1615,7 +1615,9 @@ app.whenReady().then(async () => {
     if (!mobileBridgeRuntimeStatus().running) {
       if (!restoreMobileBridgeOwnership) throw new Error("mobile-bridge-startup-not-ready");
       await restoreMobileBridgeOwnership();
-      return mobileBridgeRuntimeStatus();
+      const restored = mobileBridgeRuntimeStatus();
+      if (!restored.running) throw new Error(restored.error || "mobile-bridge-restore-failed");
+      return restored;
     }
     return retryAgentlasMobileBridge();
   });
@@ -3815,7 +3817,10 @@ app.whenReady().then(async () => {
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
-  const startMobileBridgeAfterAuth = async (requireSignedIn = false) => {
+  let bridgeStartupJob: Promise<void> | null = null;
+  let lastBridgeStartupError: unknown = null;
+  const performMobileBridgeStartup = async (requireSignedIn = false) => {
+    lastBridgeStartupError = null;
     if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
     const daemon = await daemonStartupPromise;
     let claimed = false;
@@ -3846,6 +3851,7 @@ app.whenReady().then(async () => {
         appVersion: app.getVersion(),
       });
     } catch (err) {
+      lastBridgeStartupError = err;
       if (claimed && daemon) {
         daemonMobileBridgeClaimed = false;
         await daemon.module.releaseDaemonMobileBridge(userDataDir(), process.pid).catch(() => false);
@@ -3853,13 +3859,33 @@ app.whenReady().then(async () => {
       console.error("[mobile-bridge] start failed:", err);
     }
   };
+  const startMobileBridgeAfterAuth = (requireSignedIn = false): Promise<void> => {
+    if (bridgeStartupJob) return bridgeStartupJob;
+    const started = performMobileBridgeStartup(requireSignedIn);
+    bridgeStartupJob = started;
+    void started.then(() => { if (bridgeStartupJob === started) bridgeStartupJob = null; },
+      () => { if (bridgeStartupJob === started) bridgeStartupJob = null; });
+    return started;
+  };
   let explicitBridgeRestore: Promise<void> | null = null;
   restoreMobileBridgeOwnership = () => {
     if (explicitBridgeRestore) return explicitBridgeRestore;
-    daemonStartupPromise = ensureDesktopDaemon();
-    const started = startMobileBridgeAfterAuth(true);
+    const started = (async () => {
+      // A click during bootstrap joins that startup before attempting recovery;
+      // it must not spawn a second helper or release a newer successful lease.
+      if (bridgeStartupJob) await bridgeStartupJob;
+      if (!mobileBridgeRuntimeStatus().running) {
+        await daemonStartupPromise;
+        daemonStartupPromise = ensureDesktopDaemon();
+        await startMobileBridgeAfterAuth(true);
+      }
+      if (!mobileBridgeRuntimeStatus().running) {
+        throw lastBridgeStartupError ?? new Error("mobile-bridge-restore-failed");
+      }
+    })();
     explicitBridgeRestore = started;
-    void started.finally(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
+    void started.then(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; },
+      () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
     return started;
   };
   disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
