@@ -727,14 +727,14 @@ const isPackagedUpdateRelaunch = app.isPackaged && (
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
-// Native update installers already serialize replacement and start the target
-// after the previous executable exits. Re-requesting Electron's old singleton
-// lock in that path can strand the replacement with its journal still present.
+// Recovery markers authorize a bounded wait, never bypassing the lock. A
+// marker can outlive an update and is visible to every concurrent launch.
 const initialSingleInstanceLock = allowMultiInstance
-  || isPackagedUpdateRelaunch
   || app.requestSingleInstanceLock();
 const singleInstanceLockPromise = initialSingleInstanceLock
   ? Promise.resolve(true)
+  : !isPackagedUpdateRelaunch
+  ? Promise.resolve(false)
   : new Promise<boolean>((resolve) => {
       const deadline = Date.now() + UPDATE_RELAUNCH_LOCK_TIMEOUT_MS;
       traceUpdaterStartup("single-instance-lock-waiting");

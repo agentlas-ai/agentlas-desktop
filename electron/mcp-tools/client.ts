@@ -574,7 +574,10 @@ async function createTransport(
       command,
       args,
       // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
-      env: { ...stdioEnv, ...resolved },
+      // Any stdio server using this executable must run as Node, including
+      // workspace-preview and future built-ins. Enforce after resolved env so
+      // a missing/overridden flag cannot start another Desktop application.
+      env: { ...stdioEnv, ...resolved, ...(command === process.execPath ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
       stderr: "ignore",
     }) as unknown as Transport;
     return { transport, runtimeRoot };
