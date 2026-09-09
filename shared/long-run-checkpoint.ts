@@ -15,6 +15,7 @@ export type GoalVerificationRecoveryClass = "none" | "repairable" | "prerequisit
 export type GoalVerificationPrerequisiteCode =
   | "authentication_required"
   | "permission_required"
+  | "approval_required"
   | "entitlement_required"
   | "environment_unavailable"
   | "user_stopped"

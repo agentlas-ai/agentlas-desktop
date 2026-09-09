@@ -2132,6 +2132,7 @@ function ComposerGoalBar({
       "verification_repair_stalled": ["수정 후에도 같은 기준을 통과하지 못해 멈춤", "Stopped after repeated repairs did not satisfy the same criteria"],
       "verification_prerequisite:authentication_required": ["연결된 계정의 인증이 필요해 멈춤", "Stopped because account authentication is required"],
       "verification_prerequisite:permission_required": ["추가 권한이 필요해 멈춤", "Stopped because additional permission is required"],
+      "verification_prerequisite:approval_required": ["도구 승인 경로 확인이 필요해 멈춤", "Stopped because the required tool approval path needs attention"],
       "verification_prerequisite:entitlement_required": ["계정의 이용 권한이나 크레딧 확인이 필요해 멈춤", "Stopped because account access or credits need attention"],
       "verification_prerequisite:environment_unavailable": ["필요한 실행 환경을 사용할 수 없어 멈춤", "Stopped because a required environment is unavailable"],
       "verification_prerequisite:user_stopped": ["사용자 요청으로 멈춤", "Stopped at your request"],

@@ -816,7 +816,10 @@ function hostRecoveryOverride(runId: string, invocationRunId?: string | null): R
   if (codes.has("cancelled") || codes.has("approval_declined")) {
     return prerequisiteRecovery("user_stopped", "user", "The user must explicitly resume or authorize another attempt.");
   }
-  if (codes.has("approval_required") || codes.has("permission_required")) {
+  if (codes.has("approval_required")) {
+    return prerequisiteRecovery("approval_required", "user", "Confirm the required tool approval before retrying.");
+  }
+  if (codes.has("permission_required")) {
     return prerequisiteRecovery("permission_required", "user", "Obtain the required permission before retrying.");
   }
   if (["unauthorized", "authentication_required", "not_authenticated", "credential_missing"].some((code) => codes.has(code))) {
