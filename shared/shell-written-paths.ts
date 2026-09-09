@@ -18,11 +18,61 @@ const REDIRECT_RE = /(?:^|\s|;|&&|\|\|)(?:1)?>{1,2}\s*("([^"]+)"|'([^']+)'|([^\s
 const TOOL_DEST_RE = /(?:^|\s|;|&&|\|\|)(tee|cp|mv|touch|install)\s+((?:-[A-Za-z-]+\s+)*)([^\n;|&]+)/g;
 
 function unquote(value: string): string {
-  const trimmed = value.trim();
+  let trimmed = value.trim();
   if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
     return trimmed.slice(1, -1);
   }
+  // A command passed to `sh -c`/`zsh -lc` carries its closing wrapper quote
+  // through TOOL_DEST_RE.  It is not part of the destination (for example,
+  // `zsh -lc 'cp src /tmp/out'` used to produce `/tmp/out'`).  Only remove an
+  // unmatched trailing quote; paired quotes still belong to the operand above.
+  const trailing = trimmed.at(-1);
+  if ((trailing === "'" || trailing === '"') && [...trimmed].filter((char) => char === trailing).length % 2 === 1) {
+    trimmed = trimmed.slice(0, -1).trimEnd();
+  }
   return trimmed;
+}
+
+/** Split command operands while retaining quote boundaries for `unquote`. */
+function shellOperands(value: string): string[] {
+  const operands: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  const push = () => {
+    if (token) operands.push(token);
+    token = "";
+  };
+
+  for (const char of value.trim()) {
+    if (escaped) {
+      token += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      token += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      token += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      token += char;
+      quote = char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      push();
+      continue;
+    }
+    token += char;
+  }
+  push();
+  return operands;
 }
 
 function usablePath(value: string): boolean {
@@ -54,8 +104,7 @@ export function shellWrittenPaths(command: string): string[] {
 
   for (const match of command.matchAll(TOOL_DEST_RE)) {
     const verb = match[1];
-    const operands = (match[3] ?? "")
-      .split(/\s+/)
+    const operands = shellOperands(match[3] ?? "")
       .map(unquote)
       .filter(Boolean);
     if (operands.length === 0) continue;
