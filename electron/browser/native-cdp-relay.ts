@@ -260,24 +260,71 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       await waitForStableNativeBrowserViewport(owner.ownerId, input.chatId, guest.viewId, guest, current, input.signal);
       const url = guest.wc.getURL();
       const metrics = await guest.wc.debugger.sendCommand("Page.getLayoutMetrics");
-      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport;
+      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport ?? metrics.cssLayoutViewport;
       const viewportSize = nativeBrowserGuestViewport(owner.ownerId, input.chatId, guest.viewId);
-      if (!viewportSize) throw new Error("native-browser-screenshot-stale");
+      const measured = await guest.wc.debugger.sendCommand("Runtime.evaluate", {
+        expression: "({ width: window.innerWidth, height: window.innerHeight, pageX: window.pageXOffset, pageY: window.pageYOffset })",
+        returnByValue: true,
+      }).catch(() => null);
+      const measuredViewport = measured?.result?.value;
+      const pageX = Number(viewport?.pageX ?? measuredViewport?.pageX ?? 0);
+      const pageY = Number(viewport?.pageY ?? measuredViewport?.pageY ?? 0);
+      const metricWidth = Number(viewport?.clientWidth ?? viewport?.width);
+      const metricHeight = Number(viewport?.clientHeight ?? viewport?.height);
+      // innerWidth/innerHeight include the scrollbar gutter and are the CSS
+      // viewport dimensions used by callers that build a full-window clip.
+      // They remain a visible viewport bound, unlike document dimensions.
+      const cssWidth = Number(measuredViewport?.width) || metricWidth;
+      const cssHeight = Number(measuredViewport?.height) || metricHeight;
+      const zoomFactor = Number(guest.wc.getZoomFactor());
+      if (!viewportSize || !Number.isFinite(pageX) || !Number.isFinite(pageY)
+        || !Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || cssWidth < 1 || cssHeight < 1
+        || !Number.isFinite(zoomFactor) || zoomFactor <= 0) {
+        throw new Error("native-browser-screenshot-stale");
+      }
+      // capturePage receives the native surface's coordinate space. It is
+      // safe only when that surface matches the CSS layout viewport at the
+      // default page zoom; emulation, scrollbar changes, and page zoom all
+      // require the guarded CDP capture below, even when a clip fits both.
+      const nativeViewportMatchesCss = Math.abs(cssWidth - viewportSize.width) <= 1
+        && Math.abs(cssHeight - viewportSize.height) <= 1
+        && Math.abs(zoomFactor - 1) <= 0.001;
       const clip = params.clip as { x?: unknown; y?: unknown; width?: unknown; height?: unknown; scale?: unknown } | undefined;
       let rect: { x: number; y: number; width: number; height: number } | undefined;
       let documentClip: { x: number; y: number; width: number; height: number } | undefined;
       if (clip) {
         const values = [clip.x, clip.y, clip.width, clip.height];
         if (!values.every((value) => typeof value === "number" && Number.isFinite(value)) || (clip.scale !== undefined && clip.scale !== 1)) throw new Error("native-browser-screenshot-clip-invalid");
-        rect = { x: Math.round(Number(clip.x) - viewport.pageX), y: Math.round(Number(clip.y) - viewport.pageY), width: Math.round(Number(clip.width)), height: Math.round(Number(clip.height)) };
-        if (Number(clip.x) < 0 || Number(clip.y) < 0 || rect.width < 1 || rect.height < 1) throw new Error("native-browser-screenshot-clip-invalid");
-        if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > Math.ceil(viewportSize.width) || rect.y + rect.height > Math.ceil(viewportSize.height)) {
-          if (params.captureBeyondViewport === false) throw new Error("native-browser-screenshot-beyond-viewport-unsupported");
-          documentClip = { x: Number(clip.x), y: Number(clip.y), width: Number(clip.width), height: Number(clip.height) };
+        const clipX = Number(clip.x);
+        const clipY = Number(clip.y);
+        const clipWidth = Number(clip.width);
+        const clipHeight = Number(clip.height);
+        rect = { x: Math.round(clipX - pageX), y: Math.round(clipY - pageY), width: Math.round(clipWidth), height: Math.round(clipHeight) };
+        if (clipX < 0 || clipY < 0 || rect.width < 1 || rect.height < 1) throw new Error("native-browser-screenshot-clip-invalid");
+        // CDP's captureBeyondViewport contract is expressed in CSS pixels. The
+        // native guest may be a narrow sidebar while the page remains emulated
+        // at a wider CSS viewport, so do not compare these coordinate spaces.
+        const insideCssViewport = clipX >= pageX && clipY >= pageY
+          && clipX + clipWidth <= pageX + cssWidth
+          && clipY + clipHeight <= pageY + cssHeight;
+        if (!insideCssViewport && params.captureBeyondViewport === false) {
+          throw new Error("native-browser-screenshot-beyond-viewport-unsupported");
+        }
+        const insideNativeViewport = rect.x >= 0 && rect.y >= 0
+          && rect.x + rect.width <= Math.ceil(viewportSize.width)
+          && rect.y + rect.height <= Math.ceil(viewportSize.height);
+        if (!nativeViewportMatchesCss || !insideNativeViewport || !insideCssViewport) {
+          documentClip = { x: clipX, y: clipY, width: clipWidth, height: clipHeight };
+        }
+      } else {
+        // With no explicit clip, CDP means the current CSS viewport. Preserve
+        // that viewport whenever it differs from the native surface.
+        if (!nativeViewportMatchesCss) {
+          documentClip = { x: pageX, y: pageY, width: cssWidth, height: cssHeight };
         }
       }
       const image = await captureNativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId, documentClip ? undefined : rect, input.signal,
-        documentClip ? { kind: "document", clip: documentClip, isAuthorized: () => current() && leases.get(lease.id) === lease
+        documentClip ? { kind: "document", clip: documentClip, captureBeyondViewport: params.captureBeyondViewport !== false, isAuthorized: () => current() && leases.get(lease.id) === lease
           && lease.guests.get(guest.targetId) === guest && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === guest.wc } : undefined);
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc
         || guest.wc.getURL() !== url || image.isEmpty()) throw new Error("native-browser-screenshot-stale");

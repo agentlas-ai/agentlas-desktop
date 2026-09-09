@@ -565,6 +565,8 @@ const pendingDocumentCaptures = new WeakSet<WebContents>();
 export type NativeBrowserDocumentCapture = {
   kind: "document";
   clip: Rectangle;
+  /** Preserve the caller's CDP viewport contract for emulated CSS clips. */
+  captureBeyondViewport: boolean;
   isAuthorized: () => boolean;
 };
 const MAX_CAPTURE_DIMENSION = 32_768;
@@ -577,7 +579,7 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
   if (!active || active.mode !== "browser" || active.state !== "ready") throw new Error("native-browser-capture-unavailable");
   const wc = active.view.webContents;
   if (pendingDocumentCaptures.has(wc)) throw new Error("native-browser-capture-busy");
-  if (document && (document.kind !== "document" || typeof document.isAuthorized !== "function"
+  if (document && (document.kind !== "document" || typeof document.captureBeyondViewport !== "boolean" || typeof document.isAuthorized !== "function"
     || !Object.values(document.clip).every((value) => typeof value === "number" && Number.isFinite(value))
     || document.clip.x < 0 || document.clip.y < 0 || document.clip.width < 1 || document.clip.height < 1
     || document.clip.width > MAX_CAPTURE_DIMENSION || document.clip.height > MAX_CAPTURE_DIMENSION
@@ -675,7 +677,7 @@ export async function captureNativeBrowserGuest(ownerId: number, taskScopeId: st
           throw new Error("native-browser-capture-budget-exceeded");
         }
         const result = await wc.debugger.sendCommand("Page.captureScreenshot", {
-          format: "png", fromSurface: true, captureBeyondViewport: true,
+          format: "png", fromSurface: true, captureBeyondViewport: document.captureBeyondViewport,
           clip: { ...document.clip, scale: 1 },
         });
         if (!current()) throw new Error("native-browser-capture-stale");
