@@ -4964,10 +4964,17 @@ async function runPlanner(
   controllerRuntime?: RuntimeStatus;
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
-  // The first invocation must staff the attached roster.  On a long-run
-  // continuation, the checkpoint is the authoritative signal that the
-  // planner may select only the roles needed for remaining work.
-  const semanticSubset = Boolean(p.goalCheckpoint) && !p.workforceSelectionReceipt && !p.benchmarkMode && !p.req.agentAppMode;
+  // A long-run checkpoint lets the planner select only the roles needed
+  // for remaining work. Work's first
+  // automatic-Goal turn has no checkpoint yet, but Main's active Goal context
+  // is an equivalent durable signal. Keep One's standing room contract (and
+  // explicit frozen/require-all Workforce contracts) unchanged.
+  const activeGoalContext = activeGoalContextForPlanner(p);
+  const semanticSubset = Boolean(p.goalCheckpoint || (p.req.oneMode !== true && activeGoalContext))
+    && !p.workforceSelectionReceipt
+    && !p.requireAllWorkers
+    && !p.benchmarkMode
+    && !p.req.agentAppMode;
   // This local parameter is model context only. The caller retains the
   // original history for committed human-approval checks.
   if (p.chat.goalId) history = [];
@@ -5042,7 +5049,7 @@ async function runPlanner(
     oneAttachmentExecutionPrompt(p.req),
     p.req.agentAppMode ? undefined : p.workingFolder,
     executionContext,
-    activeGoalContextForPlanner(p),
+    activeGoalContext,
   );
   const strictWorkforcePlanner = Boolean(p.workforceSelectionReceipt);
   const plannerRunnerBoundary = taskForceOrchestratorBoundary(p, specs);
