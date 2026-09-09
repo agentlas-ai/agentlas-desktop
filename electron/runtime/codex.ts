@@ -1857,8 +1857,12 @@ export const runCodex: Runner = async (
     events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  const permArgs = permissionArgs(runReq.permission);
   const approvalArgs = codexApprovalArgs(runReq.approvalsReviewer, runReq.permission);
+  // --approve-for-me already selects workspace-write and conflicts with --sandbox.
+  // Keep its network configuration while avoiding the mutually exclusive flag.
+  const permArgs = approvalArgs.length > 0
+    ? [...CODEX_WORKSPACE_WRITE_CONFIG_ARGS]
+    : permissionArgs(runReq.permission);
   const mcpArgs =
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
