@@ -6544,7 +6544,16 @@ export function OneShell() {
             profileName={oneDisplayName}
             pendingMemoryCount={oneMemory?.candidates.filter((candidate) => candidate.status === "pending").length ?? 0}
             onBack={() => setRailMode("organisation")}
-            onOpen={setSettingsSheet}
+            onOpen={(setting) => {
+              // Permission is a composer decision. Keep it anchored to the
+              // input so the control stays beside the action it governs.
+              if (setting === "permission") {
+                setSettingsSheet(null);
+                setComposerMenu("permission");
+                return;
+              }
+              setSettingsSheet(setting);
+            }}
             onOpenProfile={() => { setMemoryOpen(false); setProfileOpen(true); }}
             onOpenMemory={() => { setProfileOpen(false); setMemoryOpen(true); }}
             onToggleLocale={() => setPref(appLocale === "ko" ? "en" : "ko")}

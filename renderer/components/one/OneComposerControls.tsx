@@ -134,7 +134,7 @@ export function OneComposerControls({
 
       const composerRect = composer.getBoundingClientRect();
       const viewportMargin = window.innerWidth <= 700 ? 10 : 24;
-      const preferredWidth = activeMenu === "permission" ? 320
+      const preferredWidth = activeMenu === "permission" ? composerRect.width
           : activeMenu === "effort" ? 240
             : 390;
       const width = Math.min(
@@ -162,6 +162,15 @@ export function OneComposerControls({
       observer?.disconnect();
     };
   }, [activeMenu, portalHost]);
+  useLayoutEffect(() => {
+    if (!portalHost || activeMenu !== "permission") return;
+    const option = document.querySelector<HTMLElement>(
+      '[data-one-composer-popover="permission"] [data-one-permission-option][data-selected="true"]',
+    ) ?? document.querySelector<HTMLElement>(
+      '[data-one-composer-popover="permission"] [data-one-permission-option]',
+    );
+    option?.focus({ preventScroll: true });
+  }, [activeMenu, portalHost, permission]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredModels = useMemo(
     () => models.filter((item) => !normalizedQuery || `${item.label} ${item.tag ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)),
@@ -265,10 +274,10 @@ export function OneComposerControls({
           <header className={styles.composerPopoverHeader}>
             <strong id="one-composer-popover-title">{activeMenu === "agents" ? (locale === "ko" ? "에이전트" : "Agents") : activeMenu === "model" ? (locale === "ko" ? "모델" : "Models") : activeMenu === "effort" ? (locale === "ko" ? "추론 강도" : "Reasoning effort") : (locale === "ko" ? "실행 모드" : "Execution mode")}</strong>
           </header>
-          <label className={styles.composerPopoverSearch}>
-            <IconSearch size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={locale === "ko" ? "검색..." : "Search..."} autoFocus />
-          </label>
+          {activeMenu !== "permission" && <label className={styles.composerPopoverSearch}>
+              <IconSearch size={15} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={locale === "ko" ? "검색..." : "Search..."} autoFocus />
+            </label>}
           <div className={styles.composerPopoverDivider} />
           <div className={styles.composerPopoverScroll} data-one-composer-scroll={activeMenu}>
             {activeMenu === "agents" && filteredAgents.map((item) => (

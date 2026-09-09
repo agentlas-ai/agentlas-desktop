@@ -18,8 +18,8 @@
   --one-sheet-card-muted: var(--paper-3);
   --one-sheet-card-radius: 12px;
   --one-sheet-label-ink: var(--ink);
-  --one-sheet-section-gap: 22px;
-  --one-sheet-section-padding: 22px;
+  --one-sheet-section-gap: 16px;
+  --one-sheet-section-padding: 16px;
   --one-sheet-title-size: 17px;
   --one-sheet-body-size: 13px;
   --one-sheet-label-size: 11px;
@@ -33,7 +33,7 @@
   --one-sheet-success-surface: var(--paper-3);
   --one-sheet-success-line: var(--paper-edge);
   --one-sheet-radius: 16px;
-  --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
+  --one-sheet-horizontal-padding: 20px;
   --one-sheet-body-padding-top: 16px;
   --one-sheet-body-padding-bottom: 20px;
   /*
@@ -72,7 +72,7 @@
   position: relative;
   z-index: 1;
   width: var(--popup-2-width);
-  max-height: var(--popup-max-height);
+  max-height: min(720px, calc(100dvh - 64px));
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -88,21 +88,17 @@
   animation: oneDialogEnter var(--one-motion-overlay, 220ms) var(--one-ease-panel, ease-out) both;
 }
 
-/*
- * 팝업 크기 체계(오너 결정 2026-08-24). 이름은 그대로 두고 폭만 체계에 맞춘다:
- * full/wide = 팝업1, (기본) = 팝업2, compact = 팝업3.
- * 규격: docs/DESIGN-POPUP-SIZES.md
- */
+/* Keep ordinary settings compact; only dense multi-column editors use full width. */
 .compact {
-  width: var(--popup-3-width);
+  width: min(440px, calc(100vw - 32px));
 }
 
 .wide {
-  width: var(--popup-1-width);
+  width: min(760px, calc(100vw - 48px));
 }
 
 .full {
-  width: var(--popup-1-width);
+  width: min(960px, calc(100vw - 48px));
 }
 
 .header {
@@ -111,7 +107,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 20px;
-  padding: 22px 0 18px;
+  padding: 16px 0 12px;
   border-bottom: 1px solid var(--one-sheet-line);
 }
 
