@@ -55,10 +55,16 @@ process.stdout.write(JSON.stringify({
 }));
 `;
 
-function probeOnce(label) {
+function probeOnce(label, missingPlugins = false) {
   const out = execFileSync(process.execPath, ["-e", probe], {
     cwd: root,
     encoding: "utf8",
+    env: {
+      ...process.env,
+      // This probe deliberately parks dist/plugins. The snapshot transpiler
+      // must not recreate indexed manifests and invalidate the absence test.
+      AGENTLAS_INDEX_GATE_DISABLE_PLUGIN_COMPILE: missingPlugins ? "1" : "0",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const parsed = JSON.parse(out);
@@ -74,7 +80,7 @@ fs.renameSync(live, parked);
 let broken;
 try {
   // execFileSync 는 자식이 throw 하면(exit 1) 던진다 — 즉사하면 여기서 잡힌다.
-  broken = probeOnce("매니페스트 없는 설치본");
+  broken = probeOnce("매니페스트 없는 설치본", true);
 } catch (error) {
   assert.fail(
     "매니페스트가 없다고 메인 프로세스 모듈이 죽었다 — 이러면 앱이 안 켜져서 자가수리도 못 한다:\n" +

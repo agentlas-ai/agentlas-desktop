@@ -48,6 +48,11 @@ for (const name of ["writeFileSync", "appendFileSync", "mkdirSync", "rmSync", "u
 }
 const indexed = new Map(receipt.files.map((file) => [file.name, file]));
 const dist = path.join(root, "dist");
+// The builtin-plugin degradation gate intentionally removes dist/plugins to
+// prove that the host tolerates missing manifests. Re-emitting an indexed
+// manifest while its probe runs would both defeat that assertion and make the
+// gate's parked-directory restore collide with the recreated directory.
+const disablePluginCompile = process.env.AGENTLAS_INDEX_GATE_DISABLE_PLUGIN_COMPILE === "1";
 const artifacts = [];
 let ts;
 let options;
@@ -63,6 +68,7 @@ function readIndexed(name) {
 function compile(target) {
   if (!target.startsWith(`${dist}${path.sep}`)) return false;
   const relative = path.relative(dist, target).split(path.sep).join("/");
+  if (disablePluginCompile && relative.startsWith("plugins/")) return false;
   if (!/^(electron|shared|plugins)\//.test(relative)) return false;
   const candidates = /\.(?:js|json|cjs|mjs)$/.test(relative)
     ? [relative.replace(/\.js$/, ".ts"), relative] : [`${relative}.ts`, `${relative}/index.ts`, `${relative}.json`];

@@ -19,6 +19,7 @@ function candidateLabel(candidate: McpBuildCandidate, ko: boolean): string {
   const reasons: Record<McpBuildCandidate["recommendationReasonCode"], [string, string]> = {
     "browser-interaction": ["브라우저 조작이 필요한 요청", "The request needs browser interaction"],
     "desktop-interaction": ["데스크탑 조작이 필요한 요청", "The request needs desktop interaction"],
+    "workspace-preview": ["로컬 개발 서버 미리보기가 필요한 요청", "The request needs a local development preview"],
     "agent-routing": ["에이전트·Hub 탐색이 필요한 요청", "The request may need agent or Hub routing"],
     "current-web-research": ["최신 웹 조사가 필요한 요청", "The request needs current web research"],
     "repository-work": ["저장소 작업이 포함된 요청", "The request includes repository work"],

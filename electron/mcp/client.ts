@@ -176,6 +176,8 @@ import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntime
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate } from "../mcp-tools/mcp-config";
+import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
+import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
 import { mcpServerConfigurationDigest, preparedMcpBindings } from "../mcp-tools/prepared-transport";
@@ -1557,6 +1559,7 @@ export async function runMcpInvocation(
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
+  let workspacePreviewCapabilityCleanup: (() => void) | undefined;
   try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
@@ -2273,6 +2276,27 @@ ${effectiveUserPrompt}`;
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
+  // The owner-full fact is minted once by Main and passed separately to worker
+  // config materialization. Worker permission remains write; it is never
+  // upgraded merely because the parent can run a preview.
+  const workspacePreviewOwnerGrant: WorkspacePreviewOwnerGrant | undefined = (() => {
+    if (!workingFolder || normalizedPermission !== "full" || req.agentAppMode || req.simulation === true) return undefined;
+    let canonicalCwd: string;
+    try { canonicalCwd = fs.realpathSync(workingFolder); } catch { return undefined; }
+    // A long run keeps one preview across worker/turn handoffs, while a deleted
+    // goal must not leave its process addressable by a later goal in the same
+    // chat. Fall back to the chat only for ordinary non-goal turns.
+    const taskScopeId = getChatGoalId(chat.id) ?? chat.id;
+    return {
+      schemaVersion: "agentlas.workspace-preview-owner-grant.v1",
+      grantId: randomUUID(),
+      taskScopeId,
+      chatId: chat.id,
+      runId: req.runId!,
+      canonicalCwd,
+      ownerExecutionPermission: "full",
+    };
+  })();
 
   if (explicitNetworkGoal) {
     try {
@@ -3043,6 +3067,7 @@ ${effectiveUserPrompt}`;
       }
       const cfg = await buildMcpConfigFile({
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant, configKey: `native-browser-${req.runId}` } : {}),
+        ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
         // 그래프가 선으로 이어 선언한 도구는 자동 선택 결과와 **함께** 켠다.
         // 선언은 사용자가 화면에 그려 넣은 것이라, 선택기가 안 골랐다고 빠지면
@@ -3051,6 +3076,9 @@ ${effectiveUserPrompt}`;
           ...installedTools.map((tool) => tool.id),
           ...hubBridgedServerIds,
           ...(req.requiredToolCatalogIds ?? []),
+          ...(workspacePreviewOwnerGrant
+            ? [AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID]
+            : []),
         ])],
         ...(req.requiredToolCatalogIds?.length
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
@@ -3072,6 +3100,7 @@ ${effectiveUserPrompt}`;
           ...(req.simulation === true ? { simulation: true as const } : {}),
           ...(workingFolder ? { cwd: workingFolder } : {}),
           ...(req.chatId ? { chatId: req.chatId } : {}),
+          ...(workspacePreviewOwnerGrant ? { chatId: workspacePreviewOwnerGrant.chatId } : {}),
           ...(executionContext ? { unattended: true } : {}),
         },
       });
@@ -3081,6 +3110,7 @@ ${effectiveUserPrompt}`;
       }
       if (cfg) {
         mcpConfigPath = cfg.configPath;
+        workspacePreviewCapabilityCleanup = cfg.workspacePreviewCapabilityCleanup;
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
         mcpRuntimeEnv = cfg.runtimeEnv;
@@ -3102,7 +3132,8 @@ ${effectiveUserPrompt}`;
           inventory: () => {
             const servers = listInstalledMcpServers().filter((server) => server.enabled && server.configurationValid !== false);
             const canonicalBrowser = servers.some((server) => server.catalogId === "agentlas-browser");
-            const eligible = servers.filter((server) => (!browserOnly || baselineIds.includes(server.catalogId ?? server.id))
+            const eligible = servers.filter((server) => (server.catalogId !== AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID || Boolean(workspacePreviewOwnerGrant))
+              && (!browserOnly || baselineIds.includes(server.catalogId ?? server.id))
               && (!canonicalBrowser || server.catalogId || baselineIds.includes(server.id) || !isKeylessPlaywrightMcpDuplicate(server)));
             return {
               fingerprint: createHash("sha256").update(JSON.stringify(eligible.map((server) =>
@@ -3126,11 +3157,13 @@ ${effectiveUserPrompt}`;
           materialize: async (input, ids, generation) => {
             let grant: NativeBrowserRelayGrant | undefined;
             let childConfig: Awaited<ReturnType<typeof buildMcpConfigFile>>;
+            let childPreviewCapabilityCleanup: (() => void) | undefined;
             let released = false;
             const release = () => {
               if (released) return;
               released = true;
               grant?.release();
+              childPreviewCapabilityCleanup?.();
               if (childConfig) fs.rmSync(childConfig.configPath, { force: true });
             };
             try {
@@ -3141,9 +3174,11 @@ ${effectiveUserPrompt}`;
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
+                ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
                 toolGate: { runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
+              childPreviewCapabilityCleanup = childConfig?.workspacePreviewCapabilityCleanup;
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
                 const unavailableIds = ids.filter((id) => !boundIds.has(id)
@@ -6523,5 +6558,6 @@ ${effectiveUserPrompt}`;
   }
   } finally {
     nativeBrowserGrant?.release();
+    workspacePreviewCapabilityCleanup?.();
   }
 }

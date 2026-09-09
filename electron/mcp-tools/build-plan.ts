@@ -65,6 +65,12 @@ const CATALOG_RULES: Record<string, CatalogRule> = {
     priority: 100,
     hints: ["desktop", "screen", "app", "electron", "mac", "데스크탑", "화면", "앱", "검증"],
   },
+  "workspace-preview": {
+    capability: "workspace-preview",
+    fallbackGroup: "workspace-preview",
+    priority: 100,
+    hints: ["dev server", "development server", "preview", "localhost", "vite", "next dev", "개발 서버", "미리보기", "로컬 서버"],
+  },
   "hephaestus-network": {
     capability: "agent-routing",
     fallbackGroup: "agent-routing",
@@ -238,6 +244,7 @@ function safeName(raw: string, fallback: string): string {
 
 function minimumPermission(capability: string): "read" | "write" | "full" {
   if (capability === "web-search" || capability === "database") return "read";
+  if (capability === "workspace-preview") return "full";
   if (capability === "github" || capability === "filesystem" || capability === "notion") return "write";
   return "full";
 }
@@ -257,6 +264,7 @@ function minimumScopes(capability: string): string[] {
     discord: ["selected-server-channels"],
     "ui-components": ["public-component-catalog"],
     custom: ["user-configured-server"],
+    "workspace-preview": ["selected-workspace", "full-execution-approval"],
   };
   return scopes[capability] ?? ["task-relevant-only"];
 }
@@ -276,6 +284,7 @@ function recommendationReasonCode(capability: string): McpBuildRecommendationRea
     discord: "discord-work",
     "ui-components": "ui-components",
     custom: "custom-name-match",
+    "workspace-preview": "workspace-preview",
   };
   return code[capability] ?? "task-match";
 }

@@ -16,6 +16,7 @@ export type McpBuildCandidateSource = "system-registry" | "catalog" | "hub";
 export type McpBuildRecommendationReasonCode =
   | "browser-interaction"
   | "desktop-interaction"
+  | "workspace-preview"
   | "agent-routing"
   | "current-web-research"
   | "repository-work"

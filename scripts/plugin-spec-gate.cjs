@@ -21,9 +21,9 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].+)?$/;
 
 /** Closed list owned by the host. A resolver outside it does not exist. */
-const HOST_RESOLVERS = new Set(["browser-cdp", "computer-use", "system-time", "hephaestus-cli"]);
+const HOST_RESOLVERS = new Set(["browser-cdp", "computer-use", "system-time", "workspace-preview", "hephaestus-cli"]);
 /** Capabilities the host actually provides. `requires.tools` is valid only inside this set. */
-const HOST_CAPABILITIES = new Set(["browser", "computer-use", "agent-routing", "time", "data", "custom"]);
+const HOST_CAPABILITIES = new Set(["browser", "computer-use", "agent-routing", "time", "workspace-preview", "data", "custom"]);
 const TOOL_KINDS = new Set(["stdio", "builtin", "http"]);
 /** §2.4 — three executable forms. Unifying them makes one of them lose its guarantee. */
 const TOOL_FORMS = new Set(["materialized", "inline", "provisioned"]);

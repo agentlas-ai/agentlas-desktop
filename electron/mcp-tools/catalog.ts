@@ -279,7 +279,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     mark: "HN",
     envRequirements: [],
   },
-  ...builtinPluginCatalogEntriesIfPresent(["cua-driver", "playwright", "agentlas-browser"]),
+  ...builtinPluginCatalogEntriesIfPresent(["cua-driver", "playwright", "agentlas-browser", "workspace-preview"]),
   {
     id: "brave-search",
     name: "Brave 검색",

@@ -1,0 +1,47 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-workspace-preview",
+  "name": "Agentlas Workspace Preview",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.cloud" },
+  "surface": {
+    "displayName": "Workspace Preview",
+    "displayNameKo": "워크스페이스 미리보기",
+    "tagline": "Keep local app previews alive across worker handoffs",
+    "taglineKo": "작업자가 바뀌어도 프로젝트 미리보기를 유지합니다",
+    "description": "Keep a project development server running across worker handoffs and inspect or stop it from the current task.",
+    "descriptionKo": "작업자가 바뀌어도 프로젝트 미리보기를 유지하고 현재 작업에서 상태를 확인하거나 종료합니다.",
+    "category": "dev",
+    "brandColor": "#7C3AED",
+    "defaultPrompts": ["이 프로젝트의 개발 서버를 미리보기로 띄워줘"]
+  },
+  "invocation": { "mention": "@workspace-preview", "implicit": "always", "standalone": false },
+  "provides": {
+    "tools": [
+      {
+        "id": "workspace-preview",
+        "capability": "workspace-preview",
+        "kind": "builtin",
+        "resolver": "workspace-preview",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "워크스페이스 미리보기",
+          "nameEn": "Workspace Preview",
+          "description": "현재 작업에서 승인된 프로젝트 미리보기를 유지하고 상태를 확인합니다.",
+          "descriptionEn": "Keep, inspect, and stop an owner-approved project preview for the current task.",
+          "category": "dev",
+          "brandColor": "#7C3AED",
+          "mark": "WP"
+        },
+        "hostChannels": [
+          { "id": "control", "env": "AGENTLAS_WORKSPACE_PREVIEW_CONTROL_FILE", "mode": "read-only" }
+        ]
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "full", "network": "allow", "shell": "allow" },
+  "state": { "files": [], "assets": false }
+}

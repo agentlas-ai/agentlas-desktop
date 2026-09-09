@@ -70,6 +70,7 @@ import {
 import { getProject } from "../store/projects";
 import { getDb } from "../store/db";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
+import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
   beginQueuedSteerDrain,
   cancelQueuedSteersForChat,
@@ -2961,6 +2962,7 @@ export class InvocationService {
     } finally {
       // Even a storage failure must not keep the live invocation running.
       this.steerQueues.delete(chatId);
+      if (action === "delete") stopWorkspacePreviewsForTaskScope(expectedGoalId);
       for (const [runId, record] of records) {
         record.automaticGoalId ??= run?.goalId;
         this.cancelWithReason(runId, new Error(action === "pause" ? "goal_paused_by_user" : "goal_deleted_by_user"));

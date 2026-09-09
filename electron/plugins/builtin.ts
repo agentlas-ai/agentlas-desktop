@@ -16,6 +16,7 @@ import type { McpToolCatalogEntry } from "../../shared/types";
 import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 import { systemTimeMcpLaunchArgs } from "../mcp-tools/system-time-server";
+import { workspacePreviewMcpLaunchArgs } from "../workspace-preview/mcp-server";
 
 interface PluginManifest {
   slug: string;
@@ -33,6 +34,7 @@ export const BUILTIN_PLUGIN_MANIFEST_PATHS = [
   "../../plugins/agentlas-browser/plugin.json",
   "../../plugins/agentlas-computer-use/plugin.json",
   "../../plugins/agentlas-time/plugin.json",
+  "../../plugins/agentlas-workspace-preview/plugin.json",
   "../../plugins/flint-chart/plugin.json",
 ] as const;
 
@@ -111,6 +113,7 @@ const RESOLVERS: Record<string, () => { command: string; args: string[] }> = {
   // Inline form — argv carries the audited, hash-checked source (INV-1..INV-4).
   "computer-use": () => ({ command: process.execPath, args: computerUseMcpLaunchArgs() }),
   "system-time": () => ({ command: process.execPath, args: systemTimeMcpLaunchArgs() }),
+  "workspace-preview": () => ({ command: process.execPath, args: workspacePreviewMcpLaunchArgs() }),
 };
 
 interface PluginToolSurface {

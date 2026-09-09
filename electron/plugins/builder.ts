@@ -32,7 +32,7 @@ import { pluginRouterPrompt, resetPluginRouterCache } from "./router-prompt";
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const WORKFLOW_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const SAFE_RELATIVE_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-const HOST_CAPABILITIES = new Set(["browser", "computer-use", "agent-routing", "time", "data", "custom"]);
+const HOST_CAPABILITIES = new Set(["browser", "computer-use", "agent-routing", "time", "workspace-preview", "data", "custom"]);
 const FILE_WRITES = new Set(["none", "project-only", "ask", "full"]);
 const NETWORKS = new Set(["none", "ask", "allow"]);
 const SHELLS = new Set(["deny", "ask", "allow"]);
