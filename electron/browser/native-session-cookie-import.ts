@@ -25,6 +25,21 @@ import { BROWSER_CREDENTIAL_CONSENT_KEY, type BrowserCredentialConsent } from ".
 import type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 export type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 
+function logNativeSessionFailure(receipt: NativeBrowserCookieImportResult, requestedDomainCount: number): void {
+  if (receipt.code === "imported" || receipt.code === "already-migrated") return;
+  // Keep the diagnostic useful for QA while excluding domains, profiles, cookie
+  // names/values, paths, and provider error text from the main log.
+  console.warn("[browser-native-session] import failed", JSON.stringify({
+    code: receipt.code,
+    requestedDomainCount,
+    observed: receipt.observed,
+    imported: receipt.imported,
+    preserved: receipt.preserved ?? 0,
+    skipped: receipt.skipped,
+    hostFailure: receipt.hostFailure ?? undefined,
+  }));
+}
+
 interface CdpCookie {
   name?: unknown;
   value?: unknown;
@@ -528,9 +543,13 @@ export function syncConnectBrowserSession(input?: { domains: readonly string[]; 
     }
     return receipt;
   }).catch(() => result("source-cookie-read-failed"));
-  connectSessionFlight = flight;
-  void flight.finally(() => { if (connectSessionFlight === flight) connectSessionFlight = null; }).catch(() => undefined);
-  return flight;
+  const tracedFlight = flight.then((receipt) => {
+    logNativeSessionFailure(receipt, requestedDomains?.length ?? 0);
+    return receipt;
+  });
+  connectSessionFlight = tracedFlight;
+  void tracedFlight.finally(() => { if (connectSessionFlight === tracedFlight) connectSessionFlight = null; }).catch(() => undefined);
+  return tracedFlight;
 }
 
 /** Synchronize every consented site, retaining independent receipts for native tabs. */

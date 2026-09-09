@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IconArrowLeft, IconChevronRight, IconClose, IconMoreHorizontal, IconPlus, IconRefresh } from "@/components/Icon";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
-import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserLoginImportDiagnostic, browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type { WorkLiveViewStatus } from "@/lib/types";
 import styles from "./TaskBrowser.module.css";
 
@@ -38,6 +38,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const createInFlight = useRef(false);
   const current = tabs.find((tab) => tab.id === selectedId) ?? tabs[0];
   const loginNotice = browserLoginImportNotice(current?.status.nativeSession, ko);
+  const loginDiagnostic = browserLoginImportDiagnostic(current?.status.nativeSession, ko);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const mounted = useRef(false);
@@ -229,7 +230,10 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       <Link href="/browser" role="menuitem" onClick={() => setMenuOpen(false)}>{ko ? "로그인 연결 관리" : "Manage browser logins"}</Link>
       <p>{ko ? "커넥트 → 브라우저에서 가져온 로그인을 함께 사용합니다." : "Uses logins imported in Connect → Browser."}</p>
     </div>}
-    {loginNotice && <p className={styles.notice} role="status">{ko ? "이 브라우저를 열 때 확인한 로그인 연결: " : "Login transfer checked when opening this browser: "}{loginNotice}</p>}
+    {loginNotice && <p className={styles.notice} role="status">
+      {ko ? "이 브라우저를 열 때 확인한 로그인 연결: " : "Login transfer checked when opening this browser: "}{loginNotice}
+      {loginDiagnostic && <details><summary>{ko ? "자세히" : "Details"}</summary><code>{loginDiagnostic}</code></details>}
+    </p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     <div className={styles.pages}>
       {tabs.filter((tab) => tab.initialUrl).map((tab) => <div key={tab.id} className={styles.page} hidden={tab.id !== current?.id}>

@@ -1,5 +1,15 @@
 import type { NativeBrowserCookieImportResult } from "@shared/types";
 
+/** Safe, value-free machine evidence for a failed Connect → Browser transfer. */
+export function browserLoginImportDiagnostic(result: NativeBrowserCookieImportResult | undefined, ko: boolean): string | null {
+  if (!result || result.code === "imported" || result.code === "already-migrated") return null;
+  const host = result.hostFailure ? ` · ${result.hostFailure.stage}/${result.hostFailure.code}` : "";
+  const skipped = result.skipped;
+  return ko
+    ? `오류 코드: ${result.code}${host} · 확인 ${result.observed} · 반영 ${result.imported} · 보존 ${result.preserved ?? 0} · 건너뜀 만료 ${skipped.expired}, 분할 ${skipped.partitioned}, 잘못됨 ${skipped.invalid}, 쓰기실패 ${skipped.writeFailed}`
+    : `Error code: ${result.code}${host} · observed ${result.observed} · imported ${result.imported} · preserved ${result.preserved ?? 0} · skipped expired ${skipped.expired}, partitioned ${skipped.partitioned}, invalid ${skipped.invalid}, write-failed ${skipped.writeFailed}`;
+}
+
 /** A copied session is not proof that the website accepted its login. */
 export function browserLoginImportNotice(result: NativeBrowserCookieImportResult | undefined, ko: boolean): string | null {
   if (!result || (result.ok && (result.code === "imported" || result.code === "already-migrated"))) return null;

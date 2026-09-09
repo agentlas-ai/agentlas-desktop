@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserLoginImportDiagnostic, browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
@@ -41,6 +41,7 @@ export function CredentialImportDialog({
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [sessionDiagnostic, setSessionDiagnostic] = useState<string | null>(null);
   const [loginRequired, setLoginRequired] = useState<string[]>([]);
 
   /*
@@ -129,6 +130,7 @@ export function CredentialImportDialog({
     setError(null);
     setLoginRequired([]);
     setSessionNotice(null);
+    setSessionDiagnostic(null);
     try {
       const res = await api.browser.importCredentials(profileId, [...checked]);
       if (!res.ok) {
@@ -138,6 +140,7 @@ export function CredentialImportDialog({
       // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
       const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
       setSessionNotice(nativeNotice);
+      setSessionDiagnostic(browserLoginImportDiagnostic(res.nativeSession, ko));
       const linked = res.linkedSites.length;
       const skipped = res.skipped.length;
       const protectedSites = res.requiresLoginSites ?? [];
@@ -266,7 +269,10 @@ export function CredentialImportDialog({
         </div>
 
         {error && <div className="cid-error">{error}</div>}
-        {sessionNotice && <div className="cid-error" role="status">{sessionNotice}</div>}
+        {sessionNotice && <div className="cid-error" role="status">
+          {sessionNotice}
+          {sessionDiagnostic && <details><summary>{ko ? "자세히" : "Details"}</summary><code>{sessionDiagnostic}</code></details>}
+        </div>}
 
         {loginRequired.length > 0 && (
           <div className="cid-login-required">

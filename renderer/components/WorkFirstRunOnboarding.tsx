@@ -1,6 +1,6 @@
 "use client";
 
-import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserLoginImportDiagnostic, browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
@@ -113,6 +113,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [siteBusy, setSiteBusy] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
   const [siteNote, setSiteNote] = useState<string | null>(null);
+  const [siteDiagnostic, setSiteDiagnostic] = useState<string | null>(null);
   /*
    * ★ 상태가 아니라 ref 다 (오너 신고 2026-08-24 수리): 예전에는 useState 였고 그 값이
    *   아래 effect 의 deps 에 들어 있었다. `setSiteScanStarted(true)` 가 곧바로 effect 를
@@ -371,6 +372,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     setSiteBusy(true);
     setSiteError(null);
     setSiteNote(null);
+    setSiteDiagnostic(null);
     try {
       const res = await api.browser.importCredentials(siteProfileId, [...sitePicked]);
       if (!res.ok) {
@@ -378,6 +380,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         return;
       }
       const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
+      setSiteDiagnostic(browserLoginImportDiagnostic(res.nativeSession, ko));
       const linked = res.linkedSites.length;
       const skipped = res.skipped.length;
       const loginRequired = res.requiresLoginSites ?? [];
@@ -636,6 +639,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
               )}
 
               {siteNote && <p className={styles.stepNote}>{siteNote}</p>}
+              {siteDiagnostic && <details className={styles.stepNote}><summary>{ko ? "자세히" : "Details"}</summary><code>{siteDiagnostic}</code></details>}
               {siteError && <p className={styles.stepError}>{siteError}</p>}
             </>
           )}
