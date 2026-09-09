@@ -2916,11 +2916,11 @@ ${effectiveUserPrompt}`;
         sink({
           kind: "notice",
           notice: {
-            level: "warning",
+            level: "info",
             code: "mcp-selection-undecided",
             message: locale === "ko"
-              ? "선택형 도구 판정이 완료되지 않아 현재 설정된 도구만으로 진행합니다. 실제 사용한 런타임과 도구는 실행 기록에서 확인할 수 있습니다."
-              : "Optional-tool judgment did not complete, so this run continues with configured tools only. Check the execution record for the runtime and tools actually used.",
+              ? "연결된 도구로 작업을 계속합니다. 추가 도구 확인은 이번에 완료되지 않았습니다."
+              : "Continuing with the configured tools. The check for additional tools did not finish this time.",
           },
         });
       }
