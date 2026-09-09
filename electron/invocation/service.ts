@@ -16,7 +16,9 @@ import {
   bindLongRunWorker,
   getLongRun,
   getLongRunByGoalId,
+  getLongRunGoalRevisionBinding,
   listLongRunTasks,
+  longRunContinueDecision,
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
@@ -949,42 +951,16 @@ export class InvocationService {
     if (boundGoal && ["paused", "pausing", "cancelling", "cancelled"].includes(boundGoal.status)) {
       throw new Error("goal_explicit_resume_required");
     }
-    /*
-     * A blocked goal is a recoverable verification stop, so a person's next
-     * local turn is allowed to provide the missing evidence. The old path
-     * admitted that turn and created worker attempts while leaving the run in
-     * `blocked`; requestLongRunVerification then (correctly) refused to move
-     * it into `verifying`, making every retry look busy but unable to finish.
-     *
-     * Reopen the durable run before dispatching the new provider turn. Keep the
-     * same guards as the explicit Resume action: only the root Desktop chat
-     * may do this, and an uncertain/running attempt must never be replayed.
-     * The CAS in resumeLongRunByUser makes two concurrent user sends safe.
-     * Queueing here is completed below, immediately before the durable prompt
-     * is handed to the provider, so the run cannot remain queued after a
-     * successful invocation start.
-     */
+    /* Validate now; reopen only after this turn is durably stored. */
     const localUserTurn = req.promptOrigin !== "system"
       && !workspaceBinding
       && !executionContext
       && req.agentAppMode !== true;
     let blockedGoalReactivation: { runId: string; version: number } | null = null;
-    if (boundGoal?.status === "blocked" && localUserTurn) {
-      if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
-        throw new Error("goal_control_scope_mismatch");
-      }
-      const unsettled = getDb().prepare(
-        "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
-      ).get(boundGoal.id) as { n: number };
-      if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
-      const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
-        || (boundGoal.budget.maxCostUsd != null && boundGoal.costUsedUsd >= boundGoal.budget.maxCostUsd)
-        || (boundGoal.budget.wallclockDeadline != null
-          && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
-      if (budgetExhausted) throw new Error("auto_goal_budget_exhausted");
-      blockedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version };
-      boundGoal = resumeLongRunByUser(boundGoal.id, desktopAppInstanceId(), boundGoal.version);
-    }
+    // The request's taskIntent is only a claim for One: semantic intake may
+    // promote a conversation to a task below. Defer blocked-goal eligibility
+    // until runReq carries that effective intent; otherwise a valid One task
+    // is admitted as a plain conversation and can never reopen the run.
     const mobileOneBoundary = workspaceBinding?.source === "mobile-one";
     // A One turn may also arrive from the paired Telegram channel. Both remote
     // One boundaries keep One mode; only the Mobile one may carry a team
@@ -1291,6 +1267,21 @@ export class InvocationService {
         oneAttachmentRedactions: claimedOneAttachments.redactions,
       } : {}),
     };
+    if (boundGoal?.status === "blocked" && localUserTurn && runReq.taskIntent !== "conversation") {
+      if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
+        throw new Error("goal_control_scope_mismatch");
+      }
+      const unsettled = getDb().prepare(
+        "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
+      ).get(boundGoal.id) as { n: number };
+      if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
+      const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
+        || (boundGoal.budget.maxCostUsd != null && boundGoal.costUsedUsd >= boundGoal.budget.maxCostUsd)
+        || (boundGoal.budget.wallclockDeadline != null
+          && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
+      if (budgetExhausted) throw new Error("auto_goal_budget_exhausted");
+      blockedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version };
+    }
     const record: RunRecord = {
       controller,
       chatId: req.chatId,
@@ -2389,19 +2380,65 @@ export class InvocationService {
           payload: { promptMessageId: sourceMessageId },
         });
         if (blockedGoalReactivation) {
-          const current = getLongRun(blockedGoalReactivation.runId);
-          if (current?.status === "queued" && current.version === boundGoal?.version) {
-            transitionLongRun({
-              runId: current.id,
-              to: "running",
-              actorKind: "host",
-              reason: "blocked-goal-user-dispatch",
-              appInstanceId: desktopAppInstanceId(),
-              expectedVersion: current.version,
-            });
+          if (runReq.taskIntent === "conversation") {
             blockedGoalReactivation = null;
-            refreshGoalProjection();
+            record.automaticGoalId = undefined;
+            record.longRunProjection = undefined;
+            projectionGoalId = null;
           }
+        }
+        if (blockedGoalReactivation) {
+          let resumed: ReturnType<typeof getLongRun> = null;
+          try {
+            resumed = getDb().transaction(() => {
+              const current = getLongRun(blockedGoalReactivation!.runId);
+              if (!current || current.status !== "blocked" || current.version !== blockedGoalReactivation!.version) return null;
+              const revision = getChatGoalRevision(current.goalId);
+              const revisionBinding = getLongRunGoalRevisionBinding(current.id);
+              if (!revision || revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision) return null;
+              const pending = getDb().prepare(
+                "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
+              ).get(current.id) as { n: number };
+              if (pending.n) return null;
+              const budgetExhausted = (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles)
+                || (current.budget.maxCostUsd != null && current.costUsedUsd >= current.budget.maxCostUsd)
+                || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
+              if (budgetExhausted) return null;
+              const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
+                SET status = 'active', completed_at = NULL, updated_at = ?
+                WHERE goal_id = ? AND chat_id = ? AND status = 'blocked'`)
+                .run(new Date().toISOString(), current.goalId, chat.id);
+              if (contractChanged.changes !== 1) throw new Error("auto_goal_resume_contract_not_blocked");
+              const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), current.version);
+              if (!longRunContinueDecision(queued.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");
+              return transitionLongRun({
+                runId: queued.id,
+                to: "running",
+                actorKind: "host",
+                reason: "blocked-goal-user-dispatch",
+                appInstanceId: desktopAppInstanceId(),
+                expectedVersion: queued.version,
+              });
+            })();
+          } catch {
+            resumed = null;
+          }
+          if (!resumed) {
+            blockedGoalReactivation = null;
+            record.automaticGoalId = undefined;
+            record.longRunProjection = undefined;
+            projectionGoalId = null;
+            return {
+              blockInvocation: true as const,
+              code: "automatic-goal-resume-state-changed" as const,
+              message: pickLocale(runReq) === "ko"
+                ? "목표 상태가 바뀌어 이번 후속 작업을 시작하지 않았습니다. 현재 상태를 확인한 뒤 다시 시도해 주세요."
+                : "The Goal changed state, so this follow-up did not start. Check its current state and try again.",
+            };
+          }
+          boundGoal = resumed;
+          blockedGoalReactivation = null;
+          refreshGoalProjection();
         }
         // Only ordinary local, user-authored root-chat work enters automatic
         // Goal. Science and remote/automation authority keep their own adapters.

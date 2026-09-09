@@ -1538,7 +1538,7 @@ function deterministicOneCompletionCopy(
  */
 export interface DurableUserMessageHookBlock {
   blockInvocation: true;
-  code: "automatic-goal-intake-unavailable";
+  code: "automatic-goal-intake-unavailable" | "automatic-goal-resume-state-changed";
   message: string;
 }
 
