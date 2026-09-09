@@ -5,6 +5,8 @@
 - Electron 실행 파일을 Node 자식으로 호출하는 모든 런타임 경로에 `ELECTRON_RUN_AS_NODE=1`을 강제해 도구 훅·키체인·프로바이더 실행 때 Agentlas 창이 반복해서 열리는 문제를 막습니다.
 - 앱 시작마다 PID, 부모 PID, 안전하게 축약한 argv, Node 모드 여부를 `launches.log`에 기록해 재기동 원인을 확인할 수 있습니다.
 
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.1.10 — 2026-09-09
 
 - 앱 구현 작업의 완료 기준에 실제 앱 실행, 화면 확인, 핵심 흐름 조작 결과를 포함합니다.
