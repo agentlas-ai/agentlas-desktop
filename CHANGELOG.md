@@ -1,11 +1,16 @@
 # Changelog
 
-## 1.1.10 — 2026-09-08
+## 1.1.10 — 2026-09-09
 
 - 앱 구현 작업의 완료 기준에 실제 앱 실행, 화면 확인, 핵심 흐름 조작 결과를 포함합니다.
 - 프로젝트에 연결한 에이전트는 자동으로 시작된 Goal의 첫 작업부터 팀 실행에 참여할 수 있습니다.
 - 검증 근거가 부족하면 저장된 목표와 체크포인트를 바탕으로 후속 작업을 이어갑니다. 취소된 실행과 결과가 불확실한 작업은 자동으로 반복하지 않습니다.
 - 개발 앱에서도 공식 Science 패키지를 다운로드하고 기존 릴리스 공개키로 서명을 검증합니다.
+
+- One·Work의 실행 URL은 브라우저에서, 캡처·파일은 결과 보기에서 엽니다.
+- Science 전용 릴리스 저장소 다운로드를 지원하며 기존 다운로드 경로도 유지합니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
 ## 1.1.9 — 2026-09-08
 

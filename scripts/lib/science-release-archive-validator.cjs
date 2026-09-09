@@ -365,8 +365,10 @@ function assertArchiveUrl(value, releaseTag) {
   try { parsed = new URL(value); } catch { fail("science-release-archive-url-invalid"); }
   let pathname;
   try { pathname = decodeURIComponent(parsed.pathname); } catch { fail("science-release-archive-url-invalid", value); }
-  const prefix = `/agentlas-ai/agentlas-desktop-releases/releases/download/${releaseTag}/`;
-  const fileName = pathname.startsWith(prefix) ? pathname.slice(prefix.length) : "";
+  const prefixes = ["agentlas-science-releases", "agentlas-desktop-releases"]
+    .map((repository) => `/agentlas-ai/${repository}/releases/download/${releaseTag}/`);
+  const prefix = prefixes.find((candidate) => pathname.startsWith(candidate));
+  const fileName = prefix ? pathname.slice(prefix.length) : "";
   if (
     parsed.protocol !== "https:"
     || parsed.hostname !== "github.com"
