@@ -228,6 +228,21 @@ export function codexPermissionArgs(permission?: RunnerRequest["permission"]): s
   return permissionArgs(permission);
 }
 
+/**
+ * The non-interactive CLI has a distinct automatic-review switch. An internal
+ * worker may use it only with Main's explicit auto_review reviewer; ordinary
+ * user-reviewed turns must continue to stop at the existing approval surface.
+ * This is separate from the workspace sandbox: a writable worker still keeps
+ * its exact project root and network policy while Codex can approve its
+ * read-only browser navigation request.
+ */
+export function codexApprovalArgs(
+  reviewer?: RunnerRequest["approvalsReviewer"],
+  permission?: RunnerRequest["permission"],
+): string[] {
+  return reviewer === "auto_review" && permission === "write" ? ["--approve-for-me"] : [];
+}
+
 function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
   if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
@@ -1830,6 +1845,7 @@ export const runCodex: Runner = async (
   }
 
   const permArgs = permissionArgs(runReq.permission);
+  const approvalArgs = codexApprovalArgs(runReq.approvalsReviewer, runReq.permission);
   const mcpArgs =
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
@@ -1970,6 +1986,7 @@ export const runCodex: Runner = async (
     const resumePerm = resumePermissionArgs(runReq.permission);
     const args = [
       "exec",
+      ...approvalArgs,
       "resume",
       ...isolatedConfigArgs,
       ...browserOnlyConfigArgs,
@@ -2044,6 +2061,7 @@ export const runCodex: Runner = async (
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
   const createArgs = [
     "exec",
+    ...approvalArgs,
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
     "--json",
