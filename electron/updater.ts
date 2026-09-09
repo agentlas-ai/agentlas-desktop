@@ -61,51 +61,38 @@ let startupRecovery: { targetVersion?: string; backupPath?: string } | null = nu
 const stateListeners = new Set<(state: UpdaterState) => void>();
 const OFFICIAL_DESKTOP_INSTALL_URL = "https://agentlas.cloud/desktop";
 const OFFICIAL_DESKTOP_RELEASES_URL = "https://github.com/agentlas-ai/agentlas-desktop-releases/releases";
+// The public release repository also carries Agentlas Science archives. GitHub's
+// `/releases/latest` is therefore not a Desktop channel: whichever product was
+// published last can win it. The Web release registry already selects the
+// verified Desktop tag by its actual platform assets, so Desktop must resolve
+// its feed through that registry before asking electron-updater to check.
+const OFFICIAL_DESKTOP_RELEASE_METADATA_URL = "https://agentlas.cloud/api/desktop/latest";
+const OFFICIAL_DESKTOP_RELEASE_REPOSITORY = "agentlas-ai/agentlas-desktop-releases";
+const DESKTOP_RELEASE_METADATA_TIMEOUT_MS = 10_000;
+const DESKTOP_RELEASE_METADATA_MAX_BYTES = 128 * 1024;
 
-function updateConfigPath(): string {
-  return path.join(process.resourcesPath, "app-update.yml");
+interface DesktopReleaseMetadataSnapshot {
+  ready?: unknown;
+  version?: unknown;
+  releaseTag?: unknown;
 }
 
-function hasBundledUpdateConfig(): boolean {
-  try {
-    return fs.existsSync(updateConfigPath());
-  } catch {
-    return false;
-  }
+function validatedDesktopReleaseTag(metadata: DesktopReleaseMetadataSnapshot | null): string | null {
+  if (!metadata || metadata.ready !== true) return null;
+  const version = typeof metadata.version === "string" ? metadata.version.trim() : "";
+  const tag = typeof metadata.releaseTag === "string" ? metadata.releaseTag.trim() : "";
+  if (!/^\d+\.\d+\.\d+$/.test(version) || tag !== `v${version}`) return null;
+  return tag;
 }
 
-/** How long the pre-install feed re-read may take before it is treated as unreadable. */
-const OFFERED_VERSION_TIMEOUT_MS = 10_000;
-
-/**
- * The version the update feed offers right now, or null when it cannot be read.
- *
- * Deliberately the same source of truth electron-updater itself uses for a
- * stable channel: GET https://github.com/<owner>/<repo>/releases/latest with a
- * JSON Accept header, then `tag_name`. Reading a different surface (our website
- * API, a mirror) would create a second answer that can disagree with the one
- * the download actually came from.
- */
-async function readOfferedVersion(): Promise<string | null> {
-  let owner = "";
-  let repo = "";
-  let provider = "";
-  try {
-    const config = fs.readFileSync(updateConfigPath(), "utf8");
-    owner = /^\s*owner:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
-    repo = /^\s*repo:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
-    provider = /^\s*provider:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
-  } catch (error) {
-    console.warn("[updater] app-update.yml could not be read for the pre-install re-check", error);
-    return null;
-  }
-  // Only GitHub is wired here. Any other provider must read as "unknown", never
-  // as "confirmed" — a silent yes is what this guard exists to prevent.
-  if (provider !== "github" || !owner || !repo) return null;
-
-  return new Promise<string | null>((resolve) => {
+/** Read the canonical, verified Desktop release registry without GitHub's
+ * cross-product `releases/latest` ambiguity. */
+async function readDesktopReleaseMetadata(): Promise<DesktopReleaseMetadataSnapshot | null> {
+  return new Promise<DesktopReleaseMetadataSnapshot | null>((resolve) => {
     let settled = false;
-    const finish = (value: string | null) => {
+    let totalBytes = 0;
+    const chunks: Buffer[] = [];
+    const finish = (value: DesktopReleaseMetadataSnapshot | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -113,28 +100,35 @@ async function readOfferedVersion(): Promise<string | null> {
     };
     const request = net.request({
       method: "GET",
-      url: `https://github.com/${owner}/${repo}/releases/latest`,
+      url: OFFICIAL_DESKTOP_RELEASE_METADATA_URL,
       redirect: "follow",
     });
-    // A limit that only warns is not a limit: abort the request itself.
     const timer = setTimeout(() => {
       try { request.abort(); } catch { /* already finished */ }
       finish(null);
-    }, OFFERED_VERSION_TIMEOUT_MS);
+    }, DESKTOP_RELEASE_METADATA_TIMEOUT_MS);
     timer.unref?.();
     request.setHeader("Accept", "application/json");
+    request.setHeader("User-Agent", "Agentlas-Desktop-update-check");
     request.on("response", (response) => {
       if (response.statusCode !== 200) {
         response.on("data", () => undefined);
         response.on("end", () => finish(null));
         return;
       }
-      const chunks: Buffer[] = [];
-      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("data", (chunk: Buffer) => {
+        totalBytes += chunk.byteLength;
+        if (totalBytes > DESKTOP_RELEASE_METADATA_MAX_BYTES) {
+          try { request.abort(); } catch { /* already finished */ }
+          finish(null);
+          return;
+        }
+        chunks.push(chunk);
+      });
       response.on("end", () => {
         try {
-          const tag = JSON.parse(Buffer.concat(chunks).toString("utf8"))?.tag_name;
-          finish(typeof tag === "string" && tag ? tag.replace(/^v/, "") : null);
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as DesktopReleaseMetadataSnapshot;
+          finish(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null);
         } catch {
           finish(null);
         }
@@ -148,6 +142,56 @@ async function readOfferedVersion(): Promise<string | null> {
       finish(null);
     }
   });
+}
+
+/** Point electron-updater at the exact Desktop tag for this check. */
+async function configureDesktopReleaseFeed(): Promise<void> {
+  const metadata = await readDesktopReleaseMetadata();
+  const tag = validatedDesktopReleaseTag(metadata);
+  if (!tag) return;
+  autoUpdater.setFeedURL({
+    provider: "generic",
+    url: `https://github.com/${OFFICIAL_DESKTOP_RELEASE_REPOSITORY}/releases/download/${tag}/`,
+  });
+}
+
+let desktopFeedResolverInstalled = false;
+
+/** Keep scheduled and manual checks on the product-specific feed. */
+function installDesktopFeedResolver(): void {
+  if (desktopFeedResolverInstalled) return;
+  const nativeCheckForUpdates = autoUpdater.checkForUpdates.bind(autoUpdater);
+  autoUpdater.checkForUpdates = async () => {
+    await configureDesktopReleaseFeed();
+    return nativeCheckForUpdates();
+  };
+  desktopFeedResolverInstalled = true;
+}
+
+function updateConfigPath(): string {
+  return path.join(process.resourcesPath, "app-update.yml");
+}
+
+function hasBundledUpdateConfig(): boolean {
+  try {
+    return fs.existsSync(updateConfigPath());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The version the update feed offers right now, or null when it cannot be read.
+ *
+ * Use the same canonical Desktop release registry that powers the public
+ * download page. The GitHub repository intentionally contains both Desktop
+ * and Science releases, so its generic `/releases/latest` endpoint cannot be
+ * used as a product-specific pre-install guard.
+ */
+async function readOfferedVersion(): Promise<string | null> {
+  const metadata = await readDesktopReleaseMetadata();
+  const tag = validatedDesktopReleaseTag(metadata);
+  return tag ? tag.slice(1) : null;
 }
 
 function broadcast(state: UpdaterState): void {
@@ -377,6 +421,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     console.log("[updater] QA mode — skipping auto-update");
     return;
   }
+  installDesktopFeedResolver();
   const hasUpdateConfig = hasBundledUpdateConfig();
   if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
   const dispatchDeferredAuthRestore = () => {
