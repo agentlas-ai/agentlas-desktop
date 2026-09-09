@@ -10,6 +10,7 @@ import {
 } from "../long-run/judged-auto-goal-intent";
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
+import { goalScopeCriterion } from "../../shared/goal-scope";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -137,9 +138,11 @@ export async function prepareInvocationAutomaticGoal(input: {
       acceptanceCriteria: [
         { id: "requested-outcome", text: "Every deliverable the user asked for is complete and present in the workspace. "
           + `The request was: ${JSON.stringify(source.text.replace(/\s+/g, " ").trim().slice(0, 1_200))}` },
-        { id: "scope", text: "No file outside the run's declared working folder was created or modified, and the run stayed "
-          + `within its granted permission (${input.permission}). Both the folder and the permission are in the run receipt; `
-          + "if the evidence shows no out-of-folder writes, this criterion is met." },
+        { id: "scope", text: goalScopeCriterion({
+          permission: input.permission === "read" || input.permission === "write" || input.permission === "full" ? input.permission : undefined,
+          originalRequest: source.text,
+          locale: "en",
+        }) },
         { id: "evidence", text: "Completion is supported by current evidence on the requested output surface; unverified work remains open." },
         { id: "delivery-validation", text: "For apps or interactive UI changes, launch the actual app and exercise core user flows "
           + "in a browser, simulator, or native runtime. Preserve tool evidence or captures of launch, rendered screens, interactions, "

@@ -13,6 +13,7 @@ import {
   transitionLongRun,
   tryCompleteVerifiedLongRun,
 } from "../store/long-runs";
+import { goalScopeCriterion } from "../../shared/goal-scope";
 
 export interface GoalLedgerDecision {
   continue: boolean;
@@ -103,7 +104,7 @@ export async function getGoalLedgerGoal(
   }
 }
 
-export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "en"): string[] {
+export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "en", permission?: "read" | "write" | "full"): string[] {
   const normalized = objective.replace(/\s+/g, " ").trim().slice(0, 500);
   const requestedOutcome = locale === "ko"
     ? `요청 결과가 실제 대상 표면에서 확인 가능하게 완성되어야 합니다: ${normalized}`
@@ -118,8 +119,7 @@ export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "
   return locale === "ko"
     ? [
         requestedOutcome,
-        "선언된 작업 폴더 밖의 파일을 만들거나 고치지 않고, 부여된 권한 안에서만 실행해야 합니다."
-        + " 폴더와 권한은 실행 영수증에 있으며, 폴더 밖 쓰기 증거가 없으면 이 기준은 충족입니다.",
+        goalScopeCriterion({ permission, originalRequest: objective, locale: "ko" }),
         "변경한 경로의 관련 테스트·타입 검사·빌드가 통과하고 기존 핵심 흐름에 회귀가 없어야 합니다.",
         "앱이나 상호작용 UI를 구현·변경했다면 실제 앱을 실행하고 브라우저·시뮬레이터·네이티브 런타임에서"
         + " 핵심 사용자 흐름을 조작해야 합니다. 실행·화면·조작·결과의 도구 기록이나 캡처를 남깁니다."
@@ -129,8 +129,7 @@ export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "
       ]
     : [
         requestedOutcome,
-        "No file outside the run's declared working folder was created or modified, and the run stayed within its granted"
-        + " permission. Both are in the run receipt; if the evidence shows no out-of-folder writes, this criterion is met.",
+        goalScopeCriterion({ permission, originalRequest: objective, locale: "en" }),
         "Relevant tests, type checks, and builds for changed paths must pass without regressing the core flow.",
         "For apps or interactive UI changes, launch the actual app and exercise core user flows in a browser, simulator, or native runtime."
         + " Preserve tool evidence or captures of launch, rendered screens, interactions, and outcomes. Source, build, static analysis,"

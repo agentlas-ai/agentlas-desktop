@@ -4677,7 +4677,8 @@ ${effectiveUserPrompt}`;
             await ensureGoalLedgerGoal({
               goalId: activeGoalId,
               objective,
-              acceptanceCriteria: deriveGoalAcceptanceCriteria(objective, locale),
+              acceptanceCriteria: deriveGoalAcceptanceCriteria(objective, locale,
+                req.permissions === "read" || req.permissions === "write" || req.permissions === "full" ? req.permissions : undefined),
               projectDir: workforceProjectDir,
             });
             activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);

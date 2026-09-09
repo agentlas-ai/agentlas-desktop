@@ -1649,7 +1649,7 @@ export class InvocationService {
       });
       try {
         const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
-        const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq));
+        const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq), runReq.permissions);
         if (!objective || !ensureGoalLedgerGoal({
           goalId: projectionGoalId,
           objective,
