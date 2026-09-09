@@ -1,4 +1,5 @@
 "use client";
+import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice } from "../../../shared/types";
@@ -7256,7 +7257,7 @@ export function OneShell() {
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
               />
             )}
-            <div className={styles.composerDecisions} data-one-composer-decisions="true" />
+            <ComposerDecisionSlot className={styles.composerDecisions} surface="one" />
             <ToolApprovalInline chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
               ? selected?.taskId === selectedTaskId

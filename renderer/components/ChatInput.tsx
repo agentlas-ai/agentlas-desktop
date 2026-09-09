@@ -7,6 +7,7 @@
 //
 // 모드 토글은 V0 UI만 (실제 동작은 V1): plan/goal/permission이 invocation payload로 전달.
 "use client";
+import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -1489,6 +1490,7 @@ function ChatInputComponent({
         />
       )}
 
+      <ComposerDecisionSlot className="composer-decision-stack" surface="work" />
       <div
         className="chat-input-shell"
         data-has-progress={queuedCount > 0 || effectiveGoalMode ? "true" : "false"}

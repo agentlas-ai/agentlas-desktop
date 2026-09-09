@@ -366,7 +366,7 @@ export function McpKeyRequestSheet({
   );
 
   return (
-    <ComposerDecisionPortal enabled={presentation === "one"}>
+    <ComposerDecisionPortal enabled>
     <div
       data-composer-decision-card="true"
       className="mkr-wrap"

@@ -11739,22 +11739,22 @@ button[data-toggle-state="on"] {
  */
 :root {
   /* 카드: 테두리 1px #E8E8E8, 넉넉한 패딩, 반경 18px, 약한 그림자. */
-  --ask-card-radius: 18px;
+  --ask-card-radius: 13px;
   --ask-card-bg: #ffffff;
   --ask-card-line: #e8e8e8;
   --ask-card-shadow: 0 12px 30px rgba(20, 25, 30, .07);
-  --ask-card-pad-top: 24px;
-  --ask-card-pad-side: 20px;
-  --ask-card-pad-bottom: 24px;
+  --ask-card-pad-top: 12px;
+  --ask-card-pad-side: 12px;
+  --ask-card-pad-bottom: 12px;
 
   /* 제목 → 첫 선택지 사이 22px. */
   --ask-title-size: 14px;
   --ask-title-weight: 650;
   --ask-title-ink: #191a1c;
-  --ask-title-gap: 22px;
+  --ask-title-gap: 12px;
 
   /* 선택지: 높이 56px, 반경 12px, 서로 1px 간격. */
-  --ask-option-height: 56px;
+  --ask-option-height: 44px;
   --ask-option-radius: 12px;
   --ask-option-gap: 1px;
   --ask-option-pad-side: 12px;
@@ -11825,4 +11825,23 @@ button[data-toggle-state="on"] {
   --doc-body-size: 14.5px;
   --doc-body-leading: 1.75;
   --doc-para-gap: 15px;
+}
+
+/* Shared One/Work composer decision placement. Cards retain their own request lifecycle. */
+.composer-decision-stack {
+  width: min(100%, 740px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: auto;
+}
+[data-composer-decisions]:not(:empty) { margin-bottom: 6px; }
+[data-composer-decisions][data-composer-decisions] [data-composer-decision-card] {
+  position: relative;
+  inset: auto;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  pointer-events: auto;
 }

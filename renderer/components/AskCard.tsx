@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { askCardFooterLabel } from "@shared/ask-card-footer";
 import styles from "./AskCard.module.css";
 
@@ -31,6 +31,7 @@ export function AskCard({
   onChoose,
   onClose,
   footer,
+  otherOption,
   freeText,
   onFreeTextChange,
   children,
@@ -52,7 +53,9 @@ export function AskCard({
    * **적은 답이 그대로 나간다.** 라벨이 시킨 것과 정반대다.
    * 그래서 라벨도 상태를 따라간다: 글이 있으면 submitLabel, 없으면 skipLabel.
    */
-  footer?: { placeholder: string; skipLabel: string; submitLabel: string; onSkip: (freeText: string) => void };
+  footer?: { placeholder: string; skipLabel: string; submitLabel: string; onSkip: (freeText: string) => void; hideInput?: boolean };
+  /** An explicit, keyboard-reachable row for the free-text answer. */
+  otherOption?: { title: string; note?: string };
   /** Optional controlled value for drafts that outlive this card instance. */
   freeText?: string;
   /** Called whenever the free-text input changes in controlled mode. */
@@ -62,6 +65,7 @@ export function AskCard({
   "data-testid"?: string;
 }) {
   const [internalFreeText, setInternalFreeText] = useState("");
+  const footerInputRef = useRef<HTMLInputElement | null>(null);
   const currentFreeText = freeText ?? internalFreeText;
   const updateFreeText = (value: string) => {
     if (freeText === undefined) setInternalFreeText(value);
@@ -107,31 +111,49 @@ export function AskCard({
             {option.active && <span className={styles.arrow} aria-hidden="true">→</span>}
           </button>
         ))}
+        {otherOption && (
+          <button
+            type="button"
+            className={styles.option}
+            data-ask-option="other"
+            data-ask-other-option="true"
+            data-active={currentFreeText.trim() ? "true" : "false"}
+            onClick={() => footerInputRef.current?.focus()}
+          >
+            <span className={styles.index} aria-hidden="true">{options.length + 1}</span>
+            <span className={styles.optionText}>
+              <span className={styles.optionTitleRow}><span className={styles.optionTitle}>{otherOption.title}</span></span>
+              {otherOption.note && <span className={styles.optionNote}>{otherOption.note}</span>}
+            </span>
+            {currentFreeText.trim() && <span className={styles.arrow} aria-hidden="true">→</span>}
+          </button>
+        )}
       </div>
 
       {footer && (
         <div className={styles.footer}>
           <span className={styles.footerMark} aria-hidden="true">✎</span>
-          <input
-            className={styles.footerInput}
-            value={currentFreeText}
-            placeholder={footer.placeholder}
-            onChange={(event) => updateFreeText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                event.preventDefault();
-                /*
-                 * ★Enter 는 **바로 아래 단추가 하는 일**을 한다 (실측 2026-09-08).
-                 *   예전에는 `if (answer)` 가 붙어 있어 입력이 비면 Enter 가 아무 일도
-                 *   안 했다. 그런데 같은 자리의 단추는 비어 있어도 건너뛴다 — 같은 화면의
-                 *   두 길이 서로 다른 답을 내면 사람은 둘 중 하나를 고장으로 읽는다.
-                 *   라벨(askCardFooterLabel)도 이미 입력 유무를 따라가므로, 사람은 누르기
-                 *   전에 무슨 일이 일어날지 읽을 수 있다.
-                 */
-                footer.onSkip(currentFreeText.trim());
-              }
-            }}
-          />
+          {!footer.hideInput && <input
+              ref={footerInputRef}
+              className={styles.footerInput}
+              value={currentFreeText}
+              placeholder={footer.placeholder}
+              onChange={(event) => updateFreeText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                  event.preventDefault();
+                  /*
+                   * ★Enter 는 **바로 아래 단추가 하는 일**을 한다 (실측 2026-09-08).
+                   *   예전에는 `if (answer)` 가 붙어 있어 입력이 비면 Enter 가 아무 일도
+                   *   안 했다. 그런데 같은 자리의 단추는 비어 있어도 건너뛴다 — 같은 화면의
+                   *   두 길이 서로 다른 답을 내면 사람은 둘 중 하나를 고장으로 읽는다.
+                   *   라벨(askCardFooterLabel)도 이미 입력 유무를 따라가므로, 사람은 누르기
+                   *   전에 무슨 일이 일어날지 읽을 수 있다.
+                   */
+                  footer.onSkip(currentFreeText.trim());
+                }
+              }}
+            />}
           <button type="button" className={styles.skip} onClick={() => footer.onSkip(currentFreeText.trim())}>
             {askCardFooterLabel(currentFreeText, footer)}
           </button>

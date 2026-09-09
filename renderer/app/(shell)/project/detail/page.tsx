@@ -1,5 +1,6 @@
 // 프로젝트 상세 — 프로젝트 문맥, 채팅, PM 메모리 기반 작업 타임라인.
 "use client";
+import { OneBottomSheet as SharedDialog } from "@/components/one/OneBottomSheet";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { detailForUser, failureMessage } from "@/lib/invocation-failure";
@@ -494,15 +495,14 @@ function ProjectPage() {
   }
 
   useEffect(() => {
-    if (!externalSessionsOpen && !taskStartOpen) return;
+    if (!externalSessionsOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || externalSessionImporting) return;
       if (externalSessionsOpen) setExternalSessionsOpen(false);
-      else setTaskStartOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [externalSessionImporting, externalSessionsOpen, taskStartOpen]);
+  }, [externalSessionImporting, externalSessionsOpen]);
 
   async function saveNote() {
     const api = ipc();
@@ -750,34 +750,12 @@ function ProjectPage() {
         </button>
       </header>
 
-      {taskStartOpen && (
-        <div
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setTaskStartOpen(false);
-          }}
-          style={{ position: "fixed", inset: 0, zIndex: 1190, display: "grid", placeItems: "center", padding: 24, background: "rgba(21, 22, 18, .3)", backdropFilter: "blur(3px)" }}
-        >
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="task-start-title"
-            aria-describedby="task-start-description"
-            style={{ width: "var(--popup-3-width)", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
-          >
-            <header style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "20px 20px 16px" }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ ...eyebrowStyle, marginBottom: 6 }}>{project.name}</div>
-                <h2 id="task-start-title" style={{ margin: 0, fontSize: 19, fontFamily: "var(--font-head)" }}>{locale === "ko" ? "어떻게 시작할까요?" : "How would you like to start?"}</h2>
-                <p id="task-start-description" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.55 }}>
-                  {locale === "ko" ? "새 대화를 시작하거나, 이 프로젝트 폴더에서 진행하던 CLI 기록을 가져올 수 있습니다." : "Start a new conversation or bring in CLI history created inside this project folder."}
-                </p>
-              </div>
-              <button type="button" onClick={() => setTaskStartOpen(false)} aria-label={locale === "ko" ? "닫기" : "Close"} style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 10, color: "var(--muted-deep)" }}>
-                <IconClose size={17} />
-              </button>
-            </header>
-            <div style={{ display: "grid", gap: 10, padding: "0 20px 20px" }}>
+      <SharedDialog open={taskStartOpen} onClose={() => setTaskStartOpen(false)}
+        closeLabel={locale === "ko" ? "닫기" : "Close"} size="compact" eyebrow={project.name}
+        title={locale === "ko" ? "어떻게 시작할까요?" : "How would you like to start?"}
+        titleId="task-start-title"
+        description={locale === "ko" ? "새 대화를 시작하거나, 이 프로젝트 폴더에서 진행하던 CLI 기록을 가져올 수 있습니다." : "Start a new conversation or bring in CLI history created inside this project folder."}>
+            <div style={{ display: "grid", gap: 10, padding: 0 }}>
               <button
                 autoFocus
                 type="button"
@@ -807,9 +785,7 @@ function ProjectPage() {
                 <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
               </button>
             </div>
-          </section>
-        </div>
-      )}
+      </SharedDialog>
 
       {externalSessionsOpen && (
         <div

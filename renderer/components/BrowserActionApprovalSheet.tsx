@@ -205,7 +205,7 @@ export function BrowserActionApprovalSheet() {
       `}</style>
     </>
   );
-  return <ComposerDecisionPortal enabled={oneRoute}><div className="baa-wrap" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">{content}</div></ComposerDecisionPortal>;
+  return <ComposerDecisionPortal enabled><div className="baa-wrap" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">{content}</div></ComposerDecisionPortal>;
 }
 
 function browserActionName(actionType: string, ko: boolean): string {

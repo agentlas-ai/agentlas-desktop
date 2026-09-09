@@ -121,14 +121,21 @@ export function AskUserSheet() {
 
   const dismiss = () => {
     if (!req) return;
-    // Closing stays available even while an acknowledgement is in flight.
-    // Never send a competing decline for an already-submitted answer.
-    if (!attemptsRef.current.has(req.requestId)) void answer(null);
-    liveRequestsRef.current.delete(req.requestId);
-    attemptsRef.current.delete(req.requestId);
-    clearAskUserDraft(req);
-    setDraftValue("");
-    setQueue((current) => current.filter((item) => item.requestId !== req.requestId));
+    const requestId = req.requestId;
+    // A close is a real null answer, not a renderer-only dismissal. Keep the
+    // request mounted until Main acknowledges it so a bridge failure cannot
+    // silently leave the runtime waiting with no visible way to retry.
+    if (attemptsRef.current.has(requestId)) return;
+    // Main explicitly reported that this request ended elsewhere. It is safe
+    // to clear this stale card locally; no answer is still waiting for it.
+    if (submission?.requestId === requestId && submission.error === "ended") {
+      liveRequestsRef.current.delete(requestId);
+      clearAskUserDraft(req);
+      setDraftValue("");
+      setQueue((current) => current.filter((item) => item.requestId !== requestId));
+      return;
+    }
+    void answer(null);
   };
 
   /*
@@ -160,7 +167,7 @@ export function AskUserSheet() {
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
   return (
-    <ComposerDecisionPortal enabled={oneRoute}>
+    <ComposerDecisionPortal enabled>
     <div
       data-composer-decision-card="true"
       className={`aus ${oneRoute ? "aus-one" : ""}`}
@@ -181,20 +188,25 @@ export function AskUserSheet() {
             active: currentSubmission ? currentSubmission.value === option.label : index === 0,
             disabled: currentSubmission?.pending,
           }))}
+          otherOption={req.allowFreeText ? {
+            title: ko ? "기타" : "Other",
+            note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
+          } : undefined}
           freeText={draftValue}
           onFreeTextChange={updateDraft}
           onChoose={(id) => { void answer(id); }}
           onClose={dismiss}
-          footer={req.allowFreeText
-            ? {
-              placeholder: ko ? "직접 답하기" : "Answer in your own words",
-              skipLabel: ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`,
-              submitLabel: ko ? `이 답 보내기 · ${secondsLeft}초` : `Send answer · ${secondsLeft}s`,
-              onSkip: (text) => { void answer(text ? text : null); },
-            }
-            : undefined}
+          footer={{
+            placeholder: ko ? "직접 답하기" : "Answer in your own words",
+            skipLabel: req.allowFreeText ? (ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
+            submitLabel: req.allowFreeText ? (ko ? `이 답 보내기 · ${secondsLeft}초` : `Send answer · ${secondsLeft}s`) : (ko ? "건너뛰기" : "Skip"),
+            hideInput: !req.allowFreeText,
+            onSkip: (text) => { void answer(text ? text : null); },
+          }}
         >
-          {currentSubmission?.pending && <p role="status">{ko ? "답변 전달 중…" : "Sending answer…"}</p>}
+          {currentSubmission?.pending && <p role="status">{currentSubmission.value === null
+            ? (ko ? "질문을 닫는 중…" : "Closing the question…")
+            : (ko ? "답변 전달 중…" : "Sending answer…")}</p>}
           {currentSubmission?.error && <p role="alert">
             {currentSubmission.error === "ended"
               ? (ko ? "이 질문은 이미 종료되었거나 다른 곳에서 답변되었습니다. 입력은 남겨 두었습니다. 닫고 현재 질문을 확인해 주세요."

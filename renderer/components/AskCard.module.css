@@ -26,13 +26,13 @@
   font-size: var(--ask-title-size);
   font-weight: var(--ask-title-weight);
   color: var(--ask-title-ink);
-  line-height: 1;
+  line-height: 1.4;
 }
 
 .close {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 32px;
+  height: 32px;
   margin: -4px -4px 0 0;
   display: grid;
   place-items: center;

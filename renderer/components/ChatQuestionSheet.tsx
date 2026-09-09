@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatQuestion } from "@/components/ChatStream";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
+import { ComposerDecisionPortal } from "@/components/ComposerDecisionPortal";
 
 export interface QuestionSheetAnswer {
   questionId: string;
@@ -117,7 +118,8 @@ export function ChatQuestionSheet({
     // headings, so display the canonical bytes and retry its original run.
     keyHandlerRef.current = () => {};
     return (
-      <div className="titlebar-nodrag" ref={rootRef}>
+      <ComposerDecisionPortal enabled>
+      <div className="titlebar-nodrag" ref={rootRef} data-composer-decision-card="true">
         <AskCard
           title={ko ? "이미 저장된 답변" : "Previously saved answer"}
           locale={ko ? "ko" : "en"}
@@ -142,6 +144,7 @@ export function ChatQuestionSheet({
           }}>{initialReply}</pre>
         </AskCard>
       </div>
+      </ComposerDecisionPortal>
     );
   }
 
@@ -245,7 +248,8 @@ export function ChatQuestionSheet({
    */
   const stepPrefix = questions.length > 1 ? `${active + 1}/${questions.length} · ` : "";
   return (
-    <div className="titlebar-nodrag" ref={rootRef}>
+    <ComposerDecisionPortal enabled>
+    <div className="titlebar-nodrag" ref={rootRef} data-composer-decision-card="true">
       <AskCard
         // 질문이 바뀌면 자유입력칸도 새로 — 앞 질문에 친 글이 다음 질문에 그대로 남지 않게.
         key={q.id}
@@ -258,6 +262,10 @@ export function ChatQuestionSheet({
           note: opt.description ?? undefined,
           active: (selected[q.id] ?? []).includes(opt.label),
         }))}
+        otherOption={{
+          title: ko ? "기타" : "Other",
+          note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
+        }}
         onChoose={(id) => {
           const { sel, nts } = pick(id);
           // 하나만 고르는 질문은 고르는 순간이 답이다 — 방금 고른 상태로 판단·전송한다.
@@ -283,5 +291,6 @@ export function ChatQuestionSheet({
         }}
       />
     </div>
+    </ComposerDecisionPortal>
   );
 }
