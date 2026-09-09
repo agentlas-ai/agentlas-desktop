@@ -213,6 +213,101 @@ function stringToolArg(value: unknown, aliases: readonly string[]): string | nul
   return null;
 }
 
+function unwrapShellCommand(command: string): string {
+  let current = command.trim();
+  for (let depth = 0; depth < 2; depth += 1) {
+    const match = /^(?:\/usr\/bin\/env\s+)?(?:\/bin\/)?(?:ba|z|)sh\s+-l?c\s+(["'])([\s\S]*)\1$/.exec(current);
+    if (!match) break;
+    current = match[2].trim();
+  }
+  return current;
+}
+
+function shellWords(command: string): string[] | null {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  const push = () => { if (word) words.push(word); word = ""; };
+  for (const char of command) {
+    if (escaped) { word += char; escaped = false; continue; }
+    if (char === "\\") { escaped = true; word += char; continue; }
+    if (quote) { if (char === quote) quote = null; else word += char; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (/\s/u.test(char)) { push(); continue; }
+    word += char;
+  }
+  if (escaped || quote) return null;
+  push();
+  return words;
+}
+
+function isReadOnlySimpleShellCommand(command: string): boolean {
+  if (!command) return false;
+  const words = shellWords(command);
+  if (!words?.length) return false;
+  const rawExecutable = words.shift()!;
+  if (rawExecutable.includes("/") && !/^\/(?:usr\/)?bin\/[A-Za-z0-9._-]+$/u.test(rawExecutable)) return false;
+  const executable = rawExecutable.replace(/^.*\//u, "");
+  if (executable === "nl") {
+    // Bounded form used by evidence inspection: `nl -ba FILE` (options only).
+    return words.length >= 2
+      && words.slice(0, -1).every((word) => /^-(?:ba|b|w\d+)$/u.test(word))
+      && !words.at(-1)!.startsWith("-");
+  }
+  if (executable === "sed") {
+    // Only line-printing; reject sed's in-place/file-writing options entirely.
+    return words.length >= 2
+      && words[0] === "-n"
+      && /^\d+(?:,\d+)?p$/u.test(words[1] ?? "")
+      && words.slice(2).every((word) => !word.startsWith("-"));
+  }
+  if (executable === "rg") {
+    // Static search only. In particular, --pre can execute an arbitrary filter.
+    if (words.some((word) => word === "--pre" || word.startsWith("--pre=") || word === "--command" || word === "--replace")) return false;
+    return words.length >= 1 && words.every((word) => (
+      !word.startsWith("-") || /^-(?:n|i|F)$/u.test(word) || word.startsWith("--glob=")
+    ));
+  }
+  return false;
+}
+
+function isReadOnlyShellCommand(command: string): boolean {
+  const unwrapped = unwrapShellCommand(command);
+  if (!unwrapped || shellWrittenPaths(unwrapped).length > 0) return false;
+  const pipeline: string[] = [];
+  let part = "";
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < unwrapped.length; index += 1) {
+    const char = unwrapped[index];
+    if (char === "'" || char === '"') {
+      quote = quote === char ? null : quote ?? char;
+      part += char;
+      continue;
+    }
+    if (char === "\\") {
+      const next = unwrapped[index + 1];
+      if (quote === "'" || !next) { part += char; continue; }
+      if (quote === '"' && '"$`<>&|;\n\r'.includes(next)) return false;
+      if (!quote && '<>&|;\n\r'.includes(next)) return false;
+      part += char + next;
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if (char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">") return false;
+      part += char;
+      continue;
+    }
+    if (char === ";" || char === "&" || char === "\n" || char === "\r" || char === "`" || char === "$" || char === "(" || char === ")" || char === "<" || char === ">") return false;
+    if (char === "|") { pipeline.push(part.trim()); part = ""; continue; }
+    part += char;
+  }
+  if (quote) return false;
+  pipeline.push(part.trim());
+  return pipeline.every((segment) => isReadOnlySimpleShellCommand(segment));
+}
+
 export function auditWriteBoundary(
   events: Array<Record<string, unknown>>,
   workingFolder: string | null,
@@ -235,6 +330,10 @@ export function auditWriteBoundary(
     const detail = normalizeToolCall({ name, args: args as string | Record<string, unknown>, result, cwd: root });
     const outsideReferences = outsideAbsolutePaths(args, root);
     if (detail.type === "read" || detail.type === "list" || detail.type === "search") {
+      for (const candidate of outsideReferences) readOnlyOutsideReferences.add(candidate);
+      continue;
+    }
+    if (detail.type === "shell" && isReadOnlyShellCommand(detail.command)) {
       for (const candidate of outsideReferences) readOnlyOutsideReferences.add(candidate);
       continue;
     }
