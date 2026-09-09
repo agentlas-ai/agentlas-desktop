@@ -24,6 +24,8 @@ import {
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { inferInlineImageMime, parseMcpResult } from "../../shared/mcp-result-rendering";
+import { saveBrowserCaptureArtifact } from "../media/capture-artifacts";
 import {
   defaultCodexModelEffort,
   readCodexModelInventory,
@@ -630,7 +632,16 @@ function runCodexProcess(
       }
       if (ev.type === "response_item" && payload?.type === "custom_tool_call_output") {
         const id = nonEmptyText(payload.call_id) ?? nonEmptyText(payload.id);
-        if (id) settleResponseTool(id, outputText(payload.output), payload.status === "failed");
+        if (id) {
+          // Avoid writing a second durable capture if the host replays an
+          // already-settled response item.
+          if (settledResponseToolIds.has(id)) return;
+          const pending = responseTools.get(id);
+          const artifactPaths = payload.status === "failed" || !pending
+            ? []
+            : codexInlineCapturePaths(pending.name, payload.output);
+          settleResponseTool(id, outputText(payload.output), payload.status === "failed", artifactPaths);
+        }
         return;
       }
       if (ev.type === "event_msg" && payload?.type === "patch_apply_end") {
@@ -1517,10 +1528,10 @@ async function runCodexResidentTurn(input: {
             {
               threadId: threadToResume,
               ...commonThreadParams,
-              // A caller-owned runtimeSessionId is an explicit resume request;
-              // retain its model override. Stored same-fingerprint continuity
-              // can inherit the thread model, but still verifies the response.
-              ...(req.runtimeSessionId && req.model ? { model: req.model } : {}),
+              // Every explicit model selection must survive stored-thread
+              // recovery too, including a new pool entry after a model switch.
+              // The acknowledgement below still verifies the effective model.
+              ...(req.model ? { model: req.model } : {}),
             },
             { timeoutMs: 120_000, signal: req.signal },
           );
@@ -2083,3 +2094,33 @@ export const runCodex: Runner = async (
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,
   );
 };
+
+/**
+ * Preserve inline screenshots from Codex custom-tool results before the UI
+ * preview is truncated. The shared parser validates the MCP envelope and
+ * base64 bounds; this path validates the decoded image signature before using
+ * the existing PNG/JPEG artifact store. Tool prose and paths are never
+ * inspected for this purpose.
+ */
+function codexInlineCapturePaths(toolName: string, output: unknown): string[] {
+  let raw: string;
+  if (typeof output === "string") raw = output;
+  else {
+    try { raw = JSON.stringify(output ?? ""); } catch { return []; }
+  }
+  const images = parseMcpResult(raw, toolName).blocks.filter((block) =>
+    block.kind === "image" && block.source === "inline" && (block.mimeType === "image/png" || block.mimeType === "image/jpeg"),
+  );
+  const paths: string[] = [];
+  for (const image of images.slice(0, 4)) {
+    if (image.kind !== "image") continue;
+    const mimeType = image.mimeType === "image/png" || image.mimeType === "image/jpeg" ? image.mimeType : null;
+    if (!mimeType) continue;
+    const comma = image.src.indexOf(",");
+    const encoded = comma >= 0 ? image.src.slice(comma + 1) : "";
+    if (inferInlineImageMime(encoded) !== mimeType) continue;
+    const filePath = saveBrowserCaptureArtifact(mimeType, encoded);
+    if (filePath) paths.push(filePath);
+  }
+  return paths;
+}

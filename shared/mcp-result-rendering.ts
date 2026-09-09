@@ -124,7 +124,7 @@ function dataUrl(mime: string | undefined, value: unknown): string | null {
  * not guess from a filename or a prose hint: decode only the bounded base64
  * prefix and accept the four image signatures already allowed by the UI.
  */
-function inferInlineImageMime(value: unknown): "image/jpeg" | "image/png" | "image/gif" | "image/webp" | undefined {
+export function inferInlineImageMime(value: unknown): "image/jpeg" | "image/png" | "image/gif" | "image/webp" | undefined {
   const encoded = canonicalBase64(nonEmptyString(value) ?? "");
   if (!encoded) return undefined;
   const bytes: number[] = [];
