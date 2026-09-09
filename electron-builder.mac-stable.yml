@@ -60,6 +60,11 @@ asarUnpack:
   # materializeBuiltinPlugins() must inspect real modes/symlinks rather than
   # Electron's synthetic ASAR fs.Stats (DEP0180).
   - "dist/plugins/**/*"
+  # The task browser's standalone Node process loads the CUA isolate directly.
+  - "dist/electron/computer-use/unified/**/*.js"
+  - "**/node_modules/quickjs-emscripten-core/**/*"
+  - "**/node_modules/@jitl/quickjs-ffi-types/**/*"
+  - "**/node_modules/@jitl/quickjs-wasmfile-release-sync/**/*"
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
   # Science image rendering needs the native addon and its adjacent libvips libraries.
