@@ -224,8 +224,19 @@ const CODEX_WORKSPACE_WRITE_CONFIG_ARGS = [
  * 설치된 CLI 로 이 벡터가 아직 통하는지 재는 프로브가 사본이 아니라 이 함수를 부른다
  * (사본은 러너가 바뀌어도 안 바뀌어서, 프로브만 초록인 상태를 만든다).
  */
-export function codexPermissionArgs(permission?: RunnerRequest["permission"]): string[] {
-  return permissionArgs(permission);
+export function codexPermissionArgs(
+  permission?: RunnerRequest["permission"],
+  reviewer?: RunnerRequest["approvalsReviewer"],
+): string[] {
+  return permissionArgs(permission, reviewer);
+}
+
+/** Resume uses config overrides because `codex exec resume` has no sandbox flag. */
+export function codexResumePermissionArgs(
+  permission?: RunnerRequest["permission"],
+  reviewer?: RunnerRequest["approvalsReviewer"],
+): string[] {
+  return resumePermissionArgs(permission, reviewer);
 }
 
 /**
@@ -243,8 +254,17 @@ export function codexApprovalArgs(
   return reviewer === "auto_review" && permission === "write" ? ["--approve-for-me"] : [];
 }
 
-function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
+function permissionArgs(
+  permission?: RunnerRequest["permission"],
+  reviewer?: RunnerRequest["approvalsReviewer"],
+): string[] {
   if (permission === "full") {
+    if (reviewer === "auto_review") {
+      // `--approve-for-me` is the CLI's workspace-write-only auto-review
+      // switch. Full access must keep its sandbox while routing approvals to
+      // the same reviewer through the validated config keys.
+      return ["--sandbox", "danger-full-access", "-c", `approval_policy="on-request"`];
+    }
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
   if (permission === "write") {
@@ -263,8 +283,18 @@ function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
   return ["--sandbox", "read-only"];
 }
 
-function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[] {
+function resumePermissionArgs(
+  permission?: RunnerRequest["permission"],
+  reviewer?: RunnerRequest["approvalsReviewer"],
+): string[] {
   if (permission === "full") {
+    if (reviewer === "auto_review") {
+      // `exec resume` accepts the same config key but no `--sandbox` option.
+      return [
+        "-c", `sandbox_mode="danger-full-access"`,
+        "-c", `approval_policy="on-request"`,
+      ];
+    }
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
   // `codex exec resume` has no `--sandbox` flag, but accepts the same validated
@@ -1879,7 +1909,7 @@ export const runCodex: Runner = async (
   // Keep its network configuration while avoiding the mutually exclusive flag.
   const permArgs = approvalArgs.length > 0
     ? [...CODEX_WORKSPACE_WRITE_CONFIG_ARGS]
-    : permissionArgs(runReq.permission);
+    : permissionArgs(runReq.permission, runReq.approvalsReviewer);
   const mcpArgs =
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
@@ -2017,7 +2047,7 @@ export const runCodex: Runner = async (
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
   if (canResume) {
-    const resumePerm = resumePermissionArgs(runReq.permission);
+    const resumePerm = resumePermissionArgs(runReq.permission, runReq.approvalsReviewer);
     const args = [
       "exec",
       ...approvalArgs,

@@ -172,6 +172,11 @@ function normalizeLiveLabel(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
+/** Keep long shell/heredoc bodies in the expandable receipt, not the row head. */
+function compactShellLabel(locale: "ko" | "en"): string {
+  return locale === "ko" ? "셸 명령" : "Shell command";
+}
+
 function liveThoughtLabel(cell: OneWorkCell, locale: "ko" | "en"): string {
   if (cell.kind !== "thought") return "";
   return cell.headline ?? (cell.status === "running" ? cellVerb(cell, locale) : "");
@@ -263,18 +268,25 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
           head={(
             <>
               <strong>{verb}</strong>
+              <span className={styles.object}>{compactShellLabel(locale)}</span>
               {statusSuffix(cell, locale)}
-              <code className={styles.command}>{cell.command}</code>
               {cell.exitCode != null && cell.exitCode !== 0 && <span className={styles.muted}>exit {cell.exitCode}</span>}
             </>
           )}
         >
-          {cell.output ? (
+          {(cell.command || cell.output) ? (
             <div className={styles.commandPanel} data-status={cell.status}>
               <div className={styles.commandPanelHeader}>
                 <span>Shell</span>
               </div>
-              <pre className={styles.commandOutput}>{cell.output}</pre>
+              {cell.command && <>
+                <div className={styles.commandPanelLabel}>{locale === "ko" ? "명령" : "Command"}</div>
+                <pre className={styles.commandOutput}>{cell.command}</pre>
+              </>}
+              {cell.output && <>
+                <div className={styles.commandPanelLabel}>{locale === "ko" ? "결과" : "Output"}</div>
+                <pre className={styles.commandOutput}>{cell.output}</pre>
+              </>}
               <div className={styles.commandPanelFooter}>
                 <ShellResultFooter cell={cell} locale={locale} />
               </div>
