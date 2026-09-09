@@ -14,7 +14,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { installScienceHost } from "agentlas-science";
-import type { ScienceMcpPreparedRegistration } from "agentlas-science";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
 import { resolveManagedNodeRuntime } from "./runtime/managed-node";
@@ -53,6 +52,19 @@ import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf"
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
 
 let installed = false;
+
+/**
+ * Keep the Desktop side of this bridge structural. The pinned Science package
+ * predates its exported name, while newer Science builds call this same shape.
+ */
+interface ScienceMcpPreparedRegistration {
+  path: string;
+  configKey: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  isCurrent: () => boolean;
+}
 
 /**
  * Science's package owns the loopback grant, while Desktop Main owns the
