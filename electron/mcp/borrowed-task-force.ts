@@ -3109,7 +3109,7 @@ function buildPlannerSystemPrompt(
       : "requiresApproval is a boolean host execution boundary, not prose. Mark every implementation/build/write-code/browser-verification step true when the person asked to review or approve a PRD/plan first. Pre-approval PRD drafting, product/technical review, design questions, and PRD revision are false.",
     requireExactRoster
       ? ""
-      : "For product-building requests, give every standing teammate a useful pre-approval conversational step before any gated implementation step: the planner authors the PRD, the builder reviews feasibility, the designer asks or reviews visual direction, and the planner revises. Never hide implementation work inside a false planning/review packet.",
+      : "Only when the user explicitly requested a plan/PRD approval stop, give standing teammates useful pre-approval planning, feasibility, design, and revision steps before gated implementation. Otherwise, an authorized product-building request must include actual implementation, execution, and verification packets in this plan; planning and feasibility reports alone do not fulfill it. Assign write access explicitly to file-producing packets only within the host permission ceiling. Do not invent an approval stop. Never hide implementation work inside a planning/review packet.",
     requireExactRoster
       ? ""
       : "oneReply is One's short visible response immediately after that worker speaks. Use it when One must coordinate the room (for example, tell a designer to wait for plan approval); otherwise use an empty string.",
