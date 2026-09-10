@@ -3,6 +3,8 @@
 ## 1.1.13 — 2026-09-10
 
 - 목표 분류 모델의 첫 후보가 시간 초과되어도 다음 오케스트레이터를 계속 시도합니다. 모든 분류 후보가 한도·인증·격리 문제로 실패해도 사용자 작업은 일반 실행으로 계속하며, 화면에서 모델 역할의 연결과 사용 한도를 확인하는 방법을 안내합니다.
+- 자동 완료 기준을 Goal 저장 한도 안에서 생성하고, 종료된 Goal 결속과 계약이 남아 있으면 새 요청을 등록하기 전에 함께 정리합니다. 이미지 단독 요청은 분류 장애로 표시하지 않고 일반 실행합니다.
+- 지원 로그에 프롬프트나 스택을 남기지 않으면서 분류와 Goal 등록 중 어느 단계에서 실패했는지 구분합니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 

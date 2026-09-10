@@ -47,12 +47,24 @@ export type AutomaticGoalPreparation =
       retryable: true;
       failureKind?: AutomaticGoalIntentResolution["failureKind"];
       attempts?: AutomaticGoalIntentResolution["attempts"];
+      stage?: "source_validation" | "classification" | "admission";
+      causeName?: string;
+      causeCode?: string;
     };
 
 function safeIntakeFailureReason(error: unknown): string {
   return error instanceof Error && /^(?:auto_goal|goal|long_run)_[a-z_]+$/.test(error.message)
     ? error.message
     : "classification_or_admission_failed";
+}
+
+function safeIntakeFailureIdentity(error: unknown): { causeName: string; causeCode?: string } {
+  const causeName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
+    ? error.name
+    : typeof error;
+  if (!error || typeof error !== "object" || !("code" in error)) return { causeName };
+  const code = String((error as { code?: unknown }).code ?? "");
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? { causeName, causeCode: code } : { causeName };
 }
 
 export async function prepareInvocationAutomaticGoal(input: {
@@ -67,6 +79,7 @@ export async function prepareInvocationAutomaticGoal(input: {
     options: Parameters<typeof resolveAutomaticGoalIntent>[1],
   ) => Promise<GoalIntakeDecision | AutomaticGoalIntentResolution>;
 }): Promise<AutomaticGoalPreparation> {
+  let stage: "source_validation" | "classification" | "admission" = "source_validation";
   try {
     if (input.signal.aborted) {
       return { kind: "bypass", decision: {
@@ -79,6 +92,30 @@ export async function prepareInvocationAutomaticGoal(input: {
       throw new Error("auto_goal_source_mismatch");
     }
     const source: GoalSourceMessage = { chatId: input.chatId, messageId: input.sourceMessageId, role: "user", text: row.text };
+    // Image-only requests legitimately have no text for the auxiliary Goal
+    // classifier. The selected execution runtime still receives the image, so
+    // skip Goal intake without presenting this as a classifier outage.
+    if (!source.text.trim()) {
+      const decision: GoalIntakeDecision = {
+        messageId: source.messageId,
+        intent: "unknown",
+        commitment: "uncertain",
+      };
+      tryRecordRunEvent({
+        runId: input.runId,
+        chatId: input.chatId,
+        kind: "automatic_goal_intake",
+        payload: {
+          sourceMessageId: source.messageId,
+          intent: decision.intent,
+          commitment: decision.commitment,
+          classified: false,
+          bypassReason: "empty_text",
+        },
+      });
+      return { kind: "bypass", decision };
+    }
+    stage = "classification";
     const decision = await (input.resolveIntent ?? resolveAutomaticGoalIntent)(source, {
       signal: input.signal,
       // Local classification can exceed a short network-style deadline. Keep a
@@ -102,6 +139,7 @@ export async function prepareInvocationAutomaticGoal(input: {
           sourceMessageId: input.sourceMessageId,
           reason: unavailable.reason,
           retryable: true,
+          stage,
           ...(unavailable.failureKind ? { failureKind: unavailable.failureKind } : {}),
           ...(unavailable.attempts ? { attempts: unavailable.attempts } : {}),
         },
@@ -114,6 +152,7 @@ export async function prepareInvocationAutomaticGoal(input: {
       ...("attempts" in decision && decision.attempts ? { attempts: decision.attempts } : {}),
     } });
     if (decision.intent !== "execute" || decision.commitment !== "now") return { kind: "bypass", decision };
+    stage = "admission";
     const run = admitJudgedAutomaticGoal({
       goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,
       /*
@@ -136,22 +175,15 @@ export async function prepareInvocationAutomaticGoal(input: {
        * granted permission from the run receipt.
        */
       acceptanceCriteria: [
-        { id: "requested-outcome", text: "Every deliverable the user asked for is complete and present in the workspace. "
-          + `The request was: ${JSON.stringify(source.text.replace(/\s+/g, " ").trim().slice(0, 1_200))}` },
+        { id: "requested-outcome", text: "Every deliverable in the stored original request is complete and present on the requested output surface." },
         { id: "scope", text: goalScopeCriterion({
           permission: input.permission === "read" || input.permission === "write" || input.permission === "full" ? input.permission : undefined,
-          originalRequest: source.text,
           locale: "en",
-        }) },
+        }) + " Preserve every explicit constraint in the stored original request." },
         { id: "evidence", text: "Completion is supported by current host-owned evidence on the requested output surface; unverified work remains open. "
           + "For a delegated tool-only runtime or observation request, include a successful host tool receipt and a host-owned delegation "
           + "execution receipt when delegation was requested; worker or model prose alone is not evidence." },
-        { id: "delivery-validation", text: "Only when the request asks to create, change, deliver, or perform actual screen QA of an app or interactive UI, "
-          + "launch the actual app and exercise core user flows in a browser, simulator, or native runtime. Preserve tool evidence or captures "
-          + "of launch, rendered screens, interactions, and outcomes. Source, build, static analysis, unit/widget tests, or a completion report "
-          + "alone do not pass. Fix failures and repeat. A tool-only runtime or observation request does not require app launch or screen QA; "
-          + "its requested operation must instead be proved by the host receipts above. For other outputs inspect the delivered format. "
-          + "Missing runtime/access remains unmet; use only existing permissions." },
+        { id: "delivery-validation", text: "For an app or interactive UI delivery, launch the actual app and exercise its core user flows in a browser, simulator, or native runtime. Preserve host-owned evidence of launch, rendering, interactions, and outcomes; source, build, static analysis, tests, or a completion report alone do not pass. For tool-only work, prove the requested operation with host receipts. Inspect other outputs in their delivered format. Missing runtime or access remains unmet." },
       ],
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,
@@ -163,12 +195,15 @@ export async function prepareInvocationAutomaticGoal(input: {
     return { kind: "admitted", run };
   } catch (error) {
     const reason = safeIntakeFailureReason(error);
+    const failureIdentity = safeIntakeFailureIdentity(error);
     tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake_unavailable", payload: {
       sourceMessageId: input.sourceMessageId,
       reason,
       retryable: true,
+      stage,
+      ...failureIdentity,
     } });
-    return { kind: "unavailable", reason, retryable: true };
+    return { kind: "unavailable", reason, retryable: true, stage, ...failureIdentity };
   }
 }
 

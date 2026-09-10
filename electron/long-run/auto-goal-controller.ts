@@ -7,7 +7,7 @@ import { getDb } from "../store/db";
 import { createStoredAutomaticGoal, completeChatGoalContract } from "../store/chat-goals";
 import { getChat, setChatGoalBinding } from "../store/chats";
 import {
-  appendLongRunEvent, bindCurrentGoalRevisionToLongRun, createLongRun, getLongRun,
+  appendLongRunEvent, bindCurrentGoalRevisionToLongRun, createLongRun, getLongRun, getLongRunByGoalId,
   longRunContinueDecision, resumeLongRunByUser, transitionLongRun, type LongRunRecord,
 } from "../store/long-runs";
 
@@ -54,7 +54,20 @@ export function admitJudgedAutomaticGoal(input: {
     const chat = getDb().prepare("SELECT goal_id, origin_surface, project_id FROM chats WHERE id = ?").get(input.chatId) as
       { goal_id: string | null; origin_surface: string | null; project_id: string | null } | undefined;
     if (!chat || chat.origin_surface === "science") throw new Error("auto_goal_surface_not_supported");
-    if (chat.goal_id && chat.goal_id !== input.goalId) throw new Error("auto_goal_chat_already_bound");
+    if (chat.goal_id && chat.goal_id !== input.goalId) {
+      const priorRun = getLongRunByGoalId(chat.goal_id);
+      // Older releases could leave a chat bound to a campaign that had already
+      // terminated. Repair that stale binding inside the same admission
+      // transaction so the next user request does not lose automatic Goal
+      // tracking. A live prior campaign remains authoritative.
+      if (!priorRun || !LONG_RUN_TERMINAL_STATUSES.has(priorRun.status)) {
+        throw new Error("auto_goal_chat_already_bound");
+      }
+      completeChatGoalContract(priorRun.goalId, priorRun.status === "completed" ? "completed" : "cancelled");
+      getDb().prepare("UPDATE chats SET goal_id = NULL WHERE id = ? AND goal_id = ?")
+        .run(input.chatId, chat.goal_id);
+      chat.goal_id = null;
+    }
     const revision = createStoredAutomaticGoal({ goalId: input.goalId, source, decision: input.decision,
       acceptanceCriteria: input.acceptanceCriteria, authorityRefs: input.authorityRefs, createdAt: new Date().toISOString() });
     if (!revision) return null;
