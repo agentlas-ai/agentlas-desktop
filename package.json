@@ -281,6 +281,7 @@
     "test:science-physics-analysis-runtime": "node scripts/science-physics-analysis-runtime-contract.cjs",
     "test:science-plugin-integrity-committed": "node scripts/science-plugin-integrity-committed-contract.cjs",
     "test:science-plugin-runtime": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/science-plugin-runtime-contract.cjs",
+    "test:extension-verify-is-not-per-call": "node scripts/test-extension-verify-is-not-per-call.cjs",
     "test:science-protein-residue-validator": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/science-protein-residue-validator-contract.cjs",
     "test:science-publication-editable-table": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/science-publication-editable-table-contract.cjs",
     "test:science-research-intent": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/science-research-intent-contract.cjs",

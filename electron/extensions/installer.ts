@@ -173,7 +173,26 @@ function walkPackage(root: string, relative = ""): string[] {
   return files;
 }
 
+// 한 번 통과한 릴리스는 그 폴더의 "모양"을 기억해 둔다. 모양이 그대로면 바이트도 그대로다.
+// 이게 없으면 확장 화면이 말을 걸 때마다 릴리스 전체를 다시 해시한다 — 사이언스에서는
+// 물음 한 번이 199MB·95ms 였고, 그 시간 내내 메인 프로세스가 통째로 멈춰 있었다.
+const verifiedPackageShapes = new Map<string, string>();
+
+function packageShape(sourceDir: string, manifest: ProductExtensionManifest): string {
+  const lines: string[] = [];
+  for (const relative of walkPackage(sourceDir).sort()) {
+    const stat = fs.lstatSync(exactChild(sourceDir, relative));
+    lines.push(`${relative} ${stat.size} ${stat.mtimeMs} ${stat.ino} ${stat.dev}`);
+  }
+  // 매니페스트가 바뀌면 선언 자체가 달라지므로 같은 모양으로 봐서는 안 된다.
+  lines.push(sha256Text(productExtensionSignedPayload(manifest)));
+  return sha256Text(lines.join("\n"));
+}
+
 function verifyPackage(sourceDir: string, manifest: ProductExtensionManifest): void {
+  const shape = packageShape(sourceDir, manifest);
+  if (verifiedPackageShapes.get(sourceDir) === shape) return;
+  verifiedPackageShapes.delete(sourceDir);
   const declared = new Map(manifest.files.map((file) => [file.path, file]));
   const actual = walkPackage(sourceDir).filter((file) => file !== MANIFEST_NAME).sort();
   const expected = [...declared.keys()].sort();
@@ -187,6 +206,7 @@ function verifyPackage(sourceDir: string, manifest: ProductExtensionManifest): v
     if (total > MAX_PACKAGE_BYTES) throw new Error("extension-package-too-large");
     if (sha256File(filePath) !== file.sha256) throw new Error(`extension-file-digest-mismatch:${relative}`);
   }
+  verifiedPackageShapes.set(sourceDir, shape);
 }
 
 function copyPackage(sourceDir: string, destinationDir: string, manifest: ProductExtensionManifest): void {
