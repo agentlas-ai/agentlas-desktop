@@ -2308,6 +2308,23 @@ app.whenReady().then(async () => {
     return scienceStore().listCitationsForMessageForProject(projectId, messageId);
   });
   /*
+   * 근거 칩 하나가 어느 인용에서 왔는지 **한 번에** 답한다.
+   *
+   * 예전에는 화면이 대화 목록을 받고, 대화마다 말풍선을 받고, 말풍선마다 인용을 받아
+   * 직접 대조했다. 근거 하나를 찾는 데 (대화 수 + 전체 말풍선 수) 회의 왕복이 직렬로
+   * 나가고, 연구가 길어질수록 그 수가 계속 커진다.
+   */
+  ipcMain.handle("science:citations:forEvidence", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().findCitationForEvidenceSpan(
+      String(record.projectId ?? ""),
+      String(record.evidenceSpanId ?? ""),
+      String(record.sourceId ?? ""),
+      String(record.sourceVersionId ?? ""),
+    );
+  });
+  /*
    * 대화 하나를 여는 데 필요한 것을 **한 번에** 답한다: 말풍선마다의 블록·인용, 그리고 그
    * 인용들이 가리키는 근거 구간.
    *

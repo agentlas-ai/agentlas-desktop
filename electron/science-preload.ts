@@ -129,6 +129,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     // 대화 하나를 여는 데 필요한 블록·인용·근거를 한 번에 받는다.
     evidenceMany: (projectId: string, messageIds: string[]) =>
       ipcRenderer.invoke("science:messages:evidenceMany", { extensionId, projectId, messageIds }),
+    // 근거 하나가 어느 인용에서 왔는지 곧바로 묻는다 — 대화·말풍선을 훑지 않는다.
+    citationForEvidence: (projectId: string, evidenceSpanId: string, sourceId: string, sourceVersionId: string) =>
+      ipcRenderer.invoke("science:citations:forEvidence", { extensionId, projectId, evidenceSpanId, sourceId, sourceVersionId }),
   }),
   evidence: Object.freeze({
     get: (projectId: string, evidenceId: string) => ipcRenderer.invoke("science:evidence:get", { extensionId, projectId, evidenceId }),
