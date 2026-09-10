@@ -252,6 +252,12 @@ function requiredText(value: string, code: string, max: number): string {
   return normalized;
 }
 
+function requiredContent(value: string, code: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) throw new TypeError(code);
+  return normalized;
+}
+
 function appendEventInDb(input: {
   runId: string;
   kind: string;
@@ -310,7 +316,7 @@ export function createLongRun(input: {
   appInstanceId?: string | null;
 }): LongRunRecord {
   const goalId = requiredText(input.goalId, "long_run_goal_id_required", 240);
-  const objective = requiredText(input.objective, "long_run_objective_required", 2_000);
+  const objective = requiredContent(input.objective, "long_run_objective_required");
   const criteria = normalizeLongRunCriteria(input.acceptanceCriteria);
   if (criteria.length === 0) throw new TypeError("long_run_acceptance_criteria_required");
   const idempotencyKey = requiredText(input.idempotencyKey ?? `goal:${goalId}`, "long_run_idempotency_required", 300);
@@ -691,7 +697,7 @@ export function addLongRunTask(input: {
   if (!getLongRun(input.runId)) throw new Error(`long_run_not_found:${input.runId}`);
   const id = input.id?.trim() || `task_${randomUUID()}`;
   const title = requiredText(input.title, "long_run_task_title_required", 240);
-  const objective = requiredText(input.objective, "long_run_task_objective_required", 2_000);
+  const objective = requiredContent(input.objective, "long_run_task_objective_required");
   const criteria = normalizeLongRunCriteria(input.acceptanceCriteria ?? []);
   const dependencies = Array.from(new Set((input.dependencyIds ?? []).map((value) => value.trim()).filter(Boolean)));
   const criterionIndices = Array.from(new Set((input.criterionIndices ?? [])
@@ -1178,13 +1184,8 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
     const active = db.prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
       .get(runId) as { n: number };
     if (active.n > 0) throw new Error("long_run_goal_binding_attempt_unsettled");
-    // The existing projection is bounded. Refuse instead of silently dropping
-    // part of the authoritative objective or acceptance criteria.
     const objective = goal.objective.replace(/\s+/g, " ").trim();
     const criteria = goal.acceptanceCriteria.map((criterion) => criterion.text.replace(/\s+/g, " ").trim());
-    if (objective.length > 2_000 || criteria.length > 32 || criteria.some((text) => text.length > 500)) {
-      throw new Error("long_run_goal_projection_limit");
-    }
     const now = new Date().toISOString();
     const cursor = db.prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM long_run_verification_receipts WHERE run_id = ?")
       .get(runId) as { n: number };

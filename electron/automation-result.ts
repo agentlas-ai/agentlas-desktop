@@ -40,6 +40,26 @@ function unresolved(reasonCode: string, evidence: string | null): AutomationResu
 /** 판정 불가를 실행 실패와 구분하는 표식. 이 코드를 가진 결과는 실패 스트릭도, 복구 턴도 만들지 않는다. */
 export const JUDGMENT_UNAVAILABLE_REASON_CODE = "judgment_unavailable";
 
+/*
+ * 호스트가 스스로 찍은 표식은 모델보다 먼저다.
+ *
+ * 이 표식들은 우리 코드가 정확한 문자열로 남긴 것이라 뜻이 이미 확정돼 있다. 그런데도
+ * 매번 모델을 부르고 있었고, 분류기가 한도·인증으로 막힌 순간(이번 릴리스가 고치는 바로
+ * 그 상황) `agent_not_found` 라고 대놓고 적힌 결과조차 "판정 불가"로 떨어졌다. 사람이
+ * 답해야 하는 질문(<<agentlas-ask>>)도 마찬가지로 묻힌다.
+ *
+ * 산문 추론은 여전히 모델 몫이다. 여기서 가로채는 것은 **우리가 쓴 표식**뿐이다.
+ */
+const STRUCTURED_BLOCKED_CODES = ["agent_not_found", "owner_only", "no_cloud_package", "insufficient_credits"] as const;
+
+function structuredOutcome(value: string): AutomationResultClassification | null {
+  if (/<<\s*agentlas-ask\s*>>/u.test(value)) {
+    return { status: "needs_input", outcome: "needs_input", reasonCode: "unattended_question", reason: null, evidence: null };
+  }
+  const code = STRUCTURED_BLOCKED_CODES.find((candidate) => new RegExp(`\\b${candidate}\\b`, "u").test(value));
+  return code ? { status: "blocked", outcome: "blocked", reasonCode: code, reason: null, evidence: null } : null;
+}
+
 export function isJudgmentUnavailable(
   classification: Pick<AutomationResultClassification, "reasonCode">,
 ): boolean {
@@ -206,6 +226,8 @@ export async function classifyAutomationOutcome(
 ): Promise<AutomationResultClassification> {
   const value = text?.trim() ?? "";
   if (!value) return unresolved("missing_result", null);
+  const structured = structuredOutcome(value);
+  if (structured) return structured;
   const locale = currentUiLocale();
   const verdict = await judgeRequired<AutomationResultStatus>({
     // 캐시 키는 kind+input이므로 언어를 kind에 포함해야 언어를 바꿔도 옛 문장이 재사용되지 않는다.

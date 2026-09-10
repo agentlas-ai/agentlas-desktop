@@ -30,7 +30,10 @@ export function goalScopeCriterion(input: {
       ? `전체 권한으로 실행되며 전체 권한 자체로 작업 폴더 경계를 추가하지 않습니다.${explicit}`
       : `This run has full permission; full permission itself does not add a working-folder boundary.${explicit}`;
   }
+  // Unknown permission still has a checkable boundary: the run receipt carries both
+  // the declared working folder and the granted permission. Naming only the
+  // permission left the judge with no folder to compare against.
   return input.locale === "ko"
-    ? `실행 영수증의 실제 권한과 원문의 명시적 제약을 기준으로 범위를 확인해야 합니다.${explicit}`
-    : `Assess scope from the actual permission in the run receipt and the explicit constraints in the original request.${explicit}`;
+    ? `실행 영수증에 적힌 선언된 작업 폴더와 실제 부여된 권한을 확인하고, 그 경계와 원문의 명시적 제약을 기준으로 범위를 판단해야 합니다.${explicit}`
+    : `Assess scope against the declared working folder and the granted permission recorded in the run receipt, together with the explicit constraints in the original request.${explicit}`;
 }

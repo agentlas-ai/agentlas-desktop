@@ -136,6 +136,15 @@ export function installDesktopScienceHost(): void {
     /*
      * 내장 플러그인이 어디 있는지. 사이언스가 자기 위치로 추측하던 자리인데, 저장소가
      * 갈리면서 그 추측이 빗나갔다. 이 앱은 답을 알고 있으므로 알려 준다.
+     *
+     * ★실측(2026-09-10): `dist/electron/plugins`는 과학 플러그인과 무관한
+     *   `electron/plugins/*.ts`(에이전트 플러그인 빌더/materialize) 컴파일 산출물이며,
+     *   이름만 "plugins"로 같다. 후보 디렉터리 자체의 존재만 보면 이 무관한 폴더가
+     *   먼저 걸려 진짜 위치(`agentlas_desktop/plugins/`)를 절대 못 본다 — 그 안엔
+     *   science 하위 폴더가 하나도 없어 모든 science 플러그인이
+     *   science-plugin-runtime-unavailable 로 죽는다. 반드시 함께 번들되는
+     *   science 플러그인 하나(`agentlas-science-statistics`)를 표식으로 그 후보
+     *   **안에** 있는지까지 확인한다.
      */
     sciencePluginRoot: () => {
       const packaged = process.resourcesPath
@@ -144,7 +153,7 @@ export function installDesktopScienceHost(): void {
       const compiled = path.resolve(__dirname, "plugins");
       const source = path.resolve(__dirname, "..", "..", "plugins");
       for (const candidate of [compiled, source, packaged]) {
-        if (candidate && fs.existsSync(candidate)) return candidate;
+        if (candidate && fs.existsSync(path.join(candidate, "agentlas-science-statistics"))) return candidate;
       }
       return null;
     },

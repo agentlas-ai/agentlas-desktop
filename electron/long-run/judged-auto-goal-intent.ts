@@ -32,7 +32,7 @@ export async function resolveAutomaticGoalIntent(
     classification: "unavailable",
     ...diagnostic,
   });
-  if (source.role !== "user" || !source.text.trim() || source.text.length > 32_000 || options.signal?.aborted) return abstain();
+  if (source.role !== "user" || !source.text.trim() || options.signal?.aborted) return abstain();
   try {
     const result = await (options.judgeFn ?? judgeRequired)({
       kind: "automatic-goal-intake-v1",
@@ -49,6 +49,7 @@ export async function resolveAutomaticGoalIntent(
       ].join(" "),
       signal: options.signal,
       scanSecrets: true,
+      maxInputChars: null,
       timeoutMs: Math.min(30_000, Math.max(1, options.timeoutMs ?? 30_000)),
     });
     if (options.signal?.aborted || result.source !== "llm" || !result.verdict) {

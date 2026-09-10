@@ -4377,6 +4377,8 @@ export interface McpInvocationRequest {
   oneRecurrenceSelection?: OneRecurrenceSelectionV1;
   /** Main-only approved One Profile/Memory context. Renderer IPC always strips this field. */
   oneProfileContext?: string;
+  /** Main-only content-free attachment kinds for capability selection. */
+  attachmentCapabilitySummary?: string;
   /** Main-only Site Agent App invocation. Pins the selected target and disables router/automation expansion. */
   agentAppMode?: boolean;
   /**

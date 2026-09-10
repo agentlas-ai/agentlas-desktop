@@ -148,7 +148,11 @@ for (const gate of selected) {
   // 통과로 세지도 않는다 — 무엇을 확인하지 못했는지 남긴다.
   // 호스트 판별의 신호는 두 갈래다: electron API 부재, 그리고 **네이티브 모듈 ABI**
   // (better-sqlite3 는 이 체크아웃에서 electron ABI 로 빌드돼 node 로는 못 연다 — 실측).
-  if (/Cannot read properties of undefined \(reading '(?:setPath|whenReady|getPath|quit|exit|on)'\)|require\(['"]electron['"]\)|ERR_DLOPEN_FAILED|NODE_MODULE_VERSION/.test(output)) {
+  // ★이 목록은 손으로 유지된다. 빠진 이름 하나가 "호스트가 없어 확인 못 함"을 "제품이
+  //   깨졌다"로 둔갑시킨다 — disableHardwareAcceleration 이 빠져 있어
+  //   test-mcp-need-resolver 가 FAIL 로 보고됐고, electron 으로 돌리면 통과한다(실측
+  //   2026-09-10). app 객체에서 읽는 이름은 발견하는 대로 여기에 더한다.
+  if (/Cannot read properties of undefined \(reading '(?:setPath|whenReady|getPath|quit|exit|on|disableHardwareAcceleration|requestSingleInstanceLock|setName|isPackaged|commandLine)'\)|require\(['"]electron['"]\)|ERR_DLOPEN_FAILED|NODE_MODULE_VERSION/.test(output)) {
     skipped.push(gate);
     outcomes.push({ gate, status: "SKIP", reason: "Electron host" });
     console.log(`skip ${gate} — needs the Electron host; run it with \`npx electron ${gate}\``);

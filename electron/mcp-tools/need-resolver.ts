@@ -88,31 +88,13 @@ export const MCP_NEED_JUDGMENT_GUIDANCE = [
   "Err toward returning fewer tools.",
 ].join(" ");
 
-const MAX_GOAL_OBJECTIVE_CHARS = 2_000;
-const MAX_GOAL_CRITERIA_CHARS = 6_000;
-const MAX_TASK_CHARS = 3_000;
-
-function boundedText(value: string, limit: number): string {
-  const text = value.trim();
-  if (text.length <= limit) return text;
-  return `${text.slice(0, Math.max(0, limit - 12)).trimEnd()} [truncated]`;
-}
-
-/** Keep every criterion represented when a large contract must be bounded. */
+/** Preserve the complete Goal contract; a later criterion may be the one that requires a tool. */
 export function renderMcpGoalNeedContext(goal?: McpGoalNeedContext): string {
   if (!goal) return "GOAL CONTRACT:\nnone";
-  const criteria = goal.acceptanceCriteria.slice(0, 32);
-  const perCriterionBudget = criteria.length > 0
-    ? Math.max(80, Math.floor(MAX_GOAL_CRITERIA_CHARS / criteria.length) - 8)
-    : MAX_GOAL_CRITERIA_CHARS;
-  const renderedCriteria = criteria.map((criterion, index) =>
-    `${index + 1}. ${boundedText(criterion, perCriterionBudget)}`);
-  if (goal.acceptanceCriteria.length > criteria.length) {
-    renderedCriteria.push(`[${goal.acceptanceCriteria.length - criteria.length} further criteria omitted]`);
-  }
+  const renderedCriteria = goal.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion.trim()}`);
   return [
     "GOAL CONTRACT (host-owned, judge the complete contract):",
-    `Objective: ${boundedText(goal.objective, MAX_GOAL_OBJECTIVE_CHARS) || "unspecified"}`,
+    `Objective: ${goal.objective.trim() || "unspecified"}`,
     "Acceptance criteria:",
     renderedCriteria.join("\n") || "none supplied",
   ].join("\n");
@@ -161,11 +143,11 @@ export async function resolveMcpNeeds(input: {
     input: [
       renderMcpGoalNeedContext(input.goal),
       renderMcpRuntimeCapabilities(input.runtimeCapabilities),
-      `CURRENT TASK:\n${boundedText(input.task, MAX_TASK_CHARS)}`,
+      `CURRENT TASK:\n${input.task.trim()}`,
       `AVAILABLE TOOLS:\n${inventory}`,
     ].join("\n\n"),
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,
-    maxInputChars: MAX_INPUT_CHARS,
+    maxInputChars: null,
     signal: input.signal,
     ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
   });

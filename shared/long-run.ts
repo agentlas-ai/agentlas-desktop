@@ -268,7 +268,6 @@ export function defaultRuntimeFeatureMap(): Record<RuntimeFeature, RuntimeFeatur
 
 export function normalizeLongRunCriteria(value: readonly string[]): string[] {
   return value
-    .map((item) => item.replace(/\s+/g, " ").trim().slice(0, 500))
-    .filter(Boolean)
-    .slice(0, 32);
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }

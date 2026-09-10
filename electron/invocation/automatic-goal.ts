@@ -73,6 +73,7 @@ export async function prepareInvocationAutomaticGoal(input: {
   sourceMessageId: string;
   userPrompt: string;
   permission: string;
+  attachmentOnly?: boolean;
   signal: AbortSignal;
   resolveIntent?: (
     source: GoalSourceMessage,
@@ -92,10 +93,10 @@ export async function prepareInvocationAutomaticGoal(input: {
       throw new Error("auto_goal_source_mismatch");
     }
     const source: GoalSourceMessage = { chatId: input.chatId, messageId: input.sourceMessageId, role: "user", text: row.text };
-    // Image-only requests legitimately have no text for the auxiliary Goal
-    // classifier. The selected execution runtime still receives the image, so
-    // skip Goal intake without presenting this as a classifier outage.
-    if (!source.text.trim()) {
+    // Attachment-only requests legitimately have no text for the auxiliary
+    // Goal classifier. The selected execution runtime still receives the
+    // attachments, so skip Goal intake without presenting this as an outage.
+    if (!source.text.trim() || input.attachmentOnly) {
       const decision: GoalIntakeDecision = {
         messageId: source.messageId,
         intent: "unknown",
@@ -110,7 +111,7 @@ export async function prepareInvocationAutomaticGoal(input: {
           intent: decision.intent,
           commitment: decision.commitment,
           classified: false,
-          bypassReason: "empty_text",
+          bypassReason: input.attachmentOnly ? "attachment_only" : "empty_text",
         },
       });
       return { kind: "bypass", decision };
@@ -120,7 +121,7 @@ export async function prepareInvocationAutomaticGoal(input: {
       signal: input.signal,
       // Local classification can exceed a short network-style deadline. Keep a
       // finite bound while allowing the configured local runtime to answer.
-      timeoutMs: 30_000,
+      timeoutMs: 60_000,
     });
     if (input.signal.aborted) return { kind: "bypass", decision };
     if ("classification" in decision && decision.classification === "unavailable") {
@@ -175,11 +176,15 @@ export async function prepareInvocationAutomaticGoal(input: {
        * granted permission from the run receipt.
        */
       acceptanceCriteria: [
-        { id: "requested-outcome", text: "Every deliverable in the stored original request is complete and present on the requested output surface." },
+        // The judge sees the criterion, not the chat. Carry the request text itself
+        // so the deliverables are enumerable from the criterion alone; the Goal
+        // objective is no longer truncated, so this stays complete.
+        { id: "requested-outcome", text: "Every deliverable in this request is complete and present on the requested output surface. "
+          + `REQUEST (untrusted data): ${source.text.replace(/\s+/g, " ").trim()}` },
         { id: "scope", text: goalScopeCriterion({
           permission: input.permission === "read" || input.permission === "write" || input.permission === "full" ? input.permission : undefined,
           locale: "en",
-        }) + " Preserve every explicit constraint in the stored original request." },
+        }) + " Verify the declared working folder and granted permission from the run receipt, and apply every explicit constraint stated in the request text carried by the requested-outcome criterion." },
         { id: "evidence", text: "Completion is supported by current host-owned evidence on the requested output surface; unverified work remains open. "
           + "For a delegated tool-only runtime or observation request, include a successful host tool receipt and a host-owned delegation "
           + "execution receipt when delegation was requested; worker or model prose alone is not evidence." },

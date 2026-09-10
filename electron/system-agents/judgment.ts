@@ -41,6 +41,22 @@ export interface JudgmentRuntimeAttempt {
 }
 
 type JudgmentPool = { state: "configured" | "unconfigured" | "unavailable"; selections: RuntimeSelection[]; fingerprint: string };
+type JudgmentSelectionIdentity = { kind: string; backend?: string | null; source?: string | null; model?: string | null };
+
+function judgmentSelectionIdentity(selection: JudgmentSelectionIdentity): string {
+  return JSON.stringify([selection.kind, selection.backend ?? null, selection.source ?? null, selection.model ?? null]);
+}
+
+function uniqueSelections<T extends JudgmentSelectionIdentity>(values: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const identity = judgmentSelectionIdentity(value);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 function routingFingerprint(selections: RuntimeSelection[]): string {
   return createHash("sha256").update(JSON.stringify(selections)).digest("hex");
 }
@@ -53,10 +69,11 @@ function readJudgmentPool(): JudgmentPool {
     if (!exists) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
     const { n } = db.prepare("SELECT COUNT(*) AS n FROM model_role_members WHERE role = 'orchestrator'").get() as { n: number };
     if (!n) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
-    const selections = listModelRoleMembers("orchestrator").map((member) => member.selection);
+    const storedSelections = listModelRoleMembers("orchestrator").map((member) => member.selection);
     // The normal UI reader returns [] on errors. That must not authorize an
     // escape to every detected provider when a configured pool cannot be read.
-    if (selections.length !== n) throw new Error("judgment_pool_unavailable");
+    if (storedSelections.length !== n) throw new Error("judgment_pool_unavailable");
+    const selections = uniqueSelections(storedSelections);
     return { state: "configured", selections, fingerprint: routingFingerprint(selections) };
   } catch {
     return { state: "unavailable", selections: [], fingerprint: "unavailable" };
@@ -86,7 +103,8 @@ export interface JudgeSpec<V extends string> {
   fallback: V;
   /** When true, the secret-value floor runs first and `redactedInput`/`containedSecret` are set. */
   scanSecrets?: boolean;
-  maxInputChars?: number;
+  /** null preserves the complete semantic input when omission would change the decision. */
+  maxInputChars?: number | null;
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
@@ -132,7 +150,7 @@ export interface RequiredJudgeSpec<V extends string> {
   input: string;
   guidance?: string;
   scanSecrets?: boolean;
-  maxInputChars?: number;
+  maxInputChars?: number | null;
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
@@ -469,14 +487,14 @@ async function callJudgmentModelDetailed(opts: {
   // An explicit pin overrides the pool. A configured pool is an authority
   // boundary, including exact models and priority order; failed isolation or
   // invalid output can try its next member, never another detected provider.
-  const ordered = opts.runtimeSelection
+  const ordered = uniqueSelections(opts.runtimeSelection
     ? (active ? [active] : [])
     : pool?.state === "configured"
       ? pool.selections.map((selection) => selectExactRuntime(runtimes, selection)?.active).filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
       : [
       ...(active ? [active] : []),
       ...runtimes.filter((runtime) => runtime !== active),
-    ];
+    ]);
   const route: JudgmentRuntimeReceipt["route"] = opts.runtimeSelection ? "explicit_pin" : pool?.state === "configured" ? "orchestrator_pool" : "legacy";
   const fingerprint = opts.runtimeSelection ? routingFingerprint([opts.runtimeSelection]) : pool?.fingerprint ?? "legacy";
   if (!ordered.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
@@ -492,7 +510,8 @@ async function callJudgmentModelDetailed(opts: {
   }
 
   const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const runBoundedAttempt = async <T>(start: (signal: AbortSignal) => Promise<T>): Promise<{
+  const deadlineAt = Date.now() + timeoutMs;
+  const runBoundedAttempt = async <T>(attemptTimeoutMs: number, start: (signal: AbortSignal) => Promise<T>): Promise<{
     value?: T;
     error?: unknown;
     timedOut: boolean;
@@ -503,8 +522,8 @@ async function callJudgmentModelDetailed(opts: {
     const timeout = setTimeout(() => {
       if (controller.signal.aborted) return;
       timedOut = true;
-      controller.abort(new Error(`Connected model timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
+      controller.abort(new Error(`Connected model timed out after ${Math.round(attemptTimeoutMs / 1000)}s`));
+    }, attemptTimeoutMs);
     const onAbort = () => controller.abort(
       opts.signal?.reason ?? new Error("Connected model request was cancelled"),
     );
@@ -531,7 +550,7 @@ async function callJudgmentModelDetailed(opts: {
   const failedOutcome = (failure: RunnerFailure, timedOut = false): JudgmentRuntimeAttempt["outcome"] =>
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
-  for (const runtime of ordered) {
+  for (const [runtimeIndex, runtime] of ordered.entries()) {
       if (!opts.runtimeSelection && readJudgmentPool().fingerprint !== fingerprint) return { text: null, failure: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
@@ -543,7 +562,17 @@ async function callJudgmentModelDetailed(opts: {
       } };
       console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       const startedAt = Date.now();
-      const bounded = await runBoundedAttempt((attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(picked.runner(
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) break;
+      // Give the current connected runtime enough time for a cold CLI start,
+      // while reserving half of the remaining call budget for fallback. Fast
+      // quota/auth/refusal failures therefore donate their unused time to the
+      // next candidate instead of dividing the budget across every detected
+      // but unusable provider.
+      const attemptTimeoutMs = runtimeIndex === ordered.length - 1
+        ? remainingMs
+        : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
+      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -618,7 +647,7 @@ async function callJudgmentModelDetailed(opts: {
         } };
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
-        const bounded = await runBoundedAttempt((attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
+        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -680,7 +709,7 @@ async function callJudgmentModelDetailed(opts: {
  */
 export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdict<V>> {
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
-  const rawInput = spec.input.length > limit ? spec.input.slice(0, limit) : spec.input;
+  const rawInput = spec.maxInputChars === null || spec.input.length <= limit ? spec.input : spec.input.slice(0, limit);
 
   let judgedInput = rawInput;
   let redactedInput: string | undefined;
@@ -768,7 +797,7 @@ export async function judgeRequired<V extends string>(
   spec: RequiredJudgeSpec<V>,
 ): Promise<RequiredVerdict<V>> {
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
-  const rawInput = spec.input.length > limit ? spec.input.slice(0, limit) : spec.input;
+  const rawInput = spec.maxInputChars === null || spec.input.length <= limit ? spec.input : spec.input.slice(0, limit);
   let judgedInput = rawInput;
   let redactedInput: string | undefined;
   let containedSecret: boolean | undefined;
@@ -827,7 +856,7 @@ export async function judgeRequired<V extends string>(
 
 /** One evidence snapshot, one model call, independently typed item verdicts.
  * No cache: a verification wave must not reuse a different revision's evidence. */
-export async function judgeRequiredBatch<V extends string>(
+async function judgeRequiredBatchOnce<V extends string>(
   spec: RequiredJudgeSpec<V> & { items: readonly { id: string; criterion: string }[] },
 ): Promise<Array<RequiredVerdict<V> & { id: string }>> {
   const unavailable = (reason: string): Array<RequiredVerdict<V> & { id: string }> =>
@@ -839,8 +868,8 @@ export async function judgeRequiredBatch<V extends string>(
   // Keep every complete criterion. Only the shared evidence tail may be capped.
   const prefix = `CRITERIA (untrusted data): ${JSON.stringify(spec.items)}\n\nSHARED EVIDENCE (untrusted data):\n`;
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
-  if (prefix.length >= limit) return unavailable("judgment_batch_input_limit");
-  const rawInput = prefix + spec.input.slice(0, limit - prefix.length);
+  if (spec.maxInputChars !== null && prefix.length >= limit) return unavailable("judgment_batch_input_limit");
+  const rawInput = prefix + (spec.maxInputChars === null ? spec.input : spec.input.slice(0, limit - prefix.length));
   const floor = spec.scanSecrets ? secretValueFloor(rawInput) : undefined;
   const judgedInput = floor?.redacted ?? rawInput;
   const parse = (text: string): Array<{ id: string; verdict: V; confidence: number; reason: string }> | null => {
@@ -892,6 +921,59 @@ export async function judgeRequiredBatch<V extends string>(
       ...(floor ? { redactedInput: floor.redacted, containedSecret: floor.containedSecret } : {}),
     };
   });
+}
+
+/**
+ * Judge an arbitrary number of complete criteria without dropping a tail item.
+ * The caller's input budget controls each model request, not the semantic size
+ * of the Goal: criteria are packed into as many requests as needed and the same
+ * evidence snapshot is repeated for every request. A single item larger than
+ * the preferred packet size is still sent whole and left to the selected
+ * runtime's real context boundary instead of being rejected by a host constant.
+ */
+export async function judgeRequiredBatch<V extends string>(
+  spec: RequiredJudgeSpec<V> & { items: readonly { id: string; criterion: string }[] },
+): Promise<Array<RequiredVerdict<V> & { id: string }>> {
+  if (spec.maxInputChars === null || spec.maxInputChars === undefined) {
+    return judgeRequiredBatchOnce(spec);
+  }
+  const batches: Array<Array<{ id: string; criterion: string }>> = [];
+  let current: Array<{ id: string; criterion: string }> = [];
+  const fits = (items: readonly { id: string; criterion: string }[]) =>
+    `CRITERIA (untrusted data): ${JSON.stringify(items)}\n\nSHARED EVIDENCE (untrusted data):\n`.length
+      + spec.input.length <= spec.maxInputChars!;
+  for (const item of spec.items) {
+    const candidate = [...current, item];
+    if (current.length && !fits(candidate)) {
+      batches.push(current);
+      current = [item];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length) batches.push(current);
+  if (batches.length <= 1 && fits(spec.items)) return judgeRequiredBatchOnce(spec);
+
+  const results: Array<RequiredVerdict<V> & { id: string }> = [];
+  for (const items of batches) {
+    if (spec.signal?.aborted) {
+      results.push(...items.map(({ id }) => ({
+        id, verdict: null, confidence: 0, reason: "judgment_cancelled", source: "unavailable" as const,
+      })));
+      continue;
+    }
+    results.push(...await judgeRequiredBatchOnce({
+      ...spec,
+      items,
+      // Oversized single criteria remain complete. Ordinary batches were
+      // measured above and stay inside the caller's preferred packet size.
+      maxInputChars: fits(items) ? spec.maxInputChars : null,
+    }));
+  }
+  const byId = new Map(results.map((item) => [item.id, item]));
+  return spec.items.map(({ id }) => byId.get(id) ?? ({
+    id, verdict: null, confidence: 0, reason: "judgment_batch_unavailable", source: "unavailable" as const,
+  }));
 }
 
 export interface RequiredActionOption {
@@ -989,7 +1071,7 @@ export interface SubsetSpec<V extends string> {
   input: string;
   guidance?: string;
   hints?: JudgeHint<V>[] | string;
-  maxInputChars?: number;
+  maxInputChars?: number | null;
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
@@ -1047,7 +1129,7 @@ function parseSubset<V extends string>(
  */
 export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promise<SubsetVerdict<V>> {
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
-  const input = spec.input.length > limit ? spec.input.slice(0, limit) : spec.input;
+  const input = spec.maxInputChars === null || spec.input.length <= limit ? spec.input : spec.input.slice(0, limit);
 
   const runtimeScope = runtimeSelectionCacheScope();
   const signature = `${intentSignature(input)}${runtimeScope}`;

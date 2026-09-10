@@ -1,6 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { tryRecordRunEvent } from "../store/run-events";
 
+// judgment-exempt: 이 목록은 "이 도구가 바깥을 바꿨나"를 판정하지 않는다. claude-code가
+// 선언한 내장 도구 이름의 **재고 목록**이며, 그 런타임이 어떤 내장 도구를 허용받았는지
+// 영수증에 그대로 적기 위한 것이다(emit 은 runtimeKind: "claude-code" 로 고정).
+// 다른 런타임의 읽기 도구 이름이 빠져도 이 영수증의 뜻은 달라지지 않는다.
 const BUILTINS = ["Read", "Glob", "Grep", "ToolSearch", "WebSearch", "WebFetch", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell"] as const;
 type Scope = { runId: string; chatId: string; nodeId: string; callRef: string; agentId: string | null };
 type State = { scope: Scope; requested: boolean; observed: boolean };

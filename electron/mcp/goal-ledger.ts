@@ -105,7 +105,7 @@ export async function getGoalLedgerGoal(
 }
 
 export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "en", permission?: "read" | "write" | "full"): string[] {
-  const normalized = objective.replace(/\s+/g, " ").trim().slice(0, 500);
+  const normalized = objective.replace(/\s+/g, " ").trim();
   const requestedOutcome = locale === "ko"
     ? `요청 결과가 실제 대상 표면에서 확인 가능하게 완성되어야 합니다: ${normalized}`
     : `The requested outcome must be complete and observable on the real target surface: ${normalized}`;

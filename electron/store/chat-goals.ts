@@ -19,9 +19,8 @@ interface GoalContractRow {
 
 function normalizeCriteria(value: readonly string[]): string[] {
   return value
-    .map((item) => item.replace(/\s+/g, " ").trim().slice(0, 500))
-    .filter(Boolean)
-    .slice(0, 32);
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }
 
 function parseStatus(value: string): GoalStatus {
@@ -125,7 +124,7 @@ export function defineChatGoalContract(input: {
 }): ChatGoalContext | null {
   const goalId = input.goalId.trim();
   const chatId = input.chatId.trim();
-  const objective = input.objective.replace(/\s+/g, " ").trim().slice(0, 2_000);
+  const objective = input.objective.replace(/\s+/g, " ").trim();
   if (!goalId || !chatId || !objective) return getChatGoalContract(goalId);
   const criteria = normalizeCriteria(input.acceptanceCriteria);
   if (criteria.length === 0) throw new TypeError("goal_contract_acceptance_criteria_required");
@@ -207,6 +206,17 @@ export function createStoredAutomaticGoal(input: Parameters<typeof createAutomat
     // An existing campaign must be explicitly adopted/revised by its adapter.
     // Never overwrite it or cancel another active campaign as an intake side effect.
     if (readRow(input.goalId)) throw new Error("goal_contract_already_exists");
+    const orphan = getDb().prepare(
+      "SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND status = 'active' AND goal_id <> ? LIMIT 1",
+    ).get(revision.chatId, revision.goalId) as { goal_id: string } | undefined;
+    if (orphan) {
+      const binding = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(revision.chatId) as
+        { goal_id: string | null } | undefined;
+      if (binding?.goal_id === orphan.goal_id) throw new Error("auto_goal_chat_already_bound");
+      const now = new Date().toISOString();
+      getDb().prepare("UPDATE chat_goal_contracts SET status = 'cancelled', updated_at = ?, completed_at = ? WHERE goal_id = ? AND status = 'active'")
+        .run(now, now, orphan.goal_id);
+    }
     getDb().prepare(`INSERT INTO chat_goal_contracts
       (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
       VALUES (?, ?, ?, ?, 'active', ?, ?, NULL)`).run(revision.goalId, revision.chatId, revision.objective,

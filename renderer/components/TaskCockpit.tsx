@@ -3620,6 +3620,13 @@ function ChatPage() {
        * 소유한 값은 이 경로로만 화면에 도착한다.
        */
       if (change.entity === "chat" && change.id === chatId) {
+        /*
+         * Re-read the chat record itself, not only the message history. The Goal
+         * chip and the "목표 추진" toggle render from `chat.goalId`, which Main owns;
+         * refreshing messages alone left a closed Goal drawn as still running until
+         * the user navigated away and back.
+         */
+        void api.chats.get(chatId).then((next) => { if (!disposed && next) setChat(next); }).catch(() => undefined);
         void api.invoke.history(chatId).then((history) => {
           if (disposed) return;
           const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));

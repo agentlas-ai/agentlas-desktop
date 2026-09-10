@@ -373,7 +373,7 @@ function validatedRecord(ref: OneAttachmentRef): AttachmentSetRecord {
 }
 
 function validatePrepareInput(input: PrepareOneAttachmentsInput): void {
-  if (!input || typeof input !== "object" || !ID_RE.test(input.chatId) || typeof input.userPrompt !== "string" || input.userPrompt.length > 32_000) {
+  if (!input || typeof input !== "object" || !ID_RE.test(input.chatId) || typeof input.userPrompt !== "string") {
     throw new OneAttachmentError("invalid_request", "Invalid One attachment request.");
   }
   if (!getChat(input.chatId)) throw new OneAttachmentError("invalid_request", "The attachment chat does not exist.");

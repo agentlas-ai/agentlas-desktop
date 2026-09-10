@@ -64,8 +64,10 @@ export function admitJudgedAutomaticGoal(input: {
         throw new Error("auto_goal_chat_already_bound");
       }
       completeChatGoalContract(priorRun.goalId, priorRun.status === "completed" ? "completed" : "cancelled");
-      getDb().prepare("UPDATE chats SET goal_id = NULL WHERE id = ? AND goal_id = ?")
-        .run(input.chatId, chat.goal_id);
+      // Release through the binding writer, never raw SQL: setChatGoalBinding is
+      // the only path that emits the store-change signal, and skipping it leaves a
+      // finished Goal drawn as still running until the next unrelated refresh.
+      setChatGoalBinding(input.chatId, null);
       chat.goal_id = null;
     }
     const revision = createStoredAutomaticGoal({ goalId: input.goalId, source, decision: input.decision,

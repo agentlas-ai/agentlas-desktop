@@ -6,9 +6,6 @@ import { getDb } from "../store/db";
 const TASK_KIND_SALT_META_KEY = "agentlas.one.task-kind.salt.v1";
 const SALT_RE = /^[a-f0-9]{64}$/;
 const SAFE_PARTICIPANT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-const MAX_PROMPT_CODE_POINTS = 8_192;
-const MAX_PROMPT_UTF8_BYTES = 32_768;
-const MAX_RAW_PROMPT_CODE_UNITS = 32_768;
 const MAX_INPUT_REFS = 32;
 const MAX_INPUT_REF_UTF8_BYTES = 512;
 const MAX_INPUT_REFS_UTF8_BYTES = 16_384;
@@ -71,12 +68,11 @@ function localSalt(): string {
 }
 
 function normalizedIntent(prompt: string): string | null {
-  if (typeof prompt !== "string" || prompt.length < 1 || prompt.length > MAX_RAW_PROMPT_CODE_UNITS) return null;
+  if (typeof prompt !== "string") return null;
   // Comparability must never erase a number, date, URL, email, or path. Only
   // Unicode representation and whitespace layout are normalized before HMAC.
   const normalized = prompt.normalize("NFKC").replace(/\s+/gu, " ").trim();
-  if (!normalized || Array.from(normalized).length > MAX_PROMPT_CODE_POINTS) return null;
-  return Buffer.byteLength(normalized, "utf8") <= MAX_PROMPT_UTF8_BYTES ? normalized : null;
+  return normalized;
 }
 
 function normalizedInputRefs(input: unknown): string[] | null {
@@ -317,10 +313,11 @@ export function deriveOneTaskKindRef(input: OneTaskKindInput): string | null {
   const projectId = boundedOptional(input.projectId);
   const firmId = boundedOptional(input.firmId);
   if (
-    !intent
+    intent === null
+    || !inputRefs
+    || (!intent && inputRefs.length === 0)
     || !input.ownerAgentId
     || !SAFE_PARTICIPANT_ID_RE.test(input.ownerAgentId)
-    || !inputRefs
     || projectId === undefined
     || firmId === undefined
   ) return null;

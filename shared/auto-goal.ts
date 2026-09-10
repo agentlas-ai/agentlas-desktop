@@ -48,7 +48,7 @@ function validateSource(source: GoalSourceMessage): void {
 }
 
 function criteriaCopy(criteria: readonly GoalCriterion[]): GoalCriterion[] {
-  if (!criteria.length || criteria.length > 128) throw new Error("goal_criteria_required");
+  if (!criteria.length) throw new Error("goal_criteria_required");
   const ids = new Set<string>();
   return criteria.map((criterion) => {
     required(criterion.id, "goal_criterion_id_required");

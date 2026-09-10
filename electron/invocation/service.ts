@@ -26,6 +26,7 @@ import {
 } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
@@ -69,6 +70,7 @@ import {
 } from "../store/run-events";
 import { getProject } from "../store/projects";
 import { getDb } from "../store/db";
+import { listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
@@ -242,6 +244,8 @@ interface RunRecord {
   longRunProjection?: DesktopLongRunInvocationProjection;
   automaticGoalId?: string;
   automaticGoalDeadline?: ReturnType<typeof setTimeout>;
+  /** A Goal continuation cannot silently pretend a one-turn attachment is still present. */
+  hasTransientAttachments: boolean;
   /** Main-owned monotonic sequence shared by provider and resident-process events. */
   observableStepSequence: number;
   executionSource?: InvocationExecutionContext["source"];
@@ -261,6 +265,14 @@ interface QueuedSteer {
   workspaceBinding?: InvocationWorkspaceBinding;
   executionContext?: InvocationExecutionContext;
   drainedRunId?: string;
+}
+
+function runReqChatFileGroupIds(prompt: string): Set<string> {
+  const ids = new Set<string>();
+  for (const match of prompt.matchAll(/<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu)) {
+    if (match[1]) ids.add(match[1]);
+  }
+  return ids;
 }
 
 type OneInvocationRequest = McpInvocationRequest & {
@@ -331,12 +343,13 @@ function oneTaskKindImageRef(image: ImageAttachment): string | null {
 function oneTaskKindAttachmentRef(item: OneAttachmentSafeItem): string | null {
   if (
     !item
-    || (item.kind !== "image" && item.kind !== "file")
+    || (item.kind !== "image" && item.kind !== "file" && item.kind !== "directory")
     || typeof item.mediaType !== "string"
     || !ONE_TASK_KIND_MEDIA_TYPE_RE.test(item.mediaType)
     || !Number.isSafeInteger(item.size)
     || item.size < 0
-    || item.size > (item.kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes)
+    || item.size > (item.kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes
+      : item.kind === "directory" ? ONE_ATTACHMENT_LIMITS.maxTotalBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes)
     || typeof item.digest !== "string"
     || !ONE_TASK_KIND_DIGEST_RE.test(item.digest)
   ) return null;
@@ -938,6 +951,7 @@ export class InvocationService {
       oneParticipantExecutionSnapshot: _untrustedOneParticipantExecutionSnapshot,
       oneAttachmentContext: _untrustedOneAttachmentContext,
       oneAttachmentRedactions: _untrustedOneAttachmentRedactions,
+      attachmentCapabilitySummary: _untrustedAttachmentCapabilitySummary,
       oneRecurrenceSelection: requestedOneRecurrenceSelection,
       oneMemoryUseOnceRef: requestedOneMemoryUseOnceRef,
       oneBriefingActionRef: requestedOneBriefingActionRef,
@@ -949,7 +963,32 @@ export class InvocationService {
     if (!storedChat) throw new Error("Chat not found");
     const chat = repairRootChatSurfaceController(storedChat);
     let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
-    if (boundGoal && ["paused", "pausing", "cancelling", "cancelled"].includes(boundGoal.status)) {
+    if (chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
+      completeChatGoalContract(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled");
+      setChatGoalBinding(chat.id, null);
+      chat.goalId = null;
+      boundGoal = null;
+    } else if (chat.goalId?.startsWith("goal:auto-message:") && !boundGoal) {
+      completeChatGoalContract(chat.goalId, "cancelled");
+      setChatGoalBinding(chat.id, null);
+      chat.goalId = null;
+    }
+    if (!chat.goalId) {
+      const orphan = getDb().prepare(
+        "SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+      ).get(chat.id) as { goal_id: string } | undefined;
+      if (orphan) {
+        const orphanRun = getLongRunByGoalId(orphan.goal_id);
+        if (orphanRun && !LONG_RUN_TERMINAL_STATUSES.has(orphanRun.status)) {
+          setChatGoalBinding(chat.id, orphan.goal_id);
+          chat.goalId = orphan.goal_id;
+          boundGoal = orphanRun;
+        } else {
+          completeChatGoalContract(orphan.goal_id, orphanRun?.status === "completed" ? "completed" : "cancelled");
+        }
+      }
+    }
+    if (boundGoal && ["paused", "pausing", "cancelling"].includes(boundGoal.status)) {
       throw new Error("goal_explicit_resume_required");
     }
     /* Validate now; reopen only after this turn is durably stored. */
@@ -1241,6 +1280,23 @@ export class InvocationService {
           teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
         })
       : null;
+    const chatFileGroupIds = [...runReqChatFileGroupIds(invocationRequest.userPrompt)];
+    const workChatFiles = chatFileGroupIds.flatMap((groupId) =>
+      listChatFileSnapshot({ chatId: chat.id, groupId }));
+    const validChatFileMarkers = new Set(workChatFiles.map((file) => file.groupId));
+    const promptWithoutValidChatFileMarkers = invocationRequest.userPrompt.replace(
+      /<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu,
+      (marker, groupId: string) => validChatFileMarkers.has(groupId) ? "" : marker,
+    ).trim();
+    const attachmentDescriptors = [
+      ...(claimedOneAttachments?.receipt.attachments.map((item) => `${item.kind}:${item.mediaType}`) ?? []),
+      ...workChatFiles.map((item) => `${item.kind}:${item.mediaType}`),
+      ...(invocationRequest.images?.map((item) => `image:${item.mediaType}`) ?? []),
+    ];
+    const hasTransientAttachments = attachmentDescriptors.length > 0;
+    const attachmentCapabilitySummary = hasTransientAttachments
+      ? `[ATTACHMENT CAPABILITIES - host verified]\n${attachmentDescriptors.map((item, index) => `${index + 1}. ${item}`).join("\n")}\n[/ATTACHMENT CAPABILITIES]`
+      : undefined;
     const judgedTaskIntent = requestedOneMode
       && invocationRequest.taskIntent === "conversation"
       && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task";
@@ -1267,6 +1323,7 @@ export class InvocationService {
         oneAttachmentContext: claimedOneAttachments.runtimeContext,
         oneAttachmentRedactions: claimedOneAttachments.redactions,
       } : {}),
+      ...(attachmentCapabilitySummary ? { attachmentCapabilitySummary } : {}),
     };
     if (boundGoal?.status === "blocked" && localUserTurn && runReq.taskIntent !== "conversation") {
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
@@ -1296,6 +1353,7 @@ export class InvocationService {
       oneMode: requestedOneMode,
       goal: invocationRequest.userPrompt.slice(0, 4_000),
       pendingQuestion: false,
+      hasTransientAttachments,
       ...(questionContinuation
         ? {
             questionContinuationSourceMessageId: questionContinuation.sourceMessageId,
@@ -2464,7 +2522,8 @@ export class InvocationService {
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
         try {
           const prepared = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
-            userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal });
+            userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal,
+            attachmentOnly: hasTransientAttachments && !promptWithoutValidChatFileMarkers });
           if (controller.signal.aborted) {
             if (prepared.kind === "admitted") {
               try {
@@ -2806,6 +2865,20 @@ export class InvocationService {
         || getChat(record.chatId)?.goalId !== input.goalId) return;
       const checkpoint = latestTaskCheckpoint(input.goalId);
       if (!checkpoint || checkpoint.checkpointId !== input.checkpointId) return;
+      if (record.hasTransientAttachments) {
+        const current = getLongRunByGoalId(input.goalId);
+        if (current?.status === "running") transitionLongRun({
+          runId: current.id,
+          to: "blocked",
+          actorKind: "host",
+          reason: "goal_attachment_refresh_required",
+        });
+        const locale = pickLocale(record.request);
+        appendChatMessage(record.chatId, "assistant", locale === "ko"
+          ? "첨부파일이 필요한 후속 검증 단계가 남아 있습니다. 원본 첨부를 자동으로 재사용하지 않도록 목표를 멈췄습니다. 같은 대화에 파일을 다시 첨부하고 이어서 실행해 주세요."
+          : "A follow-up verification step still needs the attachment. The Goal was paused instead of silently reusing a one-turn file grant. Reattach the file in this conversation to continue.");
+        return;
+      }
       if (checkpoint.sideEffects.state === "uncertain") {
         const current = getLongRunByGoalId(input.goalId);
         if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_side_effects_uncertain" });

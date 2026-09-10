@@ -49,7 +49,6 @@ export const ONE_TEAM_PREFLIGHT_REPAIR_META_KEY = "one.team-preflight.repair.v1"
 
 const STORE_VERSION = 1 as const;
 const MAX_PROPOSALS = 100;
-const MAX_PROMPT_CHARS = 32_000;
 const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
@@ -994,7 +993,6 @@ export async function prepareOneTeamPreflight(
     || !ID_RE.test(input.chatId)
     || typeof input.userPrompt !== "string"
     || input.userPrompt.trim().length < 1
-    || input.userPrompt.length > MAX_PROMPT_CHARS
     || (input.expectedTaskId !== null && !ID_RE.test(input.expectedTaskId))
     || (input.expectedTaskVersion !== null && (!Number.isSafeInteger(input.expectedTaskVersion) || input.expectedTaskVersion < 1))
     || (input.requestedAgentIds !== undefined && (

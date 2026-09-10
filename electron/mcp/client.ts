@@ -2835,7 +2835,7 @@ ${effectiveUserPrompt}`;
         }
       }
       const autoSelectInput = {
-        userPrompt: effectiveUserPrompt,
+        userPrompt: [effectiveUserPrompt, req.attachmentCapabilitySummary].filter(Boolean).join("\n\n"),
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         // A CLI's name or inherited MCP configuration does not prove a native
         // browser is available to this invocation or visible in Desktop.
@@ -2858,7 +2858,7 @@ ${effectiveUserPrompt}`;
         resolveActiveGoalScope: () => {
           if (req.agentAppMode || signal?.aborted) return null;
           const goalId = getChatGoalId(chat.id);
-          if (!goalId || goalId !== chat.goalId) return null;
+          if (!goalId) return null;
           const contract = getChatGoalContract(goalId);
           const revision = getChatGoalRevision(goalId);
           const run = getLongRunByGoalId(goalId);
