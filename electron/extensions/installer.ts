@@ -425,11 +425,35 @@ export class ProductExtensionInstaller {
       verifyPackage(stage, stagedManifest);
       const release = exactChild(releases, manifest.version);
       if (fs.existsSync(release)) {
-        const currentManifest = readManifest(release);
-        assertSignature(currentManifest, this.options.trustedPublicKeys);
-        verifyPackage(release, currentManifest);
-        if (sha256Text(productExtensionSignedPayload(currentManifest)) !== manifestDigest) throw new Error("release-version-collision");
-        fs.rmSync(stage, { recursive: true, force: true });
+        // 같은 판 번호의 폴더가 이미 있다. 그것이 읽히고 믿을 수 있고 내용까지 같을 때만
+        // 그대로 둔다. 서로 다른 정품 두 개가 같은 번호를 주장하면 충돌이다.
+        // 그 밖의 경우(깨졌거나 서명을 믿을 수 없는 옛 시험 빌드)는 그 자리를 붙잡고 있을
+        // 자격이 없다 — 방금 서명과 해시를 모두 확인한 stage 로 갈아끼운다. 이게 없으면
+        // 그 기계에서는 그 판을 영원히 설치할 수 없고, 오류는 들어온 꾸러미를 탓한다.
+        let keepExisting = false;
+        try {
+          const currentManifest = readManifest(release);
+          assertSignature(currentManifest, this.options.trustedPublicKeys);
+          verifyPackage(release, currentManifest);
+          if (sha256Text(productExtensionSignedPayload(currentManifest)) !== manifestDigest) throw new Error("release-version-collision");
+          keepExisting = true;
+        } catch (error) {
+          if (error instanceof Error && error.message === "release-version-collision") throw error;
+          keepExisting = false;
+        }
+        if (keepExisting) {
+          fs.rmSync(stage, { recursive: true, force: true });
+        } else {
+          const discarded = `${release}.superseded-${Date.now()}`;
+          fs.renameSync(release, discarded);
+          try {
+            fs.renameSync(stage, release);
+          } catch (error) {
+            try { fs.renameSync(discarded, release); } catch { /* 되돌리기 실패는 아래 오류로 드러난다 */ }
+            throw error;
+          }
+          fs.rmSync(discarded, { recursive: true, force: true });
+        }
         stage = "";
       } else {
         fs.renameSync(stage, release);
