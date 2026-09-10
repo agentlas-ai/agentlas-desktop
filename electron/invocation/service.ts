@@ -2380,6 +2380,23 @@ export class InvocationService {
           kind: "invoke_prompt_bound",
           payload: { promptMessageId: sourceMessageId },
         });
+        const publishAutomaticGoalDegradedNotice = (reason: string, failureKind?: string) => {
+          const ko = "목표 자동 추적을 이번 실행에 적용하지 못했습니다. 작업은 일반 실행으로 계속합니다. 반복되면 설정의 모델 역할에서 오케스트레이터 연결과 사용 한도를 확인해 주세요.";
+          const en = "Automatic Goal tracking was unavailable for this run. The task is continuing as a normal run. If this repeats, check the orchestrator connections and usage limits under Model roles in Settings.";
+          const noticeEvent: McpInvocationEvent = {
+            kind: "notice",
+            notice: {
+              level: "warning",
+              code: "automatic-goal-intake-degraded",
+              message: pickLocale(runReq) === "ko" ? ko : en,
+              i18n: { ko, en },
+              details: JSON.stringify({ reason, ...(failureKind ? { failureKind } : {}), continued: true }),
+            },
+          };
+          record.events.push(noticeEvent);
+          recordMcpInvocationEvent(runId, runReq, noticeEvent);
+          this.publishRunEvent(record, { runId, chatId: chat.id, event: noticeEvent });
+        };
         if (blockedGoalReactivation) {
           if (runReq.taskIntent === "conversation") {
             blockedGoalReactivation = null;
@@ -2483,18 +2500,12 @@ export class InvocationService {
             return;
           }
           if (prepared.kind === "unavailable") {
-            // A Task request may execute only after its automatic Goal intake is
-            // classified and durably admitted. The prompt row already exists,
-            // so this visible, retryable stop preserves the exact request.
-            if (runReq.taskIntent !== "conversation") {
-              return {
-                blockInvocation: true as const,
-                code: "automatic-goal-intake-unavailable" as const,
-                message: pickLocale(runReq) === "ko"
-                  ? "목표 분류 엔진을 사용할 수 없어 이번 작업을 시작하지 않았습니다. 요청은 저장됐습니다. 다시 시도해 주세요."
-                  : "The Goal intake engine was unavailable, so this task did not start. Your request was saved; try again.",
-              };
-            }
+            // Automatic Goal intake is auxiliary orchestration. Its failure is
+            // already durable in automatic_goal_intake_unavailable, but it must
+            // never prevent the selected execution runtime from handling the
+            // person's request. Continue this turn as an ordinary invocation;
+            // a later turn may retry Goal admission when judgment is healthy.
+            publishAutomaticGoalDegradedNotice(prepared.reason, prepared.failureKind);
             return;
           }
           if (prepared.kind === "bypass") return;
@@ -2554,15 +2565,7 @@ export class InvocationService {
               projectionGoalId = null;
             }
           }
-          if (runReq.taskIntent !== "conversation") {
-            return {
-              blockInvocation: true as const,
-              code: "automatic-goal-intake-unavailable" as const,
-              message: pickLocale(runReq) === "ko"
-                ? "목표 실행을 준비하지 못해 이번 작업을 시작하지 않았습니다. 요청은 저장됐습니다. 다시 시도해 주세요."
-                : "The Goal could not be prepared, so this task did not start. Your request was saved; try again.",
-            };
-          }
+          publishAutomaticGoalDegradedNotice("automatic_goal_binding_failed");
         }
       },
       hostNoticePurpose,

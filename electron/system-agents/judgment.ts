@@ -491,19 +491,34 @@ async function callJudgmentModelDetailed(opts: {
     );
   }
 
-  const controller = new AbortController();
   const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    if (controller.signal.aborted) return;
-    timedOut = true;
-    controller.abort(new Error(`Connected model timed out after ${Math.round(timeoutMs / 1000)}s`));
-  }, timeoutMs);
-  const onAbort = () => controller.abort(
-    opts.signal?.reason ?? new Error("Connected model request was cancelled"),
-  );
-  if (opts.signal?.aborted) onAbort();
-  else opts.signal?.addEventListener("abort", onAbort, { once: true });
+  const runBoundedAttempt = async <T>(start: (signal: AbortSignal) => Promise<T>): Promise<{
+    value?: T;
+    error?: unknown;
+    timedOut: boolean;
+    cancelled: boolean;
+  }> => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      if (controller.signal.aborted) return;
+      timedOut = true;
+      controller.abort(new Error(`Connected model timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    const onAbort = () => controller.abort(
+      opts.signal?.reason ?? new Error("Connected model request was cancelled"),
+    );
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return { value: await start(controller.signal), timedOut, cancelled: Boolean(opts.signal?.aborted) };
+    } catch (error) {
+      return { error, timedOut, cancelled: Boolean(opts.signal?.aborted) };
+    } finally {
+      clearTimeout(timeout);
+      opts.signal?.removeEventListener("abort", onAbort);
+    }
+  };
   const recordAttempt = (startedAt: number, outcome: JudgmentRuntimeAttempt["outcome"], failure?: RunnerFailure) => {
     if (!runtimeReceipt) return;
     const attempt: JudgmentRuntimeAttempt = {
@@ -513,15 +528,14 @@ async function callJudgmentModelDetailed(opts: {
     attempts.push(attempt);
     console.info("[judgment-runtime-result]", JSON.stringify(attempt));
   };
-  const failedOutcome = (failure: RunnerFailure): JudgmentRuntimeAttempt["outcome"] =>
+  const failedOutcome = (failure: RunnerFailure, timedOut = false): JudgmentRuntimeAttempt["outcome"] =>
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
-  try {
-    for (const runtime of ordered) {
+  for (const runtime of ordered) {
       if (!opts.runtimeSelection && readJudgmentPool().fingerprint !== fingerprint) return { text: null, failure: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
-      if (controller.signal.aborted) break;
+      if (opts.signal?.aborted) break;
       const picked = pickRunner(runtime);
       if (!picked) continue;
       runtimeReceipt = { route, fingerprint, execution: "invoked", selection: {
@@ -529,8 +543,7 @@ async function callJudgmentModelDetailed(opts: {
       } };
       console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       const startedAt = Date.now();
-      try {
-        const result = await awaitConnectedModelRunnerWithAbortGrace(picked.runner(
+      const bounded = await runBoundedAttempt((attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -548,7 +561,7 @@ async function callJudgmentModelDetailed(opts: {
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
-            signal: controller.signal,
+            signal: attemptSignal,
             locale: opts.locale ?? "en",
           },
           {
@@ -556,7 +569,20 @@ async function callJudgmentModelDetailed(opts: {
             onStatus: () => {},
             onTool: () => {},
           },
-        ), controller.signal);
+        ), attemptSignal));
+      if (bounded.error !== undefined) {
+        const error = bounded.error;
+        lastFailure = {
+          kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
+          message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
+          runtime: runtime.kind,
+          source: "exit",
+        };
+        recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
+        if (bounded.cancelled) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        continue;
+      }
+      const result = bounded.value!;
         if (result.failure) {
           /*
            * ★거절은 답이 아니다 — 다음 후보로 간다. 예전에는 첫 resolve가 무조건
@@ -582,34 +608,17 @@ async function callJudgmentModelDetailed(opts: {
         }
         recordAttempt(startedAt, "success");
         return { text, runtimeReceipt, attempts };
-      } catch (error) {
-        // Timeout or caller cancellation ends the whole judgment; a runtime that
-        // merely cannot isolate just yields to the next candidate.
-        // ★빈 catch 금지 — 사유를 기록해야 전멸 시 "왜"가 남는다.
-        lastFailure = {
-          // ★"이 런타임은 판정을 못 한다"와 "한도·오류로 실패했다"는 다음 행동이 다르다.
-          //   앞의 것은 기다려도 안 풀리고 다른 런타임을 하나 연결해야 풀린다. 문장을
-          //   읽어 짐작하지 않고 표식(RuntimeJudgmentRefusal)으로 가른다.
-          kind: timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
-          message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
-          runtime: runtime.kind,
-          source: "exit",
-        };
-        recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
-        if (controller.signal.aborted) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
-      }
     }
     if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
-      if (selection && recovery && !controller.signal.aborted) {
+      if (selection && recovery && !opts.signal?.aborted) {
         runtimeReceipt = { route: "legacy", fingerprint: "legacy", execution: "invoked", selection: {
           kind: selection.kind, backend: selection.backend, source: selection.source, model: selection.model,
         } };
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
-        try {
-          const result = await awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
+        const bounded = await runBoundedAttempt((attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -623,11 +632,22 @@ async function callJudgmentModelDetailed(opts: {
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
-              signal: controller.signal,
+              signal: attemptSignal,
               locale: opts.locale ?? "en",
             },
             { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
-          ), controller.signal);
+          ), attemptSignal));
+        if (bounded.error !== undefined) {
+          const error = bounded.error;
+          lastFailure = {
+            kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
+            message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
+            runtime: selection.kind,
+            source: "exit",
+          };
+          recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
+        } else {
+          const result = bounded.value!;
           if (result.failure) {
             lastFailure = result.failure;
             recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
@@ -646,22 +666,10 @@ async function callJudgmentModelDetailed(opts: {
               return { text: recoveredText, runtimeReceipt, attempts };
             }
           }
-        } catch (error) {
-          lastFailure = {
-            kind: timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
-            message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
-            runtime: selection.kind,
-            source: "exit",
-          };
-          recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
         }
       }
     }
     return { text: null, ...(lastFailure ? { failure: lastFailure } : {}), ...(runtimeReceipt ? { runtimeReceipt } : {}), attempts };
-  } finally {
-    clearTimeout(timeout);
-    opts.signal?.removeEventListener("abort", onAbort);
-  }
 }
 
 /**

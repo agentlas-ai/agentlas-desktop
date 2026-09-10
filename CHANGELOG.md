@@ -5,6 +5,7 @@
 - 1.1.11에서 남아 있던 미리보기 MCP 연결 검사의 Node 모드 누락을 수정합니다. 보조 프로그램 인자로 GUI가 시작되면 창과 데이터 초기화 전에 종료합니다.
 - 업데이트 복구 상태에서도 단일 인스턴스 잠금을 획득해야 시작하며, 잠금 대기 중 기존 창을 반복해서 앞으로 가져오지 않습니다.
 - 모바일 데몬에서 GUI 전용 브라우저 코드가 로딩되어 상태 조회와 연결 인계가 실패하던 문제를 수정합니다. 준비 시간 초과를 성공으로 표시하지 않으며, 소유권 인계와 재시도를 실제 데몬 상태에 맞춰 처리합니다.
+- 목표 분류 모델의 첫 후보가 시간 초과되어도 다음 오케스트레이터를 계속 시도합니다. 모든 분류 후보가 한도·인증·격리 문제로 실패해도 사용자 작업은 일반 실행으로 계속하며, 화면에서 모델 역할의 연결과 사용 한도를 확인하는 방법을 안내합니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
