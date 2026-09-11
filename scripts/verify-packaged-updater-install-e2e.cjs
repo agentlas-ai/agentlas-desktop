@@ -865,6 +865,31 @@ function cdpEvaluate(wsUrl, expression) {
   });
 }
 
+/**
+ * install() 은 quitAndInstall 로 앱을 내린다. 그래서 **요청은 도착했는데 응답이 오기 전에
+ * 창구가 닫히는** 경합이 실제로 있다 — 2026-09-11 v1.1.15 윈도우 실행에서 관측했다:
+ * 앱 로그에 다운로드와 설치 실행까지 찍힌 뒤, 하네스만 15초 시간 초과로 실패했다.
+ *
+ * 응답을 못 받은 것은 설치가 실패했다는 증거가 아니다. 바로 아래에서 확인하는 두 가지가
+ * 더 강한 증거다 — 설치 기록(journal)이 실제로 쓰였는가, 실행 파일이 대상 판으로 바뀌었는가.
+ * 설치가 시작조차 안 됐다면 그 둘이 나오지 않아 그 자리에서 빨간불이 된다. 그래서 여기서는
+ * **응답이 유실된 경우만** 넘기고, 거절·예외·그 밖의 실패는 전부 그대로 올린다.
+ */
+const INSTALL_REPLY_LOST = /Runtime\.evaluate timed out|connection closed before Runtime\.evaluate completed/i;
+
+async function requestUpdaterInstall(cdpPort, evaluate = evaluateInApp) {
+  let installResult;
+  try {
+    installResult = await evaluate(cdpPort, "window.agentlas.updater.install()");
+  } catch (error) {
+    if (!INSTALL_REPLY_LOST.test(String((error && error.message) || ""))) throw error;
+    console.log("[packaged-updater-e2e] install() reply lost while the app shut down to install — proving the install from the journal and the replaced executable instead");
+    return null;
+  }
+  assert.ok(installResult && installResult.accepted === true, `Updater install was not accepted: ${stringifyState(installResult)}`);
+  return installResult;
+}
+
 async function evaluateInApp(cdpPort, expression) {
   const page = await cdpPage(cdpPort);
   return cdpEvaluate(page.webSocketDebuggerUrl, expression);
@@ -1200,8 +1225,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
 
     const observer = createJournalObserver(isolation);
     const journalPromise = observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
-    const installResult = await evaluateInApp(cdpPort, "window.agentlas.updater.install()");
-    assert.ok(installResult && installResult.accepted === true, `Updater install was not accepted: ${stringifyState(installResult)}`);
+    await requestUpdaterInstall(cdpPort);
     const journal = await journalPromise;
     const expectedJournal = path.join(isolation.userDataDir, "updater", JOURNAL_NAME);
     assert.equal(path.resolve(journal.file), path.resolve(expectedJournal), "baseline journal was not written under the isolated default userData path");
@@ -1285,8 +1309,7 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
 
     const observer = createJournalObserver(isolation);
     const journalPromise = observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
-    const installResult = await evaluateInApp(cdpPort, "window.agentlas.updater.install()");
-    assert.ok(installResult && installResult.accepted === true, `Updater install was not accepted: ${stringifyState(installResult)}`);
+    await requestUpdaterInstall(cdpPort);
     const journal = await journalPromise;
     const expectedJournal = path.join(isolation.userDataDir, "updater", JOURNAL_NAME);
     assert.equal(path.resolve(journal.file), path.resolve(expectedJournal), "baseline journal was not written under the isolated default userData path");
@@ -1388,6 +1411,30 @@ async function runSelfTest() {
   assert.equal(targetSpec("linux", "0.8.33").payloadName, "Agentlas-0.8.33-Linux-x64.AppImage");
   assert.ok(compareReleaseVersions("0.8.33", "0.8.32") > 0);
   assert.equal(windowsInstallRegistryKey(), "Software\\3bb4af84-8cbc-5026-96a0-bcbe1970587f");
+
+  // install() 응답 유실 판정 — 실제로 그 함수를 부른다.
+  // 유실은 실패가 아니다: 설치 기록과 실행 파일 교체가 그 뒤에서 증거를 댄다.
+  for (const lost of ["CDP Runtime.evaluate timed out", "CDP connection closed before Runtime.evaluate completed"]) {
+    assert.equal(
+      await requestUpdaterInstall(0, async () => { throw new Error(lost); }),
+      null,
+      `a lost install() reply must not fail the run: ${lost}`,
+    );
+  }
+  // 응답이 오면 예전과 똑같이 accepted 를 요구하고, 그 밖의 실패는 그대로 올린다.
+  assert.deepEqual(await requestUpdaterInstall(0, async () => ({ accepted: true })), { accepted: true });
+  await assert.rejects(
+    () => requestUpdaterInstall(0, async () => ({ accepted: false })),
+    /Updater install was not accepted/,
+  );
+  await assert.rejects(
+    () => requestUpdaterInstall(0, async () => undefined),
+    /Updater install was not accepted/,
+  );
+  await assert.rejects(
+    () => requestUpdaterInstall(0, async () => { throw new Error("Renderer updater call threw: boom"); }),
+    /boom/,
+  );
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-updater-e2e-selftest-"));
   let feed;
