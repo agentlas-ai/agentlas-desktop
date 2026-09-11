@@ -14,6 +14,21 @@ stable_repo="${AGENTLAS_DESKTOP_GITHUB_REPO:-agentlas-ai/agentlas-desktop-releas
 official_signing_identity="$(node -p "require('./build-resources/macos-release-signing-policy.json').leafAuthority")"
 official_team_id="$(node -p "require('./build-resources/macos-release-signing-policy.json').teamIdentifier")"
 
+# 공개 릴리스는 두 아키텍처를 한 기계에서 차례로 만들어 왔다. 그 34분 중 16분은
+# 애플 공증을 기다리는 순수한 대기다. CI 가 아키텍처별 러너로 나눠 돌릴 수 있도록
+# 만들 대상을 환경변수로 받는다. 기본값은 예전과 같은 두 아키텍처 전부다.
+read -r -a mac_release_arches <<< "${AGENTLAS_MAC_RELEASE_ARCHES:-arm64 x64}"
+if [[ "${#mac_release_arches[@]}" -eq 0 ]]; then
+  echo "AGENTLAS_MAC_RELEASE_ARCHES is empty; there is nothing to build." >&2
+  exit 1
+fi
+for requested_arch in "${mac_release_arches[@]}"; do
+  case "$requested_arch" in
+    arm64|x64) ;;
+    *) echo "Unsupported macOS release architecture: $requested_arch" >&2; exit 1 ;;
+  esac
+done
+
 load_local_signing_defaults() {
   local p12_path="$signing_dir/agentlas-developer-id.p12"
   local p12_password_path="$signing_dir/agentlas-developer-id.p12.password"
@@ -435,8 +450,8 @@ exercise_final_update_zip_boundary() {
     )
   done < <(find "$project_dir/release" -maxdepth 1 -type f -name "Agentlas-${version}-*.zip" | sort)
 
-  if [[ "$zip_count" -ne 2 ]]; then
-    echo "Expected exactly two final macOS updater ZIPs for $version; found $zip_count." >&2
+  if [[ "$zip_count" -ne "${#mac_release_arches[@]}" ]]; then
+    echo "Expected exactly ${#mac_release_arches[@]} final macOS updater ZIP(s) for $version; found $zip_count." >&2
     return 1
   fi
 }
@@ -504,8 +519,9 @@ while true; do
 done &
 cleaner_pid=$!
 
-build_mac_arch arm64
-build_mac_arch x64
+for requested_arch in "${mac_release_arches[@]}"; do
+  build_mac_arch "$requested_arch"
+done
 restore_source_package_metadata_if_builder_transform
 
 remove_sealed_tree "$project_dir/release"
@@ -514,24 +530,60 @@ COPYFILE_DISABLE=1 ditto "$local_release" "$project_dir/release"
 cleanup_appledouble "$project_dir/release"
 
 if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]]; then
-  exercise_signed_app_python_boundary
+  # 이 검사는 호스트 아키텍처의 앱만 **실행**할 수 있다. 한 기계에서 둘 다 만들던 때에도
+  # 실제로 실행된 것은 호스트 쪽 하나뿐이었으므로, 나눠 빌드해 호스트에서 못 도는
+  # 아키텍처만 만든 기계에서는 건너뛴다 — 덮이는 범위는 예전과 같다.
+  host_release_arch=""
+  case "$(uname -m)" in
+    arm64) host_release_arch="arm64" ;;
+    x86_64) host_release_arch="x64" ;;
+  esac
+  if [[ -n "$host_release_arch" && " ${mac_release_arches[*]} " == *" $host_release_arch "* ]]; then
+    exercise_signed_app_python_boundary
+  else
+    echo "[package-mac] 이 기계에서 실행할 수 없는 아키텍처만 만들었다 — 패키지 Python 경계 실행 검사는 호스트 아키텍처 빌드가 맡는다"
+  fi
   prepare_dmg_signing_identity
+  dmg_paths=()
   while IFS= read -r dmg_path; do
     sign_dmg "$dmg_path"
-    notarize_dmg "$dmg_path"
+    dmg_paths+=("$dmg_path")
   done < <(find "$project_dir/release" -maxdepth 1 -type f -name 'Agentlas-*.dmg' | sort)
+  if [[ "${#dmg_paths[@]}" -ne "${#mac_release_arches[@]}" ]]; then
+    echo "Expected ${#mac_release_arches[@]} signed DMG(s); found ${#dmg_paths[@]}." >&2
+    exit 1
+  fi
+  # 공증 한 건이 애플 왕복 4분 이상이다. 서명은 공유 키체인을 쓰므로 차례로 하고,
+  # 기다리기만 하는 공증은 동시에 보내 왕복을 겹친다. 한 건이라도 실패하면 wait 가
+  # 그 실패를 그대로 올려 릴리스가 선다.
+  notarize_pids=()
+  for dmg_path in "${dmg_paths[@]}"; do
+    notarize_dmg "$dmg_path" &
+    notarize_pids+=("$!")
+  done
+  for notarize_pid in "${notarize_pids[@]}"; do
+    wait "$notarize_pid"
+  done
   # Inspect the exact ZIP bytes consumed by Squirrel.Mac, after every builder
   # and copy step. This closes the historical gap where the source .app was
   # valid but the updater archive could still carry writable Python sources.
   exercise_final_update_zip_boundary
-  node scripts/verify-mac-release.mjs "--repo=${stable_repo}"
-else
-  node scripts/verify-mac-release.mjs --write-env --allow-unnotarized "--repo=${stable_repo}"
 fi
 
-# 반드시 마지막에 — electron-builder와 verify-mac-release 모두 latest-mac.yml을 .dmg로
-# 써버린다. 자동업데이트(Squirrel.Mac)는 .zip만 적용 가능하므로 zip 기준으로 재작성한다.
-node "$project_dir/scripts/fix-mac-latest-zip.mjs"
+# 업데이트 명세(latest-mac.yml)와 릴리스 검증 요약은 두 아키텍처의 산출물이 한자리에
+# 있어야 만들 수 있다. 나눠 빌드했다면 두 산출물을 합치는 단계가 같은 스크립트로 만든다.
+if [[ "${#mac_release_arches[@]}" -eq 2 ]]; then
+  if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]]; then
+    node scripts/verify-mac-release.mjs "--repo=${stable_repo}"
+  else
+    node scripts/verify-mac-release.mjs --write-env --allow-unnotarized "--repo=${stable_repo}"
+  fi
+  # 반드시 마지막에 — electron-builder와 verify-mac-release 모두 latest-mac.yml을 .dmg로
+  # 써버린다. 자동업데이트(Squirrel.Mac)는 .zip만 적용 가능하므로 zip 기준으로 재작성한다.
+  node "$project_dir/scripts/fix-mac-latest-zip.mjs"
+else
+  echo "[package-mac] 단일 아키텍처 빌드 — 릴리스 검증과 업데이트 명세는 두 산출물을 합치는 단계에서 만든다"
+fi
 
 # The x64 package is built last and electron-builder rewrites local native
 # modules for that target. Restore the developer machine architecture so
