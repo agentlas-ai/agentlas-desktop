@@ -1003,18 +1003,25 @@ async function reconcileAgyMcpServers(
     }));
     const requested = mcpConfigPath ? JSON.parse(await fs.readFile(mcpConfigPath, "utf8")) : {};
     const browser = global.mcpServers?.["agentlas-browser"];
-    // 요청하지 않은 실행은 여기서 세우지 않는다 — 아래 조정 단계가 그 항목을 이 실행
-    // 동안만 격리하고 끝나면 되돌린다. 예전에는 여기서 실행 전체를 거절했고, 그래서
-    // 브라우저를 한 번 쓴 기계에서는 Science 의 agy 실행이 영영 시작되지 못했다.
-    if (browser && isAgentlasOwnedBrowserMcpEntry(browser) && requested.mcpServers?.["agentlas-browser"]) {
-      const previousControl = browser.env?.[MCP_PROXY_CONTROL_FILE_ENV];
-      const nextControl = requested.mcpServers["agentlas-browser"].env?.[MCP_PROXY_CONTROL_FILE_ENV];
-      // A foreign extant channel is not proven stale. Old Desktop versions do
-      // not know about this lease, so never overwrite their live/unknown grant.
-      if (previousControl !== nextControl && typeof previousControl === "string") {
-        try { await fs.stat(previousControl); throw new Error("agy_mcp_foreign_owner_unverified"); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (browser && isAgentlasOwnedBrowserMcpEntry(browser)) {
+      const requestedBrowser = requested.mcpServers?.["agentlas-browser"];
+      if (requestedBrowser) {
+        const previousControl = browser.env?.[MCP_PROXY_CONTROL_FILE_ENV];
+        const nextControl = requestedBrowser.env?.[MCP_PROXY_CONTROL_FILE_ENV];
+        // A foreign extant channel is not proven stale. Old Desktop versions do
+        // not know about this lease, so never overwrite their live/unknown grant.
+        if (previousControl !== nextControl && typeof previousControl === "string") {
+          try { await fs.stat(previousControl); throw new Error("agy_mcp_foreign_owner_unverified"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        }
+      } else if (!mcpConfigPath) {
+        // 이 실행은 MCP 설정 자체가 없어 아래 조정 단계가 한 줄도 돌지 않는다 — 격리할
+        // 수단이 없으므로, 남의 승인 통로를 물려받지 않도록 예전처럼 여기서 세운다.
+        throw new Error("agy_mcp_browser_binding_missing");
       }
+      // 설정이 있는데 브라우저만 요청하지 않은 실행은 세우지 않는다. 아래 조정 단계가
+      // 그 항목을 이 실행 동안만 격리하고 끝나면 되돌린다. 예전에는 여기서도 거절해서,
+      // 브라우저를 한 번 쓴 기계에서는 Science 의 agy 실행이 영영 시작되지 못했다.
     }
     const bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation);
     if (bound.failure) { await lease.release(); return bound; }
