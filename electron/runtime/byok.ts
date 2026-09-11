@@ -16,6 +16,7 @@ import {
   runLocalOpenAiChat,
   runMainToolDispatch,
   runOneToolCall,
+  trackToolTurnProgress,
   type ChatMessage,
   type LocalChatContent,
 } from "./local-tool-loop";
@@ -31,8 +32,12 @@ import {
   needsLongContextToggle,
 } from "../../shared/models";
 
-/** 도구 왕복 상한 — 저가·로컬 모델이 같은 도구를 무한 반복하는 실측 때문이다. */
-const MAX_BYOK_TOOL_TURNS = 8;
+/**
+ * 도구 왕복 상한은 **일의 크기를 재는 숫자가 아니라** 폭주를 세우는 마지막 방벽이다.
+ * 8 이었을 때는 사용자 키로 도는 정상적인 긴 작업이 여기에 먼저 닿아 통째로 버려졌다.
+ * 진짜 막힘("같은 도구를 같은 인자로 반복")은 local-tool-loop 과 **같은 판정 함수**가 잡는다.
+ */
+const MAX_BYOK_TOOL_TURNS = 200;
 const MAX_BYOK_TOOL_RESULT_CHARS = 20_000;
 
 function byokFailure(
@@ -257,6 +262,8 @@ async function runAnthropicMessages(
 
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
+  let toolTurnsTaken = 0;
+  let toolProgress = { signature: "", identicalTurns: 0 };
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     const resp = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
@@ -331,12 +338,22 @@ async function runAnthropicMessages(
       break;
     }
 
+    const orderedToolUse = [...pendingToolUse.entries()].sort((a, b) => a[0] - b[0]);
+    toolTurnsTaken += 1;
+    const progress = trackToolTurnProgress(
+      toolProgress,
+      orderedToolUse.map(([, entry]) => ({ name: entry.name, arguments: entry.json })),
+    );
+    toolProgress = { signature: progress.signature, identicalTurns: progress.identicalTurns };
+    // 같은 호출을 같은 인자로 반복하고 있다 — 더 돌아도 새 사실이 오지 않는다.
+    if (progress.stalled) break;
+
     // 어시스턴트 턴을 그대로 되돌려 넣는다(텍스트 + tool_use). 그래야 다음 호출에서
     // tool_result 가 짝을 찾는다.
     const assistantContent: AnthropicContent[] = [];
     if (acc.trim()) assistantContent.push({ type: "text", text: acc });
     const resultContent: AnthropicContent[] = [];
-    for (const [, entry] of [...pendingToolUse.entries()].sort((a, b) => a[0] - b[0])) {
+    for (const [, entry] of orderedToolUse) {
       let input: Record<string, unknown> = {};
       try {
         input = entry.json ? (JSON.parse(entry.json) as Record<string, unknown>) : {};
@@ -375,7 +392,7 @@ async function runAnthropicMessages(
   const answer = acc.trim();
   let failure: RunnerFailure | null = null;
   if (!reachedAnswer) {
-    failure = byokFailure("exit", `BYOK tool loop did not reach a final answer after ${MAX_BYOK_TOOL_TURNS} turns.`);
+    failure = byokFailure("exit", `BYOK tool loop did not reach a final answer after ${toolTurnsTaken} tool turns.`);
   } else if (!answer) {
     failure = byokFailure("empty", `BYOK returned an empty answer for ${model}.`);
   } else {

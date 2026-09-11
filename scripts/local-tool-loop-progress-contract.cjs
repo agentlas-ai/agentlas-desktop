@@ -32,7 +32,11 @@ function check(name, fn) {
   catch (error) { failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}\n       ${error.message}`); }
 }
 
-const call = (name, args) => ({ id: "x", type: "function", function: { name, arguments: JSON.stringify(args) } });
+/** 프로바이더 형식과 무관하게 이름·인자만 넘긴다 — 호출부가 그렇게 매핑한다.
+ * OpenAI 는 call.function, Anthropic tool_use 는 {name, input} 을 문자열로. */
+const call = (name, args) => ({ name, arguments: JSON.stringify(args) });
+const openAiCall = (name, args) => ({ id: "x", type: "function", function: call(name, args) });
+const anthropicToolUse = (name, args) => ({ id: "x", name, json: JSON.stringify(args) });
 
 /** 도구 호출 열을 실제 판정 함수에 순서대로 먹여, 몇 번째에 막힘으로 서는지 돌려준다. */
 function runTurns(turns) {
@@ -72,6 +76,21 @@ check("한 턴에 여러 도구를 부르면 그 묶음 전체가 지문이다",
   const flipped = [call("read_file", { path: "b" }), call("read_file", { path: "a" })];
   assert.notStrictEqual(toolTurnSignature(pair), toolTurnSignature(flipped), "순서가 다르면 다른 지문이어야 한다");
   assert.strictEqual(runTurns([pair, pair, pair]), 3);
+});
+
+check("두 런타임이 같은 판정을 쓴다 — 같은 도구·인자면 형식이 달라도 같은 지문", () => {
+  const openAi = [openAiCall("read_file", { path: "a.ts" })].map((c) => c.function);
+  const anthropic = [anthropicToolUse("read_file", { path: "a.ts" })].map((b) => ({ name: b.name, arguments: b.json }));
+  assert.strictEqual(toolTurnSignature(openAi), toolTurnSignature(anthropic));
+});
+
+check("두 런타임의 상한이 모두 정상 작업 위로 올라가 있다", () => {
+  for (const file of ["electron/runtime/local-tool-loop.ts", "electron/runtime/byok.ts"]) {
+    const source = fs.readFileSync(path.join(root, file), "utf8");
+    const match = source.match(/const MAX_(?:BYOK_)?TOOL_(?:LOOP_)?TURNS = (\d+);/);
+    assert.ok(match, `${file} 에 폭주 방벽이 없다 — 상한 없는 루프는 밤새 돈다`);
+    assert.ok(Number(match[1]) >= 100, `${file} 의 방벽이 ${match[1]} 로 너무 낮다 — 긴 작업이 여기에 먼저 닿는다`);
+  }
 });
 
 check("폭주 방벽은 남아 있고, 정상 작업보다 훨씬 위에 있다", () => {

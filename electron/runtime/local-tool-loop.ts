@@ -101,9 +101,10 @@ const MAX_TOOL_LOOP_TURNS = 200;
 /** 같은 도구를 같은 인자로 이만큼 연속 부르면 진전이 없는 것으로 본다. */
 const MAX_IDENTICAL_TOOL_TURNS = 3;
 
-/** 이번 턴이 요청한 도구 호출의 지문 — 이름과 인자가 같으면 같은 지문이다. */
-export function toolTurnSignature(calls: { function: { name: string; arguments: string } }[]): string {
-  return JSON.stringify(calls.map((call) => [call.function.name, call.function.arguments]));
+/** 이번 턴이 요청한 도구 호출의 지문 — 이름과 인자가 같으면 같은 지문이다.
+ * 프로바이더 형식(OpenAI function_call / Anthropic tool_use)과 무관하게 이름·인자만 본다. */
+export function toolTurnSignature(calls: { name: string; arguments: string }[]): string {
+  return JSON.stringify(calls.map((call) => [call.name, call.arguments]));
 }
 
 export type ToolTurnProgress = { signature: string; identicalTurns: number; stalled: boolean };
@@ -115,7 +116,7 @@ export type ToolTurnProgress = { signature: string; identicalTurns: number; stal
  */
 export function trackToolTurnProgress(
   previous: { signature: string; identicalTurns: number },
-  calls: { function: { name: string; arguments: string } }[],
+  calls: { name: string; arguments: string }[],
 ): ToolTurnProgress {
   const signature = toolTurnSignature(calls);
   const identicalTurns = signature === previous.signature ? previous.identicalTurns + 1 : 1;
@@ -865,7 +866,7 @@ export async function runLocalOpenAiChat(
     toolTurnsTaken += 1;
     const progress = trackToolTurnProgress(
       { signature: lastToolSignature, identicalTurns: identicalToolTurns },
-      result.toolCalls,
+      result.toolCalls.map((call) => call.function),
     );
     lastToolSignature = progress.signature;
     identicalToolTurns = progress.identicalTurns;
