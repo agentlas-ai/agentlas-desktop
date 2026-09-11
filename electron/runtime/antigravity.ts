@@ -1097,7 +1097,8 @@ async function reconcileAgyMcpServersUnderLease(
     };
   }
   const entries = Object.entries(requested.mcpServers ?? {});
-  if (entries.length === 0) return noop;
+  // 요청한 서버가 하나도 없어도 그냥 나가지 않는다 — 공용 설정에 남은 브라우저 항목을
+  // 격리해야 할 수 있다. 정말 할 일이 없으면 아래에서 (added 0 + 변경 없음) 로 빠진다.
 
   return withAgyMcpMutationLock(async () => {
 
