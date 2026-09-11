@@ -4,6 +4,7 @@
 
 - Science 화면이 무엇을 물어도 앱이 설치된 확장 세 벌(약 199MB, 파일 900여 개)을 통째로 다시 읽어 지문을 계산하던 것을 멈춥니다. 물음 한 번에 아홉 번 돌던 검사라 그 시간 동안 앱 전체가 멈춰 있었습니다. 프로젝트 목록 조회가 108ms에서 6.6ms로, 최악값이 2.5초에서 8.6ms로 줄었습니다. 설치된 확장이 바뀌면 그 자리에서 다시 전부 검사합니다.
 - 같은 판 번호의 낡은 확장 폴더가 남아 있으면 정식 발행본을 설치할 수 없고 "서명 키를 믿을 수 없다"는 엉뚱한 이유가 표시되던 문제를 고칩니다. 이제 먼저 있던 폴더가 아니라 내용으로 판단하며, 서로 다른 정품이 같은 판 번호를 주장할 때만 멈춥니다.
+- Science에서 원고에 그림·표를 넣는 화면과 원고 편집기가 산출물마다 앱에 다시 묻던 것을 멈춥니다. 산출물 30개·그림 20개인 연구에서 화면 하나를 여는 데 150회가 넘던 왕복이 3회가 됩니다.
 - Science에서 근거를 누르면 그 근거가 어느 인용에서 왔는지 앱에 한 번만 묻습니다. 예전에는 대화를 전부, 대화마다 말풍선을 전부 훑어서 연구가 길어질수록 계속 느려졌습니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.

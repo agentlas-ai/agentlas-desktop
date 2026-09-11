@@ -2875,6 +2875,31 @@ app.whenReady().then(async () => {
     const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
     return scienceStore().getArtifactContextForProject(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
   });
+  /*
+   * 산출물 여러 개의 맥락을 한 번에 답한다.
+   *
+   * 원고 삽입 고르기와 원고 편집기는 산출물마다 맥락을 한 번씩 물었다. 그림이 30개인
+   * 연구에서 그 화면 하나를 여는 데만 수십 번의 왕복이 나간다. 판정은 그대로 두고
+   * 왕복만 줄인다 — 한 건이 실패해도 나머지는 그대로 온다.
+   */
+  ipcMain.handle("science:artifacts:contextMany", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = String(record.projectId ?? "");
+    const targets = Array.isArray(record.targets) ? record.targets : [];
+    const store = scienceStore();
+    return targets.map((entry) => {
+      const target = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+      const artifactId = String(target.artifactId ?? "");
+      const artifactVersion = target.artifactVersion === undefined ? undefined : Number(target.artifactVersion);
+      if (!artifactId) return { artifactId, artifactVersion: null, context: null, error: "science-artifact-id-missing" };
+      try {
+        return { artifactId, artifactVersion: artifactVersion ?? null, context: store.getArtifactContextForProject(projectId, artifactId, artifactVersion), error: "" };
+      } catch (error) {
+        return { artifactId, artifactVersion: artifactVersion ?? null, context: null, error: String((error as Error)?.message ?? error) };
+      }
+    });
+  });
   ipcMain.handle("science:artifacts:history", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};

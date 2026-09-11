@@ -178,6 +178,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:artifacts:list", { extensionId, projectId }),
     get: (projectId: string, artifactId: string) => ipcRenderer.invoke("science:artifacts:get", { extensionId, projectId, artifactId }),
     context: (projectId: string, artifactId: string, artifactVersion?: number) => ipcRenderer.invoke("science:artifacts:context", { extensionId, projectId, artifactId, artifactVersion }),
+    // 산출물마다 한 번씩 묻던 맥락을 한 번에 받는다.
+    contextMany: (projectId: string, targets: Array<{ artifactId: string; artifactVersion?: number }>) =>
+      ipcRenderer.invoke("science:artifacts:contextMany", { extensionId, projectId, targets }),
     history: (projectId: string, artifactId: string) => ipcRenderer.invoke("science:artifacts:history", { extensionId, projectId, artifactId }),
     diff: (projectId: string, artifactId: string, fromVersion: number, toVersion: number) => ipcRenderer.invoke("science:artifacts:diff", { extensionId, projectId, artifactId, fromVersion, toVersion }),
     forMessage: (projectId: string, conversationId: string, messageId: string) => ipcRenderer.invoke("science:artifacts:listForMessage", { extensionId, projectId, conversationId, messageId }),
