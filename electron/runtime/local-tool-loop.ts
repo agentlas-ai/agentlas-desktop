@@ -90,7 +90,37 @@ export type ResolvedTool =
     }
   | { kind: "builtin"; builtinName: string; brokerToolId: string };
 
-const MAX_TOOL_LOOP_TURNS = 8;
+/**
+ * 도구 왕복 상한은 **일의 크기를 재는 숫자가 아니라** 폭주를 세우는 마지막 방벽이다.
+ * 8 이었을 때는 정상적인 긴 작업이 여기에 먼저 닿아 "답에 도달하지 못했습니다"로 버려졌다
+ * (읽고·고치고·확인만 해도 서너 번이다). 진짜 막힘은 횟수가 아니라 **진전이 없는 것**이라
+ * 아래 동일 호출 반복으로 잡고, 이 숫자는 그것도 못 잡는 경우를 위한 방벽으로만 남긴다.
+ * 사용자는 언제든 중지할 수 있고(req.signal), 각 왕복은 사용자가 보는 중에 일어난다.
+ */
+const MAX_TOOL_LOOP_TURNS = 200;
+/** 같은 도구를 같은 인자로 이만큼 연속 부르면 진전이 없는 것으로 본다. */
+const MAX_IDENTICAL_TOOL_TURNS = 3;
+
+/** 이번 턴이 요청한 도구 호출의 지문 — 이름과 인자가 같으면 같은 지문이다. */
+export function toolTurnSignature(calls: { function: { name: string; arguments: string } }[]): string {
+  return JSON.stringify(calls.map((call) => [call.function.name, call.function.arguments]));
+}
+
+export type ToolTurnProgress = { signature: string; identicalTurns: number; stalled: boolean };
+
+/**
+ * 이번 도구 턴이 '진전 없음'인지 판정한다 — 루프는 이 함수 하나만 부른다.
+ * 진전의 정의: 부르는 도구나 인자가 달라지는 것. 같은 호출을 같은 인자로 반복하면
+ * 더 돌아도 새 사실이 오지 않는다. 횟수가 아니라 이것이 '막힘'이다.
+ */
+export function trackToolTurnProgress(
+  previous: { signature: string; identicalTurns: number },
+  calls: { function: { name: string; arguments: string } }[],
+): ToolTurnProgress {
+  const signature = toolTurnSignature(calls);
+  const identicalTurns = signature === previous.signature ? previous.identicalTurns + 1 : 1;
+  return { signature, identicalTurns, stalled: identicalTurns >= MAX_IDENTICAL_TOOL_TURNS };
+}
 const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /**
@@ -741,8 +771,12 @@ export async function runLocalOpenAiChat(
   let finalText = "";
   let sawAnyToolCall = false;
   let sawUnsupportedToolCallAttempt = false;
-  /** 루프가 답에 도달해서 끝났는가. false로 빠져나오면 도구 왕복만 하다 상한에 닿은 것. */
+  /** 루프가 답에 도달해서 끝났는가. false로 빠져나오면 도구 왕복만 하다 멈춘 것. */
   let reachedAnswer = false;
+  /** 실제로 돈 도구 왕복 횟수 — 실패 문구에는 상한이 아니라 이 사실이 실린다. */
+  let toolTurnsTaken = 0;
+  let lastToolSignature = "";
+  let identicalToolTurns = 0;
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     let resp: Response;
@@ -828,6 +862,18 @@ export async function runLocalOpenAiChat(
       break;
     }
     sawAnyToolCall = true;
+    toolTurnsTaken += 1;
+    const progress = trackToolTurnProgress(
+      { signature: lastToolSignature, identicalTurns: identicalToolTurns },
+      result.toolCalls,
+    );
+    lastToolSignature = progress.signature;
+    identicalToolTurns = progress.identicalTurns;
+    if (progress.stalled) {
+      // 같은 호출을 같은 인자로 반복하고 있다 — 더 돌아도 새 사실이 오지 않는다.
+      finalText = result.text;
+      break;
+    }
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
@@ -849,7 +895,7 @@ export async function runLocalOpenAiChat(
     // 도구만 왕복하다 상한에 닿았다. 마지막 중간 텍스트는 답이 아니다.
     failure = localFailure(
       "exit",
-      tStatus(req.locale, "errLocalToolLoopStuck", { model, turns: MAX_TOOL_LOOP_TURNS }),
+      tStatus(req.locale, "errLocalToolLoopStuck", { model, turns: toolTurnsTaken }),
       runtimeKind,
     );
   } else if (!answer) {
