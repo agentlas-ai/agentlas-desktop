@@ -828,6 +828,26 @@ function requestedAgyMcpEntry(server: {
  * run. User MCP entries are left untouched: all four proxy markers plus the
  * canonical Agentlas Browser launcher must be present before this returns true.
  */
+export type AgyBrowserEntryDisposition = "ignore" | "quarantine" | "reconcile";
+
+/**
+ * 공용 agy 설정에 남아 있는 브라우저 항목을 이번 실행이 어떻게 다뤄야 하는가.
+ *
+ * agy 는 공용 설정에 적힌 서버를 전부 띄운다. 그래서 브라우저를 **요청하지 않은** 실행도
+ * 남아 있는 항목 때문에 다른 실행의 승인 통로를 물려받을 수 있다. 예전에는 그 위험을
+ * 실행 거절로 막았는데, 브라우저를 한 번이라도 쓴 기계에서는 그 항목이 계속 남아
+ * Science 의 agy 실행이 영영 시작되지 못했다(2026-09-12 실측). 거절이 아니라
+ * **이번 실행 동안만 격리하고 끝나면 되돌리는 것**이 위험도 막고 길도 막지 않는다.
+ */
+export function agyBrowserEntryDisposition(input: {
+  owned: boolean; requested: boolean; heldByThisProcess: boolean;
+}): AgyBrowserEntryDisposition {
+  if (!input.owned) return "ignore";
+  if (input.requested) return "reconcile";
+  if (input.heldByThisProcess) return "ignore";
+  return "quarantine";
+}
+
 export function isAgentlasOwnedBrowserMcpEntry(
   entry: AgyMcpServerEntry,
 ): boolean {
@@ -983,8 +1003,10 @@ async function reconcileAgyMcpServers(
     }));
     const requested = mcpConfigPath ? JSON.parse(await fs.readFile(mcpConfigPath, "utf8")) : {};
     const browser = global.mcpServers?.["agentlas-browser"];
-    if (browser && isAgentlasOwnedBrowserMcpEntry(browser)) {
-      if (!requested.mcpServers?.["agentlas-browser"]) throw new Error("agy_mcp_browser_binding_missing");
+    // 요청하지 않은 실행은 여기서 세우지 않는다 — 아래 조정 단계가 그 항목을 이 실행
+    // 동안만 격리하고 끝나면 되돌린다. 예전에는 여기서 실행 전체를 거절했고, 그래서
+    // 브라우저를 한 번 쓴 기계에서는 Science 의 agy 실행이 영영 시작되지 못했다.
+    if (browser && isAgentlasOwnedBrowserMcpEntry(browser) && requested.mcpServers?.["agentlas-browser"]) {
       const previousControl = browser.env?.[MCP_PROXY_CONTROL_FILE_ENV];
       const nextControl = requested.mcpServers["agentlas-browser"].env?.[MCP_PROXY_CONTROL_FILE_ENV];
       // A foreign extant channel is not proven stale. Old Desktop versions do
@@ -1145,6 +1167,22 @@ async function reconcileAgyMcpServersUnderLease(
     }
   }
 
+  // 이번 실행이 브라우저를 쓰지 않으면, 남아 있는 Agentlas 소유 항목을 실행 동안만
+  // 치워 둔다. 이 프로세스의 다른 실행이 들고 있으면 그 실행의 것이므로 건드리지 않는다.
+  const BROWSER_KEY = "agentlas-browser";
+  let quarantinedBrowser: AgyMcpServerEntry | undefined;
+  if (agyBrowserEntryDisposition({
+    owned: Boolean(parsed.mcpServers[BROWSER_KEY])
+      && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[BROWSER_KEY] ?? {}),
+    requested: canonicalBrowserRequested,
+    heldByThisProcess: AGY_MCP_REFCOUNT.has(BROWSER_KEY),
+  }) === "quarantine") {
+    quarantinedBrowser = parsed.mcpServers[BROWSER_KEY];
+    delete parsed.mcpServers[BROWSER_KEY];
+    globalDirty = true;
+    onStatus("antigravity: 다른 실행이 남긴 브라우저 도구 설정을 이번 실행 동안만 치워 둡니다");
+  }
+
   const added: string[] = [];
   const stagedEntries = new Map<string, AgyMcpServerEntry>();
   const previousRefcounts = new Map<string, number | undefined>();
@@ -1282,6 +1320,12 @@ async function reconcileAgyMcpServersUnderLease(
             delete current.mcpServers![key];
             dirty = true;
           }
+        }
+        // 격리해 둔 브라우저 항목은 그 자리가 여전히 비어 있을 때만 되돌린다.
+        // 그 사이 다른 실행이 새로 넣었다면 그것이 지금의 주인이다.
+        if (quarantinedBrowser && current && !current.mcpServers![BROWSER_KEY]) {
+          current.mcpServers![BROWSER_KEY] = quarantinedBrowser;
+          dirty = true;
         }
         if (dirty && current) await writeGlobal(current);
       } catch (error) {
