@@ -255,6 +255,7 @@
     "test:one-history-catchup": "node scripts/qa-one-history-catchup-contract.cjs",
     "test:result-artifact-route": "node scripts/result-artifact-route-contract.mjs",
     "test:runtime-child-settlement": "node scripts/runtime-child-settlement-contract.cjs",
+    "test:cli-identity-path": "tsc -p electron/tsconfig.json && node scripts/cli-executable-identity-path-contract.cjs",
     "test:runtime-disabled-probe": "node scripts/runtime-disabled-probe-contract.cjs",
     "test:runtime-update-continuity": "node scripts/runtime-update-continuity-contract.cjs",
     "test:science-astronomy-analysis-oracle": "node scripts/science-astronomy-analysis-oracle-contract.cjs",

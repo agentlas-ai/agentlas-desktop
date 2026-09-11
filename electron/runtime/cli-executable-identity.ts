@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { withCliPath } from "./exec";
 
 export type CliExecutableIdentity = {
   executable: string;
@@ -24,8 +25,12 @@ function saveGeneration(resource: string, fingerprint: string | null, generation
 export function observeCliExecutableIdentity(input: {
   bin: string; cwd: string; env: NodeJS.ProcessEnv;
 }): CliExecutableIdentity | null {
+  // Resolve against the exact PATH the launch will use. A packaged GUI app
+  // inherits a minimal PATH, so resolving a bare command against the raw caller
+  // environment reports "missing" for a CLI that spawnCli would have launched.
+  const env = withCliPath(input.env);
   const environmentValue = (name: string): string | undefined => process.platform === "win32"
-    ? input.env[Object.keys(input.env).find((key) => key.toUpperCase() === name) ?? name] : input.env[name];
+    ? env[Object.keys(env).find((key) => key.toUpperCase() === name) ?? name] : env[name];
   const searchPath = environmentValue("PATH");
   const pathExtensions = environmentValue("PATHEXT");
   const scope = JSON.stringify([path.resolve(input.cwd), input.bin, searchPath, pathExtensions]);
