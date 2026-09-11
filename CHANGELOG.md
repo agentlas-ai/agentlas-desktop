@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.15 — 2026-09-11
+
+- Antigravity(agy)를 설치해 두었는데도 Science와 Work에서 "Antigravity CLI를 찾지 못했습니다"라며 실행이 시작조차 되지 않던 문제를 고칩니다. 앱이 실행 직전에 확인하는 설치 위치가 실제로 실행할 때 쓰는 위치와 달라서, 띄우면 정상이었을 CLI를 미리 없다고 거절하고 있었습니다. 같은 확인을 거치는 다른 CLI 런타임도 함께 풀립니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.1.14 — 2026-09-11
 
 - Science 화면이 무엇을 물어도 앱이 설치된 확장 세 벌(약 199MB, 파일 900여 개)을 통째로 다시 읽어 지문을 계산하던 것을 멈춥니다. 물음 한 번에 아홉 번 돌던 검사라 그 시간 동안 앱 전체가 멈춰 있었습니다. 프로젝트 목록 조회가 108ms에서 6.6ms로, 최악값이 2.5초에서 8.6ms로 줄었습니다. 설치된 확장이 바뀌면 그 자리에서 다시 전부 검사합니다.
