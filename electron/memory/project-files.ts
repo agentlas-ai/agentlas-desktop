@@ -24,9 +24,15 @@ import { getDb } from "../store/db";
 import {
   activeHubMemoryNestPaths,
   ensureActiveHubMemoryNest,
+  hubMemoryNestPathsForOwnerScope,
   normalizeHubMemorySlug,
   readableActiveHubMemoryNestRoots,
 } from "../agents/hub-memory-nest";
+import {
+  beginMemoryProjectionWrite,
+  finishMemoryProjectionWrite,
+  type MemoryProjectionWriterLease,
+} from "./revocations";
 import {
   CAREER_GRAPH_CONFIG_FILE,
   CAREER_GRAPH_DB_FILE,
@@ -57,6 +63,7 @@ export function projectMemoryDir(projectPath: string): string {
 
 const AUTO_SECTION = "## Auto-curated memory";
 const CREDENTIAL_INDEX_SECTION = "## Local Credential Index (read first)";
+const MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES = 8n * 1024n * 1024n;
 
 interface ProjectFsIdentity {
   root: string;
@@ -308,9 +315,13 @@ function readStableProjectText(
   identity: ProjectFsIdentity,
   filePath: string,
   label: string,
+  maximumBytes?: bigint,
 ): { content: string; stat: fs.BigIntStats } | null {
   const before = assertSafeProjectFile(identity, filePath, label);
   if (!before) return null;
+  if (maximumBytes !== undefined && before.size > maximumBytes) {
+    throw new ProjectArtifactError("limit-exceeded", `${label} exceeds the cleanup read limit.`);
+  }
   const parent = path.dirname(filePath);
   const parentStat = sameCanonicalPath(parent, identity.root)
     ? identity.stat
@@ -1232,6 +1243,7 @@ export function forgetProjectMemoryProjection(
   kind: string,
   contentHash: string,
   forgottenAt: string,
+  sourceMemoryIds: string[] = [],
 ): ProjectMemoryForgetResult {
   const identity = resolveProjectFsIdentity(projectPath);
   const dir = projectMemoryDir(identity.root);
@@ -1240,12 +1252,23 @@ export function forgetProjectMemoryProjection(
   let soulRemoved = 0;
   let logRedacted = 0;
 
-  const soul = readStableProjectText(identity, soulPath, "The project soul file");
+  const soul = readStableProjectText(
+    identity,
+    soulPath,
+    "The project soul file",
+    MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES,
+  );
   if (soul) {
     const hadTrailingNewline = soul.content.endsWith("\n");
+    let inAutoSection = false;
     const kept = soul.content.split(/\r?\n/).filter((line) => {
+      if (line.trim() === AUTO_SECTION) {
+        inAutoSection = true;
+        return true;
+      }
+      if (/^##\s+/.test(line) && line.trim() !== AUTO_SECTION) inAutoSection = false;
       const match = /^- \(([^)]+)\) (.*)$/.exec(line);
-      if (!match || match[1] !== kind || forgetContentHash(match[2]) !== contentHash) return true;
+      if (!inAutoSection || !match || match[1] !== kind || forgetContentHash(match[2]) !== contentHash) return true;
       soulRemoved += 1;
       return false;
     });
@@ -1261,8 +1284,14 @@ export function forgetProjectMemoryProjection(
     }
   }
 
-  const log = readStableProjectText(identity, logPath, "The project memory log");
+  const log = readStableProjectText(
+    identity,
+    logPath,
+    "The project memory log",
+    MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES,
+  );
   if (log) {
+    const sourceIds = new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean));
     const rows = log.content.split(/\r?\n/);
     const nextRows = rows.map((line) => {
       if (!line.trim()) return line;
@@ -1273,6 +1302,13 @@ export function forgetProjectMemoryProjection(
           || parsed.kind !== kind
           || forgetContentHash(parsed.content) !== contentHash
         ) return line;
+        const curatorProjection = parsed.action === "written"
+          && (parsed.source_provenance === "assistant-turn" || parsed.source_provenance === "task-force-synthesis");
+        const exactSource = curatorProjection
+          && typeof parsed.memory_id === "string"
+          && (sourceIds.size === 0 || sourceIds.has(parsed.memory_id));
+        const legacyCuratorProjection = curatorProjection && parsed.memory_id === undefined;
+        if (!exactSource && !legacyCuratorProjection) return line;
         logRedacted += 1;
         return JSON.stringify({
           action: "forgotten",
@@ -1295,6 +1331,60 @@ export function forgetProjectMemoryProjection(
     }
   }
   return { soulRemoved, logRedacted };
+}
+
+/** Verify the exact structured projection is absent after an idempotent retry. */
+export function isProjectMemoryProjectionForgotten(
+  projectPath: string,
+  kind: string,
+  contentHash: string,
+  sourceMemoryIds: string[] = [],
+): boolean {
+  const identity = resolveProjectFsIdentity(projectPath);
+  const dir = projectMemoryDir(identity.root);
+  const soul = readStableProjectText(
+    identity,
+    path.join(dir, PROJECT_SOUL_FILE),
+    "The project soul file",
+    MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES,
+  );
+  if (soul) {
+    let inAutoSection = false;
+    for (const line of soul.content.split(/\r?\n/)) {
+      if (line.trim() === AUTO_SECTION) {
+        inAutoSection = true;
+        continue;
+      }
+      if (/^##\s+/.test(line)) inAutoSection = false;
+      const match = /^- \(([^)]+)\) (.*)$/.exec(line);
+      if (inAutoSection && match && match[1] === kind && forgetContentHash(match[2]) === contentHash) return false;
+    }
+  }
+  const log = readStableProjectText(
+    identity,
+    path.join(dir, MEMORY_LOG_FILE),
+    "The project memory log",
+    MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES,
+  );
+  const sourceIds = new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean));
+  if (log?.content.split(/\r?\n/).some((line) => {
+    if (!line.trim()) return false;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (!(typeof parsed.content === "string"
+        && parsed.kind === kind
+        && forgetContentHash(parsed.content) === contentHash)) return false;
+      const curatorProjection = parsed.action === "written"
+        && (parsed.source_provenance === "assistant-turn" || parsed.source_provenance === "task-force-synthesis");
+      const exactSource = curatorProjection
+        && typeof parsed.memory_id === "string"
+        && (sourceIds.size === 0 || sourceIds.has(parsed.memory_id));
+      return exactSource || (curatorProjection && parsed.memory_id === undefined);
+    } catch {
+      return false;
+    }
+  })) return false;
+  return true;
 }
 
 // Legacy human-readable nest helper. Runtime recall now uses experience.sqlite
@@ -1478,8 +1568,23 @@ export function appendAgentNestExperienceMemory(
   if (items.length === 0) return false;
   const normalizedSlug = normalizedHubAgentSlug(slug);
   if (!normalizedSlug) return false;
+  const activePaths = activeHubMemoryNestPaths(normalizedSlug);
+  if (!activePaths) return false;
+  const leasedItems: Array<{ item: AgentNestExperienceItem; lease: MemoryProjectionWriterLease }> = [];
+  for (const item of items) {
+    const lease = beginMemoryProjectionWrite({
+      sourceMemoryId: item.id,
+      targetKind: "agent-nest-scan",
+      targetRef: activePaths.ownerScopeKey,
+    });
+    if (lease) leasedItems.push({ item, lease });
+  }
+  if (leasedItems.length === 0) return false;
   const memoryDir = ensureActiveHubMemoryNest(normalizedSlug);
-  if (!memoryDir) return false;
+  if (!memoryDir) {
+    for (const { lease } of leasedItems) finishMemoryProjectionWrite(lease);
+    return false;
+  }
   const dbPath = path.join(memoryDir, "experience.sqlite");
   let db: Database.Database | null = null;
   try {
@@ -1620,11 +1725,11 @@ export function appendAgentNestExperienceMemory(
         );
       }
     });
-    write(items);
+    write(leasedItems.map(({ item }) => item));
     replayAgentNestExperienceGovernanceRelations(
       db,
       normalizedSlug,
-      items.map((item) => item.id),
+      leasedItems.map(({ item }) => item.id),
     );
 
     // Re-embed stale rows before rebuilding derived links. Adapter identity,
@@ -1734,6 +1839,7 @@ export function appendAgentNestExperienceMemory(
     return false;
   } finally {
     try { db?.close(); } catch { /* best-effort projection */ }
+    for (const { lease } of leasedItems) finishMemoryProjectionWrite(lease);
   }
 }
 
@@ -1917,6 +2023,128 @@ export function forgetAgentNestExperienceMemory(
     }
   }
   return attempted === reconciled;
+}
+
+export interface AgentNestForgetScanResult {
+  complete: boolean;
+  scannedDatabases: number;
+  matchedRows: number;
+  nextCursor: string | null;
+}
+
+/**
+ * Reconcile one source id only inside the opaque owner partition captured when
+ * its projection was registered. Account switches cannot redirect this scan.
+ */
+export function forgetAgentNestExperienceMemoryForOwnerScope(
+  ownerScopeKey: string,
+  sourceMemoryId: string,
+  forgottenAt: string,
+  afterSlug: string | null = null,
+  maximumSlugs = 1,
+): AgentNestForgetScanResult {
+  const sourceId = sourceMemoryId.trim();
+  if (!sourceId) return { complete: false, scannedDatabases: 0, matchedRows: 0, nextCursor: afterSlug };
+  const agentRoot = path.join(os.homedir(), ".agentlas", "networking", "hub-agents");
+  let entries: fs.Dirent[];
+  try {
+    const stat = fs.lstatSync(agentRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      return { complete: false, scannedDatabases: 0, matchedRows: 0, nextCursor: afterSlug };
+    }
+    entries = fs.readdirSync(agentRoot, { withFileTypes: true })
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { complete: true, scannedDatabases: 0, matchedRows: 0, nextCursor: null };
+    }
+    return { complete: false, scannedDatabases: 0, matchedRows: 0, nextCursor: afterSlug };
+  }
+  let complete = true;
+  let scannedDatabases = 0;
+  let matchedRows = 0;
+  let scannedSlugs = 0;
+  let lastCompletedSlug = afterSlug;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const slug = normalizedHubAgentSlug(entry.name);
+    if (!slug || slug !== entry.name) continue;
+    if (afterSlug && slug <= afterSlug) continue;
+    if (scannedSlugs >= Math.max(1, Math.min(64, Math.floor(maximumSlugs)))) {
+      return { complete: false, scannedDatabases, matchedRows, nextCursor: lastCompletedSlug };
+    }
+    const paths = hubMemoryNestPathsForOwnerScope(slug, ownerScopeKey);
+    if (!paths) return { complete: false, scannedDatabases, matchedRows, nextCursor: lastCompletedSlug };
+    let slugComplete = true;
+    for (const memoryRoot of paths.readableMemoryRoots) {
+      const dbPath = path.join(memoryRoot, "experience.sqlite");
+      let db: Database.Database | null = null;
+      try {
+        const stat = fs.lstatSync(dbPath);
+        if (stat.isSymbolicLink() || !stat.isFile()) {
+          complete = false;
+          slugComplete = false;
+          continue;
+        }
+        db = new Database(dbPath);
+        db.pragma("foreign_keys = ON");
+        db.pragma("busy_timeout = 250");
+        const table = db.prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'",
+        ).get();
+        if (!table) {
+          scannedDatabases += 1;
+          continue;
+        }
+        const agentId = `hub:${slug}`;
+        const rows = db.prepare(
+          `SELECT ticket_id FROM memory_candidates
+            WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+        ).all(agentId, sourceId) as Array<{ ticket_id: string }>;
+        matchedRows += rows.length;
+        const redact = db.prepare(
+          `UPDATE memory_candidates
+              SET candidate_text = '', source_refs_json = '[]', reason = 'forgotten',
+                  status = 'superseded', tags_json = '[]', salience = 0,
+                  privacy_scope = 'private', embedding_adapter = NULL,
+                  embedding_dimensions = NULL, embedding_json = NULL,
+                  embedding_content_hash = NULL, updated_at = ?
+            WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+        );
+        const deleteLinks = db.prepare(
+          "DELETE FROM memory_links WHERE from_ticket = ? OR to_ticket = ?",
+        );
+        db.transaction(() => {
+          for (const row of rows) deleteLinks.run(row.ticket_id, row.ticket_id);
+          redact.run(forgottenAt, agentId, sourceId);
+        }).immediate();
+        const residual = db.prepare(
+          `SELECT 1 FROM memory_candidates
+            WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'
+              AND (candidate_text <> '' OR source_refs_json <> '[]' OR status <> 'superseded')
+            LIMIT 1`,
+        ).get(agentId, sourceId);
+        if (residual) complete = false;
+        scannedDatabases += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          complete = false;
+          slugComplete = false;
+        }
+      } finally {
+        try { db?.close(); } catch {
+          complete = false;
+          slugComplete = false;
+        }
+      }
+    }
+    if (!slugComplete) {
+      return { complete: false, scannedDatabases, matchedRows, nextCursor: lastCompletedSlug };
+    }
+    scannedSlugs += 1;
+    lastCompletedSlug = slug;
+  }
+  return { complete, scannedDatabases, matchedRows, nextCursor: complete ? null : lastCompletedSlug };
 }
 
 /** Resolve exact source-memory -> borrowed-agent projection ownership. */

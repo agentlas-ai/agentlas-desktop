@@ -50,6 +50,7 @@ import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
+import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { onDesktopStoreChange } from "./store/change-bus";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
@@ -1222,6 +1223,7 @@ function stopQuitServices(): Promise<void> {
   try { disposeMobileBridgeStateChange?.(); } catch {}
   disposeMobileBridgeStateChange = null;
 
+  const memoryCleanupStopped = stopMemoryRevocationCleanup();
   quitServicesStopPromise = Promise.all([
     localModelHubControl?.shutdown(),
     legacyLearningJob?.catch(() => {}),
@@ -1235,7 +1237,7 @@ function stopQuitServices(): Promise<void> {
         if (!result.stopped) console.error(`[daemon] helper pid ${result.pid ?? "?"} did not stop`);
       })
       .catch((error) => console.error("[daemon] helper shutdown failed", error)),
-  ]).then(() => undefined);
+  ]).then(() => undefined).finally(() => memoryCleanupStopped);
   return quitServicesStopPromise;
 }
 
@@ -3921,6 +3923,7 @@ app.whenReady().then(async () => {
   if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
+  if (!quitServicesStopPromise && !quitCleanupPromise) startMemoryRevocationCleanup();
   // 누가 어떤 버전을 쓰는지 서버가 알게 한다(1.0.31·32 크래시 때 영향 범위를 셀 수 없었다).
   startInstallBeacon(installIdentity.channel);
   // 창이 뜨고 초기 렌더러 IPC가 가라앉은 뒤에 레거시 정합을 돌린다.

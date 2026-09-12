@@ -8,6 +8,7 @@ import {
 } from "./borrowed-owner-scope";
 
 const HUB_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,119}$/;
+const ACCOUNT_OWNER_SCOPE_RE = /^borrowed-owner:account:[0-9a-f]{64}$/;
 
 export function normalizeHubMemorySlug(value: unknown): string | null {
   const slug = typeof value === "string"
@@ -37,7 +38,7 @@ function assertDirectoryChain(target: string, create: boolean): boolean {
   return cursor === resolved;
 }
 
-export function activeHubMemoryNestPaths(slugValue: unknown): {
+export function hubMemoryNestPathsForOwnerScope(slugValue: unknown, ownerScopeValue: unknown): {
   slug: string;
   ownerScopeKey: string;
   writableMemoryRoot: string;
@@ -45,7 +46,10 @@ export function activeHubMemoryNestPaths(slugValue: unknown): {
 } | null {
   const slug = normalizeHubMemorySlug(slugValue);
   if (!slug) return null;
-  const ownerScopeKey = activeBorrowedOwnerScopeKey();
+  const ownerScopeKey = typeof ownerScopeValue === "string" ? ownerScopeValue.trim() : "";
+  if (ownerScopeKey !== DEVICE_LOCAL_BORROWED_OWNER_SCOPE && !ACCOUNT_OWNER_SCOPE_RE.test(ownerScopeKey)) {
+    return null;
+  }
   const agentRoot = path.join(os.homedir(), ".agentlas", "networking", "hub-agents", slug);
   const flatMemoryRoot = path.join(agentRoot, "memory");
   if (ownerScopeKey === DEVICE_LOCAL_BORROWED_OWNER_SCOPE) {
@@ -77,6 +81,15 @@ export function activeHubMemoryNestPaths(slugValue: unknown): {
   const ownerDirectory = borrowedOwnerPartitionDirectory(ownerScopeKey);
   const writableMemoryRoot = path.join(agentRoot, "owners", ownerDirectory, "memory");
   return { slug, ownerScopeKey, writableMemoryRoot, readableMemoryRoots: [writableMemoryRoot] };
+}
+
+export function activeHubMemoryNestPaths(slugValue: unknown): {
+  slug: string;
+  ownerScopeKey: string;
+  writableMemoryRoot: string;
+  readableMemoryRoots: string[];
+} | null {
+  return hubMemoryNestPathsForOwnerScope(slugValue, activeBorrowedOwnerScopeKey());
 }
 
 export function ensureActiveHubMemoryNest(slugValue: unknown): string | null {

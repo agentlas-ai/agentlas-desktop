@@ -8,7 +8,12 @@ import {
   appendSoulMemory,
 } from "./project-files";
 import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
-import { MemoryRevokedError } from "./revocations";
+import {
+  beginMemoryProjectionWrite,
+  finishMemoryProjectionWrite,
+  MemoryRevokedError,
+  type MemoryProjectionWriterLease,
+} from "./revocations";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import {
   parseMemoryEvents,
@@ -478,7 +483,7 @@ export function curateEvents(
   options: EventCurationOptions = {},
 ): CurationReport {
   const report = emptyReport();
-  const soulLines: string[] = [];
+  const soulLines: Array<{ line: string; lease: MemoryProjectionWriterLease }> = [];
   // agent_repo 스코프(에이전트 기술·경험) 배움 — 빌린 에이전트의 전역 둥지로 미러링할 후보.
   const nestExperienceItems: AgentNestExperienceItem[] = [];
 
@@ -732,8 +737,15 @@ export function curateEvents(
     }
 
     if (ctx.projectPath) {
+      const projectionLease = beginMemoryProjectionWrite({
+        sourceMemoryId: entry.id,
+        targetKind: "project-files",
+        targetRef: ctx.projectPath,
+      });
+      if (!projectionLease) continue;
       appendMemoryLog(ctx.projectPath, {
         action: "written",
+        memory_id: entry.id,
         scope: effectiveScope,
         kind: ev.memory_kind,
         content: ev.content,
@@ -742,7 +754,9 @@ export function curateEvents(
         at: new Date().toISOString(),
       });
       if (SOUL_KINDS.has(ev.memory_kind) && effectiveScope === "project") {
-        soulLines.push(`(${ev.memory_kind}) ${ev.content}`);
+        soulLines.push({ line: `(${ev.memory_kind}) ${ev.content}`, lease: projectionLease });
+      } else {
+        finishMemoryProjectionWrite(projectionLease);
       }
     }
     // 에이전트 기술·경험(agent_repo) — 프로젝트 폴더 유무와 무관하게 빌린 에이전트의
@@ -762,7 +776,8 @@ export function curateEvents(
   }
 
   if (ctx.projectPath && soulLines.length > 0) {
-    appendSoulMemory(ctx.projectPath, soulLines);
+    appendSoulMemory(ctx.projectPath, soulLines.map((item) => item.line));
+    for (const item of soulLines) finishMemoryProjectionWrite(item.lease);
   }
 
   // agent_repo 배움을 이 실행에 관여한 빌린 에이전트들의 private ontology cache에 미러링.

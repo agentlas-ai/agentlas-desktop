@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import {
+  activeBorrowedOwnerScopeKey,
+  DEVICE_LOCAL_BORROWED_OWNER_SCOPE,
+} from "../agents/borrowed-owner-scope";
 import { getDb } from "../store/db";
 
 export type MemoryRevocationReason = "exact-content-revoked" | "stale-intake-epoch";
@@ -113,6 +117,98 @@ export function memoryRunPredatesAnyForget(runIdValue: string | null | undefined
 
 function stableHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+export type MemoryProjectionTargetKind = "project-files" | "agent-nest-scan";
+
+export interface MemoryProjectionWriterLease {
+  targetId: string;
+  token: string;
+}
+
+function projectionTargetIdentity(
+  sourceMemoryId: string,
+  targetKind: MemoryProjectionTargetKind,
+  targetRef: string,
+): { targetId: string; targetRefHash: string } {
+  const targetRefHash = stableHash(`memory-projection-target-v1\0${targetKind}\0${targetRef}`);
+  return {
+    targetId: `mct_${stableHash(`${sourceMemoryId}\0${targetKind}\0${targetRefHash}`).slice(0, 32)}`,
+    targetRefHash,
+  };
+}
+
+/**
+ * Register an external projection before writing it. A concurrent forget turns
+ * this exact row pending and cleanup waits for the short writer lease; a writer
+ * arriving after a tombstone is refused before raw content reaches a file.
+ */
+export function beginMemoryProjectionWrite(input: {
+  sourceMemoryId: string;
+  targetKind: MemoryProjectionTargetKind;
+  targetRef: string;
+}): MemoryProjectionWriterLease | null {
+  const sourceMemoryId = input.sourceMemoryId.trim();
+  const targetRef = input.targetKind === "project-files"
+    ? canonicalProjectPath(input.targetRef)
+    : input.targetRef.trim();
+  if (!sourceMemoryId || !targetRef) return null;
+  if (
+    input.targetKind === "agent-nest-scan"
+    && targetRef !== DEVICE_LOCAL_BORROWED_OWNER_SCOPE
+    && !/^borrowed-owner:account:[0-9a-f]{64}$/.test(targetRef)
+  ) return null;
+  const { targetId, targetRefHash } = projectionTargetIdentity(sourceMemoryId, input.targetKind, targetRef);
+  const token = `mpw_${randomUUID()}`;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + 30_000).toISOString();
+  return getDb().transaction(() => {
+    const revoked = getDb().prepare(
+      "SELECT revocation_id AS revocationId FROM memory_revocation_sources WHERE source_memory_id = ?",
+    ).get(sourceMemoryId) as { revocationId: string } | undefined;
+    getDb().prepare(
+      `INSERT OR IGNORE INTO memory_revocation_cleanup_targets (
+         target_id, source_memory_id, revocation_id, target_kind, target_ref,
+         target_ref_hash, state, lease_kind, lease_token, lease_expires_at,
+         attempt_count, progress_cursor, next_attempt_at, last_error_code, created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, NULL, NULL, NULL, ?, ?, NULL)`,
+    ).run(
+      targetId,
+      sourceMemoryId,
+      revoked?.revocationId ?? null,
+      input.targetKind,
+      targetRef,
+      targetRefHash,
+      revoked ? "pending" : "registered",
+      nowIso,
+      nowIso,
+    );
+    const row = getDb().prepare(
+      "SELECT revocation_id AS revocationId FROM memory_revocation_cleanup_targets WHERE target_id = ?",
+    ).get(targetId) as { revocationId: string | null } | undefined;
+    if (!row || row.revocationId) return null;
+    const claimed = getDb().prepare(
+      `UPDATE memory_revocation_cleanup_targets
+          SET state = 'writing', lease_kind = 'writer', lease_token = ?,
+              lease_expires_at = ?, updated_at = ?, completed_at = NULL
+        WHERE target_id = ? AND revocation_id IS NULL
+          AND (lease_token IS NULL OR lease_expires_at <= ?)`,
+    ).run(token, expiresAt, nowIso, targetId, nowIso);
+    return claimed.changes === 1 ? { targetId, token } : null;
+  }).immediate();
+}
+
+export function finishMemoryProjectionWrite(lease: MemoryProjectionWriterLease): void {
+  const now = new Date().toISOString();
+  getDb().prepare(
+    `UPDATE memory_revocation_cleanup_targets
+        SET state = CASE WHEN revocation_id IS NULL THEN 'registered' ELSE 'pending' END,
+            lease_kind = NULL, lease_token = NULL, lease_expires_at = NULL,
+            next_attempt_at = CASE WHEN revocation_id IS NULL THEN NULL ELSE ? END,
+            updated_at = ?
+      WHERE target_id = ? AND lease_kind = 'writer' AND lease_token = ?`,
+  ).run(now, now, lease.targetId, lease.token);
 }
 
 function canonicalProjectPath(value: string | null | undefined): string | null {
@@ -319,12 +415,52 @@ function reconcileLegacyDedupEpisodes(
   }
 }
 
+function enqueueRevocationCleanupTarget(input: {
+  sourceMemoryId: string;
+  revocationId: string;
+  targetKind: MemoryProjectionTargetKind;
+  targetRef: string;
+  now: string;
+}): void {
+  const { targetId, targetRefHash } = projectionTargetIdentity(
+    input.sourceMemoryId,
+    input.targetKind,
+    input.targetRef,
+  );
+  getDb().prepare(
+    `INSERT INTO memory_revocation_cleanup_targets (
+       target_id, source_memory_id, revocation_id, target_kind, target_ref,
+       target_ref_hash, state, lease_kind, lease_token, lease_expires_at,
+       attempt_count, progress_cursor, next_attempt_at, last_error_code, created_at, updated_at, completed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, 0, NULL, ?, NULL, ?, ?, NULL)
+     ON CONFLICT(source_memory_id, target_kind, target_ref_hash) DO UPDATE SET
+       revocation_id = excluded.revocation_id,
+       state = 'pending',
+       progress_cursor = NULL,
+       next_attempt_at = excluded.next_attempt_at,
+       last_error_code = NULL,
+       updated_at = excluded.updated_at,
+       completed_at = NULL`,
+  ).run(
+    targetId,
+    input.sourceMemoryId,
+    input.revocationId,
+    input.targetKind,
+    input.targetRef,
+    targetRefHash,
+    input.now,
+    input.now,
+    input.now,
+  );
+}
+
 /**
  * Commit the durable tombstone and remove every directly retrievable raw DB
  * projection in one IMMEDIATE transaction. Filesystem/nest projections are
  * reconciled by the caller from the bounded return value.
  */
 export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string): ForgottenMemoryProjection | null {
+  const activeNestOwnerScopeKey = activeBorrowedOwnerScopeKey();
   const revoke = getDb().transaction((): ForgottenMemoryProjection | null => {
     const selected = getDb().prepare(
       `SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, superseded_at
@@ -389,6 +525,36 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
        ON CONFLICT(source_memory_id) DO UPDATE SET revocation_id = excluded.revocation_id`,
     );
     for (const id of sourceMemoryIds) linkSource.run(id, canonicalRevocation.revocationId);
+
+    const placeholders = sourceMemoryIds.map(() => "?").join(",");
+    getDb().prepare(
+      `UPDATE memory_revocation_cleanup_targets
+          SET revocation_id = ?, state = 'pending', next_attempt_at = ?,
+              progress_cursor = NULL,
+              last_error_code = NULL, updated_at = ?, completed_at = NULL
+        WHERE source_memory_id IN (${placeholders})`,
+    ).run(canonicalRevocation.revocationId, now, now, ...sourceMemoryIds);
+    for (const row of matched) {
+      const projectPath = canonicalProjectPath(row.project_path);
+      if (projectPath) {
+        enqueueRevocationCleanupTarget({
+          sourceMemoryId: row.id,
+          revocationId: canonicalRevocation.revocationId,
+          targetKind: "project-files",
+          targetRef: projectPath,
+          now,
+        });
+      }
+      if (row.scope === "agent_repo") {
+        enqueueRevocationCleanupTarget({
+          sourceMemoryId: row.id,
+          revocationId: canonicalRevocation.revocationId,
+          targetKind: "agent-nest-scan",
+          targetRef: activeNestOwnerScopeKey,
+          now,
+        });
+      }
+    }
 
     const redactMemory = getDb().prepare(
       `UPDATE memory_entries

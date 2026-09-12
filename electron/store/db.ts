@@ -16,8 +16,9 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
+let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 118;
+const SCHEMA_VERSION = 119;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -1358,6 +1359,10 @@ function ensureWalJournal(db: Database.Database, dbPath: string): void {
 export function openedStorePath(): string | null {
   return _openedStorePath;
 }
+/** Resolved authority of the currently open handle; null before init/after close. */
+export function openedStoreMigrationRole(): StoreMigrationRole | null {
+  return _openedStoreMigrationRole;
+}
 let _openedStorePath: string | null = null;
 
 export function initStore(options: StoreInitOptions = {}): void {
@@ -1395,6 +1400,7 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (userVersion < SCHEMA_VERSION) {
       throw new Error(storeSchemaRefusalMessage(userVersion, dbPath));
     }
+    _openedStoreMigrationRole = migrationRole;
     return;
   }
 
@@ -6507,6 +6513,44 @@ export function initStore(options: StoreInitOptions = {}): void {
     }
   })();
 
+  // v119: external Memory projections are rebuildable, but an explicit forget
+  // must also survive a crash between the canonical DB tombstone and their
+  // filesystem redaction. The row contains only an exact source id and target
+  // authority; remembered text is never copied into this retry ledger.
+  if (userVersion < 119) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_revocation_cleanup_targets (
+        target_id TEXT PRIMARY KEY,
+        source_memory_id TEXT NOT NULL,
+        revocation_id TEXT REFERENCES memory_revocations(revocation_id) ON DELETE CASCADE,
+        target_kind TEXT NOT NULL CHECK(target_kind IN ('project-files','agent-nest-scan')),
+        target_ref TEXT NOT NULL,
+        target_ref_hash TEXT NOT NULL
+          CHECK(length(target_ref_hash) = 64 AND target_ref_hash NOT GLOB '*[^0-9a-f]*'),
+        state TEXT NOT NULL CHECK(state IN ('writing','registered','pending','leased','complete')),
+        lease_kind TEXT CHECK(lease_kind IN ('writer','cleanup')),
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        progress_cursor TEXT,
+        next_attempt_at TEXT,
+        last_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE(source_memory_id, target_kind, target_ref_hash),
+        CHECK(
+          (lease_kind IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+          OR (lease_kind IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+        )
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_revocation_cleanup_due
+        ON memory_revocation_cleanup_targets(state, next_attempt_at, lease_expires_at, created_at);
+      CREATE INDEX IF NOT EXISTS idx_memory_revocation_cleanup_revocation
+        ON memory_revocation_cleanup_targets(revocation_id, state);
+    `);
+  }
+
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -6518,9 +6562,11 @@ export function initStore(options: StoreInitOptions = {}): void {
   }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  _openedStoreMigrationRole = migrationRole;
   } catch (error) {
     try { _db?.close(); } catch {}
     _db = null;
+    _openedStoreMigrationRole = null;
     _postContinuityRepairsDeferred = false;
     throw error;
   } finally {
@@ -6552,6 +6598,7 @@ export function getDb(): Database.Database {
 export function closeStore(): void {
   const db = _db;
   _db = null;
+  _openedStoreMigrationRole = null;
   _postContinuityRepairsDeferred = false;
   if (!db) return;
   db.close();
