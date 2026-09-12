@@ -133,12 +133,12 @@
 
 .rowHead {
   width: 100%;
-  min-height: 28px;
+  min-height: 30px;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 7px;
-  padding: 5px 0;
+  padding: 1px 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -154,7 +154,7 @@
 .rowMark {
   width: 18px;
   height: 18px;
-  margin-top: 2px;
+  margin-top: 0;
   display: inline-grid;
   place-items: center;
   color: var(--work-faint);
@@ -188,7 +188,7 @@
 .rowChevron {
   display: inline-grid;
   place-items: center;
-  margin-top: 5px;
+  margin-top: 0;
   color: var(--work-faint);
   transition: transform 140ms ease;
 }
@@ -200,6 +200,17 @@
 
 .object,
 .thoughtLabel { color: var(--work-muted); }
+
+.toolOrigin {
+  width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  border-radius: 5px;
+  color: var(--work-faint);
+  background: var(--paper-2);
+}
 
 .command,
 .file code {

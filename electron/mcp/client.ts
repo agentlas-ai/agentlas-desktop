@@ -168,6 +168,8 @@ import {
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
+import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
+import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
@@ -5016,7 +5018,7 @@ ${effectiveUserPrompt}`;
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => {
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], _imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin) => {
         let sourceUrls: string[] | undefined;
         if (isError) {
           observedOneToolFailure = true;
@@ -5056,6 +5058,13 @@ ${effectiveUserPrompt}`;
           kind: "tool-use",
           tool: {
             name,
+            origin: resolveToolInvocationOrigin({
+              toolName: name,
+              runtimeKind: active.kind,
+              backendLabel: runnerReq.backendLabel,
+              ...(typeof mcpConfigPath === "string" ? { mcpConfigPath } : {}),
+              ...(dispatchedOrigin ? { dispatchedOrigin } : {}),
+            }),
             args,
             result,
             id,

@@ -1,3 +1,4 @@
+import type { CurrentDownloadProof } from "./download-proof";
 import type { CurrentFileProof } from "./file-proof";
 import { createHash } from "node:crypto";
 import type { RuntimeSelection } from "../../shared/types";
@@ -94,7 +95,8 @@ export async function ensureCriterionProofContracts(input:{goalId:string;invocat
 /** This first boundary admits the host's canonical delivered answer and concrete
  * successful observations. External-effect kinds await their typed producers;
  * neither a generic tool preview nor a render-ready receipt manufactures proof. */
-export function admissibleCriterionProofRefs(contract:CriterionProofContract,refs:readonly string[],files:readonly CurrentFileProof[]=[]):string[]{
+export function admissibleCriterionProofRefs(contract:CriterionProofContract,refs:readonly string[],files:readonly CurrentFileProof[]=[],downloads:readonly CurrentDownloadProof[]=[]):string[]{
+  if(contract.requiredProofKind==='download')return downloads.map(download=>download.ref);
   if(contract.requiredProofKind==='file')return files.filter(file=>file.action===contract.requiredFileAction).map(file=>file.ref);
   if(contract.requiredProofKind==='answer')return refs.filter(ref=>ref.startsWith('chat-message:'));
   if(contract.requiredProofKind==='semantic')return refs.filter(ref=>{

@@ -1,3 +1,4 @@
+import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
 import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, criterionProofAccountingOwner } from "./criterion-proof";
 import { withInvocationAccounting } from "./accounting-context";
@@ -1019,8 +1020,10 @@ export async function verifyGoalCompletionClaim(input: {
     const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
     const fileProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
       ? currentBuiltinFileProofs(fileProofInput) : [];
+    const downloadProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "download")
+      ? await currentBrowserDownloadProofs(fileProofInput) : [];
     const evidenceRefsByItem = Object.fromEntries(run.acceptanceCriteria.map((_,index) => [`criterion:${index}`,
-      proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs,fileProofs).slice(-32) : []]));
+      proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs,fileProofs,downloadProofs).slice(-32) : []]));
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.
@@ -1041,7 +1044,7 @@ export async function verifyGoalCompletionClaim(input: {
           "failed_unknown",
           "inconclusive",
         ],
-        input: `CURRENT HOST FILE OBSERVATIONS (action is immutable): ${JSON.stringify(fileProofs)}\n` + observation + `\nPINNED CRITERION PROOF CONTRACTS (cannot be lowered): ${JSON.stringify(proofContracts.map(({criterionIndex,requiredProofKind,requiredFileAction})=>({criterionIndex,requiredProofKind,requiredFileAction})))}`,
+        input: `CURRENT HOST COMPLETED DOWNLOADS: ${JSON.stringify(downloadProofs)}\nCURRENT HOST FILE OBSERVATIONS (action is immutable): ${JSON.stringify(fileProofs)}\n` + observation + `\nPINNED CRITERION PROOF CONTRACTS (cannot be lowered): ${JSON.stringify(proofContracts.map(({criterionIndex,requiredProofKind,requiredFileAction})=>({criterionIndex,requiredProofKind,requiredFileAction})))}`,
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
@@ -1094,6 +1097,16 @@ export async function verifyGoalCompletionClaim(input: {
           requiredActor: null,
           judgmentRuntimeReceipt: undefined,
         }));
+    const chosenDownloadRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("download-proof:")));
+    if (chosenDownloadRefs.size) {
+      const current = fileProofInput ? await currentBrowserDownloadProofs(fileProofInput) : [];
+      const currentByRef = new Map(current.map(item => [item.ref,JSON.stringify(item)]));
+      const capturedByRef = new Map(downloadProofs.map(item => [item.ref,JSON.stringify(item)]));
+      if ([...chosenDownloadRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_download_changed"});
+        return null;
+      }
+    }
     // A provider may resolve despite abort. Never persist its late verdicts.
     if (controller.signal.aborted) throw controller.signal.reason;
     if (verificationBoundary && input.invocationRunId) {

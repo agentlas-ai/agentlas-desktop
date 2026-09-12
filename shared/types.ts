@@ -4778,6 +4778,8 @@ export interface McpInvocationEvent {
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
   tool?: {
     name: string;
+    /** Main-resolved source identity; renderer names and provider prose never mint it. */
+    origin?: import("./tool-invocation-origin").ToolInvocationOrigin;
     args?: string;
     result?: string;
     id?: string;

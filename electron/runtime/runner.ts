@@ -2,6 +2,7 @@
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { createHash } from "node:crypto";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
+import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
@@ -547,7 +548,7 @@ export interface RunnerEvents {
    * command/prose output. Main still opens and verifies every candidate before
    * it can reach One's Outputs rail.
    */
-  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string) => void;
+  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, origin?: ToolInvocationOrigin) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
   /**

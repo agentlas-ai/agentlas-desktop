@@ -1,3 +1,4 @@
+import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { withAdapterEffectContext } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
@@ -1885,7 +1886,8 @@ export class InvocationService {
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
-    void withBuiltinFileProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
+    void withBrowserDownloadProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
+      readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? {goalId:goalLongRun.goalId,attemptId:goalControllerAttemptId} : null }, () => withBuiltinFileProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
       goalLongRun && goalLongRun.surface !== "science"
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
@@ -2928,7 +2930,7 @@ export class InvocationService {
         this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);
         this.drainSteerQueue(runReq.chatId);
-      }))));
+      })))));
 
     return { runId };
   }

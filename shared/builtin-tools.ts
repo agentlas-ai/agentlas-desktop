@@ -34,6 +34,8 @@ export interface BuiltinToolContext {
   permission: ToolPermission;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Main-owned native browser download; no caller-selected path or profile. */
+  browserDownload?: (url: string) => Promise<{id:string;fileName:string;bytes:number;savePath:string}>;
   /**
    * 사용자에게 묻고 **답을 기다리는** 함수. 주입으로 받는 이유는 이 파일이 electron 을
    * import 하면 안 되기 때문이다(터미널·서버도 같은 도구를 쓸 수 있어야 한다).
@@ -70,6 +72,7 @@ export interface BuiltinToolRunResult {
   content: string;
   /** Only actual builtin filesystem code produces this; never parsed from tool text. */
   fileObservation?: FileObservation;
+  downloadId?: string;
   /** Host-structured evidence; model prose and JSON output cannot populate it. */
   artifactPaths?: readonly string[];
   /** Optional visual feedback for the model's next tool-loop turn. */
@@ -422,6 +425,18 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     },
   },
   {
+    name: "browser_download",
+    minPerm: "write",
+    description: "Download an explicit HTTPS URL (or allowed localhost URL) using this task’s browser session. Up to 16 MiB, saved to app-owned downloads. Returns only after completed bytes are verified. No arbitrary destination/profile inputs.",
+    parameters: {type:"object",properties:{url:{type:"string",maxLength:8192}},required:["url"],additionalProperties:false},
+    async run(args,ctx) {
+      if (!ctx.browserDownload) throw new Error("browser_download_scope_unavailable");
+      if (Object.keys(args).length !== 1 || typeof args.url !== "string" || !args.url || args.url.length > 8192) throw new Error("browser_download_invalid_input");
+      const result = await ctx.browserDownload(args.url);
+      return {content:JSON.stringify({downloadId:result.id,fileName:result.fileName,bytes:result.bytes,state:"completed"}),downloadId:result.id,artifactPaths:[result.savePath]};
+    },
+  },
+  {
     name: "generate_image",
     minPerm: "read",
     description:
@@ -534,7 +549,7 @@ const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 /** 이 권한에서 **존재하는** 도구들. 부족한 도구는 목록에 아예 없다. */
 export function allowedBuiltinTools(
   permission: ToolPermission,
-  opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {},
+  opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {},
 ): BuiltinTool[] {
   const rank = PERM_RANK[permission] ?? 0;
   return BUILTIN_TOOLS.filter((tool) => {
@@ -543,6 +558,7 @@ export function allowedBuiltinTools(
     if (tool.name === "ask_user" && !opts.canAskUser) return false;
     // 멀티모달 슬롯이 비어 있으면 그리는 도구도 없다. "있는데 못 그림"은 함정이다.
     if (tool.name === "generate_image" && !opts.canGenerateImage) return false;
+    if (tool.name === "browser_download" && !opts.canBrowserDownload) return false;
     return true;
   });
 }
@@ -552,7 +568,7 @@ export function builtinToolByName(name: string): BuiltinTool | undefined {
 }
 
 /** OpenAI 함수 호출 형식. */
-export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {}): {
+export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {}): {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }[] {
@@ -563,7 +579,7 @@ export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskU
 }
 
 /** Anthropic 도구 형식. */
-export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {}): {
+export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {}): {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
@@ -600,6 +616,7 @@ export async function runBuiltinTool(
         ok: true,
         content: value.content,
         ...(value.fileObservation ? { fileObservation: value.fileObservation } : {}),
+        ...(value.downloadId ? { downloadId: value.downloadId } : {}),
         ...(value.artifactPaths?.length ? { artifactPaths: [...value.artifactPaths] } : {}),
         ...(value.imageDataUrl ? { imageDataUrl: value.imageDataUrl } : {}),
       };

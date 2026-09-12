@@ -36,6 +36,7 @@ import styles from "./OneTurnWork.module.css";
 import { BoundImageArtifacts } from "../workspace/BoundImageArtifacts";
 import { toolFailureCopy } from "@shared/tool-failure";
 import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
+import { toolInvocationOriginLabel, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
 /**
  * One assistant turn's process, drawn the way Codex draws it:
@@ -154,6 +155,19 @@ function CellIcon({ cell }: { cell: OneWorkCell }) {
   }
 }
 
+function ToolOriginBadge({ origin, locale }: { origin: ToolInvocationOrigin; locale: "ko" | "en" }) {
+  const label = toolInvocationOriginLabel(origin, locale);
+  const icon = origin.kind === "cli" ? <IconCode size={11} />
+    : origin.kind === "agentlas-plugin" || origin.kind === "agentlas" ? <IconSparkles size={11} />
+      : origin.kind === "mcp" ? <IconNetwork size={11} />
+        : <IconAlertTriangle size={11} />;
+  return <span className={styles.toolOrigin} title={label} aria-label={label} data-tool-origin={origin.kind}>{icon}</span>;
+}
+
+function cellOriginBadge(cell: OneWorkCell, locale: "ko" | "en") {
+  return cell.origin ? <ToolOriginBadge origin={cell.origin} locale={locale} /> : null;
+}
+
 function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
   if (cell.kind === "call" && cell.failureCode) {
     const copy = toolFailureCopy(cell.failureCode, locale);
@@ -253,6 +267,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
                       {entry.op === "read" ? (ko ? "읽음" : "Read") : entry.op === "list" ? (ko ? "목록" : "List") : (ko ? "검색" : "Search")}
                     </span>
                     <span className={styles.exploreTarget}>{entry.label}</span>
+                    {entry.origin && <ToolOriginBadge origin={entry.origin} locale={locale} />}
                   </span>
                 ))}
               </span>
@@ -269,6 +284,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
             <>
               <strong>{verb}</strong>
               <span className={styles.object}>{compactShellLabel(locale)}</span>
+              {cellOriginBadge(cell, locale)}
               {statusSuffix(cell, locale)}
               {cell.exitCode != null && cell.exitCode !== 0 && <span className={styles.muted}>exit {cell.exitCode}</span>}
             </>
@@ -315,6 +331,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
                   </span>
                 ))}
               </span>
+              {cellOriginBadge(cell, locale)}
               {statusSuffix(cell, locale)}
             </>
           )}
@@ -324,7 +341,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
       );
     case "web_search":
       return (
-        <ExpandableRow cell={cell} locale={locale} head={<><strong>{verb}</strong><span className={styles.object}>{cell.query}</span>{statusSuffix(cell, locale)}</>} />
+        <ExpandableRow cell={cell} locale={locale} head={<><strong>{verb}</strong><span className={styles.object}>{cell.query}</span>{cellOriginBadge(cell, locale)}{statusSuffix(cell, locale)}</>} />
       );
     case "fetch":
       return (
@@ -335,6 +352,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
             <>
               <strong>{verb}</strong>
               <span className={styles.object}>{cell.url}</span>
+              {cellOriginBadge(cell, locale)}
               {cell.statusCode !== undefined && <span className={styles.muted}>{cell.statusCode}</span>}
               {statusSuffix(cell, locale)}
             </>
@@ -346,7 +364,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
         ? (ko ? "연결된 도구 사용" : "Use connected tool") : cell.label;
       const action = toolObservationAction(cell.toolName ?? cell.label, fallbackLabel, cell.args, locale);
       return <ExpandableRow cell={cell} locale={locale}
-        head={<><strong>{action.label}</strong>{action.target && <span className={styles.object}>{action.target}</span>}{statusSuffix(cell, locale)}</>}>
+        head={<><strong>{action.label}</strong>{action.target && <span className={styles.object}>{action.target}</span>}{cellOriginBadge(cell, locale)}{statusSuffix(cell, locale)}</>}>
         {(cell.callId || cell.detail || cell.args || cell.result) ? <ToolObservation toolName={cell.toolName ?? cell.label}
           callId={cell.callId} detail={cell.detail} args={cell.args} result={cell.result} locale={locale} /> : undefined}
       </ExpandableRow>;

@@ -1,3 +1,4 @@
+import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof } from "../long-run/file-proof";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
 //
@@ -33,6 +34,11 @@ import {
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
 import type { ToolPermission } from "../../shared/builtin-tools";
+import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
+
+function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
+  return { kind: "agentlas", providerName: "Agentlas", toolName };
+}
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -162,6 +168,7 @@ export async function loadMainToolInventory(
   canGenerateImage: boolean,
   signal?: AbortSignal,
   browserOnly = false,
+  canBrowserDownload = false,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
@@ -175,8 +182,9 @@ export async function loadMainToolInventory(
 
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
-  if (workspaceRoot && !browserOnly) {
-    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage })) {
+  if ((workspaceRoot && !browserOnly) || canBrowserDownload) {
+    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload })) {
+      if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download") continue;
       tools.push(def);
       byName.set(def.function.name, {
         kind: "builtin",
@@ -328,6 +336,7 @@ export async function prepareMainToolLoop(
           imageSlotDiagnosis.state === "ready",
           req.signal,
           req.browserOnly === true,
+          await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
   const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools),
@@ -354,6 +363,7 @@ export async function prepareMainToolLoop(
 async function approveLocalToolCall(
   ctx: LocalToolApprovalContext,
   toolName: string,
+  detail?: string,
 ): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
   // MCP 도구는 정의에 종류 칸이 없으므로 "other"에 머문다.
@@ -362,7 +372,9 @@ async function approveLocalToolCall(
   const builtinKind = builtin
     ? builtin.minPerm === "read"
       ? ("read" as const)
-      : builtin.name === "bash"
+      : builtin.name === "browser_download"
+        ? ("fetch" as const)
+        : builtin.name === "bash"
         ? ("execute" as const)
         : ("edit" as const)
     : null;
@@ -371,6 +383,7 @@ async function approveLocalToolCall(
     sessionKey: ctx.sessionKey,
     tool: toolName,
     kind: builtinKind ?? "other",
+    ...(detail ? {detail} : {}),
     // detail 을 비워 두는 것은 의도적이다 — 세션 허용 키가 `tool::detail` 이라
     // 인자를 실으면 인자 한 글자만 달라져도 다시 묻는다. 도구 이름
     // (`mcp__<서버>__<도구>`) 자체가 사용자에게 무엇을 허용하는지 말해 준다.
@@ -413,12 +426,12 @@ export async function runMainToolDispatch(
     if (call.toolName === CODE_MODE_TOOL) {
       if (broker) throw new Error("code_mode_broker_not_supported");
       const result = await runMainCodeMode(byName, call.arguments, events, approval, runMainToolDispatch);
-      events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError);
+      events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       return result;
     }
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
-      events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false);
+      events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       return { content: menu.content, visionMessage: null, isError: false };
     }
     if (menu?.kind === "call") {
@@ -488,7 +501,11 @@ export async function runMainToolDispatch(
         },
       }
     : approval;
-  if ((await approveLocalToolCall(actionApproval, call.toolName)) === "deny") {
+  let downloadOrigin: string | undefined;
+  if (resolved.kind === "builtin" && resolved.builtinName === "browser_download" && typeof args.url === "string") {
+    try { downloadOrigin = new URL(args.url).origin; } catch { /* The builtin rejects invalid URLs before dispatch. */ }
+  }
+  if ((await approveLocalToolCall(actionApproval, call.toolName, downloadOrigin)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
     events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);
@@ -508,11 +525,14 @@ export async function runMainToolDispatch(
       import("../multimodal/image"),
     ]);
     approval.signal?.throwIfAborted();
+    const downloadProof = resolved.builtinName === "browser_download"
+      ? beginBrowserDownloadProof({...approval,toolId:eventCallId,toolName:call.toolName}) : null;
     const fileProof = beginBuiltinFileProof({ ...approval, toolId: eventCallId, toolName: call.toolName, builtinName: resolved.builtinName });
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: approval.cwd ?? process.cwd(),
       permission: (approval.permission ?? "read") as ToolPermission,
       signal: approval.signal,
+      ...(downloadProof ? {browserDownload:downloadProof.download} : {}),
       askUser: (input) =>
         askUser(
           { ...input, askedBy: approval.runtimeKind, ...(approval.chatId ? { chatId: approval.chatId } : {}) },
@@ -538,7 +558,11 @@ export async function runMainToolDispatch(
       !outcome.ok,
       outcome.artifactPaths,
       outcome.imageDataUrl,
+      agentlasDispatchedOrigin(call.toolName),
     );
+    if (outcome.ok && outcome.downloadId) {
+      try { await downloadProof?.complete(outcome.downloadId); } catch { /* Missing durable proof is never completion evidence. */ }
+    }
     if (outcome.ok && outcome.fileObservation) {
       try { fileProof?.complete(outcome.fileObservation); } catch { /* Missing durable proof never permits a verification pass. */ }
     }

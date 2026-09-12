@@ -19,6 +19,7 @@ import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyToolFailure } from "../../shared/tool-failure";
+import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitDesktopStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
@@ -439,6 +440,11 @@ function safePayload(
       const ko = typeof notice.ko === "string" ? truncate(notice.ko, 800) : "";
       const en = typeof notice.en === "string" ? truncate(notice.en, 800) : "";
       if (ko && en) out[key] = { ko, en };
+      continue;
+    }
+    if (key === "toolOrigin") {
+      const origin = decodeToolInvocationOrigin(value);
+      if (origin) out[key] = origin;
       continue;
     }
     // 채팅 타임라인 재방문용 증거 — 도구 인자·결과 미리보기·생각 요약은 800자로는
@@ -1093,6 +1099,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     surfaceId: ev.surfaceId,
     oneArtifacts: ev.oneArtifacts,
     toolName: ev.tool?.name,
+    toolOrigin: ev.tool?.origin,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
     toolFailureCode,

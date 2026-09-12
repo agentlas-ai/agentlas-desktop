@@ -2,6 +2,7 @@ import type { OneActivityItem, OneActivityState } from "./one-activity";
 import { normalizeToolCall, mcpServerName, stripCwdPrefix, type ToolCallDetail } from "@shared/tool-call-detail";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
 import type { ToolFailureCode } from "@shared/tool-failure";
+import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
 /**
  * One turn's work, in the shape Codex draws it.
@@ -26,6 +27,9 @@ export interface OneWorkExploreEntry {
   op: "read" | "list" | "search";
   /** "a.ts, b.ts" · "src/" · "query in path" — already joined for display. */
   label: string;
+  toolName?: string;
+  origin?: ToolInvocationOrigin;
+  callId?: string;
 }
 
 export interface OneWorkEditFile {
@@ -49,6 +53,9 @@ interface CellBase {
   model?: string;
   observedModel?: string;
   updatedAt?: string;
+  toolName?: string;
+  origin?: ToolInvocationOrigin;
+  callId?: string;
 }
 
 export type OneWorkCell =
@@ -58,7 +65,7 @@ export type OneWorkCell =
   | (CellBase & { kind: "edit"; files: OneWorkEditFile[]; diff?: string })
   | (CellBase & { kind: "web_search"; query: string })
   | (CellBase & { kind: "fetch"; url: string; statusCode?: number })
-  | (CellBase & { kind: "call"; label: string; toolName?: string; callId?: string; detail?: string; args?: string; result?: string; failureCode?: ToolFailureCode })
+  | (CellBase & { kind: "call"; label: string; detail?: string; args?: string; result?: string; failureCode?: ToolFailureCode })
   | (CellBase & { kind: "agent"; name: string; role?: string; phase?: OneActivityItem["phase"]; terminalObserved?: boolean })
   | (CellBase & { kind: "notice"; level: "info" | "success" | "warning" | "error"; message: string; details?: string; activityCode?: OneActivityItem["activityCode"] })
   /** Only when a turn had no thought and no tool: the one thing that happened was writing the answer. */
@@ -332,20 +339,21 @@ export function groupOneWorkerWork(cells: readonly OneWorkCell[]): OneWorkerWork
 
 function pushExplore(cells: OneWorkCell[], item: OneActivityItem, entries: OneWorkExploreEntry[]) {
   const status = itemStatus(item);
+  const observedEntries = entries.map((entry) => ({
+    ...entry,
+    ...(item.tool?.name ? { toolName: item.tool.name } : {}),
+    ...(item.tool?.origin ? { origin: item.tool.origin } : {}),
+    ...(item.tool?.id ? { callId: item.tool.id } : {}),
+  }));
   const last = cells.at(-1);
   // Never coalesce steps performed by different teammates into one row — the
   // row's attribution (G-4) must stay truthful.
   if (last && last.kind === "explore" && sameCellActor(last, item)) {
     // Codex coalesces consecutive reads ("Read a, b") and keeps list/search lines in order.
-    for (const entry of entries) {
-      const tail = last.entries.at(-1);
-      if (entry.op === "read" && tail?.op === "read") {
-        const merged = [...new Set([...tail.label.split(", "), ...entry.label.split(", ")])];
-        tail.label = merged.join(", ");
-      } else if (!last.entries.some((existing) => existing.op === entry.op && existing.label === entry.label)) {
-        last.entries.push(entry);
-      }
-    }
+    // Keep one entry per observed call. A compact semantic row may group calls,
+    // but it must not erase the ninth read or a repeated call with a distinct
+    // provider correlation identity.
+    last.entries.push(...observedEntries);
     last.status = mergeStatus(last.status, status);
     last.updatedAt = item.updatedAt ?? item.completedAt ?? item.observedAt;
     return;
@@ -355,28 +363,16 @@ function pushExplore(cells: OneWorkCell[], item: OneActivityItem, entries: OneWo
     id: item.id,
     status,
     startedAt: item.observedAt,
-    entries: [...entries],
+    entries: observedEntries,
     ...cellAttribution(item),
   });
 }
 
 function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEditFile, diff?: string) {
   const status = itemStatus(item);
-  const last = cells.at(-1);
-  if (last && last.kind === "edit" && sameCellActor(last, item)) {
-    const existing = last.files.find((candidate) => candidate.path === file.path);
-    if (existing) {
-      existing.op = file.op === "write" ? existing.op : "edit";
-      if (file.added !== undefined) existing.added = (existing.added ?? 0) + file.added;
-      if (file.removed !== undefined) existing.removed = (existing.removed ?? 0) + file.removed;
-    } else {
-      last.files.push({ ...file });
-    }
-    if (diff) last.diff = last.diff ? `${last.diff}\n${diff}` : diff;
-    last.status = mergeStatus(last.status, status);
-    last.updatedAt = item.updatedAt ?? item.completedAt ?? item.observedAt;
-    return;
-  }
+  // A same-file follow-up may be a different provider call or even a
+  // different executable source. Keep each observed edit as its own compact
+  // row so its correlation identity and Main-authored provenance survive.
   cells.push({
     kind: "edit",
     id: item.id,
@@ -384,6 +380,9 @@ function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEdit
     startedAt: item.observedAt,
     files: [{ ...file }],
     ...(diff ? { diff } : {}),
+    ...(item.tool?.name ? { toolName: item.tool.name } : {}),
+    ...(item.tool?.origin ? { origin: item.tool.origin } : {}),
+    ...(item.tool?.id ? { callId: item.tool.id } : {}),
     ...cellAttribution(item),
   });
 }
@@ -494,6 +493,9 @@ export function buildOneWorkPresentation(
               status: itemStatus(item),
               startedAt: item.observedAt,
               ...cellAttribution(item),
+              toolName: item.tool.name,
+              ...(item.tool.origin ? { origin: item.tool.origin } : {}),
+              ...(item.tool.id ? { callId: item.tool.id } : {}),
               command: classified.command,
               ...(classified.output ? { output: classified.output } : {}),
               ...(classified.exitCode !== undefined ? { exitCode: classified.exitCode } : {}),
@@ -501,7 +503,7 @@ export function buildOneWorkPresentation(
             });
             break;
           case "web_search":
-            cells.push({ kind: "web_search", id: item.id, status: itemStatus(item), startedAt: item.observedAt, ...cellAttribution(item), query: classified.query, ...(agent ? { agent } : {}) });
+            cells.push({ kind: "web_search", id: item.id, status: itemStatus(item), startedAt: item.observedAt, ...cellAttribution(item), toolName: item.tool.name, ...(item.tool.origin ? { origin: item.tool.origin } : {}), ...(item.tool.id ? { callId: item.tool.id } : {}), query: classified.query, ...(agent ? { agent } : {}) });
             break;
           case "fetch":
             cells.push({
@@ -510,6 +512,9 @@ export function buildOneWorkPresentation(
               status: itemStatus(item),
               startedAt: item.observedAt,
               ...cellAttribution(item),
+              toolName: item.tool.name,
+              ...(item.tool.origin ? { origin: item.tool.origin } : {}),
+              ...(item.tool.id ? { callId: item.tool.id } : {}),
               url: classified.url,
               ...(classified.statusCode !== undefined ? { statusCode: classified.statusCode } : {}),
               ...(agent ? { agent } : {}),
@@ -525,6 +530,7 @@ export function buildOneWorkPresentation(
               ...cellAttribution(item),
               label: classified.label,
               toolName: item.tool.name,
+              ...(item.tool.origin ? { origin: item.tool.origin } : {}),
               ...(item.tool.id ? { callId: item.tool.id } : {}),
               ...(classified.detail ? { detail: classified.detail } : {}),
               ...(item.tool.args ? { args: item.tool.args } : {}),

@@ -1,6 +1,7 @@
 import type { AgentMessageDirection, InvocationRunReceipt, McpInvocationEvent, RunEventUi } from "@shared/types";
 import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
+import { decodeToolInvocationOrigin, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
 export type OneActivityStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
@@ -48,6 +49,7 @@ export interface OneActivityHandoff {
 
 export interface OneActivityTool {
   name: string;
+  origin?: ToolInvocationOrigin;
   args?: string;
   result?: string;
   id?: string;
@@ -1048,6 +1050,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
     if (row.kind === "mcp_tool-use") {
       const agentState = ledgerAgentState(payload);
       const toolName = ledgerString(payload, "toolName");
+      const toolOrigin = decodeToolInvocationOrigin(payload.toolOrigin);
       const toolId = ledgerString(payload, "toolId");
       const delegateTo = ledgerStringArray(payload, "delegateTo");
       const agentMessage = ledgerAgentMessage(payload);
@@ -1081,6 +1084,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
           ...(ledgerString(payload, "observedModel") ? { observedModel: ledgerString(payload, "observedModel") } : {}),
           tool: {
             name: toolName,
+            ...(toolOrigin ? { origin: toolOrigin } : {}),
             ...(toolId ? { id: toolId } : {}),
             ...(toolArgs ? { args: toolArgs } : {}),
             ...(isCompletion ? { result: hasResultPreview ? (rawResultPreview as string) : "" } : {}),
