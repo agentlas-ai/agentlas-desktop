@@ -80,6 +80,7 @@ import { getProject, listProjects } from "../store/projects";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, recordLongRunUsage } from "../store/long-runs";
 import { getDb } from "../store/db";
+import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
@@ -4921,7 +4922,21 @@ ${effectiveUserPrompt}`;
         if (getLongRunByGoalId(checkpoint.goalId)?.status !== "running") throw new Error("checkpoint_dispatch_goal_not_running");
         prepareCheckpointContinuation(checkpoint, req.runId);
       }
-      const runtimeTurnContext = [turnContext, checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : ""].filter(Boolean).join("\n\n");
+      // Interactive model changes may follow a newer artifact/user-state edit.
+      // Read one canonical snapshot without rewriting the stored checkpoint or
+      // weakening the stricter automatic-continuation admission above.
+      const checkpointContext = checkpoint ? getDb().transaction(() => {
+        const artifacts = !continuationRuntimePinned && checkpoint.schemaVersion === "agentlas.task-checkpoint.v2"
+          ? { chatId: chat.id, observedAt: new Date().toISOString(),
+              artifacts: listAgentSurfaces(chat.id).map(surface => ({ artifactId: surface.id,
+                artifactRevision: surface.artifactRevision ?? null, sourceDigest: surface.artifactRef?.sourceDigest ?? null,
+                dataDigest: surface.artifactRef?.dataDigest ?? null, stateRevision: surface.stateRevision ?? null,
+                stateSchemaDigest: surface.artifactRef?.stateSchemaDigest ?? null, state: surface.state,
+              })).sort((a, b) => a.artifactId.localeCompare(b.artifactId)) }
+          : undefined;
+        return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts);
+      })() : "";
+      const runtimeTurnContext = [turnContext, checkpointContext].filter(Boolean).join("\n\n");
       return {
         ...runnerReq,
         systemPrompt: sessionCapable || !runtimeTurnContext
