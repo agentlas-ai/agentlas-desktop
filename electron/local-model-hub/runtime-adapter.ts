@@ -18,34 +18,41 @@ export function requireLocalModelHubManager(): LocalModelHubManager {
 
 export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> {
   if (!configured) return null;
-  const snapshot = await configured.manager.snapshot();
-  const resident = snapshot.resident;
-  if (!resident) return null;
-  const installation = snapshot.modelInstallations.find((item) => item.installationId === resident.installationId);
-  if (!installation) return null;
-  return {
-    kind: "agentlas-local",
-    backend: "agentlas-local",
-    source: `agentlas-local:${resident.enginePackageId}:${resident.installationId}`,
-    version: resident.enginePackageId,
-    active: false,
-    label: "Agentlas Local",
-    model: installation.fileName,
-    availableModels: [installation.fileName],
-    allocationModels: [installation.fileName],
-    allocationModelProfiles: {
-      [installation.fileName]: {
-        contextWindow: resident.contextTokens,
-        capabilities: [],
-        supportsTools: snapshot.capabilityReceipts.some((receipt) =>
-          receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
-        supportsMultimodal: snapshot.capabilityReceipts.some((receipt) =>
-          receipt.installationId === installation.installationId && receipt.imageInput === "verified"),
+  try {
+    const snapshot = await configured.manager.snapshot();
+    const resident = snapshot.resident;
+    if (!resident) return null;
+    const installation = snapshot.modelInstallations.find((item) => item.installationId === resident.installationId);
+    if (!installation) return null;
+    return {
+      kind: "agentlas-local",
+      backend: "agentlas-local",
+      source: `agentlas-local:${resident.enginePackageId}:${resident.installationId}`,
+      version: resident.enginePackageId,
+      active: false,
+      label: "Agentlas Local",
+      model: installation.fileName,
+      availableModels: [installation.fileName],
+      allocationModels: [installation.fileName],
+      allocationModelProfiles: {
+        [installation.fileName]: {
+          contextWindow: resident.contextTokens,
+          capabilities: [],
+          supportsTools: snapshot.capabilityReceipts.some((receipt) =>
+            receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
+          supportsMultimodal: snapshot.capabilityReceipts.some((receipt) =>
+            receipt.installationId === installation.installationId && receipt.imageInput === "verified"),
+        },
       },
-    },
-    effort: null,
-    efforts: [],
-  };
+      effort: null,
+      efforts: [],
+    };
+  } catch {
+    // Detection is a best-effort inventory. A broken local manager must not
+    // reject the shared probe batch and hide healthy CLI connections. The
+    // Local Models screen reports its own snapshot/install failures.
+    return null;
+  }
 }
 
 export const runManagedLocalModel: Runner = async (request, events) => {
