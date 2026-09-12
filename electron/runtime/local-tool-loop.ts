@@ -8,6 +8,8 @@
 // 파일이다(mcp-config.ts). Main이 작성할 때 봉인한 실제 transport를 사용한다.
 // key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
 import { preparedMcpBindings, preparedMcpTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
+import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { createHash } from "node:crypto";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
@@ -84,6 +86,7 @@ export type ResolvedTool =
       serverConfigKey: string;
       /** Digest of the resolved Main dispatch record; its contents never leave Main. */
       serverConfigDigest: string;
+      schemaDigest: string;
       prepared: PreparedMcpBinding;
       /** Canonical Main inventory ID; provider function names may be sanitized. */
       brokerToolId: string;
@@ -201,16 +204,18 @@ export async function loadMainToolInventory(
     signal?.throwIfAborted();
     preparedMcpTransport(prepared, server);
     if (!status.connected) continue;
+    if (new Set(status.tools.map(tool => tool.name)).size !== status.tools.length) throw new Error("mcp_tool_inventory_duplicate_name");
     for (const tool of status.tools) {
       const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
       const safeTool = tool.name.replace(/[^a-zA-Z0-9_-]/g, "_");
-      const name = `mcp__${safeKey}__${safeTool}`.slice(0, 128);
-      if (byName.has(name)) continue;
+      let name = `mcp__${safeKey}__${safeTool}`.slice(0, 128);
+      if (byName.has(name)) name = `${name.slice(0, 110)}__${mcpToolSchemaDigest([key, tool.name]).slice(0, 16)}`;
+      if (byName.has(name)) throw new Error("mcp_tool_inventory_name_collision");
       tools.push({
         type: "function",
         function: {
           name,
-          description: tool.description?.slice(0, 1024),
+          description: tool.description,
           parameters:
             tool.inputSchema && typeof tool.inputSchema === "object"
               ? tool.inputSchema
@@ -223,6 +228,7 @@ export async function loadMainToolInventory(
         serverToolName: tool.name,
         serverConfigKey: key,
         serverConfigDigest: workforceBrokerDigest(server),
+        schemaDigest: mcpToolSchemaDigest(tool),
         prepared,
         brokerToolId: `mcp__${key}__${tool.name}`,
       });
@@ -305,7 +311,7 @@ export async function prepareMainToolLoop(
   req: RunnerRequest,
   runtimeKind: string,
 ): Promise<MainToolLoopContext> {
-  const { tools, byName } = req.untrustedNoTools
+  const { tools: eagerTools, byName } = req.untrustedNoTools
     ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
     : await (async () => {
         // Tool-surface discovery lives inside this branch so the Main-authored
@@ -322,6 +328,7 @@ export async function prepareMainToolLoop(
           req.browserOnly === true,
         );
       })();
+  const tools = installLazyToolMenu(eagerTools, byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools);
   return {
     tools,
     byName,
@@ -398,6 +405,27 @@ export async function runMainToolDispatch(
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
+  approval.signal?.throwIfAborted();
+  try {
+    const menu = resolveToolMenu(byName, call.toolName, call.arguments);
+    if (menu?.kind === "result") {
+      events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false);
+      return { content: menu.content, visionMessage: null, isError: false };
+    }
+    if (menu?.kind === "call") {
+      if (broker) throw new Error("tool_menu_broker_not_supported");
+      // Preserve provider identity and the visible wrapper name on results;
+      // approval/dispatch below use the exact canonical prepared tool name.
+      const providerCall = call;
+      const providerEvents = events;
+      events = { ...events, onTool: (_name, _args, ...result) => providerEvents.onTool?.(providerCall.toolName, providerCall.arguments, ...result) };
+      call = { ...call, toolName: menu.toolName, arguments: menu.arguments };
+    }
+  } catch (error) {
+    const content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+    events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, true);
+    return { content, visionMessage: null, isError: true };
+  }
   const eventCallId = call.providerCallId ?? undefined;
   const resolved = byName.get(call.toolName);
   // Main assigns this opaque action ID before parsing/approval/dispatch. The
@@ -519,7 +547,10 @@ export async function runMainToolDispatch(
       import("../mcp-tools/client"),
       import("../media/capture-artifacts"),
     ]);
-    const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared });
+    const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
+      timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
+      expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
+    });
     if (!result) throw new Error("mcp_tool_result_unavailable");
     const text = result?.text ?? "";
     const images = result.isError ? [] : result.images;

@@ -2,11 +2,53 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import type { Automation } from "@/lib/types";
+import type { Automation, ChatGoalContext } from "@/lib/types";
 import styles from "./AutomationMonitorStrip.module.css";
 
 /** A projection of existing durable automations. Opening this UI never runs one. */
 export function AutomationMonitorStrip({ chatId, locale }: { chatId: string | null; locale: "ko" | "en" }) {
+  return <><GoalWaitMonitor chatId={chatId} locale={locale} /><AutomationMonitorRows chatId={chatId} locale={locale} /></>;
+}
+
+function GoalWaitMonitor({ chatId, locale }: { chatId: string | null; locale: "ko" | "en" }) {
+  const [context,setContext]=useState<ChatGoalContext|null>(null);
+  const [error,setError]=useState<string|null>(null);
+  const ko=locale==="ko";
+  useEffect(()=>{
+    let disposed=false,version=0;
+    setContext(null);setError(null);
+    const read=async()=>{
+      const next=++version;
+      const value=chatId ? await ipc()?.chats?.getGoalContext?.(chatId) : null;
+      if(!disposed && next===version)setContext(value??null);
+    };
+    void read().catch(()=>{if(!disposed)setError(ko?"작업 대기 상태를 불러오지 못했습니다.":"Wait status is unavailable.");});
+    const off=ipcEvents()?.onStoreChanged?.(change=>{if(change.entity==="long-run" || (change.entity==="chat" && change.id===chatId))void read().catch(()=>undefined);});
+    return()=>{disposed=true;off?.();};
+  },[chatId,ko]);
+  const wait=context?.wait;
+  if(!wait || wait.state==="cancelled" || wait.state==="dispatched")return null;
+  const active=context.runStatus==="waiting_tool" && wait.state==="pending";
+  const status=active?(ko?"결과 기다리는 중":"Waiting for a result")
+    :context.runStatus==="paused"?(ko?"대기 일시정지":"Wait paused")
+    :wait.state==="expired"?(ko?"대기 시간 종료":"Wait deadline reached"):(ko?"작업 확인 필요":"Work needs attention");
+  return <details className={styles.root} data-goal-wait={wait.waitId}>
+    <summary><span className={styles.dot} data-active={active}/>{status}</summary>
+    <div className={styles.list}>
+      <p>{ko?"앱 실행 중 변화를 확인하고, 결과가 도착하면 같은 작업을 이어갑니다.":"Checks while the app is running and continues the same task when the result arrives."}</p>
+      <div className={styles.row}><div><strong>{wait.subjectKind==="artifact"?(ko?"산출물 변경":"Artifact change"):(ko?"진행 중인 작업 결과":"Running task result")}</strong>
+        {active && wait.nextCheckAt && <span>{ko?"다음 확인: ":"Next check: "}{new Date(wait.nextCheckAt).toLocaleTimeString(locale)}</span>}
+        {wait.deadline && <span>{ko?"기다리는 기한: ":"Deadline: "}{new Date(wait.deadline).toLocaleString(locale)}</span>}
+      </div>{active && <button type="button" onClick={()=>{
+        if(!chatId || !context)return;
+        void ipc()?.chats.pauseGoal(chatId,context.goalId).then(value=>setContext(value)).catch(()=>setError(ko?"중지하지 못했습니다. 다시 시도해 주세요.":"Could not stop. Try again."));
+      }}>{ko?"중지":"Stop"}</button>}</div>
+      {error && <p role="status">{error}</p>}
+    </div>
+  </details>;
+}
+
+function AutomationMonitorRows({ chatId, locale }: { chatId: string | null; locale: "ko" | "en" }) {
   const [records, setRecords] = useState<Automation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const ko = locale === "ko";

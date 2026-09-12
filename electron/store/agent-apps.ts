@@ -312,7 +312,7 @@ export function removeAgentApp(id: string): boolean {
 
 export function listAgentAppOperations(appId: string): AppFactoryOperationRecord[] {
   const rows = getDb()
-    .prepare("SELECT * FROM agent_app_operations WHERE app_id = ? ORDER BY created_at DESC")
+    .prepare("SELECT * FROM agent_app_operations WHERE app_id = ? ORDER BY created_at DESC, rowid DESC")
     .all(appId) as AgentAppOperationRow[];
   return rows.map(toOperation);
 }
@@ -409,6 +409,7 @@ function isAppStatus(value: string): value is AppFactoryAppStatus {
 
 function isOperationKind(value: string): value is AppFactoryOperationKind {
   return (
+    value === "build-artifact" ||
     value === "scaffold" ||
     value === "install-cloud-app" ||
     value === "sync-cloud-manifest" ||

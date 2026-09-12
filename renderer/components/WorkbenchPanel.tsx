@@ -415,6 +415,8 @@ function RunningAppPreview({
     url: string | null;
     runtime: string | null;
     error: string | null;
+    updateFailure?: string;
+    readyRevision?: string;
   }>({
     pending: Boolean(appId),
     url: appId ? null : declaredUrl?.trim() || null,
@@ -437,11 +439,12 @@ function RunningAppPreview({
     setState({ pending: true, url: null, runtime: null, error: null });
     const viewLeaseId = crypto.randomUUID();
     void window.agentlas.appFactory.startLivePreview({ appId, viewLeaseId }).then((result) => {
-      if (disposed) return;
+      if (disposed) {
+        void window.agentlas.appFactory.releaseLivePreview({ appId, viewLeaseId }).catch(() => undefined);
+        return;
+      }
       if (result.ok && result.url) {
-        setState({ pending: false, url: result.url, runtime: result.runtime, error: null });
-      } else if (direct) {
-        setState({ pending: false, url: direct, runtime: "declared web", error: null });
+        setState({ pending: false, url: result.url, runtime: result.runtime, error: null, updateFailure: result.updateFailure, readyRevision: result.readyRevision?.build.bundleDigest });
       } else {
         setState({
           pending: false,
@@ -452,8 +455,7 @@ function RunningAppPreview({
       }
     }).catch((error) => {
       if (disposed) return;
-      if (direct) setState({ pending: false, url: direct, runtime: "declared web", error: null });
-      else setState({
+      setState({
         pending: false,
         url: null,
         runtime: null,
@@ -472,6 +474,8 @@ function RunningAppPreview({
       ? `work_app_${appId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60)}`
       : undefined;
     return (
+      <div data-artifact-id={appId} data-ready-revision={state.readyRevision} style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
+      {state.updateFailure && <p role="status" style={{margin:"6px 12px",fontSize:12}}>새 버전을 준비하지 못해 이전 정상 버전을 표시하고 있습니다.</p>}
       <LiveDeviceMockup
         url={state.url}
         title={title}
@@ -479,6 +483,7 @@ function RunningAppPreview({
         locale={locale}
         viewId={viewId}
       />
+      </div>
     );
   }
   return (

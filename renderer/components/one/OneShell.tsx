@@ -1458,7 +1458,6 @@ export function OneShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionSheetOpen]);
   /** 이 대화에서 켠 생성 앱 미리보기 서버들. 대화를 떠날 때 끈다. */
-  const livePreviewAppIdsRef = useRef<Set<string>>(new Set());
   /**
    * 분할 보기 — 지금 보고 있는 대화 옆에 붙는 칸들. 화면 전체로는 최대 4칸이므로
    * 옆칸은 3개까지다. 입력창은 언제나 왼쪽 첫 칸(지금 대화)에만 있다.
@@ -3267,7 +3266,8 @@ export function OneShell() {
 
     let disposed = false;
     let refreshing = false;
-    const startedPreviewAppIds = livePreviewAppIdsRef.current;
+    const startedPreviewAppIds = new Set<string>();
+    const viewLeaseId = crypto.randomUUID();
     const refresh = async () => {
       if (disposed || refreshing) return;
       refreshing = true;
@@ -3283,10 +3283,13 @@ export function OneShell() {
           if (!disposed) setOneLiveAppPreview(null);
           return;
         }
-        const preview = await bridge.appFactory.startLivePreview({ appId: app.id });
-        // 무엇을 켰는지 기억해 둔다 — 정리에서 그것만 끈다.
-        startedPreviewAppIds.add(app.id);
         if (disposed) return;
+        startedPreviewAppIds.add(app.id);
+        const preview = await bridge.appFactory.startLivePreview({ appId: app.id, viewLeaseId });
+        if (disposed) {
+          void bridge.appFactory.releaseLivePreview({ appId: app.id, viewLeaseId }).catch(() => undefined);
+          return;
+        }
         if (!preview.ok || !preview.url) {
           // Keep a currently reachable view during a transient registry or
           // filesystem read failure; clear only when the app identity changed.
@@ -3320,27 +3323,11 @@ export function OneShell() {
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      for (const appId of startedPreviewAppIds) {
+        void bridge.appFactory.releaseLivePreview({ appId, viewLeaseId }).catch(() => undefined);
+      }
     };
   }, [activeThreadChatId, busy, surface?.manifestId]);
-  /*
-   * 미리보기 서버는 대화를 떠날 때 끈다.
-   *
-   * 처음에는 위 effect 의 정리에 붙였는데, 그 effect 가 busy 를 보고 있어서
-   * 턴이 시작·종료할 때마다 서버가 닫히고 다음 실행이 새 포트로 새 서버를
-   * 열었다 — 미리보기를 켜 둔 사람은 메시지마다 화면이 다시 떴다
-   * (감사 2026-08-25). 서버가 필요 없어지는 때는 대화를 떠날 때이지 busy 가
-   * 바뀔 때가 아니다.
-   */
-  useEffect(() => {
-    const startedIds = livePreviewAppIdsRef.current;
-    return () => {
-      const bridge = typeof window === "undefined" ? null : window.agentlas;
-      for (const appId of startedIds) {
-        void bridge?.appFactory?.stopLivePreview?.({ appId }).catch(() => undefined);
-      }
-      startedIds.clear();
-    };
-  }, [activeThreadChatId]);
 
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
     if (!activeThreadChatId) return;

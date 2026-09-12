@@ -1,5 +1,6 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { getLongRunByGoalId } from "./store/long-runs";
+import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, shell } from "electron";
@@ -4294,7 +4295,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
-    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
+    const wait = latestGoalWaitSubscription(chat.goalId);
+    if (!context || !wait || wait.chatId !== id) return context;
+    return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
+      nextCheckAt: wait.nextCheckAt, deadline: wait.deadline, executionAvailability: wait.executionAvailability } };
   });
   ipcMain.handle("chats:defineGoal", async (_e, id: string, objective: string, requestedLocale?: "ko" | "en") => {
     const chat = getChat(id);

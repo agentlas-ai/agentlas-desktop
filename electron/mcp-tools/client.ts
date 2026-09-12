@@ -1,4 +1,5 @@
 import { preparedMcpTransport, type PreparedMcpBinding } from "./prepared-transport";
+import { mcpToolSchemaDigest } from "./tool-schema";
 // 실제 MCP 클라이언트 — @modelcontextprotocol/sdk로 외부 서버에 붙어 tools/list.
 // 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
 // 시크릿은 keychain 글로벌 vault에서 읽어 stdio는 자식 env로, 원격은 HTTP 헤더로 주입.
@@ -675,6 +676,31 @@ async function closeMcpProbeBounded(client: Client, transport: Transport | null)
   }
 }
 
+async function listCompleteToolInventory(client: Client, signal: AbortSignal): Promise<Awaited<ReturnType<Client["listTools"]>>> {
+  const tools: Awaited<ReturnType<Client["listTools"]>>["tools"] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let size = 0;
+  do {
+    signal.throwIfAborted();
+    // The local SDK compatibility declaration predates pagination; the installed
+    // SDK exposes listTools({cursor}) and nextCursor on its protocol result.
+    const page = await (client as unknown as {
+      listTools(params?: { cursor: string }): Promise<Awaited<ReturnType<Client["listTools"]>> & { nextCursor?: string }>;
+    }).listTools(cursor ? { cursor } : undefined);
+    signal.throwIfAborted();
+    size += Buffer.byteLength(JSON.stringify(page.tools));
+    if (tools.length + page.tools.length > 10_000 || size > 16 * 1024 * 1024) throw new Error("mcp_tool_inventory_limit_exceeded");
+    tools.push(...page.tools);
+    cursor = page.nextCursor;
+    if (cursor !== undefined) {
+      if (!cursor || cursors.has(cursor) || cursors.size >= 200) throw new Error("mcp_tool_inventory_cursor_invalid");
+      cursors.add(cursor);
+    }
+  } while (cursor !== undefined);
+  return { tools };
+}
+
 /** 한 서버에 붙어 tools/list 해보고 상태 반환. 연결은 즉시 닫는다(테스트 전용). */
 export async function testServerConnection(
   server: InstalledMcpServer,
@@ -701,7 +727,7 @@ export async function testServerConnection(
       controller.signal.throwIfAborted();
       await client.connect(transport);
       controller.signal.throwIfAborted();
-      const result = await client.listTools();
+      const result = await listCompleteToolInventory(client, controller.signal);
       controller.signal.throwIfAborted();
       return result.tools;
     })(), timeoutMs, stop, controller.signal), options?.signal, stop);
@@ -724,6 +750,11 @@ export interface McpToolContentResult {
 
 export interface McpToolCallOptions {
   prepared?: PreparedMcpBinding;
+  /** Exact descriptor observed by the Main-managed inventory, rechecked on
+   * this connection before tools/call. Native/legacy callers may omit it. */
+  expectedToolSchemaDigest?: string;
+  /** Main cache invalidation notification; never derived from server prose. */
+  onToolSchemaInvalidated?: () => void;
   timeoutMs?: number;
   maxTextChars?: number;
   signal?: AbortSignal;
@@ -795,8 +826,19 @@ async function callServerToolContentInternal(
           await activeClient.connect(transport);
           preparation.signal.throwIfAborted();
 
+          const checkedInventory = options?.expectedToolSchemaDigest
+            ? await listCompleteToolInventory(activeClient, preparation.signal) : null;
+          if (checkedInventory) {
+            preparation.signal.throwIfAborted();
+            if (options?.prepared) preparedMcpTransport(options.prepared, server);
+            const matches = checkedInventory.tools.filter(tool => tool.name === toolName);
+            if (matches.length !== 1 || mcpToolSchemaDigest(matches[0]) !== options?.expectedToolSchemaDigest) {
+              options?.onToolSchemaInvalidated?.();
+              throw new Error("mcp_prepared_tool_schema_changed");
+            }
+          }
           if (server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
-            const inventory = await activeClient.listTools();
+            const inventory = checkedInventory ?? await listCompleteToolInventory(activeClient, preparation.signal);
             const available = new Set(inventory.tools.map((tool) => tool.name));
             const required = toolName.startsWith("workforce.")
               ? WORKFORCE_MCP_CAPABILITIES

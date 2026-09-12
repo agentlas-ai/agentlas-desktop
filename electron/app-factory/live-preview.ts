@@ -1,8 +1,8 @@
 // Main-owned live preview runtime for registered generated apps.
 //
 // A scaffold path is not a running app. This module serves the registered app's
-// generated UI on an ephemeral loopback port, watches its files, and pushes a
-// reload event when they change. It never evaluates the generated server script
+// generated UI on an ephemeral loopback port. File changes compile immutable
+// candidates; only build and native first-render evidence advances the ready revision. It never evaluates the generated server script
 // in Electron and never inherits Desktop credentials into generated code.
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -10,6 +10,9 @@ import http, { type IncomingMessage, type Server, type ServerResponse } from "no
 import path from "node:path";
 import type { AppFactoryAppRecord, AppFactoryLivePreviewResult } from "../../shared/types";
 import { getAgentApp, isCloudAppRoot } from "../store/agent-apps";
+import type { ArtifactReadyRevision } from "../../shared/artifact-build";
+import { readAppArtifactSource, buildAppArtifact, loadReadyArtifact, publishReadyArtifact, recordArtifactBuildFailure, type ArtifactBundle } from "./artifact-build";
+import { observeArtifactRender, ARTIFACT_PREVIEW_CSP } from "./artifact-render";
 
 type ActivePreview = {
   appId: string;
@@ -22,6 +25,14 @@ type ActivePreview = {
   reloadTimer: NodeJS.Timeout | null;
   heartbeat: NodeJS.Timeout;
   clients: Set<ServerResponse>;
+  record: AppFactoryAppRecord;
+  bundle: ArtifactBundle;
+  ready: ArtifactReadyRevision;
+  updateFailure?: string;
+  controller: AbortController;
+  refresh: Promise<void> | null;
+  refreshAgain: boolean;
+  lastFailureKey?: string;
 };
 
 const activePreviews = new Map<string, ActivePreview>();
@@ -100,30 +111,41 @@ const MIME_TYPES: Record<string, string> = {
   ".xml": "application/xml; charset=utf-8",
 };
 
-const LIVE_CLIENT = `(() => {
+const LIVE_CLIENT = String.raw`(() => {
   if (window.__agentlasLiveReload) return;
   window.__agentlasLiveReload = true;
-  let pending = false;
-  const source = new EventSource('/__agentlas/events');
-  source.addEventListener('reload', () => {
-    if (pending) return;
-    pending = true;
-    window.setTimeout(() => window.location.reload(), 60);
+  const key = 'agentlas.presentation.v1';
+  const fieldKey = node => node.getAttribute('data-agentlas-state-key') || node.id || null;
+  const fields = () => [...document.querySelectorAll('input,textarea,select')].filter(node => fieldKey(node) && !['password','file','hidden','submit','button'].includes(node.type));
+  const snapshot = () => ({schemaVersion:1, fields:fields().slice(0,200).map(node=>({key:fieldKey(node),tag:node.tagName,type:node.type,value:node.value.slice(0,32768),checked:node.checked,selectionStart:node.selectionStart,selectionEnd:node.selectionEnd})),
+    focus:document.activeElement && fieldKey(document.activeElement),scroll:{x:scrollX,y:scrollY}});
+  const save = () => {try{const state=JSON.stringify(snapshot());if(state.length<262144)sessionStorage.setItem(key,state);}catch{}};
+  let saved;
+  try {saved=JSON.parse(sessionStorage.getItem(key)||'null');sessionStorage.removeItem(key);}catch{}
+  if(saved && saved.schemaVersion===1 && Array.isArray(saved.fields)) {
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      for(const value of saved.fields.slice(0,200)) {
+        const node=fields().find(node=>fieldKey(node)===value.key && node.tagName===value.tag && node.type===value.type);
+        if(!node || typeof value.value!=='string')continue;
+        node.value=value.value.slice(0,32768);if(typeof value.checked==='boolean')node.checked=value.checked;
+        if(saved.focus===value.key) {node.focus({preventScroll:true});if(typeof value.selectionStart==='number')try{node.setSelectionRange(value.selectionStart,value.selectionEnd);}catch{}}
+      }
+      if(saved.scroll && Number.isFinite(saved.scroll.x) && Number.isFinite(saved.scroll.y))scrollTo(saved.scroll.x,saved.scroll.y);
+      // No input/change/click event is synthesized: reopening never replays an app action.
+      window.dispatchEvent(new CustomEvent('agentlas:presentation-restored',{detail:{schemaVersion:1}}));
+    }));
+  }
+  let pending=false;
+  const source=new EventSource('/__agentlas/events');
+  source.addEventListener('reload',()=>{if(pending)return;pending=true;save();window.location.reload();});
+  source.addEventListener('build-failed',()=>{
+    let note=document.getElementById('__agentlas_build_notice');
+    if(!note){note=document.createElement('div');note.id='__agentlas_build_notice';note.setAttribute('role','status');note.style.cssText='position:fixed;bottom:12px;right:12px;max-width:min(360px,90vw);padding:12px 16px;background:#fff4df;color:#503717;border:1px solid #decba5;border-radius:12px;font:13px/1.5 system-ui;z-index:2147483647';document.body.appendChild(note);}
+    note.textContent='새 버전을 준비하지 못했어요. 이전 정상 버전을 표시하고 있습니다.';
   });
 })();`;
 
-const PREVIEW_CSP = [
-  "default-src 'self' data: blob: https:",
-  "script-src 'self' 'unsafe-inline' https:",
-  "style-src 'self' 'unsafe-inline' https:",
-  "img-src 'self' data: blob: https:",
-  "media-src 'self' data: blob: https:",
-  "font-src 'self' data: https:",
-  "connect-src 'self' https: http://127.0.0.1:* http://localhost:*",
-  "frame-src 'self' https: http://127.0.0.1:* http://localhost:*",
-  "object-src 'none'",
-  "base-uri 'self'",
-].join("; ");
+const PREVIEW_CSP = ARTIFACT_PREVIEW_CSP;
 
 function loopbackAddress(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
@@ -165,33 +187,6 @@ function inside(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function directory(pathname: string): Promise<boolean> {
-  try {
-    return (await fsp.stat(pathname)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-async function contentRoot(record: AppFactoryAppRecord): Promise<{ rootPath: string; contentRoot: string }> {
-  const declaredStat = await fsp.lstat(record.rootPath);
-  if (!declaredStat.isDirectory() || declaredStat.isSymbolicLink()) {
-    throw new Error("The generated app root is not a real directory.");
-  }
-  const rootPath = await fsp.realpath(record.rootPath);
-
-  // A built Astryx app is the richest runnable artifact. Until it is built, the
-  // deterministic generated service UI in src/ is still a real interactive app,
-  // not the Workbench's former hand-drawn mock.
-  const candidates = [path.join(rootPath, "astryx-app", "dist"), path.join(rootPath, "src")];
-  for (const candidate of candidates) {
-    if (await directory(candidate)) {
-      const canonical = await fsp.realpath(candidate);
-      if (inside(rootPath, canonical)) return { rootPath, contentRoot: canonical };
-    }
-  }
-  throw new Error("The generated app has no runnable UI directory yet.");
-}
 
 function commonHeaders(contentType?: string): Record<string, string> {
   return {
@@ -213,38 +208,14 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   response.end(body);
 }
 
-async function resolveFile(preview: ActivePreview, pathname: string): Promise<string | null> {
+function resolveFile(preview: ActivePreview, pathname: string): {path: string; bytes: Buffer} | null {
   let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathname);
-  } catch {
-    return null;
-  }
-  if (decoded.includes("\0")) return null;
-  const relative = decoded.replace(/^\/+/, "");
-  const requested = path.resolve(preview.contentRoot, relative || "index.html");
-  if (!inside(preview.contentRoot, requested)) return null;
-
-  const attempts = [requested];
-  try {
-    if ((await fsp.stat(requested)).isDirectory()) attempts.unshift(path.join(requested, "index.html"));
-  } catch {
-    if (!path.extname(requested)) {
-      attempts.push(path.join(requested, "index.html"), path.join(preview.contentRoot, "index.html"));
-    }
-  }
-
-  for (const candidate of attempts) {
-    try {
-      const canonical = await fsp.realpath(candidate);
-      if (!inside(preview.contentRoot, canonical)) continue;
-      const stat = await fsp.lstat(canonical);
-      if (stat.isFile() && !stat.isSymbolicLink()) return canonical;
-    } catch {
-      // try the next route/static fallback
-    }
-  }
-  return null;
+  try { decoded = decodeURIComponent(pathname); } catch { return null; }
+  if (decoded.includes("\0") || decoded.split("/").some(part => part === "..")) return null;
+  const relative = decoded.replace(/^\/+/, "") || "index.html";
+  const files = preview.bundle.snapshot.files;
+  return files.find(file => file.path === relative)
+    ?? (!path.extname(relative) ? files.find(file => file.path === `${relative}/index.html` || file.path === "index.html") ?? null : null);
 }
 
 function byteRange(header: string | undefined, size: number): { start: number; end: number } | null {
@@ -264,55 +235,91 @@ function byteRange(header: string | undefined, size: number): { start: number; e
   return start <= end && start < size ? { start, end } : null;
 }
 
-async function serveFile(request: IncomingMessage, response: ServerResponse, filePath: string): Promise<void> {
-  const stat = await fsp.stat(filePath);
-  const extension = path.extname(filePath).toLowerCase();
+function serveFile(request: IncomingMessage, response: ServerResponse, file: {path:string;bytes:Buffer}): void {
+  const extension = path.extname(file.path).toLowerCase();
   const type = MIME_TYPES[extension] ?? "application/octet-stream";
-
+  let bytes = file.bytes;
   if (extension === ".html") {
-    const source = await fsp.readFile(filePath, "utf8");
-    const tag = '<script src="/__agentlas/live.js" defer></script>';
-    const body = Buffer.from(source.includes("/__agentlas/live.js")
-      ? source
-      : source.includes("</body>")
-        ? source.replace("</body>", `${tag}</body>`)
-        : `${source}${tag}`);
-    response.writeHead(200, { ...commonHeaders(type), "Content-Length": String(body.length) });
-    if (request.method === "HEAD") response.end(); else response.end(body);
-    return;
+    const source = bytes.toString("utf8"), tag = '<script src="/__agentlas/live.js" defer></script>';
+    bytes = Buffer.from(source.includes("/__agentlas/live.js") ? source : source.includes("</body>") ? source.replace("</body>",`${tag}</body>`) : `${source}${tag}`);
   }
-
-  const range = byteRange(request.headers.range, stat.size);
+  const range = byteRange(request.headers.range, bytes.length);
   if (request.headers.range && !range) {
-    response.writeHead(416, { ...commonHeaders(type), "Content-Range": `bytes */${stat.size}` });
-    response.end();
-    return;
+    response.writeHead(416,{...commonHeaders(type),"Content-Range":`bytes */${bytes.length}`}).end(); return;
   }
-  if (range) {
-    response.writeHead(206, {
-      ...commonHeaders(type),
-      "Accept-Ranges": "bytes",
-      "Content-Length": String(range.end - range.start + 1),
-      "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
-    });
-    if (request.method === "HEAD") response.end();
-    else fs.createReadStream(filePath, { start: range.start, end: range.end }).pipe(response);
-    return;
-  }
-  response.writeHead(200, {
-    ...commonHeaders(type),
-    "Accept-Ranges": "bytes",
-    "Content-Length": String(stat.size),
-  });
-  if (request.method === "HEAD") response.end(); else fs.createReadStream(filePath).pipe(response);
+  response.writeHead(range ? 206 : 200, {...commonHeaders(type),"Accept-Ranges":"bytes",
+    "Content-Length":String(range ? range.end-range.start+1 : bytes.length),
+    ...(range ? {"Content-Range":`bytes ${range.start}-${range.end}/${bytes.length}`} : {})});
+  response.end(request.method === "HEAD" ? undefined : range ? bytes.subarray(range.start,range.end+1) : bytes);
 }
 
 function broadcastReload(preview: ActivePreview): void {
   preview.revision += 1;
-  const packet = `event: reload\ndata: ${preview.revision}\n\n`;
+  const packet = `event: reload\ndata: ${JSON.stringify({revision:preview.revision,bundleDigest:preview.ready.build.bundleDigest})}\n\n`;
   for (const client of preview.clients) {
     try { client.write(packet); } catch { preview.clients.delete(client); }
   }
+}
+
+async function prepareReadyArtifact(record: AppFactoryAppRecord, signal: AbortSignal): Promise<{bundle:ArtifactBundle;ready:ArtifactReadyRevision;updateFailure?:string}> {
+  const prior = await loadReadyArtifact(record, signal);
+  let sourceDigest: string | null = null;
+  try {
+    const input = await readAppArtifactSource(record, signal);
+    if(prior && prior.build.sourceIdentityDigest !== input.identityDigest) throw new Error("artifact_source_identity_changed");
+    sourceDigest = input.snapshot.digest;
+    if (prior && prior.build.sourceDigest === sourceDigest) return {bundle:prior,ready:prior.ready};
+    const bundle = await buildAppArtifact(record,input,signal);
+    const render = await observeArtifactRender(bundle,signal);
+    if ((await readAppArtifactSource(record,signal)).snapshot.digest !== sourceDigest) throw new Error("artifact_source_changed_before_publish");
+    signal.throwIfAborted();
+    return {bundle,ready:publishReadyArtifact(record,bundle,render)};
+  } catch(error) {
+    if(signal.aborted) throw error;
+    const reason=error instanceof Error ? error.message : String(error);
+    recordArtifactBuildFailure(record,sourceDigest,reason);
+    if(prior) return {bundle:prior,ready:prior.ready,updateFailure:reason};
+    throw error;
+  }
+}
+
+function refreshManagedPreview(preview: ActivePreview): Promise<void> {
+  preview.refreshAgain=true;
+  if(preview.refresh) return preview.refresh;
+  preview.refresh=(async()=>{
+    while(preview.refreshAgain && !preview.controller.signal.aborted) {
+      preview.refreshAgain=false;
+      let digest:string|null=null;
+      try {
+        const input=await readAppArtifactSource(preview.record,preview.controller.signal);
+        if(preview.ready.build.sourceIdentityDigest !== input.identityDigest) throw new Error("artifact_source_identity_changed");
+        digest=input.snapshot.digest;
+        if(digest===preview.ready.build.sourceDigest) {preview.updateFailure=undefined;continue;}
+        if(digest===preview.lastFailureKey) continue;
+        const bundle=await buildAppArtifact(preview.record,input,preview.controller.signal);
+        const render=await observeArtifactRender(bundle,preview.controller.signal);
+        if((await readAppArtifactSource(preview.record,preview.controller.signal)).snapshot.digest!==digest) {
+          preview.refreshAgain=true;continue;
+        }
+        if(activePreviews.get(preview.appId)!==preview || preview.controller.signal.aborted) return;
+        const ready=publishReadyArtifact(preview.record,bundle,render);
+        preview.bundle=bundle;preview.ready=ready;preview.contentRoot=bundle.snapshot.root;
+        preview.updateFailure=undefined;preview.lastFailureKey=undefined;
+        broadcastReload(preview);
+      } catch(error) {
+        if(preview.controller.signal.aborted) return;
+        const reason=error instanceof Error?error.message:String(error);
+        preview.updateFailure=reason;
+        const failureKey=digest??reason;
+        if(preview.lastFailureKey!==failureKey) {
+          preview.lastFailureKey=failureKey;
+          try{recordArtifactBuildFailure(preview.record,digest,reason);}catch{}
+          for(const client of preview.clients) {try{client.write(`event: build-failed\ndata: ${JSON.stringify({reason,sourceDigest:digest})}\n\n`);}catch{preview.clients.delete(client);}}
+        }
+      }
+    }
+  })().finally(()=>{preview.refresh=null;});
+  return preview.refresh;
 }
 
 function watchFiles(preview: ActivePreview): fs.FSWatcher | null {
@@ -320,7 +327,7 @@ function watchFiles(preview: ActivePreview): fs.FSWatcher | null {
     if (preview.reloadTimer) clearTimeout(preview.reloadTimer);
     preview.reloadTimer = setTimeout(() => {
       preview.reloadTimer = null;
-      broadcastReload(preview);
+      void refreshManagedPreview(preview);
     }, 160);
   };
   try {
@@ -331,7 +338,7 @@ function watchFiles(preview: ActivePreview): fs.FSWatcher | null {
 }
 
 async function handleRequest(preview: ActivePreview, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  if (!loopbackAddress(request.socket.remoteAddress)) {
+  if (!loopbackAddress(request.socket.remoteAddress) || request.headers.host !== new URL(preview.url).host) {
     sendJson(response, 403, { ok: false, error: "loopback-required" });
     return;
   }
@@ -341,7 +348,7 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
   }
   const url = new URL(request.url ?? "/", preview.url);
   if (url.pathname === "/__agentlas/live") {
-    sendJson(response, 200, { ok: true, appId: preview.appId, revision: preview.revision });
+    sendJson(response, 200, { ok: true, appId: preview.appId, revision: preview.revision, readyRevision: preview.ready, updateFailure: preview.updateFailure });
     return;
   }
   if (url.pathname === "/__agentlas/live.js") {
@@ -362,12 +369,12 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
     request.once("close", () => preview.clients.delete(response));
     return;
   }
-  const filePath = await resolveFile(preview, url.pathname);
+  const filePath = resolveFile(preview, url.pathname);
   if (!filePath) {
     sendJson(response, 404, { ok: false, error: "not-found" });
     return;
   }
-  await serveFile(request, response, filePath);
+  serveFile(request, response, filePath);
 }
 
 /**
@@ -377,12 +384,14 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
  * 진행 중 시작을 앱마다 하나로 묶는다.
  */
 const startingPreviews = new Map<string, Promise<AppFactoryLivePreviewResult>>();
+const startingControllers = new Map<string, AbortController>();
 
 async function startManagedPreview(record: AppFactoryAppRecord): Promise<AppFactoryLivePreviewResult> {
   const inFlight = startingPreviews.get(record.id);
   if (inFlight) return inFlight;
   const started = startManagedPreviewOnce(record).finally(() => {
     startingPreviews.delete(record.id);
+    startingControllers.delete(record.id);
   });
   startingPreviews.set(record.id, started);
   return started;
@@ -398,10 +407,17 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
       url: existing.url,
       runtime: "managed-loopback",
       revision: existing.revision,
+      readyRevision: existing.ready,
+      updateFailure: existing.updateFailure,
     };
   }
 
-  const roots = await contentRoot(record);
+  const controller = new AbortController();
+  startingControllers.set(record.id, controller);
+  const signal = controller.signal;
+  const prepared = await prepareReadyArtifact(record, signal);
+  if ((previewEpochs.get(record.id) ?? 0) !== requestedEpoch) throw new Error("artifact_preview_stopped");
+  const roots = {rootPath:record.rootPath, contentRoot:prepared.bundle.snapshot.root};
   let preview: ActivePreview;
   const server = http.createServer((request, response) => {
     void handleRequest(preview, request, response).catch((error) => {
@@ -433,6 +449,8 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
     reloadTimer: null,
     heartbeat: setInterval(() => undefined, 60_000),
     clients: new Set(),
+    record, bundle: prepared.bundle, ready: prepared.ready, updateFailure: prepared.updateFailure,
+    controller, refresh:null, refreshAgain:false,
   };
   clearInterval(preview.heartbeat);
   preview.heartbeat = setInterval(() => {
@@ -450,6 +468,7 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
   }
   preview.watcher = watchFiles(preview);
   activePreviews.set(record.id, preview);
+  void refreshManagedPreview(preview);
   server.once("close", () => {
     if (activePreviews.get(record.id) === preview) activePreviews.delete(record.id);
   });
@@ -459,6 +478,8 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
     url: preview.url,
     runtime: "managed-loopback",
     revision: preview.revision,
+    readyRevision: preview.ready,
+    updateFailure: preview.updateFailure,
   };
 }
 
@@ -485,11 +506,13 @@ export async function startAppFactoryLivePreview(appId: string): Promise<AppFact
 export async function stopAppFactoryLivePreview(appId: string): Promise<{ ok: true; stopped: boolean }> {
   const id = String(appId ?? "").trim();
   previewEpochs.set(id, (previewEpochs.get(id) ?? 0) + 1);
+  startingControllers.get(id)?.abort();
   previewViewLeases.delete(id);
   clearPreviewRelease(id);
   const preview = activePreviews.get(id);
   if (!preview) return { ok: true, stopped: false };
   activePreviews.delete(preview.appId);
+  preview.controller.abort();
   if (preview.reloadTimer) clearTimeout(preview.reloadTimer);
   clearInterval(preview.heartbeat);
   try { preview.watcher?.close(); } catch {}
@@ -505,10 +528,12 @@ export function disposeAppFactoryLivePreviews(): void {
   for (const id of new Set([...startingPreviews.keys(), ...activePreviews.keys()])) {
     previewEpochs.set(id, (previewEpochs.get(id) ?? 0) + 1);
   }
+  for (const controller of startingControllers.values()) controller.abort();
   for (const timer of previewReleaseTimers.values()) clearTimeout(timer);
   previewReleaseTimers.clear();
   previewViewLeases.clear();
   for (const preview of activePreviews.values()) {
+    preview.controller.abort();
     if (preview.reloadTimer) clearTimeout(preview.reloadTimer);
     clearInterval(preview.heartbeat);
     try { preview.watcher?.close(); } catch {}

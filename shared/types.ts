@@ -1791,6 +1791,14 @@ export interface ChatGoalContext {
   blockedReason?: string | null;
   version?: number;
   executionLocation?: "desktop-local" | "web-hosted";
+  wait?: {
+    waitId: string;
+    state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
+    subjectKind: "invocation" | "artifact";
+    nextCheckAt: string | null;
+    deadline: string | null;
+    executionAvailability: "app-running";
+  };
 }
 
 export type CanonicalTaskStatus =
@@ -3248,6 +3256,7 @@ export type AppFactoryAppStatus =
 
 export type AppFactoryOperationKind =
   | "scaffold"
+  | "build-artifact"
   | "install-cloud-app"
   | "sync-cloud-manifest"
   | "open-launch-target"
@@ -3784,6 +3793,8 @@ export interface AppFactoryLivePreviewResult {
   runtime: "managed-loopback" | "external-web" | "unavailable";
   revision?: number;
   reason?: string;
+  readyRevision?: import("./artifact-build").ArtifactReadyRevision;
+  updateFailure?: string;
 }
 
 export interface WorkLiveViewBounds {
