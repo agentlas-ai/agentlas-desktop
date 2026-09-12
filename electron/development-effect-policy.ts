@@ -81,7 +81,8 @@ const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "fs:unwatchFile", "oneArtifacts:revokePreview", "site:stopAgentApp", "multimodal:cancelVideo",
   "marketplace:closeProfileView", "telegram:stop", "browser:stopLiveView", "automations:stopRun",
   "appFactory:stopLivePreview", "workLiveView:close", "invoke:cancel", "hephaestus:cancelBuild",
-  "hephaestus:stopStudio", "productExtensions:closeScienceView", "science:composer:cancel", "science:renderers:dispose",
+  "hephaestus:stopStudio", "productExtensions:closeScienceView", "science:composer:cancel", "science:renderers:dispose", "science:manuscripts:cancelRenderJob",
+  "browserAnnotation:stop", "browserUi:stopFind",
 ]);
 
 export function assertDevelopmentIpcAllowed(channel: string, args: readonly unknown[]): void {

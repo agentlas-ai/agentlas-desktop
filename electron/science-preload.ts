@@ -238,6 +238,15 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     validate: (input: unknown) => ipcRenderer.invoke("science:artifactValidations:validate", { extensionId, input }),
   }),
   manuscripts: Object.freeze({
+    editNode: (input: unknown) => ipcRenderer.invoke("science:manuscripts:editNode", { extensionId, input }),
+    prepareRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:prepareRenderJob", { extensionId, input }),
+    createRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:createRenderJob", { extensionId, input }),
+    getRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:getRenderJob", { extensionId, input }),
+    listRenderJobs: (input: unknown) => ipcRenderer.invoke("science:manuscripts:listRenderJobs", { extensionId, input }),
+    retryRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:retryRenderJob", { extensionId, input }),
+    cancelRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:cancelRenderJob", { extensionId, input }),
+    readRenderOutput: (input: unknown) => ipcRenderer.invoke("science:manuscripts:readRenderOutput", { extensionId, input }),
+
     list: (projectId: string) => ipcRenderer.invoke("science:manuscripts:list", { extensionId, projectId }),
     get: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:get", { extensionId, projectId, manuscriptId }),
     editorModel: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:editorModel", { extensionId, projectId, manuscriptId }),

@@ -43,6 +43,7 @@ import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
+import { registerSciencePublicationIpc } from "./science-host/publication-ipc";
 import { installDesktopScienceHost } from "./science-host";
 import { projectScienceLoopLongRun } from "./long-run/science-projection";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
@@ -3424,6 +3425,7 @@ app.whenReady().then(async () => {
       artifactVersion: Number(record.artifactVersion),
     });
   });
+  registerSciencePublicationIpc({ ipc: ipcMain, assertScienceSender });
   ipcMain.handle("science:manuscripts:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
