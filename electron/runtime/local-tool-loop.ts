@@ -1,3 +1,4 @@
+import { beginBuiltinFileProof } from "../long-run/file-proof";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
 //
 // claude-code/codex는 CLI 서브프로세스가 자체 tool-calling 루프를 갖고 있어서 우리는
@@ -507,6 +508,7 @@ export async function runMainToolDispatch(
       import("../multimodal/image"),
     ]);
     approval.signal?.throwIfAborted();
+    const fileProof = beginBuiltinFileProof({ ...approval, toolId: eventCallId, toolName: call.toolName, builtinName: resolved.builtinName });
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: approval.cwd ?? process.cwd(),
       permission: (approval.permission ?? "read") as ToolPermission,
@@ -537,6 +539,9 @@ export async function runMainToolDispatch(
       outcome.artifactPaths,
       outcome.imageDataUrl,
     );
+    if (outcome.ok && outcome.fileObservation) {
+      try { fileProof?.complete(outcome.fileObservation); } catch { /* Missing durable proof never permits a verification pass. */ }
+    }
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, outcome.ok ? "succeeded" : "failed");

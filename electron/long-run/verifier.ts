@@ -1,3 +1,4 @@
+import { currentBuiltinFileProofs } from "./file-proof";
 import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, criterionProofAccountingOwner } from "./criterion-proof";
 import { withInvocationAccounting } from "./accounting-context";
 import { createHash, randomUUID } from "node:crypto";
@@ -1015,8 +1016,11 @@ export async function verifyGoalCompletionClaim(input: {
           reasonCode:error instanceof Error && error.message.startsWith("criterion_proof_") ? error.message : "criterion_proof_unavailable"}});
       }
     }
+    const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
+    const fileProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
+      ? currentBuiltinFileProofs(fileProofInput) : [];
     const evidenceRefsByItem = Object.fromEntries(run.acceptanceCriteria.map((_,index) => [`criterion:${index}`,
-      proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs).slice(-32) : []]));
+      proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs,fileProofs).slice(-32) : []]));
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.
@@ -1037,7 +1041,7 @@ export async function verifyGoalCompletionClaim(input: {
           "failed_unknown",
           "inconclusive",
         ],
-        input: observation + `\nPINNED CRITERION PROOF CONTRACTS (cannot be lowered): ${JSON.stringify(proofContracts.map(({criterionIndex,requiredProofKind})=>({criterionIndex,requiredProofKind})))}`,
+        input: `CURRENT HOST FILE OBSERVATIONS (action is immutable): ${JSON.stringify(fileProofs)}\n` + observation + `\nPINNED CRITERION PROOF CONTRACTS (cannot be lowered): ${JSON.stringify(proofContracts.map(({criterionIndex,requiredProofKind,requiredFileAction})=>({criterionIndex,requiredProofKind,requiredFileAction})))}`,
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
@@ -1097,6 +1101,16 @@ export async function verifyGoalCompletionClaim(input: {
       try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Refuse stale result. */ }
       if (current?.digest !== verificationBoundary.digest) {
         settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: "none", errorCode: "verification_boundary_changed"});
+        return null;
+      }
+    }
+    const chosenFileRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("file-proof:")));
+    if (chosenFileRefs.size) {
+      const currentFiles = fileProofInput ? currentBuiltinFileProofs(fileProofInput) : [];
+      const currentByRef = new Map(currentFiles.map(file => [file.ref,JSON.stringify(file)]));
+      const capturedByRef = new Map(fileProofs.map(file => [file.ref,JSON.stringify(file)]));
+      if ([...chosenFileRefs].some(ref => currentByRef.get(ref) !== capturedByRef.get(ref) || !currentByRef.has(ref))) {
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_file_changed"});
         return null;
       }
     }

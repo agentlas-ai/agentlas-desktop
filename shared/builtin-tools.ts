@@ -18,6 +18,7 @@
 //
 // 권한 등급(minPerm)은 사용자가 고른 권한 칩과 같은 축이다. read 실행에서는
 // write_file 이 목록에 아예 없다 — "있는데 거절"이 아니라 "없다".
+import { observeWorkspaceFile, type FileObservation } from "./file-observation";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -67,6 +68,8 @@ export interface BuiltinToolContext {
 
 export interface BuiltinToolRunResult {
   content: string;
+  /** Only actual builtin filesystem code produces this; never parsed from tool text. */
+  fileObservation?: FileObservation;
   /** Host-structured evidence; model prose and JSON output cannot populate it. */
   artifactPaths?: readonly string[];
   /** Optional visual feedback for the model's next tool-loop turn. */
@@ -302,6 +305,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     run(args, ctx) {
       const file = resolveExistingIn(ctx.cwd, args.path);
       let content = readUtf8File(file);
+      const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "read", content);
       const offset = num(args.offset);
       const limit = num(args.limit);
       if (offset || limit) {
@@ -310,7 +314,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         const end = limit ? start + limit : lines.length;
         content = lines.slice(start, end).join("\n");
       }
-      return truncate(content, 20_000);
+      return { content: truncate(content, 20_000), ...(fileObservation ? { fileObservation } : {}) };
     },
   },
   {
@@ -329,7 +333,8 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       fs.mkdirSync(path.dirname(file), { recursive: true });
       const existed = fs.existsSync(file);
       writeUtf8File(file, content);
-      return `${existed ? "overwrote" : "created"} ${file} (${content.length} bytes)`;
+      const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "write", content);
+      return { content: `${existed ? "overwrote" : "created"} ${file} (${Buffer.byteLength(content, "utf8")} bytes)`, ...(fileObservation ? { fileObservation } : {}) };
     },
   },
   {
@@ -363,7 +368,8 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         ? src.split(oldString).join(newString)
         : src.replace(oldString, newString);
       writeUtf8File(file, out);
-      return `edited ${file} (${count} replacement${count > 1 ? "s" : ""})`;
+      const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "edit", out);
+      return { content: `edited ${file} (${count} replacement${count > 1 ? "s" : ""})`, ...(fileObservation ? { fileObservation } : {}) };
     },
   },
   {
@@ -578,7 +584,7 @@ export async function runBuiltinTool(
   name: string,
   args: Record<string, unknown>,
   ctx: BuiltinToolContext,
-): Promise<{ ok: boolean; content: string; artifactPaths?: readonly string[]; imageDataUrl?: string }> {
+): Promise<BuiltinToolRunResult & { ok: boolean }> {
   const tool = BY_NAME.get(name);
   if (!tool) return { ok: false, content: `unknown tool: ${name}` };
   if (PERM_RANK[tool.minPerm] > (PERM_RANK[ctx.permission] ?? 0)) {
@@ -593,6 +599,7 @@ export async function runBuiltinTool(
       return {
         ok: true,
         content: value.content,
+        ...(value.fileObservation ? { fileObservation: value.fileObservation } : {}),
         ...(value.artifactPaths?.length ? { artifactPaths: [...value.artifactPaths] } : {}),
         ...(value.imageDataUrl ? { imageDataUrl: value.imageDataUrl } : {}),
       };

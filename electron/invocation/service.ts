@@ -1,3 +1,4 @@
+import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { withAdapterEffectContext } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
@@ -1884,7 +1885,8 @@ export class InvocationService {
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
-    void withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
+    void withBuiltinFileProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
+      readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
       goalLongRun && goalLongRun.surface !== "science"
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
         begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => runMcpInvocation(
@@ -2926,7 +2928,7 @@ export class InvocationService {
         this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);
         this.drainSteerQueue(runReq.chatId);
-      })));
+      }))));
 
     return { runId };
   }
