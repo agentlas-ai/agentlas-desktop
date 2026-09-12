@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.17 — 2026-09-12
+
+- Node가 없는 새 맥에서 CLI 연결이 막히던 것을 고칩니다. 앱이 터미널에 띄우는 로그인 명령이 시스템에 설치된 Node를 찾다가 실패했습니다. 이제 앱이 들고 다니는 검증된 Node를 그 명령에만 보이게 해서, 사용자의 셸 설정은 건드리지 않고 처음 켠 맥에서도 연결이 끝까지 진행됩니다.
+- 프로젝트 화면에서 Hub 에이전트를 프로젝트에 바로 붙일 수 있습니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.1.16 — 2026-09-12
 
 - Antigravity(agy)로 도는 Science 연구가 시작조차 못 하던 두 가지를 고칩니다. 예전 실행이 공용 설정에 남긴 도구 항목 때문에, 그 도구를 쓰지도 않는 실행까지 통째로 거절되고 있었습니다. 이제 남은 항목은 실행하는 동안만 치워 두었다가 끝나면 되돌립니다. 또 Science가 지난 실행에 스스로 남긴 항목을 남의 것으로 오인해 자기 자신을 거절하던 문제도 고칩니다. 사용자가 직접 등록한 도구는 그대로 둡니다.
