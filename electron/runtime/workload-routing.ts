@@ -1,5 +1,6 @@
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
 import { createHash } from "node:crypto";
+import { buildShadowRoutingEvaluation } from "./routing-evaluation";
 
 /**
  * A parent LLM assigns provider-neutral capacity. Deterministic host code only
@@ -786,7 +787,13 @@ export function workloadAllocationReceipt(
       ? "fallback-current"
       : !fallback && hasResolvedCurrent
         ? "resolved"
-        : "unresolved";
+      : "unresolved";
+  const decisionId = `desktop:model-allocation:${featureHash.slice(0, 24)}`;
+  const routingEvaluation = buildShadowRoutingEvaluation({
+    allocationDecisionId: decisionId,
+    runtime: resolution.runtime,
+    observedUsage,
+  });
   return {
     // v2: `role` joined the receipt around 2026-07-28 and `resolved.effort` can
     // now be null, both without a version bump — so the 46 receipts on this
@@ -796,7 +803,7 @@ export function workloadAllocationReceipt(
     // easy to mistake for "role was never assigned" (I made exactly that
     // mistake). A shape change needs a version, or the version is decoration.
     schemaVersion: "agentlas.model-allocation-receipt.v2",
-    decisionId: `desktop:model-allocation:${featureHash.slice(0, 24)}`,
+    decisionId,
     packetId: null,
     role: modelRoleForWorkloadPhase(resolution.allocation.phase),
     status,
@@ -843,6 +850,7 @@ export function workloadAllocationReceipt(
         }
       : null,
     validationIssues: fallback ? requestedReasonCodes : [],
+    routingEvaluation,
     privacy: { rawPromptIncluded: false, rawTranscriptIncluded: false },
   };
 }
