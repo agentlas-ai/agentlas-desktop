@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { findFileViewerZoomProvider } from "@file-viewer/core";
 import FileViewer, { type FileViewerHandle, type ViewerOptions, type ViewerState } from "@file-viewer/react";
 import officePreset from "@file-viewer/preset-office";
@@ -10,9 +10,20 @@ import { installPresentationLayoutCompatibility, type PresentationLayoutCompatib
 import {
   agentlasSpreadsheetRenderer,
   installPagedDocumentChrome,
+  type DocumentChromeSelection,
   type PagedDocumentChrome,
 } from "@/lib/file-viewer-document-chrome";
+import {
+  createOfficeDocumentSession,
+  mainArtifactRevision,
+  officeCapabilities,
+  reduceOfficeDocumentSession,
+  resolveOfficeFormat,
+  type OfficeEditIntent,
+  type OfficeTaskSelection,
+} from "@/lib/office-document-session";
 import { IconExpand } from "./Icon";
+import { OfficeDocumentSessionBar } from "./OfficeDocumentSessionBar";
 import styles from "./LiveOutputViewer.module.css";
 
 const FILE_VIEWER_ASSET_ROOT = "file-viewer/";
@@ -30,16 +41,13 @@ function runtimeAsset(root: string, path: string): string {
   return new URL(path, root).href;
 }
 
-function resolveViewerType(name: string, mimeType?: string): string | undefined {
+function resolveViewerType(name: string, mimeType?: string, signature?: Uint8Array): string | undefined {
   const extension = name.trim().toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
-  if (extension) return extension;
+  const office = resolveOfficeFormat(name, mimeType, signature);
+  if (office.format) return office.format;
+  if (extension && !["pdf", "docx", "xlsx", "pptx", "hwp", "hwpx"].includes(extension)) return extension;
   const mimeFallbacks: Record<string, string> = {
-    "application/pdf": "pdf",
     "application/zip": "zip",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
-    "application/x-hwp": "hwpx",
     "application/x-iwork-pages-sffpages": "pages",
     "application/x-iwork-numbers-sffnumbers": "numbers",
     "application/x-iwork-keynote-sffkey": "key",
@@ -59,6 +67,8 @@ export function UniversalFileViewerEngine({
   openExternalHint,
   onExpand,
   fileInfo,
+  onOfficeSelection,
+  onOfficeEditIntent,
 }: {
   source: string;
   name: string;
@@ -71,11 +81,24 @@ export function UniversalFileViewerEngine({
   openExternalHint?: string;
   onExpand?: () => void;
   fileInfo?: { sha256: string; binding: string; tabId: string };
+  onOfficeSelection?: (selection: OfficeTaskSelection) => void | Promise<void>;
+  onOfficeEditIntent?: (intent: OfficeEditIntent) => void | Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [zoomLabel, setZoomLabel] = useState("100%");
   const [actionState, setActionState] = useState<"idle" | "downloading" | "opening" | "error">("idle");
   const [availability, setAvailability] = useState<ViewerState["availability"]>(null);
+  const [viewerState, setViewerState] = useState<"loading" | "ready" | "failed">("loading");
+  const [signatureProbe, setSignatureProbe] = useState<{ source: string; bytes: Uint8Array | null }>({ source: "", bytes: null });
+  const signature = signatureProbe.source === source ? signatureProbe.bytes ?? undefined : undefined;
+  const incomingFormat = resolveOfficeFormat(name, mimeType, signature);
+  const incomingRevision = mainArtifactRevision(fileInfo);
+  const [session, dispatchSession] = useReducer(
+    reduceOfficeDocumentSession,
+    undefined,
+    () => createOfficeDocumentSession(incomingFormat.format, incomingRevision),
+  );
+  const [viewDocument, setViewDocument] = useState(() => ({ source, name, mimeType, size, fileInfo, signature, format: incomingFormat.format }));
   const hostRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<FileViewerHandle>(null);
   const userZoomedRef = useRef(false);
@@ -83,6 +106,50 @@ export function UniversalFileViewerEngine({
   const documentChromeRef = useRef<PagedDocumentChrome | null>(null);
   const zoomFrameRef = useRef<number | null>(null);
   const zoomRevisionRef = useRef(0);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  useEffect(() => {
+    const unresolved = resolveOfficeFormat(name, mimeType);
+    if (!unresolved.needsSignature) {
+      setSignatureProbe((current) => current.source === source ? current : { source, bytes: null });
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(source, { headers: { Range: "bytes=0-7" }, signal: controller.signal });
+        if (!response.ok) throw new Error("signature-unavailable");
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("signature-unavailable");
+        const prefix = new Uint8Array(8);
+        let offset = 0;
+        while (offset < prefix.byteLength) {
+          const next = await reader.read();
+          if (next.done) break;
+          const count = Math.min(prefix.byteLength - offset, next.value.byteLength);
+          prefix.set(next.value.subarray(0, count), offset);
+          offset += count;
+          if (offset >= prefix.byteLength) await reader.cancel();
+        }
+        if (!controller.signal.aborted) setSignatureProbe({ source, bytes: prefix.slice(0, offset) });
+      } catch {
+        if (!controller.signal.aborted) setSignatureProbe({ source, bytes: new Uint8Array(0) });
+      }
+    })();
+    return () => controller.abort();
+  }, [source, name, mimeType]);
+
+  useEffect(() => {
+    dispatchSession({ type: "observe-document", format: incomingFormat.format, revision: incomingRevision });
+    const active = sessionRef.current.activeRevision;
+    const sameIdentity = Boolean(active && incomingRevision
+      && active.sha256 === incomingRevision.sha256
+      && active.binding === incomingRevision.binding
+      && active.tabId === incomingRevision.tabId);
+    if (sessionRef.current.pendingEdit && !sameIdentity) return;
+    setViewDocument({ source, name, mimeType, size, fileInfo, signature, format: incomingFormat.format });
+  }, [source, name, mimeType, size, fileInfo?.sha256, fileInfo?.binding, fileInfo?.tabId, incomingFormat.format]);
   const syncRenderedZoom = useCallback(() => {
     const host = hostRef.current;
     const handle = viewerRef.current;
@@ -116,8 +183,9 @@ export function UniversalFileViewerEngine({
     setZoomLabel("100%");
     setActionState("idle");
     setAvailability(null);
+    setViewerState("loading");
     setError(null);
-  }, [source, name, mimeType]);
+  }, [viewDocument.source, viewDocument.name, viewDocument.mimeType]);
   const fitSelectedPage = useCallback(() => {
     if (userZoomedRef.current) {
       syncRenderedZoom();
@@ -135,7 +203,9 @@ export function UniversalFileViewerEngine({
   useEffect(() => {
     if (!hostRef.current) return undefined;
     const compatibility = installPresentationLayoutCompatibility(hostRef.current);
-    const documentChrome = installPagedDocumentChrome(hostRef.current, locale, fitSelectedPage);
+    const documentChrome = installPagedDocumentChrome(hostRef.current, locale, fitSelectedPage, (selection: DocumentChromeSelection) => {
+      dispatchSession({ type: "select", anchor: selection });
+    });
     layoutCompatibilityRef.current = compatibility;
     documentChromeRef.current = documentChrome;
     return () => {
@@ -144,7 +214,7 @@ export function UniversalFileViewerEngine({
       compatibility.dispose();
       documentChrome.dispose();
     };
-  }, [source, name, mimeType, locale, fitSelectedPage]);
+  }, [viewDocument.source, viewDocument.name, viewDocument.mimeType, locale, fitSelectedPage]);
   const options = useMemo<ViewerOptions>(() => {
     const assetRoot = resolveFileViewerAssetRoot();
     return ({
@@ -163,7 +233,7 @@ export function UniversalFileViewerEngine({
     ai: false,
     // Paged PPTX chrome fits the selected slide from its natural dimensions.
     // Generic auto-fit races that resize handler and measures scaled content.
-    fit: resolveViewerType(name, mimeType) === "pptx" ? undefined
+    fit: resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) === "pptx" ? undefined
       : { mode: "contain" as const, resize: "until-interaction" as const, padding: 18, minScale: 0.25, maxScale: 2 },
     ui: { density: "compact" as const, surfaceBackground: "#edf0f4" },
     docx: {
@@ -228,7 +298,7 @@ export function UniversalFileViewerEngine({
       useWorker: true,
     },
   });
-  }, [locale, name, mimeType]);
+  }, [locale, viewDocument.name, viewDocument.mimeType, viewDocument.signature]);
 
   const runViewerAction = async (kind: "download" | "open", action: () => void | Promise<void>) => {
     setActionState(kind === "download" ? "downloading" : "opening");
@@ -262,14 +332,38 @@ export function UniversalFileViewerEngine({
     setAvailability(state.availability);
     if (state.error) setError(state.error instanceof Error ? state.error.message : String(state.error));
     else if (state.ready) setError(null);
+    setViewerState(state.error ? "failed" : state.ready ? "ready" : "loading");
   }, [syncRenderedZoom]);
+
+  const capabilities = officeCapabilities({
+    format: session.format,
+    viewerState,
+    nativeOpenAvailable: Boolean(onOpenExternal),
+  });
+
+  const discardDraftAndLoad = () => {
+    dispatchSession({ type: "discard-draft-and-load" });
+    dispatchSession({ type: "observe-document", format: incomingFormat.format, revision: incomingRevision });
+    setViewDocument({ source, name, mimeType, size, fileInfo, signature, format: incomingFormat.format });
+  };
+
+  const sendEdit = onOfficeEditIntent ? async (intent: OfficeEditIntent) => {
+    dispatchSession({ type: "set-delivery", draftSequence: intent.draftSequence, delivery: "sending" });
+    try {
+      await onOfficeEditIntent(intent);
+      dispatchSession({ type: "set-delivery", draftSequence: intent.draftSequence, delivery: "acknowledged" });
+    } catch (sendError) {
+      dispatchSession({ type: "set-delivery", draftSequence: intent.draftSequence, delivery: "failed" });
+      throw sendError;
+    }
+  } : undefined;
 
   return (
     <div ref={hostRef} className={styles.documentEngine} data-compact={compact ? "true" : "false"} data-fill={fill ? "true" : "false"} data-testid="universal-file-viewer">
-      <header className={styles.documentToolbar} data-document-viewer-toolbar="true" {...(fileInfo ? { "data-chat-file-header": "true" } : {})}>
+      <header className={styles.documentToolbar} data-document-viewer-toolbar="true" {...(viewDocument.fileInfo ? { "data-chat-file-header": "true" } : {})}>
         <div className={styles.documentIdentity}>
-          <strong title={name}>{name}</strong>
-          {typeof size === "number" && size >= 0 ? <span>{size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`}</span> : null}
+          <strong title={viewDocument.name}>{viewDocument.name}</strong>
+          {typeof viewDocument.size === "number" && viewDocument.size >= 0 ? <span>{viewDocument.size < 1024 ? `${viewDocument.size} B` : viewDocument.size < 1024 * 1024 ? `${Math.round(viewDocument.size / 1024)} KB` : `${(viewDocument.size / (1024 * 1024)).toFixed(1)} MB`}</span> : null}
         </div>
         <div className={styles.documentToolbarActions}>
           {availability?.zoom !== false ? <div className={styles.documentZoom} role="group" aria-label={locale === "ko" ? "문서 확대/축소" : "Document zoom"}>
@@ -287,21 +381,32 @@ export function UniversalFileViewerEngine({
             {actionState === "opening" ? (locale === "ko" ? "여는 중…" : "Opening…") : (locale === "ko" ? "열기" : "Open")}
           </button> : null}
           {onExpand ? <button type="button" className={styles.documentIconButton} onClick={onExpand} aria-label={locale === "ko" ? "패널 확장" : "Expand panel"} title={locale === "ko" ? "패널 확장" : "Expand panel"}><IconExpand size={14} /></button> : null}
-          {fileInfo ? <details className={styles.documentInfo} data-chat-file-info="true">
+          {viewDocument.fileInfo ? <details className={styles.documentInfo} data-chat-file-info="true">
             <summary aria-label={locale === "ko" ? "파일 정보" : "File info"}>i</summary>
-            <div><span>SHA-256: {fileInfo.sha256}</span><span>{locale === "ko" ? "바인딩" : "Binding"}: {fileInfo.binding}</span><span>{locale === "ko" ? "탭 ID" : "Tab ID"}: {fileInfo.tabId}</span></div>
+            <div><span>SHA-256: {viewDocument.fileInfo.sha256}</span><span>{locale === "ko" ? "바인딩" : "Binding"}: {viewDocument.fileInfo.binding}</span><span>{locale === "ko" ? "탭 ID" : "Tab ID"}: {viewDocument.fileInfo.tabId}</span></div>
           </details> : null}
         </div>
         {actionState === "error" ? <span className={styles.documentActionError} role="alert">{locale === "ko" ? "파일 작업을 완료하지 못했습니다." : "The file action could not be completed."}</span> : null}
       </header>
+      {(session.format || incomingFormat.reason === "ambiguous-hwp-container" || incomingFormat.reason === "signature-conflict") ? <OfficeDocumentSessionBar
+        locale={locale}
+        session={session}
+        capabilities={capabilities}
+        formatReason={incomingFormat.reason}
+        onDraftChange={(replacementValue) => dispatchSession({ type: "change-draft", replacementValue })}
+        onClearDraft={session.conflict ? discardDraftAndLoad : () => dispatchSession({ type: "clear-draft" })}
+        onDiscardDraftAndLoad={discardDraftAndLoad}
+        onSendSelection={onOfficeSelection}
+        onSendEdit={sendEdit}
+      /> : null}
       <FileViewer
         ref={viewerRef}
-        key={`${source}:${name}:${mimeType ?? ""}`}
-        url={source}
-        name={name}
-        filename={name}
-        type={resolveViewerType(name, mimeType)}
-        size={size}
+        key={`${viewDocument.source}:${viewDocument.name}:${viewDocument.mimeType ?? ""}`}
+        url={viewDocument.source}
+        name={viewDocument.name}
+        filename={viewDocument.name}
+        type={resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature)}
+        size={viewDocument.size}
         options={options}
         className={styles.documentEngineRoot}
         onStateChange={handleStateChange}

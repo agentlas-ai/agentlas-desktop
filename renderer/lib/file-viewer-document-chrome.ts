@@ -19,6 +19,12 @@ type SpreadsheetCellDetail = {
   rect: { x: number; y: number; width: number; height: number };
 };
 
+export type DocumentChromeSelection =
+  | { kind: "cell"; sheetName: string; address: string; displayValue: string; formula?: string; formulaState: "loading" | "ready" | "unavailable" }
+  | { kind: "page"; pageNumber: number }
+  | { kind: "slide"; slideNumber: number; title?: string }
+  | { kind: "text"; text: string; pageNumber?: number; slideNumber?: number };
+
 type SpreadsheetCell = {
   type?: string;
   rowIndex?: number;
@@ -76,11 +82,18 @@ async function installSpreadsheetCellBridge(): Promise<string> {
     // intentionally importing this concrete ESM entry.
     // @ts-expect-error -- runtime entry is present in e-virt-table/dist.
     const module = await import("e-virt-table/dist/index.es.js");
-    const Table = module.default as unknown as SpreadsheetTableConstructor;
+    const candidate = module.default as unknown;
+    const Table = (typeof candidate === "function"
+      ? candidate
+      : typeof (candidate as { default?: unknown } | null)?.default === "function"
+        ? (candidate as { default: unknown }).default
+        : null) as SpreadsheetTableConstructor | null;
+    if (!Table?.prototype) return "";
     const prototype = Table.prototype;
     if (!prototype[SPREADSHEET_BRIDGE_MARK]) {
       const originalOn = prototype.on;
       prototype.on = function patchedSpreadsheetOn(event, callback) {
+        if ((typeof this !== "object" && typeof this !== "function") || this === null) return;
         if (!Object.prototype.hasOwnProperty.call(this, SPREADSHEET_BRIDGE_MARK)) {
           Object.defineProperty(this, SPREADSHEET_BRIDGE_MARK, { value: true });
           originalOn.call(this, "cellFocusChange", (candidate: unknown) => {
@@ -659,7 +672,12 @@ async function fitPresentationSurface(surface: HTMLElement): Promise<FileViewerZ
   return provider.getState();
 }
 
-export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en", onPageSelected?: () => void): PagedDocumentChrome {
+export function installPagedDocumentChrome(
+  host: HTMLElement,
+  locale: "ko" | "en",
+  onPageSelected?: () => void,
+  onSelection?: (selection: DocumentChromeSelection) => void,
+): PagedDocumentChrome {
   let disposed = false;
   let discoveryTimer = 0;
   let discoveryStop = 0;
@@ -680,11 +698,21 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
   let spreadsheetCellHandler: ((event: Event) => void) | null = null;
   let spreadsheetWheelHandler: (() => void) | null = null;
   let spreadsheetClickHandler: ((event: Event) => void) | null = null;
+  let textSelectionRoot: ShadowRoot | null = null;
+  let textSelectionHandler: (() => void) | null = null;
+  let lastSelectionKey = "";
   let pdfAlignTimer = 0;
   let pdfSelectionFrame = 0;
   let pdfSettleFrame = 0;
   let pdfSelectionRevision = 0;
   let rebuildFrame = 0;
+
+  const emitSelection = (selection: DocumentChromeSelection) => {
+    const key = JSON.stringify(selection);
+    if (key === lastSelectionKey) return;
+    lastSelectionKey = key;
+    onSelection?.(selection);
+  };
 
   const stopDiscovery = () => {
     if (discoveryTimer) window.clearInterval(discoveryTimer);
@@ -747,6 +775,46 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
     spreadsheetClickHandler = null;
   };
 
+  const disconnectTextSelection = () => {
+    if (textSelectionRoot && textSelectionHandler) {
+      textSelectionRoot.removeEventListener("pointerup", textSelectionHandler);
+      textSelectionRoot.removeEventListener("keyup", textSelectionHandler);
+    }
+    textSelectionRoot = null;
+    textSelectionHandler = null;
+  };
+
+  const installTextSelection = (root: ShadowRoot) => {
+    if (textSelectionRoot === root && textSelectionHandler) return;
+    disconnectTextSelection();
+    textSelectionRoot = root;
+    textSelectionHandler = () => {
+      queueMicrotask(() => {
+        if (disposed || textSelectionRoot !== root) return;
+        const shadowSelection = (root as ShadowRoot & { getSelection?: () => Selection | null }).getSelection?.();
+        const selection = shadowSelection ?? document.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+        const anchor = selection.anchorNode;
+        if (!anchor || !root.contains(anchor)) return;
+        const text = selection.toString().replace(/\s+/gu, " ").trim().slice(0, 1_000);
+        if (!text) return;
+        const element = anchor instanceof Element ? anchor : anchor.parentElement;
+        const page = element?.closest<HTMLElement>(".page[data-page-number]");
+        const slide = element?.closest<HTMLElement>("[data-agentlas-paged-slide='true']");
+        const slides = slide ? presentationSlides(slide.parentElement ?? slide) : [];
+        const slideIndex = slide ? slides.indexOf(slide) : -1;
+        emitSelection({
+          kind: "text",
+          text,
+          ...(page?.dataset.pageNumber ? { pageNumber: Number(page.dataset.pageNumber) } : {}),
+          ...(slideIndex >= 0 ? { slideNumber: slideIndex + 1 } : {}),
+        });
+      });
+    };
+    root.addEventListener("pointerup", textSelectionHandler);
+    root.addEventListener("keyup", textSelectionHandler);
+  };
+
   const installSpreadsheet = (root: ShadowRoot): boolean => {
     const shell = root.querySelector<HTMLElement>("[data-file-viewer-spreadsheet-root]");
     const tableWrapper = shell?.querySelector<HTMLElement>(":scope > .table-wrapper");
@@ -796,6 +864,14 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
         outline.style.width = `${detail.rect.width}px`;
         outline.style.height = `${detail.rect.height}px`;
       }
+      emitSelection({
+        kind: "cell",
+        sheetName: detail.sheetName,
+        address: detail.address,
+        displayValue: detail.displayValue,
+        ...(detail.formula ? { formula: detail.formula } : {}),
+        formulaState: detail.formulaState,
+      });
     };
     spreadsheetWheelHandler = () => { outline.hidden = true; };
     spreadsheetClickHandler = (event) => {
@@ -863,6 +939,7 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
       const revision = pdfSelectionRevision;
       const isCurrentSelection = () => !disposed && pdfRoot === root && revision === pdfSelectionRevision;
       showPage(page);
+      emitSelection({ kind: "page", pageNumber: page });
       closeCompactNavigation(shell);
       pdfSelectionFrame = window.requestAnimationFrame(() => {
         pdfSelectionFrame = 0;
@@ -884,6 +961,7 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
     pdfObserver = new MutationObserver(() => showPage(selectedPage));
     pdfObserver.observe(viewer, { childList: true, subtree: true });
     showPage(selectedPage);
+    emitSelection({ kind: "page", pageNumber: selectedPage });
     shell.dataset.agentlasSinglePageReady = "true";
     return true;
   };
@@ -928,7 +1006,8 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
     };
 
     const setActive = (active: number) => {
-      presentationSlides(surface).forEach((slide, index) => {
+      const slides = presentationSlides(surface);
+      slides.forEach((slide, index) => {
         slide.dataset.agentlasPagedSlide = "true";
         slide.dataset.agentlasActiveSlide = index === active ? "true" : "false";
       });
@@ -937,6 +1016,12 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
         if (index === active) button.setAttribute("aria-current", "page");
         else button.removeAttribute("aria-current");
       });
+      const activeSlide = slides[active];
+      if (activeSlide) {
+        const title = (activeSlide.querySelector<HTMLElement>("h1, h2, h3, [role='heading']")?.textContent
+          ?? activeSlide.textContent ?? "").replace(/\s+/gu, " ").trim().slice(0, 240);
+        emitSelection({ kind: "slide", slideNumber: active + 1, ...(title ? { title } : {}) });
+      }
     };
 
     const syncActiveFallback = () => {
@@ -1068,10 +1153,11 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
     // Renderer packages append their own stylesheet while loading. Keep the
     // host compatibility layer last without duplicating it.
     root.append(style);
+    installTextSelection(root);
     if (root.querySelector(".pptx-viewer-shell")) return installPresentation(root);
     if (root.querySelector(".pdf-shell")) return installPdf(root);
     if (root.querySelector("[data-file-viewer-spreadsheet-root]")) return installSpreadsheet(root);
-    return Boolean(root.querySelector(".pdf-shell, .docx-fit-viewer"));
+    return Boolean(root.querySelector(".pdf-shell, .docx-fit-viewer, .hangul-page"));
   };
 
   const refresh = () => {
@@ -1091,6 +1177,7 @@ export function installPagedDocumentChrome(host: HTMLElement, locale: "ko" | "en
       disconnectPresentation();
       disconnectPdf();
       disconnectSpreadsheet();
+      disconnectTextSelection();
     },
   };
 }

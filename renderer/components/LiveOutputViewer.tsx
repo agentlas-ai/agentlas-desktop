@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
+import type { OfficeEditIntent, OfficeTaskSelection } from "@/lib/office-document-session";
 import styles from "./LiveOutputViewer.module.css";
 
 const UniversalFileViewerEngine = dynamic(
@@ -30,6 +31,8 @@ export function LiveOutputViewer({
   openExternalHint,
   onExpand,
   fileInfo,
+  onOfficeSelection,
+  onOfficeEditIntent,
 }: {
   source: string;
   name: string;
@@ -52,6 +55,10 @@ export function LiveOutputViewer({
   onExpand?: () => void;
   /** Optional exact binding metadata kept behind the toolbar's collapsed info control. */
   fileInfo?: { sha256: string; binding: string; tabId: string };
+  /** Sends a Main-SHA-bound structured page/cell/slide/text selection to the owning task. */
+  onOfficeSelection?: (selection: OfficeTaskSelection) => void | Promise<void>;
+  /** Sends a revision-checked edit request. A successful callback is only an acknowledgement, not a saved file. */
+  onOfficeEditIntent?: (intent: OfficeEditIntent) => void | Promise<void>;
 }) {
   const [observedMedia, setObservedMedia] = useState<{
     source: string;
@@ -173,7 +180,7 @@ export function LiveOutputViewer({
       <MediaStatus state={mediaState} locale={locale} />
     </div>;
   }
-  return <UniversalFileViewerEngine source={source} name={name} mimeType={mimeType} size={size} locale={locale} compact={compact} fill={fill} onOpenExternal={onOpenExternal} openExternalHint={openExternalHint} onExpand={onExpand} fileInfo={fileInfo} />;
+  return <UniversalFileViewerEngine source={source} name={name} mimeType={mimeType} size={size} locale={locale} compact={compact} fill={fill} onOpenExternal={onOpenExternal} openExternalHint={openExternalHint} onExpand={onExpand} fileInfo={fileInfo} onOfficeSelection={onOfficeSelection} onOfficeEditIntent={onOfficeEditIntent} />;
 }
 
 function MediaStatus({ state, locale }: { state: "loading" | "ready" | "error"; locale: "ko" | "en" }) {
