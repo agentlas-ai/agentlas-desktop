@@ -1,3 +1,4 @@
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
 import { workerCapabilityRunner, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // Borrowed Hub task-force orchestration.
@@ -957,18 +958,12 @@ function permissionInvocationReceipt(
 function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permission"] {
   // ★오너 결정 2026-08-20 — Site 도 소유자가 준 권한 그대로 실행한다(read 강등 폐지).
   // 앱 생성 모드만 여전히 읽기다(스캐폴딩이 남의 프로젝트를 건드릴 이유가 없다).
-  return p.req.appsGenerateMode ? "read" : p.req.permissions;
+  return effectiveInvocationPermission(p.req.appsGenerateMode ? "read" : p.req.permissions, p.req.planMode);
 }
 
-/**
- * Child turns do not inherit the parent's authority.  A task-force packet is
- * normally the explicit grant: implementation and authored-file writing
- * packets may receive the bounded read-write worker mode.  An explicit One
- * `full` grant is stronger evidence than a planner-authored packet label,
- * though: a planner may call a real implementation job `review` even when the
- * person's request explicitly says to edit, test, and build.  In that case the
- * worker still receives only bounded workspace `write` (never `full`).
- */
+/** Child grants preserve explicit workspace intent under the host ceiling.
+ * Explicit read grants remain observational; omitted access retains the host's
+ * ordinary bounded execution intent, regardless of the packet's role label. */
 export function taskForceChildPermission(
   p: Pick<BorrowedTaskForceParams, "req">,
   inputType: BorrowedInputPacket["inputType"],
@@ -977,7 +972,7 @@ export function taskForceChildPermission(
   preApprovalStage = false,
   workspaceAccess?: "read" | "write",
 ): RunnerRequest["permission"] {
-  const host = p.req.appsGenerateMode ? "read" : p.req.permissions;
+  const host = effectiveInvocationPermission(p.req.appsGenerateMode ? "read" : p.req.permissions, p.req.planMode);
   if (host === "read") return "read";
   // A PRD-first gate is an execution boundary, not just prose in the packet.
   // While implementation is deferred, every child is forced read-only even
@@ -1361,6 +1356,13 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
   return "runtime default";
 }
 
+/** Apply after package/capability spreads, immediately before provider dispatch. */
+function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
+  return p.req.planMode === true
+    ? { ...request, permission: "read", planMode: true }
+    : request;
+}
+
 function taskForceRunnerBase(
   p: BorrowedTaskForceParams,
   childPermission: RunnerRequest["permission"] = taskForcePermission(p),
@@ -1368,6 +1370,7 @@ function taskForceRunnerBase(
 ): Pick<
   RunnerRequest,
   | "permission"
+  | "planMode"
   | "approvalChatId"
   | "approvalsReviewer"
   | "restrictedReadBoundary"
@@ -1381,13 +1384,14 @@ function taskForceRunnerBase(
   | "untrustedAllowedMcpTools"
   | "onAgentAppMcpRuntimeUnavailable"
 > {
-  const permission = childPermission;
+  const permission = effectiveInvocationPermission(childPermission, p.req.planMode);
   const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
     validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
   const toolsAllowed = !p.req.agentAppMode && taskForceAllowsTools(p);
   return {
+    ...(p.req.planMode === true ? { planMode: true as const } : {}),
     permission,
     approvalChatId: p.chat.id,
     // Keep Codex in `on-request`: `never` means "decline anything that would
@@ -1482,6 +1486,7 @@ function taskForceOrchestratorBoundary(
 ): Pick<
   RunnerRequest,
   | "permission"
+  | "planMode"
   | "restrictedReadBoundary"
   | "mcpConfigPath"
   | "mcpAllowedTools"
@@ -1514,6 +1519,7 @@ function taskForceOrchestratorBoundary(
     specs,
   });
   return {
+    ...(p.req.planMode === true ? { planMode: true as const } : {}),
     permission: "read",
     restrictedReadBoundary: p.restrictedReadBoundary,
     mcpConfigPath: undefined,
@@ -2473,6 +2479,7 @@ export function buildFallbackPackets(
      */
     requiresApproval: false,
     inputType: "specialist-task",
+    workspaceAccess: "read",
     inputKind: "text-request",
     // 이 브리프는 단톡 방에 One의 전달 카드로 그대로 보인다(emitDelegationMessage).
     // 라우팅 템플릿이 아니라 방의 언어로 말한다 (G-3, 2026-08-25).
@@ -4086,7 +4093,7 @@ async function runBorrowedAgentTurn(
               agentId: null,
               runtime: managerPlanActive,
             }, () => managerPlanPicked.runner(
-          {
+          taskForceRunnerRequest(p, {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
               !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
@@ -4119,7 +4126,7 @@ async function runBorrowedAgentTurn(
             runtimeSessionOwnerId: managerPlanInvocationId,
             agentId: p.orchestratorAgent.id,
             locale: p.locale,
-          },
+          }),
           {
             onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
             onPartial: () => {},
@@ -4245,7 +4252,7 @@ async function runBorrowedAgentTurn(
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => observedWorkerPicked.runner(request, events)), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
+            }, () => observedWorkerPicked.runner(taskForceRunnerRequest(p, request), events)), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 systemPrompt: [
                   buildBorrowedAgentSystemPrompt(workerSpec, packagePermission, materializedWorkerMcpTools),
@@ -4463,7 +4470,7 @@ async function runBorrowedAgentTurn(
         agentId: null,
         runtime: managerSynthesisActive,
           }, () => managerSynthesisPicked.runner(
-        {
+        taskForceRunnerRequest(p, {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
             !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
@@ -4496,7 +4503,7 @@ async function runBorrowedAgentTurn(
           runtimeSessionOwnerId: managerSynthesisInvocationId,
           agentId: p.orchestratorAgent.id,
           locale: p.locale,
-        },
+        }),
         {
           onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
@@ -4687,7 +4694,7 @@ async function runBorrowedAgentTurn(
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => observedDirectPicked.runner(request, events)), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => observedDirectPicked.runner(taskForceRunnerRequest(p, request), events)), capabilityEvidence(id, observedDirectInvocationId))(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(spec, packagePermission, materializedWorkerMcpTools),
@@ -5116,7 +5123,7 @@ async function runPlanner(
     systemPrompt: string,
     validationError = "",
   ): Promise<RunnerResult> => plannerPicked.runner(
-    {
+    taskForceRunnerRequest(p, {
       systemPrompt,
       history: boundedTaskForceHistory(history),
       userPrompt: [validationError
@@ -5140,7 +5147,7 @@ async function runPlanner(
       runtimeSessionOwnerId: invocationId,
       agentId: p.orchestratorAgent.id,
       locale: p.locale,
-    },
+    }),
     {
       onStatus: (status) => p.sink({
         kind: "tool-use",
@@ -6154,7 +6161,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     agentId: p.orchestratorAgent.id,
     runtime: runtimeForCall,
   }, () => pickedForCall.runner(
-    {
+    taskForceRunnerRequest(p, {
       systemPrompt: [
         buildSynthesisSystemPrompt(
           p.orchestratorAgent,
@@ -6192,7 +6199,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       runtimeSessionOwnerId: synthesisInvocationId,
       agentId: p.orchestratorAgent.id,
       locale: p.locale,
-    },
+    }),
     {
       onStatus: (status) => p.sink({
         kind: "tool-use",

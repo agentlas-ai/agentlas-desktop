@@ -19,6 +19,7 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
@@ -236,7 +237,7 @@ function firmProjectReadOnly(
   p: FirmRunParams,
   permission: RunnerRequest["permission"] = p.req.permissions,
 ): boolean {
-  return p.restrictedReadBoundary === true || (permission !== "write" && permission !== "full");
+  return p.req.planMode === true || p.restrictedReadBoundary === true || (permission !== "write" && permission !== "full");
 }
 
 /**
@@ -249,7 +250,7 @@ export function firmNodePermission(
   p: Pick<FirmRunParams, "req" | "restrictedReadBoundary">,
   turn: Pick<NodeTurn, "tier" | "phase">,
 ): RunnerRequest["permission"] {
-  const host = p.req.permissions;
+  const host = effectiveInvocationPermission(p.req.permissions, p.req.planMode);
   if (p.restrictedReadBoundary === true || host === "read") return "read";
   if (turn.tier === 1) return host;
   return turn.phase === "delegate" ? "write" : "read";
@@ -1073,12 +1074,18 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   ): Promise<RunnerResult> => {
     try {
       const capabilityAttemptId = `firm-worker:${node.id}:${randomUUID()}`;
-      const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? runtimePicked.runner
+      // Reapply the host ceiling after prepared capability fields are merged,
+      // including retries on another runtime. A child cannot lower Plan mode.
+      const boundedRunner: Runner = (request, events) => runtimePicked.runner(
+        p.req.planMode === true ? { ...request, permission: "read", planMode: true } : request,
+        events,
+      );
+      const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? boundedRunner
         : workerCapabilityRunner(p.prepareWorkerCapabilities, {
           workerId: node.id, attemptId: capabilityAttemptId, agentId: node.agentId ?? undefined, agentName: node.name,
           task: { ...p.workerCapabilityTask, brief: turn.userPrompt, doneWhen: p.workerCapabilityTask?.doneWhen ?? [] },
           runtime, ceiling: p.req.agentAppMode ? "agent-app" : p.workerCapabilityCeiling ?? "host",
-        }, runtimePicked.runner, (code) => {
+        }, boundedRunner, (code) => {
           tryRecordRunEvent({ runId: p.req.runId ?? p.chat.id, chatId: p.chat.id, agentId: node.id,
             kind: "worker_capability_preparation", payload: { code, attemptId: capabilityAttemptId } });
         });
@@ -1095,6 +1102,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           permission: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn
             ? "read"
             : nodePermission,
+          ...(p.req.planMode === true ? { planMode: true as const } : {}),
           approvalChatId: phase === "delegate" ? p.chat.id : undefined,
           approvalsReviewer:
             // A delegated worker is non-interactive. Requiring the allocation
