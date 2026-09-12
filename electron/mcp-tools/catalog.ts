@@ -12,6 +12,7 @@ import {
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
 import { builtinPluginCatalogEntriesIfPresent } from "../plugins/builtin";
+import { loadDedicatedPluginToolCatalog, type DedicatedPluginToolFailure } from "../plugins/tool-provider";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -355,6 +356,39 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   },
   ...builtinPluginCatalogEntriesIfPresent(["agentlas-time"]),
 ];
+
+const STATIC_CATALOG_LENGTH = MCP_TOOL_CATALOG.length;
+let dedicatedPluginFailures: DedicatedPluginToolFailure[] = [];
+
+/**
+ * Called after bundled releases have been atomically materialized. The exported
+ * array keeps its identity because renderer IPC, selection and attachment
+ * consumers all retain the same catalog reference for the process lifetime.
+ */
+export function refreshDedicatedPluginToolCatalog(): {
+  installed: string[];
+  failures: DedicatedPluginToolFailure[];
+} {
+  MCP_TOOL_CATALOG.splice(STATIC_CATALOG_LENGTH);
+  const loaded = loadDedicatedPluginToolCatalog();
+  const occupied = new Set(MCP_TOOL_CATALOG.map((entry) => entry.id));
+  const accepted: McpToolCatalogEntry[] = [];
+  dedicatedPluginFailures = [...loaded.failures];
+  for (const entry of loaded.entries) {
+    if (occupied.has(entry.id)) {
+      dedicatedPluginFailures.push({ slug: entry.id, reason: "plugin_tool_catalog_id_collision" });
+      continue;
+    }
+    occupied.add(entry.id);
+    accepted.push(entry);
+  }
+  MCP_TOOL_CATALOG.push(...accepted);
+  return { installed: accepted.map((entry) => entry.id), failures: [...dedicatedPluginFailures] };
+}
+
+export function dedicatedPluginToolCatalogFailures(): DedicatedPluginToolFailure[] {
+  return [...dedicatedPluginFailures];
+}
 
 export function getCatalogEntry(id: string): McpToolCatalogEntry | null {
   return MCP_TOOL_CATALOG.find((e) => e.id === id) ?? null;

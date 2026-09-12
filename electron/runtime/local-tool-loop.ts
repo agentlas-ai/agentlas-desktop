@@ -422,11 +422,16 @@ export async function runMainToolDispatch(
     }
     if (menu?.kind === "call") {
       if (broker) throw new Error("tool_menu_broker_not_supported");
-      // Preserve provider identity and the visible wrapper name on results;
-      // approval/dispatch below use the exact canonical prepared tool name.
+      // Keep the provider's correlation ID, but record the exact prepared tool
+      // that Main approved and executed. Recording only agentlas_tools_call
+      // makes a successful ledger row unable to identify its actual effect.
       const providerCall = call;
       const providerEvents = events;
-      events = { ...events, onTool: (_name, _args, ...result) => providerEvents.onTool?.(providerCall.toolName, providerCall.arguments, ...result) };
+      events = {
+        ...events,
+        onTool: (name, args, result, _providerId, ...rest) =>
+          providerEvents.onTool?.(name, args, result, providerCall.providerCallId ?? undefined, ...rest),
+      };
       call = { ...call, toolName: menu.toolName, arguments: menu.arguments };
     }
   } catch (error) {
@@ -803,10 +808,10 @@ export async function runLocalOpenAiChat(
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
     if (req.cwd) {
       // 파일 도구의 허용 루트를 실행 폴더로 좁혔음을 모델에게도 알려, 처음부터 이
-      // 폴더 안 절대경로로 쓰게 한다(밖은 서버가 거부하지만 왕복 낭비를 줄인다).
+      // 실제 파일 도구 계약에 맞춰 작업 폴더 상대경로를 안내한다.
       messages.splice(1, 0, {
         role: "system",
-        content: `File tools are sandboxed to this run's workspace folder: ${req.cwd}. Always pass absolute paths inside that folder; paths outside it will be rejected.`,
+        content: `File tools are sandboxed to this run's workspace folder: ${req.cwd}. Pass workspace-relative paths (for example, src/index.ts); absolute paths and paths escaping this folder will be rejected.`,
       });
     }
   }

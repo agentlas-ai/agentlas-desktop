@@ -2,6 +2,8 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { WorkLiveViewState, WorkLiveViewStatus } from "@/lib/types";
+import { useT } from "@/lib/i18n";
+import { IconAlertTriangle, IconRefresh } from "./Icon";
 import styles from "./NativeLiveWebView.module.css";
 
 // Native guests sit above the renderer DOM. Their hide/cleanup requests must be
@@ -39,6 +41,8 @@ function stateLabel(state: WorkLiveViewState): string {
 }
 
 export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode = "app", viewId, taskScopeId, active = true, retainOnUnmount = false, onStatus, stableNavigation = false }: Props) {
+  const { locale } = useT();
+  const ko = locale === "ko";
   const generationRef = useRef(0);
   const visibilityRef = useRef(active);
   visibilityRef.current = active;
@@ -249,28 +253,24 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
     <section className={styles.shell} data-bare={bare ? "true" : "false"} aria-label={`${title} live app`}>
       {!bare && <div className={styles.toolbar}>
         <div className={styles.identity}>
-          <span className={`${styles.statusDot} ${styles[status.state]}`} aria-hidden="true" />
+          <span className={`${styles.statusDot} ${styles[status.state]}`} role="img" aria-label={stateLabel(status.state)} title={stateLabel(status.state)} />
           <strong>{title}</strong>
-          <span className={styles.statusLabel}>{stateLabel(status.state)}</span>
-          {runtimeLabel ? <span className={styles.runtimeLabel}>{runtimeLabel}</span> : null}
         </div>
         <div className={styles.actions}>
-          <button type="button" onClick={reload}>Reload</button>
+          <button type="button" onClick={reload} aria-label={ko ? "새로고침" : "Reload"} title={ko ? "새로고침" : "Reload"}><IconRefresh size={15} /></button>
         </div>
       </div>}
       {!bare && <div className={styles.address} title={status.url || url}>{status.url || url}</div>}
       <div ref={stageRef} className={styles.stage}>
         {status.state !== "ready" && !openError ? (
-          <div className={styles.message} role="status" aria-live="polite">
+          <div className={styles.message} role="status" aria-label={ko ? "미리보기 여는 중" : "Opening preview"} title={ko ? "미리보기 여는 중" : "Opening preview"}>
             <span className={styles.spinner} aria-hidden="true" />
-            Connecting to the real app runtime…
           </div>
         ) : null}
         {openError ? (
-          <div className={styles.message} role="alert">
-            <strong>Live app unavailable</strong>
-            <span>{openError}</span>
-            <button type="button" onClick={reload}>Try again</button>
+          <div className={styles.message} role="alert" aria-label={ko ? "미리보기를 열지 못했습니다" : "Could not open preview"}>
+            <span title={ko ? "미리보기를 열지 못했습니다" : "Could not open preview"}><IconAlertTriangle size={18} /></span>
+            <button type="button" onClick={reload} aria-label={ko ? "다시 시도" : "Try again"} title={ko ? "다시 시도" : "Try again"}><IconRefresh size={16} /></button>
           </div>
         ) : null}
       </div>

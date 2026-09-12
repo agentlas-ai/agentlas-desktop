@@ -44,12 +44,35 @@ export interface ManuscriptPdfResult {
   toolchain?: TectonicToolchainReceipt;
 }
 
-const TOOL_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", path.join(os.homedir(), ".local/bin"), path.join(os.homedir(), ".cargo/bin")];
+/** Platform-native executable candidates; no shell or inferred engine fallback. */
+export function tectonicCandidates(input: { platform: NodeJS.Platform; home: string; pathValue: string }): string[] {
+  const windows = input.platform === "win32";
+  const paths = windows ? path.win32 : path.posix;
+  const executable = windows ? "tectonic.exe" : "tectonic";
+  const fixed = [
+    ...(windows ? [] : ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]),
+    paths.join(input.home, ".local", "bin"),
+    paths.join(input.home, ".cargo", "bin"),
+  ];
+  const fromPath = input.pathValue.split(windows ? ";" : ":")
+    .map(directory => directory.trim().replace(/^"(.*)"$/, "$1")).filter(Boolean);
+  const seen = new Set<string>();
+  return [...fixed, ...fromPath].map(directory => paths.join(directory, executable)).filter(candidate => {
+    const key = windows ? candidate.toLowerCase() : candidate;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export function resolveTectonic(): string | null {
-  const fromPath = (process.env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, process.platform === "win32" ? "tectonic.exe" : "tectonic"));
-  for (const candidate of [...TOOL_DIRS.map((dir) => path.join(dir, "tectonic")), ...fromPath]) {
-    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch { /* keep looking */ }
+  const candidates = tectonicCandidates({ platform: process.platform, home: os.homedir(), pathValue: process.env.PATH ?? process.env.Path ?? "" });
+  for (const candidate of candidates) {
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* keep looking */ }
   }
   return null;
 }

@@ -17,6 +17,7 @@ import { beginAccountedInference } from "../long-run/accounting-context";
 // is genuinely correct.
 
 import { detectRuntimes } from "../runtime/detect";
+import { invocationJudgmentContext } from "../runtime/judgment-context";
 import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
@@ -296,7 +297,7 @@ function judgmentCacheKey(kind: string, input: string): string {
 }
 
 /** Share the verdict-cache scope with callers that suppress duplicate warming. */
-export function runtimeSelectionCacheScope(selection?: RuntimeSelection): string {
+export function runtimeSelectionCacheScope(selection = invocationJudgmentContext()?.selection): string {
   if (!selection) {
     const pool = readJudgmentPool();
     return pool.state === "unconfigured" ? "" : `\u0000orchestrator-pool:${pool.fingerprint}`;
@@ -306,6 +307,8 @@ export function runtimeSelectionCacheScope(selection?: RuntimeSelection): string
     backend: selection.backend ?? null,
     source: selection.source ?? null,
     model: selection.model ?? null,
+    effort: selection.effort ?? null,
+    longContext: selection.longContext ?? null,
   })}`;
 }
 
@@ -466,6 +469,13 @@ async function callJudgmentModelDetailed(opts: {
    */
   authoring?: boolean;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
+  const inherited = invocationJudgmentContext();
+  opts = {
+    ...opts,
+    runtimeSelection: opts.runtimeSelection ?? inherited?.selection,
+    signal: opts.signal && inherited?.signal && opts.signal !== inherited.signal
+      ? AbortSignal.any([opts.signal, inherited.signal]) : opts.signal ?? inherited?.signal,
+  };
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
   let runtimeReceipt: JudgmentRuntimeReceipt | undefined;
@@ -581,8 +591,8 @@ async function callJudgmentModelDetailed(opts: {
             userPrompt: opts.input,
             backendLabel: picked.label,
             model: runtime.model ?? undefined,
-            longContext: false,
-            effort: "low",
+            longContext: opts.runtimeSelection ? runtime.longContextEnabled : false,
+            effort: opts.runtimeSelection ? runtime.effort ?? undefined : "low",
             permission: "read",
             // Pure classification: zero tools, no local rules or memory, no
             // session persistence, and the runner fails closed if it cannot

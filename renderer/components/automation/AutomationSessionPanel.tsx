@@ -10,7 +10,7 @@ import type { KeyboardEvent } from "react";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
-import { IconClose } from "@/components/Icon";
+import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
 import type {
   AutomationExecutionPermission,
@@ -600,8 +600,8 @@ export function AutomationSessionPanel({
       <header>
         <span>{ko ? "세션 대화" : "Session"}</span>
         <div className="automation-session-head-actions">
-          <button type="button" onClick={() => void load()}>
-            {ko ? "새로고침" : "Refresh"}
+          <button type="button" onClick={() => void load()} aria-label={ko ? "새로고침" : "Refresh"} title={ko ? "새로고침" : "Refresh"}>
+            <IconRefresh size={15} />
           </button>
           {onCollapse ? (
             <button
@@ -610,7 +610,7 @@ export function AutomationSessionPanel({
               aria-label={ko ? "세션 대화 접기" : "Collapse session"}
               title={ko ? "세션 대화 접기" : "Collapse session"}
             >
-              ⟨
+              <IconArrowLeft size={15} />
             </button>
           ) : null}
         </div>

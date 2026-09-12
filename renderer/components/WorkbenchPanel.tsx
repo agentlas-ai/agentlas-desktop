@@ -3,7 +3,7 @@
 // in-app right-side workspace. Surface manifests remain declarative; registered
 // live apps run in a sandboxed native web surface with no Desktop IPC.
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildSurfaceDelegationPlan } from "@shared/surface-delegation";
 import type { AgentlasSurfaceCredentialRequest, AgentlasSurfacePaymentRequest } from "@shared/surface-delegation";
@@ -21,6 +21,11 @@ import type {
 import type { CodeArtifact } from "./Markdown";
 import { CodeIdeViewer } from "./CodeIdeViewer";
 import {
+  IconAlertTriangle,
+  IconCopy,
+  IconDownload,
+  IconMoreHorizontal,
+  IconRefresh,
   IconBolt,
   IconCircleDollar,
   IconCheck,
@@ -39,6 +44,7 @@ import {
   IconWand,
 } from "./Icon";
 import { useT } from "@/lib/i18n";
+import menu from "./PanelPopover.module.css";
 import { LiveDeviceMockup } from "./LiveDeviceMockup";
 import { OneLiveMap } from "./one/OneLiveMap";
 import { FlintChart } from "./FlintChart";
@@ -95,8 +101,6 @@ export function WorkbenchPanel({
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
   embedded?: boolean;
 }) {
-  /* ★머리말의 복사 단추가 아무 말도 하지 않았다 (실측 2026-09-08). */
-  const [headerCopy, setHeaderCopy] = useState<"idle" | "done" | "failed">("idle");
   /*
    * ★대화상자는 Escape 로 닫혀야 한다 (실측 2026-09-08).
    *   이 패널에는 Escape 처리가 없어 나가는 길이 마우스뿐이었다.
@@ -105,7 +109,7 @@ export function WorkbenchPanel({
   useEffect(() => {
     if (!onClose || embedded) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.defaultPrevented || event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
       event.stopPropagation();
       onClose();
     };
@@ -118,11 +122,6 @@ export function WorkbenchPanel({
 
   const isSurface = surface !== null;
   const title = surface?.manifest.title ?? artifact?.language ?? "Artifact";
-  const subtitle = surface
-    ? `${surface.manifest.domain} · ${surface.manifest.layout}`
-    : artifact
-      ? t("chatstream.lines", { count: artifact.code.split("\n").length })
-      : "";
   const outputKind = surface
     ? designSurfaceKindForOutput(surface.manifest.layout)
     : "code";
@@ -166,40 +165,22 @@ export function WorkbenchPanel({
       `}</style>
       {!liveAppSurface && (
         <>
-          <header style={header}>
+          <header style={header} data-workbench-toolbar="true">
             <div style={mark}>
               {isSurface ? <IconSparkles size={15} /> : <IconLayers size={15} />}
             </div>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={eyebrow}>{isSurface ? "Agent OS Workbench" : "Code Artifact"}</div>
               <div style={titleStyle} title={title}>
                 {title}
               </div>
             </div>
-            {subtitle && <span style={chip}>{subtitle}</span>}
-            <button
-              onClick={() => {
-                /* ★눌러도 아무 말이 없던 복사 (실측 2026-09-08) — 아래 chip 과 같은 알림을 쓴다. */
-                void navigator.clipboard.writeText(
-                  surface ? JSON.stringify(surface.manifest, null, 2) : artifact?.code ?? "",
-                ).then(() => setHeaderCopy("done")).catch(() => setHeaderCopy("failed"));
-                window.setTimeout(() => setHeaderCopy("idle"), 1800);
-              }}
-              style={ghostButton}
-            >
-              {headerCopy === "done"
-                ? t("chatstream.copied")
-                : headerCopy === "failed"
-                  ? (t("chatstream.copy_failed") || "복사 실패")
-                  : t("chatstream.copy")}
-            </button>
+            <ArtifactExportMenu artifact={artifact} surface={surface} />
             {onClose && (
               <button onClick={onClose} aria-label={t("chatstream.close_panel")} title={t("chatstream.close")} style={iconButton}>
                 <IconClose size={15} />
               </button>
             )}
           </header>
-          <ExportBar artifact={artifact} surface={surface} />
         </>
       )}
       {surface ? (
@@ -211,11 +192,8 @@ export function WorkbenchPanel({
   );
 }
 
-/**
- * ExportBar — 산출물을 .agentlas/MD/JSON 등으로 가져갈 수 있다는 점을 노출. "내보내기: lock-in 없음".
- * MD/JSON 복사는 클립보드로, "파일로 저장"은 fs.saveTextFile(네이티브 저장 다이얼로그)로 디스크에 실제 기록한다.
- */
-function ExportBar({
+/** Export actions share the result toolbar; file contents remain unchanged. */
+export function ArtifactExportMenu({
   artifact,
   surface,
 }: {
@@ -225,6 +203,22 @@ function ExportBar({
   const { locale } = useT();
   const ko = locale === "ko";
   const [copied, setCopied] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const timerRef = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timerRef.current), []);
+  useEffect(() => {
+    if (!open) return;
+    containerRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const outside = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open]);
+  const closeMenu = () => { setOpen(false); triggerRef.current?.focus(); };
+
 
   // 실제로 클립보드에 넣을 수 있는 내용물만 — 없으면 버튼 비활성.
   const copyAsMarkdown = () => {
@@ -255,7 +249,8 @@ function ExportBar({
   };
   const flash = (which: string) => {
     setCopied(which);
-    window.setTimeout(() => setCopied((cur) => (cur === which ? null : cur)), 1600);
+    window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopied((cur) => (cur === which ? null : cur)), 1600);
   };
 
   // 파일로 저장 — 네이티브 저장 다이얼로그(fs.saveTextFile)로 디스크에 실제로 쓴다. lock-in 없음.
@@ -273,66 +268,41 @@ function ExportBar({
       ? JSON.stringify(surface.manifest, null, 2)
       : (artifact?.code ?? "");
     if (!content) return;
-    const res = await api.saveTextFile(name, content);
-    if (res.ok) flash("saved");
-    else if (!res.canceled) flash("save-error");
+    try {
+      const res = await api.saveTextFile(name, content);
+      if (res.ok) flash("saved");
+      else if (!res.canceled) flash("save-error");
+    } catch { flash("save-error"); }
   };
 
   const hasContent = Boolean(artifact || surface);
   if (!hasContent) return null;
 
-  // ArtifactFileBridge — 이 산출물이 디스크 어디에 연결돼 있는지 실측 경로만 표시(없으면 미표시).
-  const diskPath = surface ? surfaceDiskPath(surface) : null;
-
-  return (
-    <div style={exportBar}>
-      <span style={exportLabel}>
-        {ko ? "내보내기" : "Export"}
-        <span style={exportLockFree}>{ko ? "lock-in 없음" : "no lock-in"}</span>
-      </span>
-      <button type="button" style={exportButton} onClick={copyAsMarkdown}>
-        {copied === "md" ? (ko ? "복사됨" : "Copied") : copied === "md-error" ? (ko ? "복사 실패" : "Copy failed") : ko ? "MD 복사" : "Copy MD"}
-      </button>
-      <button type="button" style={exportButton} onClick={copyAsJson}>
-        {copied === "json" ? (ko ? "복사됨" : "Copied") : copied === "json-error" ? (ko ? "복사 실패" : "Copy failed") : ko ? "JSON 복사" : "Copy JSON"}
-      </button>
-      {/* 파일로 저장 — 네이티브 저장 다이얼로그로 디스크에 실제 기록(fs.saveTextFile) */}
-      <button
-        type="button"
-        style={exportButton}
-        onClick={saveToFile}
-        title={ko ? "산출물을 내 디스크의 파일로 저장합니다 (lock-in 없음)" : "Save the artifact to a file on your disk (no lock-in)"}
-      >
-        {copied === "saved"
-          ? ko ? "저장됨" : "Saved"
-          : copied === "save-error"
-            ? ko ? "저장 실패" : "Save failed"
-            : ko ? "파일로 저장" : "Save to file"}
-      </button>
-      {diskPath && (
-        <span style={exportFileBridge} title={diskPath}>
-          <IconLayers size={11} />
-          {ko ? "파일 위치" : "On disk"} · <code style={exportFilePath}>{diskPath}</code>
-        </span>
-      )}
-    </div>
-  );
-}
-
-/**
- * ArtifactFileBridge — surface가 실제 디스크에 연결된 경로를 실측으로 찾는다.
- * 1순위: app.deployment.repoPath, 2순위: artifacts 데이터셋 row의 path 필드. 둘 다 없으면 null
- * (지어내지 않음 — CodeArtifact에는 경로 자체가 없어 항상 null).
- */
-function surfaceDiskPath(surface: WorkbenchSurface): string | null {
-  const repoPath = surface.manifest.app?.deployment?.repoPath;
-  if (typeof repoPath === "string" && repoPath.trim()) return repoPath.trim();
-  const artifactData = dataByName(surface.manifest, "artifacts") ?? firstData(surface.manifest, "artifacts");
-  for (const row of rowsOf(artifactData)) {
-    const path = stringField(row, "path") || stringField(row, "filePath") || stringField(row, "rootPath");
-    if (path && path.trim()) return path.trim();
-  }
-  return null;
+  const feedback = copied?.endsWith("-error") ? (ko ? "내보내기 실패 · 다시 시도" : "Export failed · Retry")
+    : copied === "saved" ? (ko ? "파일 저장됨" : "File saved")
+    : copied ? (ko ? "복사됨" : "Copied") : null;
+  const label = feedback ?? (ko ? "내보내기 메뉴" : "Export menu");
+  return <div ref={containerRef} style={{ position: "relative", flexShrink: 0 }} onKeyDown={event => {
+    if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); closeMenu(); }
+    if (event.key === "Tab" && open) setOpen(false);
+    if (open && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const items = [...(containerRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+      const at = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (at + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[next]?.focus();
+    }
+  }}>
+    <button ref={triggerRef} type="button" style={iconButton} title={label} aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      {copied?.endsWith("-error") ? <IconAlertTriangle size={16} /> : feedback ? <IconCheck size={16} /> : <IconMoreHorizontal size={17} />}
+    </button>
+    {open && <div className={menu.panelPopover} style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 30 }} role="menu" aria-label={ko ? "내보내기" : "Export"}>
+      <button type="button" role="menuitem" className={menu.panelMenuRow} onClick={() => { closeMenu(); void copyAsMarkdown(); }}>{ko ? "Markdown 복사" : "Copy Markdown"}<IconCopy size={14} /></button>
+      <button type="button" role="menuitem" className={menu.panelMenuRow} onClick={() => { closeMenu(); void copyAsJson(); }}>{ko ? "JSON 복사" : "Copy JSON"}<IconCopy size={14} /></button>
+      <hr className={menu.panelMenuSeparator} />
+      <button type="button" role="menuitem" className={menu.panelMenuRow} disabled={!window.agentlas?.fs?.saveTextFile} onClick={() => { closeMenu(); void saveToFile(); }}>{ko ? "파일로 저장" : "Save to file"}<IconDownload size={14} /></button>
+    </div>}
+  </div>;
 }
 
 /** Surface manifest를 사람이 읽는 마크다운으로 — 내보내기용. 실측 필드만, 추측 금지. */
@@ -475,11 +445,11 @@ function RunningAppPreview({
       : undefined;
     return (
       <div data-artifact-id={appId} data-ready-revision={state.readyRevision} style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
-      {state.updateFailure && <p role="status" style={{margin:"6px 12px",fontSize:12}}>새 버전을 준비하지 못해 이전 정상 버전을 표시하고 있습니다.</p>}
       <LiveDeviceMockup
         url={state.url}
         title={title}
         runtimeLabel={state.runtime ?? undefined}
+        updateFailed={Boolean(state.updateFailure)}
         locale={locale}
         viewId={viewId}
       />
@@ -488,14 +458,10 @@ function RunningAppPreview({
   }
   return (
     <section style={appRuntimeUnavailable} role={state.error ? "alert" : "status"}>
-      <span style={appRuntimeStatusDot} />
-      <div>
-        <strong>{state.pending ? "Starting the real app runtime…" : "Live app unavailable"}</strong>
-        <p>{state.pending ? "Allocating a private loopback URL and attaching the in-app web surface." : state.error}</p>
-      </div>
-      {!state.pending ? (
-        <button type="button" style={exportButton} onClick={() => setAttempt((value) => value + 1)}>Retry</button>
-      ) : null}
+      <span title={locale === "ko" ? (state.pending ? "미리보기 여는 중" : "미리보기를 열지 못했습니다") : (state.pending ? "Opening preview" : "Could not open preview")} aria-label={locale === "ko" ? (state.pending ? "미리보기 여는 중" : "미리보기를 열지 못했습니다") : (state.pending ? "Opening preview" : "Could not open preview")} role="img">
+        {state.pending ? <IconRefresh size={18} /> : <IconAlertTriangle size={18} />}
+      </span>
+      {!state.pending ? <button type="button" style={iconButton} title={locale === "ko" ? "다시 시도" : "Retry"} aria-label={locale === "ko" ? "다시 시도" : "Retry"} onClick={() => setAttempt(value => value + 1)}><IconRefresh size={16} /></button> : null}
     </section>
   );
 }
@@ -896,15 +862,6 @@ function GenericSurface({
   });
   return (
     <div style={surfaceBody}>
-      <section style={genericHero}>
-        <div style={eyebrowDark}>Generated Workbench</div>
-        <h2 style={surfaceTitle}>{manifest.title}</h2>
-        <div className="agentlas-workbench-pills" style={formatPills}>
-          <span style={darkPill}>{manifest.domain}</span>
-          <span style={darkPill}>{manifest.layout}</span>
-          <span style={darkPill}>{manifest.widgets.length} widgets</span>
-        </div>
-      </section>
       {mapBlock && (
         <section style={genericMapSection} data-surface-renderer="live-map">
           <SectionTitle icon={<IconRoute size={14} />} label={mapBlock.title} />
@@ -1983,13 +1940,14 @@ const liveEmbeddedShell: CSSProperties = {
 };
 
 const header: CSSProperties = {
-  padding: "10px 14px",
+  padding: "4px 10px",
   display: "flex",
   alignItems: "center",
-  gap: 10,
+  gap: 8,
   background: "var(--paper)",
   borderBottom: "1px solid var(--paper-edge)",
-  minHeight: 56,
+  flexShrink: 0,
+  minHeight: 40,
 };
 
 const mark: CSSProperties = {
@@ -2004,44 +1962,14 @@ const mark: CSSProperties = {
   flexShrink: 0,
 };
 
-const eyebrow: CSSProperties = {
-  fontSize: 10,
-  color: "var(--muted-deep)",
-  fontWeight: 700,
-  textTransform: "uppercase",
-};
-
 const titleStyle: CSSProperties = {
   fontFamily: "var(--font-head)",
-  fontSize: 14,
-  fontWeight: 700,
+  fontSize: 12,
+  fontWeight: 500,
   color: "var(--ink)",
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-};
-
-const chip: CSSProperties = {
-  fontSize: 11,
-  padding: "4px 8px",
-  borderRadius: 8,
-  background: "var(--paper-2)",
-  color: "var(--muted-deep)",
-  border: "1px solid var(--paper-edge)",
-  maxWidth: 180,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const ghostButton: CSSProperties = {
-  fontSize: 11,
-  padding: "5px 10px",
-  borderRadius: 8,
-  background: "var(--paper-2)",
-  color: "var(--ink-soft)",
-  border: "1px solid var(--paper-edge)",
-  fontWeight: 700,
 };
 
 const iconButton: CSSProperties = {
@@ -2054,37 +1982,6 @@ const iconButton: CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-};
-
-const exportBar: CSSProperties = {
-  flexShrink: 0,
-  display: "flex",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 7,
-  padding: "8px 14px",
-  borderBottom: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-};
-
-const exportLabel: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  fontSize: 11,
-  fontWeight: 800,
-  color: "var(--muted-deep)",
-  marginRight: 2,
-};
-
-const exportLockFree: CSSProperties = {
-  fontSize: 9.5,
-  fontWeight: 800,
-  color: "var(--green-deep)",
-  background: "rgba(80,150,110,0.12)",
-  border: "1px solid rgba(80,150,110,0.24)",
-  borderRadius: 999,
-  padding: "1px 6px",
 };
 
 const exportButton: CSSProperties = {
@@ -2101,28 +1998,6 @@ const exportButton: CSSProperties = {
 
 
 // ArtifactFileBridge — 디스크 경로 칩. 좁은 폭에서 줄여 넘침 방지.
-const exportFileBridge: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 5,
-  minWidth: 0,
-  maxWidth: "100%",
-  marginLeft: "auto",
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  fontWeight: 700,
-};
-
-const exportFilePath: CSSProperties = {
-  minWidth: 0,
-  maxWidth: 260,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  color: "var(--ink-soft)",
-};
 
 const surfaceBody: CSSProperties = {
   flex: 1,
@@ -2269,14 +2144,6 @@ const appHeroCopy: CSSProperties = {
   maxWidth: 480,
 };
 
-const genericHero: CSSProperties = {
-  margin: 14,
-  minHeight: 112,
-  padding: 16,
-  borderRadius: 8,
-  background: "var(--black)",
-  color: "white",
-};
 
 const genericMapSection: CSSProperties = {
   minWidth: 0,
@@ -2346,14 +2213,6 @@ const appRuntimeUnavailable: CSSProperties = {
   color: "var(--muted-deep)",
 };
 
-const appRuntimeStatusDot: CSSProperties = {
-  width: 9,
-  height: 9,
-  flex: "0 0 auto",
-  borderRadius: 999,
-  background: "var(--warn)",
-  boxShadow: "0 0 0 4px rgba(245,158,11,.12)",
-};
 
 const appPreviewTopbar: CSSProperties = {
   minHeight: 46,

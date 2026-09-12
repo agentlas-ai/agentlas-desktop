@@ -13,12 +13,13 @@
 }
 
 .windowBar {
-  min-height: 42px;
+  min-height: 40px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 12px 0 16px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--device-shell-line);
   background: color-mix(in srgb, var(--device-shell-bg) 94%, var(--design-panel-muted, var(--paper-3)));
 }
@@ -36,16 +37,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  font-weight: 700;
-}
-
-/* 창 제목 옆의 종류 표기 — 무엇을 보고 있는지(미리보기)를 말하되 장치를 단정하지 않는다. */
-.windowKind {
-  flex: 0 0 auto;
-  color: var(--muted-deep);
-  font-size: 10px;
-  font-weight: 600;
-  white-space: nowrap;
+  font-weight: 500;
 }
 
 .windowDot {
@@ -57,19 +49,11 @@
   box-shadow: 0 0 0 3px rgb(61 164 90 / 13%);
 }
 
-.liveBadge {
-  padding: 3px 6px;
-  border: 1px solid color-mix(in srgb, var(--design-accent, var(--accent)) 35%, transparent);
-  border-radius: 999px;
-  color: var(--design-accent, var(--accent));
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: .08em;
-}
+.windowDot[data-live-state="off"], .windowDot[data-live-state="opening"], .windowDot[data-live-state="loading"] { background: var(--muted-deep); box-shadow: none; }
+.windowDot[data-live-state="offline"] { background: var(--error, #b45309); box-shadow: none; }
 
-.windowActions { gap: 2px; }
-.windowButton,
-.deviceControls button {
+.windowActions { gap: 2px; flex-shrink: 0; }
+.windowButton {
   display: grid;
   place-items: center;
   border: 0;
@@ -85,9 +69,7 @@
 }
 
 .windowButton:hover,
-.windowButton:focus-visible,
-.deviceControls button:hover,
-.deviceControls button:focus-visible {
+.windowButton:focus-visible {
   outline: none;
   background: var(--design-accent-soft, var(--paper-3));
   color: var(--design-ink, var(--ink));
@@ -224,39 +206,6 @@
   cursor: pointer;
 }
 
-.deviceControls {
-  min-height: 48px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 14px 10px;
-  border-top: 1px solid var(--device-shell-line);
-  background: var(--device-shell-bg);
-}
-
-.deviceControls::before {
-  position: absolute;
-  content: "";
-}
-
-.deviceControls button {
-  width: 31px;
-  height: 31px;
-  border-radius: 50%;
-}
-
-.deviceToggle {
-  width: auto !important;
-  min-width: 62px;
-  padding: 0 9px;
-  border: 1px solid var(--device-shell-line) !important;
-  border-radius: 999px !important;
-  font-size: 10px;
-}
-
-.deviceControls .passiveControl { color: var(--muted); }
-
 .shell[data-expanded="true"] .deviceFrame { width: min(390px, 100%); }
 
 @media (max-width: 700px) {
@@ -266,6 +215,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .windowButton,
-  .deviceControls button { transition: none; }
+  .windowButton { transition: none; }
 }
+
+.windowButton:disabled { opacity: .4; cursor: default; }

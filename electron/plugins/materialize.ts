@@ -23,7 +23,7 @@ function bundledPluginsRoot(): string {
   return path.join(appPath, "dist", "plugins");
 }
 
-function installedPluginsRoot(): string {
+export function installedPluginsRoot(): string {
   return path.join(os.homedir(), ".agentlas", "plugins");
 }
 
@@ -290,6 +290,33 @@ function exactInstalledMetadata(
       && value.digest === digest;
   } catch {
     return false;
+  }
+}
+
+export type VerifiedInstalledPluginRelease = {
+  slug: string;
+  version: string;
+  digest: string;
+  directory: string;
+};
+
+/**
+ * Recomputes the exact installed release before another subsystem trusts files
+ * from it. `.install.json` is only a receipt; matching its stored digest to the
+ * current real, symlink-free tree is the admission check.
+ */
+export function verifiedInstalledPluginRelease(destination: string): VerifiedInstalledPluginRelease | null {
+  try {
+    const root = path.resolve(installedPluginsRoot());
+    const directory = path.resolve(destination);
+    if (path.dirname(directory) !== root) return null;
+    const identity = readManifestIdentity(directory);
+    if (path.basename(directory) !== identity.slug) return null;
+    const digest = releaseDigest(directory);
+    if (!exactInstalledMetadata(directory, identity.slug, identity.version, digest)) return null;
+    return { ...identity, digest, directory };
+  } catch {
+    return null;
   }
 }
 

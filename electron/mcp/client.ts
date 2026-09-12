@@ -1,3 +1,4 @@
+import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { officeTaskContextForInvocation } from "../office-task-context";
@@ -1562,7 +1563,22 @@ export interface DurableUserMessageHookBlock {
   message: string;
 }
 
-export async function runMcpInvocation(
+export function runMcpInvocation(
+  req: McpInvocationRequest,
+  sink: EventSink,
+  signal?: AbortSignal,
+  workspaceBinding?: InvocationWorkspaceBinding,
+  executionContext?: InvocationExecutionContext,
+  onDurableUserMessage?: (messageId: string) => Promise<void | DurableUserMessageHookBlock>,
+  hostNoticePurpose?: ChatHostNotice["purpose"],
+  browserPresentation: "foreground" | "background" = "background",
+): Promise<McpInvocationResult> {
+  return withInvocationJudgmentContext(req.runtimeSelection, signal, () => runMcpInvocationInContext(
+    req, sink, signal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation,
+  ));
+}
+
+async function runMcpInvocationInContext(
   req: McpInvocationRequest,
   sink: EventSink,
   signal?: AbortSignal,
@@ -2547,6 +2563,7 @@ ${effectiveUserPrompt}`;
     longContext: active.longContextEnabled,
     effort: active.effort ?? undefined,
   };
+  bindInvocationJudgmentRuntime(confirmedRuntime);
   const runtimeLabel = `${confirmedRuntime.kind}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
   console.info(
     `[runtime-selection] run=${req.runId ?? "-"} node=${executionContext?.nodeId ?? "root"} `
@@ -2596,6 +2613,7 @@ ${effectiveUserPrompt}`;
     const previous = controllerSelectionForFallback;
     controllerSelectionForFallback = nextSelection;
     req = { ...req, runtimeSelection: nextSelection };
+    bindInvocationJudgmentRuntime(nextSelection);
     /*
      * ★폴백은 이번 실행의 우회로지 **사용자의 선택을 바꾸는 일이 아니다**.
      *

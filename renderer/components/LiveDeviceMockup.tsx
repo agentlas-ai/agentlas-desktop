@@ -3,14 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkLiveViewState } from "@/lib/types";
 import {
-  IconCamera,
   IconExpand,
-  IconFilm,
   IconHome,
-  IconLogOut,
   IconPower,
   IconRefresh,
   IconClose,
+  IconMonitor,
+  IconSmartphone,
+  IconAlertTriangle,
 } from "@/components/Icon";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
 import styles from "./LiveDeviceMockup.module.css";
@@ -21,6 +21,7 @@ export type LiveDeviceMockupProps = {
   url: string;
   title: string;
   runtimeLabel?: string;
+  updateFailed?: boolean;
   viewId?: string;
   locale?: Locale;
   onClose?: () => void;
@@ -40,7 +41,7 @@ function makeViewId(): string {
  * Main-owned WebContentsView used by Work and One. This deliberately does not
  * pretend to be an iOS/Android binary or invoke Xcode/Gradle.
  */
-export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "ko", onClose }: LiveDeviceMockupProps) {
+export function LiveDeviceMockup({ url, title, runtimeLabel, updateFailed = false, viewId, locale = "ko", onClose }: LiveDeviceMockupProps) {
   const ko = locale === "ko";
   const viewIdRef = useRef(viewId || makeViewId());
   const effectiveViewId = viewIdRef.current;
@@ -89,7 +90,7 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
       window.clearInterval(timer);
     };
   }, [localOrigin, poweredOff]);
-  const badge = serverGone || viewState === "error"
+  const badge = poweredOff ? (ko ? "미리보기 꺼짐" : "Preview off") : serverGone || viewState === "error"
     ? (ko ? "연결 끊김" : "OFFLINE")
     : viewState === "ready"
       ? "LIVE"
@@ -120,30 +121,23 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
     >
       <header className={styles.windowBar}>
         <div className={styles.windowTitle}>
-          <span className={styles.windowDot} aria-hidden="true" />
-          {/*
-           * ★ 창 제목은 **실제로 도는 것**의 이름이어야 한다.
-           *
-           * 여기에는 "iOS 시뮬레이터"가 박혀 있었다. 이 컴포넌트 자신의 주석이 바로 위에서
-           * "iOS/Android 바이너리인 척하지 않는다"고 적어 두었는데, 정작 제목이 그 척을 하고
-           * 있었다 — 안에서 도는 것은 Xcode 시뮬레이터가 아니라 Main 이 소유한 로컬
-           * 미리보기(WebContentsView, 웹은 iframe)다. 오너가 화면을 보고 바로 잡아냈다.
-           *
-           * OS 이름은 박지 않는다: 이 틀은 표현일 뿐이고 뷰포트는 폰/데스크탑을 오갈 수 있다.
-           * 관측된 사실("무엇을 미리보고 있는가")만 적고, 이름이 없으면 종류만 말한다.
-           * LIVE 배지가 "관측된 사실일 때만 단다"와 같은 규칙이다.
-           */}
-          <strong>{previewName}</strong>
-          <span className={styles.windowKind}>{ko ? "미리보기" : "Preview"}</span>
-          <span className={styles.liveBadge} data-live-state={serverGone || viewState === "error" ? "offline" : viewState}>{badge}</span>
+          <span className={styles.windowDot} data-live-state={poweredOff ? "off" : serverGone || viewState === "error" ? "offline" : viewState} role="img" aria-label={badge} title={badge} />
+          <strong title={previewName}>{previewName}</strong>
         </div>
         <div className={styles.windowActions}>
+          {updateFailed && <span className={styles.windowButton} role="img" aria-label={ko ? "갱신 실패 · 마지막 미리보기 표시 중" : "Update failed · Showing last preview"} title={ko ? "갱신 실패 · 마지막 미리보기 표시 중" : "Update failed · Showing last preview"}><IconAlertTriangle size={15} /></span>}
+          <button type="button" className={styles.windowButton} onClick={goHome} disabled={poweredOff} aria-label={ko ? "홈" : "Home"} title={ko ? "홈" : "Home"}><IconHome size={15} /></button>
+          <button type="button" className={styles.windowButton} onClick={reload} disabled={poweredOff} aria-label={ko ? "앱 새로고침" : "Reload app"} title={ko ? "앱 새로고침" : "Reload app"}><IconRefresh size={15} /></button>
+          <button type="button" className={styles.windowButton} onClick={() => setDevice(current => current === "desktop" ? "phone" : "desktop")} aria-label={ko ? "미리보기 화면 크기 전환" : "Toggle preview viewport"} aria-pressed={device === "phone"} title={device === "desktop" ? (ko ? "휴대전화 화면" : "Phone viewport") : (ko ? "데스크탑 화면" : "Desktop viewport")}>
+            {device === "desktop" ? <IconSmartphone size={15} /> : <IconMonitor size={15} />}
+          </button>
+          <button type="button" className={styles.windowButton} onClick={togglePower} aria-label={poweredOff ? (ko ? "미리보기 켜기" : "Start preview") : (ko ? "미리보기 끄기" : "Stop preview")} aria-pressed={!poweredOff} title={poweredOff ? (ko ? "미리보기 켜기" : "Start preview") : (ko ? "미리보기 끄기" : "Stop preview")}><IconPower size={15} /></button>
           <button
             type="button"
             className={styles.windowButton}
             onClick={() => setExpanded((current) => !current)}
-            aria-label={expanded ? (ko ? "목업 축소" : "Restore device mockup") : (ko ? "목업 확대" : "Expand device mockup")}
-            title={expanded ? (ko ? "목업 축소" : "Restore") : (ko ? "목업 확대" : "Expand")}
+            aria-label={expanded ? (ko ? "미리보기 축소" : "Restore preview") : (ko ? "미리보기 확대" : "Expand preview")}
+            title={expanded ? (ko ? "미리보기 축소" : "Restore") : (ko ? "미리보기 확대" : "Expand")}
           >
             <IconExpand size={14} />
           </button>
@@ -151,8 +145,8 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
             type="button"
             className={styles.windowButton}
             onClick={close}
-            aria-label={ko ? "앱 목업 닫기" : "Close app mockup"}
-            title={ko ? "앱 목업 닫기" : "Close mockup"}
+            aria-label={ko ? "미리보기 닫기" : "Close preview"}
+            title={ko ? "미리보기 닫기" : "Close preview"}
           >
             <IconClose size={14} />
           </button>
@@ -192,7 +186,7 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
                 {poweredOff ? (
                   <div className={styles.poweredOff} role="status">
                     <IconPower size={24} />
-                    <strong>{ko ? "앱 목업이 꺼져 있습니다" : "App mockup is powered off"}</strong>
+                    <strong>{ko ? "미리보기가 꺼져 있습니다" : "Preview is powered off"}</strong>
                     <button type="button" onClick={() => setPoweredOff(false)}>
                       {ko ? "다시 켜기" : "Turn on"}
                     </button>
@@ -216,53 +210,7 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
         )}
       </div>
 
-      <footer className={styles.deviceControls} aria-label={ko ? "미리보기 제어" : "Preview controls"}>
-        <button
-          type="button"
-          className={styles.deviceToggle}
-          onClick={() => setDevice((current) => (current === "desktop" ? "phone" : "desktop"))}
-          aria-label={ko ? "미리보기 화면 크기 전환" : "Toggle preview viewport"}
-          title={device === "desktop" ? (ko ? "데스크탑 · 눌러서 폰" : "Desktop · tap for phone") : (ko ? "폰 · 눌러서 데스크탑" : "Phone · tap for desktop")}
-        >
-          {device === "desktop" ? (ko ? "데스크탑" : "Desktop") : (ko ? "폰" : "Phone")}
-        </button>
-        <button type="button" onClick={goHome} aria-label={ko ? "홈" : "Home"} title={ko ? "홈" : "Home"}>
-          <IconHome size={15} />
-        </button>
-        {/*
-         * ★ 아직 없는 기능을 있는 것처럼 부르지 않는다 (같은 계열, 한 겹 아래).
-         * 이 둘은 `onClick` 이 없다 — 눌러도 아무 일도 일어나지 않는다. 그런데 "(준비 중)"
-         * 은 마우스를 올려야 보이는 title 에만 있고, 화면 낭독기가 읽는 이름은 그냥
-         * "스크린샷"·"화면 녹화"였다. 이름에도 상태를 적고 실제로 비활성으로 둔다.
-         */}
-        <button
-          type="button"
-          className={styles.passiveControl}
-          disabled
-          aria-label={ko ? "스크린샷 (준비 중)" : "Screenshot (coming soon)"}
-          title={ko ? "스크린샷 (준비 중)" : "Screenshot (coming soon)"}
-        >
-          <IconCamera size={15} />
-        </button>
-        <button
-          type="button"
-          className={styles.passiveControl}
-          disabled
-          aria-label={ko ? "화면 녹화 (준비 중)" : "Record screen (coming soon)"}
-          title={ko ? "화면 녹화 (준비 중)" : "Record screen (coming soon)"}
-        >
-          <IconFilm size={15} />
-        </button>
-        <button type="button" onClick={reload} aria-label={ko ? "앱 새로고침" : "Reload app"} title={ko ? "앱 새로고침" : "Reload app"}>
-          <IconRefresh size={15} />
-        </button>
-        <button type="button" onClick={togglePower} aria-label={ko ? "전원" : "Power"} title={ko ? "전원" : "Power"}>
-          <IconPower size={15} />
-        </button>
-        <button type="button" onClick={close} aria-label={ko ? "목업 닫기" : "Exit mockup"} title={ko ? "목업 닫기" : "Exit mockup"}>
-          <IconLogOut size={15} />
-        </button>
-      </footer>
+
     </section>
   );
 }

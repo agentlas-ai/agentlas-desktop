@@ -367,7 +367,8 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
           display: "flex",
           alignItems: "center",
           gap: 8,
-          padding: "10px 12px",
+          padding: "4px 10px",
+          minHeight: 40,
           borderBottom: "var(--hairline)",
           background: "var(--paper-2)",
         }}
@@ -400,15 +401,11 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
             </button>
             <button
               onClick={() => void pickFolder()}
-              style={{
-                ...iconBtn(),
-                fontSize: 11,
-                width: "auto",
-                padding: "0 8px",
-              }}
+              style={iconBtn()}
+              aria-label={t("workspace.change_folder")}
               title={t("workspace.change_folder")}
             >
-              {t("workspace.change_folder")}
+              <IconFolder size={13} />
             </button>
           </>
         )}

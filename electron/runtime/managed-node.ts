@@ -167,6 +167,8 @@ interface AsyncVerificationResult {
 }
 
 export interface ResolveManagedNodeRuntimeAsyncOptions {
+  /** Security-sensitive consumers revalidate the full supplied runtime tree. */
+  forceVerify?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -681,7 +683,7 @@ function verifyManagedNodeRuntimeRootInChild(
 async function resolveManagedNodeRuntimeAsyncOnce(
   options: ResolveManagedNodeRuntimeAsyncOptions = {},
 ): Promise<ManagedNodeResolution> {
-  if (cached) return cached;
+  if (cached && !options.forceVerify) return cached;
   if (options.signal?.aborted) return { ok: false, reason: "managed Node runtime verification cancelled" };
   const failures: string[] = [];
   for (const root of candidateRoots()) {

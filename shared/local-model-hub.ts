@@ -129,6 +129,7 @@ export interface LocalEngineInstallationReceipt {
   enginePackageId: string;
   enginePackageSha256: string;
   provenanceVerified: boolean;
+  provenanceVerification?: { verifier: "managed-sigstore"; bundleSha256: string; certificateIdentity: string; sourceCommit: string };
   executableSha256: string;
   executableRelativePath: string;
   /** Exact files from the attested archive; required before loading Windows DLLs. */

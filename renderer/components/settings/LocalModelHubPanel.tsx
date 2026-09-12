@@ -7,15 +7,12 @@ import { IconBolt, IconCode, IconCpu, IconImage, IconMoreHorizontal, IconPower, 
 import type { LocalModelHubSnapshot } from "@shared/local-model-hub";
 import menu from "@/components/PanelPopover.module.css";
 import styles from "./LocalModelHubPanel.module.css";
+import { LocalModelFitIcon, LocalModelInstallDialog, type LocalModelInstallPlan } from "./LocalModelInstallDialog";
 
-type Operation = { id: string; packageId: string; kind: "engine" | "model" | "load" | "capability" };
+type Operation = { id: string; packageId: string; kind: "engine" | "model" | "load" | "capability"; alsoIds?: string[] };
 function bytes(value: number | null): string {
   if (value === null) return "—";
   return value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(value / 1024 ** 2)} MiB`;
-}
-function fitLabel(value: string | undefined, ko: boolean): string {
-  const labels: Record<string, [string, string]> = { recommended: ["메모리 여유", "Memory available"], runnable: ["실행 가능 추정", "Estimated to fit"], may_be_slow: ["느릴 수 있음", "May be slow"], not_recommended: ["메모리 부족 가능", "Memory may be limited"], unsupported: ["지원하지 않음", "Unsupported"], unknown: ["실행 확인 필요", "Compatibility unconfirmed"] };
-  return (labels[value ?? "unknown"] ?? labels.unknown)[ko ? 0 : 1];
 }
 function checked(value: string | undefined, ko: boolean): string {
   return value === "verified" ? ko ? "확인됨" : "Verified" : value === "failed" ? ko ? "실패" : "Failed" : ko ? "미검사" : "Not tested";
@@ -24,6 +21,7 @@ function checked(value: string | undefined, ko: boolean): string {
 export function LocalModelHubPanel({ locale, standalone = false, selectedPackageId, onOperationStarted }: { locale: string; standalone?: boolean; selectedPackageId?: string; onOperationStarted?: (id: string) => void }) {
   const ko = locale === "ko";
   const [snapshot, setSnapshot] = useState<LocalModelHubSnapshot | null>(null);
+  const [confirmation, setConfirmation] = useState<{ packageId?: string; engineOnly: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -72,9 +70,8 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
   // A requested exact package never temporarily falls back to another model.
   const requestedId = selectedPackageId !== lastRequestedPackage.current ? selectedPackageId : selectedModelId;
   const model = requestedId ? filtered.find(item => item.packageId === requestedId) ?? null : filtered[0] ?? null;
-  const engineInstall = snapshot?.engineInstallations.find(item => item.enginePackageId === engine?.packageId);
+  const engineInstall = snapshot?.engineInstallations.find(item => item.enginePackageId === engine?.packageId && item.enginePackageSha256 === engine?.sha256 && item.provenanceVerified);
   const modelInstall = [...(snapshot?.modelInstallations ?? [])].reverse().find(item => item.modelPackageId === model?.packageId);
-  const fit = snapshot?.fitAssessments.find(item => item.modelPackageId === model?.packageId);
   const resident = snapshot?.resident;
   const residentModel = snapshot?.modelInstallations.find(item => item.installationId === resident?.installationId);
   const selectedResident = !!modelInstall && resident?.installationId === modelInstall.installationId;
@@ -83,14 +80,27 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
     ? [...(snapshot?.engineProgress ?? []), ...(snapshot?.modelProgress ?? [])].find(item => item.packageId === operation.packageId) : null;
   const unavailable = !!snapshot?.unavailableReason;
   const beginOperation = (value: Operation) => { onOperationStarted?.(value.id); setOperation(value); };
-  const installEngine = () => { if (!engine) return; closeMenu(); void run(ko ? "실행 엔진 준비 중…" : "Preparing engine…", async api => {
-    const id = crypto.randomUUID(); beginOperation({ id, packageId: engine.packageId, kind: "engine" });
-    await api.localModelHub.installEnginePackage({ packageId: engine.packageId, operationId: id });
-  }); };
-  const installModel = () => { if (!model) return; void run(ko ? "모델 다운로드 중…" : "Downloading model…", async api => {
-    const id = crypto.randomUUID(); beginOperation({ id, packageId: model.packageId, kind: "model" });
-    await api.localModelHub.installModelPackage({ packageId: model.packageId, operationId: id });
-  }); };
+  const installEngine = () => { if (!engine) return; closeMenu(); setConfirmation({ packageId: model?.packageId, engineOnly: true }); };
+  const installModel = () => { if (model) setConfirmation({ packageId: model.packageId, engineOnly: false }); };
+  const confirmInstall = (plan: LocalModelInstallPlan) => {
+    setConfirmation(null);
+    void run(ko ? "설치 준비 중…" : "Preparing installation…", async api => {
+      const ids: string[] = [], pending: Promise<unknown>[] = [];
+      if (plan.installEngine) {
+        const id = crypto.randomUUID(); ids.push(id); onOperationStarted?.(id);
+        pending.push(api.localModelHub.installEnginePackage({ packageId: plan.engine.packageId, operationId: id }));
+      }
+      if (plan.installModel && plan.model) {
+        const id = crypto.randomUUID(); ids.push(id); onOperationStarted?.(id);
+        pending.push(api.localModelHub.installModelPackage({ packageId: plan.model.packageId, operationId: id }));
+      }
+      const id = ids.at(-1)!;
+      setOperation({ id, packageId: plan.installModel ? plan.model!.packageId : plan.engine.packageId, kind: plan.installModel ? "model" : "engine", alsoIds: ids.slice(0,-1) });
+      const results = await Promise.allSettled(pending);
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+    });
+  };
   const importModel = () => { if (!model) return; closeMenu(); void run(ko ? "파일 확인 중…" : "Checking file…", async api => {
     const receipt = await api.localModelHub.importModel({ packageId: model.packageId });
     if (!receipt) setNotice(ko ? "파일 선택을 취소했습니다." : "File selection cancelled.");
@@ -112,7 +122,11 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
     const id = crypto.randomUUID(); beginOperation({ id, packageId: modelInstall.modelPackageId, kind: "capability" });
     await api.localModelHub.testCapabilities({ installationId: modelInstall.installationId, strictJson: true, toolUse: true, cancellation: true, operationId: id });
   }); };
-  const cancel = async () => { if (!operation) return; try { await bridge()?.localModelHub.cancelOperation({ operationId: operation.id }); } catch { setNotice(ko ? "중지 상태를 확인하지 못했습니다. 다시 시도하세요." : "Could not confirm cancellation. Try again."); } };
+  const cancel = async () => { if (!operation) return;
+    const api = bridge()?.localModelHub;
+    const results = await Promise.allSettled([operation.id,...(operation.alsoIds ?? [])].map(operationId => api?.cancelOperation({ operationId })));
+    if (results.some(row => row.status === "rejected")) setNotice(ko ? "중지 상태를 확인하지 못했습니다. 다시 시도하세요." : "Could not confirm cancellation. Try again.");
+  };
   const toggleMenu = (value: "computer" | "model", button: HTMLElement) => { menuButton.current = button; setPanel(panel === value ? null : value); };
   return <section className={styles.library} style={{ marginTop: standalone ? 0 : 32 }} aria-label={ko ? "모델 라이브러리" : "Model library"}>
     <div className={styles.toolbar}>
@@ -149,14 +163,14 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
           {filtered.map(item => {
             const installed = snapshot.modelInstallations.some(value => value.modelPackageId === item.packageId);
             return <button type="button" role="option" key={item.packageId} aria-selected={model?.packageId === item.packageId} data-model-package={item.packageId} className={styles.model} onClick={() => { setSelectedModelId(item.packageId); setNotice(null); }}>
-              <span>{item.repository.split("/").at(-1)}</span><small>{item.repository.split("/")[0]} · {item.quantization} · {bytes(item.byteLength)}</small><small>{installed ? ko ? "설치됨" : "Installed" : ko ? "다운로드 가능" : "Available to download"}</small>
+              <span>{item.repository.split("/").at(-1)} <LocalModelFitIcon snapshot={snapshot} packageId={item.packageId} ko={ko}/></span><small>{item.repository.split("/")[0]} · {item.quantization} · {bytes(item.byteLength)}</small><small>{installed ? ko ? "설치됨" : "Installed" : ko ? "다운로드 가능" : "Available to download"}</small>
             </button>;
           })}
           {!filtered.length && <p className={styles.empty}>{ko ? "검색 결과가 없습니다." : "No matching models."}</p>}
         </div>
         {model ? <div className={styles.detail} data-selected-package={model.packageId}>
           <h2>{model.repository.split("/").at(-1)}</h2><p className={styles.muted}>{model.repository.split("/")[0]} · {model.quantization} · {bytes(model.byteLength)}</p>
-          <p className={styles.muted} title={ko ? "메모리 기준 추정이며 실제 실행 확인과 다를 수 있습니다." : "Memory estimate; actual execution may differ."}>{fitLabel(fit?.class,ko)}</p>
+          <LocalModelFitIcon snapshot={snapshot} packageId={model.packageId} ko={ko}/>
           <div className={styles.actions}>
             {!modelInstall ? <button type="button" className={styles.primary} disabled={!!busy || model.gated || unavailable} onClick={installModel}>{model.gated ? ko ? "접근 승인 필요" : "Access approval required" : ko ? "다운로드" : "Download"}</button>
               : !engineInstall ? <button type="button" className={styles.primary} disabled={!!busy || !engine || unavailable} onClick={installEngine}>{ko ? "실행 엔진 준비" : "Set up engine"}</button>
@@ -171,5 +185,6 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
       {busy && <div role="status" className={styles.progress} data-operation-package={operation?.packageId}><span>{busy}{progress ? ` ${bytes(progress.downloadedBytes)} / ${bytes(progress.totalBytes)}` : ""}</span>{operation && <button type="button" onClick={() => void cancel()}>{ko ? "중지" : "Stop"}</button>}</div>}
       {notice && <p role="status" className={styles.notice}>{notice}</p>}
     </>}
+    {confirmation && <LocalModelInstallDialog key={`${confirmation.packageId}:${confirmation.engineOnly}`} {...confirmation} ko={ko} onCancel={() => setConfirmation(null)} onConfirm={confirmInstall}/> }
   </section>;
 }

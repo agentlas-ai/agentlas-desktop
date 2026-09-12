@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, open, readdir, readlink, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type {
   LocalEngineInstallationReceipt,
   LocalEnginePackageIdentity,
@@ -12,6 +12,7 @@ import {
 } from "../../shared/local-model-hub";
 import { sha256File } from "./download-manager";
 import { extractEngineZip } from "./archive";
+import { verifyManagedEngineAttestation } from "./attestation";
 
 interface CommandResult {
   exitCode: number | null;
@@ -20,7 +21,7 @@ interface CommandResult {
 }
 
 export interface LocalEngineInstallerOptions {
-  ghCandidates?: readonly string[];
+  attestationVerifier?: typeof verifyManagedEngineAttestation;
   /** Injectable host facts for archive policy tests; production always uses actual process facts. */
   platform?: NodeJS.Platform;
   arch?: string;
@@ -51,13 +52,6 @@ async function regularFile(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function findGh(candidates: readonly string[]): Promise<string | null> {
-  for (const candidate of candidates) {
-    if (await regularFile(candidate)) return candidate;
-  }
-  return null;
 }
 
 export async function verifyWindowsPortableExecutable(path: string, arch: string): Promise<void> {
@@ -104,7 +98,7 @@ async function walkFiles(root: string, rejectLinks = false): Promise<string[]> {
 
 export class LocalEngineInstaller {
   private readonly commandRunner: (executable: string, args: readonly string[], signal?: AbortSignal) => Promise<CommandResult>;
-  private readonly ghCandidates: readonly string[];
+  private readonly attestationVerifier: typeof verifyManagedEngineAttestation;
   private readonly platform: NodeJS.Platform;
   private readonly arch: string;
 
@@ -112,11 +106,7 @@ export class LocalEngineInstaller {
     this.commandRunner = options.commandRunner ?? runCommand;
     this.platform = options.platform ?? process.platform;
     this.arch = options.arch ?? process.arch;
-    this.ghCandidates = options.ghCandidates ?? (this.platform === "win32" ? [
-      ...(process.env.ProgramFiles ? [join(process.env.ProgramFiles,"GitHub CLI","gh.exe")] : []),
-      ...(process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA,"Microsoft","WinGet","Links","gh.exe")] : []),
-      ...(process.env.PATH ?? "").split(";").filter(value => isAbsolute(value)).map(value => join(value,"gh.exe")),
-    ] : ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]);
+    this.attestationVerifier = options.attestationVerifier ?? verifyManagedEngineAttestation;
   }
 
   async install(
@@ -135,20 +125,8 @@ export class LocalEngineInstaller {
     if ((await stat(verifiedArchivePath)).size !== identity.byteLength) throw new Error("engine_archive_size_mismatch");
     if (await sha256File(verifiedArchivePath) !== identity.sha256) throw new Error("engine_archive_sha256_mismatch");
 
-    const gh = await findGh(this.ghCandidates);
-    if (!gh) throw new Error("engine_attestation_verifier_unavailable");
+    const provenanceVerification = await this.attestationVerifier(identity, verifiedArchivePath, join(this.installRoot, ".verification"), signal);
     signal?.throwIfAborted();
-    const attestation = await this.commandRunner(gh, [
-      "attestation",
-      "verify",
-      verifiedArchivePath,
-      "--repo",
-      identity.provenance.repository,
-      "--signer-repo",
-      identity.provenance.signerWorkflowRepository,
-    ], signal);
-    signal?.throwIfAborted();
-    if (attestation.exitCode !== 0) throw new Error("engine_artifact_attestation_failed");
 
     const tar = "/usr/bin/tar";
     if (identity.archiveFormat === "tar.gz") {
@@ -194,6 +172,7 @@ export class LocalEngineInstaller {
         enginePackageId: identity.packageId,
         enginePackageSha256: identity.sha256,
         provenanceVerified: true,
+        provenanceVerification,
         executableSha256,
         executableRelativePath: executableRelativePath.split(sep).join("/"),
         runtimeFiles,

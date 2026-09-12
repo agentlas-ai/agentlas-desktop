@@ -36,6 +36,10 @@ export const IconChevronRight = (p: Props) => svg("M9 6l6 6-6 6", p);
 export const IconChevronDown = (p: Props) => svg("M6 9l6 6 6-6", p);
 export const IconArrowLeft = (p: Props) => svg("M19 12H5M12 19l-7-7 7-7", p);
 export const IconClose = (p: Props) => svg("M6 6l12 12M18 6L6 18", p);
+export const IconCopy = (p: Props) => svg("M9 9h12v12H9zM15 9V3H3v12h6", p);
+export const IconDownload = (p: Props) => svg("M12 3v12M7 10l5 5 5-5M4 16v5h16v-5", p);
+export const IconMonitor = (p: Props) => svg("M3 4h18v13H3zM12 17v4M8 21h8", p);
+export const IconSmartphone = (p: Props) => svg("M6 2h12v20H6zM10 18h4", p);
 export const IconSearch = (p: Props) =>
   svg("M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3", p);
 export const IconFilter = (p: Props) => svg("M4 6h16M7 12h10M10 18h4", p);
