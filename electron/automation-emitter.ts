@@ -87,6 +87,8 @@ function parseMonitor(raw: unknown): EmittedMonitor | null {
     minIntervalMs:min,maxIntervalMs:max,...(source ? {source}:{}),...(condition ? {condition}:{}) };
 }
 export interface ParsedAutomation {
+  action?: "pause" | "resume";
+  expectedDefinitionDigest?: string;
   automationId?: string;
   monitor?: EmittedMonitor;
   name: string;
@@ -478,6 +480,17 @@ export function parseAutomations(text: string): ParseAutomationsResult {
               return null;
             }
             const o = d as Record<string, unknown>;
+            if (o.action !== undefined) {
+              if ((o.action !== "pause" && o.action !== "resume") || typeof o.automationId !== "string"
+                || !o.automationId.trim() || o.automationId.length > 512
+                || Object.keys(o).some(key=>!["action","automationId","name","expectedDefinitionDigest"].includes(key))
+                || (o.action === "resume" && (typeof o.expectedDefinitionDigest !== "string" || !/^[a-f0-9]{64}$/.test(o.expectedDefinitionDigest)))) {
+                errors.push("Invalid automation lifecycle action, exact ID, or definition digest"); return null;
+              }
+              return {action:o.action,automationId:o.automationId.trim(),
+                ...(typeof o.expectedDefinitionDigest === "string" ? {expectedDefinitionDigest:o.expectedDefinitionDigest}:{}),
+                name:typeof o.name === "string" ? o.name.trim() : "",prompt:"",schedule:"",scheduleEmitted:false};
+            }
             const name = typeof o.name === "string" ? o.name.trim() : "";
             const prompt = typeof o.prompt === "string" ? o.prompt.trim() : "";
             const agent = typeof o.agent === "string" ? o.agent.trim() : "";

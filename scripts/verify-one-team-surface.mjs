@@ -167,7 +167,7 @@ assert.doesNotMatch(
 );
 assert.doesNotMatch(adaptiveResult, /router\.push\(`\/automation\/flow/, "One automation cards must not navigate to Work");
 assert.match(adaptiveResult, /intent:\s*"run_automation"[\s\S]*?targetRef:\s*`automation:\$\{automationId\}`/);
-assert.match(adaptiveResult, /intent:\s*"open_automation"[\s\S]*?Edit with @graph/);
+assert.match(adaptiveResult, /intent:\s*"open_automation"[\s\S]*?Edit schedule/);
 assert.match(adaptiveResult, /Progress stays in (?:this conversation|One)/);
 assert.match(electronIpc, /const interviewDeadline = Date\.now\(\) \+ 120_000/);
 assert.match(electronIpc, /timeoutMs: Math\.max\(1, interviewDeadline - Date\.now\(\)\)/);

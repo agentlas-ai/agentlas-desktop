@@ -1,3 +1,4 @@
+import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
@@ -1150,7 +1151,9 @@ type AutomationRegistrationResult = {
   timezone: string | null;
   notificationPolicy: "meaningful_changes" | "every_run";
   executionAvailability: "app-running";
-  action: "created" | "updated";
+  action: "created" | "updated" | "paused" | "resumed";
+  enabled: boolean;
+  activeRunStopRequested?: boolean;
   name: string;
   schedule: string;
   targetType: "agent" | "firm" | "hub";
@@ -1160,16 +1163,19 @@ type AutomationRegistrationResult = {
 };
 
 function automationActionLabel(action: AutomationRegistrationResult["action"], locale: "ko" | "en"): string {
-  if (locale === "ko") return action === "created" ? "등록" : "업데이트";
-  return action === "created" ? "created" : "updated";
+  if (locale === "ko") return {created:"등록",updated:"업데이트",paused:"중지",resumed:"다시 켜기"}[action];
+  return action;
 }
 
 function automationRegistrationToolName(action: AutomationRegistrationResult["action"]): string {
-  return action === "created" ? "automation.create" : "automation.update";
+  return {created:"automation.create",updated:"automation.update",paused:"automation.pause",resumed:"automation.resume"}[action];
 }
 
 function automationRegistrationResultText(item: AutomationRegistrationResult, locale: "ko" | "en"): string {
   const action = automationActionLabel(item.action, locale);
+  if (item.action === "paused") return locale === "ko"
+    ? `${item.name} · 예약 실행을 껐습니다${item.activeRunStopRequested ? " · 진행 중인 실행에 중지를 요청했습니다" : ""}.`
+    : `${item.name} · scheduled runs are disabled${item.activeRunStopRequested ? "; Stop requested for the active run" : ""}.`;
   if (locale === "ko") {
     return `${item.name} ${action} 완료 · 앱 실행 중 확인 · ${item.schedule}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
   }
@@ -1181,9 +1187,9 @@ function automationFinalSummary(items: AutomationRegistrationResult[], locale: "
   const lines = items.map((item) => {
     const action = automationActionLabel(item.action, locale);
     const nextRun =
-      item.nextRunAt && locale === "ko"
+      item.enabled && item.nextRunAt && locale === "ko"
         ? ` · 다음 실행 ${item.nextRunAt}`
-        : item.nextRunAt
+        : item.enabled && item.nextRunAt
           ? ` · next run ${item.nextRunAt}`
           : "";
     return `- ${item.name} · ${action} · ${item.schedule}${nextRun}`;
@@ -4647,6 +4653,13 @@ ${effectiveUserPrompt}`;
       turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`);
     }
   }
+  if (!req.agentAppMode && executionContext?.source !== "automation" && (chat.kind !== "division" || req.automationId)) {
+    const lifecycleContext = automationLifecycleContext(chat.id, req.automationId);
+    if (lifecycleContext) {
+      systemPrompt = `${systemPrompt}\n\n${lifecycleContext}`;
+      turnContextParts.push(lifecycleContext);
+    }
+  }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division" && canWrite) {
     systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
@@ -5911,7 +5924,7 @@ ${effectiveUserPrompt}`;
           console.warn("[automation] parse warnings:", errors.join("; "));
           automationRefusals.push(...errors);
         }
-        if (autos.length > 0 && !canWrite) {
+        if (autos.some(a=>a.action!=="pause") && !canWrite) {
           automationPermissionRequired = true;
           sink({
             kind: "tool-use",
@@ -5930,7 +5943,30 @@ ${effectiveUserPrompt}`;
                 : `Setting up ${autos.length} automation${autos.length === 1 ? "" : "s"}`,
           });
         }
-        for (const a of canWrite && !signal?.aborted ? autos : []) {
+        for (const a of !signal?.aborted ? autos.filter(a=>canWrite || a.action==="pause") : []) {
+          if (a.action) {
+            const operationId = `host-automation:${randomUUID()}`;
+            const toolName = a.action === "pause" ? "automation.pause" : "automation.resume";
+            sink({kind:"tool-use",tool:{id:operationId,name:toolName,args:JSON.stringify({automationId:a.automationId,action:a.action})}});
+            try {
+              const applied = applyAutomationLifecycle({parsed:a,chatId:chat.id,sessionAutomationId:req.automationId,canWrite});
+              const row = applied.automation;
+              const registration: AutomationRegistrationResult = {action:applied.action,enabled:row.enabled,
+                activeRunStopRequested:applied.activeRunStopRequested,automationId:row.id,name:row.name,
+                timezone:row.timezone ?? null,notificationPolicy:row.monitor?.notificationPolicy ?? "every_run",
+                executionAvailability:"app-running",schedule:row.scheduleHuman,targetType:row.targetType,targetId:row.targetId,
+                nextRunAt:row.nextRunAt,graph:Boolean(row.graph)};
+              automationRegistrations.push(registration);
+              sink({kind:"tool-use",tool:{id:operationId,name:toolName,isError:false,args:JSON.stringify(registration),
+                result:automationRegistrationResultText(registration,locale)}});
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : "automation_lifecycle_failed";
+              const message = automationLifecycleRefusalText(reason,locale);
+              automationRefusals.push(message);
+              sink({kind:"tool-use",tool:{id:operationId,name:toolName,isError:true,args:JSON.stringify({automationId:a.automationId,action:a.action,reasonCode:reason}),result:message}});
+            }
+            continue;
+          }
           // 등록 시점 구조 게이트 — 정의·사유는 automation-emitter의
           // automationRegistrationGateProblems (순수 함수, 하네스와 동일 코드 객체).
           const gateProblems = automationRegistrationGateProblems(a);
@@ -5990,6 +6026,7 @@ ${effectiveUserPrompt}`;
             const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
             const registration: AutomationRegistrationResult = {
               action: "updated",
+              enabled: updatedWithGraph.enabled,
               automationId: updatedWithGraph.id,
               timezone: updatedWithGraph.timezone ?? null,
               notificationPolicy: updatedWithGraph.monitor?.notificationPolicy ?? "every_run",
@@ -6010,6 +6047,8 @@ ${effectiveUserPrompt}`;
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
                   automationId: registration.automationId,
+                  action: registration.action,
+                  enabled: registration.enabled,
                   nextRunAt: registration.nextRunAt,
                   timezone: registration.timezone,
                   notificationPolicy: registration.notificationPolicy,
@@ -6055,6 +6094,7 @@ ${effectiveUserPrompt}`;
             });
             const registration: AutomationRegistrationResult = {
               action: "created",
+              enabled: created.enabled,
               automationId: created.id,
               timezone: created.timezone ?? null,
               notificationPolicy: created.monitor?.notificationPolicy ?? "every_run",
@@ -6075,6 +6115,8 @@ ${effectiveUserPrompt}`;
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
                   automationId: registration.automationId,
+                  action: registration.action,
+                  enabled: registration.enabled,
                   nextRunAt: registration.nextRunAt,
                   timezone: registration.timezone,
                   notificationPolicy: registration.notificationPolicy,

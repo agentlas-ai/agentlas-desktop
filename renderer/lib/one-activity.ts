@@ -1279,20 +1279,21 @@ export interface OneAutomationRegistration {
   automationId?: string;
   /** Stable per-turn identity — the source activity item's id. */
   itemId: string;
-  action: "created" | "updated";
+  action: "created" | "updated" | "paused" | "resumed";
   name: string;
   schedule?: string;
   targetType?: string;
   targetId?: string;
   graph?: boolean;
+  enabled?: boolean;
 }
 
-const AUTOMATION_REGISTRATION_TOOL_RE = /^automation\.(create|update)$/;
+const AUTOMATION_REGISTRATION_TOOL_RE = /^automation\.(create|update|pause|resume)$/;
 
 export function extractAutomationRegistrations(state: OneActivityState): OneAutomationRegistration[] {
   const registrations: OneAutomationRegistration[] = [];
   for (const item of state.items) {
-    if (item.kind !== "tool" || !item.tool || item.tool.isError) continue;
+    if (item.kind !== "tool" || item.status !== "completed" || !item.tool || item.tool.isError || item.tool.result === undefined) continue;
     const match = AUTOMATION_REGISTRATION_TOOL_RE.exec(item.tool.name.trim());
     if (!match) continue;
     let args: Record<string, unknown>;
@@ -1305,15 +1306,19 @@ export function extractAutomationRegistrations(state: OneActivityState): OneAuto
     }
     const name = typeof args.name === "string" ? args.name.trim() : "";
     if (!name) continue;
+    const lifecycle = match[1] === "pause" || match[1] === "resume";
+    if (lifecycle && (typeof args.automationId !== "string" || !args.automationId.trim()
+      || args.enabled !== (match[1] === "resume"))) continue;
     registrations.push({
       itemId: item.id,
       ...(typeof args.automationId === "string" && args.automationId.trim() ? { automationId: args.automationId.trim() } : {}),
-      action: match[1] === "create" ? "created" : "updated",
+      action: match[1] === "create" ? "created" : match[1] === "update" ? "updated" : match[1] === "pause" ? "paused" : "resumed",
       name,
       ...(typeof args.schedule === "string" && args.schedule.trim() ? { schedule: args.schedule.trim() } : {}),
       ...(typeof args.targetType === "string" ? { targetType: args.targetType } : {}),
       ...(typeof args.targetId === "string" ? { targetId: args.targetId } : {}),
       ...(typeof args.graph === "boolean" ? { graph: args.graph } : {}),
+      ...(typeof args.enabled === "boolean" ? { enabled: args.enabled } : {}),
     });
   }
   return registrations;

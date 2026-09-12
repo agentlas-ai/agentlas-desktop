@@ -45,6 +45,7 @@ import {
   type OneArtifactBindingRequestV1,
   type OneArtifactPreviewCapabilityV1,
 } from "@shared/one-artifacts";
+import { humanizeScheduleLabel } from "@shared/schedule-describe";
 import { redactSecrets } from "@shared/secret-patterns";
 import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -1019,14 +1020,14 @@ function useAutomationActions(
   const editInChat = useCallback((automationId: string) => {
     if (!onSemanticAction) {
       setMessage(locale === "en"
-        ? `Type @graph to edit ${automationName || "this automation"} in this conversation.`
-        : `이 대화에서 @graph로 ${automationName || "이 자동화"}을 수정해 주세요.`);
+        ? `Tell me what to change about ${automationName || "this automation"} here, such as its time or report content.`
+        : `이 대화에서 ${automationName || "이 자동화"}의 시간이나 보고 내용 등 바꿀 내용을 말씀해 주세요.`);
       return;
     }
     onSemanticAction({
       actionId: `one-edit-${automationId}`,
       intent: "open_automation",
-      label: locale === "en" ? "Edit with @graph" : "@graph로 수정",
+      label: locale === "en" ? "Edit schedule" : "예약 수정",
       description: locale === "en" ? "Continue editing in this One conversation." : "이 One 대화에서 계속 수정합니다.",
       instruction: locale === "en"
         ? `Review and edit the ${automationName || "selected"} automation.`
@@ -1066,7 +1067,7 @@ function AutomationCardFrame({
     <div className={styles.statusBlock} data-one-automation-card="true">
       <p>
         <span className={styles.statusPill} data-task-state={statusState}>{statusLabel}</span>
-        {scheduleLine && <span>{displayValue(scheduleLine)}</span>}
+        {scheduleLine && <span>{displayValue(humanizeScheduleLabel(scheduleLine, locale))}</span>}
       </p>
       {nodes.length > 0 && (
         <ol>
@@ -1094,7 +1095,7 @@ function AutomationCardFrame({
           disabled={!automationId}
           onClick={() => automationId && onEditInChat(automationId)}
         >
-          <span>{ko ? "@graph로 수정" : "Edit with @graph"}</span>
+          <span>{ko ? "수정 방법" : "How to edit"}</span>
         </button>
       </div>
       {actionMessage && <p role="status">{displayValue(actionMessage)}</p>}
@@ -1147,21 +1148,23 @@ export function OneAutomationRegistrationCard({
 }: {
   automationId?: string;
   name: string;
-  action: "created" | "updated";
+  action: "created" | "updated" | "paused" | "resumed";
   schedule?: string;
   locale: "ko" | "en";
 }) {
   const ko = locale === "ko";
   const { message, runNow, editInChat } = useAutomationActions(locale, name);
   const [record, setRecord] = useState<Automation | null>(null);
+  const [recordRead, setRecordRead] = useState(false);
   useEffect(() => {
     const api = ipc();
     setRecord(null);
-    if (!api || !automationId) return;
+    setRecordRead(false);
+    if (!api || !automationId) { setRecordRead(true); return; }
     let active = true;
     const read = () => api.automations.get(automationId).then((row) => {
-      if (active) setRecord(row?.id === automationId ? row : null);
-    }).catch(() => { if (active) setRecord(null); });
+      if (active) { setRecord(row?.id === automationId ? row : null); setRecordRead(true); }
+    }).catch(() => { if (active) { setRecord(null); setRecordRead(true); } });
     void read();
     const off = ipcEvents()?.onStoreChanged?.((change) => {
       if (change.entity === "automation" && (!change.id || change.id === automationId)) void read();
@@ -1169,7 +1172,7 @@ export function OneAutomationRegistrationCard({
     return () => { active = false; off?.(); };
   }, [automationId]);
   const scheduleLine = record?.scheduleHuman || schedule || "";
-  const lastRunLine = record?.nextRunAt
+  const lastRunLine = record?.enabled && record.nextRunAt
     ? `${ko ? "다음 실행" : "Next run"} · ${formatTimelineAt(record.nextRunAt, locale)}`
     : "";
   return (
@@ -1181,12 +1184,18 @@ export function OneAutomationRegistrationCard({
             <p className={styles.summary}>
               {action === "created"
                 ? (ko ? "자동화를 등록했어요." : "This automation is registered.")
+                : action === "paused"
+                ? (ko ? "자동화를 중지했어요." : "This automation is paused.")
+                : action === "resumed"
+                ? (ko ? "자동화를 다시 켰어요." : "This automation is resumed.")
                 : (ko ? "자동화를 업데이트했어요." : "This automation is updated.")}
             </p>
             <AutomationCardFrame
               locale={locale}
-              statusState={record && !record.enabled ? "working" : "completed"}
-              statusLabel={record && !record.enabled
+              statusState={!record || !record.enabled ? "working" : "completed"}
+              statusLabel={!record
+                ? (recordRead ? (ko ? "현재 상태 확인 불가" : "Current state unavailable") : (ko ? "현재 상태 확인 중" : "Checking current state"))
+                : !record.enabled
                 ? (ko ? "꺼짐" : "Off")
                 : automationStatusLabel("registered", locale)}
               scheduleLine={scheduleLine}
