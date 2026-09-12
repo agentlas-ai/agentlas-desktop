@@ -8,7 +8,7 @@ import type { BrowserDevicePreset, BrowserDownloadSummary, BrowserDurableHistory
 import menu from "@/components/PanelPopover.module.css";
 import styles from "./TaskBrowser.module.css";
 
-type Panel = "menu" | "find" | "downloads" | "history" | "clear" | "autofill" | "device" | null;
+type Panel = "menu" | "find" | "downloads" | "history" | "clear" | "autofill" | "device" | "notice" | null;
 function size(n: number) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
@@ -50,10 +50,13 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     await onPrepareOverlay();
     if (epoch.current === currentEpoch) setPanel(next);
   };
-  useEffect(() => { close(); setZoom(null); setMatches(null); }, [target?.viewId, close]);
+  useEffect(() => {
+    close(); setZoom(null); setMatches(null);
+    return () => { epoch.current++; findEpoch.current++; };
+  }, [target?.viewId, target?.taskScopeId, close]);
   useEffect(() => {
     if (!panel || panel === "autofill") return;
-    root.current?.querySelector<HTMLElement>(panel === "find" ? "[data-browser-find] input" : '[role="menu"] button,[role="dialog"] button')?.focus();
+    root.current?.querySelector<HTMLElement>(panel === "find" ? "[data-browser-find] input" : '[role="menu"] button,[role="dialog"] button,[role="alertdialog"] button')?.focus();
     let waitingForRelease = false;
     const outside = (event: PointerEvent) => {
       if (root.current?.contains(event.target as Node)) return;
@@ -77,11 +80,20 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     if (!current || !api) return;
     if (!keepOpen) close();
     const currentEpoch = epoch.current;
+    const isCurrent = () => epoch.current === currentEpoch && targetRef.current?.viewId === current.viewId
+      && targetRef.current?.taskScopeId === current.taskScopeId;
+    const showNotice = async (message: string) => {
+      if (!isCurrent()) return;
+      // Native actions close the menu before running. Freeze the guest again
+      // so a later failure uses the same accessible overlay as other panels.
+      try { await onPrepareOverlay(); } catch { /* The notice still allows dismissal. */ }
+      if (!isCurrent()) return;
+      setNotice(message); setPanel("notice");
+    };
     try {
       const result = await call(api, current);
-      if (epoch.current !== currentEpoch || targetRef.current?.viewId !== current.viewId) return;
-      if (!result.ok && result.reason !== "dialog-cancelled") setNotice(ko ? "이 작업을 완료하지 못했습니다. 다시 시도하세요." : "This action did not finish. Try again.");
-    } catch { if (epoch.current === currentEpoch) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
+      if (!result.ok && result.reason !== "dialog-cancelled") await showNotice(ko ? "이 작업을 완료하지 못했습니다. 다시 시도하세요." : "This action did not finish. Try again.");
+    } catch { await showNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
   };
   const refreshDownloads = useCallback(async () => {
     const current = targetRef.current;
@@ -168,6 +180,6 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
       <hr className={menu.panelMenuSeparator}/><div className={menu.panelMenuRow}><button type="button" onClick={close}>{ko ? "취소" : "Cancel"}</button><button type="button" disabled={!target || !clear.length} onClick={() => void run((api, target) => api.clearData({ ...target, categories: clear }))}>{ko ? "선택한 기록 삭제" : "Clear selected data"}</button></div>
     </div>}
     <BrowserAutofill open={panel === "autofill"} mode={autofillMode} target={target} ko={ko} onClose={close} onPrepareOverlay={onPrepareOverlay} onOverlayClosed={onOverlayClosed} />
-    {notice && <div className={`${menu.panelPopover} ${styles.controlPopover}`} role="alertdialog" aria-label={ko ? "브라우저 작업 알림" : "Browser action notice"}><span className={menu.panelMenuLabel}>{notice}</span><button className={menu.panelMenuRow} type="button" onClick={close}>{ko ? "닫기" : "Close"}</button></div>}
+    {panel === "notice" && notice && <div className={`${menu.panelPopover} ${styles.controlPopover}`} role="alertdialog" aria-label={ko ? "브라우저 작업 알림" : "Browser action notice"}><span className={menu.panelMenuLabel}>{notice}</span><button className={menu.panelMenuRow} type="button" onClick={close}>{ko ? "닫기" : "Close"}</button></div>}
   </span>;
 }
