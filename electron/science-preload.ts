@@ -238,6 +238,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     validate: (input: unknown) => ipcRenderer.invoke("science:artifactValidations:validate", { extensionId, input }),
   }),
   manuscripts: Object.freeze({
+    listTypesetProfiles: (input: unknown) => ipcRenderer.invoke("science:manuscripts:listTypesetProfiles", { extensionId, input }),
+    getPublicationPreference: (input: unknown) => ipcRenderer.invoke("science:manuscripts:getPublicationPreference", { extensionId, input }),
+    setPublicationPreference: (input: unknown) => ipcRenderer.invoke("science:manuscripts:setPublicationPreference", { extensionId, input }),
     editNode: (input: unknown) => ipcRenderer.invoke("science:manuscripts:editNode", { extensionId, input }),
     prepareRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:prepareRenderJob", { extensionId, input }),
     createRenderJob: (input: unknown) => ipcRenderer.invoke("science:manuscripts:createRenderJob", { extensionId, input }),

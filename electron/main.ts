@@ -3588,7 +3588,13 @@ app.whenReady().then(async () => {
       : null;
     if (!input || typeof input !== "object" || typeof input.projectId !== "string") throw new Error("science-manuscript-render-input-invalid");
     const service = scienceManuscriptRenderService();
+    const { validateSciencePdfSelection } = await import("agentlas-science/dist/contracts/science-typeset-profile");
+    const pdfSelection = input.pdfEngine === undefined && input.pdfProfile === undefined ? null
+      : validateSciencePdfSelection({ engine: input.pdfEngine, ...(input.pdfProfile === undefined ? {} : { profile: input.pdfProfile }) });
+    if ((pdfSelection && input.pdfFallback !== "forbid") || (input.pdfFallback !== undefined && input.pdfFallback !== "forbid")) throw new Error("publication_pdf_fallback_forbidden");
     const options = {
+      ...(pdfSelection ? { pdfEngine: pdfSelection.engine, ...(pdfSelection.engine === "pdflatex" ? { pdfProfile: pdfSelection.profile } : {}) } : {}),
+      ...(input.pdfFallback === "forbid" ? { pdfFallback: "forbid" as const } : {}),
       outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html" as const],
       style: (input.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
       lineNumbers: input.lineNumbers === true, doubleSpacing: input.doubleSpacing === true,
