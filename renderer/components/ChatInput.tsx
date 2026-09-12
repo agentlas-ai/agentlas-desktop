@@ -782,10 +782,9 @@ function ChatInputComponent({
     };
   }
 
-  /** 첨부(파일·폴더 경로 + 붙여넣은 텍스트)를 메시지 본문에 동봉 — 로컬 에이전트가 경로로 읽는다. */
+  /** User-authored/pasted text stays visible; file execution context is minted by Main from the snapshot capability. */
   function withAttachmentContext(base: string): string {
     const parts: string[] = [];
-    for (const g of fileGrants) parts.push(`- ${g.kind === "directory" ? "폴더" : "파일"}: ${g.grant.path}`);
     for (const p of pastedTexts) parts.push(`- ${locale === "ko" ? "붙여넣은 텍스트" : "pasted text"} "${p.name}":\n${p.text}`);
     if (parts.length === 0) return base;
     return `${base}${base ? "\n\n" : ""}[${locale === "ko" ? "첨부" : "attachments"}]\n${parts.join("\n")}`;

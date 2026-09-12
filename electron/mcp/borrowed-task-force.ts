@@ -1,3 +1,4 @@
+import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
 import { workerCapabilityRunner, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
@@ -1358,6 +1359,8 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 
 /** Apply after package/capability spreads, immediately before provider dispatch. */
 function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
+  const context = !request.untrustedNoTools && request.cwd ? mainWorkAttachmentContext(p.req, request.cwd) : "";
+  if (context) request = { ...request, systemPrompt: [request.systemPrompt, context].filter(Boolean).join("\n\n") };
   return p.req.planMode === true
     ? { ...request, permission: "read", planMode: true }
     : request;
@@ -6820,7 +6823,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   // incorrectly replacing a successful, reopenable team result with
   // result-not-durable.
   const durableAssistantEntry = emitFinal && !p.req.agentAppMode
-    ? appendChatMessage(p.chat.id, "assistant", displayText)
+    ? appendChatMessage(p.chat.id, "assistant", redactWorkAttachmentText(p.req, displayText))
     : undefined;
   const durableTextForVerification = durableAssistantEntry?.text;
   p.sink({

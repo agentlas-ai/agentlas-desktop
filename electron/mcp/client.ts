@@ -1,3 +1,4 @@
+import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
@@ -2327,7 +2328,7 @@ ${effectiveUserPrompt}`;
   const targetAppWorkingFolder = !workspaceBinding && !suppressProjectBinding && targetApp
     ? path.resolve(targetApp.rootPath)
     : null;
-  const workingFolder: string | null = suppressProjectBinding
+  let workingFolder: string | null = suppressProjectBinding
     ? null
     : workspaceBinding
       ? boundMobileWorkingFolder
@@ -2335,6 +2336,9 @@ ${effectiveUserPrompt}`;
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
+  await prepareWorkAttachmentContext(req, resolvedResultFolder, signal);
+  // A snapshot's relative paths must use the same concrete cwd in every selected runner.
+  if (mainWorkAttachmentContext(req, resolvedResultFolder)) workingFolder = resolvedResultFolder;
   // The owner-full fact is minted once by Main and passed separately to worker
   // config materialization. Worker permission remains write; it is never
   // upgraded merely because the parent can run a preview.
@@ -3418,6 +3422,8 @@ ${effectiveUserPrompt}`;
     // Work and One use the same canonical Task output rail. Admission depends
     // on that exact Task/run binding, not on which product opened the chat.
     if (req.agentAppMode || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
+    paths = paths.filter(target => !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, path.resolve(resolvedResultFolder, target)));
+    if (!paths.length) return [];
     return bindOneRuntimeToolArtifacts({
       taskId: canonicalTask.id,
       taskVersion: canonicalTask.version,
@@ -4364,6 +4370,8 @@ ${effectiveUserPrompt}`;
     ? mainOneAttachmentContext(req)
     : "";
   if (approvedOneAttachmentContext) turnContextParts.push(approvedOneAttachmentContext);
+  const approvedWorkAttachmentContext = mainWorkAttachmentContext(req, resolvedResultFolder);
+  if (approvedWorkAttachmentContext) turnContextParts.push(approvedWorkAttachmentContext);
   if (autoRoute) {
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
@@ -5633,7 +5641,7 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(chat.id, "assistant", stripPermissionEscalationMarker(redactOneAttachmentText(req, continuation.text)));
+        appendChatMessage(chat.id, "assistant", stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text))));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
@@ -6582,10 +6590,10 @@ ${effectiveUserPrompt}`;
 
     // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
     // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
-    const displayWithFloor = stripDanglingLanguageFence(redactOneAttachmentText(
+    const displayWithFloor = stripDanglingLanguageFence(redactWorkAttachmentText(req, redactOneAttachmentText(
       req,
       partialFloor ? `${partialFloor}\n${displayText}` : displayText,
-    ));
+    )));
     /*
      * 권한 승격 표식은 저장 본문에서 지운다 — 화면/승인칩 감지는 final 이벤트
      * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침

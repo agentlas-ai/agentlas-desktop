@@ -1,3 +1,4 @@
+import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { withAdapterEffectContext } from "./adapter-effect-context";
@@ -1890,6 +1891,22 @@ export class InvocationService {
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
+    if (chat.originSurface === "work" && !requestedOneMode && !runReq.agentAppMode && !runWorkspaceBinding) {
+      const pinnedRevision = goalLongRun ? getChatGoalRevision(goalLongRun.goalId) : null;
+      bindWorkAttachmentRun({ runId, chatId: chat.id, signal: controller.signal, readGroups: () => {
+        const groups = workAttachmentGroupIds(runReq.userPrompt);
+        if (pinnedRevision && goalLongRun) {
+          const current = getChatGoalRevision(goalLongRun.goalId);
+          if (!current || current.revision !== pinnedRevision.revision || current.chatId !== chat.id) throw new Error("work_attachment_goal_revision_changed");
+          for (const source of [current.originalRequest, current.sourceMessage]) {
+            const message = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?").get(source.messageId) as { chat_id: string; role: string; text: string } | undefined;
+            if (!message || message.chat_id !== chat.id || source.chatId !== chat.id || message.role !== "user" || message.text !== source.text) throw new Error("work_attachment_goal_source_changed");
+            groups.push(...workAttachmentGroupIds(source.text));
+          }
+        }
+        return [...new Set(groups)];
+      } });
+    }
     void withBrowserDownloadProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? {goalId:goalLongRun.goalId,attemptId:goalControllerAttemptId} : null }, () => withBuiltinFileProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
@@ -1900,6 +1917,7 @@ export class InvocationService {
       (rawEvent) => {
         effectBoundary.observe(rawEvent);
         rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
+        rawEvent = redactWorkAttachmentEvent(runReq, rawEvent);
         rawEvent = { ...rawEvent, goalResult: undefined };
         // One provider/run gets one terminal settlement. Late duplicate finals,
         // EOF callbacks, and post-cancel deliveries cannot reopen a Decision.
@@ -2825,10 +2843,10 @@ export class InvocationService {
             }
           } catch { /* Keep the original provider failure visible. */ }
         }
-        const rawMessage = redactOneAttachmentText(
+        const rawMessage = redactWorkAttachmentText(runReq, redactOneAttachmentText(
           runReq,
           error instanceof Error ? error.message : String(error),
-        );
+        ));
         const safeFailure = runReq.agentAppMode
           ? untrustedRuntimeFailurePayload()
           : { code: record.steeringInterruptRequested ? "interrupted" : controller.signal.aborted ? "cancelled" : "invoke-threw", message: rawMessage };
@@ -2892,7 +2910,8 @@ export class InvocationService {
           }
         }
       })
-      .finally(() => {
+      .finally(async () => {
+        await releaseWorkAttachmentRun(runId).catch(() => { /* cleanup refusal cannot prevent terminal settlement */ });
         if (record.automaticGoalDeadline && !this.pendingGoalVerifications.has(runId)) clearTimeout(record.automaticGoalDeadline);
         settleGoalControllerAttempt(false);
         if (!this.pendingGoalVerifications.has(runId)) this.settleAutomaticGoalInterruption(record);

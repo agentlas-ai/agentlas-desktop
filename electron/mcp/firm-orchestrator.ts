@@ -1,3 +1,4 @@
+import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
@@ -1047,6 +1048,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       // Operational/Taste overlays are optional and never block a firm node.
     }
   }
+  if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && workingFolder) {
+    const inputContext = mainWorkAttachmentContext(p.req, workingFolder);
+    if (inputContext) systemPrompt += `\n\n${inputContext}`;
+  }
   // 이 노드가 어떤 모델/런타임으로 도는지 — 오케스트레이션 트리에 "모델 사용 중" 표시용.
   const modelLabel =
     active.model ||
@@ -1396,7 +1401,7 @@ async function runDivision(
   // single-division path.
   if (specialists.length === 0 && firmDivisionRequiresDirectExecution(stageKind, 0, runtimeToolsDisabled)) {
     const direct = await runDirectDivision();
-    if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", direct.text);
+    if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", redactWorkAttachmentText(p.req, direct.text));
     return { node: division, result: direct.text, ok: direct.ok, evidence: direct.evidence };
   }
   const plan = await runNodeTurnSafe(p, {
@@ -1502,7 +1507,7 @@ async function runDivision(
     evidence = mergeFirmExecutionEvidence([plan.evidence, direct.evidence]);
   }
 
-  if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", result);
+  if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", redactWorkAttachmentText(p.req, result));
   return { node: division, result, ok: divisionOk, evidence };
 }
 
@@ -1557,7 +1562,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
       return { ok: false, text: solo.text };
     }
-    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
     return { ok: true, text: solo.text };
   }
@@ -1591,11 +1596,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       withImages: true,
     });
     if (!solo.ok) {
-      if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
+      if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
       return { ok: false, text: solo.text };
     }
-    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
     return { ok: true, text: solo.text };
   }
@@ -1603,7 +1608,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   const matched = matchTargets(plan.delegations, ceoReports);
   if (matched.length === 0) {
     // CEO가 위임 안 함 → plan.text가 곧 최종 답
-    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", plan.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, plan.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: plan.text });
     return { ok: true, text: plan.text };
   }
@@ -1894,7 +1899,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     }
   }
 
-  if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
+  if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, finalTurn.text));
   // CEO 종합 턴의 성공은 팀의 성공이 아니다. 본부/전문가가 전멸해도 CEO가 문장을 만들어내면
   // 예전엔 return.ok 만 false 로 바꿨지만 direct Firm 호출부는 그 반환값을 소비하지 않고
   // 스트림의 `final` 이벤트로 실행을 정산한다. 그 결과 실패한 Worker의 복구 체크포인트가

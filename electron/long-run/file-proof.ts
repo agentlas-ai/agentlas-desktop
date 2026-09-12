@@ -1,3 +1,5 @@
+import path from "node:path";
+import { isWorkAttachmentInput } from "../invocation/work-attachments";
 import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
@@ -58,6 +60,8 @@ export function beginBuiltinFileProof(input: {chatId?:string;agentId?:string;cwd
       if (scope.signal.aborted || observation.action !== action || observation.root !== bound.root) return;
       const current = boundOwner(owner.goalId, owner.attemptId!, scope.runId, scope.chatId);
       if (!current || current.root !== bound.root || current.goalRevision !== bound.goalRevision) return;
+      try { if (isWorkAttachmentInput(scope.runId, scope.chatId, bound.root, path.resolve(bound.root, observation.relativePath))) return; }
+      catch { return; } // A replaced Main input is uncertain, never a new output proof.
       const rows = toolReceipts(scope.runId, scope.chatId, input.toolId!, input.toolName);
       if (!rows || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind IN ('invoke_completed','invoke_failed','invoke_cancelled','invoke_interrupted') LIMIT 1").get(scope.runId)) return;
       recordRunEvent({runId:scope.runId,chatId:scope.chatId,kind:"runtime_file_observed",sourceEventId:`builtin-file:${rows[1].id}`,

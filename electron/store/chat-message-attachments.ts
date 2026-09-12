@@ -311,6 +311,19 @@ function ensureChatFileSnapshotTables(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_chat_file_items_group
       ON chat_file_items(group_id, chat_id, created_at, id);
+    CREATE TABLE IF NOT EXISTS chat_file_execution_sources (
+      item_id TEXT PRIMARY KEY REFERENCES chat_file_items(id) ON DELETE CASCADE,
+      schema_version TEXT NOT NULL CHECK(schema_version = 'snapshot-bytes-v1'),
+      source_grant_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chat_file_directory_bytes (
+      item_id TEXT NOT NULL REFERENCES chat_file_items(id) ON DELETE CASCADE,
+      relative_path TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      data BLOB NOT NULL,
+      PRIMARY KEY(item_id, relative_path)
+    );
   `);
 }
 
@@ -342,6 +355,8 @@ function readStableChatFile(sourcePath: string, expectedSize: number): { bytes: 
       offset += read;
     }
     const after = fs.fstatSync(fd, { bigint: true });
+    const live = fs.lstatSync(sourcePath, { bigint: true });
+    if (!live.isFile() || live.dev !== before.dev || live.ino !== before.ino) throw new ChatFileSnapshotError("changed", "The attachment path was replaced while read.");
     if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
       throw new ChatFileSnapshotError("changed", "The attachment changed while it was being read.");
     }
@@ -357,7 +372,8 @@ function readStableChatFile(sourcePath: string, expectedSize: number): { bytes: 
   }
 }
 
-function directoryManifest(rootPath: string): { entries: Array<{ path: string; size: number; sha256: string }>; size: number; sha256: string } {
+function directoryManifest(rootPath: string): { entries: Array<{ path: string; size: number; sha256: string }>; files: Array<{ path: string; size: number; sha256: string; bytes: Buffer }>; size: number; sha256: string } {
+  const files: Array<{ path: string; size: number; sha256: string; bytes: Buffer }> = [];
   const entries: Array<{ path: string; size: number; sha256: string }> = [];
   let total = 0;
   const visit = (directory: string) => {
@@ -383,13 +399,17 @@ function directoryManifest(rootPath: string): { entries: Array<{ path: string; s
       if (entries.length >= MAX_DIRECTORY_ENTRIES) throw new ChatFileSnapshotError("too_many", `A folder attachment may contain at most ${MAX_DIRECTORY_ENTRIES} files.`);
       total += stat.size;
       if (total > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "The folder attachment exceeds the total size limit.");
+      const canonical = fs.realpathSync(absolute);
+      if (canonical !== absolute || !canonical.startsWith(rootPath + path.sep)) throw new ChatFileSnapshotError("permission", "The folder entry escaped its approved root.");
       const file = readStableChatFile(absolute, stat.size);
+      if (fs.realpathSync(absolute) !== canonical) throw new ChatFileSnapshotError("changed", "The folder entry changed while copied.");
       entries.push({ path: relative, size: file.size, sha256: file.sha256 });
+      files.push({ path: relative, ...file });
     }
   };
   visit(rootPath);
   const digestInput = entries.map((entry) => `${entry.path}\u0000${entry.size}\u0000${entry.sha256}`).join("\n");
-  return { entries, size: total, sha256: createHash("sha256").update(digestInput, "utf8").digest("hex") };
+  return { entries, files, size: total, sha256: createHash("sha256").update(digestInput, "utf8").digest("hex") };
 }
 
 export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId: string; files: StoredChatFile[] } {
@@ -426,13 +446,13 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
       const manifest = directoryManifest(sourcePath);
       totalBytes += manifest.size;
       if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "The selected attachments exceed the total size limit.");
-      return { id: randomUUID(), name, kind: item.kind, mediaType: "application/vnd.agentlas.directory+json", size: manifest.size, sha256: manifest.sha256, data: null, manifest: manifest.entries };
+      return { id: randomUUID(), name, kind: item.kind, mediaType: "application/vnd.agentlas.directory+json", size: manifest.size, sha256: manifest.sha256, data: null, manifest: manifest.entries, directoryBytes: manifest.files, sourceGrant: item.grant };
     }
     const mediaType = canonicalChatFileType(sourcePath);
     const file = readStableChatFile(sourcePath, item.size);
     totalBytes += file.size;
     if (totalBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "The selected attachments exceed the total size limit.");
-    return { id: randomUUID(), name, kind: item.kind, mediaType, size: file.size, sha256: file.sha256, data: file.bytes, manifest: undefined };
+    return { id: randomUUID(), name, kind: item.kind, mediaType, size: file.size, sha256: file.sha256, data: file.bytes, manifest: undefined, directoryBytes: [], sourceGrant: item.grant };
   });
   const groupId = randomUUID();
   const createdAt = new Date().toISOString();
@@ -444,6 +464,10 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const item of prepared) {
       insert.run(item.id, groupId, input.chatId, item.name, item.kind, item.mediaType, item.size, item.sha256, item.data, item.manifest ? JSON.stringify(item.manifest) : null, createdAt);
+      db.prepare("INSERT INTO chat_file_execution_sources(item_id, schema_version, source_grant_json) VALUES (?, 'snapshot-bytes-v1', ?)")
+        .run(item.id, JSON.stringify(item.sourceGrant));
+      const insertChild = db.prepare("INSERT INTO chat_file_directory_bytes(item_id, relative_path, size_bytes, sha256, data) VALUES (?, ?, ?, ?, ?)");
+      for (const child of item.directoryBytes) insertChild.run(item.id, child.path, child.size, child.sha256, child.bytes);
     }
   })();
   return {
@@ -495,6 +519,74 @@ export function listChatFileSnapshot(input: { chatId: string; groupId: string })
  * Renderer input is only an identity claim: Main rechecks the complete
  * chat/group/file/digest binding and returns bytes, never the original path.
  */
+/** Main-only execution projection. Original grants never enter the public file DTO. */
+export interface WorkChatFileInput {
+  id: string; groupId: string; chatId: string; name: string; kind: "file" | "directory";
+  sha256: string; size: number;
+  entries: Array<{ path: string; size: number; sha256: string }>;
+  original: { path: string; available: boolean } | null;
+}
+
+function safeEntryPath(value: string): boolean {
+  return typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= MAX_RELATIVE_PATH_BYTES
+    && !path.posix.isAbsolute(value) && !path.win32.isAbsolute(value) && !/^[A-Za-z]:/.test(value)
+    && !value.includes("\\") && !/[\u0000-\u001f\u007f]/.test(value)
+    && value.split("/").every(part => part !== "" && part !== "." && part !== "..");
+}
+
+export function workChatFileInputs(chatId: string, groupId: string): WorkChatFileInput[] {
+  const items = listChatFileSnapshot({ chatId, groupId });
+  if (!items.length || items.length > ONE_ATTACHMENT_LIMITS.maxCount) throw new ChatFileSnapshotError("missing", "work_attachment_group_unavailable");
+  const db = getDb();
+  let total = 0;
+  return items.map(item => {
+    if (safeChatFileName(item.name, "attachment") !== item.name || !/^[a-f0-9]{64}$/.test(item.sha256)) throw new ChatFileSnapshotError("invalid", "work_attachment_identity_invalid");
+    const source = db.prepare("SELECT schema_version, source_grant_json FROM chat_file_execution_sources WHERE item_id = ?")
+      .get(item.id) as { schema_version: string; source_grant_json: string } | undefined;
+    let original: WorkChatFileInput["original"] = null;
+    if (source?.schema_version === "snapshot-bytes-v1") {
+      try { const grant = JSON.parse(source.source_grant_json) as FsPathGrant; original = { path: pathFromGrant(grant, item.kind), available: true }; }
+      catch { original = null; } // A dead transient grant never becomes ambient filesystem access.
+    }
+    let entries = [{ path: item.name, size: item.size, sha256: item.sha256 }];
+    if (item.kind === "directory") {
+      if (source?.schema_version !== "snapshot-bytes-v1") throw new ChatFileSnapshotError("unsupported", "work_attachment_legacy_folder_bytes_unavailable");
+      if (!Array.isArray(item.manifest) || item.manifest.length > MAX_DIRECTORY_ENTRIES) throw new ChatFileSnapshotError("invalid", "work_attachment_manifest_invalid");
+      entries = item.manifest;
+      const actual = db.prepare("SELECT relative_path AS path, size_bytes AS size, sha256 FROM chat_file_directory_bytes WHERE item_id = ? ORDER BY relative_path")
+        .all(item.id) as typeof entries;
+      const normalize = (rows: typeof entries) => JSON.stringify([...rows].sort((a, b) => a.path.localeCompare(b.path, "en")));
+      if (normalize(actual) !== normalize(entries)) throw new ChatFileSnapshotError("changed", "work_attachment_folder_entries_changed");
+      const digestInput = entries.map(entry => `${entry.path}\u0000${entry.size}\u0000${entry.sha256}`).join("\n");
+      if (createHash("sha256").update(digestInput).digest("hex") !== item.sha256) throw new ChatFileSnapshotError("changed", "work_attachment_manifest_digest_changed");
+    }
+    const names = new Set<string>(); let itemBytes = 0;
+    for (const entry of entries) {
+      const folded = entry.path.normalize("NFKC").toLocaleLowerCase("en");
+      if (!safeEntryPath(entry.path) || names.has(folded) || !Number.isSafeInteger(entry.size) || entry.size < 0
+        || entry.size > ONE_ATTACHMENT_LIMITS.maxFileBytes || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new ChatFileSnapshotError("invalid", "work_attachment_entry_invalid");
+      names.add(folded); itemBytes += entry.size;
+    }
+    total += itemBytes;
+    if (itemBytes !== item.size || total > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "work_attachment_size_mismatch");
+    return { id: item.id, groupId, chatId, name: item.name, kind: item.kind, sha256: item.sha256, size: item.size, entries, original };
+  });
+}
+
+/** One bounded entry at a time; exact snapshot metadata is rechecked before bytes are returned. */
+export function readWorkChatFileEntry(input: WorkChatFileInput, entry: WorkChatFileInput["entries"][number]): Buffer {
+  const live = workChatFileInputs(input.chatId, input.groupId).find(item => item.id === input.id);
+  if (!live || live.sha256 !== input.sha256 || !live.entries.some(row => row.path === entry.path && row.size === entry.size && row.sha256 === entry.sha256)) throw new ChatFileSnapshotError("changed", "work_attachment_binding_changed");
+  const row = input.kind === "directory"
+    ? getDb().prepare("SELECT b.data FROM chat_file_directory_bytes b JOIN chat_file_items i ON i.id = b.item_id WHERE i.chat_id = ? AND i.group_id = ? AND i.id = ? AND b.relative_path = ? AND b.sha256 = ?")
+      .get(input.chatId, input.groupId, input.id, entry.path, entry.sha256)
+    : getDb().prepare("SELECT data FROM chat_file_items WHERE chat_id = ? AND group_id = ? AND id = ? AND sha256 = ? AND kind = 'file'")
+      .get(input.chatId, input.groupId, input.id, entry.sha256);
+  const bytes = (row as { data?: unknown } | undefined)?.data;
+  if (!Buffer.isBuffer(bytes) || bytes.length !== entry.size || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new ChatFileSnapshotError("changed", "work_attachment_bytes_changed");
+  return bytes;
+}
+
 export function readChatFileSnapshotForExternalOpen(input: unknown): { name: string; mediaType: string; bytes: Buffer; size: number; sha256: string } | null {
   if (
     !input
