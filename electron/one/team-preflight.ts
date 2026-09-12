@@ -18,6 +18,7 @@ import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight } from "./taskforces";
+import { inspectOneAttachmentInput } from "./attachments";
 import type {
   CanonicalTask,
   Chat,
@@ -996,7 +997,7 @@ export async function prepareOneTeamPreflight(
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
-  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission", "runtimeSelection"]);
+  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
   if (
     !input || typeof input !== "object"
     || inputKeys.some((key) => !allowedInputKeys.has(key))
@@ -1016,7 +1017,16 @@ export async function prepareOneTeamPreflight(
     || (input.runtimeSelection !== undefined && !validRuntimeSelection(input.runtimeSelection))
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
   const requestedAgentIds = input.requestedAgentIds ?? [];
-  const pinnedRuntime = input.runtimeSelection ? await liveRuntime(deps, input.runtimeSelection) : null;
+  const attachmentInput = input.attachmentRef === undefined ? null : inspectOneAttachmentInput({
+    ref: input.attachmentRef, chatId: input.chatId, userPrompt: input.userPrompt,
+  });
+  const pinnedRuntime = input.runtimeSelection || attachmentInput ? await liveRuntime(deps, input.runtimeSelection) : null;
+  // Managed Local currently loads text GGUFs without a vision projector. This
+  // known limitation precedes staffing inference; no team or substitute model
+  // can make this exact selected runtime accept the prepared image.
+  if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
+    return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
+  }
   const teamNeed = await resolveOneTeamNeed(
     input.userPrompt,
     deps,

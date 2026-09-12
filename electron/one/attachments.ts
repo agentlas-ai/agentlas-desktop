@@ -372,6 +372,18 @@ function validatedRecord(ref: OneAttachmentRef): AttachmentSetRecord {
   return record;
 }
 
+/** Observe Main's prepared capability without claiming it or accepting renderer type hints. */
+export function inspectOneAttachmentInput(input: {
+  ref: OneAttachmentRef; chatId: string; userPrompt: string;
+}): { hasImages: boolean } {
+  const record = validatedRecord(input.ref);
+  if (record.chatId !== input.chatId || record.promptDigest !== sha256Text(input.userPrompt)
+    || record.teamProposalId !== null) {
+    throw new OneAttachmentError("stale_grant", "The attachment capability does not match this chat and request.");
+  }
+  return { hasImages: record.items.some(item => item.safe.kind === "image") };
+}
+
 function validatePrepareInput(input: PrepareOneAttachmentsInput): void {
   if (!input || typeof input !== "object" || !ID_RE.test(input.chatId) || typeof input.userPrompt !== "string") {
     throw new OneAttachmentError("invalid_request", "Invalid One attachment request.");

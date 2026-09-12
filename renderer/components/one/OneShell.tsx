@@ -4498,6 +4498,7 @@ export function OneShell() {
         ? "이전 팀 제안은 시간이 지나 만료됐습니다. 방금 보낸 내용으로 계속합니다."
         : "The earlier team proposal expired. Continuing with what you just sent.");
     }
+    let unsupportedInputMessage: string | null = null;
     const prepareOrRun = async (
       chatId: string,
       taskId: string | null,
@@ -4596,6 +4597,7 @@ export function OneShell() {
           expectedTaskId: taskId,
           expectedTaskVersion: taskVersion,
           permission: onePermission === "read" ? "read" : "write",
+          ...(preparedAttachments ? { attachmentRef: preparedAttachments.ref } : {}),
           ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
           ...((() => {
             // 이번 턴에 지정한 팀원이 우선이고, 없으면 방의 팀원이 기본이다.
@@ -4616,6 +4618,12 @@ export function OneShell() {
           })()),
           ...(overrideSnapshot.sessionRouting ? { dynamicTeamRequested: true } : {}),
         });
+        if (prepared.kind === "input_unsupported") {
+          unsupportedInputMessage = appLocale === "ko"
+            ? "현재 로컬 실행 환경에서는 이미지 입력을 처리할 수 없습니다."
+            : "The current local runtime does not support image input.";
+          throw Object.assign(new Error(unsupportedInputMessage), { code: prepared.code });
+        }
         if (prepared.kind === "not_required") {
           await startRun(
             chatId,
@@ -4830,9 +4838,9 @@ export function OneShell() {
       setSubmissionBusy(false);
       setPreflightPrompt(null);
       if (freshCreatedChatId && !runIdRef.current) {
-        recoverFreshCreatedChatDraft(appLocale === "ko"
+        recoverFreshCreatedChatDraft(unsupportedInputMessage ?? (appLocale === "ko"
           ? "새 대화는 열렸지만 실행 준비를 저장하고 확인하지 못해 아무 작업도 시작하지 않았습니다. 입력과 첨부는 이 대화에 복원했습니다. 다시 시도해 주세요."
-          : "The new conversation is open, but its setup could not be saved and verified, so nothing ran. Your draft and attachments were restored here; try again.");
+          : "The new conversation is open, but its setup could not be saved and verified, so nothing ran. Your draft and attachments were restored here; try again."));
         return;
       }
       // Preparing an attachment failed before an invocation exists. Recovering
@@ -4889,6 +4897,10 @@ export function OneShell() {
        *   자리가 없다). 그래서 이미 화면에 그려지는 actionNotice 로 낸다.
        */
       const raw = failureMessage(cause);
+      if (unsupportedInputMessage) {
+        setActionNotice(unsupportedInputMessage);
+        return;
+      }
       setActionNotice(
         isChatBusyFailure(cause)
           // 엔진이 이미 "무엇을 하면 되는지"까지 담아 보낸 문장이다. 덮어쓰지 않는다.

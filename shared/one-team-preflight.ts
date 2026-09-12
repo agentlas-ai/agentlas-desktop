@@ -1,5 +1,6 @@
 import type { OneTaskforceReceipt } from "./one-taskforces";
 import type { RuntimeSelection } from "./types";
+import type { OneAttachmentRef } from "./one-attachments";
 
 export const ONE_TEAM_PREFLIGHT_CONTRACT_VERSION = "1.0.0" as const;
 
@@ -194,10 +195,13 @@ export interface PrepareOneTeamPreflightInput {
    * with `one-team-runtime-selection-changed` at start.
    */
   runtimeSelection?: RuntimeSelection;
+  /** Main-issued capability for this exact chat/prompt; never a claimed MIME flag. */
+  attachmentRef?: OneAttachmentRef;
 }
 
 export type PrepareOneTeamPreflightResult =
   | { kind: "not_required" }
+  | { kind: "input_unsupported"; code: "local_model_image_input_unsupported" }
   | { kind: "proposal"; proposal: OneTeamPreflightProposal };
 
 export type OneTeamPreflightResolution =

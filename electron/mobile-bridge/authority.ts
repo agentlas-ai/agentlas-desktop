@@ -1187,6 +1187,9 @@ async function bindMobileOneTurn(
     requestedAgentIds: targets.map((target) => target.agentId),
     permission: invocation.permissions === "read" ? "read" : "write",
   });
+  if (prepared.kind === "input_unsupported") {
+    throw Object.assign(new Error("The selected runtime does not support this input"), { code: prepared.code });
+  }
   if (prepared.kind !== "proposal" || !prepared.proposal.canConfirmTeam) {
     throw new Error("The exact turn-only agent roster could not be prepared");
   }
