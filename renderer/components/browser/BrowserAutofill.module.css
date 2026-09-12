@@ -12,4 +12,8 @@
 .form label { display:grid; grid-template-columns:96px minmax(0,1fr); align-items:center; gap:8px; font-size:11px; }
 .form input { width:100%; min-height:30px; padding:5px 8px; border:1px solid var(--paper-edge,#ddd); border-radius:7px; background:var(--paper,#fff); color:inherit; font:inherit; }
 .formActions { justify-content:flex-end; padding-top:4px; }
+.header .iconButton,.actions .iconButton { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:0; background:transparent; }
+.iconButton:hover { background:color-mix(in srgb,var(--ink,#27272a) 5%,transparent); }
+.iconButton:focus-visible { outline:2px solid var(--accent,#777); outline-offset:-2px; }
+.iconButton:disabled { opacity:.45; cursor:default; }
 @media(max-width:560px){.panel{position:fixed;left:12px;right:12px;top:auto;bottom:12px;width:auto;max-height:72vh}.item{align-items:flex-start;flex-direction:column}.form label{grid-template-columns:1fr;gap:3px}}
