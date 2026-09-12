@@ -8,11 +8,14 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import type { AppFactoryAppRecord, AppFactoryLivePreviewResult } from "../../shared/types";
 import { getAgentApp, isCloudAppRoot } from "../store/agent-apps";
 import type { ArtifactReadyRevision } from "../../shared/artifact-build";
 import { readAppArtifactSource, buildAppArtifact, loadReadyArtifact, publishReadyArtifact, recordArtifactBuildFailure, type ArtifactBundle } from "./artifact-build";
 import { observeArtifactRender, ARTIFACT_PREVIEW_CSP } from "./artifact-render";
+import { readArtifactPresentation, writeArtifactPresentation } from "../store/artifact-presentation";
+import { artifactPresentationClient } from "./presentation-client";
 
 type ActivePreview = {
   appId: string;
@@ -33,6 +36,8 @@ type ActivePreview = {
   refresh: Promise<void> | null;
   refreshAgain: boolean;
   lastFailureKey?: string;
+  presentationToken: string;
+  issuedBundles: Set<string>;
 };
 
 const activePreviews = new Map<string, ActivePreview>();
@@ -111,39 +116,6 @@ const MIME_TYPES: Record<string, string> = {
   ".xml": "application/xml; charset=utf-8",
 };
 
-const LIVE_CLIENT = String.raw`(() => {
-  if (window.__agentlasLiveReload) return;
-  window.__agentlasLiveReload = true;
-  const key = 'agentlas.presentation.v1';
-  const fieldKey = node => node.getAttribute('data-agentlas-state-key') || node.id || null;
-  const fields = () => [...document.querySelectorAll('input,textarea,select')].filter(node => fieldKey(node) && !['password','file','hidden','submit','button'].includes(node.type));
-  const snapshot = () => ({schemaVersion:1, fields:fields().slice(0,200).map(node=>({key:fieldKey(node),tag:node.tagName,type:node.type,value:node.value.slice(0,32768),checked:node.checked,selectionStart:node.selectionStart,selectionEnd:node.selectionEnd})),
-    focus:document.activeElement && fieldKey(document.activeElement),scroll:{x:scrollX,y:scrollY}});
-  const save = () => {try{const state=JSON.stringify(snapshot());if(state.length<262144)sessionStorage.setItem(key,state);}catch{}};
-  let saved;
-  try {saved=JSON.parse(sessionStorage.getItem(key)||'null');sessionStorage.removeItem(key);}catch{}
-  if(saved && saved.schemaVersion===1 && Array.isArray(saved.fields)) {
-    requestAnimationFrame(()=>requestAnimationFrame(()=>{
-      for(const value of saved.fields.slice(0,200)) {
-        const node=fields().find(node=>fieldKey(node)===value.key && node.tagName===value.tag && node.type===value.type);
-        if(!node || typeof value.value!=='string')continue;
-        node.value=value.value.slice(0,32768);if(typeof value.checked==='boolean')node.checked=value.checked;
-        if(saved.focus===value.key) {node.focus({preventScroll:true});if(typeof value.selectionStart==='number')try{node.setSelectionRange(value.selectionStart,value.selectionEnd);}catch{}}
-      }
-      if(saved.scroll && Number.isFinite(saved.scroll.x) && Number.isFinite(saved.scroll.y))scrollTo(saved.scroll.x,saved.scroll.y);
-      // No input/change/click event is synthesized: reopening never replays an app action.
-      window.dispatchEvent(new CustomEvent('agentlas:presentation-restored',{detail:{schemaVersion:1}}));
-    }));
-  }
-  let pending=false;
-  const source=new EventSource('/__agentlas/events');
-  source.addEventListener('reload',()=>{if(pending)return;pending=true;save();window.location.reload();});
-  source.addEventListener('build-failed',()=>{
-    let note=document.getElementById('__agentlas_build_notice');
-    if(!note){note=document.createElement('div');note.id='__agentlas_build_notice';note.setAttribute('role','status');note.style.cssText='position:fixed;bottom:12px;right:12px;max-width:min(360px,90vw);padding:12px 16px;background:#fff4df;color:#503717;border:1px solid #decba5;border-radius:12px;font:13px/1.5 system-ui;z-index:2147483647';document.body.appendChild(note);}
-    note.textContent='새 버전을 준비하지 못했어요. 이전 정상 버전을 표시하고 있습니다.';
-  });
-})();`;
 
 const PREVIEW_CSP = ARTIFACT_PREVIEW_CSP;
 
@@ -342,17 +314,50 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
     sendJson(response, 403, { ok: false, error: "loopback-required" });
     return;
   }
+  const url = new URL(request.url ?? "/", preview.url);
+  if (url.pathname === "/__agentlas/presentation") {
+    const target = { appId: preview.appId, sourceIdentityDigest: preview.ready.build.sourceIdentityDigest };
+    if (request.method === "GET" && request.headers["x-agentlas-presentation"] === preview.presentationToken) {
+      sendJson(response, 200, { receipt: readArtifactPresentation(target) });
+      return;
+    }
+    if (request.method !== "POST" || request.headers.origin !== new URL(preview.url).origin
+      || !String(request.headers["content-type"] ?? "").startsWith("application/json")) {
+      sendJson(response, 403, { error: "artifact_presentation_origin_refused" }); return;
+    }
+    const chunks: Buffer[] = []; let size = 0;
+    for await (const chunk of request) {
+      const bytes = Buffer.from(chunk); size += bytes.length;
+      if (size > 270_336) { sendJson(response, 413, { error: "artifact_presentation_too_large" }); return; }
+      chunks.push(bytes);
+    }
+    try {
+      const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!input || input.token !== preview.presentationToken || !preview.issuedBundles.has(input.bundleDigest)) {
+        sendJson(response, 403, { error: "artifact_presentation_capability_refused" }); return;
+      }
+      const result = writeArtifactPresentation(target, {
+        originBundleDigest: input.bundleDigest, expectedRevision: input.expectedRevision, requestId: input.requestId, state: input.state,
+      });
+      sendJson(response, result.status === "conflict" ? 409 : 200, result);
+    } catch (error) {
+      sendJson(response, 400, { error: error instanceof Error ? error.message : "artifact_presentation_invalid" });
+    }
+    return;
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     sendJson(response, 405, { ok: false, error: "method-not-allowed" });
     return;
   }
-  const url = new URL(request.url ?? "/", preview.url);
   if (url.pathname === "/__agentlas/live") {
     sendJson(response, 200, { ok: true, appId: preview.appId, revision: preview.revision, readyRevision: preview.ready, updateFailure: preview.updateFailure });
     return;
   }
   if (url.pathname === "/__agentlas/live.js") {
-    const body = Buffer.from(LIVE_CLIENT);
+    const bundleDigest = preview.ready.build.bundleDigest;
+    preview.issuedBundles.add(bundleDigest);
+    if (preview.issuedBundles.size > 32) preview.issuedBundles.delete(preview.issuedBundles.values().next().value!);
+    const body = Buffer.from(artifactPresentationClient({ token: preview.presentationToken, bundleDigest }));
     response.writeHead(200, { ...commonHeaders("text/javascript; charset=utf-8"), "Content-Length": String(body.length) });
     response.end(request.method === "HEAD" ? undefined : body);
     return;
@@ -451,6 +456,7 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
     clients: new Set(),
     record, bundle: prepared.bundle, ready: prepared.ready, updateFailure: prepared.updateFailure,
     controller, refresh:null, refreshAgain:false,
+    presentationToken: randomBytes(32).toString("hex"), issuedBundles: new Set(),
   };
   clearInterval(preview.heartbeat);
   preview.heartbeat = setInterval(() => {
