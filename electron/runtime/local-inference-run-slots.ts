@@ -15,6 +15,16 @@ interface Waiter {
 
 const queue: Waiter[] = [];
 
+function concurrencyLimit(): number {
+  try {
+    return getLocalInferenceConcurrency();
+  } catch {
+    // Recovery judgments can run while SQLite is unavailable. They still
+    // share this process's FIFO queue; an unreadable setting permits only one.
+    return 1;
+  }
+}
+
 function abortError(): Error {
   const e = new Error("local inference slot acquisition aborted");
   e.name = "AbortError";
@@ -32,7 +42,7 @@ function makeRelease(): () => void {
 }
 
 function pump(): void {
-  while (inUse < getLocalInferenceConcurrency() && queue.length > 0) {
+  while (inUse < concurrencyLimit() && queue.length > 0) {
     const w = queue.shift()!;
     if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
     if (w.signal?.aborted) {
@@ -54,7 +64,7 @@ export function acquireLocalInferenceSlot(
   onQueued?: (position: number) => void,
 ): Promise<() => void> {
   if (signal?.aborted) return Promise.reject(abortError());
-  if (inUse < getLocalInferenceConcurrency()) {
+  if (inUse < concurrencyLimit()) {
     inUse += 1;
     return Promise.resolve(makeRelease());
   }
@@ -79,5 +89,5 @@ export function acquireLocalInferenceSlot(
 
 /** 진단/표시용 스냅샷. */
 export function localInferenceSlotStats(): { inUse: number; queued: number; limit: number } {
-  return { inUse, queued: queue.length, limit: getLocalInferenceConcurrency() };
+  return { inUse, queued: queue.length, limit: concurrencyLimit() };
 }

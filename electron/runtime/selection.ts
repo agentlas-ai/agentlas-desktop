@@ -315,8 +315,9 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner;
 
 /**
  * Exact DB-independent runner for One's recovery plane. It never selects a
- * different runtime and never acquires a DB-backed concurrency slot. This path
- * is only for tool-free judgment while the operational store is unavailable.
+ * different runtime. Local inference shares the normal in-memory FIFO queue,
+ * with a conservative limit if the operational store cannot be read. This
+ * path is only for tool-free judgment while that store is unavailable.
  */
 export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { source?: string; acpAgentId?: string }): {
   runner: Runner;
@@ -340,9 +341,9 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   }
   if (selection.kind === "agentlas") return { runner: runAgentlasServing, label: "Agentlas" };
   if (selection.kind === "ollama") return null;
-  if (selection.kind === "agentlas-local") return { runner: runManagedLocalModel, label: "Agentlas Local" };
-  if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
-  if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };
+  if (selection.kind === "agentlas-local") return { runner: runManagedLocalModelSlotted, label: "Agentlas Local" };
+  if (selection.kind === "lmstudio") return { runner: runLMStudioSlotted, label: "LM Studio" };
+  if (selection.kind === "mlx") return { runner: runMLXSlotted, label: "MLX" };
   return null;
 }
 
