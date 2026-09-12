@@ -1011,11 +1011,16 @@ export class AgentlasMobileBridgeServer {
           },
         ).catch((ledgerError) => this.onError(errorOf(ledgerError)));
       }
+      const uncertainWrite = timeout && writeRequest;
       let response: MobileBridgeReplayResponse = mobileBridgeFailure(
         request.id,
-        timeout ? "request_timeout" : "authority_error",
-        timeout ? "Desktop did not answer in time" : "Desktop rejected the request",
-        timeout,
+        uncertainWrite ? "outcome_unknown" : timeout ? "request_timeout" : "authority_error",
+        uncertainWrite
+          ? "Desktop may have accepted this command, but its acknowledgement was not available; check Desktop state before trying again"
+          : timeout
+            ? "Desktop did not answer in time"
+            : "Desktop rejected the request",
+        timeout && !writeRequest,
       );
       if (!timeout && writeRequest && this.replayStore && replayFingerprint) {
         response = this.completeReplay(

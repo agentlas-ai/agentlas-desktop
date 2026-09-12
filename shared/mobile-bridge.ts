@@ -618,6 +618,7 @@ export interface MobileBridgeRpcErrorBody {
     | "idempotency_conflict"
     | "idempotency_in_progress"
     | "idempotency_uncertain"
+    | "outcome_unknown"
     | "idempotency_unavailable"
     | "authority_error"
     | "response_too_large"
