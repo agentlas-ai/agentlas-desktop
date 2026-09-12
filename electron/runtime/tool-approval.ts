@@ -54,6 +54,8 @@ export type ToolApprovalRequest = ToolApprovalRequestEvent;
  * 아무것도 import 하지 않아서, 러너들이 Electron 없이도 그대로 테스트된다.
  */
 export interface RuntimeToolPermissionAsk {
+  /** Main-only lifetime; never serialized into the approval card or consent identity. */
+  signal?: AbortSignal;
   /** Main-authored hard read boundary, independent of existing capability grants. */
   planMode?: true;
   runtime: string;
@@ -189,14 +191,16 @@ export interface ToolApprovalOutcome {
   durableConsent?: ToolApprovalDurableConsentReceipt;
 }
 
+type ApprovalWaiter = {
+  sessionKey: string;
+  resolve: (outcome: ToolApprovalOutcome) => void;
+  reject: (reason: unknown) => void;
+  cleanup: () => void;
+};
 type Pending = {
   request: ToolApprovalRequest;
-  resolve: (outcome: ToolApprovalOutcome) => ToolApprovalOutcome;
   timer: NodeJS.Timeout;
-  promise: Promise<ToolApprovalOutcome>;
-  /** Every session that joined a deduplicated exact request receives the
-   * session grant once the shared decision settles. */
-  sessionKeys: Set<string>;
+  waiters: Set<ApprovalWaiter>;
   dedupeKey: string;
 };
 
@@ -348,10 +352,45 @@ export function clearSessionGrants(sessionKey: string): void {
  * 아무도 답하지 않으면 `deny`로 닫는다. **열어둔 채 실행을 매달아 두지 않는다** —
  * 이 제품에서 "끝나지 않는 실행"은 이미 한 번 비싼 대가를 치른 실패 모양이다.
  */
+function detachPending(entry: Pending): void {
+  clearTimeout(entry.timer);
+  pending.delete(entry.request.id);
+  if (pendingByKey.get(entry.dedupeKey) === entry.request.id) pendingByKey.delete(entry.dedupeKey);
+}
+
+function expirePending(entry: Pending): void {
+  if (pending.get(entry.request.id) !== entry) return;
+  detachPending(entry);
+  const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
+  rememberResolution({ requestId: entry.request.id, decision: "deny", actionId: null,
+    status: "expired", decidedAt: outcome.decidedAt });
+  for (const waiter of entry.waiters) { waiter.cleanup(); waiter.resolve(outcome); }
+  entry.waiters.clear();
+  for (const fn of resolvedListeners) { try { fn(entry.request.id, outcome); } catch { /* UI cannot block settlement. */ } }
+}
+
+function joinApproval(entry: Pending, sessionKey: string, signal?: AbortSignal): Promise<ToolApprovalOutcome> {
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      if (!entry.waiters.delete(waiter)) return;
+      waiter.cleanup();
+      // Cancellation is not a user denial and cannot create a session/durable grant.
+      reject(signal?.reason ?? new Error("tool_approval_cancelled"));
+      if (!entry.waiters.size) expirePending(entry);
+    };
+    const waiter: ApprovalWaiter = { sessionKey, resolve, reject,
+      cleanup: () => signal?.removeEventListener("abort", aborted) };
+    entry.waiters.add(waiter);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
+  });
+}
+
 export function requestToolApproval(
-  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey: string; timeoutMs?: number },
+  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey: string; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<ToolApprovalOutcome> {
-  const { sessionKey, timeoutMs = 5 * 60_000, ...rest } = input;
+  const { sessionKey, timeoutMs = 5 * 60_000, signal, ...rest } = input;
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("tool_approval_cancelled"));
   if (hasSessionGrant(sessionKey, rest)) {
     return Promise.resolve({ decision: "allow_session", decidedAt: new Date().toISOString() });
   }
@@ -359,54 +398,24 @@ export function requestToolApproval(
   const existingId = pendingByKey.get(dedupeKey);
   if (existingId) {
     const existing = pending.get(existingId);
-    if (existing) {
-      existing.sessionKeys.add(sessionKey);
-      return existing.promise;
-    }
+    if (existing) return joinApproval(existing, sessionKey, signal);
     pendingByKey.delete(dedupeKey);
   }
   const requestedAt = new Date();
   const request: ToolApprovalRequest = {
-    ...rest,
-    id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
-    mode: "live",
-    requestedAt: requestedAt.toISOString(),
+    ...rest, id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
+    mode: "live", requestedAt: requestedAt.toISOString(),
     expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(),
   };
-  const sessionKeys = new Set([sessionKey]);
-  let resolvePromise!: (outcome: ToolApprovalOutcome) => void;
-  const promise = new Promise<ToolApprovalOutcome>((resolve) => {
-    resolvePromise = resolve;
-  });
-  const timer = setTimeout(() => {
-    pending.delete(request.id);
-    if (pendingByKey.get(dedupeKey) === request.id) pendingByKey.delete(dedupeKey);
-    const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
-    rememberResolution({
-      requestId: request.id,
-      decision: outcome.decision,
-      actionId: null,
-      status: "expired",
-      decidedAt: outcome.decidedAt,
-    });
-    for (const fn of resolvedListeners) { try { fn(request.id, outcome); } catch { /* 화면 하나가 실행을 깨지 못한다 */ } }
-    resolvePromise(outcome);
-  }, timeoutMs);
-  timer.unref?.();
-  pending.set(request.id, {
-    request,
-    timer,
-    promise,
-    sessionKeys,
-    dedupeKey,
-    resolve: (outcome) => {
-      const settled = settleApproval(request, sessionKeys, outcome);
-      resolvePromise(settled);
-      return settled;
-    },
-  });
+  const entry: Pending = { request, dedupeKey, waiters: new Set(),
+    timer: setTimeout(() => expirePending(entry), timeoutMs) };
+  entry.timer.unref?.();
+  pending.set(request.id, entry);
   pendingByKey.set(dedupeKey, request.id);
-  for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
+  const promise = joinApproval(entry, sessionKey, signal);
+  if (pending.get(request.id) === entry) {
+    for (const fn of listeners) { try { fn(request); } catch { /* UI cannot block settlement. */ } }
+  }
   return promise;
 }
 
@@ -490,10 +499,12 @@ export function resolveToolApproval(
   const entry = pending.get(id);
   let outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
-    clearTimeout(entry.timer);
-    pending.delete(id);
-    if (pendingByKey.get(entry.dedupeKey) === id) pendingByKey.delete(entry.dedupeKey);
-    outcome = entry.resolve(outcome);
+    detachPending(entry);
+    const waiters = [...entry.waiters];
+    entry.waiters.clear();
+    for (const waiter of waiters) waiter.cleanup();
+    outcome = settleApproval(entry.request, new Set(waiters.map(waiter => waiter.sessionKey)), outcome);
+    for (const waiter of waiters) waiter.resolve(outcome);
     rememberResolution({
       requestId: id,
       decision: outcome.decision,

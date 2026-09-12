@@ -383,7 +383,9 @@ async function approveLocalToolCall(
         ? ("execute" as const)
         : ("edit" as const)
     : null;
+  ctx.signal?.throwIfAborted();
   const ask: RuntimeToolPermissionAsk = {
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
     ...(ctx.planMode ? { planMode: true as const } : {}),
     runtime: ctx.runtimeKind,
     sessionKey: ctx.sessionKey,
@@ -413,6 +415,7 @@ async function approveLocalToolCall(
       decision = "deny";
     }
   }
+  ctx.signal?.throwIfAborted();
   ctx.onApprovalDecision?.(decision);
   return decision;
 }

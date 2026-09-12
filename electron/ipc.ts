@@ -3992,6 +3992,7 @@ export function registerIpcHandlers(): void {
       return "deny";
     }
     const outcome = await requestToolApproval({
+      ...(ask.signal ? { signal: ask.signal } : {}),
       sessionKey: ask.sessionKey,
       runtime: ask.runtime,
       tool: ask.tool,
