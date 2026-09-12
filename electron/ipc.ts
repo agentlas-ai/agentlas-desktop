@@ -850,6 +850,7 @@ import {
   setCapabilityGrantPersister,
   setRuntimeToolPermissionArbiter,
 } from "./runtime/tool-approval";
+import { mainToolConsentResource } from "./runtime/tool-consent";
 import {
   getCapabilityDecision,
   capabilityConsentScope,
@@ -3866,7 +3867,7 @@ export function registerIpcHandlers(): void {
    */
   const recentUserDenials = new Map<string, number>();
   const USER_DENIAL_TTL_MS = 5 * 60_000;
-  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${ask.detail ?? ""}`;
+  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
 
   const opaqueConsentIdentity = (label: string, value: string): string => {
     // Account ids, workspace paths, and agent names are Main-only material.
@@ -3917,7 +3918,7 @@ export function registerIpcHandlers(): void {
       userIdentity: opaqueConsentIdentity("user", rawUser),
       workspaceIdentity: opaqueConsentIdentity("workspace", rawWorkspaceIdentity),
       requesterIdentity: opaqueConsentIdentity("requester", rawRequester),
-      credentialResourceIdentity: capabilityResourceIdentity(ask.tool, ask.detail),
+      credentialResourceIdentity: mainToolConsentResource(ask) ?? capabilityResourceIdentity(ask.tool, ask.detail),
       permissionScope: ask.permission ?? "read",
     };
   };

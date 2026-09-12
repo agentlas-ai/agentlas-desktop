@@ -9,7 +9,8 @@ import { beginBuiltinFileProof } from "../long-run/file-proof";
 // mcpConfigPath는 buildMcpConfigFile()이 만든 { mcpServers: { [key]: {...} } } 형식의
 // 파일이다(mcp-config.ts). Main이 작성할 때 봉인한 실제 transport를 사용한다.
 // key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
-import { preparedMcpBindings, preparedMcpTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { preparedMcpBindings, preparedMcpTransport, preparedMcpConsentResource, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { bindMainToolConsentResource } from "./tool-consent";
 import { planMcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
@@ -366,6 +367,7 @@ export async function prepareMainToolLoop(
 async function approveLocalToolCall(
   ctx: LocalToolApprovalContext,
   toolName: string,
+  consentMaterial: unknown,
   detail?: string,
 ): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
@@ -388,9 +390,8 @@ async function approveLocalToolCall(
     tool: toolName,
     kind: builtinKind ?? "other",
     ...(detail ? {detail} : {}),
-    // detail 을 비워 두는 것은 의도적이다 — 세션 허용 키가 `tool::detail` 이라
-    // 인자를 실으면 인자 한 글자만 달라져도 다시 묻는다. 도구 이름
-    // (`mcp__<서버>__<도구>`) 자체가 사용자에게 무엇을 허용하는지 말해 준다.
+    // Display detail is separate from the exact Main-owned consent scope.
+    // Credentials and raw arguments must not be copied into an approval card.
     cwd: ctx.cwd,
     permission: ctx.permission,
     // 내장 read_file·list_dir 은 변이가 아니라는 것을 **증명할 수 있다**(우리 코드다).
@@ -400,6 +401,7 @@ async function approveLocalToolCall(
     ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
     ...(ctx.unattended ? { unattended: true as const } : {}),
   };
+  bindMainToolConsentResource(ask, consentMaterial);
   const arbiter = getRuntimeToolPermissionArbiter();
   let decision: RuntimeToolPermissionDecision;
   if (!arbiter) {
@@ -526,7 +528,11 @@ export async function runMainToolDispatch(
   if (resolved.kind === "builtin" && resolved.builtinName === "browser_download" && typeof args.url === "string") {
     try { downloadOrigin = new URL(args.url).origin; } catch { /* The builtin rejects invalid URLs before dispatch. */ }
   }
-  if ((await approveLocalToolCall(actionApproval, call.toolName, downloadOrigin)) === "deny") {
+  const consentMaterial = resolved.kind === "mcp"
+    ? { tool: call.toolName, target: preparedMcpConsentResource(resolved.prepared, resolved.server),
+        schema: resolved.schemaDigest, arguments: args }
+    : { tool: call.toolName, builtin: resolved.builtinName, arguments: args };
+  if ((await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
     events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import type { InstalledMcpServer } from "../../shared/types";
+import { mainToolConsentDigest } from "../runtime/tool-consent";
 
 /** Opaque Main-only admission. File contents or renderer objects cannot mint it. */
 export interface PreparedMcpBinding { readonly configKey: string; readonly server: InstalledMcpServer }
@@ -9,7 +10,7 @@ export type PreparedMcpTransport =
   | { kind: "http" | "sse"; url: string; headers: Record<string, string>; runtimeRoot: null };
 type Seal = { path: string; digest: string; current: () => boolean; invalid?: boolean; bindings: PreparedMcpBinding[] };
 const seals = new Map<string, Seal>();
-const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport }>();
+const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; consentResource: string }>();
 function fileDigest(path: string): string {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -29,7 +30,9 @@ function stringRecord(value: unknown): Record<string, string> {
 }
 /** Called only by the Main config builder after its private file is written. */
 export function registerPreparedMcpConfig(input: {
-  path: string; servers: Array<{ configKey: string; server: InstalledMcpServer; transport: unknown; runtimeRoot?: string | null }>;
+  path: string; servers: Array<{ configKey: string; server: InstalledMcpServer; transport: unknown; runtimeRoot?: string | null;
+    /** Main's actual target before its per-run approval proxy is added. */
+    consentTransport?: unknown }>;
   runtimeEnv: Record<string, string>; isCurrent: () => boolean;
 }): void {
   const resolve = (value: string) => value.replace(/\$\{(AGENTLAS_MCP_SECRET_[A-Za-z0-9_]+)\}/g, (_match, key: string) => {
@@ -37,8 +40,8 @@ export function registerPreparedMcpConfig(input: {
     return input.runtimeEnv[key];
   });
   const seal: Seal = { path: input.path, digest: fileDigest(input.path), current: input.isCurrent, bindings: [] };
-  for (const row of input.servers) {
-    const spec = row.transport as Record<string, unknown>;
+  const resolveTransport = (value: unknown, runtimeRoot: string | null): PreparedMcpTransport => {
+    const spec = value as Record<string, unknown>;
     if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("mcp_prepared_transport_invalid");
     let transport: PreparedMcpTransport;
     if (typeof spec.command === "string" && Array.isArray(spec.args) && spec.args.every((arg) => typeof arg === "string")) {
@@ -56,15 +59,22 @@ export function registerPreparedMcpConfig(input: {
         for (const key of Object.keys(targetEnv)) if (key.startsWith("AGENTLAS_MCP_SECRET_")) targetEnv[key] = resolve(targetEnv[key]);
         env.AGENTLAS_MCP_PROXY_TARGET = JSON.stringify({ ...target, env: targetEnv });
       }
-      transport = { kind: "stdio", command: spec.command, args: [...spec.args] as string[], env, runtimeRoot: row.runtimeRoot ?? null };
+      transport = { kind: "stdio", command: spec.command, args: [...spec.args] as string[], env, runtimeRoot };
     } else if ((spec.type === "http" || spec.type === "sse") && typeof spec.url === "string") {
       const headers = stringRecord(spec.headers ?? {});
       for (const key of Object.keys(headers)) headers[key] = resolve(headers[key]);
       transport = { kind: spec.type, url: resolve(spec.url), headers, runtimeRoot: null };
     } else throw new Error("mcp_prepared_transport_invalid");
+    return transport;
+  };
+  for (const row of input.servers) {
+    const transport = resolveTransport(row.transport, row.runtimeRoot ?? null);
+    const consentResource = mainToolConsentDigest({ configKey: row.configKey,
+      configuration: mcpServerConfigurationDigest(row.server),
+      transport: row.consentTransport === undefined ? transport : resolveTransport(row.consentTransport, row.runtimeRoot ?? null) });
     const server = Object.freeze({ ...row.server, args: Object.freeze([...row.server.args]) as unknown as string[], envKeys: Object.freeze([...row.server.envKeys]) as unknown as string[] });
     const binding = Object.freeze({ configKey: row.configKey, server });
-    bindings.set(binding, { seal, transport }); seal.bindings.push(binding);
+    bindings.set(binding, { seal, transport, consentResource }); seal.bindings.push(binding);
   }
   if (!seal.current()) throw new Error("mcp_prepared_scope_changed");
   seals.set(input.path, seal);
@@ -87,4 +97,12 @@ export function preparedMcpTransport(binding: PreparedMcpBinding, server: Instal
   validate(row.seal);
   return row.transport.kind === "stdio" ? { ...row.transport, args: [...row.transport.args], env: { ...row.transport.env } }
     : { ...row.transport, headers: { ...row.transport.headers } };
+}
+
+/** Sealed target/credential identity, independent of the approval session ID. */
+export function preparedMcpConsentResource(binding: PreparedMcpBinding, server: InstalledMcpServer): string {
+  const row = bindings.get(binding);
+  if (!row || binding.server !== server) throw new Error("mcp_prepared_binding_unapproved");
+  validate(row.seal);
+  return row.consentResource;
 }

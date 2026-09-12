@@ -660,6 +660,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
+    let consentTransport: unknown;
     if (s.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(s)) {
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;
@@ -795,6 +796,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // re-opened between Agent App validation and runtime spawn.
         const inlineEnv = { ELECTRON_RUN_AS_NODE: "1", ...builtInEnv };
         const direct = { command: process.execPath, args, env: inlineEnv };
+        consentTransport = direct;
         const isComputerUse = isAuthenticComputerUseMcpLaunch(command, args);
         const proxied = isComputerUse || opts?.toolGate?.planMode
           ? mcpProxySpec(key, direct, opts, s.catalogId, isComputerUse ? "cua-driver" : undefined) : null;
@@ -833,11 +835,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
          * 묻는다. 프록시를 붙이는 조건은 하나 — 승인 서버가 **실제로 떠 있을 때만**.
          * 관문 없는 프록시는 통과 파이프일 뿐이라 한 겹만 늘리는 손해다.
          */
-        const proxied = mcpProxySpec(key, {
+        const actual = {
           command: process.execPath,
           args: wrapperArgs,
           env: wrapperEnv,
-        }, opts, s.catalogId, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
+        };
+        consentTransport = actual;
+        const proxied = mcpProxySpec(key, actual, opts, s.catalogId, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -963,7 +967,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     } else {
       continue;
     }
-    preparedRows.push({ configKey: key, server: s, transport: mcpServers[key], runtimeRoot: preparedRuntimeRoot });
+    preparedRows.push({ configKey: key, server: s, transport: mcpServers[key], runtimeRoot: preparedRuntimeRoot,
+      ...(consentTransport !== undefined ? { consentTransport } : {}) });
     includedServerIds.push(s.id);
     includedServers.push({ serverId: s.id, catalogId: s.catalogId, configKey: key });
     allowedTools.push(`mcp__${key}`, `mcp__${key}__*`);
