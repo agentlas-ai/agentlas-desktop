@@ -1251,28 +1251,119 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
   return run;
 }
 
-function latestCriterionVerdicts(runId: string): Map<number, { verdict: string; evidenceRefs: string[]; artifactRefs: string[] }> {
+function latestCriterionVerdicts(runId: string): Map<number, { taskId: string | null; verdict: string; evidenceRefs: string[]; artifactRefs: string[] }> {
   const binding = getLongRunGoalRevisionBinding(runId);
   const rows = getDb().prepare(
-    `SELECT criterion_index, verdict, evidence_refs_json, artifact_refs_json
+    `SELECT task_id, criterion_index, verdict, evidence_refs_json, artifact_refs_json
      FROM long_run_verification_receipts
      WHERE run_id = ? AND rowid > ? ORDER BY created_at DESC, rowid DESC`,
   ).all(runId, binding?.receiptCursor ?? 0) as Array<{
+    task_id: string | null;
     criterion_index: number;
     verdict: string;
     evidence_refs_json: string;
     artifact_refs_json: string;
   }>;
-  const result = new Map<number, { verdict: string; evidenceRefs: string[]; artifactRefs: string[] }>();
+  const result = new Map<number, { taskId: string | null; verdict: string; evidenceRefs: string[]; artifactRefs: string[] }>();
   for (const row of rows) {
     if (result.has(row.criterion_index)) continue;
     result.set(row.criterion_index, {
+      taskId: row.task_id,
       verdict: row.verdict,
       evidenceRefs: stringArray(row.evidence_refs_json),
       artifactRefs: stringArray(row.artifact_refs_json),
     });
   }
   return result;
+}
+
+/** Resolve required canonical links again at the durable write/complete boundary.
+ * The verifier owns semantic and file-integrity checks; a dangling or foreign
+ * ledger reference cannot survive those checks as a reusable passed receipt.
+ * Science resolves its own references before projecting its signed receipt set. */
+function verificationReferencesResolve(run: LongRunRecord, receipt: { evidenceRefs: readonly string[]; artifactRefs: readonly string[] }): boolean {
+  const refs = [...receipt.evidenceRefs, ...receipt.artifactRefs];
+  if (!refs.length) return false;
+  if (run.surface === "science") return true;
+  const db = getDb(), binding = getLongRunGoalRevisionBinding(run.id);
+  const ownsInvocation = (invocationRunId: string): boolean => {
+    const attempts = db.prepare("SELECT id, run_id FROM long_run_worker_attempts WHERE invocation_run_id = ?")
+      .all(invocationRunId) as Array<{ id: string; run_id: string }>;
+    return attempts.length > 0 && attempts.every(attempt => attempt.run_id === run.id
+      && (!binding || getLongRunAttemptGoalRevision(run.id, attempt.id) === binding.revision));
+  };
+  const eventRow = (id: string) => db.prepare("SELECT run_id, chat_id, seq, kind, payload_json FROM run_events WHERE id = ?")
+    .get(id) as { run_id: string; chat_id: string | null; seq: number; kind: string; payload_json: string } | undefined;
+  return refs.every(ref => {
+    try {
+      const event = /^(event|file-proof|download-proof):(.+)$/.exec(ref);
+      if (event) {
+        const row = eventRow(event[2]);
+        if (!row || row.chat_id !== run.rootChatId || (binding && !ownsInvocation(row.run_id))) return false;
+        if (event[1] === "event") return true;
+        if (row.kind !== (event[1] === "file-proof" ? "runtime_file_observed" : "runtime_download_observed")) return false;
+        const payload = JSON.parse(row.payload_json);
+        if (typeof payload.startEventId !== "string" || typeof payload.resultEventId !== "string"
+          || typeof payload.toolId !== "string" || !payload.toolId) return false;
+        const start = eventRow(payload.startEventId), result = eventRow(payload.resultEventId);
+        if (!start || !result || start.seq >= result.seq || result.seq >= row.seq
+          || [start, result].some(tool => tool.kind !== "mcp_tool-use" || tool.run_id !== row.run_id || tool.chat_id !== row.chat_id)) return false;
+        const before = JSON.parse(start.payload_json), after = JSON.parse(result.payload_json);
+        const toolName = event[1] === "download-proof" ? "browser_download" : payload.toolName;
+        if (typeof toolName !== "string" || !toolName || before.toolName !== toolName || after.toolName !== toolName
+          || before.toolId !== payload.toolId || after.toolId !== payload.toolId
+          || typeof before.toolResultPreview === "string" || typeof after.toolResultPreview !== "string" || after.toolIsError !== false) return false;
+        const count = db.prepare("SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND chat_id = ? AND kind = 'mcp_tool-use' AND json_extract(payload_json, '$.toolId') = ?")
+          .get(row.run_id, row.chat_id, payload.toolId) as { n: number };
+        return count.n === 2;
+      }
+      const message = /^chat-message:(.+)$/.exec(ref);
+      if (message) {
+        const row = db.prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?").get(message[1]) as
+          { chat_id: string; role: string; text: string } | undefined;
+        if (row?.chat_id !== run.rootChatId || row.role !== "assistant" || !row.text.trim()) return false;
+        const finals = db.prepare("SELECT DISTINCT run_id FROM run_events WHERE chat_id = ? AND kind = 'mcp_final' AND json_extract(payload_json, '$.durableMessageId') = ?")
+          .all(run.rootChatId, message[1]) as Array<{ run_id: string }>;
+        return finals.some(final => {
+          if (!ownsInvocation(final.run_id)) return false;
+          const count = db.prepare(`SELECT COUNT(DISTINCT m.id) AS n FROM run_events e JOIN chat_messages m
+            ON m.id = json_extract(e.payload_json, '$.durableMessageId') WHERE e.run_id = ? AND e.chat_id = ?
+            AND e.kind = 'mcp_final' AND m.chat_id = ? AND m.role = 'assistant'`)
+            .get(final.run_id, run.rootChatId, run.rootChatId) as { n: number };
+          return count.n === 1;
+        });
+      }
+      const ledger = /^long-run-event:(.+):([1-9]\d*)$/.exec(ref);
+      if (ledger) return ledger[1] === run.id && Number.isSafeInteger(Number(ledger[2]))
+        && Boolean(db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND seq = ?").get(run.id, Number(ledger[2])));
+      const goal = /^goal:(.+):revision:([1-9]\d*)$/.exec(ref);
+      if (goal) return goal[1] === run.goalId && Number(goal[2]) === binding?.revision
+        && getChatGoalRevision(run.goalId)?.revision === binding.revision;
+      const invocation = /^invocation:(.+):completed$/.exec(ref);
+      if (invocation) {
+        if (!ownsInvocation(invocation[1])) return false;
+        const start = db.prepare("SELECT chat_id, seq FROM run_events WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq LIMIT 1")
+          .get(invocation[1]) as { chat_id: string | null; seq: number } | undefined;
+        const terminal = db.prepare("SELECT chat_id, seq, kind FROM run_events WHERE run_id = ? AND kind IN ('invoke_completed','mcp_final','invoke_failed','invoke_threw','mcp_error','invoke_cancelled','invoke_interrupted') ORDER BY seq DESC LIMIT 1")
+          .get(invocation[1]) as { chat_id: string | null; seq: number; kind: string } | undefined;
+        return start?.chat_id === run.rootChatId && terminal?.chat_id === run.rootChatId
+          && start.seq < terminal.seq && ["invoke_completed", "mcp_final"].includes(terminal.kind);
+      }
+      const artifact = /^artifact:(.+):revision:([1-9]\d*)$/.exec(ref);
+      if (artifact) {
+        if (!Number.isSafeInteger(Number(artifact[2]))) return false;
+        const row = db.prepare("SELECT s.chat_id, s.project_id, r.reference_json FROM agent_surface_revisions r JOIN agent_surfaces s ON s.id = r.surface_id WHERE r.surface_id = ? AND r.revision = ?")
+          .get(artifact[1], Number(artifact[2])) as { chat_id: string; project_id: string | null; reference_json: string } | undefined;
+        if (!row || row.chat_id !== run.rootChatId || row.project_id !== run.projectId) return false;
+        const reference = JSON.parse(row.reference_json);
+        return reference.artifactId === artifact[1] && reference.revision === Number(artifact[2])
+          && reference.owner?.chatId === run.rootChatId && reference.owner?.projectId === run.projectId;
+      }
+      // Opaque legacy references remain readable. Newly bound Goal contracts
+      // require a resolvable typed reference instead of inventing an authority.
+      return binding === null;
+    } catch { return false; }
+  });
 }
 
 function maybeCompleteVerifiedTask(runId: string, taskId: string, at: string): void {
@@ -1282,10 +1373,12 @@ function maybeCompleteVerifiedTask(runId: string, taskId: string, at: string): v
   if (!row || !LONG_RUN_OPEN_TASK_STATES.has(row.state)) return;
   const required = integerArray(row.criterion_indices_json);
   if (required.length === 0) return;
+  const run = getLongRun(runId);
+  if (!run) return;
   const latest = latestCriterionVerdicts(runId);
   const passed = required.every((index) => {
     const receipt = latest.get(index);
-    return receipt?.verdict === "passed" && (receipt.evidenceRefs.length > 0 || receipt.artifactRefs.length > 0);
+    return receipt?.verdict === "passed" && verificationReferencesResolve(run, receipt);
   });
   if (!passed) return;
   getDb().prepare(
@@ -1333,6 +1426,9 @@ export function recordLongRunVerification(input: {
     const currentBinding = getLongRunGoalRevisionBinding(input.runId);
     if (!goalRevisionIsCurrent(current) || (currentBinding && (input.goalRevision !== currentBinding.revision || current.status !== "verifying"))) {
       throw new Error("long_run_verification_goal_revision_conflict");
+    }
+    if (input.verdict === "passed" && !verificationReferencesResolve(current, { evidenceRefs, artifactRefs })) {
+      throw new Error("long_run_verification_reference_unresolved");
     }
     db.prepare(
       `INSERT INTO long_run_verification_receipts (
@@ -1445,11 +1541,29 @@ export function tryCompleteVerifiedLongRun(runId: string): boolean {
     if (!run || run.status !== "verifying") return false;
     if (run.surface === "science") return false;
     if (!goalRevisionIsCurrent(run)) return false;
-    if (listLongRunTasks(runId, true).length > 0) return false;
     const latest = latestCriterionVerdicts(runId);
+    const unresolved = run.acceptanceCriteria.flatMap((_, index) => {
+      const receipt = latest.get(index);
+      return receipt?.verdict === "passed" && !verificationReferencesResolve(run, receipt) ? [index] : [];
+    });
+    if (unresolved.length) {
+      const now = new Date().toISOString();
+      // Reopen only tasks named by this revision's invalid receipts. Earlier
+      // revisions retain their completed audit records, even when indices match.
+      const taskIds = new Set(unresolved.map(index => latest.get(index)?.taskId).filter((id): id is string => !!id));
+      for (const taskId of taskIds) {
+        getDb().prepare("UPDATE long_run_tasks SET state = 'todo', evidence_ref = NULL, completed_at = NULL, updated_at = ? WHERE run_id = ? AND id = ? AND state = 'completed'")
+          .run(now, runId, taskId);
+      }
+      appendEventInDb({ runId, kind: "verification.references_unresolved", actorKind: "host", at: now,
+        payload: { criterionIndices: unresolved, goalRevision: getLongRunGoalRevisionBinding(runId)?.revision ?? null } });
+      transitionLongRun({ runId, to: "blocked", actorKind: "host", reason: "verification_reference_unresolved" });
+      return false;
+    }
+    if (listLongRunTasks(runId, true).length > 0) return false;
     const allPassed = run.acceptanceCriteria.every((_, index) => {
       const receipt = latest.get(index);
-      return receipt?.verdict === "passed" && (receipt.evidenceRefs.length > 0 || receipt.artifactRefs.length > 0);
+      return receipt?.verdict === "passed";
     });
     if (!allPassed) return false;
     transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
