@@ -1,3 +1,4 @@
+import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { randomUUID } from "node:crypto";
 import {
   LONG_RUN_ACTIVE_STATUSES,
@@ -258,6 +259,19 @@ function requiredContent(value: string, code: string): string {
   return normalized;
 }
 
+/** Bind evidence to the contract at the durable attempt-start cursor. A later
+ * steering revision cannot relabel output from an older worker. Legacy starts
+ * without a prior binding stay unknown. */
+export function getLongRunAttemptGoalRevision(runId: string, attemptId: string): number | null {
+  const start = getDb().prepare("SELECT seq FROM long_run_events WHERE run_id = ? AND kind = 'worker.attempt_started' AND json_extract(payload_json, '$.attemptId') = ? ORDER BY seq ASC LIMIT 1")
+    .get(runId, attemptId) as { seq: number } | undefined;
+  if (!start) return null;
+  const binding = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.goal_revision_bound' AND seq <= ? ORDER BY seq DESC LIMIT 1")
+    .get(runId, start.seq) as { payload_json: string } | undefined;
+  const revision = binding ? JSON.parse(binding.payload_json).revision : null;
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
 function appendEventInDb(input: {
   runId: string;
   kind: string;
@@ -265,12 +279,41 @@ function appendEventInDb(input: {
   actorId?: string | null;
   payload?: unknown;
   at: string;
+  sourceEventId?: string;
+  correlation?: RuntimeCorrelation;
+  evidencePhase?: RuntimeEvidencePhase;
 }): number {
   const db = getDb();
   const row = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?")
     .get(input.runId) as { last_event_seq: number } | undefined;
   if (!row) throw new Error(`long_run_not_found:${input.runId}`);
+  if (input.sourceEventId) {
+    const prior = db.prepare("SELECT seq, kind FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
+      .get(input.runId, input.sourceEventId) as { seq: number; kind: string } | undefined;
+    if (prior) {
+      if (prior.kind !== input.kind) throw new Error("runtime_source_event_conflict");
+      return prior.seq;
+    }
+  }
   const seq = row.last_event_seq + 1;
+  const payload = input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
+    ? input.payload as Record<string, unknown> : { value: input.payload ?? null };
+  const identity = db.prepare("SELECT goal_id FROM long_runs WHERE id = ?").get(input.runId) as { goal_id: string };
+  const binding = input.kind === "run.goal_revision_bound" ? payload.revision
+    : typeof payload.attemptId === "string" && input.kind !== "worker.attempt_started"
+      ? getLongRunAttemptGoalRevision(input.runId, payload.attemptId)
+      : getLongRunGoalRevisionBinding(input.runId)?.revision;
+  const payloadCorrelation: RuntimeCorrelation = {};
+  for (const key of ["taskId", "workerId", "attemptId", "invocationRunId", "actionId", "environmentId", "artifactVersionRef"] as const) {
+    if (typeof payload[key] === "string" && payload[key]) payloadCorrelation[key] = payload[key] as string;
+  }
+  if (Number.isSafeInteger(binding) && Number(binding) > 0) payloadCorrelation.goalRevision = Number(binding);
+  const runtimeEvidence = decodeRuntimeEvidence({ schemaVersion: "agentlas.runtime-evidence.v1",
+    sourceEventId: input.sourceEventId ?? `long-run:${input.runId}:event:${seq}`,
+    phase: input.evidencePhase ?? runtimeEvidencePhase(input.kind, payload),
+    correlation: { ...payloadCorrelation, ...input.correlation, longRunId: input.runId, goalId: identity.goal_id,
+      ...(input.actorKind === "worker" && input.actorId ? { workerId: input.actorId } : {}) } });
+  if (!runtimeEvidence) throw new Error("runtime_evidence_invalid");
   db.prepare(
     `INSERT INTO long_run_events
       (run_id, seq, kind, actor_kind, actor_id, payload_json, occurred_at)
@@ -281,7 +324,7 @@ function appendEventInDb(input: {
     requiredText(input.kind, "long_run_event_kind_required", 120),
     input.actorKind,
     input.actorId?.trim() || null,
-    JSON.stringify(input.payload ?? {}),
+    JSON.stringify({ ...payload, runtimeEvidence }),
     input.at,
   );
   db.prepare(

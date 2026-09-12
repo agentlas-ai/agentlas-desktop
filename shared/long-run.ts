@@ -1,3 +1,5 @@
+import type { CheckpointArtifactVersion, RuntimePlanSnapshot } from "./runtime-plan";
+import type { InstructionSnapshot } from "./runtime-instructions";
 /**
  * Provider-neutral long-running work contracts.
  *
@@ -243,7 +245,7 @@ export interface LongRunBudget {
 }
 
 export interface ContinuityCapsule {
-  schemaVersion: "agentlas.continuity-capsule.v1";
+  schemaVersion: "agentlas.continuity-capsule.v1" | "agentlas.continuity-capsule.v2";
   runId: string;
   workerId: string;
   taskId: string | null;
@@ -257,6 +259,16 @@ export interface ContinuityCapsule {
   workspaceFingerprint: string;
   nativeCoordinate: { kind: string; id: string } | null;
   lastCommittedEventSeq: number;
+  /** v1 absence is unknown; path identity is not a content observation. */
+  pathHash?: string;
+  observedContentSnapshot?: { scope: "loaded-instructions"; digest: string; files: Array<{ sourceRef: string; contentHash: string }> } | null;
+  originalConstraintsRef?: string | null;
+  originalConstraints?: string | null;
+  plan?: RuntimePlanSnapshot | null;
+  instructionSnapshot?: InstructionSnapshot | null;
+  artifactVersions?: CheckpointArtifactVersion[];
+  historyRangeRef?: { chatId: string; firstMessageId: string | null; lastMessageId: string | null; messageCount: number } | null;
+  externalActionReceipts?: Array<{ attemptId: string; invocationRunId: string | null; state: string; sideEffectState: string }>;
 }
 
 export function defaultRuntimeFeatureMap(): Record<RuntimeFeature, RuntimeFeatureSupport> {

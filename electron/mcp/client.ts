@@ -1,3 +1,5 @@
+import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
+import { renderInstructionSnapshot } from "../../shared/runtime-instructions";
 import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
 import type { NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
 import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
@@ -4255,6 +4257,14 @@ ${effectiveUserPrompt}`;
     turnContextParts.push(locale === "ko"
       ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
       : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. Do not mention or quote this contract.\n[/Host response-language contract]");
+  }
+  // One immutable project snapshot per execution boundary. All supported runner
+  // adapters consume the same block through their existing context transport.
+  const projectInstructions = req.runId
+    ? recordInvocationInstructionSnapshot({ runId: req.runId, chatId: chat.id, projectDir: workforceProjectDir })
+    : compileProjectInstructionSnapshot({ projectDir: workforceProjectDir });
+  if (projectInstructions.snapshot.sources.length > 0 || projectInstructions.delta.changedRefs.length > 0) {
+    turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot));
   }
   /*
    * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의

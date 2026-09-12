@@ -53,7 +53,7 @@ export function goalVerificationDisposition(input: {
 /** Host state, never a model-written conversation summary. Provider protocol
  * values (including thought signatures) stay in their native session/sidecar. */
 export interface LongRunTaskCheckpoint {
-  schemaVersion: "agentlas.task-checkpoint.v1";
+  schemaVersion: "agentlas.task-checkpoint.v1" | "agentlas.task-checkpoint.v2";
   checkpointId: string;
   goalId: string;
   goalRevision: number | null;
@@ -94,6 +94,14 @@ export function compileLongRunCheckpoint(checkpoint: LongRunTaskCheckpoint, kind
       text,
       fullCriterionRef: `${checkpoint.capsule.goalContractRef}:criterion:${criterionIndex}`,
     })),
+    originalConstraintsRef: checkpoint.capsule.originalConstraintsRef ?? null,
+    originalConstraints: checkpoint.capsule.originalConstraints ?? null,
+    plan: checkpoint.capsule.plan ?? null,
+    openQuestions: checkpoint.capsule.openQuestions,
+    artifactVersions: checkpoint.capsule.artifactVersions ?? null,
+    historyRangeRef: checkpoint.capsule.historyRangeRef ?? null,
+    instructionRevision: checkpoint.capsule.instructionSnapshot?.revision ?? null,
+    externalActionReceipts: checkpoint.capsule.externalActionReceipts ?? null,
     workspacePath: checkpoint.workspacePath,
     eventCursor: checkpoint.capsule.lastCommittedEventSeq,
     completedTaskIds: checkpoint.completedTaskIds.slice(0, 16),

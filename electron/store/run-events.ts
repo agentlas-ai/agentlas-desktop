@@ -1,3 +1,5 @@
+import { getLongRunAttemptGoalRevision } from "./long-runs";
+import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
 import { externalToolNames } from "../../shared/tool-activity";
@@ -98,6 +100,9 @@ export interface RecordRunEventInput {
   nodeId?: string | null;
   agentId?: string | null;
   payload?: Record<string, unknown>;
+  sourceEventId?: string;
+  correlation?: RuntimeCorrelation;
+  evidencePhase?: RuntimeEvidencePhase;
 }
 
 export interface RecordFailureEventInput {
@@ -378,6 +383,17 @@ function safePayload(
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    if (key === "runtimeEvidence") {
+      const envelope = decodeRuntimeEvidence(value);
+      if (envelope) out[key] = envelope;
+      continue;
+    }
+    if (key === "instructionSnapshot") {
+      // Exact host snapshot is local Main state, removed from generic UI reads.
+      if (context?.kind === "instruction_snapshot" && typeof value === "object"
+        && (value as Record<string, unknown>).schemaVersion === "agentlas.instruction-snapshot.v1") out[key] = value;
+      continue;
+    }
     if (key === QUESTION_CONTINUATION_REPLY_FIELD) {
       if (canonicalReply !== undefined) out[key] = canonicalReply;
       continue;
@@ -797,6 +813,8 @@ function runRowToUi(row: RunEventRow): RunEventUi {
   // Main-only field through another event kind.
   delete payload.workerReportJson;
   delete payload[QUESTION_CONTINUATION_REPLY_FIELD];
+  delete payload.instructionSnapshot;
+  payload.runtimeEvidence = runtimeEvidenceForRow({ id: row.id, kind: row.kind, payload });
   enrichOneArtifactContentIdentity(payload);
   return {
     id: row.id,
@@ -864,55 +882,78 @@ function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
 }
 
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
-  const seq = nextSeq(input.runId);
-  const row = {
-    id: `evt_${randomUUID()}`,
-    run_id: input.runId,
-    seq,
-    ts: nowIso(),
-    kind: input.kind,
-    chat_id: input.chatId ?? null,
-    automation_id: input.automationId ?? null,
-    node_id: input.nodeId ?? null,
-    agent_id: input.agentId ?? null,
-    payload_json: JSON.stringify(safePayload(input.payload, {
-      runId: input.runId,
+  return getDb().transaction(() => {
+    const id = input.sourceEventId ? `evt_${stableUuid(`${input.runId}:${input.sourceEventId}`)}` : `evt_${randomUUID()}`;
+    const existing = getDb().prepare("SELECT * FROM run_events WHERE id = ?").get(id) as RunEventRow | undefined;
+    if (existing) {
+      if (existing.kind !== input.kind || existing.chat_id !== (input.chatId ?? null)) throw new Error("runtime_source_event_conflict");
+      // An exact source identity is immutable: repeat deliveries return the
+      // original committed payload, even if a retried producer changed its copy.
+      return runRowToUi(existing);
+    }
+    const seq = nextSeq(input.runId);
+    // Link only an actual attempt binding, never infer identity from chat titles.
+    const attempt = getDb().prepare(`SELECT a.id, a.worker_id, a.task_id, a.run_id, r.goal_id
+      FROM long_run_worker_attempts a JOIN long_runs r ON r.id = a.run_id
+      WHERE a.invocation_run_id = ? LIMIT 1`).get(input.runId) as
+      { id: string; worker_id: string; task_id: string | null; run_id: string; goal_id: string } | undefined;
+    const goalRevision = attempt ? getLongRunAttemptGoalRevision(attempt.run_id, attempt.id) : null;
+    const boundCorrelation: RuntimeCorrelation = attempt ? { longRunId: attempt.run_id, goalId: attempt.goal_id,
+      workerId: attempt.worker_id, attemptId: attempt.id, ...(attempt.task_id ? { taskId: attempt.task_id } : {}),
+      ...(goalRevision !== null ? { goalRevision } : {}) } : {};
+    const runtimeEvidence = decodeRuntimeEvidence({ schemaVersion: "agentlas.runtime-evidence.v1",
+      sourceEventId: input.sourceEventId ?? id, phase: input.evidencePhase ?? runtimeEvidencePhase(input.kind, input.payload),
+      correlation: { ...input.correlation, ...boundCorrelation, invocationRunId: input.runId } });
+    if (!runtimeEvidence) throw new Error("runtime_evidence_invalid");
+    const row = {
+      id,
+      run_id: input.runId,
+      seq,
+      ts: nowIso(),
       kind: input.kind,
-      chatId: input.chatId ?? null,
-    })),
-  };
-  getDb()
-    .prepare(
-      `INSERT INTO run_events
-       (id, run_id, seq, ts, kind, chat_id, automation_id, node_id, agent_id, payload_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      row.id,
-      row.run_id,
-      row.seq,
-      row.ts,
-      row.kind,
-      row.chat_id,
-      row.automation_id,
-      row.node_id,
-      row.agent_id,
-      row.payload_json,
-    );
-  if (row.agent_id) {
-    bumpAgentUsage(row.agent_id, row.run_id, row.ts);
-    if (row.chat_id) {
-      const projected = projectObservedTaskParticipantInDb(getDb(), {
-        chatId: row.chat_id,
-        observedAgentIdentity: row.agent_id,
-        seenAt: row.ts,
-      });
-      if (projected.changed && projected.taskId) {
-        emitDesktopStoreChange({ entity: "task", id: projected.taskId });
+      chat_id: input.chatId ?? null,
+      automation_id: input.automationId ?? null,
+      node_id: input.nodeId ?? null,
+      agent_id: input.agentId ?? null,
+      payload_json: JSON.stringify(safePayload({ ...input.payload, runtimeEvidence }, {
+        runId: input.runId,
+        kind: input.kind,
+        chatId: input.chatId ?? null,
+      })),
+    };
+    getDb()
+      .prepare(
+        `INSERT INTO run_events
+         (id, run_id, seq, ts, kind, chat_id, automation_id, node_id, agent_id, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.run_id,
+        row.seq,
+        row.ts,
+        row.kind,
+        row.chat_id,
+        row.automation_id,
+        row.node_id,
+        row.agent_id,
+        row.payload_json,
+      );
+    if (row.agent_id) {
+      bumpAgentUsage(row.agent_id, row.run_id, row.ts);
+      if (row.chat_id) {
+        const projected = projectObservedTaskParticipantInDb(getDb(), {
+          chatId: row.chat_id,
+          observedAgentIdentity: row.agent_id,
+          seenAt: row.ts,
+        });
+        if (projected.changed && projected.taskId) {
+          emitDesktopStoreChange({ entity: "task", id: projected.taskId });
+        }
       }
     }
-  }
-  return runRowToUi(row);
+    return runRowToUi(row);
+  })();
 }
 
 export function recordFailureEvent(input: RecordFailureEventInput): FailureEventUi {
@@ -972,6 +1013,12 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
 }
 
 export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent): void {
+  // Skip the entire already-committed projection, including selection/failure
+  // companion rows. The host assigns the source sequence before delivery.
+  if (Number.isSafeInteger(ev.sequence)) {
+    const id = `evt_${stableUuid(`${runId}:invocation:${runId}:event:${ev.sequence}`)}`;
+    if (getDb().prepare("SELECT 1 FROM run_events WHERE id = ?").get(id)) return;
+  }
   // Partial deltas and usage counters are high-frequency and remain live-only.
   // Reasoning boundaries are different: they contain no chain-of-thought text,
   // only start/end timing. Persist those typed facts so Activity does not lose
@@ -1103,6 +1150,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
   tryRecordRunEvent({
     runId,
     kind: `mcp_${ev.kind}`,
+    sourceEventId: Number.isSafeInteger(ev.sequence) ? `invocation:${runId}:event:${ev.sequence}` : undefined,
+    correlation: ev.tool?.id ? { actionId: ev.tool.id } : undefined,
     chatId: req.chatId,
     automationId: req.automationId ?? null,
     nodeId: ev.nodeId,

@@ -1,3 +1,6 @@
+import { listAgentSurfaces } from "../store/agent-surfaces";
+import { latestInvocationInstructionSnapshot } from "./instructions";
+import { latestRuntimePlan, recordRuntimePlan } from "./plan";
 import { createHash } from "node:crypto";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { getDb } from "../store/db";
@@ -25,9 +28,30 @@ export function recordTaskCheckpoint(input: {
     const revision = getChatGoalRevision(run.goalId);
     const attempts = getDb().prepare("SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')")
       .all(run.id) as Array<{ id: string; state: string; side_effect_state: string }>;
-    const checkpointId = `checkpoint:${run.id}:${run.lastEventSeq + 1}`;
+    const instructionSnapshot = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
+    const currentPlan = latestRuntimePlan(run.id);
+    const plan = !currentPlan || currentPlan.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)
+      || JSON.stringify(currentPlan.steps) !== JSON.stringify(tasks.map((task) => ({ taskId: task.id, title: task.title, state: task.state })))
+      ? recordRuntimePlan({ runId: run.id, expectedRevision: currentPlan?.revision ?? null }) : currentPlan;
+    const questions = getDb().prepare("SELECT id FROM long_run_messages WHERE run_id = ? AND kind = 'question' AND state IN ('queued','delivered') ORDER BY created_at, id")
+      .all(run.id) as Array<{ id: string }>;
+    const history = run.rootChatId ? getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? ORDER BY created_at, rowid")
+      .all(run.rootChatId) as Array<{ id: string }> : [];
+    const artifactVersions = run.rootChatId ? listAgentSurfaces(run.rootChatId).map((surface) => ({
+      artifactId: surface.id, artifactRevision: surface.artifactRevision ?? null,
+      sourceDigest: surface.artifactRef?.sourceDigest ?? null, dataDigest: surface.artifactRef?.dataDigest ?? null,
+      stateRevision: surface.stateRevision ?? null, stateSchemaDigest: surface.artifactRef?.stateSchemaDigest ?? null,
+    })) : [];
+    const effects = getDb().prepare("SELECT id, invocation_run_id, state, side_effect_state, native_coordinate_json FROM long_run_worker_attempts WHERE run_id = ? ORDER BY started_at, id")
+      .all(run.id) as Array<{ id: string; invocation_run_id: string | null; state: string; side_effect_state: string; native_coordinate_json: string | null }>;
+    const nativeAttempt = effects.find((effect) => effect.invocation_run_id === input.invocationRunId);
+    const nativeCoordinate = nativeAttempt?.native_coordinate_json ? JSON.parse(nativeAttempt.native_coordinate_json) : null;
+    const observedFiles = instructionSnapshot?.sources.map(({ sourceRef, contentHash }) => ({ sourceRef, contentHash })) ?? [];
+    const pathHash = createHash("sha256").update(input.projectDir ?? "").digest("hex");
+    const eventCursor = getLongRunByGoalId(input.goalId)!.lastEventSeq;
+    const checkpointId = `checkpoint:${run.id}:${eventCursor + 1}`;
     const checkpoint: LongRunTaskCheckpoint = {
-      schemaVersion: "agentlas.task-checkpoint.v1", checkpointId, goalId: run.goalId,
+      schemaVersion: "agentlas.task-checkpoint.v2", checkpointId, goalId: run.goalId,
       goalRevision: getLongRunGoalRevisionBinding(run.id)?.revision ?? null,
       invocationRunId: input.invocationRunId ?? null, disposition: input.disposition,
       objective: run.objective,
@@ -41,13 +65,23 @@ export function recordTaskCheckpoint(input: {
       sideEffects: { state: attempts.length ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id) },
       createdAt: new Date().toISOString(),
       capsule: {
-        schemaVersion: "agentlas.continuity-capsule.v1", runId: run.id, workerId: input.workerId,
+        schemaVersion: "agentlas.continuity-capsule.v2", runId: run.id, workerId: input.workerId,
         taskId: tasks.find((task) => task.state !== "completed")?.id ?? null, attempt: input.attempt,
         goalContractRef: revision ? `goal:${run.goalId}:revision:${revision.revision}` : `goal:${run.goalId}`,
-        compactedContextRef: null, openQuestions: [], artifactRefs: [], evidenceRefs: input.evidenceRefs,
+        compactedContextRef: null, openQuestions: [...plan.unresolvedQuestions, ...questions.map((question) => `message:${question.id}`)],
+        artifactRefs: artifactVersions.map((artifact) => `artifact:${artifact.artifactId}:revision:${artifact.artifactRevision ?? "unknown"}`), evidenceRefs: input.evidenceRefs,
+        artifactVersions, plan, instructionSnapshot,
+        originalConstraintsRef: revision ? `message:${revision.originalRequest.messageId}` : null,
+        originalConstraints: revision?.originalRequest.text ?? null,
+        historyRangeRef: run.rootChatId ? { chatId: run.rootChatId, firstMessageId: history[0]?.id ?? null,
+          lastMessageId: history.at(-1)?.id ?? null, messageCount: history.length } : null,
+        externalActionReceipts: effects.map((effect) => ({ attemptId: effect.id, invocationRunId: effect.invocation_run_id,
+          state: effect.state, sideEffectState: effect.side_effect_state })),
+        pathHash, observedContentSnapshot: instructionSnapshot ? { scope: "loaded-instructions", files: observedFiles,
+          digest: createHash("sha256").update(JSON.stringify(observedFiles)).digest("hex") } : null,
         toolInvocationRefs: input.invocationRunId ? [`invocation:${input.invocationRunId}`] : [],
-        workspaceFingerprint: createHash("sha256").update(input.projectDir ?? "").digest("hex"),
-        nativeCoordinate: null, lastCommittedEventSeq: run.lastEventSeq,
+        workspaceFingerprint: pathHash,
+        nativeCoordinate, lastCommittedEventSeq: eventCursor,
       },
     };
     appendLongRunEvent({ runId: run.id, kind: "run.task_checkpoint", actorKind: "host", payload: { checkpoint } });
@@ -63,13 +97,19 @@ export function latestTaskCheckpoint(goalId: string): LongRunTaskCheckpoint | nu
   if (!row) return null;
   const checkpoint = JSON.parse(row.payload_json).checkpoint as LongRunTaskCheckpoint;
   const revision = getChatGoalRevision(goalId);
-  if (checkpoint.schemaVersion !== "agentlas.task-checkpoint.v1" || checkpoint.goalId !== goalId
+  if (!["agentlas.task-checkpoint.v1", "agentlas.task-checkpoint.v2"].includes(checkpoint.schemaVersion) || checkpoint.goalId !== goalId
     || checkpoint.capsule.runId !== run.id
     || (revision && checkpoint.goalRevision !== revision.revision)
     || checkpoint.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)) return null;
   // Early v1 checkpoints only carried the goal reference. The revision check
   // above makes the current ledger the exact contract that reference names.
-  return { ...checkpoint, acceptanceCriteria: run.acceptanceCriteria };
+  if (checkpoint.schemaVersion === "agentlas.task-checkpoint.v2") {
+    if (checkpoint.capsule.plan?.revision !== latestRuntimePlan(run.id)?.revision) return null;
+    const instructions = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
+    if ((checkpoint.capsule.instructionSnapshot?.revision ?? null) !== (instructions?.revision ?? null)) return null;
+    return checkpoint;
+  }
+  return { ...checkpoint, acceptanceCriteria: checkpoint.acceptanceCriteria ?? run.acceptanceCriteria };
 }
 
 /** Claim a successor once, before dispatch. A crash after claiming is never
