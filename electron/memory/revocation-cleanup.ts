@@ -3,8 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import {
   forgetAgentNestExperienceMemoryForOwnerScope,
-  forgetProjectMemoryProjection,
-  isProjectMemoryProjectionForgotten,
+  reconcileProjectMemoryProjectionCleanup,
 } from "./project-files";
 
 const DEFAULT_BATCH_SIZE = 8;
@@ -91,7 +90,11 @@ function deferTarget(
 ): void {
   const nowIso = now.toISOString();
   const retryAt = new Date(
-    now.getTime() + (reason === "agent-nest-scan-continued" ? 0 : retryDelayMs(row.attemptCount)),
+    now.getTime() + (
+      reason === "agent-nest-scan-continued" || reason === "project-projection-continued"
+        ? 0
+        : retryDelayMs(row.attemptCount)
+    ),
   ).toISOString();
   getDb().prepare(
     `UPDATE memory_revocation_cleanup_targets
@@ -103,25 +106,22 @@ function deferTarget(
   ).run(retryAt, progressCursor, reason, nowIso, row.targetId, token);
 }
 
-function reconcileTarget(row: CleanupTargetRow): { complete: boolean; reason: string; progressCursor?: string | null } {
+function reconcileTarget(
+  row: CleanupTargetRow,
+  token: string,
+): { complete: boolean; reason: string; progressCursor?: string | null } {
   try {
     if (row.targetKind === "project-files") {
-      forgetProjectMemoryProjection(
-        row.targetRef,
-        row.memoryKind,
-        row.contentHash,
-        row.forgottenAt,
-        [row.sourceMemoryId],
-      );
-      return {
-        complete: isProjectMemoryProjectionForgotten(
-          row.targetRef,
-          row.memoryKind,
-          row.contentHash,
-          [row.sourceMemoryId],
-        ),
-        reason: "project-projection-remains",
-      };
+      return reconcileProjectMemoryProjectionCleanup({
+        targetId: row.targetId,
+        cleanupToken: token,
+        sourceMemoryId: row.sourceMemoryId,
+        projectPath: row.targetRef,
+        kind: row.memoryKind,
+        contentHash: row.contentHash,
+        forgottenAt: row.forgottenAt,
+        progressCursor: row.progressCursor,
+      });
     }
     const result = forgetAgentNestExperienceMemoryForOwnerScope(
       row.targetRef,
@@ -158,7 +158,7 @@ export async function drainMemoryRevocationCleanup(input: {
   for (; claimed < limit && !input.signal?.aborted; claimed += 1) {
     const lease = claimNextTarget(now());
     if (!lease) break;
-    const result = reconcileTarget(lease.row);
+    const result = reconcileTarget(lease.row, lease.token);
     if (result.complete) {
       if (completeTarget(lease.row.targetId, lease.token, now())) completed += 1;
     } else {

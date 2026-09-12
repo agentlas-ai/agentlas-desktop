@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { TextDecoder } from "node:util";
 import Database from "better-sqlite3";
 import {
   autoLocalEmbedding,
@@ -1386,6 +1387,591 @@ export function isProjectMemoryProjectionForgotten(
     }
   })) return false;
   return true;
+}
+
+const PROJECT_CLEANUP_CHUNK_BYTES = 512 * 1024;
+const PROJECT_CLEANUP_MAX_LINE_BYTES = 1024 * 1024;
+const PROJECT_CLEANUP_READ_BYTES = 64 * 1024;
+const PROJECT_CLEANUP_CURSOR_VERSION = 1;
+const PROJECT_CLEANUP_UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+interface ProjectCleanupFingerprint {
+  dev: string;
+  ino: string;
+  birthtimeNs: string;
+  size: string;
+  mtimeNs: string;
+  ctimeNs: string;
+}
+
+interface ProjectCleanupCursor {
+  version: 1;
+  phase: "soul" | "log";
+  fingerprint: ProjectCleanupFingerprint | null;
+  inputOffset: number;
+  outputBytes: number;
+  inAutoSection: boolean;
+}
+
+export interface ProjectMemoryProjectionCleanupInput {
+  targetId: string;
+  cleanupToken: string;
+  sourceMemoryId: string;
+  projectPath: string;
+  kind: string;
+  contentHash: string;
+  forgottenAt: string;
+  progressCursor: string | null;
+}
+
+export interface ProjectMemoryProjectionCleanupResult {
+  complete: boolean;
+  reason: string;
+  progressCursor: string | null;
+}
+
+class ProjectCleanupSourceChangedError extends Error {}
+class ProjectCleanupLineTooLargeError extends Error {}
+class ProjectCleanupInvalidUtf8Error extends Error {}
+class ProjectCleanupTemporaryResetError extends Error {}
+
+function cleanupFingerprint(stat: fs.BigIntStats): ProjectCleanupFingerprint {
+  return {
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    birthtimeNs: String(stat.birthtimeNs),
+    size: String(stat.size),
+    mtimeNs: String(stat.mtimeNs),
+    ctimeNs: String(stat.ctimeNs),
+  };
+}
+
+function matchesCleanupFingerprint(
+  stat: fs.BigIntStats,
+  expected: ProjectCleanupFingerprint,
+): boolean {
+  const actual = cleanupFingerprint(stat);
+  return Object.keys(actual).every((key) => (
+    actual[key as keyof ProjectCleanupFingerprint] === expected[key as keyof ProjectCleanupFingerprint]
+  ));
+}
+
+function initialProjectCleanupCursor(phase: ProjectCleanupCursor["phase"]): ProjectCleanupCursor {
+  return {
+    version: PROJECT_CLEANUP_CURSOR_VERSION,
+    phase,
+    fingerprint: null,
+    inputOffset: 0,
+    outputBytes: 0,
+    inAutoSection: false,
+  };
+}
+
+function parseProjectCleanupCursor(raw: string | null): ProjectCleanupCursor | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ProjectCleanupCursor>;
+    if (
+      parsed.version !== PROJECT_CLEANUP_CURSOR_VERSION
+      || (parsed.phase !== "soul" && parsed.phase !== "log")
+      || !Number.isSafeInteger(parsed.inputOffset)
+      || !Number.isSafeInteger(parsed.outputBytes)
+      || Number(parsed.inputOffset) < 0
+      || Number(parsed.outputBytes) < 0
+      || typeof parsed.inAutoSection !== "boolean"
+    ) return null;
+    let fingerprint: ProjectCleanupFingerprint | null = null;
+    if (parsed.fingerprint !== null) {
+      if (!parsed.fingerprint || typeof parsed.fingerprint !== "object") return null;
+      const values = parsed.fingerprint as Partial<ProjectCleanupFingerprint>;
+      if ([values.dev, values.ino, values.birthtimeNs, values.size, values.mtimeNs, values.ctimeNs]
+        .some((value) => typeof value !== "string" || !/^\d+$/.test(value))) return null;
+      fingerprint = values as ProjectCleanupFingerprint;
+    }
+    return {
+      version: PROJECT_CLEANUP_CURSOR_VERSION,
+      phase: parsed.phase,
+      fingerprint,
+      inputOffset: Number(parsed.inputOffset),
+      outputBytes: Number(parsed.outputBytes),
+      inAutoSection: parsed.inAutoSection,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function projectCleanupCursorJson(cursor: ProjectCleanupCursor): string {
+  return JSON.stringify(cursor);
+}
+
+function projectCleanupPaths(
+  identity: ProjectFsIdentity,
+  phase: ProjectCleanupCursor["phase"],
+  targetId: string,
+): { sourcePath: string; temporaryPath: string; label: string } {
+  if (!/^mct_[0-9a-f]{32}$/.test(targetId)) {
+    throw new ProjectArtifactError("invalid-input", "A canonical cleanup target is required.");
+  }
+  const fileName = phase === "soul" ? PROJECT_SOUL_FILE : MEMORY_LOG_FILE;
+  const sourcePath = path.join(projectMemoryDir(identity.root), fileName);
+  return {
+    sourcePath,
+    temporaryPath: path.join(
+      path.dirname(sourcePath),
+      `.${fileName}.agentlas-cleanup-${targetId}.tmp`,
+    ),
+    label: phase === "soul" ? "The project soul file" : "The project memory log",
+  };
+}
+
+function removeProjectCleanupTemporary(
+  identity: ProjectFsIdentity,
+  temporaryPath: string,
+): void {
+  const stat = assertSafeProjectFile(identity, temporaryPath, "The project cleanup temporary file");
+  if (!stat) return;
+  fs.unlinkSync(temporaryPath);
+  fsyncDirectory(path.dirname(temporaryPath));
+}
+
+function openProjectCleanupTemporary(
+  identity: ProjectFsIdentity,
+  temporaryPath: string,
+  outputBytes: number,
+  fresh: boolean,
+): number {
+  if (fresh) removeProjectCleanupTemporary(identity, temporaryPath);
+  else {
+    const existing = assertSafeProjectFile(
+      identity,
+      temporaryPath,
+      "The project cleanup temporary file",
+    );
+    if (!existing || existing.size < BigInt(outputBytes)) {
+      throw new ProjectCleanupTemporaryResetError();
+    }
+  }
+  const flags = fresh
+    ? fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL
+    : fs.constants.O_RDWR;
+  const fd = openNoFollow(temporaryPath, flags, 0o600);
+  try {
+    const descriptor = fs.fstatSync(fd, { bigint: true });
+    const pathStat = assertSafeProjectFile(identity, temporaryPath, "The project cleanup temporary file");
+    if (
+      !descriptor.isFile()
+      || descriptor.nlink !== 1n
+      || !pathStat
+      || !sameFsObject(descriptor, pathStat)
+    ) {
+      projectPathError("The project cleanup temporary file is unsafe.");
+    }
+    if (BigInt(outputBytes) > descriptor.size) {
+      throw new ProjectCleanupTemporaryResetError();
+    }
+    fs.ftruncateSync(fd, outputBytes);
+    return fd;
+  } catch (error) {
+    fs.closeSync(fd);
+    throw error;
+  }
+}
+
+function decodeProjectCleanupLine(bytes: Buffer): string {
+  try {
+    return PROJECT_CLEANUP_UTF8.decode(bytes);
+  } catch {
+    throw new ProjectCleanupInvalidUtf8Error();
+  }
+}
+
+function writeProjectCleanupBytes(fd: number, bytes: Buffer, position: number): number {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, position + offset);
+    if (written <= 0) projectPathError("The project cleanup temporary file could not be written completely.");
+    offset += written;
+  }
+  return position + offset;
+}
+
+function splitProjectCleanupLine(raw: Buffer): { body: Buffer; newline: Buffer } {
+  if (raw.length === 0 || raw[raw.length - 1] !== 0x0a) {
+    return { body: raw, newline: Buffer.alloc(0) };
+  }
+  if (raw.length >= 2 && raw[raw.length - 2] === 0x0d) {
+    return { body: raw.subarray(0, raw.length - 2), newline: raw.subarray(raw.length - 2) };
+  }
+  return { body: raw.subarray(0, raw.length - 1), newline: raw.subarray(raw.length - 1) };
+}
+
+function transformProjectCleanupLine(
+  raw: Buffer,
+  cursor: ProjectCleanupCursor,
+  input: ProjectMemoryProjectionCleanupInput,
+): { output: Buffer; inAutoSection: boolean } {
+  const { body, newline } = splitProjectCleanupLine(raw);
+  const line = decodeProjectCleanupLine(body);
+  if (cursor.phase === "soul") {
+    let inAutoSection = cursor.inAutoSection;
+    if (line.trim() === AUTO_SECTION) inAutoSection = true;
+    else if (/^##\s+/.test(line)) inAutoSection = false;
+    const match = /^- \(([^)]+)\) (.*)$/.exec(line);
+    const remove = Boolean(
+      inAutoSection
+      && match
+      && match[1] === input.kind
+      && forgetContentHash(match[2]) === input.contentHash,
+    );
+    return { output: remove ? Buffer.alloc(0) : raw, inAutoSection };
+  }
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const curatorProjection = parsed.action === "written"
+      && (parsed.source_provenance === "assistant-turn" || parsed.source_provenance === "task-force-synthesis");
+    const exactSource = curatorProjection && parsed.memory_id === input.sourceMemoryId;
+    const legacySource = curatorProjection && parsed.memory_id === undefined;
+    if (
+      typeof parsed.content === "string"
+      && parsed.kind === input.kind
+      && forgetContentHash(parsed.content) === input.contentHash
+      && (exactSource || legacySource)
+    ) {
+      return {
+        output: Buffer.concat([
+          Buffer.from(JSON.stringify({
+            action: "forgotten",
+            kind: input.kind,
+            content_hash: input.contentHash,
+            at: input.forgottenAt,
+          }), "utf8"),
+          newline,
+        ]),
+        inAutoSection: false,
+      };
+    }
+  } catch (error) {
+    if (error instanceof ProjectCleanupInvalidUtf8Error) throw error;
+  }
+  return { output: raw, inAutoSection: false };
+}
+
+function withCurrentProjectCleanupLease<T>(
+  input: ProjectMemoryProjectionCleanupInput,
+  operation: () => T,
+): { executed: boolean; value: T | null } {
+  return getDb().transaction(() => {
+    const current = getDb().prepare(
+      `SELECT 1
+         FROM memory_revocation_cleanup_targets target
+        WHERE target.target_id = ? AND target.source_memory_id = ?
+          AND target.state = 'leased' AND target.lease_kind = 'cleanup'
+          AND target.lease_token = ? AND target.revocation_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM memory_revocation_sources source
+             WHERE source.source_memory_id = target.source_memory_id
+               AND source.revocation_id = target.revocation_id
+          )`,
+    ).get(input.targetId, input.sourceMemoryId, input.cleanupToken);
+    if (!current) return { executed: false, value: null };
+    return { executed: true, value: operation() };
+  }).immediate();
+}
+
+function projectCleanupFilesFitImmediatePath(identity: ProjectFsIdentity): boolean {
+  for (const [fileName, label] of [
+    [PROJECT_SOUL_FILE, "The project soul file"],
+    [MEMORY_LOG_FILE, "The project memory log"],
+  ] as const) {
+    const stat = assertSafeProjectFile(identity, path.join(projectMemoryDir(identity.root), fileName), label);
+    if (stat && stat.size > MEMORY_PROJECTION_CLEANUP_MAX_FILE_BYTES) return false;
+  }
+  return true;
+}
+
+function finalizeProjectCleanupTemporaryUnderLease(
+  identity: ProjectFsIdentity,
+  sourcePath: string,
+  temporaryPath: string,
+  sourceFingerprint: ProjectCleanupFingerprint,
+): void {
+  const sourceStat = assertSafeProjectFile(identity, sourcePath, "The project projection source file");
+  if (!sourceStat || !matchesCleanupFingerprint(sourceStat, sourceFingerprint)) {
+    throw new ProjectCleanupSourceChangedError();
+  }
+  const temporaryStat = assertSafeProjectFile(
+    identity,
+    temporaryPath,
+    "The project cleanup temporary file",
+  );
+  if (!temporaryStat) projectPathError("The project cleanup temporary file disappeared.");
+  fs.renameSync(temporaryPath, sourcePath);
+  const installed = assertSafeProjectFile(identity, sourcePath, "The project projection source file");
+  if (!installed || !sameFsObject(temporaryStat, installed) || installed.size !== temporaryStat.size) {
+    projectPathError("The project cleanup replacement changed during installation.");
+  }
+  fsyncDirectory(path.dirname(sourcePath));
+}
+
+function streamProjectCleanupChunkUnderLease(
+  input: ProjectMemoryProjectionCleanupInput,
+  identity: ProjectFsIdentity,
+  cursorValue: ProjectCleanupCursor,
+): ProjectMemoryProjectionCleanupResult {
+  const paths = projectCleanupPaths(identity, cursorValue.phase, input.targetId);
+  const sourceStat = assertSafeProjectFile(identity, paths.sourcePath, paths.label);
+  if (!sourceStat) {
+    removeProjectCleanupTemporary(identity, paths.temporaryPath);
+    if (cursorValue.phase === "soul") {
+      return {
+        complete: false,
+        reason: "project-projection-continued",
+        progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor("log")),
+      };
+    }
+    return { complete: true, reason: "project-projection-absent", progressCursor: null };
+  }
+
+  const fresh = cursorValue.fingerprint === null;
+  const cursor: ProjectCleanupCursor = fresh
+    ? { ...initialProjectCleanupCursor(cursorValue.phase), fingerprint: cleanupFingerprint(sourceStat) }
+    : cursorValue;
+  if (!cursor.fingerprint || !matchesCleanupFingerprint(sourceStat, cursor.fingerprint)) {
+    removeProjectCleanupTemporary(identity, paths.temporaryPath);
+    return {
+      complete: false,
+      reason: "project-projection-source-changed",
+      progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor(cursor.phase)),
+    };
+  }
+
+  let sourceFd: number | null = null;
+  let temporaryFd: number | null = null;
+  try {
+    sourceFd = openNoFollow(paths.sourcePath, fs.constants.O_RDONLY);
+    const openedSource = fs.fstatSync(sourceFd, { bigint: true });
+    if (!openedSource.isFile() || openedSource.nlink !== 1n || !matchesCleanupFingerprint(openedSource, cursor.fingerprint)) {
+      throw new ProjectCleanupSourceChangedError();
+    }
+    temporaryFd = openProjectCleanupTemporary(
+      identity,
+      paths.temporaryPath,
+      cursor.outputBytes,
+      fresh,
+    );
+    let inputOffset = cursor.inputOffset;
+    let outputBytes = cursor.outputBytes;
+    let inAutoSection = cursor.inAutoSection;
+    let processedBytes = 0;
+    let pending = Buffer.alloc(0);
+    let scanOffset = inputOffset;
+    let reachedEof = false;
+
+    while (processedBytes < PROJECT_CLEANUP_CHUNK_BYTES) {
+      const chunk = Buffer.allocUnsafe(PROJECT_CLEANUP_READ_BYTES);
+      const read = fs.readSync(sourceFd, chunk, 0, chunk.length, scanOffset);
+      if (read === 0) {
+        reachedEof = true;
+        if (pending.length > 0) {
+          if (pending.length > PROJECT_CLEANUP_MAX_LINE_BYTES) throw new ProjectCleanupLineTooLargeError();
+          const transformed = transformProjectCleanupLine(
+            pending,
+            { ...cursor, inAutoSection },
+            input,
+          );
+          if (transformed.output.length > 0) {
+            outputBytes = writeProjectCleanupBytes(temporaryFd, transformed.output, outputBytes);
+          }
+          inputOffset += pending.length;
+          processedBytes += pending.length;
+          inAutoSection = transformed.inAutoSection;
+          pending = Buffer.alloc(0);
+        }
+        break;
+      }
+      const available = chunk.subarray(0, read);
+      let start = 0;
+      while (start < available.length) {
+        const newlineIndex = available.indexOf(0x0a, start);
+        if (newlineIndex < 0) {
+          pending = Buffer.concat([pending, available.subarray(start)]);
+          if (pending.length > PROJECT_CLEANUP_MAX_LINE_BYTES) throw new ProjectCleanupLineTooLargeError();
+          scanOffset += available.length - start;
+          break;
+        }
+        const segment = available.subarray(start, newlineIndex + 1);
+        const rawLine = pending.length > 0 ? Buffer.concat([pending, segment]) : segment;
+        if (rawLine.length > PROJECT_CLEANUP_MAX_LINE_BYTES) throw new ProjectCleanupLineTooLargeError();
+        const transformed = transformProjectCleanupLine(
+          rawLine,
+          { ...cursor, inAutoSection },
+          input,
+        );
+        if (transformed.output.length > 0) {
+          outputBytes = writeProjectCleanupBytes(temporaryFd, transformed.output, outputBytes);
+        }
+        inputOffset += rawLine.length;
+        processedBytes += rawLine.length;
+        inAutoSection = transformed.inAutoSection;
+        pending = Buffer.alloc(0);
+        start = newlineIndex + 1;
+        scanOffset = inputOffset;
+        if (processedBytes >= PROJECT_CLEANUP_CHUNK_BYTES) break;
+      }
+    }
+
+    fs.fsyncSync(temporaryFd);
+    const afterSource = fs.fstatSync(sourceFd, { bigint: true });
+    const afterPath = assertSafeProjectFile(identity, paths.sourcePath, paths.label);
+    if (
+      !matchesCleanupFingerprint(afterSource, cursor.fingerprint)
+      || !afterPath
+      || !matchesCleanupFingerprint(afterPath, cursor.fingerprint)
+    ) throw new ProjectCleanupSourceChangedError();
+
+    if (!reachedEof) {
+      return {
+        complete: false,
+        reason: "project-projection-continued",
+        progressCursor: projectCleanupCursorJson({
+          ...cursor,
+          inputOffset,
+          outputBytes,
+          inAutoSection,
+        }),
+      };
+    }
+  } catch (error) {
+    if (error instanceof ProjectCleanupSourceChangedError) {
+      try { removeProjectCleanupTemporary(identity, paths.temporaryPath); } catch {}
+      return {
+        complete: false,
+        reason: "project-projection-source-changed",
+        progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor(cursor.phase)),
+      };
+    }
+    if (error instanceof ProjectCleanupLineTooLargeError) {
+      return {
+        complete: false,
+        reason: "project-projection-line-too-large",
+        progressCursor: projectCleanupCursorJson(cursor),
+      };
+    }
+    if (error instanceof ProjectCleanupInvalidUtf8Error) {
+      return {
+        complete: false,
+        reason: "project-projection-invalid-utf8",
+        progressCursor: projectCleanupCursorJson(cursor),
+      };
+    }
+    if (error instanceof ProjectCleanupTemporaryResetError) {
+      removeProjectCleanupTemporary(identity, paths.temporaryPath);
+      return {
+        complete: false,
+        reason: "project-projection-continued",
+        progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor(cursor.phase)),
+      };
+    }
+    throw error;
+  } finally {
+    if (temporaryFd !== null) fs.closeSync(temporaryFd);
+    if (sourceFd !== null) fs.closeSync(sourceFd);
+  }
+
+  try {
+    finalizeProjectCleanupTemporaryUnderLease(
+      identity,
+      paths.sourcePath,
+      paths.temporaryPath,
+      cursor.fingerprint,
+    );
+  } catch (error) {
+    if (error instanceof ProjectCleanupSourceChangedError) {
+      try { removeProjectCleanupTemporary(identity, paths.temporaryPath); } catch {}
+      return {
+        complete: false,
+        reason: "project-projection-source-changed",
+        progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor(cursor.phase)),
+      };
+    }
+    throw error;
+  }
+  if (cursor.phase === "soul") {
+    return {
+      complete: false,
+      reason: "project-projection-continued",
+      progressCursor: projectCleanupCursorJson(initialProjectCleanupCursor("log")),
+    };
+  }
+  return { complete: true, reason: "project-projection-clean", progressCursor: null };
+}
+
+function streamProjectCleanupChunk(
+  input: ProjectMemoryProjectionCleanupInput,
+  identity: ProjectFsIdentity,
+  cursorValue: ProjectCleanupCursor,
+): ProjectMemoryProjectionCleanupResult {
+  const result = withCurrentProjectCleanupLease(input, () => (
+    streamProjectCleanupChunkUnderLease(input, identity, cursorValue)
+  ));
+  return result.executed && result.value
+    ? result.value
+    : {
+        complete: false,
+        reason: "project-projection-authority-lost",
+        progressCursor: input.progressCursor,
+      };
+}
+
+/**
+ * Cleanup worker entrypoint. Small files keep the original synchronous path;
+ * large files are transformed in bounded, content-free-cursor chunks.
+ */
+export function reconcileProjectMemoryProjectionCleanup(
+  input: ProjectMemoryProjectionCleanupInput,
+): ProjectMemoryProjectionCleanupResult {
+  const identity = resolveProjectFsIdentity(input.projectPath);
+  const parsedCursor = parseProjectCleanupCursor(input.progressCursor);
+  if (!parsedCursor && projectCleanupFilesFitImmediatePath(identity)) {
+    const immediate = withCurrentProjectCleanupLease(input, () => {
+      if (input.progressCursor) {
+        for (const phase of ["soul", "log"] as const) {
+          const paths = projectCleanupPaths(identity, phase, input.targetId);
+          removeProjectCleanupTemporary(identity, paths.temporaryPath);
+        }
+      }
+      forgetProjectMemoryProjection(
+        identity.root,
+        input.kind,
+        input.contentHash,
+        input.forgottenAt,
+        [input.sourceMemoryId],
+      );
+      return isProjectMemoryProjectionForgotten(
+        identity.root,
+        input.kind,
+        input.contentHash,
+        [input.sourceMemoryId],
+      );
+    });
+    return immediate.executed
+      ? {
+          complete: immediate.value === true,
+          reason: immediate.value === true ? "project-projection-clean" : "project-projection-remains",
+          progressCursor: null,
+        }
+      : {
+          complete: false,
+          reason: "project-projection-authority-lost",
+          progressCursor: input.progressCursor,
+        };
+  }
+  return streamProjectCleanupChunk(
+    input,
+    identity,
+    parsedCursor ?? initialProjectCleanupCursor("soul"),
+  );
 }
 
 // Legacy human-readable nest helper. Runtime recall now uses experience.sqlite
