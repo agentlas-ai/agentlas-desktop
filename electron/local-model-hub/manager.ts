@@ -595,11 +595,23 @@ export class LocalModelHubManager {
         reasonCode: null,
       };
       this.residentReceipt = receipt;
-      child.once("exit", () => {
+      child.once("exit", (code, exitSignal) => {
         if (this.residentProcess === child && this.residentReceipt?.processEpoch === receipt.processEpoch) {
           this.residentProcess = null;
           this.residentReceipt = null;
           this.residentAuthToken = null;
+          // Keep the successful load observation, and append the exact process's
+          // later failure. Intentional unload clears ownership before killing it.
+          this.state.loadReceipts = bounded([...this.state.loadReceipts, {
+            ...receipt,
+            receiptId: randomUUID(),
+            state: "failed",
+            finishedAt: new Date().toISOString(),
+            reasonCode: `engine_exited_${code ?? exitSignal ?? "unknown"}`,
+          }]);
+          void this.save().catch(() => {
+            this.unavailableReason = "local_model_crash_receipt_write_failed";
+          });
           void this.removeProcessLease(receipt.processEpoch);
         }
       });
