@@ -154,6 +154,19 @@ export async function getAgentLeaseQuote(slug: string): Promise<AgentLeaseQuote>
   }
 }
 
+function leasePurchaseFailureMessage(code: string): string {
+  switch (code) {
+    case "forbidden": return "You do not have permission to purchase a lease in this workspace.";
+    case "price_changed": return "The lease price changed. Review the new price before confirming again.";
+    case "lease_not_offered": return "This agent does not offer long-term leases.";
+    case "insufficient_credits": return "There are not enough credits for this lease.";
+    case "lease_recovery_incomplete": return "The original purchase needs to be checked. Keep the same request; do not start another purchase.";
+    case "idempotency_key_conflict": return "The request differs from the original purchase. Check that purchase before continuing.";
+    case "unauthorized": return "Sign in to the original account to check this lease.";
+    default: return "The purchase result is not confirmed. Check the same request before starting another purchase.";
+  }
+}
+
 export async function purchaseAgentLease(input: AgentLeasePurchaseInput): Promise<AgentLeasePurchaseResult> {
   const authAtRequest = captureLeaseAuthIdentity();
   if (!authAtRequest) {
@@ -192,7 +205,8 @@ export async function purchaseAgentLease(input: AgentLeasePurchaseInput): Promis
     if (response.ok) {
       if (!body || typeof body !== "object" || !validExpiry(body.leasedUntil)
         || body.days !== days || body.perDayCredits !== expectedPerDayCredits
-        || body.ok === false
+        || body.ok !== true || typeof body.replayed !== "boolean"
+        || body.idempotencyKey !== idempotencyKey || body.priceKind !== "INGEST"
         || (body.replayed === true
           ? body.idempotencyKey !== idempotencyKey || body.chargedCredits !== 0
           : body.chargedCredits !== expectedTotalCredits)) {
@@ -213,7 +227,7 @@ export async function purchaseAgentLease(input: AgentLeasePurchaseInput): Promis
       code: typeof body.error === "string" ? body.error : `http_${response.status}`,
       ...(typeof body.needed === "number" ? { needed: body.needed } : {}),
       ...(typeof body.have === "number" ? { have: body.have } : {}),
-      message: typeof body.error === "string" ? body.error : "The lease could not be purchased.",
+      message: leasePurchaseFailureMessage(typeof body.error === "string" ? body.error : "unknown"),
     };
   } catch {
     return {

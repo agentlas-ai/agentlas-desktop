@@ -29,6 +29,7 @@ type PendingLeaseRequest = {
   days: number;
   idempotencyKey: string;
   perDayCredits: number | null;
+  workspaceUnverified?: boolean;
 };
 
 const PENDING_LEASE_PREFIX = "agentlas.agent-lease-purchase.v1:";
@@ -37,8 +38,8 @@ function leaseAccountScope(): string | null {
   const session = readViewData<AuthSession>("shell.auth-session")?.value;
   if (!session?.signedIn) return null;
   const fingerprint = session.accountFingerprint?.trim();
-  if (fingerprint) return `account:${fingerprint}`;
   const workspaceId = session.workspaceId?.trim();
+  if (fingerprint && workspaceId) return `account:${fingerprint}:workspace:${workspaceId}`;
   return workspaceId ? `workspace:${workspaceId}` : null;
 }
 
@@ -82,6 +83,14 @@ function readPendingLease(slug: string, accountScope = leaseAccountScope()): Pen
     if (!accountScope || !storageKey) return null;
     const raw = window.localStorage.getItem(storageKey);
     const parsed = parsePendingLease(raw, slug, accountScope);
+    if (!raw && accountScope.startsWith("account:") && accountScope.includes(":workspace:")) {
+      const legacyScope = accountScope.slice(0, accountScope.lastIndexOf(":workspace:"));
+      const legacyKey = pendingLeaseStorageKey(slug, legacyScope);
+      const legacy = legacyKey ? parsePendingLease(window.localStorage.getItem(legacyKey), slug, legacyScope) : null;
+      // Old account-only keys do not identify the billed workspace. Preserve
+      // them for reconciliation, but never send them as a new workspace buy.
+      if (legacy) return { ...legacy, accountScope, workspaceUnverified: true };
+    }
     if (!parsed && raw) {
       window.localStorage.removeItem(storageKey);
     }
@@ -242,15 +251,7 @@ export function AgentLeaseDialog({
       .then((result) => {
         if (!currentRequest()) return;
         setQuote(result);
-        const pending = readPendingLease(slug, requestAccountScope);
-        const expiresAt = result?.active && typeof result.leasedUntil === "string" ? Date.parse(result.leasedUntil) : NaN;
-        if (skipPurchaseIfActive && pending && result?.ok && Number.isFinite(expiresAt) && expiresAt > Date.now()) {
-          // A lost POST response may have committed successfully. The active server lease
-          // is enough to continue; replaying the same key is unnecessary.
-          removePendingLease(slug, requestAccountScope);
-          setPendingRequest(null);
-          onLeased(result.leasedUntil!);
-        }
+
       })
       .catch(() => {
         if (currentRequest()) setQuote({ ok: false, active: false, leasedUntil: null, perDayCredits: null, leaseOffered: false, code: "network" });
@@ -259,13 +260,18 @@ export function AgentLeaseDialog({
     return () => { cancelled = true; };
   }, [slug, skipPurchaseIfActive, authVersion]); // onLeased is a parent event sink; auth changes also refresh the quote.
 
+  useEffect(() => () => {
+    authEpochRef.current += 1;
+    activePurchaseRef.current = null;
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !purchasing) onClose();
+      if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, purchasing]);
+  }, [onClose]);
 
   const currentAccountScope = leaseAccountScope();
   const visiblePendingRequest = currentAccountScope && pendingRequest?.accountScope === currentAccountScope
@@ -321,6 +327,12 @@ export function AgentLeaseDialog({
       perDayCredits: perDay,
     };
     if (request.slug !== slug || request.days !== days) return;
+    if (request.workspaceUnverified) {
+      setFailure({ kind: "other", message: ko
+        ? "이전 요청의 작업공간을 확인할 수 없습니다. 원래 작업공간의 결제 내역을 확인하세요. 새 요청은 보내지 않았습니다."
+        : "The previous request has no workspace identity. Check its original workspace purchase history. No new request was sent." });
+      return;
+    }
 
     const requestAuthEpoch = authEpochRef.current;
     const runId = ++purchaseSequenceRef.current;
@@ -336,7 +348,7 @@ export function AgentLeaseDialog({
     try {
       const bridge = ipc();
       if (!bridge) throw new Error("network");
-      if (skipPurchaseIfActive) {
+      if (skipPurchaseIfActive && !scopedPendingRequest) {
         const latestQuote = await bridge.agentLeases.quote(slug);
         if (!isCurrentRequest()) return;
         const latestExpiry = latestQuote?.active && typeof latestQuote.leasedUntil === "string" ? Date.parse(latestQuote.leasedUntil) : NaN;
@@ -396,7 +408,11 @@ export function AgentLeaseDialog({
       if (scopedPendingRequest) {
         // An earlier attempt may have charged before its response was lost.
         // Even a later price refusal cannot authorize a fresh purchase key.
-        setFailure({ kind: "other", message: pendingRetryMessage(ko, request.days) });
+        setFailure({ kind: "other", message: result?.code === "lease_recovery_incomplete" || result?.code === "idempotency_key_conflict"
+          ? (ko ? "이전 결제 내역을 확인해야 합니다. 새 요청은 보내지 않습니다." : "The original purchase needs to be checked. No new purchase will be sent.")
+          : result?.code === "forbidden"
+          ? (ko ? "이 작업공간에서 이전 결제를 확인할 권한이 없습니다." : "You do not have permission to reconcile the purchase in this workspace.")
+          : pendingRetryMessage(ko, request.days) });
       } else if (result?.code === "price_changed") {
         removePendingLease(slug, accountScope);
         setPendingRequest(null);
@@ -411,12 +427,18 @@ export function AgentLeaseDialog({
         removePendingLease(slug, accountScope);
         setPendingRequest(null);
         setQuote((current) => current ? { ...current, leaseOffered: false, code: "lease_not_offered" } : current);
-      } else if (result?.code === "network" || result?.code === "http" || String(result?.code || "").startsWith("http_")) {
-        setFailure({ kind: "other", message: pendingRetryMessage(ko, request.days) });
-      } else {
+      } else if (result?.code === "forbidden") {
         removePendingLease(slug, accountScope);
         setPendingRequest(null);
-        setFailure({ kind: "other", message: result?.message || (ko ? "대여를 완료하지 못했습니다." : "The lease could not be completed.") });
+        setFailure({ kind: "other", message: ko ? "이 작업공간에서 대여할 권한이 없습니다." : "You do not have permission to purchase a lease in this workspace." });
+      } else {
+        // Anything without a definitive no-charge refusal may have committed.
+        // Keep the exact durable confirmation, including unknown/new codes.
+        setFailure({ kind: "other", message: result?.code === "lease_recovery_incomplete"
+          ? (ko ? "이전 결제 내역을 확인해야 합니다. 새 요청은 보내지 않습니다." : "The original purchase needs to be checked. No new purchase will be sent.")
+          : result?.code === "idempotency_key_conflict"
+          ? (ko ? "이전 요청과 결제 조건이 다릅니다. 원래 결제 내역을 확인하세요." : "The request differs from the original purchase. Check that purchase before continuing.")
+          : pendingRetryMessage(ko, request.days) });
       }
     } catch {
       // A thrown request has an unknown outcome. Keep the exact confirmation key so
@@ -444,7 +466,7 @@ export function AgentLeaseDialog({
     <div
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !purchasing) onClose();
+        if (event.target === event.currentTarget) onClose();
       }}
       style={{ position: "fixed", inset: 0, zIndex: 1220, display: "grid", placeItems: "center", padding: 24, background: "rgba(21, 22, 18, .34)", backdropFilter: "blur(3px)" }}
     >
@@ -463,7 +485,17 @@ export function AgentLeaseDialog({
           </p>
         </header>
 
-        {quoteLoading ? (
+        {visiblePendingRequest?.workspaceUnverified ? (
+          <>
+            <div role="alert" style={{ color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.55 }}>
+              {ko ? "이전 요청의 작업공간을 확인할 수 없습니다. 원래 작업공간의 결제 내역을 확인하세요."
+                : "The previous request has no workspace identity. Check its original workspace purchase history."}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" onClick={onClose} style={secondaryButton}>{ko ? "닫기" : "Close"}</button>
+            </div>
+          </>
+        ) : quoteLoading ? (
           <div role="status" style={{ padding: "18px 0", textAlign: "center", color: "var(--muted-deep)", fontSize: 12.5, display: "grid", gap: 6, justifyItems: "center" }}>
             <span>{ko ? "대여 조건을 확인하는 중…" : "Checking lease terms…"}</span>
             <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-agent-lease-quote" expectedSeconds={[2, 15]} />
@@ -608,7 +640,7 @@ export function AgentLeaseDialog({
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button type="button" disabled={purchasing} onClick={onClose} style={secondaryButton}>
+              <button type="button" onClick={onClose} style={secondaryButton}>
                 {ko ? "닫기" : "Close"}
               </button>
               <button
