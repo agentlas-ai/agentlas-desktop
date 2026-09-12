@@ -30,6 +30,7 @@ import {
 } from "../agents/hub-memory-nest";
 import {
   beginMemoryProjectionWrite,
+  commitMemoryProjectionWrites,
   finishMemoryProjectionWrite,
   type MemoryProjectionWriterLease,
 } from "./revocations";
@@ -1586,18 +1587,23 @@ export function appendAgentNestExperienceMemory(
     return false;
   }
   const dbPath = path.join(memoryDir, "experience.sqlite");
-  let db: Database.Database | null = null;
   try {
-    fs.mkdirSync(memoryDir, { recursive: true, mode: 0o700 });
-    if (process.platform !== "win32") fs.chmodSync(memoryDir, 0o700);
-    if (fs.existsSync(dbPath)) {
-      const stat = fs.lstatSync(dbPath);
-      if (stat.isSymbolicLink() || !stat.isFile()) return false;
-    }
-    db = new Database(dbPath);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    db.exec(`
+    const receipt = commitMemoryProjectionWrites(
+      leasedItems.map(({ item, lease }) => ({ lease, value: item })),
+      (validItems) => {
+        fs.mkdirSync(memoryDir, { recursive: true, mode: 0o700 });
+        if (process.platform !== "win32") fs.chmodSync(memoryDir, 0o700);
+        if (fs.existsSync(dbPath)) {
+          const stat = fs.lstatSync(dbPath);
+          if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new Error("agent nest projection target is not a regular file");
+          }
+        }
+        const db = new Database(dbPath);
+        try {
+          db.pragma("journal_mode = WAL");
+          db.pragma("foreign_keys = ON");
+          db.exec(`
       CREATE TABLE IF NOT EXISTS memory_candidates (
         ticket_id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -1647,7 +1653,7 @@ export function appendAgentNestExperienceMemory(
         updated_at TEXT NOT NULL
       );
     `);
-    const agentId = `hub:${normalizedSlug}`;
+          const agentId = `hub:${normalizedSlug}`;
     // v1 of this Desktop projection used review-state `accepted`, while Core
     // recall intentionally reads only active experience states. This cache is
     // already downstream of curator approval, so upgrade those old rows in
@@ -1725,12 +1731,12 @@ export function appendAgentNestExperienceMemory(
         );
       }
     });
-    write(leasedItems.map(({ item }) => item));
-    replayAgentNestExperienceGovernanceRelations(
-      db,
-      normalizedSlug,
-      leasedItems.map(({ item }) => item.id),
-    );
+          write(validItems);
+          replayAgentNestExperienceGovernanceRelations(
+            db,
+            normalizedSlug,
+            validItems.map((item) => item.id),
+          );
 
     // Re-embed stale rows before rebuilding derived links. Adapter identity,
     // model checksum, and text hash changes invalidate old vectors without a
@@ -1828,18 +1834,20 @@ export function appendAgentNestExperienceMemory(
         );
       }
     }
-    if (process.platform !== "win32") {
-      fs.chmodSync(dbPath, 0o600);
-      for (const suffix of ["-wal", "-shm"]) {
-        if (fs.existsSync(`${dbPath}${suffix}`)) fs.chmodSync(`${dbPath}${suffix}`, 0o600);
-      }
-    }
-    return true;
+          if (process.platform !== "win32") {
+            fs.chmodSync(dbPath, 0o600);
+            for (const suffix of ["-wal", "-shm"]) {
+              if (fs.existsSync(`${dbPath}${suffix}`)) fs.chmodSync(`${dbPath}${suffix}`, 0o600);
+            }
+          }
+        } finally {
+          try { db.close(); } catch { /* best-effort projection */ }
+        }
+      },
+    );
+    return receipt.committedTargetIds.length > 0;
   } catch {
     return false;
-  } finally {
-    try { db?.close(); } catch { /* best-effort projection */ }
-    for (const { lease } of leasedItems) finishMemoryProjectionWrite(lease);
   }
 }
 

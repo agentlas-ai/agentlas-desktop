@@ -10,7 +10,7 @@ import {
 import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
 import {
   beginMemoryProjectionWrite,
-  finishMemoryProjectionWrite,
+  commitMemoryProjectionWrites,
   MemoryRevokedError,
   type MemoryProjectionWriterLease,
 } from "./revocations";
@@ -483,7 +483,11 @@ export function curateEvents(
   options: EventCurationOptions = {},
 ): CurationReport {
   const report = emptyReport();
-  const soulLines: Array<{ line: string; lease: MemoryProjectionWriterLease }> = [];
+  const projectProjections: Array<{
+    lease: MemoryProjectionWriterLease;
+    logRecord: Record<string, unknown>;
+    soulLine: string | null;
+  }> = [];
   // agent_repo 스코프(에이전트 기술·경험) 배움 — 빌린 에이전트의 전역 둥지로 미러링할 후보.
   const nestExperienceItems: AgentNestExperienceItem[] = [];
 
@@ -743,21 +747,22 @@ export function curateEvents(
         targetRef: ctx.projectPath,
       });
       if (!projectionLease) continue;
-      appendMemoryLog(ctx.projectPath, {
-        action: "written",
-        memory_id: entry.id,
-        scope: effectiveScope,
-        kind: ev.memory_kind,
-        content: ev.content,
-        source_provenance: ctx.sourceProvenance ?? "assistant-turn",
-        request_context: requestContextForLog(requestContext),
-        at: new Date().toISOString(),
+      projectProjections.push({
+        lease: projectionLease,
+        logRecord: {
+          action: "written",
+          memory_id: entry.id,
+          scope: effectiveScope,
+          kind: ev.memory_kind,
+          content: ev.content,
+          source_provenance: ctx.sourceProvenance ?? "assistant-turn",
+          request_context: requestContextForLog(requestContext),
+          at: new Date().toISOString(),
+        },
+        soulLine: SOUL_KINDS.has(ev.memory_kind) && effectiveScope === "project"
+          ? `(${ev.memory_kind}) ${ev.content}`
+          : null,
       });
-      if (SOUL_KINDS.has(ev.memory_kind) && effectiveScope === "project") {
-        soulLines.push({ line: `(${ev.memory_kind}) ${ev.content}`, lease: projectionLease });
-      } else {
-        finishMemoryProjectionWrite(projectionLease);
-      }
     }
     // 에이전트 기술·경험(agent_repo) — 프로젝트 폴더 유무와 무관하게 빌린 에이전트의
     // 전역 experience.sqlite로 미러링한다(크로스 프로젝트 축적). project 스코프와 달리 프로젝트 고유
@@ -775,9 +780,22 @@ export function curateEvents(
     }
   }
 
-  if (ctx.projectPath && soulLines.length > 0) {
-    appendSoulMemory(ctx.projectPath, soulLines.map((item) => item.line));
-    for (const item of soulLines) finishMemoryProjectionWrite(item.lease);
+  if (ctx.projectPath && projectProjections.length > 0) {
+    commitMemoryProjectionWrites(
+      projectProjections.map((projection) => ({
+        lease: projection.lease,
+        value: projection,
+      })),
+      (validProjections) => {
+        for (const projection of validProjections) {
+          appendMemoryLog(ctx.projectPath!, projection.logRecord);
+        }
+        const validSoulLines = validProjections.flatMap((projection) => (
+          projection.soulLine ? [projection.soulLine] : []
+        ));
+        if (validSoulLines.length > 0) appendSoulMemory(ctx.projectPath!, validSoulLines);
+      },
+    );
   }
 
   // agent_repo 배움을 이 실행에 관여한 빌린 에이전트들의 private ontology cache에 미러링.

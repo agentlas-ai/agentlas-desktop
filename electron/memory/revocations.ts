@@ -124,6 +124,17 @@ export type MemoryProjectionTargetKind = "project-files" | "agent-nest-scan";
 export interface MemoryProjectionWriterLease {
   targetId: string;
   token: string;
+  sourceMemoryId: string;
+}
+
+export interface MemoryProjectionWriteItem<T> {
+  lease: MemoryProjectionWriterLease;
+  value: T;
+}
+
+export interface MemoryProjectionCommitReceipt {
+  committedTargetIds: string[];
+  rejectedTargetIds: string[];
 }
 
 function projectionTargetIdentity(
@@ -195,8 +206,153 @@ export function beginMemoryProjectionWrite(input: {
         WHERE target_id = ? AND revocation_id IS NULL
           AND (lease_token IS NULL OR lease_expires_at <= ?)`,
     ).run(token, expiresAt, nowIso, targetId, nowIso);
-    return claimed.changes === 1 ? { targetId, token } : null;
+    return claimed.changes === 1 ? { targetId, token, sourceMemoryId } : null;
   }).immediate();
+}
+
+/**
+ * Perform the final external projection write while the canonical store still
+ * owns the exact writer lease. The callback is deliberately synchronous: its
+ * file or nested-SQLite write completes before this IMMEDIATE transaction can
+ * release the target to forget cleanup.
+ */
+export function commitMemoryProjectionWrites<T>(
+  items: MemoryProjectionWriteItem<T>[],
+  write: (values: T[]) => void,
+): MemoryProjectionCommitReceipt {
+  const releaseInputLeases = (): void => {
+    for (const item of items) finishMemoryProjectionWrite(item.lease);
+  };
+  if (write.constructor.name === "AsyncFunction") {
+    releaseInputLeases();
+    throw new TypeError("memory projection callback must be synchronous");
+  }
+  const uniqueItems = new Map<string, MemoryProjectionWriteItem<T>>();
+  for (const item of items) {
+    const targetId = item.lease.targetId.trim();
+    const token = item.lease.token.trim();
+    const sourceMemoryId = item.lease.sourceMemoryId.trim();
+    if (!targetId || !token || !sourceMemoryId) continue;
+    const previous = uniqueItems.get(targetId);
+    if (
+      previous
+      && (
+        previous.lease.token !== token
+        || previous.lease.sourceMemoryId !== sourceMemoryId
+      )
+    ) {
+      releaseInputLeases();
+      throw new TypeError("conflicting memory projection leases");
+    }
+    uniqueItems.set(targetId, item);
+  }
+  const normalizedItems = [...uniqueItems.values()];
+  if (normalizedItems.length === 0) {
+    return { committedTargetIds: [], rejectedTargetIds: [] };
+  }
+
+  try {
+    return getDb().transaction(() => {
+      const selectTarget = getDb().prepare(
+        `SELECT source_memory_id AS sourceMemoryId, revocation_id AS revocationId,
+                state, lease_kind AS leaseKind, lease_token AS leaseToken,
+                EXISTS(
+                  SELECT 1 FROM memory_revocation_sources source
+                   WHERE source.source_memory_id = memory_revocation_cleanup_targets.source_memory_id
+                ) AS sourceRevoked
+           FROM memory_revocation_cleanup_targets
+          WHERE target_id = ?`,
+      );
+      const releaseRevokedWriter = getDb().prepare(
+        `UPDATE memory_revocation_cleanup_targets
+            SET revocation_id = COALESCE(
+                  revocation_id,
+                  (SELECT source.revocation_id FROM memory_revocation_sources source
+                    WHERE source.source_memory_id = memory_revocation_cleanup_targets.source_memory_id)
+                ),
+                state = 'pending', lease_kind = NULL, lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = ?, updated_at = ?
+          WHERE target_id = ? AND source_memory_id = ?
+            AND lease_kind = 'writer' AND lease_token = ?`,
+      );
+      const completeWriter = getDb().prepare(
+        `UPDATE memory_revocation_cleanup_targets
+            SET state = 'registered', lease_kind = NULL, lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = NULL,
+                updated_at = ?, completed_at = NULL
+          WHERE target_id = ? AND source_memory_id = ?
+            AND state = 'writing' AND lease_kind = 'writer' AND lease_token = ?
+            AND revocation_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_revocation_sources source
+               WHERE source.source_memory_id = memory_revocation_cleanup_targets.source_memory_id
+            )`,
+      );
+      const valid: MemoryProjectionWriteItem<T>[] = [];
+      const rejectedTargetIds: string[] = [];
+      const now = new Date().toISOString();
+      for (const item of normalizedItems) {
+        const row = selectTarget.get(item.lease.targetId) as {
+          sourceMemoryId: string;
+          revocationId: string | null;
+          state: string;
+          leaseKind: string | null;
+          leaseToken: string | null;
+          sourceRevoked: number;
+        } | undefined;
+        const exactLease = Boolean(
+          row
+          && row.sourceMemoryId === item.lease.sourceMemoryId
+          && row.leaseKind === "writer"
+          && row.leaseToken === item.lease.token
+        );
+        const exactWriter = exactLease && row?.state === "writing";
+        if (exactWriter && row && !row.revocationId && row.sourceRevoked === 0) {
+          valid.push(item);
+          continue;
+        }
+        rejectedTargetIds.push(item.lease.targetId);
+        if (exactLease && row && (row.revocationId || row.sourceRevoked !== 0)) {
+          releaseRevokedWriter.run(
+            now,
+            now,
+            item.lease.targetId,
+            item.lease.sourceMemoryId,
+            item.lease.token,
+          );
+        }
+      }
+
+      if (valid.length > 0) {
+        const result = write(valid.map((item) => item.value));
+        if (
+          result !== null
+          && (typeof result === "object" || typeof result === "function")
+          && typeof (result as { then?: unknown }).then === "function"
+        ) {
+          throw new TypeError("memory projection callback must be synchronous");
+        }
+      }
+
+      const committedTargetIds: string[] = [];
+      for (const item of valid) {
+        const completed = completeWriter.run(
+          now,
+          item.lease.targetId,
+          item.lease.sourceMemoryId,
+          item.lease.token,
+        );
+        if (completed.changes !== 1) {
+          throw new Error("memory projection authority changed during commit");
+        }
+        committedTargetIds.push(item.lease.targetId);
+      }
+      return { committedTargetIds, rejectedTargetIds };
+    }).immediate();
+  } catch (error) {
+    for (const item of normalizedItems) finishMemoryProjectionWrite(item.lease);
+    throw error;
+  }
 }
 
 export function finishMemoryProjectionWrite(lease: MemoryProjectionWriterLease): void {
