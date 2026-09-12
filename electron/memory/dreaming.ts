@@ -21,6 +21,7 @@ import {
   supersedeMemoryEntries,
   type MemoryEntry,
 } from "./store";
+import { currentMemoryForgetEpoch, MemoryRevokedError } from "./revocations";
 import {
   agentNestExperienceOwnership,
   reconcileAgentNestExperienceConsolidation,
@@ -183,6 +184,7 @@ async function dreamOnce(): Promise<void> {
       const numbered = entries
         .map((e, i) => `${i + 1}. [${e.kind}/${e.confidence}] ${e.content.replace(/\s+/g, " ").slice(0, 400)}`)
         .join("\n");
+      const intakeEpoch = currentMemoryForgetEpoch();
       const result = await picked.runner(
         {
           systemPrompt: [
@@ -226,6 +228,7 @@ async function dreamOnce(): Promise<void> {
           agentId: target.agentId,
           confidence: "medium",
           sensitivity: strictestSensitivity,
+          intakeEpoch,
           evidence: [
             `dreaming: consolidated ${absorbed.length}/${entries.length} entries`,
             ...supersedePointers,
@@ -248,6 +251,10 @@ async function dreamOnce(): Promise<void> {
       })));
       console.log(`[dreaming] agent ${agent.slug}: ${rules.length} rules from ${absorbed.length} entries`);
     } catch (err) {
+      if (err instanceof MemoryRevokedError) {
+        console.info("[dreaming] stale consolidation discarded after memory forget");
+        continue;
+      }
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
       if (!controller.signal.aborted) console.error("[dreaming] consolidation failed:", err);
       return;

@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDb } from "../store/db";
 import { looksSecret } from "../../shared/secret-patterns";
+import { memoryRunPredatesAnyForget } from "./revocations";
 import {
   autoLocalEmbedding,
   parseLocalEmbedding,
@@ -234,7 +235,12 @@ export function beginMemoryTicket(input: {
       now,
       now,
     );
-    insertEpisode(ticketId, input.context, input.turnSummary, now);
+    insertEpisode(
+      ticketId,
+      input.context,
+      memoryRunPredatesAnyForget(input.context.runId) ? null : input.turnSummary,
+      now,
+    );
   });
   insert();
   return {
@@ -332,6 +338,18 @@ export function recordMemoryDecision(input: MemoryDecisionInput): void {
   );
 }
 
+/** Remove a ticket's derived recall text after one of its candidates is revoked. */
+export function redactMemoryTicketEpisode(ticketId: string): void {
+  getDb().prepare(
+    `UPDATE memory_episodes
+        SET summary = NULL, summary_hash = NULL,
+            embedding_model = NULL, embedding_adapter = NULL,
+            embedding_model_sha256 = NULL, embedding_content_hash = NULL,
+            embedding_dimensions = NULL, embedding_json = NULL
+      WHERE ticket_id = ?`,
+  ).run(ticketId);
+}
+
 function toEpisode(row: EpisodeRow): MemoryEpisode | null {
   if (!row.summary) return null;
   const embedding = parseLocalEmbedding(
@@ -359,11 +377,16 @@ function toEpisode(row: EpisodeRow): MemoryEpisode | null {
 }
 
 export function listRecentMemoryEpisodes(limit = 80): MemoryEpisode[] {
+  const capped = Math.max(1, Math.min(500, Math.floor(limit)));
   const rows = getDb().prepare(
-    `SELECT * FROM memory_episodes
-      WHERE summary IS NOT NULL
-      ORDER BY created_at DESC LIMIT ?`,
-  ).all(Math.max(1, Math.min(500, Math.floor(limit)))) as EpisodeRow[];
+    `SELECT episode.* FROM memory_episodes episode
+      WHERE episode.summary IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_episode_quarantines quarantine
+           WHERE quarantine.ticket_id = episode.ticket_id
+        )
+      ORDER BY episode.created_at DESC LIMIT ?`,
+  ).all(capped) as EpisodeRow[];
   return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
 }
 
@@ -381,8 +404,12 @@ export function listMemoryEpisodesForContext(
   const canonicalPathHash = projectPathHash(projectPath);
   const rows = projectId && canonicalPathHash
     ? getDb().prepare(
-        `SELECT * FROM memory_episodes
-          WHERE summary IS NOT NULL AND (
+        `SELECT episode.* FROM memory_episodes episode
+          WHERE episode.summary IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_episode_quarantines quarantine
+               WHERE quarantine.ticket_id = episode.ticket_id
+            ) AND (
             (project_id = ? AND project_path_hash = ?) OR
             (project_id IS NULL AND project_path_hash IS NULL)
           )
@@ -390,24 +417,37 @@ export function listMemoryEpisodesForContext(
       ).all(projectId, canonicalPathHash, capped) as EpisodeRow[]
     : projectId
     ? getDb().prepare(
-        `SELECT * FROM memory_episodes
-          WHERE summary IS NOT NULL AND (
+        `SELECT episode.* FROM memory_episodes episode
+          WHERE episode.summary IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_episode_quarantines quarantine
+               WHERE quarantine.ticket_id = episode.ticket_id
+            ) AND (
             project_id = ? OR (project_id IS NULL AND project_path_hash IS NULL)
           )
           ORDER BY created_at DESC LIMIT ?`,
       ).all(projectId, capped) as EpisodeRow[]
     : canonicalPathHash
       ? getDb().prepare(
-          `SELECT * FROM memory_episodes
-            WHERE summary IS NOT NULL AND (
+          `SELECT episode.* FROM memory_episodes episode
+            WHERE episode.summary IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_episode_quarantines quarantine
+                 WHERE quarantine.ticket_id = episode.ticket_id
+              ) AND (
               project_path_hash = ? OR (project_id IS NULL AND project_path_hash IS NULL)
             )
             ORDER BY created_at DESC LIMIT ?`,
         ).all(canonicalPathHash, capped) as EpisodeRow[]
     : getDb().prepare(
-        `SELECT * FROM memory_episodes
-          WHERE summary IS NOT NULL AND project_id IS NULL AND project_path_hash IS NULL
-          ORDER BY created_at DESC LIMIT ?`,
+        `SELECT episode.* FROM memory_episodes episode
+          WHERE episode.summary IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_episode_quarantines quarantine
+               WHERE quarantine.ticket_id = episode.ticket_id
+            )
+            AND episode.project_id IS NULL AND episode.project_path_hash IS NULL
+          ORDER BY episode.created_at DESC LIMIT ?`,
       ).all(capped) as EpisodeRow[];
   return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
 }
@@ -428,17 +468,26 @@ export function listProjectMemoryEpisodes(
   const canonicalPathHash = projectPathHash(projectPath);
   const rows = canonicalPathHash
     ? getDb().prepare(
-        `SELECT * FROM memory_episodes
-          WHERE summary IS NOT NULL AND (
+        `SELECT episode.* FROM memory_episodes episode
+          WHERE episode.summary IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_episode_quarantines quarantine
+               WHERE quarantine.ticket_id = episode.ticket_id
+            ) AND (
             (project_id = ? AND project_path_hash = ?) OR
             (project_id IS NULL AND project_path_hash = ?)
           )
           ORDER BY created_at DESC LIMIT ?`,
       ).all(id, canonicalPathHash, canonicalPathHash, capped) as EpisodeRow[]
     : getDb().prepare(
-        `SELECT * FROM memory_episodes
-          WHERE summary IS NOT NULL AND project_id = ?
-          ORDER BY created_at DESC LIMIT ?`,
+        `SELECT episode.* FROM memory_episodes episode
+          WHERE episode.summary IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_episode_quarantines quarantine
+               WHERE quarantine.ticket_id = episode.ticket_id
+            )
+            AND episode.project_id = ?
+          ORDER BY episode.created_at DESC LIMIT ?`,
       ).all(id, capped) as EpisodeRow[];
   return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
 }

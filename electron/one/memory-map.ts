@@ -13,6 +13,12 @@ import {
 } from "../../shared/one-memory-map";
 import { getDb } from "../store/db";
 import type { OneDurableMemoryEntryUi } from "../../shared/types";
+import { revokeOneMemoryEntry } from "../memory/revocations";
+import {
+  findAgentNestExperienceSlugs,
+  forgetAgentNestExperienceMemory,
+  forgetProjectMemoryProjection,
+} from "../memory/project-files";
 
 import { BUILTIN_ONE_AGENT_ID as ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 const MAX_RENDERED_RELATIONS_PER_NODE = 12;
@@ -407,14 +413,30 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   });
 }
 
-/** "잊기": supersede one of One's live entries. Non-destructive (history stays); the map drops the node. */
+/** "잊기": commit a durable fence, then remove every known raw recall projection. */
 export function forgetOneDurableMemoryEntry(memoryId: string): { ok: boolean; memoryId: string; forgottenAt: string | null } {
   const id = typeof memoryId === "string" ? memoryId.trim() : "";
   if (!id) return { ok: false, memoryId: "", forgottenAt: null };
-  const now = new Date().toISOString();
-  const result = getDb().prepare(
-    "UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND agent_id = ? AND superseded_at IS NULL",
-  ).run(now, id, ONE_AGENT_ID);
-  if (result.changes > 0) cachedMap = null;
-  return { ok: result.changes > 0, memoryId: id, forgottenAt: result.changes > 0 ? now : null };
+  const forgotten = revokeOneMemoryEntry(id, ONE_AGENT_ID);
+  if (!forgotten) return { ok: false, memoryId: id, forgottenAt: null };
+  cachedMap = null;
+
+  for (const projectPath of forgotten.projectPaths) {
+    try {
+      forgetProjectMemoryProjection(
+        projectPath,
+        forgotten.kind,
+        forgotten.contentHash,
+        forgotten.forgottenAt,
+      );
+    } catch {
+      console.warn("[memory] forgotten project projection reconciliation failed");
+    }
+  }
+  for (const slug of findAgentNestExperienceSlugs(forgotten.sourceMemoryIds)) {
+    if (!forgetAgentNestExperienceMemory(slug, forgotten.sourceMemoryIds, forgotten.forgottenAt)) {
+      console.warn("[memory] forgotten agent projection reconciliation failed");
+    }
+  }
+  return { ok: true, memoryId: id, forgottenAt: forgotten.forgottenAt };
 }

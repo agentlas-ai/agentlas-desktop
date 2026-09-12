@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 117;
+const SCHEMA_VERSION = 118;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6423,6 +6423,89 @@ export function initStore(options: StoreInitOptions = {}): void {
         CREATE INDEX IF NOT EXISTS idx_office_task_context_operations_chat ON office_task_context_operations(chat_id);`);
     })();
   }
+
+  // v118: durable Memory forget authority. A run snapshots the global forget
+  // epoch at its canonical invoke_started event, so a curator batch that was
+  // already in flight cannot write a paraphrase after the user forgets an
+  // entry. Tombstones retain only one-way owner/content identities; old
+  // superseded history is not inferred as a forget and is never purged here.
+  if (userVersion < 118) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS memory_forget_clock (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          epoch INTEGER NOT NULL CHECK(epoch >= 0)
+        );
+        INSERT OR IGNORE INTO memory_forget_clock (id, epoch) VALUES (1, 0);
+
+        CREATE TABLE IF NOT EXISTS memory_run_epochs (
+          run_id TEXT PRIMARY KEY,
+          intake_epoch INTEGER NOT NULL CHECK(intake_epoch >= 0),
+          captured_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_revocations (
+          revocation_id TEXT PRIMARY KEY,
+          owner_key TEXT NOT NULL
+            CHECK(length(owner_key) = 64 AND owner_key NOT GLOB '*[^0-9a-f]*'),
+          memory_kind TEXT NOT NULL,
+          content_hash TEXT NOT NULL
+            CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+          source_memory_id TEXT NOT NULL,
+          revoked_epoch INTEGER NOT NULL CHECK(revoked_epoch > 0),
+          revoked_at TEXT NOT NULL,
+          UNIQUE(owner_key, memory_kind, content_hash)
+        );
+        CREATE TABLE IF NOT EXISTS memory_revocation_sources (
+          source_memory_id TEXT PRIMARY KEY,
+          revocation_id TEXT NOT NULL REFERENCES memory_revocations(revocation_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS memory_episode_quarantines (
+          ticket_id TEXT PRIMARY KEY REFERENCES memory_tickets(ticket_id) ON DELETE CASCADE,
+          revocation_id TEXT NOT NULL REFERENCES memory_revocations(revocation_id) ON DELETE CASCADE,
+          reason TEXT NOT NULL CHECK(reason IN ('legacy-unlinked-dedup')),
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_revocations_owner_epoch
+          ON memory_revocations(owner_key, revoked_epoch DESC);
+        CREATE INDEX IF NOT EXISTS idx_memory_episode_quarantines_revocation
+          ON memory_episode_quarantines(revocation_id);
+
+        INSERT OR IGNORE INTO memory_run_epochs (run_id, intake_epoch, captured_at)
+          SELECT run_id, 0, MIN(ts) FROM run_events GROUP BY run_id;
+
+        DROP TRIGGER IF EXISTS trg_memory_capture_run_epoch;
+        CREATE TRIGGER trg_memory_capture_run_epoch
+        AFTER INSERT ON run_events
+        WHEN NEW.kind = 'invoke_started'
+        BEGIN
+          INSERT OR IGNORE INTO memory_run_epochs (run_id, intake_epoch, captured_at)
+          SELECT NEW.run_id, epoch, NEW.ts FROM memory_forget_clock WHERE id = 1;
+        END;
+      `);
+    })();
+  }
+
+  // A schema-only bootstrap can already advertise v118 while omitting the
+  // singleton seed row. Keep this owner-side invariant outside the version
+  // ladder: followers never repair, an existing epoch is never overwritten,
+  // and a missing row resumes after the greatest durable revocation epoch.
+  _db.transaction(() => {
+    _db!.exec(`
+      CREATE TABLE IF NOT EXISTS memory_forget_clock (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        epoch INTEGER NOT NULL CHECK(epoch >= 0)
+      );
+    `);
+    if (tableExists(_db!, "memory_revocations")) {
+      _db!.exec(`
+        INSERT OR IGNORE INTO memory_forget_clock (id, epoch)
+          SELECT 1, COALESCE(MAX(revoked_epoch), 0) FROM memory_revocations;
+      `);
+    } else {
+      _db!.exec("INSERT OR IGNORE INTO memory_forget_clock (id, epoch) VALUES (1, 0)");
+    }
+  })();
 
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

@@ -124,6 +124,7 @@ export function harvestCompactionSummaries(opts: {
         projectPath: ctx.projectPath,
         agentId: ctx.agentId,
         chatId: ctx.chatId,
+        intakeRunId: ctx.runId,
       });
       // DB insert가 실제 성공한 항목만 처리 완료로 남긴다. 실패한 UUID는 다음 harvest에서
       // 다시 시도되어야 하며, 다른 항목 하나의 성공 때문에 함께 소거되면 안 된다.

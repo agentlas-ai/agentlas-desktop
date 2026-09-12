@@ -7,7 +7,8 @@ import {
   appendMemoryLog,
   appendSoulMemory,
 } from "./project-files";
-import { hasEquivalentMemory, insertMemoryEntry, type RequestContext } from "./store";
+import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
+import { MemoryRevokedError } from "./revocations";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import {
   parseMemoryEvents,
@@ -30,6 +31,7 @@ import {
   completeMemoryTicket,
   memoryDecisionReport,
   readMemoryTicketReport,
+  redactMemoryTicketEpisode,
   recordMemoryDecision,
   type MemoryCuratorMode,
   type MemoryEmitterStatus,
@@ -632,7 +634,14 @@ export function curateEvents(
 
     const projectPath = effectiveScope === "project" ? ctx.projectPath : null;
     const requestContext = buildRequestContext(ev, ctx, projectPath);
-    if (hasEquivalentMemory(effectiveScope, ev.memory_kind, ev.content, projectPath, effectiveAgentId)) {
+    const equivalentMemoryId = findEquivalentMemoryId(
+      effectiveScope,
+      ev.memory_kind,
+      ev.content,
+      projectPath,
+      effectiveAgentId,
+    );
+    if (equivalentMemoryId) {
       report.deduped += 1;
       recordCandidateDecision({
         options,
@@ -641,23 +650,51 @@ export function curateEvents(
         scope: effectiveScope,
         action: "deduped",
         reason: "policy-exact-duplicate",
+        targetMemoryId: equivalentMemoryId,
       });
       continue;
     }
 
-    const entry = insertMemoryEntry({
-      scope: effectiveScope,
-      kind: ev.memory_kind,
-      content: ev.content,
-      projectId: ctx.projectId,
-      projectPath,
-      agentId: effectiveAgentId,
-      chatId: ctx.chatId,
-      confidence: ev.confidence,
-      sensitivity: ev.sensitivity,
-      evidence: evidenceWithSourceProvenance(ev, ctx),
-      requestContext,
-    });
+    let entry: ReturnType<typeof insertMemoryEntry>;
+    try {
+      entry = insertMemoryEntry({
+        scope: effectiveScope,
+        kind: ev.memory_kind,
+        content: ev.content,
+        projectId: ctx.projectId,
+        projectPath,
+        agentId: effectiveAgentId,
+        chatId: ctx.chatId,
+        confidence: ev.confidence,
+        sensitivity: ev.sensitivity,
+        evidence: evidenceWithSourceProvenance(ev, ctx),
+        requestContext,
+        intakeRunId: ctx.runId,
+      });
+    } catch (error) {
+      if (!(error instanceof MemoryRevokedError)) throw error;
+      if (options.ticketId) redactMemoryTicketEpisode(options.ticketId);
+      report.discarded += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope: effectiveScope,
+        action: "discarded",
+        reason: error.reason === "stale-intake-epoch"
+          ? "policy-forgotten-stale-intake"
+          : "policy-forgotten-content",
+      });
+      if (ctx.projectPath) {
+        appendMemoryLog(ctx.projectPath, {
+          action: "discarded",
+          reason: "owner-forgotten",
+          kind: ev.memory_kind,
+          at: new Date().toISOString(),
+        });
+      }
+      continue;
+    }
     report.written += 1;
     recordCandidateDecision({
       options,

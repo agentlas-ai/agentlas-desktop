@@ -117,6 +117,7 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
         confidence: strategyChange ? "high" : "medium",
         sensitivity: "internal",
         evidence: [input.runId],
+        intakeRunId: input.runId,
         requestContext: {
           userIntent: `automation recovery: ${input.automation.name}`.slice(0, 200),
           triggerTerms: [],

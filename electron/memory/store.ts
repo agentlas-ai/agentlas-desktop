@@ -7,6 +7,7 @@ import {
   parseLocalEmbedding,
   type LocalMemoryEmbedding,
 } from "./local-embedding";
+import { assertMemoryWriteAllowed } from "./revocations";
 
 export interface RequestContext {
   userIntent?: string;
@@ -146,14 +147,29 @@ export interface NewMemoryEntry {
   sensitivity?: MemoryEntry["sensitivity"];
   evidence?: string[];
   requestContext?: RequestContext | null;
+  /** Canonical Main run identity captured before provider execution. */
+  intakeRunId?: string | null;
+  /** Trusted in-process epoch captured before a background model call. */
+  intakeEpoch?: number | null;
 }
 
 export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
   const embedding = autoLocalEmbedding(e.content);
-  getDb()
-    .prepare(
+  const insert = getDb().transaction(() => {
+    assertMemoryWriteAllowed({
+      scope: e.scope,
+      kind: e.kind,
+      content: e.content,
+      projectId: e.projectId,
+      projectPath: e.projectPath,
+      agentId: e.agentId,
+      chatId: e.chatId,
+      intakeRunId: e.intakeRunId,
+      intakeEpoch: e.intakeEpoch,
+    });
+    getDb().prepare(
       `INSERT INTO memory_entries
        (id, scope, kind, content, project_id, project_path, agent_id, chat_id,
         confidence, sensitivity, evidence_json, context_json,
@@ -161,8 +177,7 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
         embedding_dimensions, embedding_json,
         superseded_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-    )
-    .run(
+    ).run(
       id,
       e.scope,
       e.kind,
@@ -183,6 +198,8 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       JSON.stringify(embedding.vector),
       now,
     );
+  });
+  insert.immediate();
   const entry: MemoryEntry = {
     id,
     scope: e.scope,
@@ -341,6 +358,27 @@ export function listMemoryRelationCandidates(entry: MemoryEntry, limit = 160): M
 }
 
 /** Dedup check: same scope+kind+content already live for this path (or globally). */
+export function findEquivalentMemoryId(
+  scope: MemoryScope,
+  kind: MemoryKind,
+  content: string,
+  projectPath: string | null,
+  agentId: string | null,
+): string | null {
+  const norm = content.trim().toLowerCase();
+  const row = getDb()
+    .prepare(
+      `SELECT id FROM memory_entries
+       WHERE scope = ? AND kind = ? AND lower(trim(content)) = ?
+         AND superseded_at IS NULL
+         AND (project_path IS ? OR project_path = ?)
+         AND (scope != 'agent_repo' OR agent_id IS ?)
+       LIMIT 1`,
+    )
+    .get(scope, kind, norm, projectPath, projectPath, agentId) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
 export function hasEquivalentMemory(
   scope: MemoryScope,
   kind: MemoryKind,
@@ -348,18 +386,7 @@ export function hasEquivalentMemory(
   projectPath: string | null,
   agentId: string | null,
 ): boolean {
-  const norm = content.trim().toLowerCase();
-  const row = getDb()
-    .prepare(
-      `SELECT 1 FROM memory_entries
-       WHERE scope = ? AND kind = ? AND lower(trim(content)) = ?
-         AND superseded_at IS NULL
-         AND (project_path IS ? OR project_path = ?)
-         AND (scope != 'agent_repo' OR agent_id IS ?)
-       LIMIT 1`,
-    )
-    .get(scope, kind, norm, projectPath, projectPath, agentId);
-  return Boolean(row);
+  return findEquivalentMemoryId(scope, kind, content, projectPath, agentId) !== null;
 }
 
 /** 에이전트 상세 UI용 — 프로젝트에 귀속되지 않은 agent-repo 메모리만 최신순.

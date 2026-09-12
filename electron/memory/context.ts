@@ -30,6 +30,7 @@ import {
 } from "./safe-project-read";
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 import { listMemoryEpisodesForContext } from "./tickets";
+import { filterRevokedProjectSoul } from "./revocations";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
 import { looksSecret } from "../../shared/secret-patterns";
 import {
@@ -741,7 +742,8 @@ export async function buildMemoryContext(
     if (!verifyActivatedFolderIdentity(projectPath)) {
       return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
     }
-    const soul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
+    const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
+    const soul = rawSoul ? filterRevokedProjectSoul(rawSoul, options.projectId, projectPath) : null;
     if (soul && soul.trim()) {
       const soulSection = `### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`;
       sections.push(soulSection);

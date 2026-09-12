@@ -1211,6 +1211,92 @@ export function appendSoulMemory(
   }
 }
 
+export interface ProjectMemoryForgetResult {
+  soulRemoved: number;
+  logRedacted: number;
+}
+
+function forgetContentHash(value: string): string {
+  return createHash("sha256")
+    .update(value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase(), "utf8")
+    .digest("hex");
+}
+
+/**
+ * Remove the exact auto-curated project projections of a forgotten DB entry.
+ * Hand-authored soul prose is left alone; the append-only log keeps a
+ * value-free tombstone in the removed record's position.
+ */
+export function forgetProjectMemoryProjection(
+  projectPath: string,
+  kind: string,
+  contentHash: string,
+  forgottenAt: string,
+): ProjectMemoryForgetResult {
+  const identity = resolveProjectFsIdentity(projectPath);
+  const dir = projectMemoryDir(identity.root);
+  const soulPath = path.join(dir, PROJECT_SOUL_FILE);
+  const logPath = path.join(dir, MEMORY_LOG_FILE);
+  let soulRemoved = 0;
+  let logRedacted = 0;
+
+  const soul = readStableProjectText(identity, soulPath, "The project soul file");
+  if (soul) {
+    const hadTrailingNewline = soul.content.endsWith("\n");
+    const kept = soul.content.split(/\r?\n/).filter((line) => {
+      const match = /^- \(([^)]+)\) (.*)$/.exec(line);
+      if (!match || match[1] !== kind || forgetContentHash(match[2]) !== contentHash) return true;
+      soulRemoved += 1;
+      return false;
+    });
+    if (soulRemoved > 0) {
+      const next = kept.join("\n").replace(/\n{3,}/g, "\n\n");
+      atomicPrivateProjectWrite(
+        identity,
+        soulPath,
+        hadTrailingNewline && !next.endsWith("\n") ? `${next}\n` : next,
+        soul.stat,
+        "The project soul file",
+      );
+    }
+  }
+
+  const log = readStableProjectText(identity, logPath, "The project memory log");
+  if (log) {
+    const rows = log.content.split(/\r?\n/);
+    const nextRows = rows.map((line) => {
+      if (!line.trim()) return line;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (
+          typeof parsed.content !== "string"
+          || parsed.kind !== kind
+          || forgetContentHash(parsed.content) !== contentHash
+        ) return line;
+        logRedacted += 1;
+        return JSON.stringify({
+          action: "forgotten",
+          kind,
+          content_hash: contentHash,
+          at: forgottenAt,
+        });
+      } catch {
+        return line;
+      }
+    });
+    if (logRedacted > 0) {
+      atomicPrivateProjectWrite(
+        identity,
+        logPath,
+        nextRows.join("\n"),
+        log.stat,
+        "The project memory log",
+      );
+    }
+  }
+  return { soulRemoved, logRedacted };
+}
+
 // Legacy human-readable nest helper. Runtime recall now uses experience.sqlite
 // below; this path remains only for old callers that explicitly request a
 // markdown export and is no longer called by the Memory Curator.
@@ -1773,6 +1859,64 @@ export function supersedeAgentNestExperienceMemory(
   // true only when every db we attempted actually committed; a partial failure
   // returns false so the caller cannot treat a still-active stale row as retired.
   return attempted > 0 && reconciled === attempted;
+}
+
+/** Remove raw recall material from one exact borrowed-agent cache source. */
+export function forgetAgentNestExperienceMemory(
+  slug: string,
+  sourceMemoryIds: string[],
+  forgottenAt: string,
+): boolean {
+  const normalizedSlug = normalizedHubAgentSlug(slug);
+  const sourceIds = [...new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
+  if (!normalizedSlug || sourceIds.length === 0) return false;
+  const paths = activeHubMemoryNestPaths(normalizedSlug);
+  if (!paths) return true;
+  let attempted = 0;
+  let reconciled = 0;
+  for (const root of paths.readableMemoryRoots) {
+    const dbPath = path.join(root, "experience.sqlite");
+    if (!fs.existsSync(dbPath)) continue;
+    let db: Database.Database | null = null;
+    try {
+      const stat = fs.lstatSync(dbPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      attempted += 1;
+      db = new Database(dbPath);
+      db.pragma("foreign_keys = ON");
+      db.pragma("busy_timeout = 5000");
+      const agentId = `hub:${normalizedSlug}`;
+      const select = db.prepare(
+        `SELECT ticket_id FROM memory_candidates
+          WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+      );
+      const redact = db.prepare(
+        `UPDATE memory_candidates
+            SET candidate_text = '', source_refs_json = '[]', reason = 'forgotten',
+                status = 'superseded', tags_json = '[]', salience = 0,
+                privacy_scope = 'private', embedding_adapter = NULL,
+                embedding_dimensions = NULL, embedding_json = NULL,
+                embedding_content_hash = NULL, updated_at = ?
+          WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+      );
+      const deleteLinks = db.prepare(
+        "DELETE FROM memory_links WHERE from_ticket = ? OR to_ticket = ?",
+      );
+      db.transaction(() => {
+        for (const sourceId of sourceIds) {
+          const rows = select.all(agentId, sourceId) as Array<{ ticket_id: string }>;
+          for (const row of rows) deleteLinks.run(row.ticket_id, row.ticket_id);
+          redact.run(forgottenAt, agentId, sourceId);
+        }
+      }).immediate();
+      reconciled += 1;
+    } catch {
+      // false below preserves the unresolved mirror as an observable failure.
+    } finally {
+      try { db?.close(); } catch { /* best-effort close */ }
+    }
+  }
+  return attempted === reconciled;
 }
 
 /** Resolve exact source-memory -> borrowed-agent projection ownership. */

@@ -24,6 +24,7 @@ import {
   readableActiveHubMemoryNestRoots,
 } from "./hub-memory-nest";
 import { autoLocalEmbedding, rankHybridLocal } from "../memory/local-embedding";
+import { revokedMemorySourceIds } from "../memory/revocations";
 
 type CareerRow = {
   owner_scope_key: string;
@@ -227,17 +228,16 @@ function readNestCounts(memoryKey: string): { memoryCount: number; relationCount
     try {
       db = openReadonlyNestDatabase(root);
       if (!db) continue;
-      memoryCount += Number((db.prepare(
-        "SELECT COUNT(*) AS n FROM memory_candidates WHERE agent_id = ? AND status = 'active'",
-      ).get(`hub:${memoryKey}`) as { n?: number } | undefined)?.n ?? 0);
-      relationCount += Number((db.prepare(
-        `SELECT COUNT(*) AS n
-           FROM memory_links link
-           JOIN memory_candidates source ON source.ticket_id = link.from_ticket
-           JOIN memory_candidates target ON target.ticket_id = link.to_ticket
-          WHERE source.agent_id = ? AND target.agent_id = ?
-            AND source.status = 'active' AND target.status = 'active'`,
-      ).get(`hub:${memoryKey}`, `hub:${memoryKey}`) as { n?: number } | undefined)?.n ?? 0);
+      const active = db.prepare(
+        "SELECT ticket_id AS ticketId, source_memory_id AS sourceMemoryId FROM memory_candidates WHERE agent_id = ? AND status = 'active'",
+      ).all(`hub:${memoryKey}`) as Array<{ ticketId: string; sourceMemoryId: string | null }>;
+      const revoked = revokedMemorySourceIds(active.flatMap((row) => row.sourceMemoryId ? [row.sourceMemoryId] : []));
+      const allowedTickets = new Set(active.filter((row) => !row.sourceMemoryId || !revoked.has(row.sourceMemoryId)).map((row) => row.ticketId));
+      memoryCount += allowedTickets.size;
+      const links = db.prepare(
+        "SELECT from_ticket AS fromTicket, to_ticket AS toTicket FROM memory_links",
+      ).all() as Array<{ fromTicket: string; toTicket: string }>;
+      relationCount += links.filter((link) => allowedTickets.has(link.fromTicket) && allowedTickets.has(link.toTicket)).length;
     } catch {
       // A rebuildable or legacy cache may be absent/corrupt.
     } finally {
@@ -380,7 +380,7 @@ export function getBorrowedAgentOntologyGraph(profileIdValue: string): Experienc
       db = openReadonlyNestDatabase(root);
       if (!db) continue;
       const memories = db.prepare(`
-        SELECT ticket_id, candidate_text
+        SELECT ticket_id, candidate_text, source_memory_id
           FROM memory_candidates
          WHERE agent_id = ? AND status = 'active'
          ORDER BY updated_at DESC, ticket_id ASC
@@ -388,9 +388,12 @@ export function getBorrowedAgentOntologyGraph(profileIdValue: string): Experienc
       `).all(`hub:${memoryKey}`, GRAPH_NODE_LIMIT - nodes.length) as Array<{
         ticket_id: string;
         candidate_text: string;
+        source_memory_id: string | null;
       }>;
+      const revoked = revokedMemorySourceIds(memories.flatMap((memory) => memory.source_memory_id ? [memory.source_memory_id] : []));
       for (const memory of memories) {
         if (nodes.length >= GRAPH_NODE_LIMIT) break;
+        if (memory.source_memory_id && revoked.has(memory.source_memory_id)) continue;
         const nodeId = stableGraphId(profile.profileId, "memory", memory.ticket_id);
         if (ticketNodeId.has(memory.ticket_id)) continue;
         ticketNodeId.set(memory.ticket_id, nodeId);
@@ -470,13 +473,20 @@ export function buildBorrowedAgentMemoryContext(memoryKeyValue: string, task: st
       db = openReadonlyNestDatabase(root);
       if (!db) continue;
       const candidates = db.prepare(`
-        SELECT ticket_id, candidate_text, confidence
+        SELECT ticket_id, candidate_text, confidence, source_memory_id
           FROM memory_candidates
          WHERE agent_id = ? AND status = 'active'
          ORDER BY updated_at DESC, ticket_id ASC
          LIMIT 200
-      `).all(`hub:${memoryKey}`) as Array<{ ticket_id: string; candidate_text: string; confidence: number }>;
+      `).all(`hub:${memoryKey}`) as Array<{
+        ticket_id: string;
+        candidate_text: string;
+        confidence: number;
+        source_memory_id: string | null;
+      }>;
+      const revoked = revokedMemorySourceIds(candidates.flatMap((candidate) => candidate.source_memory_id ? [candidate.source_memory_id] : []));
       for (const candidate of candidates) {
+        if (candidate.source_memory_id && revoked.has(candidate.source_memory_id)) continue;
         if (rows.has(candidate.ticket_id)) continue;
         const text = candidate.candidate_text.normalize("NFKC").replace(/\s+/g, " ").trim().slice(0, 800);
         if (!text) continue;

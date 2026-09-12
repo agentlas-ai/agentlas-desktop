@@ -134,6 +134,7 @@ export function backfillExperienceFromRunHistory(options: { agentId?: string } =
           content,
           confidence: "medium",
           sensitivity: "internal",
+          intakeRunId: turn.runId,
           evidenceRefs: [turn.runId],
           source: "host-observed-backfill",
         } as never);

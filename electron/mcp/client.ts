@@ -6503,6 +6503,7 @@ ${effectiveUserPrompt}`;
           sessionId: result.sessionId,
           cwd: workingFolder,
           ctx: {
+            runId: req.runId,
             projectPath: memoryReadPath,
             projectId: invocationProjectId,
             agentId: agent.id,
