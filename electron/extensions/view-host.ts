@@ -85,6 +85,17 @@ interface ActiveScienceView {
 
 const activeViews = new Map<number, ActiveScienceView>();
 const scienceToolApprovalChatByRequestId = new Map<string, string>();
+const scienceCaptureTails = new WeakMap<Electron.WebContents, Promise<void>>();
+
+function serializeScienceCapture<T>(webContents: Electron.WebContents, operation: () => Promise<T>): Promise<T> {
+  const previous = scienceCaptureTails.get(webContents) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  const tail = current.then(() => undefined, () => undefined);
+  scienceCaptureTails.set(webContents, tail);
+  return current.finally(() => {
+    if (scienceCaptureTails.get(webContents) === tail) scienceCaptureTails.delete(webContents);
+  });
+}
 
 /*
  * Science is a WebContentsView, not one of the Desktop BrowserWindows that receive
@@ -282,97 +293,132 @@ function safeCaptureRect(value: unknown, active: ActiveScienceView): Rectangle {
 export async function captureScienceExtensionViewRegion(senderId: number, identity: { artifactId: string; artifactVersion: number; contentSha256: string }): Promise<{ png: Buffer; renderContext: Record<string, unknown> }> {
   const active = activeViewForSender(senderId);
   if (!active) throw new Error("science-extension-sender-not-authorized");
-  const captureToken = randomUUID();
-  const value = await active.view.webContents.executeJavaScript(`(async () => {
-    const expected = ${JSON.stringify(identity)};
-    const captureToken = ${JSON.stringify(captureToken)};
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const host = [...document.querySelectorAll('[data-artifact-host]')].find((node) =>
-      node.dataset.artifactHost === expected.artifactId &&
-      Number(node.dataset.artifactVersion) === expected.artifactVersion &&
-      node.dataset.contentSha256 === expected.contentSha256
-    );
-    const target = host?.querySelector('[data-science-capture]');
-    if (!host || !target) throw new Error('science-capture-target-missing');
-    target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const style = getComputedStyle(target);
-    const rect = target.getBoundingClientRect();
-    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 || rect.width < 1 || rect.height < 1) throw new Error('science-capture-target-hidden');
-    Object.defineProperty(target, '__agentlasScienceCaptureRestore', {
-      value: { style: target.getAttribute('style') },
-      configurable: true,
-    });
-    target.dataset.scienceCaptureStage = captureToken;
-    const opaqueBackground = style.backgroundColor === 'rgba(0, 0, 0, 0)' || style.backgroundColor === 'transparent'
-      ? 'rgb(255, 255, 255)'
-      : style.backgroundColor;
-    target.style.setProperty('position', 'fixed', 'important');
-    target.style.setProperty('inset', '0 auto auto 0', 'important');
-    target.style.setProperty('width', rect.width + 'px', 'important');
-    target.style.setProperty('height', rect.height + 'px', 'important');
-    target.style.setProperty('margin', '0', 'important');
-    target.style.setProperty('transform', 'none', 'important');
-    target.style.setProperty('z-index', '2147483647', 'important');
-    target.style.setProperty('isolation', 'isolate', 'important');
-    target.style.setProperty('background-color', opaqueBackground, 'important');
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const staged = target.getBoundingClientRect();
-    if (Math.abs(staged.x) > 0.5 || Math.abs(staged.y) > 0.5 || Math.abs(staged.width - rect.width) > 1 || Math.abs(staged.height - rect.height) > 1) {
-      throw new Error('science-capture-stage-invalid');
+  const webContents = active.view.webContents;
+  return serializeScienceCapture(webContents, async () => {
+    if (webContents.isDestroyed() || activeViewForSender(senderId) !== active) throw new Error("science-extension-sender-not-authorized");
+    const captureToken = randomUUID();
+    let attachedByCapture = false;
+    try {
+      // Electron 43 can ignore non-zero capture origins for an embedded
+      // WebContentsView. Stage the already-laid-out target at the renderer
+      // viewport origin, preserving its measured dimensions, then capture that
+      // origin. Staging is inside this try so even validation failures restore
+      // the original inline style before the next queued capture starts.
+      const value = await webContents.executeJavaScript(`(async () => {
+        const expected = ${JSON.stringify(identity)};
+        const captureToken = ${JSON.stringify(captureToken)};
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const host = [...document.querySelectorAll('[data-artifact-host]')].find((node) =>
+          node.dataset.artifactHost === expected.artifactId &&
+          Number(node.dataset.artifactVersion) === expected.artifactVersion &&
+          node.dataset.contentSha256 === expected.contentSha256
+        );
+        const target = host?.querySelector('[data-science-capture]');
+        if (!host || !target) throw new Error('science-capture-target-missing');
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const style = getComputedStyle(target);
+        const rect = target.getBoundingClientRect();
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 || rect.width < 1 || rect.height < 1) throw new Error('science-capture-target-hidden');
+        Object.defineProperty(target, '__agentlasScienceCaptureRestore', {
+          value: { style: target.getAttribute('style') },
+          configurable: true,
+        });
+        target.dataset.scienceCaptureStage = captureToken;
+        const opaqueBackground = style.backgroundColor === 'rgba(0, 0, 0, 0)' || style.backgroundColor === 'transparent'
+          ? 'rgb(255, 255, 255)'
+          : style.backgroundColor;
+        target.style.setProperty('position', 'fixed', 'important');
+        target.style.setProperty('inset', '0 auto auto 0', 'important');
+        target.style.setProperty('width', rect.width + 'px', 'important');
+        target.style.setProperty('height', rect.height + 'px', 'important');
+        target.style.setProperty('margin', '0', 'important');
+        target.style.setProperty('transform', 'none', 'important');
+        target.style.setProperty('z-index', '2147483647', 'important');
+        target.style.setProperty('isolation', 'isolate', 'important');
+        target.style.setProperty('background-color', opaqueBackground, 'important');
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const staged = target.getBoundingClientRect();
+        if (Math.abs(staged.x) > 0.5 || Math.abs(staged.y) > 0.5 || Math.abs(staged.width - rect.width) > 1 || Math.abs(staged.height - rect.height) > 1) {
+          throw new Error('science-capture-stage-invalid');
+        }
+        return { x: 0, y: 0, width: staged.width, height: staged.height };
+      })()`);
+      const rect = safeCaptureRect(value, active);
+      if (webContents.isDestroyed()) throw new Error("science-capture-target-closed");
+      const stagedDocumentMatches = await webContents.executeJavaScript(`(() => {
+        const expected = ${JSON.stringify(identity)};
+        const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
+        const host = target?.closest('[data-artifact-host]');
+        return Boolean(target && host && host.dataset.artifactHost === expected.artifactId && Number(host.dataset.artifactVersion) === expected.artifactVersion && host.dataset.contentSha256 === expected.contentSha256);
+      })()`);
+      if (stagedDocumentMatches !== true) throw new Error("science-capture-document-changed");
+
+      if (!webContents.debugger.isAttached()) {
+        webContents.debugger.attach("1.3");
+        attachedByCapture = true;
+      }
+      const result = await webContents.debugger.sendCommand("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
+      }) as { data?: unknown };
+      const capturedDocumentMatches = activeViewForSender(senderId) === active
+        && !webContents.isDestroyed()
+        && await webContents.executeJavaScript(`(() => {
+        const expected = ${JSON.stringify(identity)};
+        const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
+        const host = target?.closest('[data-artifact-host]');
+        return Boolean(target && host && host.dataset.artifactHost === expected.artifactId && Number(host.dataset.artifactVersion) === expected.artifactVersion && host.dataset.contentSha256 === expected.contentSha256);
+      })()`).catch(() => false);
+      if (capturedDocumentMatches !== true) throw new Error("science-capture-document-changed");
+      if (typeof result.data !== "string" || !result.data) throw new Error("science-capture-empty");
+      const png = Buffer.from(result.data, "base64");
+      const image = nativeImage.createFromBuffer(png);
+      if (image.isEmpty()) throw new Error("science-capture-empty");
+      const pixels = image.getSize();
+      if (pixels.width < 1 || pixels.height < 1) throw new Error("science-capture-size-invalid");
+      return {
+        png,
+        renderContext: {
+          electronVersion: process.versions.electron ?? "unknown",
+          chromiumVersion: process.versions.chrome ?? "unknown",
+          platform: process.platform,
+          architecture: process.arch,
+          locale: app.getLocale(),
+          colorScheme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
+          deviceScaleFactor: screen.getDisplayMatching(active.window.getBounds()).scaleFactor,
+          captureMethod: "cdp-staged-origin-clip",
+          cssWidth: rect.width,
+          cssHeight: rect.height,
+          pixelWidth: pixels.width,
+          pixelHeight: pixels.height,
+        },
+      };
+    } finally {
+      if (!webContents.isDestroyed()) {
+        await webContents.executeJavaScript(`(() => {
+          const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
+          if (!target) return false;
+          const restore = target.__agentlasScienceCaptureRestore;
+          if (restore?.style === null) target.removeAttribute('style');
+          else if (typeof restore?.style === 'string') target.setAttribute('style', restore.style);
+          delete target.__agentlasScienceCaptureRestore;
+          delete target.dataset.scienceCaptureStage;
+          return true;
+        })()`).catch(() => false);
+      }
+      if (attachedByCapture) {
+        try {
+          if (webContents.debugger.isAttached()) webContents.debugger.detach();
+        } catch {
+          // The target may have closed after capture. Its debugger session is
+          // already gone; do not replace the original capture error.
+        }
+      }
     }
-    return { x: 0, y: 0, width: staged.width, height: staged.height };
-  })()`);
-  const rect = safeCaptureRect(value, active);
-  // Electron 43 can ignore non-zero capture origins for an embedded
-  // WebContentsView. Stage the already-laid-out target at the renderer viewport
-  // origin, preserving its measured dimensions, then capture that origin. This
-  // avoids guessing between view, window, bitmap, and scrolled-document spaces.
-  const debuggerWasAttached = active.view.webContents.debugger.isAttached();
-  try {
-    if (!debuggerWasAttached) active.view.webContents.debugger.attach("1.3");
-    const result = await active.view.webContents.debugger.sendCommand("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: false,
-      clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
-    }) as { data?: unknown };
-    if (typeof result.data !== "string" || !result.data) throw new Error("science-capture-empty");
-    const png = Buffer.from(result.data, "base64");
-    const image = nativeImage.createFromBuffer(png);
-    if (image.isEmpty()) throw new Error("science-capture-empty");
-    const pixels = image.getSize();
-    if (pixels.width < 1 || pixels.height < 1) throw new Error("science-capture-size-invalid");
-    return {
-      png,
-      renderContext: {
-        electronVersion: process.versions.electron ?? "unknown",
-        chromiumVersion: process.versions.chrome ?? "unknown",
-        platform: process.platform,
-        architecture: process.arch,
-        locale: app.getLocale(),
-        colorScheme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
-        deviceScaleFactor: screen.getDisplayMatching(active.window.getBounds()).scaleFactor,
-        captureMethod: "cdp-staged-origin-clip",
-        cssWidth: rect.width,
-        cssHeight: rect.height,
-        pixelWidth: pixels.width,
-        pixelHeight: pixels.height,
-      },
-    };
-  } finally {
-    await active.view.webContents.executeJavaScript(`(() => {
-      const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
-      if (!target) return false;
-      const restore = target.__agentlasScienceCaptureRestore;
-      if (restore?.style === null) target.removeAttribute('style');
-      else if (typeof restore?.style === 'string') target.setAttribute('style', restore.style);
-      delete target.__agentlasScienceCaptureRestore;
-      delete target.dataset.scienceCaptureStage;
-      return true;
-    })()`).catch(() => false);
-    if (!debuggerWasAttached && active.view.webContents.debugger.isAttached()) active.view.webContents.debugger.detach();
-  }
+  });
 }
 
 function rendererForGuest(senderId: number, instanceId: string): { active: ActiveScienceView; renderer: ActiveScienceRendererView } | null {

@@ -1,3 +1,5 @@
+import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, criterionProofAccountingOwner } from "./criterion-proof";
+import { withInvocationAccounting } from "./accounting-context";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { judgeRequiredBatch, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
@@ -999,11 +1001,30 @@ export async function verifyGoalCompletionClaim(input: {
   const judgeInputCeiling = 28_000;
   try {
     const recoveryOverride = hostRecoveryOverride(run.id, input.invocationRunId);
+    let proofContracts: Awaited<ReturnType<typeof ensureCriterionProofContracts>> = [];
+    if (durableEvidence.ready && input.invocationRunId) {
+      try {
+        proofContracts = await ensureCriterionProofContracts({goalId:input.goalId,invocationRunId:input.invocationRunId,attemptId:attempt.attemptId,signal:controller.signal});
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        if (getLongRunByGoalId(input.goalId)?.status !== "verifying") {
+          settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"criterion_proof_boundary_changed"});
+          return null;
+        }
+        appendLongRunEvent({runId:run.id,kind:"verification.criterion_proof_unavailable",actorKind:"host",payload:{attemptId:attempt.attemptId,
+          reasonCode:error instanceof Error && error.message.startsWith("criterion_proof_") ? error.message : "criterion_proof_unavailable"}});
+      }
+    }
+    const evidenceRefsByItem = Object.fromEntries(run.acceptanceCriteria.map((_,index) => [`criterion:${index}`,
+      proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs).slice(-32) : []]));
+    const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.
-    const judgments = durableEvidence.ready
-      ? await judgeRequiredBatch<CriterionJudgeLabel>({
+    const judgments = durableEvidence.ready && hasAdmissibleProof && input.invocationRunId && run.rootChatId
+      ? await withInvocationAccounting({runId:input.invocationRunId,chatId:run.rootChatId,readOwner:()=>criterionProofAccountingOwner(input.goalId,input.invocationRunId!)},()=>judgeRequiredBatch<CriterionJudgeLabel>({
         kind: `long-run-criteria:${run.id}:${goalRevision}`,
+        runtimeSelection: criterionProofRuntimeSelection(input.goalId,input.invocationRunId!),
+        evidenceRefsByItem,
         items: run.acceptanceCriteria.map((criterion, index) => ({ id: `criterion:${index}`, criterion })),
         question: "Does the observed evidence prove this exact acceptance criterion, and if it fails, what typed recovery applies?",
         labels: [
@@ -1016,7 +1037,7 @@ export async function verifyGoalCompletionClaim(input: {
           "failed_unknown",
           "inconclusive",
         ],
-        input: observation,
+        input: observation + `\nPINNED CRITERION PROOF CONTRACTS (cannot be lowered): ${JSON.stringify(proofContracts.map(({criterionIndex,requiredProofKind})=>({criterionIndex,requiredProofKind})))}`,
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
@@ -1035,7 +1056,7 @@ export async function verifyGoalCompletionClaim(input: {
         // The batch shares one bounded packet across every criterion.
         maxInputChars: judgeInputCeiling,
         timeoutMs: 60_000,
-      }) : null;
+      })) : null;
     const verdicts: JudgedCriterion[] = judgments
       ? judgments.map((judged, criterionIndex) => {
       let result = criterionFromJudge(
@@ -1043,6 +1064,11 @@ export async function verifyGoalCompletionClaim(input: {
         judged.verdict,
         judged.reason || "No connected verifier produced a verdict.",
       );
+      const allowedRefs=evidenceRefsByItem[`criterion:${criterionIndex}`]??[];
+      const chosenRefs=judged.evidenceRefs??[];
+      if(result.verdict==='passed' && (!proofContracts[criterionIndex] || !chosenRefs.length || chosenRefs.some(ref=>!allowedRefs.includes(ref)))) {
+        result={criterionIndex,verdict:'inconclusive',reason:'The pinned criterion proof contract has no matching host evidence.',recoveryClass:'unknown',prerequisiteCode:null,requiredActor:null,nextAction:null};
+      }
       // Current host state is authoritative for unsafe/unavailable execution.
       // It can narrow a failed model classification, but never convert a pass or
       // inconclusive result into a guessed failure.
@@ -1055,7 +1081,9 @@ export async function verifyGoalCompletionClaim(input: {
       : run.acceptanceCriteria.map((_, criterionIndex) => ({
           criterionIndex,
           verdict: "inconclusive" as const,
-          reason: `Durable verification evidence is unavailable (${durableEvidence.reason}).`,
+          reason: proofContracts[criterionIndex]
+            ? `No current host proof satisfies the pinned criterion requirement (${proofContracts[criterionIndex].requiredProofKind}).`
+            : `Durable verification evidence is unavailable (${durableEvidence.reason}).`,
           recoveryClass: "unknown" as const,
           nextAction: null,
           prerequisiteCode: null,
@@ -1105,7 +1133,8 @@ export async function verifyGoalCompletionClaim(input: {
         verdict: verdict.verdict,
         // A failed receipt still needs reproducible evidence. Verdict state, not
         // presence of references, controls task completion.
-        evidenceRefs: [...durableEvidence.refs, ...boundaryEvidenceRefs, ...runtimeRefs],
+        evidenceRefs: [...(verdict.verdict==='passed' ? (judgments?.[verdict.criterionIndex]?.evidenceRefs??[]) : durableEvidence.refs),
+          ...(proofContracts[verdict.criterionIndex] ? [proofContracts[verdict.criterionIndex].ref] : []), ...boundaryEvidenceRefs, ...runtimeRefs],
         summary: verdict.reason,
       });
     }
