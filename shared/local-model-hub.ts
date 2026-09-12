@@ -212,8 +212,53 @@ export interface LocalModelHubSnapshot {
   unavailableReason: string | null;
 }
 
+/** Repository metadata is a source claim, never device capability evidence. */
+export interface HuggingFaceModelSummary {
+  repository: string;
+  author: string | null;
+  downloads?: number;
+  likes?: number;
+  updatedAt?: string;
+  gated: boolean | "unknown";
+  license?: string;
+  tags: string[];
+}
+export interface HuggingFaceCatalogStatus {
+  syncedAt: string | null;
+  source: "live" | "cache";
+  stale: boolean;
+  reasonCode?: string;
+}
+export interface HuggingFaceSearchResult extends HuggingFaceCatalogStatus {
+  models: HuggingFaceModelSummary[];
+  nextCursor?: string;
+}
+export interface HuggingFaceModelFile {
+  fileName: string;
+  byteLength: number | null;
+  sha256: string | null;
+  quantization: string | null;
+  downloadable: boolean;
+  reasonCodes: string[];
+}
+export interface HuggingFaceRepositoryInspection extends HuggingFaceCatalogStatus {
+  repository: string;
+  revision: string | null;
+  publisher: string | null;
+  creator: string | null;
+  converter: string | null;
+  architecture: string | null;
+  license: string | null;
+  gated: boolean | "unknown";
+  files: HuggingFaceModelFile[];
+  reasonCodes: string[];
+}
+
 /** Renderer-facing API. Main owns operation controllers and the import dialog. */
 export interface LocalModelHubAPI {
+  searchModels: (payload: { query: string; cursor?: string; refresh?: boolean }) => Promise<HuggingFaceSearchResult>;
+  inspectRepository: (payload: { repository: string; refresh?: boolean }) => Promise<HuggingFaceRepositoryInspection>;
+  addModel: (payload: { repository: string; revision: string; fileName: string }) => Promise<LocalModelPackageIdentity>;
   snapshot: () => Promise<LocalModelHubSnapshot>;
   downloadEngine: (payload: { packageId: string; operationId: string }) => Promise<LocalPackageDownloadReceipt>;
   downloadModel: (payload: { packageId: string; operationId: string }) => Promise<LocalPackageDownloadReceipt>;

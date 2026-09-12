@@ -6,6 +6,7 @@ import { join, resolve, sep } from "node:path";
 import type {
   LocalEngineInstallationReceipt,
   LocalModelCapabilityReceipt,
+  LocalModelPackageIdentity,
   LocalModelFitAssessment,
   LocalModelHubSnapshot,
   LocalModelInstallationReceipt,
@@ -14,20 +15,21 @@ import type {
   LocalPackageDownloadReceipt,
   LocalPackageProgress,
 } from "../../shared/local-model-hub";
-import { LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
+import { assertLocalModelPackageIdentity, LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
 import {
   compatibleEnginePackage,
   localEngineCatalog,
   localEnginePackage,
   localModelCatalog,
-  localModelPackage,
 } from "./catalog";
 import { LocalPackageDownloadManager, sha256File } from "./download-manager";
+import { HuggingFaceModelIndex } from "./huggingface";
 import { LocalEngineInstaller } from "./engine-installer";
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 
 interface PersistedHubState {
   schemaVersion: 1;
+  registeredModels?: LocalModelPackageIdentity[];
   downloadReceipts: LocalPackageDownloadReceipt[];
   engineInstallations: LocalEngineInstallationReceipt[];
   modelInstallations: LocalModelInstallationReceipt[];
@@ -141,6 +143,7 @@ export class LocalModelHubManager {
   private readonly ownerLeasePath: string;
   private readonly processLeasePath: string;
   private readonly instanceId = randomUUID();
+  private readonly modelIndex: HuggingFaceModelIndex;
   private readonly downloader: LocalPackageDownloadManager;
   private readonly installer: LocalEngineInstaller;
   private readonly fetchImpl: typeof fetch;
@@ -166,6 +169,7 @@ export class LocalModelHubManager {
     this.ownerLeasePath = join(rootPath, "owner-lease.json");
     this.processLeasePath = join(rootPath, "process-lease.json");
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.modelIndex = new HuggingFaceModelIndex(join(rootPath, "hf-cache"), this.fetchImpl);
     this.spawnImpl = options.spawnImpl ?? spawn;
     this.healthTimeoutMs = options.healthTimeoutMs ?? 60_000;
     this.downloader = new LocalPackageDownloadManager(this.packageRoot);
@@ -197,6 +201,10 @@ export class LocalModelHubManager {
         this.initialized = true;
         return;
       }
+      try {
+        if (parsed.registeredModels !== undefined && (!Array.isArray(parsed.registeredModels) || parsed.registeredModels.length > 1000)) throw new Error();
+        for (const identity of parsed.registeredModels ?? []) assertLocalModelPackageIdentity(identity);
+      } catch { this.unavailableReason = "local_model_registry_invalid"; this.initialized = true; return; }
       this.state = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -293,11 +301,46 @@ export class LocalModelHubManager {
     if (this.unavailableReason) throw new Error(this.unavailableReason);
   }
 
+  private modelCatalog(): LocalModelPackageIdentity[] {
+    return [...localModelCatalog(), ...(this.state.registeredModels ?? [])].map(value => ({ ...value }));
+  }
+
+  private modelPackage(id: string): LocalModelPackageIdentity | undefined {
+    return this.modelCatalog().find(value => value.packageId === id);
+  }
+
+  searchModels(input: { query: string; cursor?: string; refresh?: boolean }) { return this.modelIndex.searchModels(input); }
+  inspectRepository(input: { repository: string; refresh?: boolean }) { return this.modelIndex.inspectRepository(input); }
+
+  async addModel(input: { repository: string; revision: string; fileName: string }): Promise<LocalModelPackageIdentity> {
+    await this.readyForMutation();
+    const identity = await this.modelIndex.resolveModel(input);
+    return this.enqueueLifecycle(async () => {
+      if (this.shutdownPromise) throw new Error("local_model_hub_admission_closed");
+      if (this.unavailableReason) throw new Error(this.unavailableReason);
+      const existing = this.modelCatalog().find(value => value.repository === identity.repository && value.revision === identity.revision && value.fileName === identity.fileName);
+      if (existing) {
+        if (existing.sha256 !== identity.sha256 || existing.byteLength !== identity.byteLength) throw new Error("local_model_identity_conflict");
+        return existing;
+      }
+      if ((this.state.registeredModels?.length ?? 0) >= 1000) throw new Error("local_model_registry_capacity_exceeded");
+      this.state.registeredModels = [...(this.state.registeredModels ?? []), identity];
+      try { await this.save(); } catch (error) { this.unavailableReason = "local_model_registry_write_failed"; throw error; }
+      return { ...identity };
+    });
+  }
+
   async snapshot(): Promise<LocalModelHubSnapshot> {
     await this.ready();
     const hardware = await observeLocalHardware(this.rootPath);
-    const models = localModelCatalog();
-    const fitAssessments = models.map((model) => estimateLocalModelFit(hardware, model));
+    const models = this.modelCatalog();
+    const fitAssessments = models.map((model) => {
+      const fit = estimateLocalModelFit(hardware, model);
+      const loaded = this.state.loadReceipts.some(receipt => receipt.state === "resident" && this.state.modelInstallations.some(installation => installation.installationId === receipt.installationId && installation.modelPackageId === model.packageId));
+      return this.state.registeredModels?.some(registered => registered.packageId === model.packageId) && !loaded
+        ? { ...fit, class: "unknown" as const, reasonCodes: [...fit.reasonCodes, "hf_engine_compatibility_unverified"] }
+        : fit;
+    });
     const compatible = compatibleEnginePackage();
     return {
       schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
@@ -338,7 +381,7 @@ export class LocalModelHubManager {
 
   async downloadModel(packageId: string, signal?: AbortSignal): Promise<LocalPackageDownloadReceipt> {
     await this.readyForMutation();
-    const identity = localModelPackage(packageId);
+    const identity = this.modelPackage(packageId);
     if (!identity) throw new Error("unknown_model_package");
     if (identity.gated) throw new Error("gated_model_download_unsupported");
     const result = await this.downloader.download(identity, "model", {
@@ -357,7 +400,7 @@ export class LocalModelHubManager {
     signal?: AbortSignal,
   ): Promise<LocalModelInstallationReceipt> {
     await this.readyForMutation();
-    const identity = localModelPackage(packageId);
+    const identity = this.modelPackage(packageId);
     if (!identity) throw new Error("unknown_model_package");
     const result = await this.downloader.importVerified(selectedPath, identity, "model", signal);
     this.state.downloadReceipts = bounded([...this.state.downloadReceipts, result.receipt]);
@@ -391,7 +434,7 @@ export class LocalModelHubManager {
     packageId: string,
     source: LocalModelInstallationReceipt["source"],
   ): Promise<LocalModelInstallationReceipt> {
-    const identity = localModelPackage(packageId);
+    const identity = this.modelPackage(packageId);
     if (!identity) throw new Error("unknown_model_package");
     const modelPath = this.downloader.verifiedPath(identity);
     const file = await stat(modelPath).catch(() => null);
@@ -449,7 +492,7 @@ export class LocalModelHubManager {
     }
     const installation = this.state.modelInstallations.find((item) => item.installationId === installationId);
     if (!installation) throw new Error("model_installation_not_found");
-    const model = localModelPackage(installation.modelPackageId);
+    const model = this.modelPackage(installation.modelPackageId);
     if (!model || installation.fileSha256 !== model.sha256) throw new Error("model_installation_identity_mismatch");
     const compatible = compatibleEnginePackage();
     if (!compatible.item) throw new Error(compatible.reasonCode ?? "engine_package_unavailable");
@@ -730,7 +773,7 @@ export class LocalModelHubManager {
       throw new Error("capability_test_model_not_resident");
     }
     const installation = this.residentInstallation();
-    const model = localModelPackage(installation.modelPackageId);
+    const model = this.modelPackage(installation.modelPackageId);
     if (!model) throw new Error("model_package_not_found");
     const hardware = await observeLocalHardware(this.rootPath);
     const reasonCodes: string[] = [];

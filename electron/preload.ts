@@ -52,6 +52,9 @@ const api: AgentlasIpc = {
     commitOneSelection: (payload) => ipcRenderer.invoke("localModelMigration:commitOneSelection", payload),
   },
   localModelHub: {
+    searchModels: (payload) => ipcRenderer.invoke("localModelHub:searchModels", payload),
+    inspectRepository: (payload) => ipcRenderer.invoke("localModelHub:inspectRepository", payload),
+    addModel: (payload) => ipcRenderer.invoke("localModelHub:addModel", payload),
     snapshot: () => ipcRenderer.invoke("localModelHub:snapshot"),
     downloadEngine: (payload) => ipcRenderer.invoke("localModelHub:downloadEngine", payload),
     downloadModel: (payload) => ipcRenderer.invoke("localModelHub:downloadModel", payload),

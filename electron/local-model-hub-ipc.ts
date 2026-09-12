@@ -85,6 +85,9 @@ export function registerLocalModelHubIpc(deps: {
     return entry.promise as Promise<T>;
   }
 
+  handle("searchModels", (_event, input) => deps.manager.searchModels(input as unknown as Parameters<LocalModelHubManager["searchModels"]>[0]), { read: true });
+  handle("inspectRepository", (_event, input) => deps.manager.inspectRepository(input as unknown as Parameters<LocalModelHubManager["inspectRepository"]>[0]), { read: true });
+  handle("addModel", (_event, input) => deps.manager.addModel(input as unknown as Parameters<LocalModelHubManager["addModel"]>[0]));
   handle("snapshot", () => deps.manager.snapshot(), { read: true });
   handle("downloadEngine", (event, input) => {
     const id = packageId(input.packageId);
