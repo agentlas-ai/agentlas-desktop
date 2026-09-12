@@ -189,26 +189,43 @@ function receiptRecoveryMessage(
   const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
   const baseText = receipt.status === "cancelled"
     ? (locale === "ko"
-      ? "이전 모델 실행이 최종 답변 전에 취소되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
-      : "The previous model turn was cancelled before a final response. Your last instruction and conversation are preserved.")
+      ? "작업이 취소되었습니다."
+      : "The task was cancelled.")
     : (locale === "ko"
-      ? "이전 모델 실행이 최종 답변 전에 중단되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
-      : "The previous model turn stopped before a final response. Your last instruction and conversation are preserved.");
+      ? "작업이 중단되었습니다."
+      : "The task stopped.");
   const errorCode = receipt.errorCode?.trim();
   const errorMessage = receipt.errorMessage?.trim();
   const failure = isFailure && (errorCode || errorMessage)
     ? { code: errorCode || "runtime_error", message: errorMessage || baseText }
     : undefined;
-  const failureDetail = isFailure && (errorMessage || errorCode)
-    ? `\n${locale === "ko" ? "실패 사유" : "Failure reason"}: ${errorMessage || (locale === "ko" ? "실행 오류" : "Runtime error")}${errorCode ? ` [${errorCode}]` : ""}`
-    : "";
-  const text = `${isFailure ? "⚠️ " : ""}${baseText}${failureDetail}`;
+  const text = (isFailure && errorMessage ? detailForUser(errorMessage) : "") || baseText;
   return {
     id: `run-recovery:${receipt.runId}:${receipt.status}`,
     role: "system",
+    recoveryForRunId: receipt.runId,
     text,
     ...(failure ? { failure } : {}),
   };
+}
+
+/** The canonical activity already shows this exact run's terminal reason. */
+function appendReceiptRecovery(messages: StreamMessage[], recovery: StreamMessage | null | undefined): StreamMessage[] {
+  if (!recovery) return messages;
+  const represented = recovery.recoveryForRunId && messages.some(message => {
+    if (message.role !== "agent") return false;
+    const state = message.activityRuns?.find(run => run.runId === recovery.recoveryForRunId)?.state
+      ?? (message.runId === recovery.recoveryForRunId ? workActivityStateFromMessage(message) : undefined);
+    if (!state) return false;
+    if (!recovery.failure) return state.terminalStatus === "cancelled";
+    return state.terminalStatus === "failed" && state.items.some(item => (
+      (item.kind === "run" || item.kind === "terminal" || item.kind === "notice")
+      && item.status === "failed"
+      && item.message?.trim() === recovery.failure?.message.trim()
+    ));
+  });
+  if (represented || messages.some(message => message.id === recovery.id)) return messages;
+  return [...messages, recovery];
 }
 
 function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko" | "en"): string {
@@ -1519,8 +1536,7 @@ function reconcileTranscriptSnapshot(
     rows.findIndex((candidate) => candidate.id === message.id) === index
   ));
   const next = [...durableWithRichSteps, ...tail];
-  if (recovery && !new Set(next.map(signature)).has(signature(recovery))) next.push(recovery);
-  return dedupeStreamMessages(next);
+  return dedupeStreamMessages(appendReceiptRecovery(next, recovery));
 }
 
 /**
@@ -3852,7 +3868,7 @@ function ChatPage() {
             ? hydratedHistory
             : attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
           const recovery = receiptRecoveryMessage(receipt, locale);
-          const restoredMessages = recovery ? [...historyWithMcp, recovery] : historyWithMcp;
+          const restoredMessages = appendReceiptRecovery(historyWithMcp, recovery);
           setHydratedChatId(chatId);
           setMessages((current) => {
             if (transcriptRevisionRef.current !== hydrationRevision) return current;

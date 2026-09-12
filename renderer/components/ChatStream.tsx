@@ -29,6 +29,7 @@ import {
 import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
+import { IconAlertTriangle, IconClose } from "./Icon";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
@@ -217,6 +218,8 @@ export interface StreamMessage {
   text: string;
   /** Main-issued invocation identity for this assistant turn, when available. */
   runId?: string;
+  /** Receipt-only fallback; never used as an assistant/run identity anchor. */
+  recoveryForRunId?: string;
   /** Canonical typed One activity projection for this turn's exact run. */
   activityState?: OneActivityState;
   /** Rare fallback when multiple durable runs have no distinct assistant row. */
@@ -977,6 +980,21 @@ const Bubble = memo(function Bubble({
     if (normalizeChatHostNotice(message.role, message.hostNotice)) {
       return <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} />;
     }
+    if (message.recoveryForRunId) {
+      const label = <span style={{ display: "inline-flex", gap: 7, alignItems: "center" }}>
+        {message.failure ? <IconAlertTriangle size={14} /> : <IconClose size={14} />}
+        <span>{message.text}</span>
+      </span>;
+      return message.failure ? (
+        <details data-chat-failure-code={message.failure.code} style={{ color: "var(--red-deep)", fontSize: 12.5 }}>
+          <summary style={{ cursor: "pointer", listStyle: "none" }}>{label}</summary>
+          <div style={{ padding: "6px 0 0 21px", color: "var(--muted-deep)", overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>
+            <code>{message.failure.code}</code>
+            {message.failure.message !== message.text && <div>{message.failure.message}</div>}
+          </div>
+        </details>
+      ) : <div style={{ color: "var(--muted-deep)", fontSize: 12.5 }}>{label}</div>;
+    }
     if (isInternalSystemNote(message.text)) return null;
     const isError = message.text.trim().startsWith("⚠️");
     return (
@@ -1016,7 +1034,7 @@ const Bubble = memo(function Bubble({
     || (message.steps ?? []).some((step) => step.reasoning === true || step.kind === "tool")
   ));
   return (
-    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
+    <div className="agentlas-chat-turn" data-work-run-unbound={message.unboundRun ? "true" : undefined} style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
@@ -1026,16 +1044,6 @@ const Bubble = memo(function Bubble({
       >
         {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
           <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
-        )}
-        {message.unboundRun && showWorkActivity && (
-          <div
-            data-work-run-unbound="true"
-            style={{ color: "var(--muted-deep)", fontSize: 11.5, marginBottom: 5 }}
-          >
-            {locale === "ko"
-              ? "실행 기록이 답변 행과 연결되지 않아 별도 작업 기록으로 표시됩니다."
-              : "This durable run has no linked answer row, so its work record is shown separately."}
-          </div>
         )}
         {showWorkActivity && workActivities.map(({ runId, state }, index) => (
           <OneTurnWork
