@@ -9,7 +9,12 @@ import menu from "@/components/PanelPopover.module.css";
 import styles from "./TaskBrowser.module.css";
 
 type Panel = "menu" | "find" | "downloads" | "history" | "clear" | "autofill" | "device" | null;
-function size(n: number) { return n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`; }
+function size(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
+}
 
 export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOverlay, onOverlayClosed }: {
   target: BrowserUiTarget | null; ko: boolean; onImport: () => void; onNavigate: (url: string) => void;

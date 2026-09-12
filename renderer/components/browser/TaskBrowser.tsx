@@ -35,6 +35,10 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [address, setAddress] = useState("");
+  const addressEdited = useRef(false);
+  const addressRevision = useRef(0);
+  const addressTab = useRef<string | undefined>(undefined);
+  const [pendingUrl, setPendingUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -158,7 +162,11 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
 
   useEffect(() => {
     const url = current?.status.url ?? current?.initialUrl ?? "";
-    setAddress(url === "about:blank" ? "" : url);
+    // Initial tab/status delivery must not replace text being entered. An
+    // explicit switch between existing tabs starts a fresh address draft.
+    if (addressTab.current && addressTab.current !== current?.id) addressEdited.current = false;
+    addressTab.current = current?.id;
+    if (!addressEdited.current) setAddress(url === "about:blank" ? "" : url);
     setNotice(null);
   }, [current?.id, current?.status.url, current?.initialUrl]);
 
@@ -172,6 +180,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       if (result.tab) {
         acceptStatus(result.tab);
         setSelectedId(result.tab.viewId);
+        return result.tab;
       }
       else if (!result.ok) setNotice(result.reason ?? (ko ? "탭을 열지 못했습니다." : "Could not open a tab."));
     } catch { if (mounted.current) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
@@ -181,17 +190,33 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const navigate = useCallback(async (tabId: string | undefined, input: string) => {
     const url = navigationUrl(input);
     if (!url) { setNotice(ko ? "HTTPS 주소 또는 로컬 앱 주소를 입력해 주세요." : "Enter an HTTPS address or a local app URL."); return; }
-    if (!tabId) { await create(url); return; }
+    if (!tabId || !connected) { setPendingUrl(url); return; }
     setNotice(null);
     const generation = ++navigation.current;
+    const draftRevision = addressRevision.current;
     try {
       const result = await window.agentlas.workLiveView.navigate({ viewId: tabId, taskScopeId, url });
       if (!mounted.current || generation !== navigation.current || currentId.current !== tabId) return;
+      if (result.ok && draftRevision === addressRevision.current) {
+        addressEdited.current = false;
+        const observed = tabsRef.current.find(tab => tab.id === tabId)?.status.url;
+        setAddress(observed && observed !== "about:blank" ? observed : url);
+      }
       if (!result.ok && result.reason !== "navigation-superseded") setNotice(result.reason ?? (ko ? "페이지를 열지 못했습니다." : "Could not open this page."));
     } catch {
       if (mounted.current && generation === navigation.current && currentId.current === tabId) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection.");
     }
-  }, [create, ko, taskScopeId]);
+  }, [connected, ko, taskScopeId]);
+
+  useEffect(() => {
+    if (!pendingUrl || !connected || creating || createInFlight.current) return;
+    if (current?.id) {
+      setPendingUrl(null);
+      void navigate(current.id, pendingUrl);
+    } else {
+      void create().then(tab => { if (!tab && mounted.current) setPendingUrl(null); });
+    }
+  }, [pendingUrl, connected, creating, current?.id, navigate, create]);
 
   useEffect(() => {
     if (!connected || !preferredUrl || observedUrl.current === preferredUrl) return;
@@ -204,6 +229,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
 
   const close = async (id: string) => {
     navigation.current += 1;
+    setPendingUrl(null);
     try {
       const result = await window.agentlas?.workLiveView.close(id, taskScopeId);
       if (!mounted.current) return;
@@ -250,7 +276,13 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       <button type="button" disabled={!current?.status?.canGoBack} aria-label={ko ? "뒤로" : "Back"} onClick={() => void history("back")}><IconArrowLeft size={16}/></button>
       <button type="button" disabled={!current?.status?.canGoForward} aria-label={ko ? "앞으로" : "Forward"} onClick={() => void history("forward")}><IconChevronRight size={16}/></button>
       <button type="button" disabled={!current?.initialUrl} aria-label={ko ? "새로고침" : "Reload"} onClick={() => void history("reload")}><IconRefresh size={15}/></button>
-      <input aria-label={ko ? "브라우저 주소" : "Browser address"} placeholder={ko ? "주소 입력" : "Enter address"} value={address} onChange={(event) => setAddress(event.target.value)} onFocus={(event) => event.target.select()} spellCheck={false}/>
+      <input aria-label={ko ? "브라우저 주소" : "Browser address"} placeholder={ko ? "주소 입력" : "Enter address"} value={address} onChange={(event) => { addressEdited.current = true; addressRevision.current++; setAddress(event.target.value); }} onFocus={(event) => event.target.select()} onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          addressEdited.current = false; setPendingUrl(null);
+          const url = current?.status.url ?? current?.initialUrl ?? "";
+          setAddress(url === "about:blank" ? "" : url); event.currentTarget.blur();
+        }
+      }} spellCheck={false}/>
       {loginNotice && !importBanner && <button type="button" title={ko ? "로그인 연결 확인" : "Check sign-in connection"} aria-label={ko ? "로그인 연결 확인" : "Check sign-in connection"} onClick={() => void openImport()}><IconAlertTriangle size={15}/></button>}
       {onAnnotation && <BrowserAnnotation target={current && active ? { viewId: current.id, taskScopeId } : null} ko={ko} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} onComment={onAnnotation} getViewportBounds={() => pagesRef.current?.getBoundingClientRect() ?? null} />}
       <BrowserControls target={current ? { viewId: current.id, taskScopeId } : null} ko={ko} onImport={openImport} onNavigate={url => void navigate(current?.id, url)} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} />
