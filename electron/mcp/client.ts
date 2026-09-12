@@ -609,12 +609,33 @@ function stripDanglingLanguageFence(text: string): string {
  * 어느 런타임이 왜 멈췄고 무엇을 하면 되는지 먼저 말하고, 리셋 시각이 담긴 원문은
  * 뒤에 그대로 붙인다(사실을 지우지 않는다).
  */
+class InvocationRunnerFailureError extends Error {
+  readonly #failure: Readonly<RunnerFailure>;
+
+  constructor(failure: RunnerFailure, includeHeuristic = false) {
+    super(`${failure.runtime} runtime ${failure.kind}${includeHeuristic && failure.source === "heuristic" ? " (appears)" : ""}: ${failure.message}`);
+    this.#failure = Object.freeze({ ...failure });
+  }
+
+  static imageInputFailure(error: unknown): { code: string; message: string } | null {
+    // Only the host's typed runner-result boundary can mint this brand. A
+    // provider message, serialized error or forged prototype is not evidence.
+    if (!(error instanceof InvocationRunnerFailureError) || !(#failure in error)) return null;
+    const failure = error.#failure;
+    if (failure.kind !== "unsupported" || failure.runtime !== "agentlas-local"
+      || failure.source !== "marker" || failure.providerCode !== "local_model_image_input_unsupported") return null;
+    return { code: failure.providerCode, message: failure.message };
+  }
+}
+
 function invocationFailure(
   req: McpInvocationRequest,
   fallbackCode: string,
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
+  const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error);
+  if (capabilityFailure) return capabilityFailure;
   const raw = error instanceof Error ? error.message : String(error);
   if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
     return { code: error.code, message: raw };
@@ -5493,7 +5514,7 @@ ${effectiveUserPrompt}`;
      * 경로(sink error → NODE_FAILED/챗 오류 카드)를 그대로 탄다.
      */
     if (result.failure) {
-      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}${result.failure.source === "heuristic" ? " (appears)" : ""}: ${result.failure.message}`);
+      throw new InvocationRunnerFailureError(result.failure, true);
     }
     result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
@@ -5734,7 +5755,7 @@ ${effectiveUserPrompt}`;
         };
         result = await invokeCurrentRuntime(activeRunnerReq);
         if (result.failure) {
-          throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+          throw new InvocationRunnerFailureError(result.failure);
         }
         result = sanitizeRestrictedPass(result);
         advanceUsageFloor();
@@ -5758,7 +5779,7 @@ ${effectiveUserPrompt}`;
         };
         result = await invokeCurrentRuntime(activeRunnerReq);
         if (result.failure) {
-          throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+          throw new InvocationRunnerFailureError(result.failure);
         }
         result = sanitizeRestrictedPass(result);
         advanceUsageFloor();
