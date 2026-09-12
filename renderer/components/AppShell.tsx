@@ -940,16 +940,10 @@ const TOUR_STEPS = [
       "This is where you build and fine-tune your own agents or teams. It's an advanced menu meant for those comfortable with development, so it's fine to skip it at first.",
   },
   {
-    title: "Sites",
-    body: "웹·모바일·에이전트용 인터페이스를 한 곳에서 만들고 다듬는 화면이에요.",
-    bodyEn:
-      "Build and refine interfaces for the web, mobile, and agents in one place.",
-  },
-  {
     title: "Hub",
-    body: "남들이 만든 에이전트·팀을 찾아 설치하는 곳이에요. 설치는 무료고, 받은 에이전트는 내 구독으로 돌아가요.",
+    body: "필요한 에이전트·팀을 찾아 설치하는 곳이에요. 추가하기 전에 표시된 가격과 사용 조건을 확인할 수 있어요.",
     bodyEn:
-      "This is where you find and install agents and teams made by others. Installing is free, and the agents you get run on your own subscription.",
+      "Find and install agents and teams for your work. Review the displayed price and terms before adding them.",
   },
   {
     title: "Environment",

@@ -137,7 +137,6 @@ export function TopNavbar() {
           <NavItem label={t("nav.dashboard")} href="/dashboard" active={pathname.startsWith("/dashboard")} />
           <NavItem label={t("nav.workspace")} href="/workspace" active={pathname.startsWith("/workspace") || pathname.startsWith("/project")} />
           <NavItem label={t("nav.group.agent_forge")} href="/build" dropdown="agent_forge" active={agentForgeActive} />
-          <NavItem label={t("nav.site")} href="/site" active={pathname.startsWith("/site")} />
           <NavItem label={t("nav.group.hub")} href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
           <NavItem label={t("nav.group.environment")} href="/library/env" dropdown="environment" active={environmentActive} />
         </nav>
