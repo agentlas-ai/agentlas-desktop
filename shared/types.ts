@@ -6599,6 +6599,14 @@ export interface AgentLeaseQuote {
   message?: string;
 }
 
+export interface AgentLeasePurchaseInput {
+  slug: string;
+  days: number;
+  expectedPerDayCredits: number;
+  expectedTotalCredits: number;
+  idempotencyKey?: string;
+}
+
 export type AgentLeasePurchaseResult =
   | { ok: true; leasedUntil: string; days: number; perDayCredits: number; chargedCredits: number }
   | { ok: false; code: "lease_not_offered" | "insufficient_credits" | "signed_out" | "network" | string; needed?: number; have?: number; message: string };
@@ -7515,7 +7523,7 @@ export interface AgentlasIpc {
   };
   agentLeases: {
     quote: (slug: string) => Promise<AgentLeaseQuote>;
-    purchase: (input: { slug: string; days: number; idempotencyKey?: string }) => Promise<AgentLeasePurchaseResult>;
+    purchase: (input: AgentLeasePurchaseInput) => Promise<AgentLeasePurchaseResult>;
     /** Cached (~60s) list of this account's leases; active ones call at 0 credits. */
     list: () => Promise<AgentLeaseRow[]>;
   };

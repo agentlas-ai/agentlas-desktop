@@ -10,7 +10,7 @@
 // legacy wire id of the per-day price kind.
 //
 // Server contract (implemented in parallel in the web repo, 2026-08-18):
-//   POST /api/account/agent-leases {slug, days:1..30, idempotencyKey?: string ≤128}
+//   POST /api/account/agent-leases {slug, days:1..30, expectedPerDayCredits, expectedTotalCredits, idempotencyKey}
 //     → 200 {leasedUntil, days, perDayCredits, chargedCredits, priceKind:"INGEST"}
 //       (same-day repurchase EXTENDS the lease — 409 lease_already_purchased_today
 //       no longer exists)
@@ -21,6 +21,7 @@
 //     → [{slug, leasedUntil}]
 
 import { randomUUID } from "node:crypto";
+import type { AgentLeasePurchaseInput } from "../../shared/types";
 
 import { getAuthSession, getSessionCookieHeader } from "../auth";
 
@@ -41,6 +42,13 @@ export type AgentLeasePurchaseResult =
 export interface AgentLeaseRow {
   slug: string;
   leasedUntil: string;
+}
+
+function validCredits(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function validExpiry(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 function webBase(): string {
@@ -68,7 +76,7 @@ function captureLeaseAuthIdentity(): LeaseAuthIdentity | null {
   const fingerprint = session.accountFingerprint?.trim();
   const workspaceId = session.workspaceId?.trim();
   const accountScope = fingerprint
-    ? `account:${fingerprint}`
+    ? `account:${fingerprint}:workspace:${workspaceId ?? ""}`
     : workspaceId
       ? `workspace:${workspaceId}`
       : null;
@@ -118,12 +126,17 @@ export async function getAgentLeaseQuote(slug: string): Promise<AgentLeaseQuote>
     // The account may switch while the response body is being read. Do this
     // second check before interpreting `active` as authority for One seating.
     if (!leaseAuthIdentityCurrent(authAtRequest)) return accountChangedQuote();
+    if (!body || typeof body !== "object" || typeof body.active !== "boolean" || typeof body.leaseOffered !== "boolean"
+      || (body.active && !validExpiry(body.leasedUntil))
+      || (body.leaseOffered && !validCredits(body.perDayCredits))) {
+      return { ...missing, code: "http", message: "Could not read the Hub lease terms right now." };
+    }
     const leaseOffered = body.leaseOffered === true;
     const quote: AgentLeaseQuote = {
       ok: true,
-      active: body.active === true,
+      active: body.active === true && Date.parse(body.leasedUntil!) > Date.now(),
       leasedUntil: typeof body.leasedUntil === "string" ? body.leasedUntil : null,
-      perDayCredits: typeof body.perDayCredits === "number" && Number.isFinite(body.perDayCredits)
+      perDayCredits: validCredits(body.perDayCredits)
         ? body.perDayCredits
         : null,
       leaseOffered,
@@ -141,14 +154,22 @@ export async function getAgentLeaseQuote(slug: string): Promise<AgentLeaseQuote>
   }
 }
 
-export async function purchaseAgentLease(input: { slug: string; days: number; idempotencyKey?: string }): Promise<AgentLeasePurchaseResult> {
-  const cookie = getSessionCookieHeader();
-  if (!cookie) {
+export async function purchaseAgentLease(input: AgentLeasePurchaseInput): Promise<AgentLeasePurchaseResult> {
+  const authAtRequest = captureLeaseAuthIdentity();
+  if (!authAtRequest) {
     return { ok: false, code: "signed_out", message: "Sign in to agentlas.cloud to lease an agent." };
   }
-  const days = Math.trunc(input.days);
-  if (!Number.isFinite(days) || days < 1 || days > 30) {
+  const days = input?.days;
+  if (!Number.isSafeInteger(days) || days < 1 || days > 30) {
     return { ok: false, code: "invalid_days", message: "A lease runs between 1 and 30 days." };
+  }
+  if (typeof input?.slug !== "string" || !input.slug.trim() || input.slug.length > 256) {
+    return { ok: false, code: "invalid_slug", message: "The Hub agent identifier is invalid." };
+  }
+  const { expectedPerDayCredits, expectedTotalCredits } = input;
+  if (!validCredits(expectedPerDayCredits) || !validCredits(expectedTotalCredits)
+    || expectedTotalCredits !== expectedPerDayCredits * days) {
+    return { ok: false, code: "invalid_quote", message: "Check the lease price before confirming the purchase." };
   }
   try {
     const base = webBase();
@@ -161,19 +182,30 @@ export async function purchaseAgentLease(input: { slug: string; days: number; id
     }
     const response = await fetch(`${base}/api/account/agent-leases`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie, origin: base },
-      body: JSON.stringify({ slug: String(input.slug || "").trim(), days, idempotencyKey }),
+      headers: { "content-type": "application/json", cookie: authAtRequest.cookie, origin: base },
+      body: JSON.stringify({ slug: input.slug.trim(), days, expectedPerDayCredits, expectedTotalCredits, idempotencyKey }),
     });
     const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (response.ok && typeof body.leasedUntil === "string") {
+    if (!leaseAuthIdentityCurrent(authAtRequest)) {
+      return { ok: false, code: "account_changed", message: "The account changed while confirming this lease. Check the original account for the result." };
+    }
+    if (response.ok) {
+      if (!body || typeof body !== "object" || !validExpiry(body.leasedUntil)
+        || body.days !== days || body.perDayCredits !== expectedPerDayCredits
+        || body.ok === false
+        || (body.replayed === true
+          ? body.idempotencyKey !== idempotencyKey || body.chargedCredits !== 0
+          : body.chargedCredits !== expectedTotalCredits)) {
+        return { ok: false, code: "http", message: "The purchase result could not be verified. Retry the same confirmation." };
+      }
       // The shelf just changed price-wise; auto-hire cost estimates must see it.
       invalidateAgentLeaseCache();
       return {
         ok: true,
         leasedUntil: body.leasedUntil,
-        days: typeof body.days === "number" ? body.days : days,
-        perDayCredits: typeof body.perDayCredits === "number" ? body.perDayCredits : 0,
-        chargedCredits: typeof body.chargedCredits === "number" ? body.chargedCredits : 0,
+        days,
+        perDayCredits: expectedPerDayCredits,
+        chargedCredits: body.replayed === true ? 0 : expectedTotalCredits,
       };
     }
     return {
@@ -193,15 +225,16 @@ export async function purchaseAgentLease(input: { slug: string; days: number; id
 }
 
 export async function listAgentLeases(): Promise<AgentLeaseRow[]> {
-  const cookie = getSessionCookieHeader();
-  if (!cookie) return [];
+  const authAtRequest = captureLeaseAuthIdentity();
+  if (!authAtRequest) return [];
   try {
     const base = webBase();
     const response = await fetch(`${base}/api/account/agent-leases`, {
-      headers: { cookie, origin: base },
+      headers: { cookie: authAtRequest.cookie, origin: base },
     });
     if (!response.ok) return [];
     const parsed = (await response.json()) as unknown;
+    if (!leaseAuthIdentityCurrent(authAtRequest)) return [];
     // 서버 계약(2026-08-18): bare GET은 {leases:[...]} 봉투로 온다. 과거 가정이던
     // 맨 배열도 수용한다 — 형태가 다르다고 조용히 빈 목록을 돌려주면 대여가
     // 있는데도 유료 견적이 나가는 거짓이 된다.
@@ -227,25 +260,31 @@ export async function listAgentLeases(): Promise<AgentLeaseRow[]> {
 // only OVER-states cost (a fresh lease not yet seen) or keeps a just-expired
 // lease at 0 for at most the TTL — the server bill remains the authority.
 const LEASE_CACHE_TTL_MS = 60_000;
-let leaseCache: { fetchedAt: number; rows: AgentLeaseRow[] } | null = null;
-let leaseCacheInFlight: Promise<AgentLeaseRow[]> | null = null;
+let leaseGeneration = 0;
+let leaseCache: { fetchedAt: number; rows: AgentLeaseRow[]; auth: LeaseAuthIdentity } | null = null;
+let leaseCacheInFlight: { auth: LeaseAuthIdentity; generation: number; promise: Promise<AgentLeaseRow[]> } | null = null;
 
 export function invalidateAgentLeaseCache(): void {
+  leaseGeneration += 1;
   leaseCache = null;
+  leaseCacheInFlight = null;
 }
 
 export async function listAgentLeasesCached(): Promise<AgentLeaseRow[]> {
-  if (leaseCache && Date.now() - leaseCache.fetchedAt < LEASE_CACHE_TTL_MS) return leaseCache.rows;
-  if (leaseCacheInFlight) return leaseCacheInFlight;
-  leaseCacheInFlight = listAgentLeases()
-    .then((rows) => {
-      leaseCache = { fetchedAt: Date.now(), rows };
-      return rows;
-    })
-    .finally(() => {
-      leaseCacheInFlight = null;
-    });
-  return leaseCacheInFlight;
+  const auth = captureLeaseAuthIdentity();
+  if (!auth) { invalidateAgentLeaseCache(); return []; }
+  if (leaseCache && leaseAuthIdentityCurrent(leaseCache.auth) && Date.now() - leaseCache.fetchedAt < LEASE_CACHE_TTL_MS) return leaseCache.rows;
+  if (leaseCacheInFlight && leaseCacheInFlight.generation === leaseGeneration && leaseAuthIdentityCurrent(leaseCacheInFlight.auth)) return leaseCacheInFlight.promise;
+  const generation = leaseGeneration;
+  const promise = listAgentLeases().then(rows => {
+    if (!leaseAuthIdentityCurrent(auth) || generation !== leaseGeneration) return [];
+    leaseCache = { fetchedAt: Date.now(), rows, auth };
+    return rows;
+  }).finally(() => {
+    if (leaseCacheInFlight?.promise === promise) leaseCacheInFlight = null;
+  });
+  leaseCacheInFlight = { auth, generation, promise };
+  return promise;
 }
 
 /** Slugs whose lease is active RIGHT NOW (leasedUntil in the future). */

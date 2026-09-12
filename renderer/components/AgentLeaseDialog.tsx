@@ -272,7 +272,7 @@ export function AgentLeaseDialog({
     ? pendingRequest
     : null;
   const validDays = Number.isInteger(days) && days >= 1 && days <= 30;
-  const perDay = quote?.perDayCredits ?? visiblePendingRequest?.perDayCredits ?? null;
+  const perDay = visiblePendingRequest ? visiblePendingRequest.perDayCredits : quote?.perDayCredits ?? null;
   const total = useMemo(
     () => (validDays && typeof perDay === "number" ? perDay * days : null),
     [validDays, perDay, days],
@@ -378,8 +378,14 @@ export function AgentLeaseDialog({
       } else if (!isCurrentRequest()) {
         return;
       }
+      if (typeof request.perDayCredits !== "number" || !Number.isSafeInteger(request.perDayCredits) || request.perDayCredits < 0) {
+        setFailure({ kind: "other", message: quoteUnavailableMessage(null, ko) });
+        return;
+      }
       requestSent = true;
-      const result = await bridge.agentLeases.purchase({ slug, days: request.days, idempotencyKey: request.idempotencyKey });
+      const result = await bridge.agentLeases.purchase({ slug, days: request.days,
+        expectedPerDayCredits: request.perDayCredits, expectedTotalCredits: request.perDayCredits * request.days,
+        idempotencyKey: request.idempotencyKey });
       if (!isCurrentRequest()) return;
       if (result?.ok) {
         removePendingLease(slug, accountScope);
@@ -387,7 +393,17 @@ export function AgentLeaseDialog({
         onLeased(result.leasedUntil);
         return;
       }
-      if (result?.code === "insufficient_credits") {
+      if (scopedPendingRequest) {
+        // An earlier attempt may have charged before its response was lost.
+        // Even a later price refusal cannot authorize a fresh purchase key.
+        setFailure({ kind: "other", message: pendingRetryMessage(ko, request.days) });
+      } else if (result?.code === "price_changed") {
+        removePendingLease(slug, accountScope);
+        setPendingRequest(null);
+        setQuote(null);
+        setAuthVersion(version => version + 1);
+        setFailure({ kind: "other", message: ko ? "대여 가격이 변경됐습니다. 새 가격을 확인하고 다시 선택하세요." : "The lease price changed. Review the new price and confirm again." });
+      } else if (result?.code === "insufficient_credits") {
         removePendingLease(slug, accountScope);
         setPendingRequest(null);
         setFailure({ kind: "insufficient", needed: result.needed ?? total, have: result.have ?? null });
