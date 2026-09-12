@@ -5,6 +5,7 @@ import type { FoundInPageResult, WebContents } from "electron";
 import { listBrowserSites } from "../store/browser-vault";
 import {
   NATIVE_BROWSER_PARTITION,
+  listWorkBrowserTabs,
   nativeBrowserGuest,
   nativeBrowserGuestDocument,
   nativeBrowserTaskOwner,
@@ -350,7 +351,12 @@ export async function clearBrowserData(ownerId: number, input: BrowserUiTarget &
   if (!contents) return { ok: false, reason: "guest-unavailable" };
   try {
     if (categories.includes("history")) {
-      contents.navigationHistory.clear();
+      // The chooser promises task-wide history clearing, including native
+      // back/forward entries in background tabs owned by this same window.
+      for (const tab of listWorkBrowserTabs(ownerId, input.taskScopeId)) {
+        const tabContents = nativeBrowserGuest(ownerId, input.taskScopeId, tab.viewId);
+        if (tabContents && !tabContents.isDestroyed()) tabContents.navigationHistory.clear();
+      }
       if (clearBrowserHistory(input.taskScopeId) === null) return { ok: false, reason: "history-unavailable" };
     }
     if (categories.includes("downloads")) clearBrowserDownloadHistory(ownerId, input.taskScopeId);
