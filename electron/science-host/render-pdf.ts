@@ -4,9 +4,9 @@
 //   tectonic  — real LaTeX typesetting when the toolchain exists on this machine
 //               (`tectonic` on PATH or in the usual Homebrew/user locations).
 //   chromium  — Electron's own print engine over the HTML rendering. Zero external
-//               dependencies, so a manuscript PDF is always producible.
-// The caller decides the preferred engine; when LaTeX fails or is missing, the
-// Chromium result carries `degraded` so nobody can present it as typeset LaTeX.
+//               dependencies for draft HTML printing.
+// The caller pins the engine and fallback policy. Required LaTeX failures do
+// not launch Chromium; explicitly allowed draft fallback carries `degraded`.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -148,13 +148,23 @@ export interface ManuscriptPdfInput {
   html: string;
   latex: LatexPdfInput | null;
   prefer: ManuscriptPdfEngine;
+  /** Required typesetting must fail before invoking a different renderer. */
+  allowFallback?: boolean;
 }
 
-/** Produces a PDF with the preferred engine and falls back honestly. */
+/** Produces a PDF with the requested engine, respecting required-engine failures. */
 export async function renderManuscriptPdf(input: ManuscriptPdfInput): Promise<ManuscriptPdfResult> {
-  if (input.prefer === "tectonic" && input.latex) {
-    const latex = await renderPdfWithTectonic(input.latex);
+  if (input.prefer === "tectonic") {
+    if (!input.latex && input.allowFallback === false) {
+      return { ok: false, engine: "tectonic", reason: "publication_pdf_source_unavailable" };
+    }
+    const latex = input.latex ? await renderPdfWithTectonic(input.latex) : {
+      ok: false, engine: "tectonic" as const, reason: "publication_pdf_source_unavailable",
+    };
     if (latex?.ok) return latex;
+    if (input.allowFallback === false) {
+      return latex ?? { ok: false, engine: "tectonic", reason: "toolchain-missing" };
+    }
     const fallback = await renderPdfWithChromium(input.html);
     if (!fallback.ok) return { ok: false, reason: [latex?.reason, fallback.reason].filter(Boolean).join(" / ") || "pdf export failed" };
     return { ...fallback, degraded: latex === null ? "toolchain-missing" : "typeset-failed", ...(latex?.reason ? { degradedReason: latex.reason } : {}), log: latex?.log, diagnostics: latex?.diagnostics, toolchain: latex?.toolchain };
