@@ -40,8 +40,9 @@ export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> 
           capabilities: [],
           supportsTools: snapshot.capabilityReceipts.some((receipt) =>
             receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
-          supportsMultimodal: snapshot.capabilityReceipts.some((receipt) =>
-            receipt.installationId === installation.installationId && receipt.imageInput === "verified"),
+          // The managed loader has no vision projector; old/imported receipts
+          // cannot make the current executable path support image input.
+          supportsMultimodal: false,
         },
       },
       effort: null,

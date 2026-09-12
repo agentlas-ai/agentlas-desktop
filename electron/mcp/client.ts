@@ -5339,6 +5339,10 @@ ${effectiveUserPrompt}`;
         persistGoalUsage(result.observedUsage);
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
+        // Image incompatibility is a capability outcome, not a temporary
+        // outage. Keep the selected binding; forwarding the attachment to a
+        // different provider requires a new model choice.
+        if (result.failure?.kind === "unsupported" && request.images?.length) return result;
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
         // First failure: this is when recovery actually begins.

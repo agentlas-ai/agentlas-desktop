@@ -469,10 +469,14 @@ export function rolePriorityRuntimes(
   role: RuntimeRole,
   options: {
     failedRuntime?: RuntimeStatus;
-    failure?: Pick<RunnerFailure, "kind">;
+    failure?: Pick<RunnerFailure, "kind" | "providerCode">;
     exclude?: RuntimeStatus[];
   } = {},
 ): RuntimeStatus[] {
+  // The managed local runner has not processed these images. Team/controller
+  // recovery must not forward them to another provider as an outage retry.
+  if (options.failure?.kind === "unsupported"
+    && options.failure.providerCode === "local_model_image_input_unsupported") return [];
   // Unavailable credential storage requires explicit recovery of the selected key.
   // Do not turn its marker failure into a run on another provider.
   if (isRuntimeCredentialUnavailable(options.failedRuntime)) return [];

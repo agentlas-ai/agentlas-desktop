@@ -103,7 +103,8 @@ export function makeLocalOpenAiRunner(
       }
     }
 
-    // 비전 모델이면 image_url(OpenAI 호환)로 첨부. 텍스트 모델은 조용히 무시한다.
+    // Preserve every attachment on the wire. Managed runners must reject
+    // unsupported image input before calling this transport.
     if (req.images && req.images.length > 0) {
       const content: LocalChatContent[] = req.images.map((img) => ({
         type: "image_url" as const,
