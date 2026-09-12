@@ -1504,6 +1504,10 @@ app.whenReady().then(async () => {
   traceStartup("startup-window-visible");
   startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall || developmentEffectsSuppressed() });
+  if (!developmentEffectsSuppressed()) {
+    const { initializeVideoJobs } = await import("./multimodal/video");
+    initializeVideoJobs();
+  }
   try {
     const scrubbed = scrubLegacyRunEventSecrets();
     if (scrubbed > 0) console.warn(`[security] scrubbed ${scrubbed} legacy run-event payload(s)`);

@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 114;
+const SCHEMA_VERSION = 115;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6284,6 +6284,63 @@ export function initStore(options: StoreInitOptions = {}): void {
           status: "legacy-unverified", createdAt: row.created_at,
         }), row.created_at);
       }
+    })();
+  }
+
+  // v115: media provider work survives renderer/Main restarts without blindly
+  // repeating a chargeable submit. Cancellation is an independent axis because
+  // a provider may finish while a cancellation request is in flight.
+  if (userVersion < 115) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS media_operations (
+          id TEXT PRIMARY KEY,
+          modality TEXT NOT NULL CHECK(modality IN ('image','video','audio')),
+          provider_id TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          client_request_key TEXT NOT NULL UNIQUE,
+          input_digest TEXT NOT NULL,
+          intent_json TEXT NOT NULL,
+          spend_limit_usd REAL,
+          capabilities_json TEXT NOT NULL,
+          lifecycle TEXT NOT NULL CHECK(lifecycle IN ('submit_intent','submitting','provider_accepted','running','verifying','succeeded','failed','outcome_unknown')),
+          provider_operation_id TEXT,
+          provider_checkpoint_json TEXT,
+          provider_status TEXT,
+          cancellation TEXT NOT NULL CHECK(cancellation IN ('none','requested','confirmed','unconfirmed')),
+          cancel_requested_at TEXT,
+          cancel_confirmed_at TEXT,
+          result_path TEXT,
+          result_sha256 TEXT,
+          result_receipt_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          poll_attempts INTEGER NOT NULL DEFAULT 0 CHECK(poll_attempts >= 0),
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(spend_limit_usd IS NULL OR spend_limit_usd >= 0),
+          CHECK((result_path IS NULL AND result_sha256 IS NULL AND result_receipt_json IS NULL)
+            OR (result_path IS NOT NULL AND result_sha256 IS NOT NULL AND result_receipt_json IS NOT NULL)),
+          CHECK(lifecycle != 'succeeded' OR result_path IS NOT NULL)
+        );
+        CREATE TABLE IF NOT EXISTS media_operation_events (
+          operation_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL CHECK(sequence > 0),
+          from_lifecycle TEXT,
+          to_lifecycle TEXT NOT NULL,
+          cancellation TEXT NOT NULL,
+          reason_code TEXT NOT NULL,
+          detail_json TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(operation_id, sequence),
+          FOREIGN KEY(operation_id) REFERENCES media_operations(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_media_operations_recovery
+          ON media_operations(modality, lifecycle, cancellation, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_media_operation_events_created
+          ON media_operation_events(operation_id, created_at);
+      `);
     })();
   }
 

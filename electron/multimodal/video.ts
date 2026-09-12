@@ -23,6 +23,24 @@ import { grokAuthSource } from "./availability";
 import { resolveGrokBin, runGrokImagine } from "./grok-imagine";
 import { userDataPath } from "../runtime-paths";
 import { MediaVerificationError, verifyVideoOutput } from "./output-verification";
+import {
+  currentVideoAdapterCapabilities,
+  markMediaSubmitting,
+  mediaInputDigest,
+  reconcileMediaOperation,
+  recordMediaFailed,
+  recordMediaOutcomeUnknown,
+  recordMediaProviderAccepted,
+  recordMediaProviderProgress,
+  recordMediaSucceeded,
+  recordMediaVerifying,
+  recoverableMediaOperations,
+  registerMediaOperation,
+  requestMediaCancellation,
+  settleMediaCancellation,
+} from "./media-operation-registry";
+import { getMediaOperation } from "../store/media-operations";
+import type { MediaCancellationState, MediaOperationLifecycle, MediaOperationRecord } from "../../shared/media-operation";
 
 // provider별 허용 env 키 — 멀티모달 레지스트리(shared/multimodal.ts) 키명을 먼저,
 // 레거시/실동작 키명을 폴백으로. "멀티모달로 연결한 키"를 animate가 그대로 인식하도록 정렬.
@@ -60,6 +78,30 @@ const MAX_POLLS = 120; // ~10분
 const jobs = new Map<string, MultimodalVideoJob>();
 const cancelledJobs = new Set<string>();
 const verificationControllers = new Map<string, AbortController>();
+let hydrationStarted = false;
+
+interface DurableVideoIntent {
+  kind: "video";
+  job: MultimodalVideoJob;
+  request: MultimodalVideoRequest;
+}
+
+type VideoJobWithOperation = MultimodalVideoJob & {
+  operation?: {
+    lifecycle: MediaOperationLifecycle;
+    cancellation: MediaCancellationState;
+    version: number;
+  };
+};
+
+function attachOperation(job: MultimodalVideoJob, operation: MediaOperationRecord): MultimodalVideoJob {
+  (job as VideoJobWithOperation).operation = {
+    lifecycle: operation.lifecycle,
+    cancellation: operation.cancellation,
+    version: operation.version,
+  };
+  return job;
+}
 
 async function hasAnyEnvVar(keys: string[]): Promise<boolean> {
   const checks = await Promise.all(keys.map((key) => hasEnvVar(key)));
@@ -78,11 +120,123 @@ export async function videoKeyStatus(): Promise<MultimodalVideoKeyStatus> {
   return { runway, luma, veo, seedance, kling, grok: Boolean(resolveGrokBin()) && grokAuth === "oauth" };
 }
 
+function validateVideoRequest(request: MultimodalVideoRequest, provider: MultimodalVideoProvider, model: string): void {
+  const prompt = request.prompt?.trim() ?? "";
+  if (!prompt || prompt.length > 12_000) throw new Error("media_video_prompt_invalid");
+  if (!model.trim() || model.length > 256 || /[\u0000-\u001f\u007f]/u.test(model)) throw new Error("media_video_model_invalid");
+  if (request.aspectRatio !== undefined && !["16:9", "9:16", "1:1"].includes(request.aspectRatio)) {
+    throw new Error("media_video_aspect_ratio_invalid");
+  }
+  if (request.durationSec !== undefined
+    && (!Number.isFinite(request.durationSec) || request.durationSec <= 0 || request.durationSec > 60)) {
+    throw new Error("media_video_duration_invalid");
+  }
+  const requirements = request.outputRequirements;
+  for (const value of [requirements?.minWidth, requirements?.minHeight]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0 || value > 16_384)) {
+      throw new Error("media_video_output_requirements_invalid");
+    }
+  }
+  if (requirements?.requireAudio !== undefined && typeof requirements.requireAudio !== "boolean") {
+    throw new Error("media_video_output_requirements_invalid");
+  }
+  if (provider === "luma" && (!request.imageUrl || !/^https:\/\//iu.test(request.imageUrl))) {
+    throw new Error("media_video_luma_https_image_required");
+  }
+  if (provider !== "luma" && !request.imagePath && !request.imageUrl) throw new Error("media_video_input_image_required");
+  if (request.imageUrl && !/^https:\/\//iu.test(request.imageUrl)) throw new Error("media_video_image_url_invalid");
+}
+
+function durableVideoIntent(value: unknown): DurableVideoIntent | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<DurableVideoIntent>;
+  if (candidate.kind !== "video" || !candidate.job || !candidate.request) return null;
+  const provider = candidate.job.provider;
+  if (!Object.hasOwn(PROVIDER_KEYS, provider) || candidate.job.id.length < 1 || !candidate.job.outputDir) return null;
+  return candidate as DurableVideoIntent;
+}
+
+function outputDirInAppScope(outputDir: string): boolean {
+  const root = path.resolve(userDataPath("multimodal-video"));
+  const candidate = path.resolve(outputDir);
+  const relative = path.relative(root, candidate);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function jobFromOperation(operation: MediaOperationRecord): MultimodalVideoJob {
+  const intent = durableVideoIntent(operation.intent);
+  if (!intent || intent.job.id !== operation.id || intent.job.provider !== operation.providerId
+    || intent.job.model !== operation.modelId || !outputDirInAppScope(intent.job.outputDir)) {
+    throw new Error("media_video_operation_corrupt");
+  }
+  const job = snapshot(intent.job);
+  job.updatedAtMs = Date.parse(operation.updatedAt) || job.updatedAtMs;
+  if (operation.result) {
+    const relative = path.relative(job.outputDir, operation.result.path);
+    if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("media_video_result_scope_mismatch");
+    }
+    const verification = operation.result.receipt as MultimodalVideoFile["verification"];
+    job.files = [{
+      id: `verified:${operation.result.sha256.slice(0, 24)}`,
+      kind: "animation_mp4",
+      name: path.basename(operation.result.path),
+      absPath: operation.result.path,
+      url: pathToFileURL(operation.result.path).href,
+      mime: "video/mp4",
+      sizeBytes: verification?.sizeBytes ?? 0,
+      verification,
+    }];
+  }
+  if (operation.lifecycle === "succeeded") {
+    job.status = "succeeded";
+    job.progress = { phase: "complete", percent: 100 };
+    job.message = currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete";
+  } else if (operation.cancellation === "requested" || operation.cancellation === "unconfirmed" || operation.cancellation === "confirmed") {
+    job.status = "cancelled";
+    job.progress = { phase: "cancelled", percent: job.progress.percent };
+    job.message = operation.cancellation === "confirmed"
+      ? (currentUiLocale() === "ko" ? "취소 확인됨" : "Cancellation confirmed")
+      : (currentUiLocale() === "ko" ? "로컬 대기는 중단됐지만 외부 작업 취소는 확인되지 않았습니다" : "Local waiting stopped; provider cancellation is unconfirmed");
+    if (operation.cancellation !== "confirmed" && !job.warnings.includes("provider_cancel_unconfirmed")) job.warnings.push("provider_cancel_unconfirmed");
+  } else if (operation.lifecycle === "failed" || operation.lifecycle === "outcome_unknown") {
+    job.status = "failed";
+    job.progress = { phase: "failed", percent: job.progress.percent };
+    job.error = operation.failureMessage ?? undefined;
+    job.message = operation.lifecycle === "outcome_unknown"
+      ? (currentUiLocale() === "ko" ? "제출 접수 여부를 확인할 수 없어 다시 제출하지 않았습니다" : "Provider acceptance is unknown; the job was not resubmitted")
+      : (currentUiLocale() === "ko" ? "실패" : "Failed");
+  } else {
+    job.status = operation.lifecycle === "submit_intent" ? "queued" : "running";
+    job.progress.phase = operation.lifecycle === "verifying" ? "verifying"
+      : operation.lifecycle === "submitting" ? "submitting" : "generating";
+  }
+  return attachOperation(job, operation);
+}
+
+function ensureVideoJobsHydrated(): void {
+  if (hydrationStarted) return;
+  const operations = recoverableMediaOperations().filter((entry) => entry.modality === "video");
+  hydrationStarted = true;
+  for (const operation of operations) {
+    const job = jobFromOperation(operation);
+    jobs.set(job.id, job);
+    void recoverVideoOperation(operation).catch((error: unknown) => failJob(operation.id, error));
+  }
+}
+
+export function initializeVideoJobs(): void {
+  ensureVideoJobsHydrated();
+}
+
 export function startVideoJob(request: MultimodalVideoRequest): MultimodalVideoJob {
+  ensureVideoJobsHydrated();
   const ko = currentUiLocale() === "ko";
   const id = randomUUID();
   const provider: MultimodalVideoProvider = request.provider ?? "runway";
+  if (!Object.hasOwn(PROVIDER_KEYS, provider)) throw new Error("media_video_provider_invalid");
   const model = request.model || DEFAULT_MODELS[provider];
+  validateVideoRequest(request, provider, model);
   const title = request.title || "Video";
   const outputDir = userDataPath("multimodal-video", `${safeSlug(title)}-${id.slice(0, 8)}`);
   const now = Date.now();
@@ -101,31 +255,71 @@ export function startVideoJob(request: MultimodalVideoRequest): MultimodalVideoJ
     createdAtMs: now,
     updatedAtMs: now,
   };
+  const operation = registerMediaOperation({
+    id,
+    modality: "video",
+    providerId: provider,
+    modelId: model,
+    clientRequestKey: `video:${id}`,
+    inputDigest: mediaInputDigest({ provider, model, request }),
+    intent: { kind: "video", job, request } satisfies DurableVideoIntent,
+    spendLimitUsd: null,
+    capabilities: currentVideoAdapterCapabilities(provider),
+  });
+  attachOperation(job, operation);
   jobs.set(id, job);
   void runAnimateJob(id, request).catch((error: unknown) => failJob(id, error));
   return snapshot(job);
 }
 
 export function getVideoJob(id: string): MultimodalVideoJob | null {
-  const job = jobs.get(id);
+  ensureVideoJobsHydrated();
+  let job = jobs.get(id);
+  if (!job) {
+    const operation = getMediaOperation(id);
+    if (operation?.modality === "video") {
+      job = jobFromOperation(operation);
+      jobs.set(id, job);
+    }
+  }
+  if (job) {
+    const operation = getMediaOperation(id);
+    if (operation) attachOperation(job, operation);
+  }
   return job ? snapshot(job) : null;
 }
 
 export function cancelVideoJob(id: string): MultimodalVideoJob | null {
-  const job = jobs.get(id);
+  ensureVideoJobsHydrated();
+  const job = jobs.get(id) ?? (() => {
+    const operation = getMediaOperation(id);
+    if (!operation || operation.modality !== "video") return null;
+    const restored = jobFromOperation(operation);
+    jobs.set(id, restored);
+    return restored;
+  })();
   if (!job) return null;
+  const operation = requestMediaCancellation(id);
   const ko = currentUiLocale() === "ko";
+  if (operation.lifecycle === "succeeded" || operation.lifecycle === "failed") {
+    return snapshot(jobFromOperation(operation));
+  }
   cancelledJobs.add(id);
   verificationControllers.get(id)?.abort();
-  job.status = "cancelled";
-  job.progress.phase = "cancelled";
-  job.message = ko ? "취소됨" : "Cancelled";
+  const settled = operation.cancellation === "confirmed" ? operation : settleMediaCancellation(id, "unconfirmed");
+  const restored = jobFromOperation(settled);
+  jobs.set(id, restored);
+  job.status = restored.status;
+  job.progress = restored.progress;
+  job.message = restored.message || (ko ? "취소 요청됨" : "Cancellation requested");
+  job.warnings = restored.warnings;
   job.updatedAtMs = Date.now();
+  if (settled.cancellation === "unconfirmed" && settled.providerOperationId) scheduleVideoRecovery(id);
   return snapshot(job);
 }
 
 export async function openVideoOutput(id: string): Promise<{ ok: boolean; message: string }> {
-  const job = jobs.get(id);
+  const job = getVideoJob(id);
   if (!job) return { ok: false, message: "Animate job not found." };
   await fs.mkdir(job.outputDir, { recursive: true });
   const result = await shell.openPath(job.outputDir);
@@ -204,6 +398,7 @@ async function runGrokAnimate(
   const inputFrame = await materializeGrokAnimateInput(job, request);
   const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
   const absPath = path.join(job.outputDir, name);
+  markMediaSubmitting(id);
   updateJob(job, {
     status: "running",
     phase: "generating",
@@ -266,28 +461,38 @@ async function runVeo(
   assertNotCancelled(id);
 
   const ai = new GoogleGenAI({ apiKey });
-  let operation: GenerateVideosOperation = await ai.models.generateVideos({
-    model: job.model,
-    prompt,
-    image,
-    config: {
-      numberOfVideos: 1,
-      durationSeconds: (request.durationSec ?? 5) >= 8 ? 8 : 6,
-      aspectRatio: request.aspectRatio === "9:16" ? "9:16" : "16:9",
-      resolution: "720p",
-      enhancePrompt: true,
-      personGeneration: "allow_adult",
-    },
-  });
+  markMediaSubmitting(id);
+  let operation: GenerateVideosOperation;
+  try {
+    operation = await ai.models.generateVideos({
+      model: job.model,
+      prompt,
+      image,
+      config: {
+        numberOfVideos: 1,
+        durationSeconds: (request.durationSec ?? 5) >= 8 ? 8 : 6,
+        aspectRatio: request.aspectRatio === "9:16" ? "9:16" : "16:9",
+        resolution: "720p",
+        enhancePrompt: true,
+        personGeneration: "allow_adult",
+      },
+    });
+  } catch (error) {
+    throw submitOutcomeUnknown(job.provider, error);
+  }
+  if (!operation.name) throw new SubmitOutcomeUnknown("Veo accepted a request without a recoverable operation name.");
+  persistProviderAccepted(id, operation.name, { operationName: operation.name });
 
   updateJob(job, { phase: "generating", message: ko ? "Veo 생성 중" : "Veo generating", percent: 25 });
   for (let i = 0; !operation.done && i < MAX_POLLS; i += 1) {
     assertNotCancelled(id);
     await sleep(POLL_MS);
-    operation = await ai.operations.getVideosOperation({ operation });
+    try { operation = await ai.operations.getVideosOperation({ operation }); }
+    catch (error) { throw new ProviderStatusUnknown(`Veo status lookup was interrupted; no new submit was sent. ${error instanceof Error ? error.message : String(error)}`); }
+    recordProviderPoll(job, operation.done ? "SUCCEEDED" : "RUNNING", i);
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  if (!operation.done) throw new Error(ko ? "Veo 생성 시간 초과." : "Veo operation timed out before completion.");
+  if (!operation.done) throw new ProviderStatusUnknown(ko ? "Veo 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Veo status polling timed out; the job was not resubmitted.");
   if (operation.error) throw new Error(JSON.stringify(operation.error));
 
   const video = operation.response?.generatedVideos?.[0]?.video;
@@ -360,7 +565,10 @@ async function runRunway(job: MultimodalVideoJob, request: MultimodalVideoReques
     ratio: runwayRatio(request.aspectRatio),
     duration: clampDuration(request.durationSec),
   };
-  const res = await fetch(`${RUNWAY_BASE}/v1/image_to_video`, { method: "POST", headers, body: JSON.stringify(body) });
+  markMediaSubmitting(job.id);
+  let res: Response;
+  try { res = await fetch(`${RUNWAY_BASE}/v1/image_to_video`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  catch (error) { throw submitOutcomeUnknown(job.provider, error); }
   if (!res.ok) {
     throw new Error(
       ko
@@ -368,21 +576,23 @@ async function runRunway(job: MultimodalVideoJob, request: MultimodalVideoReques
         : `Runway submission failed (HTTP ${res.status}): ${truncate(await res.text())}`,
     );
   }
-  const json = (await res.json()) as { id?: string };
+  const json = await readAcceptedJson<{ id?: string }>(job.provider, res);
   const taskId = json.id;
-  if (!taskId) throw new Error(ko ? "Runway 응답에 task id가 없습니다." : "The Runway response did not include a task id.");
+  if (!taskId) throw new SubmitOutcomeUnknown(ko ? "Runway 접수 응답에 복구할 task id가 없습니다." : "Runway accepted the request without a recoverable task id.");
+  persistProviderAccepted(job.id, taskId);
 
   updateJob(job, { phase: "generating", message: ko ? "Runway 생성 중" : "Runway generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
-    const poll = await fetch(`${RUNWAY_BASE}/v1/tasks/${taskId}`, { headers });
+    const poll = await fetchProviderStatus(`${RUNWAY_BASE}/v1/tasks/${taskId}`, { headers });
     if (!poll.ok) {
-      if (poll.status === 429) continue; // throttled
+      if (poll.status === 429) { recordProviderPoll(job, "HTTP_429", i); continue; }
       throw new Error(ko ? `Runway 폴링 실패 (HTTP ${poll.status})` : `Runway polling failed (HTTP ${poll.status})`);
     }
     const data = (await poll.json()) as { status?: string; output?: string[]; failure?: string; failureCode?: string };
     const status = String(data.status || "").toUpperCase();
+    recordProviderPoll(job, status || "UNKNOWN", i);
     if (status === "SUCCEEDED") {
       const url = data.output?.[0];
       if (!url) throw new Error(ko ? "Runway 완료됐으나 결과 URL이 없습니다." : "Runway completed but returned no result URL.");
@@ -395,7 +605,7 @@ async function runRunway(job: MultimodalVideoJob, request: MultimodalVideoReques
     }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error(ko ? "Runway 생성 시간 초과(약 10분)." : "Runway generation timed out (~10 minutes).");
+  throw new ProviderStatusUnknown(ko ? "Runway 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Runway status polling timed out; the job was not resubmitted.");
 }
 
 async function resolveRunwayImage(request: MultimodalVideoRequest): Promise<string> {
@@ -435,7 +645,10 @@ async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest,
     duration: clampDuration(request.durationSec) >= 9 ? "9s" : "5s",
     aspect_ratio: request.aspectRatio ?? "16:9",
   };
-  const res = await fetch(`${LUMA_BASE}/dream-machine/v1/generations`, { method: "POST", headers, body: JSON.stringify(body) });
+  markMediaSubmitting(job.id);
+  let res: Response;
+  try { res = await fetch(`${LUMA_BASE}/dream-machine/v1/generations`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  catch (error) { throw submitOutcomeUnknown(job.provider, error); }
   if (!res.ok) {
     throw new Error(
       ko
@@ -443,18 +656,23 @@ async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest,
         : `Luma submission failed (HTTP ${res.status}): ${truncate(await res.text())}`,
     );
   }
-  const json = (await res.json()) as { id?: string };
+  const json = await readAcceptedJson<{ id?: string }>(job.provider, res);
   const genId = json.id;
-  if (!genId) throw new Error(ko ? "Luma 응답에 generation id가 없습니다." : "The Luma response did not include a generation id.");
+  if (!genId) throw new SubmitOutcomeUnknown(ko ? "Luma 접수 응답에 복구할 generation id가 없습니다." : "Luma accepted the request without a recoverable generation id.");
+  persistProviderAccepted(job.id, genId);
 
   updateJob(job, { phase: "generating", message: ko ? "Luma 생성 중" : "Luma generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
-    const poll = await fetch(`${LUMA_BASE}/dream-machine/v1/generations/${genId}`, { headers });
-    if (!poll.ok) throw new Error(ko ? `Luma 폴링 실패 (HTTP ${poll.status})` : `Luma polling failed (HTTP ${poll.status})`);
+    const poll = await fetchProviderStatus(`${LUMA_BASE}/dream-machine/v1/generations/${genId}`, { headers });
+    if (!poll.ok) {
+      if (poll.status === 429) { recordProviderPoll(job, "HTTP_429", i); continue; }
+      throw new Error(ko ? `Luma 폴링 실패 (HTTP ${poll.status})` : `Luma polling failed (HTTP ${poll.status})`);
+    }
     const data = (await poll.json()) as { state?: string; assets?: { video?: string }; failure_reason?: string };
     const state = String(data.state || "").toLowerCase();
+    recordProviderPoll(job, state || "unknown", i);
     if (state === "completed") {
       const url = data.assets?.video;
       if (!url) throw new Error(ko ? "Luma 완료됐으나 결과 영상이 없습니다." : "Luma completed but returned no result video.");
@@ -465,7 +683,7 @@ async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest,
     }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error(ko ? "Luma 생성 시간 초과(약 10분)." : "Luma generation timed out (~10 minutes).");
+  throw new ProviderStatusUnknown(ko ? "Luma 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Luma status polling timed out; the job was not resubmitted.");
 }
 
 // ── Seedance 2.0 (ByteDance, fal.ai queue 경유; image-to-video) ──
@@ -481,7 +699,10 @@ async function runSeedance(job: MultimodalVideoJob, request: MultimodalVideoRequ
     resolution: "720p",
     duration: clampDuration(request.durationSec) >= 10 ? "10" : "5",
   };
-  const submit = await fetch(`${FAL_QUEUE_BASE}/${job.model}`, { method: "POST", headers, body: JSON.stringify(body) });
+  markMediaSubmitting(job.id);
+  let submit: Response;
+  try { submit = await fetch(`${FAL_QUEUE_BASE}/${job.model}`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  catch (error) { throw submitOutcomeUnknown(job.provider, error); }
   if (!submit.ok) {
     throw new Error(
       ko
@@ -489,24 +710,27 @@ async function runSeedance(job: MultimodalVideoJob, request: MultimodalVideoRequ
         : `Seedance (fal) submission failed (HTTP ${submit.status}): ${truncate(await submit.text())}`,
     );
   }
-  const queued = (await submit.json()) as { status_url?: string; response_url?: string };
+  const queued = await readAcceptedJson<{ request_id?: string; status_url?: string; response_url?: string }>(job.provider, submit);
+  const requestId = queued.request_id;
   const statusUrl = queued.status_url;
   const responseUrl = queued.response_url;
-  if (!statusUrl || !responseUrl) {
-    throw new Error(ko ? "Seedance(fal) 응답에 상태 URL이 없습니다." : "The fal response did not include a status URL.");
+  if (!requestId || !statusUrl || !responseUrl) {
+    throw new SubmitOutcomeUnknown(ko ? "Seedance 접수 응답에 복구할 작업 ID 또는 상태 URL이 없습니다." : "fal accepted the request without a recoverable request id or status URL.");
   }
+  persistProviderAccepted(job.id, requestId, { statusUrl, responseUrl });
 
   updateJob(job, { phase: "generating", message: ko ? "Seedance 생성 중" : "Seedance generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
-    const poll = await fetch(statusUrl, { headers });
+    const poll = await fetchProviderStatus(statusUrl, { headers });
     if (!poll.ok) {
-      if (poll.status === 429) continue; // throttled
+      if (poll.status === 429) { recordProviderPoll(job, "HTTP_429", i); continue; }
       throw new Error(ko ? `Seedance(fal) 폴링 실패 (HTTP ${poll.status})` : `fal polling failed (HTTP ${poll.status})`);
     }
     const data = (await poll.json()) as { status?: string };
     const status = String(data.status || "").toUpperCase();
+    recordProviderPoll(job, status || "UNKNOWN", i);
     if (status === "COMPLETED") {
       const out = await fetch(responseUrl, { headers });
       if (!out.ok) throw new Error(ko ? `Seedance(fal) 결과 조회 실패 (HTTP ${out.status})` : `fal result fetch failed (HTTP ${out.status})`);
@@ -520,7 +744,7 @@ async function runSeedance(job: MultimodalVideoJob, request: MultimodalVideoRequ
     }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error(ko ? "Seedance 생성 시간 초과(약 10분)." : "Seedance generation timed out (~10 minutes).");
+  throw new ProviderStatusUnknown(ko ? "Seedance 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Seedance status polling timed out; the job was not resubmitted.");
 }
 
 // ── Kling 2.x (Kuaishou, PiAPI 경유; image-to-video) ─────────
@@ -541,7 +765,10 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
       version: "2.5",
     },
   };
-  const submit = await fetch(`${PIAPI_BASE}/api/v1/task`, { method: "POST", headers, body: JSON.stringify(body) });
+  markMediaSubmitting(job.id);
+  let submit: Response;
+  try { submit = await fetch(`${PIAPI_BASE}/api/v1/task`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  catch (error) { throw submitOutcomeUnknown(job.provider, error); }
   if (!submit.ok) {
     throw new Error(
       ko
@@ -549,21 +776,22 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
         : `Kling (PiAPI) submission failed (HTTP ${submit.status}): ${truncate(await submit.text())}`,
     );
   }
-  const created = (await submit.json()) as { message?: string; data?: { task_id?: string } };
+  const created = await readAcceptedJson<{ message?: string; data?: { task_id?: string } }>(job.provider, submit);
   const taskId = created.data?.task_id;
   if (!taskId) {
-    throw new Error(
+    throw new SubmitOutcomeUnknown(
       ko ? `Kling(PiAPI) 응답에 task id가 없습니다: ${truncate(created.message || "")}` : `PiAPI response did not include a task id: ${truncate(created.message || "")}`,
     );
   }
+  persistProviderAccepted(job.id, taskId);
 
   updateJob(job, { phase: "generating", message: ko ? "Kling 생성 중" : "Kling generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
-    const poll = await fetch(`${PIAPI_BASE}/api/v1/task/${taskId}`, { headers });
+    const poll = await fetchProviderStatus(`${PIAPI_BASE}/api/v1/task/${taskId}`, { headers });
     if (!poll.ok) {
-      if (poll.status === 429) continue; // throttled
+      if (poll.status === 429) { recordProviderPoll(job, "HTTP_429", i); continue; }
       throw new Error(ko ? `Kling(PiAPI) 폴링 실패 (HTTP ${poll.status})` : `PiAPI polling failed (HTTP ${poll.status})`);
     }
     const data = (await poll.json()) as {
@@ -575,6 +803,7 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
     };
     const rec = data.data;
     const status = String(rec?.status || "").toLowerCase();
+    recordProviderPoll(job, status || "unknown", i);
     if (status === "completed") {
       const out = rec?.output;
       const url =
@@ -589,12 +818,13 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
     }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error(ko ? "Kling 생성 시간 초과(약 10분)." : "Kling generation timed out (~10 minutes).");
+  throw new ProviderStatusUnknown(ko ? "Kling 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Kling status polling timed out; the job was not resubmitted.");
 }
 
 // ── 공통 ─────────────────────────────────────────────────────
 async function downloadVideo(job: MultimodalVideoJob, url: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
   const ko = currentUiLocale() === "ko";
+  recordMediaVerifying(job.id, { resultUrl: url });
   const res = await fetch(url);
   if (!res.ok) throw new Error(ko ? `결과 영상 다운로드 실패 (HTTP ${res.status})` : `Failed to download the result video (HTTP ${res.status})`);
   const limit = 1024 * 1024 * 1024;
@@ -629,6 +859,7 @@ async function downloadVideo(job: MultimodalVideoJob, url: string, request: Mult
 async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
   assertNotCancelled(job.id);
   const ko = currentUiLocale() === "ko";
+  recordMediaVerifying(job.id, { localPath: absPath });
   updateJob(job, { phase: "verifying", percent: 96, message: ko ? "영상 재생·길이·크기 확인 중" : "Checking video playback, duration and dimensions" });
   const controller = new AbortController();
   verificationControllers.set(job.id, controller);
@@ -644,7 +875,7 @@ async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, reque
     throw error;
   } finally { if (verificationControllers.get(job.id) === controller) verificationControllers.delete(job.id); }
   assertNotCancelled(job.id);
-  return {
+  const file: MultimodalVideoFile = {
     id: randomUUID(),
     kind: "animation_mp4",
     name: path.basename(verified.path),
@@ -654,6 +885,215 @@ async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, reque
     sizeBytes: verified.verification.sizeBytes,
     verification: verified.verification,
   };
+  recordMediaSucceeded(job.id, {
+    path: verified.path,
+    sha256: verified.verification.sha256,
+    receipt: verified.verification,
+  });
+  return file;
+}
+
+function persistProviderAccepted(id: string, providerOperationId: string, providerCheckpoint?: unknown): void {
+  try {
+    recordMediaProviderAccepted({ id, providerOperationId, providerCheckpoint });
+  } catch (error) {
+    throw new SubmitOutcomeUnknown(`The provider accepted the request, but its operation identity could not be persisted: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function recordProviderPoll(job: MultimodalVideoJob, providerStatus: string, attempt: number, providerCheckpoint?: unknown): void {
+  const current = getMediaOperation(job.id);
+  if (!current) throw new Error("media_operation_not_found");
+  if (current.pollAttempts >= MAX_POLLS) throw new ProviderStatusUnknown("Provider polling reached its durable attempt limit; the job was not resubmitted.");
+  recordMediaProviderProgress({ id: job.id, providerStatus, providerCheckpoint });
+  updateJob(job, { percent: Math.min(90, 25 + Math.round((attempt / MAX_POLLS) * 65)) });
+}
+
+function submitOutcomeUnknown(provider: MultimodalVideoProvider, error: unknown): SubmitOutcomeUnknown {
+  return new SubmitOutcomeUnknown(`${provider} submission response was interrupted; acceptance is unknown and the request will not be resubmitted automatically. ${error instanceof Error ? error.message : String(error)}`);
+}
+
+async function readAcceptedJson<T>(provider: MultimodalVideoProvider, response: Response): Promise<T> {
+  try { return await response.json() as T; }
+  catch (error) {
+    throw new SubmitOutcomeUnknown(`${provider} returned an unreadable successful submission response; acceptance is unknown and the request will not be resubmitted automatically. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function fetchProviderStatus(url: string, init: RequestInit): Promise<Response> {
+  try { return await fetch(url, init); }
+  catch (error) {
+    throw new ProviderStatusUnknown(`Provider status lookup was interrupted; no new submit was sent. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function syncJobFromOperation(operation: MediaOperationRecord): void {
+  const next = jobFromOperation(operation);
+  jobs.set(next.id, next);
+}
+
+function scheduleVideoRecovery(id: string): void {
+  const timer = setTimeout(() => {
+    const current = getMediaOperation(id);
+    if (current) void recoverVideoOperation(current).catch((error: unknown) => failJob(id, error));
+  }, POLL_MS);
+  timer.unref?.();
+}
+
+async function recoverVideoOperation(operation: MediaOperationRecord): Promise<void> {
+  if (operation.cancellation === "requested") {
+    const receipt = await reconcileMediaOperation(operation.id);
+    syncJobFromOperation(receipt.operation);
+    return;
+  }
+  if (operation.lifecycle === "submit_intent") {
+    const intent = durableVideoIntent(operation.intent);
+    if (!intent) throw new Error("media_video_operation_corrupt");
+    await runAnimateJob(operation.id, intent.request);
+    return;
+  }
+  if (operation.lifecycle === "submitting" && !operation.providerOperationId) {
+    const receipt = await reconcileMediaOperation(operation.id);
+    syncJobFromOperation(receipt.operation);
+    return;
+  }
+  if (operation.lifecycle === "verifying") {
+    const intent = durableVideoIntent(operation.intent);
+    const checkpoint = operation.providerCheckpoint as { localPath?: unknown; resultUrl?: unknown } | null;
+    const job = jobs.get(operation.id);
+    if (!intent || !job) throw new Error("media_video_operation_corrupt");
+    const file = typeof checkpoint?.localPath === "string"
+      ? await verifiedVideoFile(job, checkpoint.localPath, intent.request)
+      : typeof checkpoint?.resultUrl === "string"
+        ? await downloadVideo(job, checkpoint.resultUrl, intent.request)
+        : null;
+    if (!file) throw new Error("media_video_verification_checkpoint_missing");
+    job.files = [file];
+    updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
+    return;
+  }
+  if (["provider_accepted", "running"].includes(operation.lifecycle) && operation.providerOperationId) {
+    await pollRecoveredVideoOperation(operation);
+  }
+}
+
+async function pollRecoveredVideoOperation(operation: MediaOperationRecord): Promise<void> {
+  const intent = durableVideoIntent(operation.intent);
+  const job = jobs.get(operation.id);
+  if (!intent || !job || !operation.providerOperationId) throw new Error("media_video_operation_corrupt");
+  if (operation.pollAttempts >= MAX_POLLS) throw new ProviderStatusUnknown("Provider polling reached its durable attempt limit; the job was not resubmitted.");
+  const key = operation.providerId === "grok" ? null : await readFirstSecret(PROVIDER_KEYS[job.provider]);
+  if (job.provider !== "grok" && !key) throw new ProviderStatusUnknown("The provider credential is unavailable for restart reconciliation.");
+  try {
+    if (job.provider === "runway") {
+      const response = await fetch(`${RUNWAY_BASE}/v1/tasks/${operation.providerOperationId}`, {
+        headers: { Authorization: `Bearer ${key}`, "X-Runway-Version": RUNWAY_VERSION, "Content-Type": "application/json" },
+      });
+      if (response.status === 429) { recordProviderPoll(job, "HTTP_429", operation.pollAttempts); scheduleVideoRecovery(job.id); return; }
+      if (!response.ok) throw new Error(`Runway status HTTP ${response.status}`);
+      const data = await response.json() as { status?: string; output?: string[]; failure?: string; failureCode?: string };
+      const status = String(data.status ?? "").toUpperCase();
+      recordProviderPoll(job, status || "UNKNOWN", operation.pollAttempts);
+      if (status === "SUCCEEDED" && data.output?.[0]) return completeRecoveredRemote(job, intent.request, data.output[0]);
+      if (["FAILED", "CANCELED", "EXPIRED"].includes(status)) throw new ProviderTerminalFailure(data.failure || data.failureCode || status);
+      scheduleVideoRecovery(job.id);
+      return;
+    }
+    if (job.provider === "luma") {
+      const response = await fetch(`${LUMA_BASE}/dream-machine/v1/generations/${operation.providerOperationId}`, {
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      });
+      if (response.status === 429) { recordProviderPoll(job, "HTTP_429", operation.pollAttempts); scheduleVideoRecovery(job.id); return; }
+      if (!response.ok) throw new Error(`Luma status HTTP ${response.status}`);
+      const data = await response.json() as { state?: string; assets?: { video?: string }; failure_reason?: string };
+      const status = String(data.state ?? "").toLowerCase();
+      recordProviderPoll(job, status || "unknown", operation.pollAttempts);
+      if (status === "completed" && data.assets?.video) return completeRecoveredRemote(job, intent.request, data.assets.video);
+      if (status === "failed") throw new ProviderTerminalFailure(data.failure_reason || status);
+      scheduleVideoRecovery(job.id);
+      return;
+    }
+    if (job.provider === "seedance") {
+      const checkpoint = operation.providerCheckpoint as { statusUrl?: unknown; responseUrl?: unknown } | null;
+      if (typeof checkpoint?.statusUrl !== "string" || typeof checkpoint.responseUrl !== "string") throw new ProviderStatusUnknown("The fal status checkpoint is unavailable.");
+      const headers = { Authorization: `Key ${key}`, "Content-Type": "application/json" };
+      const response = await fetch(checkpoint.statusUrl, { headers });
+      if (response.status === 429) { recordProviderPoll(job, "HTTP_429", operation.pollAttempts, checkpoint); scheduleVideoRecovery(job.id); return; }
+      if (!response.ok) throw new Error(`fal status HTTP ${response.status}`);
+      const status = String((await response.json() as { status?: string }).status ?? "").toUpperCase();
+      recordProviderPoll(job, status || "UNKNOWN", operation.pollAttempts, checkpoint);
+      if (status === "COMPLETED") {
+        const output = await fetch(checkpoint.responseUrl, { headers });
+        if (!output.ok) throw new Error(`fal result HTTP ${output.status}`);
+        const url = (await output.json() as { video?: { url?: string } }).video?.url;
+        if (!url) throw new ProviderTerminalFailure("fal completed without a video URL");
+        return completeRecoveredRemote(job, intent.request, url);
+      }
+      if (status.includes("FAIL") || status.includes("ERROR")) throw new ProviderTerminalFailure(status);
+      scheduleVideoRecovery(job.id);
+      return;
+    }
+    if (job.provider === "kling") {
+      const response = await fetch(`${PIAPI_BASE}/api/v1/task/${operation.providerOperationId}`, {
+        headers: { "x-api-key": key!, "Content-Type": "application/json" },
+      });
+      if (response.status === 429) { recordProviderPoll(job, "HTTP_429", operation.pollAttempts); scheduleVideoRecovery(job.id); return; }
+      if (!response.ok) throw new Error(`PiAPI status HTTP ${response.status}`);
+      const rec = (await response.json() as { data?: { status?: string; output?: { video_url?: string; works?: { video?: { resource?: string; resource_without_watermark?: string } }[] }; error?: { message?: string } } }).data;
+      const status = String(rec?.status ?? "").toLowerCase();
+      recordProviderPoll(job, status || "unknown", operation.pollAttempts);
+      const url = rec?.output?.video_url || rec?.output?.works?.[0]?.video?.resource_without_watermark || rec?.output?.works?.[0]?.video?.resource;
+      if (status === "completed" && url) return completeRecoveredRemote(job, intent.request, url);
+      if (status === "failed") throw new ProviderTerminalFailure(rec?.error?.message || status);
+      scheduleVideoRecovery(job.id);
+      return;
+    }
+    if (job.provider === "veo") {
+      const ai = new GoogleGenAI({ apiKey: key! });
+      const refreshed = await ai.operations.getVideosOperation({ operation: { name: operation.providerOperationId } as GenerateVideosOperation });
+      recordProviderPoll(job, refreshed.done ? "SUCCEEDED" : "RUNNING", operation.pollAttempts, { operationName: operation.providerOperationId });
+      if (!refreshed.done) { scheduleVideoRecovery(job.id); return; }
+      if (refreshed.error) throw new ProviderTerminalFailure(JSON.stringify(refreshed.error));
+      await finishRecoveredVeo(job, intent.request, ai, refreshed);
+      return;
+    }
+    throw new ProviderStatusUnknown("This local video adapter has no provider operation lookup.");
+  } catch (error) {
+    if (error instanceof ProviderStatusUnknown || error instanceof ProviderTerminalFailure) throw error;
+    throw new ProviderStatusUnknown(`Provider status reconciliation was interrupted; no new submit was sent. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function completeRecoveredRemote(job: MultimodalVideoJob, request: MultimodalVideoRequest, url: string): Promise<void> {
+  const operation = getMediaOperation(job.id);
+  if (operation?.cancellation === "unconfirmed") {
+    const failed = recordMediaFailed(job.id, "provider_completed_after_local_cancel", "The provider completed after local waiting was cancelled; no output was downloaded.");
+    syncJobFromOperation(failed);
+    return;
+  }
+  updateJob(job, { phase: "downloading", message: currentUiLocale() === "ko" ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
+  const file = await downloadVideo(job, url, request);
+  job.files = [file];
+  updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
+}
+
+async function finishRecoveredVeo(job: MultimodalVideoJob, request: MultimodalVideoRequest, ai: GoogleGenAI, operation: GenerateVideosOperation): Promise<void> {
+  const durable = getMediaOperation(job.id);
+  if (durable?.cancellation === "unconfirmed") {
+    const failed = recordMediaFailed(job.id, "provider_completed_after_local_cancel", "Veo completed after local waiting was cancelled; no output was downloaded.");
+    syncJobFromOperation(failed);
+    return;
+  }
+  const video = operation.response?.generatedVideos?.[0]?.video;
+  if (!video) throw new Error("Veo completed without a video.");
+  const absPath = path.join(job.outputDir, `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`);
+  await fs.mkdir(job.outputDir, { recursive: true });
+  if (video.videoBytes) await fs.writeFile(absPath, Buffer.from(video.videoBytes, "base64"));
+  else if (video.uri) await ai.files.download({ file: video.uri, downloadPath: absPath });
+  else throw new Error("Veo completed without downloadable bytes.");
+  const file = await verifiedVideoFile(job, absPath, request);
+  job.files = [file];
+  updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
 }
 
 function clampDuration(sec: number | undefined): number {
@@ -704,6 +1144,38 @@ function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
   if (job.status === "cancelled") return;
+  try {
+    if (error instanceof ProviderStatusUnknown) {
+      const current = getMediaOperation(id);
+      if (current?.providerOperationId && ["provider_accepted", "running"].includes(current.lifecycle)
+        && current.pollAttempts < MAX_POLLS) {
+        const deferred = recordMediaProviderProgress({
+          id,
+          providerStatus: "LOOKUP_INTERRUPTED",
+          providerCheckpoint: current.providerCheckpoint ?? undefined,
+        });
+        syncJobFromOperation(deferred);
+        scheduleVideoRecovery(id);
+        return;
+      }
+      const operation = recordMediaOutcomeUnknown(id, error.message.slice(0, 4_000));
+      syncJobFromOperation(operation);
+      return;
+    }
+    if (error instanceof SubmitOutcomeUnknown) {
+      const operation = recordMediaOutcomeUnknown(id, error.message.slice(0, 4_000));
+      syncJobFromOperation(operation);
+      return;
+    }
+    const operation = recordMediaFailed(id, error instanceof MediaVerificationError ? error.reasonCode : "media_video_failed",
+      (error instanceof Error ? error.message : String(error)).slice(0, 4_000));
+    if (operation.lifecycle === "succeeded") {
+      syncJobFromOperation(operation);
+      return;
+    }
+  } catch (registryError) {
+    job.warnings.push(`media_registry_update_failed:${registryError instanceof Error ? registryError.message : String(registryError)}`);
+  }
   const ko = currentUiLocale() === "ko";
   job.status = "failed";
   job.progress.phase = "failed";
@@ -721,3 +1193,7 @@ class AnimateCancelled extends Error {
     super("Animate cancelled");
   }
 }
+
+class SubmitOutcomeUnknown extends Error {}
+class ProviderStatusUnknown extends Error {}
+class ProviderTerminalFailure extends Error {}

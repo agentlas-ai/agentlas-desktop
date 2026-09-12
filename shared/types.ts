@@ -5520,6 +5520,11 @@ export interface MultimodalVideoJob {
   provider: MultimodalVideoProvider;
   model: string;
   status: MultimodalVideoJobStatus;
+  operation?: {
+    lifecycle: import("./media-operation").MediaOperationLifecycle;
+    cancellation: import("./media-operation").MediaCancellationState;
+    version: number;
+  };
   outputDir: string;
   progress: OberonAnimateProgress;
   files: MultimodalVideoFile[];
