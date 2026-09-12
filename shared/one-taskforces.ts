@@ -39,3 +39,11 @@ export interface RemoveOneTaskforceInput {
   id: string;
   expectedRevision?: number;
 }
+
+/** Exact durable group returned after a preflight reservation commits. */
+export interface OneTaskforceReceipt {
+  id: string;
+  chatId: string;
+  revision: number;
+  memberAgentIds: string[];
+}

@@ -587,7 +587,7 @@ function readHandoverSource(agentSlug: string, displayName: string): string {
   for (const file of candidates) {
     try {
       const body = fs.readFileSync(file, "utf8").trim();
-      if (body) return `인수인계 출처: ${displayName}\n\n${redactSecrets(body).replace(/(?:\/Users\/[^\s/]+|\/home\/[^\s/]+)/g, "<local path>").slice(0, 8_000)}`;
+      if (body) return `인수인계 출처: ${displayName}\n\n${redactOneHandoverPaths(redactSecrets(body)).slice(0, 8_000)}`;
     } catch {
       // Local, absent memory is a valid no-op; replacement must still succeed.
     }
@@ -606,6 +606,43 @@ function handoverNote(value: string | null | undefined, row: Row): string | null
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
     .trim();
   return safe ? safe.slice(0, 8_000) : null;
+}
+
+/** Main-only local staffing inside the caller's group/reservation transaction.
+ * Existing leased seats are reused only while current; this never recruits or
+ * renews a remote asset and never restores an archived identity implicitly.
+ */
+export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true): void {
+  const db = getDb();
+  if (!db.inTransaction) throw new Error("one_group_transaction_required");
+  for (const id of [...new Set(agentIds)]) {
+    const agent = ensureAvailableAgent(id);
+    if (agent.sourceMissingSince || agent.visibility === "private" || agent.visibility === "background") throw new Error("one_group_member_unavailable");
+    const prior = db.prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
+    if (prior) {
+      if (prior.archived_at || prior.status_kind === "failed" || prior.status_kind === "locked" || isExpired(prior.lease_expires_at)
+        || prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))
+        || prior.source === "hub" && !prior.lease_expires_at) throw new Error("one_group_member_unavailable");
+      continue;
+    }
+    if (sourceFor(agent) !== "local") throw new Error("one_group_member_seating_required");
+    if (!seatMissing) continue;
+    ensureSlot();
+    const now = new Date().toISOString();
+    const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
+    db.prepare(`INSERT INTO one_org_members
+      (id, agent_slug, installed_agent_id, display_name, icon, sort_order, source,
+       lease_expires_at, added_at, updated_at, status_kind, status_line, credit_state, revision)
+      VALUES (?, ?, ?, NULL, ?, ?, 'local', NULL, ?, ?, 'new', ?, 'unknown', 1)`)
+      .run(randomUUID(), agent.slug, agent.id, agent.tone ?? "one-puppy", sortOrder, now, now, DEFAULT_STATUS_LINE);
+  }
+}
+
+/** Value-free transcript handoff: redact Unix, drive-letter, and UNC homes. */
+export function redactOneHandoverPaths(text: string): string {
+  return text.replace(/(?:\/Users\/[^\s/]+|\/home\/[^\s/]+)/g, "<local path>")
+    .replace(/\b[A-Za-z]:[\\/][^\r\n<>"|]+/g, "<local path>")
+    .replace(/\\\\[^\s\\/]+[\\/][^\r\n<>"|]+/g, "<local path>");
 }
 
 async function verifiedStandingLease(agent: InstalledAgent): Promise<string | null> {

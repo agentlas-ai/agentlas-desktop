@@ -17,6 +17,7 @@ import {
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { oneOrgExecutionGuidance } from "./org";
+import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight } from "./taskforces";
 import type {
   CanonicalTask,
   Chat,
@@ -52,7 +53,7 @@ const MAX_PROPOSALS = 100;
 const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
-const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[] }>();
+const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[]; runtimeSelection?: RuntimeSelection }>();
 
 export interface OneTeamRuntimeBinding {
   kind: RuntimeStatus["kind"];
@@ -138,6 +139,7 @@ export class OneTeamPreflightError extends Error {
       | "stale_binding"
       | "expired"
       | "external_selection_unavailable"
+      | "judgment_unavailable"
       | "runtime_changed"
       | "candidate_changed"
       | "already_resolved"
@@ -275,10 +277,12 @@ export interface OneTeamNeedResolution {
 
 export type OneTeamNeedJudge = (input: {
   prompt: string;
+  runtimeSelection?: RuntimeSelection;
 }) => Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }>;
 
 async function defaultJudgeTeamNeed(input: {
   prompt: string;
+  runtimeSelection?: RuntimeSelection;
 }): Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }> {
   const { judgeRequired } = await import("../system-agents/judgment");
   const verdict = await judgeRequired<"yes" | "no">({
@@ -290,7 +294,9 @@ async function defaultJudgeTeamNeed(input: {
     question:
       "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
     labels: ["yes", "no"] as const,
-    input: input.prompt.slice(0, 4_000),
+    input: input.prompt,
+    maxInputChars: null,
+    ...(input.runtimeSelection ? { runtimeSelection: input.runtimeSelection } : {}),
     guidance:
       "Judge the actual work in any language. Say yes when multiple specialist agents add real value through independent contributions, parallel execution, or verification. An explicit semantic request to add, attach, bring in, or work with an expert/collaborator is itself a team request even when the person names only the one additional specialist or phrases it as a short follow-up. Do not require tool names, agent IDs, UI toggles, or a repeated description of the earlier task. Do not infer from isolated keywords or phrasing templates; decide the request's meaning.",
   });
@@ -310,6 +316,7 @@ async function resolveOneTeamNeed(
   prompt: string,
   deps: OneTeamPreflightDependencies,
   explicit: boolean,
+  runtimeSelection?: RuntimeSelection,
 ): Promise<OneTeamNeedResolution> {
   if (explicit) {
     return {
@@ -321,7 +328,7 @@ async function resolveOneTeamNeed(
   const judgeTeamNeed = deps.judgeTeamNeed ?? defaultJudgeTeamNeed;
   let judged: Awaited<ReturnType<OneTeamNeedJudge>>;
   try {
-    judged = await judgeTeamNeed({ prompt });
+    judged = await judgeTeamNeed({ prompt, ...(runtimeSelection ? { runtimeSelection } : {}) });
   } catch {
     return { needed: false, reasons: [], source: "unavailable" };
   }
@@ -466,6 +473,7 @@ async function prejudgeRosterAutoRoute(
   chat: Chat,
   prompt: string,
   deps: OneTeamPreflightDependencies,
+  runtimeSelection?: RuntimeSelection,
 ): Promise<void> {
   try {
     const byId = deps.getAgentById ?? getAgentById;
@@ -477,6 +485,7 @@ async function prejudgeRosterAutoRoute(
     await selectAutoRoutedAgentJudged(prompt, eligible, preferredLocaleFromText(prompt), {
       allowFallback: false,
       timeoutMs: 8_000,
+      runtimeSelection,
     });
   } catch {
     // Best-effort warm; a missing model verdict leaves the roster unchanged.
@@ -490,6 +499,7 @@ function exactInstalledRoster(
   allowDeterministicLocalSelection = true,
   requestedAgentIds: string[] = [],
   permission: OneTeamPreflightPermission = "write",
+  runtimeSelection?: RuntimeSelection,
 ): {
   roles: OneTeamPreflightRole[];
   candidates: CandidateSnapshot[];
@@ -577,7 +587,7 @@ function exactInstalledRoster(
     const locale = preferredLocaleFromText(prompt);
     // Synchronous site reads only the model verdict warmed by the async pass.
     // A cache miss cannot become a wordlist or embedding decision.
-    const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false, judgedOnly: true });
+    const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false, judgedOnly: true, runtimeSelection });
     if (selected) {
       const snapshot = candidateSnapshot(selected.agent, "installed");
       candidates.push(snapshot);
@@ -1006,11 +1016,14 @@ export async function prepareOneTeamPreflight(
     || (input.runtimeSelection !== undefined && !validRuntimeSelection(input.runtimeSelection))
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
   const requestedAgentIds = input.requestedAgentIds ?? [];
+  const pinnedRuntime = input.runtimeSelection ? await liveRuntime(deps, input.runtimeSelection) : null;
   const teamNeed = await resolveOneTeamNeed(
     input.userPrompt,
     deps,
     requestedAgentIds.length > 0 || input.dynamicTeamRequested === true,
+    input.runtimeSelection,
   );
+  if (teamNeed.source === "unavailable") throw new OneTeamPreflightError("judgment_unavailable", "The selected model could not decide staffing; no substitute team or provider was selected");
   if (!teamNeed.needed) return { kind: "not_required" };
   const reasons = teamNeed.reasons;
   recoverReservations(deps);
@@ -1031,10 +1044,10 @@ export async function prepareOneTeamPreflight(
     if (current.proposal.status !== "expired") return { kind: "proposal", proposal: current.proposal };
   }
 
-  const runtime = await liveRuntime(deps, input.runtimeSelection);
-  if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
+  const runtime = pinnedRuntime ?? await liveRuntime(deps, input.runtimeSelection);
+  if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps, input.runtimeSelection);
   const permission = input.permission ?? "write";
-  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission);
+  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission, input.runtimeSelection);
   /*
    * 한 명이 못 오면 나머지도 버리던 자리(오너 지적 2026-08-24 "one만 일하냐?").
    * 실측: 방 팀원 둘 중 하나는 원본 폴더가 사라져 부를 수 없었는데, 그 한 명
@@ -1156,6 +1169,7 @@ export async function prepareOneTeamPreflight(
     original: input.userPrompt,
     execution: standingStaffGuidance ? `${input.userPrompt}\n\n${standingStaffGuidance}` : input.userPrompt,
     requestedAgentIds,
+    runtimeSelection: input.runtimeSelection,
   });
 
   if (taskWasCreated) {
@@ -1235,7 +1249,7 @@ function exactRosterBinding(
 ): boolean {
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt) return false;
-  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds, record.proposal.binding.permission);
+  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds, record.proposal.binding.permission, prompt.runtimeSelection);
   return sha256({
     candidates: current.candidates,
     targets: current.targets,
@@ -1406,13 +1420,23 @@ export async function resolveOneTeamPreflight(
     if (live.proposal.version !== input.expectedProposalVersion || live.reservation) {
       throw new OneTeamPreflightError("stale_binding", "The team proposal changed before reservation");
     }
+    const currentBound = exactTaskAndChat(live, deps);
+    if (!currentBound || !exactCandidateSnapshots(live, deps) || !exactRosterBinding(live, currentBound.chat, deps)) {
+      throw new OneTeamPreflightError("stale_binding", "The task or roster changed before the atomic reservation");
+    }
     const reservedAt = now.toISOString();
     const reservedStatus = requestedMode === "team"
       ? "team_reserved"
       : requestedMode === "workforce"
         ? "workforce_reserved"
         : "solo_reserved";
+    // Group creation and the invocation reservation are one durable decision.
+    // External workforce runs keep their existing acquisition authority.
+    const taskforce = requestedMode === "team" && live.main.taskForceTargets.every(target => target.source === "local")
+      ? ensureOneTaskforceForPreflight({ chatId: live.proposal.binding.chatId, memberAgentIds: live.main.candidates.slice(1).map(candidate => candidate.installedAgentId) })
+      : undefined;
     const proposal = mutateProposal(live.proposal, reservedStatus, now, {
+      ...(taskforce ? { taskforce } : {}),
       reservedRun: { mode: requestedMode as "team" | "workforce" | "solo", runId, reservedAt },
       startedRun: null,
     });
@@ -1433,6 +1457,7 @@ export async function resolveOneTeamPreflight(
     return next;
   });
   const reserved = reserve.immediate();
+  if (reserved.proposal.taskforce) notifyOneTaskforceFromPreflight(reserved.proposal.taskforce);
   deps.afterReservation?.(reserved.proposal);
   resolutionEvent(reserved.proposal, bound.task, input.resolution, actor);
   return {

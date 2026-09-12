@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import type {
   CreateOneTaskforceInput,
   OneTaskforce,
+  OneTaskforceReceipt,
   RemoveOneTaskforceInput,
   UpdateOneTaskforceInput,
 } from "../../shared/one-taskforces";
 import { createChat, renameChat } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getDb } from "../store/db";
+import { ensureOneGroupLocalStaff } from "./org";
 import {
   applySeatSnapshotToChats,
   dissolveSeat,
@@ -239,4 +241,40 @@ export function oneTaskforceRemovalPreview(input: { id: string }): { sessionCoun
   if (chatSeat?.seatId) return { sessionCount: seatSessionCount(chatSeat.seatId) };
   // 좌석 미이관 행 — 최소한 이 방의 대화 1개는 보존된다.
   return { sessionCount: 1 };
+}
+
+/** Promote the exact canonical One chat, retaining its task, messages and runtime.
+ * The caller owns the reservation transaction; no provider runs here.
+ */
+export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAgentIds: string[] }): OneTaskforceReceipt {
+  const db = getDb();
+  if (!db.inTransaction) throw new Error("one_group_transaction_required");
+  const chatId = assertId(input.chatId, "chatId");
+  const chat = db.prepare("SELECT title, origin_surface, archived_at, seat_id FROM chats WHERE id = ?").get(chatId) as
+    { title: string; origin_surface: string; archived_at: string | null; seat_id: string | null } | undefined;
+  if (!chat || chat.origin_surface !== "one" || chat.archived_at) throw new Error("one_group_chat_unavailable");
+  if (chat.seat_id && db.prepare("SELECT 1 FROM one_seats WHERE id = ? AND dissolved_at IS NOT NULL").get(chat.seat_id)) throw new Error("one_group_chat_unavailable");
+  const existing = db.prepare("SELECT * FROM one_taskforces WHERE chat_id = ?").get(chatId) as Row | undefined;
+  // A task-scoped extra participant does not rewrite an existing standing group.
+  const memberAgentIds = normalizeMemberIds(input.memberAgentIds, { allowUnavailable: true });
+  if (existing) {
+    ensureOneGroupLocalStaff(memberAgentIds, false);
+    return { id: existing.id, chatId, revision: existing.revision, memberAgentIds: readMemberIds(existing.member_agent_ids_json) };
+  }
+  if (!memberAgentIds.length) throw new Error("one_group_members_required");
+  ensureOneGroupLocalStaff(memberAgentIds);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const title = normalizeTitle(Array.from(chat.title.trim() || "One Team").slice(0, 80).join(""));
+  db.prepare(`INSERT INTO one_taskforces (id, chat_id, title, description, member_agent_ids_json, created_at, updated_at, revision)
+    VALUES (?, ?, ?, '', ?, ?, ?, 1)`).run(id, chatId, title, JSON.stringify(memberAgentIds), now, now);
+  const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now });
+  db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
+  applySeatSnapshotToChats(seatId);
+  return { id, chatId, revision: 1, memberAgentIds };
+}
+
+export function notifyOneTaskforceFromPreflight(receipt: OneTaskforceReceipt): void {
+  emitTaskforceChanged(receipt.id);
+  emitDesktopStoreChange({ entity: "one-org" });
 }

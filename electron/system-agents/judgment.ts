@@ -1226,9 +1226,9 @@ export function clearJudgmentCache(): void {
  * model's verdict here. A miss simply means "not judged yet" — the caller keeps its own
  * conservative default, so behaviour never depends on cache timing.
  */
-export function peekJudgment<V extends string>(kind: string, input: string, maxInputChars = MAX_INPUT_CHARS): Verdict<V> | null {
+export function peekJudgment<V extends string>(kind: string, input: string, maxInputChars = MAX_INPUT_CHARS, runtimeSelection?: RuntimeSelection): Verdict<V> | null {
   const text = input.length > maxInputChars ? input.slice(0, maxInputChars) : input;
-  const hit = cacheGet<V>(`${judgmentCacheKey(kind, text)}${runtimeSelectionCacheScope()}`);
+  const hit = cacheGet<V>(`${judgmentCacheKey(kind, text)}${runtimeSelectionCacheScope(runtimeSelection)}`);
   return hit ?? null;
 }
 

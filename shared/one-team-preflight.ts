@@ -1,3 +1,4 @@
+import type { OneTaskforceReceipt } from "./one-taskforces";
 import type { RuntimeSelection } from "./types";
 
 export const ONE_TEAM_PREFLIGHT_CONTRACT_VERSION = "1.0.0" as const;
@@ -123,6 +124,7 @@ export interface OneTeamPreflightProposal {
   version: number;
   status: OneTeamPreflightStatus;
   goalSummary: string;
+  taskforce?: OneTaskforceReceipt;
   /**
    * 사람이 부른 팀원 중 이번에 올 수 없는 사람과 그 사유. 조용히 빠지면
    * "왜 One 만 답하지" 로만 보인다(오너 지적 2026-08-24).
@@ -363,9 +365,16 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
     "contractVersion", "proposalId", "version", "status", "goalSummary", "binding",
     "complexityReasons", "roles", "cost", "selectionBoundary", "limitation", "canConfirmTeam",
     "canConfirmWorkforce", "reservedRun", "startedRun", "createdAt", "updatedAt", "expiresAt",
-  ], ["unavailableMembers"])) return false;
+  ], ["unavailableMembers", "taskforce"])) return false;
   if (proposal.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION || !safeId(proposal.proposalId)) return false;
   if (!Number.isSafeInteger(proposal.version) || Number(proposal.version) < 1 || !STATUSES.has(proposal.status as OneTeamPreflightStatus)) return false;
+  if (proposal.taskforce !== undefined) {
+    const group = objectValue(proposal.taskforce);
+    if (!group || !exactKeys(group, ["id", "chatId", "revision", "memberAgentIds"])
+      || !safeId(group.id) || !safeId(group.chatId) || !Number.isSafeInteger(group.revision) || Number(group.revision) < 1
+      || !Array.isArray(group.memberAgentIds) || group.memberAgentIds.length > 16
+      || !group.memberAgentIds.every(safeId) || new Set(group.memberAgentIds).size !== group.memberAgentIds.length) return false;
+  }
   const unavailableMembers = proposal.unavailableMembers ?? [];
   if (!Array.isArray(unavailableMembers) || unavailableMembers.length > 16) return false;
   for (const raw of unavailableMembers) {
@@ -385,6 +394,7 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   if (!binding || !exactKeys(binding, [
     "chatId", "taskId", "taskVersion", "promptDigest", "runtimeDigest", "permission",
   ])) return false;
+  if (proposal.taskforce && (proposal.taskforce as OneTaskforceReceipt).chatId !== binding.chatId) return false;
   if (!safeId(binding.chatId) || !safeId(binding.taskId) || !Number.isSafeInteger(binding.taskVersion) || Number(binding.taskVersion) < 1) return false;
   if (typeof binding.promptDigest !== "string" || !HASH_RE.test(binding.promptDigest)) return false;
   if (typeof binding.runtimeDigest !== "string" || !HASH_RE.test(binding.runtimeDigest)) return false;

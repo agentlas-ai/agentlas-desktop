@@ -1,4 +1,4 @@
-import type { AutomationHubMode, InstalledAgent } from "../../shared/types";
+import type { AutomationHubMode, InstalledAgent, RuntimeSelection } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import { judgeRequired, peekJudgment } from "../system-agents/judgment";
@@ -16,6 +16,7 @@ export interface AutoRouteExperiencePrior {
 }
 
 export interface AutoRouteOptions {
+  runtimeSelection?: RuntimeSelection;
   allowFallback?: boolean;
   judgedOnly?: boolean;
   judgedPeek?: boolean;
@@ -73,6 +74,7 @@ export async function selectAutoRoutedAgentJudged(
     ...(opts?.signal ? { signal: opts.signal } : {}),
     ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
     locale,
+    ...(opts?.runtimeSelection ? { runtimeSelection: opts.runtimeSelection } : {}),
   });
   if (!verdict.verdict || verdict.verdict === "none") {
     return { choice: null, source: verdict.source === "llm" ? "llm" : "unavailable" };
@@ -93,7 +95,7 @@ export function selectAutoRoutedAgent(
   _opts?: AutoRouteOptions,
 ): AutoRouteChoice | null {
   const pool = agents.filter((agent, index) => agents.findIndex((item) => item.slug === agent.slug) === index);
-  const verdict = peekJudgment<string>(AUTO_ROUTE_JUDGMENT_KIND, autoRouteJudgmentInput(userPrompt, pool));
+  const verdict = peekJudgment<string>(AUTO_ROUTE_JUDGMENT_KIND, autoRouteJudgmentInput(userPrompt, pool), undefined, _opts?.runtimeSelection);
   if (!verdict || verdict.source !== "llm" || verdict.verdict === "none") return null;
   const agent = pool.find((candidate) => candidate.slug === verdict.verdict);
   return agent ? { agent, reason: verdict.reason, matchedTerms: [] } : null;
