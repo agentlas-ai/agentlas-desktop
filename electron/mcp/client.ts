@@ -1,3 +1,4 @@
+import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
 import { renderInstructionSnapshot } from "../../shared/runtime-instructions";
@@ -1349,6 +1350,7 @@ export interface McpInvocationResult {
    * 호출자 쪽에 있다. 그 호출자에게 선언을 전달할 유일한 통로가 이 칸이다 —
    * 없으면 마커는 텍스트에서 지워진 뒤 아무 데도 도달하지 못한다.
    */
+  goalWaitRequest?: ParsedGoalWait;
   goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
   resultFolder?: string;
   /**
@@ -4747,6 +4749,7 @@ ${effectiveUserPrompt}`;
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
           turnContextParts.push(goalCompletionProtocol(locale));
+          if (!executionContext) turnContextParts.push(goalWaitProtocol());
         }
       }
     }
@@ -4867,7 +4870,7 @@ ${effectiveUserPrompt}`;
         if (signal?.aborted) throw new Error("checkpoint_dispatch_cancelled");
         if (!checkpoint) throw new Error("checkpoint_dispatch_context_missing");
         if (getLongRunByGoalId(checkpoint.goalId)?.status !== "running") throw new Error("checkpoint_dispatch_goal_not_running");
-        prepareCheckpointContinuation(checkpoint);
+        prepareCheckpointContinuation(checkpoint, req.runId);
       }
       const runtimeTurnContext = [turnContext, checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : ""].filter(Boolean).join("\n\n");
       return {
@@ -4970,7 +4973,8 @@ ${effectiveUserPrompt}`;
       // final-only so cancel/error can never persist an unfinished Memory block.
       onPartial: (text: string) => {
         if (!projectReadOnlyBoundary) {
-          sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${text}` : text });
+          const visible = activeGoalId && !executionContext ? stripGoalWaitDisplayText(text) : text;
+          sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${visible}` : visible });
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
@@ -5425,6 +5429,9 @@ ${effectiveUserPrompt}`;
     /** Set when a failed pass stopped the loop while leaving the goal open and resumable. */
     let goalPassStop: { reason: string; retryAfterHint?: string } | null = null;
     for (let pass = 2; pass <= maxPasses; pass += 1) {
+      // A structured external wait ends inference immediately. Only service
+      // settlement may accept it; neither completion nor another live pass wins.
+      if (activeGoalId && !executionContext && parseGoalWaitIntent(result.text).request) break;
       const rawContinuation = stripStormbreakerContinueMarker(result.text);
       const passClaim = stripGoalCompleteMarker(rawContinuation.text);
       if (passClaim.claimed) {
@@ -5605,7 +5612,7 @@ ${effectiveUserPrompt}`;
     // 같은 대화 안에서 스스로 복구 패스를 돌려 막힌 단계를 재실행하고 결과까지
     // 완주한다. 복구 패스가 도구 성공 증거를 남기고 무오류로 끝났을 때에만
     // 실패 흔적을 지운다 — 말로만 "됐다"고 하는 가짜 성공은 통과하지 못한다.
-    if (oneTeamExecutionPolicy && !req.agentAppMode) {
+    if (oneTeamExecutionPolicy && !req.agentAppMode && !parseGoalWaitIntent(result.text).request) {
       const ONE_RECOVERY_MAX_PASSES = 2;
       for (let attempt = 1; attempt <= ONE_RECOVERY_MAX_PASSES && observedOneToolFailure && !signal?.aborted; attempt += 1) {
         sink({
@@ -5664,6 +5671,9 @@ ${effectiveUserPrompt}`;
         if (oneRecoveryDecisionPending) partialFloor = "";
       }
     }
+    const waitProposal = !executionContext && activeGoalId ? parseGoalWaitIntent(result.text) : { text: result.text, request: null };
+    const goalWaitRequest = waitProposal.request;
+    result = { ...result, text: waitProposal.text };
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
     // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
@@ -5673,16 +5683,16 @@ ${effectiveUserPrompt}`;
     // 루프가 그 패스에서 마커를 떼어 냈기 때문이다. 선언은 OR로 합친다.
     const goalCompletion = {
       text: finalClaim.text,
-      claimed: finalClaim.claimed || goalClaimSeen,
+      claimed: !goalWaitRequest && (finalClaim.claimed || goalClaimSeen),
       evidence: finalClaim.evidence ?? goalClaimEvidence,
     };
-    let stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
+    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && finalContinuation.shouldContinue;
     result = { ...result, text: goalCompletion.text };
     // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
     // 라이브 루프가 이미 사이클을 기록했으면 그 판정을 재사용하고, 아니면(비-continuous
     // 경로·read 경계 등) 여기서 한 사이클을 기록해 회계를 이어간다. goal 미달이면 마커
     // 없이도 연속실행이 예약되고, 예산/정지/종료는 마커보다 우선한다.
-    if (!req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
+    if (!goalWaitRequest && !req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
       /*
        * ★순서가 계약이다. 선언을 원장에 반영한 **뒤에** 판정을 읽는다.
        * 반대로 하면 방금 닫은 task가 안 보이는 낡은 판정으로 완료를 놓치고,
@@ -6540,6 +6550,7 @@ ${effectiveUserPrompt}`;
         finalText: displayWithFloor,
         tokens: result.tokens,
         stormbreakerContinueRequested,
+        ...(goalWaitRequest ? { goalWaitRequest } : {}),
         goalCompletionClaim: {
           claimed: goalCompletion.claimed,
           evidence: goalCompletion.evidence,
@@ -6571,6 +6582,7 @@ ${effectiveUserPrompt}`;
       finalText: displayWithFloor,
       tokens: result.tokens,
       stormbreakerContinueRequested,
+      ...(goalWaitRequest ? { goalWaitRequest } : {}),
       goalCompletionClaim: {
         claimed: goalCompletion.claimed,
         evidence: goalCompletion.evidence,

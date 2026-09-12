@@ -1,3 +1,4 @@
+import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import type { McpInvocationRequest } from "../../shared/types";
@@ -42,6 +43,10 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
   const candidates = listLongRuns({ statuses: ["paused"], executionLocation: "desktop-local", limit: 500 });
   for (const candidate of candidates) {
     if (candidate.surface === "science" || !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
+    // Pending subscriptions restore observation, not ordinary inference.
+    // A claimed wake without a dispatch receipt is inspectable, never replayed.
+    const wait = latestGoalWaitSubscription(candidate.goalId);
+    if (wait && ["pending", "claimed"].includes(wait.state)) continue;
     const evaluated = getDb().prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_startup' AND json_extract(payload_json, '$.appInstanceId') = ? LIMIT 1")
       .get(candidate.id, appInstanceId);
     if (evaluated) continue;

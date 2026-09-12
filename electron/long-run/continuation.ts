@@ -17,7 +17,7 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
  * Existing client runnerRequestForRuntime delivers the compiled checkpoint in
  * native turnContext or managed systemPrompt; this also checks its full budget
  * before a continuation claim consumes the durable dispatch slot. */
-export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint): {
+export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint, dispatchInvocationId?: string): {
   runtimeSelection: RuntimeSelection; context: string; userPrompt: string;
 } {
   const run = getLongRunByGoalId(checkpoint.goalId);
@@ -61,6 +61,14 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint)
   const boundary = readInvocationEffectBoundary({ invocationRunId: expected.invocationRunId, expectedChatId: chat.id });
   if (boundary.effects !== "settled" || boundary.terminalEventId !== expected.terminalEventId
     || boundary.receiptEventId !== expected.receiptEventId || boundary.snapshotDigest !== expected.snapshotDigest) throw new Error("checkpoint_effect_boundary_changed");
+  const newest = getDb().prepare("SELECT invocation_run_id, state FROM long_run_worker_attempts WHERE run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY rowid DESC LIMIT 1")
+    .get(run.id, run.id) as { invocation_run_id: string | null; state: string } | undefined;
+  if (!newest || newest.invocation_run_id !== checkpoint.invocationRunId) {
+    const authorizedDispatch = dispatchInvocationId && newest?.invocation_run_id === dispatchInvocationId && newest.state === "running"
+      && getDb().prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind IN ('run.checkpoint_continuation','run.checkpoint_startup') AND json_extract(payload_json,'$.checkpointId') = ? AND json_extract(payload_json,'$.invocationRunId') = ? LIMIT 1")
+        .get(run.id, checkpoint.checkpointId, dispatchInvocationId);
+    if (!authorizedDispatch) throw new Error("checkpoint_newer_attempt_exists");
+  }
   const worker = getDb().prepare("SELECT runtime_selection_json FROM long_run_workers WHERE run_id = ? AND role = 'controller' ORDER BY updated_at DESC LIMIT 1")
     .get(run.id) as { runtime_selection_json: string } | undefined;
   if (!worker) throw new Error("checkpoint_runtime_binding_missing");

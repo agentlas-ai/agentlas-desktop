@@ -1,3 +1,4 @@
+import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
@@ -1597,6 +1598,9 @@ function tick(): void {
     console.error("[automation] stale run recovery failed:", err);
   }
   void runDueAutomationsNow();
+  // Goal subscriptions have their own ledger and the Main invocation dispatcher.
+  // Reuse this timer only; they are never converted into automation jobs.
+  void pollGoalWaitSubscriptions().catch(error => console.error("[goal-wait] observation failed:", error));
   // 폴 트리거 구동(설계 §3.3) — 새 타이머 없이 같은 60초 틱에 얹는다. nextPollAt<=now인
   // poll 자동화만 검사(적응형 간격). 매니저 미기동(헤드리스 등)이면 no-op.
   void (async () => {

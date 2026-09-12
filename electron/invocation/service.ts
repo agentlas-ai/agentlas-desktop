@@ -1,3 +1,4 @@
+import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { InvocationEffectBoundaryTracker } from "./effect-boundary";
 import { recordAgentSurface } from "../store/agent-surfaces";
@@ -1755,6 +1756,10 @@ export class InvocationService {
       }
     }
     let goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
+    if (!executionContext && goalLongRun?.rootChatId === chat.id) {
+      supersedeGoalWaitForInvocation(goalLongRun.goalId, runId);
+      goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
+    }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
     let goalInvocationProjection: DesktopLongRunInvocationProjection | null = null;
     const refreshGoalProjection = (): void => {
@@ -2682,6 +2687,35 @@ export class InvocationService {
             hasFinalText: Boolean(result.finalText?.trim()),
           },
         });
+        if (result.goalWaitRequest && !executionContext) {
+          try {
+            if (controller.signal.aborted || record.steeringInterruptRequested) return;
+            if (result.goalWaitRequest.status === "invalid") throw new Error(result.goalWaitRequest.reason);
+            const goalId = getChat(chat.id)?.goalId;
+            if (!goalId || goalId !== goalLongRun?.goalId) throw new Error("goal_wait_goal_binding_changed");
+            const subscription = registerGoalWaitSubscription({ goalId, invocationRunId: runId,
+              intent: result.goalWaitRequest.intent, hasTransientAttachments: record.hasTransientAttachments });
+            const message = pickLocale(runReq) === "ko" ? "대기를 등록했어요. 앱 실행 중 확인하며, 조건이 바뀌면 이어서 진행합니다."
+              : "The wait is registered. While the app is running, the Goal continues when its condition changes.";
+            appendChatMessage(chat.id, "assistant", message);
+            const event: McpInvocationEvent = { kind: "notice", notice: { code: "goal-wait-registered", level: "info", message } };
+            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: subscription.waitId,
+              goalId, subjectRef: subscription.subjectRef, nextCheckAt: subscription.nextCheckAt, deadline: subscription.deadline, executionAvailability: "app-running" } });
+            this.publishRunEvent(record, { runId, chatId: chat.id, event });
+          } catch (error) {
+            const reason = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_registration_failed";
+            const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
+            if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
+            tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
+            const message = pickLocale(runReq) === "ko" ? "대기를 등록하지 못했어요. 대기할 대상이나 실행 상태를 확인해 주세요."
+              : "The wait was not registered. Review the requested subject and the execution state.";
+            appendChatMessage(chat.id, "assistant", message);
+            this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice", notice: { code: reason, level: "warning", message } } });
+          }
+          // An invalid/unsafe wait is a blocker, never permission for the
+          // ordinary completion/retry path to keep calling the model.
+          return;
+        }
         const completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
           : undefined);
@@ -2884,6 +2918,21 @@ export class InvocationService {
       });
 
     return { runId };
+  }
+
+  /** Main-only scheduler seam. Claims are durable before this call; a crash
+   * after claim cannot dispatch a second successor on replay. */
+  resumeGoalWait(input: GoalWaitDispatch): { runId: string } {
+    const wait = latestGoalWaitSubscription(input.goalId), run = getLongRunByGoalId(input.goalId);
+    if (!this.acceptingStarts || !wait || wait.waitId !== input.waitId || wait.state !== "claimed"
+      || wait.successorInvocationId !== input.invocationRunId || wait.checkpointId !== input.checkpointId
+      || !run || run.status !== "running" || getChat(wait.chatId)?.goalId !== input.goalId
+      || input.request.chatId !== wait.chatId || input.request.runId !== input.invocationRunId
+      || this.activeChatIds().includes(wait.chatId) || this.steerQueues.get(wait.chatId)?.length) throw new Error("goal_wait_dispatch_state_changed");
+    const checkpoint = latestTaskCheckpoint(input.goalId);
+    if (!checkpoint || checkpoint.checkpointId !== input.checkpointId) throw new Error("goal_wait_checkpoint_changed");
+    prepareCheckpointContinuation(checkpoint);
+    return this.start(input.request, undefined, undefined, undefined, "goal-continuation");
   }
 
   private continueGoalCheckpoint(input: {

@@ -52,6 +52,7 @@ import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
+import { setGoalWaitHost, pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
 import {
@@ -4056,6 +4057,20 @@ app.whenReady().then(async () => {
   }
   if (!developmentEffectsSuppressed()) {
     try {
+      setGoalWaitHost({
+        dispatch: (input) => invocationService.resumeGoalWait(input),
+        isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
+        notify: (attention) => {
+          if (!Notification.isSupported()) return;
+          const body = attention.state === "dispatched" ? "기다리던 결과가 도착해 작업을 이어갑니다."
+            : attention.state === "expired" ? "기다리던 결과가 제한 시간 안에 도착하지 않았습니다."
+            : "기다리던 작업을 이어가기 전에 확인이 필요합니다.";
+          const notification = new Notification({ title: "Agentlas", body, silent: true });
+          notification.on("click", () => { void openOneFromNotification(); });
+          notification.show();
+        },
+      });
+      await pollGoalWaitSubscriptions();
       const { resumeSettledGoalCheckpoints } = await import("./long-run/startup-checkpoints");
       const resumed = resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
