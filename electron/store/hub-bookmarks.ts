@@ -65,7 +65,6 @@ function normalizeWebMasterListing(input: MarketplaceListing): MarketplaceListin
     tagline: WEB_MASTER_TAGLINE_KO,
     taglineEn: WEB_MASTER_TAGLINE_EN,
     entityKind: "team",
-    perCallCredits: typeof input.perCallCredits === "number" ? input.perCallCredits : 10,
     manifestUrl: input.manifestUrl || `https://agentlas.cloud/p/${WEB_MASTER_SLUG}`,
   };
 }

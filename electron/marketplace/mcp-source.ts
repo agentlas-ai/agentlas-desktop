@@ -211,6 +211,20 @@ function cleanNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function cleanPriceCredits(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= 1_000_000
+    ? value
+    : undefined;
+}
+
+function cleanPackageHash(value: unknown): string | undefined {
+  const hash = cleanString(value).toLowerCase();
+  return /^[a-f0-9]{64}$/u.test(hash) ? hash : undefined;
+}
+
 function cleanIsoString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -605,7 +619,7 @@ function normalizeListing(raw: MarketplaceListing): MarketplaceListing | null {
     `https://agentlas.cloud/api/mcp/v1/manifest/agent/${slug}`,
   );
 
-  return {
+  const normalized: MarketplaceListing = {
     ...record,
     slug,
     name,
@@ -616,6 +630,13 @@ function normalizeListing(raw: MarketplaceListing): MarketplaceListing | null {
     installCount: cleanNumber(record.installCount, cleanNumber(record.verifiedInvocations)),
     manifestUrl,
   };
+  const perCallCredits = cleanPriceCredits(record.perCallCredits);
+  const packageHash = cleanPackageHash(record.packageHash);
+  if (perCallCredits === undefined) delete normalized.perCallCredits;
+  else normalized.perCallCredits = perCallCredits;
+  if (packageHash === undefined) delete normalized.packageHash;
+  else normalized.packageHash = packageHash;
+  return normalized;
 }
 
 function normalizeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
@@ -778,8 +799,10 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
   );
   const taglineKo = cleanString(raw.taglineKo, taglineEn);
   const totalBorrows = cleanNumber(raw.totalBorrows);
-  // 그래프는 호출 가격이 없다(서버 pricing과 동일 규칙) — 기본값도 만들지 않는다.
-  const perCallCredits = entityKind === "graph" ? 0 : cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);
+  // 공개 응답에 실린 값만 가격으로 보존한다. 누락·음수·비정상 값은 미상이며,
+  // 자산 종류만 보고 3/10 크레딧을 만들어 내면 견적과 실제 결제가 달라진다.
+  const perCallCredits = cleanPriceCredits(raw.perCallCredits);
+  const packageHash = cleanPackageHash(raw.packageHash);
   // REST `kind` carries the entity shape (agent/team); delivery state lives in
   // deliveryKind. Anything other than an explicit cloud-callable is install-only.
   const deliveryKind = cleanString(raw.deliveryKind) === "cloud-callable" ? "cloud-callable" : "install-only";
@@ -808,7 +831,8 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
     routingStatus: "public-profile",
     source: "hub-profile",
     entityKind,
-    perCallCredits,
+    ...(perCallCredits !== undefined ? { perCallCredits } : {}),
+    ...(packageHash ? { packageHash } : {}),
     // verifiedInvocations is the invocation trust ledger, not borrow volume.
     ...(Number.isFinite(Number(raw.verifiedInvocations))
       ? { verifiedInvocations: cleanNumber(raw.verifiedInvocations) }

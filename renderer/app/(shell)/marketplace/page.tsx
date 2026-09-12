@@ -30,8 +30,6 @@ import type {
   MarketplaceSourceStatus,
 } from "@/lib/types";
 
-const TEAM_CALL_CREDITS = 10;
-const AGENT_CALL_CREDITS = 3;
 
 const C = {
   purple: "color-mix(in oklch, var(--rd-accent) 18%, var(--rd-surface))",
@@ -1350,9 +1348,12 @@ function AgentCard({
   const callable = !plugin && !graph && isCallableHubListing(listing);
   const perCallCredits = graph
     ? 0
-    : typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
+    : typeof listing.perCallCredits === "number"
+      && Number.isFinite(listing.perCallCredits)
+      && listing.perCallCredits >= 0
+      && listing.perCallCredits <= 1_000_000
       ? listing.perCallCredits
-      : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
+      : null;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
   // 이 플러그인을 실제로 제공하는 사이트. Hub가 아직 homepage를 못 돌려주는 낡은 응답이면
   // 최소한 Hub 자체 상세 페이지(manifestUrl)로라도 보낸다 — 링크가 아예 없는 것보다 낫다.
@@ -1406,7 +1407,9 @@ function AgentCard({
                   ? (ko
                     ? `${new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(new Date(leasedUntil))}까지 대여`
                     : `Leased until ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(leasedUntil))}`)
-                  : (ko ? `작업당 ${perCallCredits} 크레딧` : `${perCallCredits} credits per work order`))
+                  : perCallCredits === null
+                    ? (ko ? "가격 확인 필요" : "Price unavailable")
+                    : (ko ? `작업당 ${perCallCredits} 크레딧` : `${perCallCredits} credits per work order`))
                 : (ko ? "설치 후 사용" : "Install to use")}
         </span>
       </div>

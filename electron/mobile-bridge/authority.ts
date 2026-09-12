@@ -681,8 +681,11 @@ function projectBorrowableHubAgents() {
     nameEn: boundedRedactedText(bookmark.listing.nameEn, 512),
     entityKind: bookmark.listing.entityKind === "team" ? "team" : "agent",
     perCallCredits:
-      typeof bookmark.listing.perCallCredits === "number" && Number.isFinite(bookmark.listing.perCallCredits)
-        ? Math.max(0, bookmark.listing.perCallCredits)
+      typeof bookmark.listing.perCallCredits === "number"
+        && Number.isFinite(bookmark.listing.perCallCredits)
+        && bookmark.listing.perCallCredits >= 0
+        && bookmark.listing.perCallCredits <= 1_000_000
+        ? bookmark.listing.perCallCredits
         : null,
   }));
 }
