@@ -26,7 +26,7 @@ if (!fs.existsSync(dist)) {
   console.error(`빌드 산출물이 없다: ${dist}\n먼저 'npx tsc -p electron/tsconfig.json' 을 돌릴 것.`);
   process.exit(2);
 }
-const { agyBrowserEntryDisposition } = require(dist);
+const { agyBrowserEntryDisposition, isAgentlasWrittenMcpEntry } = require(dist);
 
 const failures = [];
 let passed = 0;
@@ -81,6 +81,48 @@ check("우리 것이 아닌 항목은 어떤 경우에도 손대지 않는다", 
       );
     }
   }
+});
+
+// ── 우리 항목인지 알아보는 판정 — 모양이 여러 가지다(실측 2026-09-12) ──
+check("브라우저 승인 프록시는 우리 것이다", () => {
+  assert.strictEqual(isAgentlasWrittenMcpEntry({
+    command: "/Applications/Agentlas.app/Contents/MacOS/Agentlas",
+    args: ["/x/dist/electron/mcp-tools/proxy-child.cjs"],
+    env: { ELECTRON_RUN_AS_NODE: "1", AGENTLAS_MCP_PROXY_CONTROL: "/tmp/c", AGENTLAS_MCP_PROXY_TARGET: "{}", AGENTLAS_MCP_PROXY_SERVER_KEY: "k", AGENTLAS_MCP_PROXY_SESSION: "s" },
+  }), true);
+});
+
+check("인라인 스크립트로 띄우는 내장 서버(Science·Time)도 우리 것이다", () => {
+  assert.strictEqual(isAgentlasWrittenMcpEntry({
+    command: "/Applications/Agentlas.app/Contents/MacOS/Agentlas",
+    args: ["-e", "/* inline */"],
+    env: { ELECTRON_RUN_AS_NODE: "1", AGENTLAS_AGY_MCP_GENERATION: "gen-1", AGENTLAS_AGY_MCP_SERVER_KEY: "agentlas-science" },
+  }), true, "지난 실행에 우리가 남긴 항목을 남의 것으로 오인하면 스스로를 거절한다");
+});
+
+check("사용자가 직접 등록한 서버는 우리 것이 아니다", () => {
+  for (const entry of [
+    { command: "npx", args: ["-y", "mongodb-mcp-server"], env: { MDB_MCP_CONNECTION_STRING: "x" } },
+    { command: "hephaestus", args: ["mcp", "serve"] },
+    { command: "npx", args: ["-y", "some-tool"], env: {} },
+    {},
+  ]) {
+    assert.strictEqual(isAgentlasWrittenMcpEntry(entry), false, `남의 항목을 우리 것으로 봤다: ${JSON.stringify(entry)}`);
+  }
+});
+
+check("우리 것이면 거절하지 않고 갈아 끼우는 경로로 간다", () => {
+  const source = fs.readFileSync(path.join(root, "electron/runtime/antigravity.ts"), "utf8");
+  assert.match(
+    source,
+    /if \(isAgentlasWrittenMcpEntry\(parsed\.mcpServers\[key\] \?\? \{\}\)\) continue;/,
+    "우리가 남긴 항목에서 scope-conflict 로 거절하는 길이 되살아났다",
+  );
+  assert.doesNotMatch(
+    source,
+    /key === "agentlas-browser"\s*&& !AGY_MCP_REFCOUNT\.has\(key\)/,
+    "교체 경로가 브라우저 키에만 열려 있으면 Science·Time 잔여 항목은 그대로 막힌다",
+  );
 });
 
 check("격리한 항목을 되돌리는 코드가 정리 경로에 있다", () => {

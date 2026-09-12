@@ -848,6 +848,22 @@ export function agyBrowserEntryDisposition(input: {
   return "quarantine";
 }
 
+/**
+ * 이 항목을 Agentlas 가 썼는가.
+ *
+ * 우리가 쓰는 모양은 한 가지가 아니다 — 브라우저 승인 프록시(proxy-child.cjs)도 우리 것이고,
+ * Science·Time 처럼 인라인 스크립트로 띄우는 내장 서버도 우리 것이다. 예전에는 프록시 모양
+ * 하나만 우리 것으로 알아봐서, **Science 가 지난 실행에 자기가 남긴 항목을 남의 것으로 오인해
+ * "다른 전송 범위" 라며 스스로를 거절했다**(2026-09-12 실측). 표식은 env 에 남는 우리 전용
+ * 키다 — 사용자가 직접 등록한 서버에는 없으므로 남의 항목을 뺏을 위험이 없다.
+ */
+export function isAgentlasWrittenMcpEntry(entry: AgyMcpServerEntry): boolean {
+  if (isAgentlasOwnedBrowserMcpEntry(entry)) return true;
+  return Object.keys(entry.env ?? {}).some(
+    (key) => key.startsWith("AGENTLAS_AGY_MCP_") || key.startsWith("AGENTLAS_MCP_PROXY_"),
+  );
+}
+
 export function isAgentlasOwnedBrowserMcpEntry(
   entry: AgyMcpServerEntry,
 ): boolean {
@@ -1133,7 +1149,9 @@ async function reconcileAgyMcpServersUnderLease(
     const live = AGY_MCP_REFCOUNT.get(key);
     const requestedEntry = requestedAgyMcpEntry(server);
     if (live === undefined) {
-      if (key === "agentlas-browser" && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[key] ?? {})) continue;
+      // 우리가 지난 실행에 남긴 항목은 '다른 전송 범위'가 아니라 우리 것이다 —
+      // 거절하지 말고 아래에서 이번 실행의 항목으로 갈아 끼운다.
+      if (isAgentlasWrittenMcpEntry(parsed.mcpServers[key] ?? {})) continue;
       if (!parsed.mcpServers[key] || isAgyMcpEntryEqual(parsed.mcpServers[key], requestedEntry ?? undefined)) continue;
       // Preserve user entries without borrowing their different scope. This
       // preflight must precede any process refcount or global-file mutation.
@@ -1217,9 +1235,8 @@ async function reconcileAgyMcpServersUnderLease(
        * 그래서 우리가 넣은 키는 참조 계수로 센다. 계수가 0이 될 때만 걷어낸다.
        */
       if (
-        key === "agentlas-browser"
-        && !AGY_MCP_REFCOUNT.has(key)
-        && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[key])
+        !AGY_MCP_REFCOUNT.has(key)
+        && isAgentlasWrittenMcpEntry(parsed.mcpServers[key])
       ) {
         rememberProcessState(key);
         const staged: AgyMcpServerEntry = {
