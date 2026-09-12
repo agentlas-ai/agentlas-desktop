@@ -50,6 +50,7 @@ import {
 } from "./extensions/science";
 
 // OS 권한이 필요해 데스크탑에 남은 넷
+import { probePdfLatexProfile } from "./science-host/pdflatex";
 import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf";
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
 
@@ -183,7 +184,7 @@ export function installDesktopScienceHost(): void {
       },
     },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
-    render: { renderManuscriptPdf, resolveTectonic },
+    render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile },
     runtimeCatalog: {
       detectRuntimes: async () => (await (await import("./runtime/detect")).detectRuntimes()).map((runtime) => ({ ...runtime, availableModels: runtime.availableModels ?? [] })),
       listRuntimeModels: async (kind, backend, models, timestamp) => (await import("./runtime/providers")).listRuntimeModels(kind, backend, models, timestamp),

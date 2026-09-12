@@ -1,6 +1,7 @@
 // PDF production for Science manuscripts.
 //
-// Two engines, always reported honestly:
+// Engines are always reported honestly:
+//   pdflatex — exact Main-owned offline profile, two passes, no fallback.
 //   tectonic  — real LaTeX typesetting when the toolchain exists on this machine
 //               (`tectonic` on PATH or in the usual Homebrew/user locations).
 //   chromium  — Electron's own print engine over the HTML rendering. Zero external
@@ -8,13 +9,14 @@
 // The caller pins the engine and fallback policy. Required LaTeX failures do
 // not launch Chromium; explicitly allowed draft fallback carries `degraded`.
 
+import { renderPdfWithPdfLatex, type PdfLatexProfileRef, type PdfLatexReceipt } from "./pdflatex";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type ManuscriptPdfEngine = "tectonic" | "chromium";
+export type ManuscriptPdfEngine = "tectonic" | "chromium" | "pdflatex";
 
 export interface LatexCompileDiagnostics {
   logSha256: string;
@@ -41,7 +43,8 @@ export interface ManuscriptPdfResult {
   reason?: string;
   log?: string;
   diagnostics?: LatexCompileDiagnostics;
-  toolchain?: TectonicToolchainReceipt;
+  toolchain?: TectonicToolchainReceipt | PdfLatexReceipt;
+  typesetFiles?: Array<{ name: string; bytes: Uint8Array }>;
 }
 
 /** Platform-native executable candidates; no shell or inferred engine fallback. */
@@ -173,10 +176,16 @@ export interface ManuscriptPdfInput {
   prefer: ManuscriptPdfEngine;
   /** Required typesetting must fail before invoking a different renderer. */
   allowFallback?: boolean;
+  pdfProfile?: PdfLatexProfileRef;
 }
 
 /** Produces a PDF with the requested engine, respecting required-engine failures. */
 export async function renderManuscriptPdf(input: ManuscriptPdfInput): Promise<ManuscriptPdfResult> {
+  if (input.prefer === "pdflatex") {
+    if (!input.latex) return { ok: false, engine: "pdflatex", reason: "publication_pdf_source_unavailable" };
+    if (input.allowFallback === true) return { ok: false, engine: "pdflatex", reason: "publication_pdf_fallback_forbidden" };
+    return renderPdfWithPdfLatex(input.latex, input.pdfProfile);
+  }
   if (input.prefer === "tectonic") {
     if (!input.latex && input.allowFallback === false) {
       return { ok: false, engine: "tectonic", reason: "publication_pdf_source_unavailable" };
@@ -192,5 +201,6 @@ export async function renderManuscriptPdf(input: ManuscriptPdfInput): Promise<Ma
     if (!fallback.ok) return { ok: false, reason: [latex?.reason, fallback.reason].filter(Boolean).join(" / ") || "pdf export failed" };
     return { ...fallback, degraded: latex === null ? "toolchain-missing" : "typeset-failed", ...(latex?.reason ? { degradedReason: latex.reason } : {}), log: latex?.log, diagnostics: latex?.diagnostics, toolchain: latex?.toolchain };
   }
-  return renderPdfWithChromium(input.html);
+  if (input.prefer === "chromium") return renderPdfWithChromium(input.html);
+  return { ok: false, reason: "publication_pdf_engine_unavailable" };
 }
