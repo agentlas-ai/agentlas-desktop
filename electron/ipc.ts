@@ -6531,6 +6531,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) =>
     invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
+  ipcMain.handle("invoke:replay", (_event, input: unknown) => invocationService.replay(input));
   ipcMain.handle("invoke:workerReport", (_event, scope) => getWorkerReport(scope));
   ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
   ipcMain.handle("invoke:latestOneSurface", (_event, input: unknown) => {

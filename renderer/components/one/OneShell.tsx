@@ -1,6 +1,7 @@
 "use client";
 
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
+import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
@@ -2650,6 +2651,8 @@ export function OneShell() {
   }, [reconcileConversationTask, scrollToLatest, settleRun, followStreamToLatest]);
 
   const consumeRunEventRef = useRef(consumeRunEvent);
+  const settleOrderedRunRef = useRef(settleRun);
+  settleOrderedRunRef.current = settleRun;
   useEffect(() => {
     consumeRunEventRef.current = consumeRunEvent;
   }, [consumeRunEvent]);
@@ -2659,7 +2662,36 @@ export function OneShell() {
     const events = ipcEvents();
     if (!api || !events) return;
     unsubscribeRunRef.current?.();
-    unsubscribeRunRef.current = events.on(api.invoke.eventChannel(runId), (event) => consumeRunEventRef.current(event, runId));
+    const chatId = runChatIdRef.current;
+    if (!chatId || typeof api.invoke.replay !== "function") {
+      unsubscribeRunRef.current = events.on(api.invoke.eventChannel(runId), event => consumeRunEventRef.current(event, runId));
+      return;
+    }
+    const owns = () => runIdRef.current === runId && runChatIdRef.current === chatId;
+    unsubscribeRunRef.current = subscribeOrderedRunEvents({ runId, chatId,
+      listen: listener => events.on(api.invoke.eventChannel(runId), listener),
+      replay: input => api.invoke.replay(input),
+      consume: event => { if (owns()) consumeRunEventRef.current(event, runId); },
+      recover: async snapshot => {
+        if (!owns() || !snapshot.receipt) return;
+        if (snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling") {
+          runIdRef.current = null; streamTextRef.current = "";
+          unsubscribeRunRef.current?.(); unsubscribeRunRef.current = null;
+          setBusy(false); setKeyRequestSheet(null);
+          await settleOrderedRunRef.current(chatId, runTaskIdRef.current, runId);
+          return;
+        }
+        const ledger = await api.runLedger.events(runId, 500);
+        if (!owns()) return;
+        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: snapshot.latestOrdinal };
+        activityEventRunIdRef.current = runId;
+        setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
+        if (snapshot.partialText !== undefined) {
+          streamTextRef.current = snapshot.partialText;
+          setMessages(current => owns() ? upsertLiveMessage(current, snapshot.partialText!, true) : current);
+        }
+      },
+    });
   }, []);
 
   useEffect(() => {
@@ -2879,7 +2911,7 @@ export function OneShell() {
         setBusy(true);
         setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
         subscribeRun(attachment.runId);
-        for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+        if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
       }
       /*
        * ★대화를 열면 **가장 최근 말**이 보여야 한다 (실측 2026-09-08).
@@ -3600,7 +3632,7 @@ export function OneShell() {
           return current.slice(1);
         });
         subscribeRun(attachment.runId);
-        for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+        if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
       }).catch(() => undefined);
     });
     return () => {
@@ -6530,7 +6562,7 @@ export function OneShell() {
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
             </nav>}
             <div className={styles.railBottomMenu}>
-              <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />Local Models</span></button>
+              <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />{appLocale === "ko" ? "로컬 모델" : "Local Models"}</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
               <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
               <span className={styles.connection} data-offline={!executionAvailable ? "true" : "false"} role="status"><span className={styles.connectionDot} aria-hidden="true" /><span>{connectionLabel}</span></span>
@@ -7893,10 +7925,10 @@ export function OneShell() {
               data-one-home-history-toggle="true"
               aria-expanded={false}
               aria-label={appLocale === "ko" ? "기록과 추천 펼치기" : "Expand history and recommendations"}
+              title={appLocale === "ko" ? "기록과 추천 펼치기" : "Expand history and recommendations"}
               onClick={() => setHomeHistoryOpen(true)}
             >
               <IconPanelRight size={15} />
-              <span>{appLocale === "ko" ? "기록" : "History"}</span>
             </button>
           </aside>
         )}

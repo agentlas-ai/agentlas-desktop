@@ -1088,6 +1088,7 @@ const api: AgentlasIpc = {
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),
     steer: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:steer", req),
     eventChannel: (runId: string) => `invoke:event:${runId}`,
+    replay: (input) => ipcRenderer.invoke("invoke:replay", input),
     cancel: (runId: string) => ipcRenderer.invoke("invoke:cancel", runId),
     unsteer: (req: { chatId: string; position: number; text: string }) => ipcRenderer.invoke("invoke:unsteer", req),
     history: (chatId: string) => ipcRenderer.invoke("invoke:history", chatId),

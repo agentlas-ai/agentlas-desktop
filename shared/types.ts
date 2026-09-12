@@ -4655,6 +4655,8 @@ export interface AgentlasUserDecisionRequest {
 }
 
 export interface McpInvocationEvent {
+  /** Main-owned transport identity, separate from lifecycle/effect evidence. */
+  delivery?: import("./run-event-delivery").RunEventDelivery;
   kind:
     | "lifecycle"
     | "thinking"
@@ -8132,6 +8134,7 @@ export interface AgentlasIpc {
   officeTaskContext: import("./office-task-context").OfficeTaskContextAPI;
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {
+    replay: (input: import("./run-event-delivery").RunEventReplayInput) => Promise<import("./run-event-delivery").RunEventReplay>;
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
     /** Queue a follow-up, cancel the current turn, then resume this chat after terminal settlement. */
     steer: (req: McpInvocationRequest) => Promise<InvocationSteerResult>;

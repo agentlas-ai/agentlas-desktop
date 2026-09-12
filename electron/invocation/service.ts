@@ -1,4 +1,6 @@
 import { withAdapterEffectContext } from "./adapter-effect-context";
+import { RunEventDeliveryJournal } from "./event-delivery";
+import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
@@ -255,6 +257,7 @@ interface RunRecord {
   hasTransientAttachments: boolean;
   /** Main-owned monotonic sequence shared by provider and resident-process events. */
   observableStepSequence: number;
+  deliveryOrdinal: number;
   executionSource?: InvocationExecutionContext["source"];
 }
 
@@ -744,6 +747,7 @@ function immutableWorkspaceBinding(
 }
 
 export class InvocationService {
+  private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
@@ -1369,6 +1373,7 @@ export class InvocationService {
         : {}),
       settlementPublished: false,
       observableStepSequence: 0,
+      deliveryOrdinal: 0,
       ...(executionContext?.source ? { executionSource: executionContext.source } : {}),
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
@@ -3335,6 +3340,16 @@ export class InvocationService {
     return found;
   }
 
+  replay(value: unknown): RunEventReplay {
+    const input = parseRunEventReplayInput(value);
+    const receipt = this.receipt(input.runId);
+    if (receipt && receipt.chatId !== input.chatId) throw new Error("run-event-replay-owner-mismatch");
+    const replay = this.deliveryJournal.replay(input);
+    const record = this.activeRuns.get(input.runId) ?? this.pendingGoalVerifications.get(input.runId);
+    if (record && record.chatId !== input.chatId) throw new Error("run-event-replay-owner-mismatch");
+    return { ...replay, receipt, ...(record && record.partialText.length <= 8 * 1024 * 1024 ? { partialText: record.partialText } : {}) };
+  }
+
   receipt(runId: string): InvocationRunReceipt | null {
     const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId);
     const durable = getInvocationRunReceipt(runId);
@@ -3450,7 +3465,8 @@ export class InvocationService {
     const scienceDelivery = record.executionSource === "science"
       ? recordScienceRuntimeOutboxEvent({ runId: envelope.runId, chatId: envelope.chatId, event: envelope.event })
       : undefined;
-    this.publishEvent(scienceDelivery ? { ...envelope, scienceDelivery } : envelope);
+    const event = this.deliveryJournal.publish(envelope.runId, envelope.chatId, envelope.event, ++record.deliveryOrdinal);
+    this.publishEvent(scienceDelivery ? { ...envelope, event, scienceDelivery } : { ...envelope, event });
   }
 
   private publishActiveChats(): void {

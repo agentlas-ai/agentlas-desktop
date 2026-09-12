@@ -3201,33 +3201,22 @@
   background: var(--paper-2);
 }
 
+/* A single labelled icon restores history without rotating text. */
 .homeHistoryExpand {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  /*
-   * 세로쓰기에서는 height 가 "글자가 흐르는 축"이라, 높이를 못박으면 글자가 잘린다
-   * (실측 2026-08-25: height:32px 에서 "History" 가 "Histor" 로 잘림). 두께는 width 로
-   * 정하고 글자 길이는 내용이 정하게 둔다.
-   */
-  width: 26px;
-  padding: 11px 0;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--paper-edge);
   border-radius: 9px;
   background: var(--paper);
   color: var(--muted-deep);
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
   cursor: pointer;
-  /* 좁은 띠 안에서는 세로로 세워 글자까지 읽히게 한다 — 아이콘만 있는 출구는 못 찾는다. */
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
 }
 .homeHistoryExpand:hover,
 .homeHistoryExpand:focus-visible { border-color: var(--paper-edge-strong); background: var(--paper-2); color: var(--ink); outline: none; }
-.homeHistoryExpand svg { transform: rotate(180deg); }
 
 .homeHistoryCollapse {
   position: absolute;

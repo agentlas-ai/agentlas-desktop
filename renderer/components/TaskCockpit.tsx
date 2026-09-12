@@ -2,6 +2,7 @@
 
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
+import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
@@ -3498,8 +3499,41 @@ function ChatPage() {
       if (!api || !events || !isCurrentChat()) return;
       const channel = api.invoke.eventChannel(runId);
       subRef.current?.();
-      subRef.current = events.on(channel, (ev: McpInvocationEvent) => {
-        if (isCurrentChat()) consumeEventRef.current(ev, placeholderId, lastStatusRef, runId);
+      const owns = () => isCurrentChat() && runIdRef.current === runId;
+      if (typeof api.invoke.replay !== "function") {
+        subRef.current = events.on(channel, ev => { if (owns()) consumeEventRef.current(ev, placeholderId, lastStatusRef, runId); });
+        return;
+      }
+      subRef.current = subscribeOrderedRunEvents({ runId, chatId,
+        listen: listener => events.on(channel, listener), replay: input => api.invoke.replay(input),
+        consume: ev => { if (owns()) consumeEventRef.current(ev, placeholderId, lastStatusRef, runId); },
+        recover: async snapshot => {
+          if (!owns() || !snapshot.receipt) return;
+          const terminal = snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling";
+          const [ledger, history] = await Promise.all([
+            api.runLedger.events(runId, 500),
+            terminal ? api.invoke.history(chatId) : Promise.resolve(null),
+          ]);
+          if (!owns()) return;
+          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: snapshot.latestOrdinal };
+          if (terminal && history) {
+            const next = attachMcpStepsToLatestAgent(history.map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
+            lastFinalRunIdRef.current = runId;
+            setMessages(current => isCurrentChat() && (!runIdRef.current || runIdRef.current === runId) && lastFinalRunIdRef.current === runId ? reconcileTranscriptSnapshot(current.map(message =>
+              message.id === placeholderId && message.runId === runId ? { ...message, busy: false, streaming: false, activityState: state } : message), next, null,
+              new Set(steerQueueRef.current.map(item => item.optimisticMessageId))) : current);
+            runIdRef.current = null;
+            subRef.current?.(); subRef.current = null;
+            setBusy(false); setCancelPending(false); setKeyRequestSheet(null);
+            return;
+          }
+          const partial = snapshot.partialText === undefined ? undefined : stripMultimodalSetup(extractQuestions(snapshot.partialText, placeholderId).text).text;
+          if (snapshot.partialText !== undefined) partialTextRef.current = snapshot.partialText;
+          setMessages(current => owns() ? current.map(message => message.id === placeholderId ? { ...message,
+            activityState: state, steps: mcpStepsFromLedger(ledger), ...(partial !== undefined ? { text: partial } : {}),
+            ...(message.activityRuns?.length ? { activityRuns: message.activityRuns.map(run => run.runId === runId ? { ...run, state } : run) } : {}),
+          } : message) : current);
+        },
       });
     },
     [isCurrentChat],
@@ -3950,8 +3984,8 @@ function ChatPage() {
         runIdRef.current = attached.runId;
         lastRunIdRef.current = attached.runId;
         const lastStatusRef = { text: "" };
-        for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef, attached.runId);
         if (runIdRef.current === attached.runId) subscribeRun(attached.runId, placeholderId, lastStatusRef);
+        if (typeof api.invoke.replay !== "function") for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef, attached.runId);
       }
     })().catch((error) => {
       if (cancelled) return;
@@ -4096,8 +4130,8 @@ function ChatPage() {
           partialTextRef.current = "";
           processedTextLenRef.current = 0;
           const lastStatusRef = { text: "" };
-          for (const event of attached.events) consumeEventRef.current(event, placeholderId, lastStatusRef, attached.runId);
           if (runIdRef.current === attached.runId) subscribeRun(attached.runId, placeholderId, lastStatusRef);
+          if (typeof api.invoke.replay !== "function") for (const event of attached.events) consumeEventRef.current(event, placeholderId, lastStatusRef, attached.runId);
         }).catch(() => undefined);
         return;
       }
