@@ -1,6 +1,6 @@
 import type { Automation, Trigger } from "../shared/types";
 import type { AutomationMonitorContract } from "../shared/automation-monitor";
-import type { ParsedAutomation } from "./automation-emitter";
+import { parseAutomations, type ParsedAutomation } from "./automation-emitter";
 
 /** Only exact receipts/session identity or an unambiguous same-origin name may
  * select an existing automation. Global display names are not identity. */
@@ -48,4 +48,14 @@ export function automationRegistrationMonitoring(input: {
   if (!next.pollState) next.pollState = {schemaVersion:"agentlas.poll-state.v1",revision:1,
     nextCheckAt:(input.now ?? new Date()).toISOString(), currentIntervalMs:emitted.minIntervalMs, observedAt:null,status:"pending"};
   return {monitor,triggerType:"poll",trigger:next};
+}
+
+/** A parsed proposal needs the host consumer before another inference pass.
+ * This is admission to registration/permission validation, never completion. */
+export function hasAutomationRegistrationHandoff(text: string, input: {
+  agentAppMode: boolean; division: boolean; sessionAutomationId?: string; backgroundAutomation: boolean;
+}): boolean {
+  if (input.agentAppMode || input.backgroundAutomation || (input.division && !input.sessionAutomationId)) return false;
+  const parsed = parseAutomations(text);
+  return parsed.automations.length > 0 || parsed.errors.length > 0;
 }

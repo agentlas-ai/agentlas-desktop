@@ -219,6 +219,10 @@ function resolveSchedule(
     return { spec: { kind: "cron", expr: cron, tz: tz || "UTC" }, token: `cron:${cron}`, tz };
   }
 
+  if (o.time !== undefined && (typeof o.time !== "string" || !/^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(o.time))) {
+    errors.push("Invalid 24-hour schedule time rejected");
+    return fallback;
+  }
   const preset = (o.preset ?? "daily") as SchedulePreset;
   const time = typeof o.time === "string" && /^\d{1,2}:\d{2}$/.test(o.time) ? o.time : "09:00";
   const spec = compilePreset(preset, time, tz || "UTC", { dow: o.dow, day: o.day });

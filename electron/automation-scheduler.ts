@@ -1,4 +1,5 @@
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
+import { deliverAutomationResult } from "./automation-delivery";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
@@ -628,8 +629,8 @@ async function runOne(
   let leaseOwnershipLost = false;
   let leaseHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let leaseRenewWarningEmitted = false;
+  const controller = new AbortController();
   try {
-    const controller = new AbortController();
     /*
      * ★사람이 멈출 수 있게 이 실행의 중단 손잡이를 등록한다.
      *
@@ -852,10 +853,10 @@ async function runOne(
         }
         throw err;
       } finally {
-    if (ABORT_BY_AUTOMATION.get(a.id) === controller) ABORT_BY_AUTOMATION.delete(a.id);
         acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
+      if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
       const graphError = graphStall
         ? automationWatchdogError(graphStall)
         : result.error ?? null;
@@ -901,6 +902,7 @@ async function runOne(
           // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
           declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
+        if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
         runOutcomeReason = classified.reason ?? null;
@@ -1075,6 +1077,7 @@ async function runOne(
         if (stallDecision) {
           throw new Error(automationWatchdogError(stallDecision));
         }
+        if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
@@ -1085,6 +1088,7 @@ async function runOne(
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
           declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
+        if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.
         // 여기서 runStatus를 덮으면 "끝까지 돌았다"는 사실이 다시 지워진다.
@@ -1209,10 +1213,10 @@ async function runOne(
     // 판정은 원문을 읽기 좋은 한 문장으로 **교체**하므로, 교체된 문장에서 다시 표식을 찾으면
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = rawError;
-    const classified = await classifyAutomationFailure(rawError, {
-      runtimeSelection: a.runtimeSelection,
-    });
-    runStatus = classified.status;
+    const classified = controller.signal.aborted
+      ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
+      : await classifyAutomationFailure(rawError, { runtimeSelection: a.runtimeSelection });
+    runStatus = controller.signal.aborted ? "partial" : classified.status;
     // Keep the graph kernel's machine gate alongside the human explanation.
     // The fresh-run UI must be able to distinguish an intentional replay
     // refusal from an unrelated failed preflight; the judgment service is
@@ -1220,7 +1224,9 @@ async function runOne(
     const durableGateCode = rawError.match(
       /^(automation_(?:fresh_run_blocked|ambiguous_side_effect|partial_reconciliation_required|partial_graph_changed))(?::|$)/i,
     )?.[1] ?? null;
-    const classifiedReason = classified.reasonCode
+    const classifiedReason = controller.signal.aborted
+      ? "[automation_stopped_by_user] The run was stopped. Review its recorded effects before restarting."
+      : classified.reasonCode
       ? `[${classified.reasonCode}] ${classified.reason ?? rawError}`
       : classified.reason ?? rawError;
     runError = durableGateCode
@@ -1238,6 +1244,7 @@ async function runOne(
       console.error(`[automation] run failed (${a.name}):`, err);
     }
   } finally {
+    if (ABORT_BY_AUTOMATION.get(a.id) === controller) ABORT_BY_AUTOMATION.delete(a.id);
     if (leaseHeartbeatTimer) {
       clearInterval(leaseHeartbeatTimer);
       leaseHeartbeatTimer = null;
@@ -1330,6 +1337,7 @@ async function runOne(
     if (
       runStatus !== "ok" && runStatus !== "skipped" && runStatus !== "needs_input" &&
       runOutcome !== "needs_input" &&
+      !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
       !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
     ) {
       try {
@@ -1359,7 +1367,7 @@ async function runOne(
       }
     }
     try {
-      if (!parentMissing && !leaseOwnershipLost && currentRunId && claimAutomationNotification({
+      if (!parentMissing && !leaseOwnershipLost && currentRunId && deliverAutomationResult({
         automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError,
         ...(typeof opts?.triggerContext?.observationDigest === "string" ? { observationDigest: opts.triggerContext.observationDigest } : {}),
         unchanged: opts?.triggerContext?.unchanged === true,
@@ -1399,6 +1407,7 @@ async function runOne(
   // 완주된 결과를 받았어야 했다. 재시도는 1회뿐이고(표식), 스케줄은 이미
   // 전진했으므로 advanceSchedule=false, 리스는 새로 잡는다.
   if (
+    !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
     !opts?.zeroToolRetried &&
     !opts?.dryRun &&
     typeof runError === "string" &&

@@ -6819,7 +6819,7 @@ export function OneShell() {
                           {liveWorkBlock}
                         </>}
                         {(visibleText || hasAttachments) && (normalizeChatHostNotice(message.role, message.hostNotice)
-                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} />
+                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} />
                           : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One

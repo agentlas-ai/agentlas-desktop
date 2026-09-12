@@ -1866,10 +1866,9 @@ export interface AgentConcurrencyInfo {
 }
 
 /** Main-authored display metadata. It grants no execution authority. */
-export interface ChatHostNotice {
-  purpose: "goal-continuation";
-  runId: string;
-}
+export type ChatHostNotice =
+  | { purpose: "goal-continuation"; runId: string }
+  | { purpose: "automation-report"; runId: string; automationId: string };
 
 export interface ChatHistoryEntry {
   goalResult?: import("./goal-result").GoalResultPresentation;

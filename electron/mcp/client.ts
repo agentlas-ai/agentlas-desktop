@@ -164,7 +164,7 @@ import {
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
-import { automationRegistrationMonitoring, resolveAutomationRegistrationTarget } from "../automation-registration";
+import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -1786,7 +1786,7 @@ export async function runMcpInvocation(
   const persistUserMessage = () => {
     if (req.agentAppMode || userMessagePersisted) return;
     if (promptIsSystemAuthored) {
-      appendChatMessage(chat.id, "system", req.userPrompt, hostNoticePurpose && req.runId
+      appendChatMessage(chat.id, "system", req.userPrompt, hostNoticePurpose === "goal-continuation" && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
     } else {
       /*
@@ -5428,7 +5428,14 @@ ${effectiveUserPrompt}`;
     let identicalPassStreak = 0;
     /** Set when a failed pass stopped the loop while leaving the goal open and resumable. */
     let goalPassStop: { reason: string; retryAfterHint?: string } | null = null;
+    const needsAutomationRegistration = (text: string): boolean => hasAutomationRegistrationHandoff(text, {
+      agentAppMode: req.agentAppMode === true, division: chat.kind === "division",
+      sessionAutomationId: req.automationId, backgroundAutomation: executionContext?.source === "automation",
+    });
     for (let pass = 2; pass <= maxPasses; pass += 1) {
+      // The host must consume a schedule proposal before the Goal can judge its
+      // receipt. Continuing inference here starves the registration below.
+      if (needsAutomationRegistration(result.text)) break;
       // A structured external wait ends inference immediately. Only service
       // settlement may accept it; neither completion nor another live pass wins.
       if (activeGoalId && !executionContext && parseGoalWaitIntent(result.text).request) break;
@@ -5612,7 +5619,7 @@ ${effectiveUserPrompt}`;
     // 같은 대화 안에서 스스로 복구 패스를 돌려 막힌 단계를 재실행하고 결과까지
     // 완주한다. 복구 패스가 도구 성공 증거를 남기고 무오류로 끝났을 때에만
     // 실패 흔적을 지운다 — 말로만 "됐다"고 하는 가짜 성공은 통과하지 못한다.
-    if (oneTeamExecutionPolicy && !req.agentAppMode && !parseGoalWaitIntent(result.text).request) {
+    if (oneTeamExecutionPolicy && !req.agentAppMode && !needsAutomationRegistration(result.text) && !parseGoalWaitIntent(result.text).request) {
       const ONE_RECOVERY_MAX_PASSES = 2;
       for (let attempt = 1; attempt <= ONE_RECOVERY_MAX_PASSES && observedOneToolFailure && !signal?.aborted; attempt += 1) {
         sink({
@@ -5671,6 +5678,7 @@ ${effectiveUserPrompt}`;
         if (oneRecoveryDecisionPending) partialFloor = "";
       }
     }
+    const automationHandoff = needsAutomationRegistration(result.text);
     const waitProposal = !executionContext && activeGoalId ? parseGoalWaitIntent(result.text) : { text: result.text, request: null };
     const goalWaitRequest = waitProposal.request;
     result = { ...result, text: waitProposal.text };
@@ -5686,13 +5694,13 @@ ${effectiveUserPrompt}`;
       claimed: !goalWaitRequest && (finalClaim.claimed || goalClaimSeen),
       evidence: finalClaim.evidence ?? goalClaimEvidence,
     };
-    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && finalContinuation.shouldContinue;
+    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && finalContinuation.shouldContinue;
     result = { ...result, text: goalCompletion.text };
     // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
     // 라이브 루프가 이미 사이클을 기록했으면 그 판정을 재사용하고, 아니면(비-continuous
     // 경로·read 경계 등) 여기서 한 사이클을 기록해 회계를 이어간다. goal 미달이면 마커
     // 없이도 연속실행이 예약되고, 예산/정지/종료는 마커보다 우선한다.
-    if (!goalWaitRequest && !req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
+    if (!goalWaitRequest && !automationHandoff && !req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
       /*
        * ★순서가 계약이다. 선언을 원장에 반영한 **뒤에** 판정을 읽는다.
        * 반대로 하면 방금 닫은 task가 안 보이는 낡은 판정으로 완료를 놓치고,
@@ -5901,6 +5909,7 @@ ${effectiveUserPrompt}`;
         if (errors.length > 0) {
           // 조용히 드롭하지 않고 표면화(설계 §2.5) — 로그로 남겨 진단 가능하게.
           console.warn("[automation] parse warnings:", errors.join("; "));
+          automationRefusals.push(...errors);
         }
         if (autos.length > 0 && !canWrite) {
           automationPermissionRequired = true;
@@ -5921,7 +5930,7 @@ ${effectiveUserPrompt}`;
                 : `Setting up ${autos.length} automation${autos.length === 1 ? "" : "s"}`,
           });
         }
-        for (const a of canWrite ? autos : []) {
+        for (const a of canWrite && !signal?.aborted ? autos : []) {
           // 등록 시점 구조 게이트 — 정의·사유는 automation-emitter의
           // automationRegistrationGateProblems (순수 함수, 하네스와 동일 코드 객체).
           const gateProblems = automationRegistrationGateProblems(a);
@@ -5955,7 +5964,9 @@ ${effectiveUserPrompt}`;
             continue;
           }
           const monitoring = automationRegistrationMonitoring({parsed:a,chatId:chat.id,messageId:persistedUserMessageId,existing:dup});
+          const registrationOperationId = `host-automation:${randomUUID()}`;
           if (dup) {
+            sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.update",args:JSON.stringify({automationId:dup.id,name:a.name})}});
             const updated = updateAutomation(dup.id, {
               ...monitoring,
               ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
@@ -5994,6 +6005,8 @@ ${effectiveUserPrompt}`;
             sink({
               kind: "tool-use",
               tool: {
+                id: registrationOperationId,
+                isError: false,
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
                   automationId: registration.automationId,
@@ -6022,10 +6035,14 @@ ${effectiveUserPrompt}`;
               },
             });
           } else {
+            sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.create",args:JSON.stringify({name:a.name})}});
             const created = createAutomation({
               ...monitoring,
               ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
               name: a.name,
+              // An explicit user runtime remains the execution binding of the
+              // durable job. Later Worker defaults must not silently replace it.
+              ...(req.runtimeSelection ? { runtimeSelection: req.runtimeSelection } : {}),
               scheduleHuman: a.schedule,
               targetType,
               targetId,
@@ -6053,6 +6070,8 @@ ${effectiveUserPrompt}`;
             sink({
               kind: "tool-use",
               tool: {
+                id: registrationOperationId,
+                isError: false,
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
                   automationId: registration.automationId,

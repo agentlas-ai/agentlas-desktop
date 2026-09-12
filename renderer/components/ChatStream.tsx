@@ -975,7 +975,7 @@ const Bubble = memo(function Bubble({
   }
   if (message.role === "system") {
     if (normalizeChatHostNotice(message.role, message.hostNotice)) {
-      return <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} />;
+      return <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} />;
     }
     if (isInternalSystemNote(message.text)) return null;
     const isError = message.text.trim().startsWith("⚠️");

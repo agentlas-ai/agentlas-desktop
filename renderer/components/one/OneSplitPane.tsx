@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
+import { HostContinuationNotice } from "@/components/HostContinuationNotice";
+import { normalizeChatHostNotice } from "@shared/chat-host-notice";
+import type { ChatHostNotice } from "@shared/types";
 import { ipc } from "@/lib/ipc";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
@@ -22,6 +25,7 @@ export interface OneSplitPaneMessage {
   role: string;
   text: string;
   createdAt?: string | null;
+  hostNotice?: ChatHostNotice;
 }
 
 export function OneSplitPane({
@@ -200,6 +204,8 @@ export function OneSplitPane({
           const text = typeof message.text === "string" ? message.text.trim() : "";
           if (!text) return null;
           if (message.role === "system") {
+            const notice = normalizeChatHostNotice(message.role, message.hostNotice);
+            if (notice) return <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} />;
             return (
               <p key={message.id} className={styles.systemTurn} data-role="system">{text}</p>
             );
