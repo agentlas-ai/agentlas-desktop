@@ -3,6 +3,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -108,34 +109,46 @@ export function OneMemorySheet({
   const [durable, setDurable] = useState<OneDurableMemoryEntryUi[] | null>(null);
   const [durableQuery, setDurableQuery] = useState("");
   const [durableExpanded, setDurableExpanded] = useState(false);
+  const durableRequest = useRef(0);
   useEffect(() => {
+    const request = ++durableRequest.current;
     if (!open) return;
-    let cancelled = false;
+    setBusyId(null);
+    setDurable(null);
     const api = ipc();
     if (!api?.oneMemory?.listEntries) {
       setDurable([]);
       return;
     }
     api.oneMemory.listEntries({ limit: 1000 })
-      .then((rows) => { if (!cancelled) setDurable(rows); })
-      .catch(() => { if (!cancelled) setDurable([]); });
-    return () => { cancelled = true; };
+      .then((rows) => { if (request === durableRequest.current) setDurable(rows); })
+      .catch(() => { if (request === durableRequest.current) setDurable([]); });
+    return () => { ++durableRequest.current; };
   }, [open]);
   const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
     const api = ipc();
     if (!api?.oneMemory?.forgetEntry) return;
+    const request = ++durableRequest.current;
     setBusyId(entry.id);
+    setMessage(null);
+    setError(null);
     try {
       const result = await api.oneMemory.forgetEntry({ memoryId: entry.id });
+      if (request !== durableRequest.current) return;
+      // Main may revoke several duplicate rows. Replace the complete projection
+      // instead of leaving another forgotten row visible until the sheet reopens.
+      setDurable(null);
+      const rows = await api.oneMemory.listEntries({ limit: 1000 });
+      if (request !== durableRequest.current) return;
+      setDurable(rows);
       if (result.ok) {
-        setDurable((current) => (current ?? []).filter((row) => row.id !== entry.id));
         setMessage(locale === "ko" ? "잊었어요. 기억 지도에서도 사라집니다." : "Forgotten. It leaves the memory map too.");
         setError(null);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (request === durableRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusyId(null);
+      if (request === durableRequest.current) setBusyId(null);
     }
   };
   const durableFiltered = useMemo(() => {
