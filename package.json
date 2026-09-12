@@ -365,7 +365,7 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "github:agentlas-ai/agentlas-science#fd82e8dcdc85e41817235022ffa535e1a7296089",
+    "agentlas-science": "github:agentlas-ai/agentlas-science#8be7ce1c61fdb9509c31e900f3e0350d61dc86e9",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
     "croner": "^9.1.0",
