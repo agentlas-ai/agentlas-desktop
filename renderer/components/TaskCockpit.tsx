@@ -1416,6 +1416,26 @@ function dedupeStreamMessages(messages: StreamMessage[]): StreamMessage[] {
  * only freshly settled live messages that the durable snapshot does not yet
  * contain; the next reconciliation naturally deduplicates them by role+text.
  */
+function settleTranscriptRun(
+  current: StreamMessage[],
+  receipt: InvocationRunReceipt | null,
+  runId: string | null,
+  chatId: string,
+  ledger: Parameters<typeof projectOneActivityFromLedger>[0],
+): StreamMessage[] {
+  if (!runId || receipt?.runId !== runId || receipt.chatId !== chatId
+    || !["completed", "failed", "cancelled", "interrupted"].includes(receipt.status)) return current;
+  const activityState = projectOneActivityFromLedger(ledger, receipt);
+  const finishedAt = receipt.finishedAt ? Date.parse(receipt.finishedAt) : NaN;
+  return current.map(message => message.role === "agent" && message.runId === runId
+    ? { ...message, busy: false, streaming: false, activityState,
+      ...(Number.isFinite(finishedAt) ? { finishedAt } : {}),
+      ...(message.thinking ? { thinking: { ...message.thinking, active: false } } : {}),
+      ...(message.activityRuns?.length ? { activityRuns: message.activityRuns.map(run =>
+        run.runId === runId ? { ...run, state: activityState } : run) } : {}),
+    } : message);
+}
+
 function reconcileTranscriptSnapshot(
   current: StreamMessage[],
   durable: StreamMessage[],
@@ -1493,6 +1513,7 @@ function reconcileTranscriptSnapshot(
     && !message.streaming
     && message.text.trim().length > 0
     && !durableTailSignatures.has(signature(message))
+    && !durableWithRichSteps.some(durableMessage => exactMessageIdentityMatches(message, durableMessage))
   ));
   const tail = [...freshlySettled, ...pendingDirections].filter((message, index, rows) => (
     rows.findIndex((candidate) => candidate.id === message.id) === index
@@ -4169,6 +4190,7 @@ function ChatPage() {
         const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
+        if (!isCurrentChat() || (runIdRef.current && runIdRef.current !== endedRunId)) return;
         const historyMessages = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
         const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
         const next = hasHydratedWorkActivities(hydrated)
@@ -4182,7 +4204,10 @@ function ChatPage() {
         setMessages((current) => {
           if (transcriptRevisionRef.current !== historyRevision) return current;
           const optimisticIds = new Set(steerQueueRef.current.map((item) => item.optimisticMessageId));
-          return reconcileTranscriptSnapshot(current, next, recovery, optimisticIds);
+          // Active-chat removal can beat the frame that consumes the terminal
+          // event. Settle only its canonical run before the live-draft guard;
+          // a newer run still keeps that guard and its subscription intact.
+          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents), next, recovery, optimisticIds);
         });
       });
     });
@@ -4226,7 +4251,7 @@ function ChatPage() {
         const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
-        if (!stopped) {
+        if (!stopped && isCurrentChat() && (!runIdRef.current || runIdRef.current === endedRunId)) {
           const historyMessages = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
           const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
           const next = hasHydratedWorkActivities(hydrated)
@@ -4240,7 +4265,7 @@ function ChatPage() {
           setMessages((current) => (
             transcriptRevisionRef.current === historyRevision
               ? reconcileTranscriptSnapshot(
-                  current,
+                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents),
                   next,
                   recovery,
                   new Set(steerQueueRef.current.map((item) => item.optimisticMessageId)),
