@@ -1,6 +1,8 @@
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { pickLocalized, type Locale } from "@/lib/i18n";
+import { redactSecrets } from "@shared/secret-patterns";
+import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "@shared/project-hub-recommendation";
 import {
   isUserFacingProjectAgent,
   projectPoolMemberKey,
@@ -12,6 +14,7 @@ import type {
   InstalledFirm,
   MarketplaceListing,
   ProjectAgentPoolMember,
+  Project,
 } from "@/lib/types";
 
 export type ProjectRosterSource = "local" | "cloud" | "hub";
@@ -25,6 +28,8 @@ export interface ProjectRosterCandidate {
   kind: "agent" | "team";
   installed: boolean;
   callable: boolean;
+  /** Equivalent source-native ids (for Hub, slug and definition id). */
+  identityAliases?: string[];
   blockedReason?: string;
 }
 
@@ -50,6 +55,13 @@ export interface ProjectRosterSection {
   labelEn: string;
   firms: ProjectRosterFirm[];
   standalone: ProjectRosterCandidate[];
+}
+
+export interface ProjectHubRecommendation {
+  listing: MarketplaceListing;
+  candidate: ProjectRosterCandidate;
+  reason: string;
+  bookmarked: boolean;
 }
 
 // The pool key and the user-facing predicate are shared with the Mobile Bridge
@@ -261,10 +273,175 @@ function remoteProjectCandidate(
     kind: entityKind,
     installed: false,
     callable: hasIdentity,
+    identityAliases: [listing.slug, listing.agentDefinitionId]
+      .map((value) => String(value ?? "").trim().toLowerCase())
+      .filter(Boolean),
     blockedReason: hasIdentity
       ? undefined
       : (locale === "ko" ? "이 목록 행에는 식별자가 없습니다." : "This catalog row carries no identity."),
   };
+}
+
+/**
+ * Turn the user's existing project context into one natural-language Hub query.
+ * `marketplace.search` owns remote matching and result order. This helper
+ * deliberately does not invent a client-side score or label substring matching
+ * as AI judgment because the remote search may use a lexical fallback.
+ */
+export function buildProjectHubRecommendationQuery(project: Pick<Project, "name" | "description" | "systemPrompt">): string {
+  const publicSafe = (value: string): string => redactSecrets(value)
+    .replace(/https?:\/\/[^\s<>"']+/gi, "[redacted-url]")
+    .replace(/\b[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gi, "[redacted-path]")
+    .replace(/(^|[\s"'(])\/(?:[^/\s"'<>]+\/)+[^\s"'<>)]*/g, "$1[redacted-path]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+    .replace(/\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/g, "[redacted-identifier]");
+  const passage = (value: string | null) => {
+    const cleaned = publicSafe(String(value ?? "")).replace(/\s+/g, " ").trim();
+    return cleaned ? cleaned.slice(0, 1_200) : null;
+  };
+  return [
+    passage(project.name),
+    passage(project.description),
+    passage(project.systemPrompt),
+  ].filter((value): value is string => Boolean(value)).join("\n");
+}
+
+/**
+ * Compact, redacted model input for selecting from the public Hub recall menu.
+ * The resident judgment service owns semantic selection; this helper only
+ * supplies the project context and published catalog evidence verbatim.
+ */
+export function buildProjectHubRecommendationJudgmentInput(
+  project: Pick<Project, "name" | "description" | "systemPrompt">,
+  recommendations: ProjectHubRecommendation[],
+): string {
+  const context = buildProjectHubRecommendationQuery(project);
+  const header = `PROJECT\n${context}\n\nPUBLIC HUB CANDIDATES\n`;
+  const bases = recommendations.slice(0, 50).map((recommendation, index) => {
+    const slug = recommendation.listing.slug.replace(/\s+/g, " ").trim().slice(0, 160);
+    const name = recommendation.candidate.name.replace(/\s+/g, " ").trim().slice(0, 100);
+    return {
+      prefix: `candidate-${index + 1}\t${slug}\t${name}\t`,
+      capability: recommendation.reason.replace(/\s+/g, " ").trim(),
+    };
+  });
+  const fixedChars = header.length + bases.reduce((sum, row) => sum + row.prefix.length, 0) + Math.max(0, bases.length - 1);
+  const capabilityChars = bases.length > 0
+    ? Math.max(0, Math.min(360, Math.floor((23_900 - fixedChars) / bases.length)))
+    : 0;
+  const rows = bases.map((row) => `${row.prefix}${row.capability.slice(0, capabilityChars)}`);
+  return `${header}${rows.join("\n")}`;
+}
+
+export function buildProjectHubRecommendationJudgmentSpec(
+  project: Pick<Project, "name" | "description" | "systemPrompt">,
+  recommendations: ProjectHubRecommendation[],
+) {
+  const candidates = recommendations.slice(0, 50);
+  const options = candidates.map((recommendation, index) => ({
+    label: `candidate-${index + 1}`,
+    recommendation,
+  }));
+  return {
+    candidates,
+    options,
+    kind: PROJECT_HUB_RECOMMENDATION_JUDGMENT.kind,
+    labels: options.map((option) => option.label),
+    input: buildProjectHubRecommendationJudgmentInput(project, candidates),
+    timeoutMs: PROJECT_HUB_RECOMMENDATION_JUDGMENT.timeoutMs,
+    minConfidence: PROJECT_HUB_RECOMMENDATION_JUDGMENT.minConfidence,
+  };
+}
+
+/** Public Hub search results and saved bookmarks are different surfaces. */
+export function hubProjectCandidate(listing: MarketplaceListing, locale: Locale): ProjectRosterCandidate {
+  return remoteProjectCandidate(listing, "hub", locale);
+}
+
+/**
+ * Keep usable public agents/teams that are not already attached to this
+ * project. Result order stays exactly as Hub returned it. Explicit bookmarks
+ * remain in the results with a marker because the user asked to discover beyond
+ * bookmarks, not to hide bookmarked best fits. Server-observed prior use
+ * (`bookmarked:false`) is not presented as a bookmark.
+ */
+export function buildProjectHubRecommendations(
+  listings: MarketplaceListing[],
+  bookmarks: HubAgentBookmark[],
+  members: ProjectAgentPoolMember[],
+  locale: Locale,
+  limit = 6,
+): ProjectHubRecommendation[] {
+  const explicitBookmarks = new Set(
+    (Array.isArray(bookmarks) ? bookmarks : [])
+      .filter((bookmark) => bookmark.bookmarked !== false)
+      .map((bookmark) => String(bookmark.slug || bookmark.listing?.slug || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const attached = new Set(
+    (Array.isArray(members) ? members : [])
+      .filter((member) => member.source === "hub")
+      .map((member) => `${member.entityKind}:${member.targetId.trim().toLowerCase()}`),
+  );
+  const seen = new Set<string>();
+  const out: ProjectHubRecommendation[] = [];
+  for (const listing of Array.isArray(listings) ? listings : []) {
+    const slug = String(listing.slug ?? "").trim().toLowerCase();
+    const entityKind = listing.entityKind === "team" ? "team" : listing.entityKind === "agent" ? "agent" : null;
+    if (
+      !slug
+      || !entityKind
+      || seen.has(slug)
+      || listing.visibility === "background"
+      || listing.visibility === "private"
+      || listing.callable !== true
+      || listing.routingReady === false
+      || listing.kind === "install-only"
+    ) continue;
+    const candidate = hubProjectCandidate(listing, locale);
+    const aliases = candidate.identityAliases?.length
+      ? candidate.identityAliases
+      : [candidate.member.targetId.trim().toLowerCase()];
+    if (!candidate.callable || aliases.some((alias) => attached.has(`${candidate.member.entityKind}:${alias}`))) continue;
+    seen.add(slug);
+    const tagline = pickLocalized(listing, locale).tagline.trim();
+    out.push({
+      listing,
+      candidate,
+      reason: tagline || (locale === "ko"
+        ? "프로젝트 문맥으로 찾은 공개 Hub 후보입니다."
+        : "A public Hub candidate found from the project context."),
+      bookmarked: explicitBookmarks.has(slug),
+    });
+    if (out.length >= Math.max(1, limit)) break;
+  }
+  return out;
+}
+
+export type AppendProjectPoolResult =
+  | { status: "added"; members: ProjectAgentPoolMember[] }
+  | { status: "duplicate" | "full"; members: ProjectAgentPoolMember[] };
+
+/** One write path for ordinary clicks and recommendation attachments. */
+export function appendProjectPoolMember(
+  members: ProjectAgentPoolMember[],
+  candidate: ProjectRosterCandidate,
+  maxMembers = 32,
+): AppendProjectPoolResult {
+  const current = Array.isArray(members) ? members : [];
+  const candidateAliases = new Set(
+    (candidate.identityAliases?.length ? candidate.identityAliases : [candidate.member.targetId])
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const sameIdentity = current.some((member) => (
+    member.source === candidate.member.source
+    && member.entityKind === candidate.member.entityKind
+    && candidateAliases.has(member.targetId.trim().toLowerCase())
+  ));
+  if (sameIdentity) return { status: "duplicate", members: current };
+  if (current.length >= maxMembers) return { status: "full", members: current };
+  return { status: "added", members: [...current, candidate.member] };
 }
 
 export function buildProjectRosterSections(

@@ -19,6 +19,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconSparkles,
   IconTrash,
   IconUsers,
 } from "@/components/Icon";
@@ -27,10 +28,16 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { judgeSubsetViaBridge } from "@/lib/judgment";
 import {
   buildProjectRosterSections,
+  appendProjectPoolMember,
+  buildProjectHubRecommendationQuery,
+  buildProjectHubRecommendationJudgmentSpec,
+  buildProjectHubRecommendations,
   isUserFacingProjectPoolMember,
   projectPoolMemberKey,
+  type ProjectHubRecommendation,
   type ProjectRosterCandidate,
   type ProjectRosterSection,
   type ProjectRosterSource,
@@ -211,6 +218,14 @@ function ProjectPage() {
   const [noteDraft, setNoteDraft] = useState("");
   const [agentPoolDraft, setAgentPoolDraft] = useState<ProjectAgentPoolMember[]>([]);
   const [editingTeam, setEditingTeam] = useState(false);
+  const [teamSaveError, setTeamSaveError] = useState("");
+  const [hubRecommendationsOpen, setHubRecommendationsOpen] = useState(false);
+  const [hubRecommendationsLoading, setHubRecommendationsLoading] = useState(false);
+  const [hubRecommendations, setHubRecommendations] = useState<ProjectHubRecommendation[]>([]);
+  const [hubRecommendationError, setHubRecommendationError] = useState("");
+  const [hubRecommendationNotice, setHubRecommendationNotice] = useState("");
+  const [hubRecommendationAttaching, setHubRecommendationAttaching] = useState<string | null>(null);
+  const hubRecommendationRequestRef = useRef(0);
   const [draggedCandidateKey, setDraggedCandidateKey] = useState<string | null>(null);
   const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null);
   const pointerDragRef = useRef<{ kind: "candidate" | "member"; id: string; startX: number; startY: number } | null>(null);
@@ -525,14 +540,10 @@ function ProjectPage() {
 
   function addCandidates(candidates: ProjectRosterCandidate[]) {
     setAgentPoolDraft((current) => {
-      const next = [...current];
-      const seen = new Set(next.map(projectPoolMemberKey));
+      let next = current;
       for (const candidate of candidates) {
-        if (next.length === 0 && !candidate.installed) continue;
-        const key = projectPoolMemberKey(candidate.member);
-        if (seen.has(key)) continue;
-        next.push(candidate.member);
-        seen.add(key);
+        if (!candidate.callable) continue;
+        next = appendProjectPoolMember(next, candidate).members;
       }
       return next;
     });
@@ -640,13 +651,158 @@ function ProjectPage() {
       return;
     }
     if (!project) return;
+    setTeamSaveError("");
     try {
       const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
       setProject(updated);
       setEditingTeam(false);
       setRecoveryPending(false);
-    } catch {
-      setRecoveryPending(true);
+    } catch (error) {
+      setTeamSaveError(locale === "ko"
+        ? `프로젝트 도구를 저장하지 못했습니다: ${detailForUser(error)}`
+        : `Could not save project tools: ${detailForUser(error)}`);
+    }
+  }
+
+  async function openHubRecommendations() {
+    const api = ipc();
+    setHubRecommendationsOpen(true);
+    setHubRecommendations([]);
+    setHubRecommendationError("");
+    setHubRecommendationNotice("");
+    if (!api || !project) {
+      setHubRecommendationError(locale === "ko" ? "Desktop 연결을 확인할 수 없습니다." : "Desktop connection is unavailable.");
+      return;
+    }
+    const requestId = hubRecommendationRequestRef.current + 1;
+    hubRecommendationRequestRef.current = requestId;
+    setHubRecommendationsLoading(true);
+    try {
+      const listings = await api.marketplace.search(buildProjectHubRecommendationQuery(project));
+      if (hubRecommendationRequestRef.current !== requestId) return;
+      const recommendationMenu = buildProjectHubRecommendations(
+        listings,
+        hubBookmarks,
+        project.agentPool,
+        locale,
+        50,
+      );
+      const judgmentSpec = buildProjectHubRecommendationJudgmentSpec(project, recommendationMenu);
+      const judgeableMenu = judgmentSpec.candidates;
+      if (judgeableMenu.length === 0) {
+        const status = await api.marketplace.status(true).catch(() => null);
+        if (hubRecommendationRequestRef.current !== requestId) return;
+        setHubRecommendationError(status && !status.online
+          ? (locale === "ko"
+              ? "Hub 검색에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도하세요."
+              : "Could not connect to Hub search. Check your network and try again.")
+          : (locale === "ko"
+              ? "아직 붙이지 않은 실행 가능한 Hub 에이전트를 찾지 못했습니다."
+              : "No callable Hub agents were found that are not already attached."));
+        return;
+      }
+      let judgment: Awaited<ReturnType<typeof judgeSubsetViaBridge<string>>>;
+      try {
+        judgment = await judgeSubsetViaBridge({
+          kind: judgmentSpec.kind,
+          labels: judgmentSpec.labels,
+          input: judgmentSpec.input,
+          timeoutMs: judgmentSpec.timeoutMs,
+        });
+      } catch {
+        if (hubRecommendationRequestRef.current !== requestId) return;
+        setHubRecommendationError(locale === "ko"
+          ? "추천을 판단할 연결 모델이 응답하지 않았습니다. 모델 연결을 확인한 뒤 다시 시도하거나 Hub에서 직접 검색하세요."
+          : "No connected model answered the recommendation request. Check the model connection, try again, or search Hub directly.");
+        return;
+      }
+      if (hubRecommendationRequestRef.current !== requestId) return;
+      if (judgment.confidence < judgmentSpec.minConfidence) {
+        setHubRecommendationError(locale === "ko"
+          ? "연결 모델이 확실한 추천을 고르지 못했습니다. 다시 시도하거나 Hub에서 직접 검색하세요."
+          : "The connected model could not choose recommendations confidently. Try again or search Hub directly.");
+        return;
+      }
+      const byLabel = new Map(judgmentSpec.options.map((option) => [option.label, option.recommendation]));
+      const recommendations = judgment.selected
+        .map((label) => byLabel.get(label))
+        .filter((row): row is ProjectHubRecommendation => Boolean(row))
+        .slice(0, 6);
+      setHubRecommendations(recommendations);
+      if (recommendations.length === 0) {
+        setHubRecommendationError(locale === "ko"
+          ? "연결 모델이 직접 맞는 Hub 에이전트를 찾지 못했습니다. Hub에서 직접 검색해 보세요."
+          : "The connected model found no direct Hub match. Try searching Hub directly.");
+      }
+    } catch (error) {
+      if (hubRecommendationRequestRef.current !== requestId) return;
+      setHubRecommendationError(locale === "ko"
+        ? `Hub 추천을 불러오지 못했습니다: ${detailForUser(error)}`
+        : `Could not load Hub recommendations: ${detailForUser(error)}`);
+    } finally {
+      if (hubRecommendationRequestRef.current === requestId) setHubRecommendationsLoading(false);
+    }
+  }
+
+  async function attachHubRecommendation(recommendation: ProjectHubRecommendation) {
+    const api = ipc();
+    if (!api || !project || hubRecommendationAttaching) return;
+    setHubRecommendationError("");
+    setHubRecommendationNotice("");
+    if (editingTeam) {
+      setHubRecommendationError(locale === "ko"
+        ? "현재 도구 편집을 먼저 저장하거나 취소한 뒤 붙여 주세요."
+        : "Save or cancel the current tool edits before attaching a recommendation.");
+      return;
+    }
+    const baseMembers = project.agentPool;
+    const appended = appendProjectPoolMember(baseMembers, recommendation.candidate);
+    if (appended.status === "duplicate") {
+      setHubRecommendationNotice(locale === "ko" ? "이미 이 프로젝트에 붙어 있습니다." : "Already attached to this project.");
+      return;
+    }
+    if (appended.status === "full") {
+      setHubRecommendationError(locale === "ko" ? "프로젝트에는 도구를 최대 32개까지 붙일 수 있습니다." : "A project can have up to 32 tools.");
+      return;
+    }
+    setHubRecommendationAttaching(recommendation.candidate.key);
+    let addedBookmark = false;
+    try {
+      // Selection is free and durable. Paid Hub entitlement remains enforced
+      // later by the invocation/lease path when the project actually runs it.
+      // Hub project members resolve back to a callable slug through the bookmark
+      // store after reopen, so an unbookmarked result is bookmarked as part of
+      // this explicit attach action. Keep a successful bookmark when the local
+      // project write fails: search state cannot prove another view or device
+      // did not create that bookmark in the meantime.
+      if (!recommendation.bookmarked) {
+        const bookmark = await api.marketplace.bookmarkAdd(recommendation.listing);
+        addedBookmark = true;
+        const normalizedSlug = bookmark.slug.trim().toLowerCase();
+        setHubBookmarks((current) => [bookmark, ...current.filter((row) => row.slug.trim().toLowerCase() !== normalizedSlug)]);
+        setHubRecommendations((current) => current.map((row) => (
+          row.listing.slug.trim().toLowerCase() === normalizedSlug ? { ...row, bookmarked: true } : row
+        )));
+      }
+      const updated = await api.projects.update(project.id, { agentPool: appended.members });
+      setProject(updated);
+      setAgentPoolDraft(updated.agentPool);
+      setTeamTreeOpen(true);
+      setRecoveryPending(false);
+      setHubRecommendationNotice(locale === "ko"
+        ? `${recommendation.candidate.name}을(를) 프로젝트에 붙이고 저장했습니다.`
+        : `${recommendation.candidate.name} was attached and saved to this project.`);
+      window.dispatchEvent(new Event("agentlas:projects-changed"));
+    } catch (error) {
+      setHubRecommendationError(locale === "ko"
+        ? (addedBookmark
+            ? `북마크는 저장됐지만 프로젝트에 붙이지 못했습니다. 다시 시도하세요: ${detailForUser(error)}`
+            : `프로젝트에 붙이지 못했습니다: ${detailForUser(error)}`)
+        : (addedBookmark
+            ? `The bookmark was saved, but the project attachment failed. Try again: ${detailForUser(error)}`
+            : `Could not attach this agent: ${detailForUser(error)}`));
+    } finally {
+      setHubRecommendationAttaching(null);
     }
   }
 
@@ -785,6 +941,91 @@ function ProjectPage() {
                 <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
               </button>
             </div>
+      </SharedDialog>
+
+      <SharedDialog
+        open={hubRecommendationsOpen}
+        onClose={() => {
+          hubRecommendationRequestRef.current += 1;
+          setHubRecommendationsOpen(false);
+          setHubRecommendationsLoading(false);
+        }}
+        closeLabel={locale === "ko" ? "닫기" : "Close"}
+        size="wide"
+        eyebrow={project.name}
+        title={locale === "ko" ? "이 프로젝트에 맞는 Hub 에이전트" : "Hub agents for this project"}
+        titleId="project-hub-recommendations-title"
+        description={locale === "ko"
+          ? "프로젝트 이름·설명·지시로 공개 Hub 전체에서 후보를 찾습니다. 북마크하지 않은 항목도 함께 확인하며, 이미 붙인 항목만 결과에서 뺍니다."
+          : "Searches the full public Hub catalog from the project name, description, and instructions, including items you have not bookmarked. Already attached items are omitted."}
+      >
+        <div data-testid="project-hub-recommendations" style={{ display: "grid", gap: 12 }}>
+          {hubRecommendationsLoading ? (
+            <div role="status" style={{ padding: "18px 4px", color: "var(--muted-deep)", fontSize: 13 }}>
+              {locale === "ko" ? "Hub에서 프로젝트에 맞는 에이전트를 찾는 중…" : "Finding agents that fit this project…"}
+            </div>
+          ) : null}
+          {hubRecommendationError ? (
+            <div role="alert" style={{ padding: 12, border: "1px solid color-mix(in srgb, var(--danger) 35%, var(--paper-edge))", borderRadius: 10, background: "color-mix(in srgb, var(--danger) 5%, var(--paper))", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.5 }}>
+              {hubRecommendationError}
+              <span style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 8 }}>
+                <button type="button" onClick={() => void openHubRecommendations()} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                  {locale === "ko" ? "다시 찾기" : "Try again"}
+                </button>
+                <button type="button" onClick={() => navigate(`/marketplace?q=${encodeURIComponent(project.name)}`)} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                  {locale === "ko" ? "Hub에서 직접 검색" : "Search Hub directly"}
+                </button>
+              </span>
+            </div>
+          ) : null}
+          {hubRecommendationNotice ? (
+            <div role="status" style={{ padding: "10px 12px", borderRadius: 10, background: "color-mix(in srgb, var(--accent) 7%, var(--paper))", color: "var(--ink-soft)", fontSize: 12.5 }}>
+              {hubRecommendationNotice}
+            </div>
+          ) : null}
+          {!hubRecommendationsLoading && hubRecommendations.length > 0 ? (
+            <div style={{ display: "grid", gap: 8 }}>
+              {hubRecommendations.map((recommendation) => {
+                const attached = appendProjectPoolMember(agentPoolDraft, recommendation.candidate).status === "duplicate";
+                const attaching = hubRecommendationAttaching === recommendation.candidate.key;
+                return (
+                  <article
+                    key={recommendation.candidate.key}
+                    data-testid={`project-hub-recommendation-${recommendation.listing.slug}`}
+                    style={{ display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto", gap: 11, alignItems: "center", padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--paper)" }}
+                  >
+                    <span style={{ width: 40, height: 40, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--paper-2)", color: "var(--accent)" }}>
+                      {recommendation.candidate.kind === "team" ? <IconBuilding size={17} /> : <IconUsers size={17} />}
+                    </span>
+                    <span style={{ minWidth: 0, display: "grid", gap: 4 }}>
+                      <strong style={{ fontSize: 13.5, color: "var(--ink)" }}>{recommendation.candidate.name}</strong>
+                      <small style={{ color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>
+                        {recommendation.bookmarked ? (locale === "ko" ? "북마크됨 · " : "Bookmarked · ") : null}{recommendation.reason}
+                      </small>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={attached || Boolean(hubRecommendationAttaching)}
+                      onClick={() => void attachHubRecommendation(recommendation)}
+                      style={{ minHeight: 36, padding: "0 12px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: attached ? "var(--paper-2)" : "var(--accent)", color: attached ? "var(--muted-deep)" : "white", fontSize: 11.5, fontWeight: 720 }}
+                    >
+                      {attached
+                        ? (locale === "ko" ? "붙임 완료" : "Attached")
+                        : attaching
+                          ? (locale === "ko" ? "저장 중…" : "Saving…")
+                          : (locale === "ko" ? "프로젝트에 붙이기" : "Attach to project")}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+          <p style={{ margin: 0, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.5 }}>
+            {locale === "ko"
+              ? "추가한 에이전트는 북마크에도 저장됩니다. 붙이기는 무료이며, 실제 실행 비용과 계정 권한은 실행할 때 확인합니다."
+              : "Added agents are also saved to bookmarks. Attaching is free; execution cost and account entitlement are checked when the agent runs."}
+          </p>
+        </div>
       </SharedDialog>
 
       {externalSessionsOpen && (
@@ -993,10 +1234,23 @@ function ProjectPage() {
                 <span style={{ color: "var(--muted-deep)", fontSize: 10, fontWeight: 650 }}>{agentPoolDraft.length}</span>
               </button>
               {!editingTeam ? (
-                <button type="button" onClick={() => { setEditingTeam(true); setTeamTreeOpen(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                <button type="button" onClick={() => { setTeamSaveError(""); setEditingTeam(true); setTeamTreeOpen(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded={hubRecommendationsOpen}
+                data-testid="project-hub-recommend-button"
+                disabled={editingTeam}
+                title={editingTeam ? (locale === "ko" ? "현재 도구 편집을 먼저 저장하거나 취소하세요." : "Save or cancel the current tool edits first.") : undefined}
+                onClick={() => void openHubRecommendations()}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 30, padding: "0 9px", border: "1px solid color-mix(in srgb, var(--accent) 30%, var(--paper-edge))", borderRadius: 8, background: "color-mix(in srgb, var(--accent) 5%, var(--paper))", color: "var(--accent)", fontSize: 11.5, fontWeight: 720 }}
+              >
+                <IconSparkles size={13} />
+                {locale === "ko" ? "Hub 추천" : "Recommend from Hub"}
+              </button>
               <button
                 type="button"
                 className="project-agent-help"
@@ -1073,8 +1327,9 @@ function ProjectPage() {
             </div>}
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "도구 저장" : "Save tools"}</button>
-              <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
+              <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setTeamSaveError(""); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
             </div> : null}
+            {teamSaveError ? <div role="alert" style={{ marginTop: 10, color: "var(--danger)", fontSize: 12, lineHeight: 1.5 }}>{teamSaveError}</div> : null}
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "0 0 12px" }}>

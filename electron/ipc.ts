@@ -450,6 +450,7 @@ import {
   resolveOneRequestIntent,
 } from "./one/judged-request-intent";
 import { judge, judgeSubset } from "./system-agents/judgment";
+import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
@@ -1583,14 +1584,23 @@ export function registerIpcHandlers(): void {
         "Do not require Work merely because the action is R2 or higher; decide whether One can safely ask here.",
     },
   };
-  const RENDERER_SUBSET_KINDS: Record<string, { question: string; guidance: string }> = {
+  const RENDERER_SUBSET_KINDS: Record<string, { question: string; guidance: string; maxInputChars?: number; maxTimeoutMs?: number }> = {
     "oberon-brief-tone": {
       question: "Which of the listed tone/mood attributes genuinely fit this film/video brief? Choose zero or more.",
       guidance: "Never pad the list; an empty selection is valid.",
     },
+    [PROJECT_HUB_RECOMMENDATION_JUDGMENT.kind]: {
+      question: PROJECT_HUB_RECOMMENDATION_JUDGMENT.question,
+      guidance: PROJECT_HUB_RECOMMENDATION_JUDGMENT.guidance,
+      maxInputChars: PROJECT_HUB_RECOMMENDATION_JUDGMENT.maxInputChars,
+      maxTimeoutMs: PROJECT_HUB_RECOMMENDATION_JUDGMENT.timeoutMs,
+    },
   };
   const RENDERER_JUDGMENT_LABEL_RE = /^[a-z0-9가-힣][a-z0-9가-힣 :._-]{0,63}$/i;
-  const sanitizeRendererJudgmentSpec = (raw: unknown, allowlist: Record<string, { question: string; guidance: string }>) => {
+  const sanitizeRendererJudgmentSpec = (
+    raw: unknown,
+    allowlist: Record<string, { question: string; guidance: string; maxInputChars?: number; maxTimeoutMs?: number }>,
+  ) => {
     if (!raw || typeof raw !== "object") throw new TypeError("Invalid judgment request");
     const spec = raw as Record<string, unknown>;
     const kind = String(spec.kind ?? "");
@@ -1600,7 +1610,8 @@ export function registerIpcHandlers(): void {
       ? spec.labels.map((label) => String(label)).filter((label) => RENDERER_JUDGMENT_LABEL_RE.test(label)).slice(0, 64)
       : [];
     if (labels.length < 1) throw new TypeError("Judgment labels are required");
-    const input = String(spec.input ?? "").slice(0, 6_000);
+    const maxInputChars = meta.maxInputChars ?? 6_000;
+    const input = String(spec.input ?? "").slice(0, maxInputChars);
     const hints = Array.isArray(spec.hints)
       ? spec.hints
           .filter((hint): hint is { label: unknown; words: unknown } => Boolean(hint) && typeof hint === "object")
@@ -1612,8 +1623,9 @@ export function registerIpcHandlers(): void {
           .slice(0, 32)
       : undefined;
     const timeoutRaw = Number(spec.timeoutMs);
-    const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(1_000, Math.min(10_000, Math.floor(timeoutRaw))) : 6_000;
-    return { kind, meta, labels, input, hints, timeoutMs, fallback: String(spec.fallback ?? "") };
+    const maxTimeoutMs = meta.maxTimeoutMs ?? 10_000;
+    const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(1_000, Math.min(maxTimeoutMs, Math.floor(timeoutRaw))) : 6_000;
+    return { kind, meta, labels, input, hints, timeoutMs, maxInputChars, fallback: String(spec.fallback ?? "") };
   };
   ipcMain.handle("judgment:judge", async (_e, raw: unknown) => {
     const spec = sanitizeRendererJudgmentSpec(raw, RENDERER_JUDGE_KINDS);
@@ -1641,6 +1653,7 @@ export function registerIpcHandlers(): void {
       guidance: spec.meta.guidance,
       hints: spec.hints,
       timeoutMs: spec.timeoutMs,
+      maxInputChars: spec.maxInputChars,
     });
     return { selected: verdict.selected, source: verdict.source, confidence: verdict.confidence, reason: verdict.reason };
   });

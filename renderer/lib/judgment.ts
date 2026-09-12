@@ -45,6 +45,7 @@ export async function judgeLabelViaBridge<V extends string>(spec: {
 export interface RendererSubsetJudged<V extends string> {
   selected: V[];
   source: "llm";
+  confidence: number;
   reason: string;
 }
 
@@ -72,6 +73,7 @@ export async function judgeSubsetViaBridge<V extends string>(spec: {
     return {
       selected: result.selected.filter((label): label is V => allowed.has(label)),
       source: "llm",
+      confidence: Number.isFinite(result.confidence) ? Math.max(0, Math.min(1, result.confidence)) : 0,
       reason: result.reason,
     };
   } catch {

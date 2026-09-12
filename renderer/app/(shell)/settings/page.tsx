@@ -3162,10 +3162,20 @@ function CliInstallPanel({
         setMsg((m) => ({ ...m, [kind]: def?.setup === "login" ? t("settings.cli.login_hint") : t("settings.cli.install_ok") }));
         await onChanged();
       } else {
-        setMsg((m) => ({ ...m, [kind]: t("settings.cli.install_failed", { cmd: r.command ?? "" }) }));
+        const reason = r.message?.trim() || t("settings.cli.install_failed_unknown");
+        const command = r.command?.trim();
+        setMsg((m) => ({
+          ...m,
+          [kind]: command
+            ? t("settings.cli.install_failed_command", { reason, command })
+            : t("settings.cli.install_failed", { reason }),
+        }));
       }
     } catch (err) {
-      setMsg((m) => ({ ...m, [kind]: `${t("settings.cli.install_failed", { cmd: "" })} ${detailForUser(err)}` }));
+      setMsg((m) => ({
+        ...m,
+        [kind]: t("settings.cli.install_failed", { reason: detailForUser(err) }),
+      }));
     } finally {
       setInstalling(null);
     }
@@ -3180,10 +3190,24 @@ function CliInstallPanel({
       return;
     }
     try {
-      await api.runtime.openCliLogin(kind as "claude-code" | "codex" | "kimi" | "grok" | "antigravity");
+      const result = await api.runtime.openCliLogin(kind as "claude-code" | "codex" | "kimi" | "grok" | "antigravity");
+      if (!result?.ok) {
+        const reason = result?.message?.trim() || t("settings.cli.login_failed_unknown");
+        const command = result?.command?.trim();
+        setMsg((m) => ({
+          ...m,
+          [kind]: command
+            ? t("settings.cli.login_failed_command", { reason, command })
+            : t("settings.cli.login_failed", { reason }),
+        }));
+        return;
+      }
       setMsg((m) => ({ ...m, [kind]: t("settings.cli.login_hint") }));
     } catch (err) {
-      setMsg((m) => ({ ...m, [kind]: `${t("settings.cli.login_hint")} ${detailForUser(err)}` }));
+      setMsg((m) => ({
+        ...m,
+        [kind]: t("settings.cli.login_failed", { reason: detailForUser(err) }),
+      }));
     }
   }
 

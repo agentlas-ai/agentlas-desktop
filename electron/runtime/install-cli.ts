@@ -107,6 +107,40 @@ function managedNodeBinDir(): string | null {
   return path.dirname(bundled.runtime.node);
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Build the command entered into a POSIX terminal for provider authentication.
+ *
+ * A freshly installed Mac has no system Node. npm's provider launchers use
+ * `#!/usr/bin/env node`, so opening the launcher by absolute path is not enough:
+ * its shebang still searches the terminal's PATH. Keep the verified packaged
+ * Node visible to that one login command, without modifying the user's shell
+ * profile or installing anything system-wide.
+ */
+export function buildPosixCliLoginCommand(
+  binary: string,
+  args: readonly string[],
+  pathDirs: readonly string[],
+  guide: string,
+): string {
+  return `echo ${shellQuote(guide)}; ${buildPosixCliInvocation(binary, args, pathDirs)}`;
+}
+
+export function buildPosixCliInvocation(
+  binary: string,
+  args: readonly string[],
+  pathDirs: readonly string[],
+): string {
+  const uniqueDirs = Array.from(new Set(pathDirs.filter(Boolean)));
+  const pathPrefix = uniqueDirs.length > 0
+    ? `export PATH=${uniqueDirs.map(shellQuote).join(":")}:$PATH; `
+    : "";
+  return `${pathPrefix}${[binary, ...args].map(shellQuote).join(" ")}`;
+}
+
 function augmentedEnv(): NodeJS.ProcessEnv {
   // 번들 Node 는 기존 PATH **뒤**, 보충 경로 **앞** — 실행 경로(exec.ts withCliPath)와
   // 같은 순서다. 두 곳이 어긋나면 "검증은 통과했는데 실행은 죽는" 상태가 만들어진다.
@@ -141,6 +175,57 @@ let installTail: Promise<void> = Promise.resolve();
 function packageSpec(kind: InstallableCli): string {
   const plan = CLI_PLAN[kind];
   return `${plan.pkg}@${plan.version}`;
+}
+
+export function manualInstallCommand(kind: InstallableCli): string | undefined {
+  if (process.platform === "win32") return undefined;
+  const spec = packageSpec(kind);
+  ensureManagedNpmConfigFiles();
+  const managed = resolveManagedNodeRuntime();
+  if (managed.ok) {
+    return buildPosixCliInvocation(managed.runtime.node, [
+      managed.runtime.npmCli,
+      "install",
+      "--global",
+      spec,
+      "--prefix",
+      AGENTLAS_NPM_PREFIX,
+      "--registry",
+      OFFICIAL_NPM_REGISTRY,
+      "--userconfig",
+      AGENTLAS_NPM_CONFIG,
+      "--globalconfig",
+      AGENTLAS_NPM_GLOBAL_CONFIG,
+      "--no-audit",
+      "--no-fund",
+    ], [path.dirname(managed.runtime.node)]);
+  }
+  const npm = resolveBinary("npm");
+  return npm
+    ? buildPosixCliInvocation(npm, [
+      "install",
+      "--global",
+      spec,
+      "--prefix",
+      AGENTLAS_NPM_PREFIX,
+      "--registry",
+      OFFICIAL_NPM_REGISTRY,
+      "--userconfig",
+      AGENTLAS_NPM_CONFIG,
+      "--globalconfig",
+      AGENTLAS_NPM_GLOBAL_CONFIG,
+      "--no-audit",
+      "--no-fund",
+    ], [path.dirname(npm)])
+    : undefined;
+}
+
+function safeManualInstallCommand(kind: InstallableCli): string | undefined {
+  try {
+    return manualInstallCommand(kind);
+  } catch {
+    return undefined;
+  }
 }
 
 function managedBinDir(): string {
@@ -178,12 +263,7 @@ function writeNpmBootstrapNodeShim(runtime: ManagedNodeRuntime): void {
   }
 }
 
-function managedNpmEnv(runtime?: ManagedNodeRuntime): NodeJS.ProcessEnv {
-  let env = augmentedEnv();
-  for (const key of Object.keys(env)) {
-    const lower = key.toLowerCase();
-    if (lower === "node_options" || lower.startsWith("npm_config_")) delete env[key];
-  }
+function ensureManagedNpmConfigFiles(): void {
   fs.mkdirSync(path.dirname(AGENTLAS_NPM_CONFIG), { recursive: true, mode: 0o700 });
   fs.mkdirSync(AGENTLAS_NPM_CACHE, { recursive: true, mode: 0o700 });
   const npmrc = `registry=${OFFICIAL_NPM_REGISTRY}\naudit=false\nfund=false\nupdate-notifier=false\n`;
@@ -193,6 +273,15 @@ function managedNpmEnv(runtime?: ManagedNodeRuntime): NodeJS.ProcessEnv {
   if (!fs.existsSync(AGENTLAS_NPM_GLOBAL_CONFIG) || fs.readFileSync(AGENTLAS_NPM_GLOBAL_CONFIG, "utf8") !== npmrc) {
     fs.writeFileSync(AGENTLAS_NPM_GLOBAL_CONFIG, npmrc, { encoding: "utf8", mode: 0o600 });
   }
+}
+
+function managedNpmEnv(runtime?: ManagedNodeRuntime): NodeJS.ProcessEnv {
+  let env = augmentedEnv();
+  for (const key of Object.keys(env)) {
+    const lower = key.toLowerCase();
+    if (lower === "node_options" || lower.startsWith("npm_config_")) delete env[key];
+  }
+  ensureManagedNpmConfigFiles();
   env = prependPath(env, managedBinDir());
   if (runtime) {
     writeNpmBootstrapNodeShim(runtime);
@@ -355,8 +444,7 @@ async function installCliUnlocked(
 ): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
   const spec = packageSpec(kind);
-  const command = `npm install -g ${spec} --prefix ${AGENTLAS_NPM_PREFIX}`;
-  const fallbackCommand = process.platform === "win32" ? undefined : command;
+  const fallbackCommand = safeManualInstallCommand(kind);
 
   const existing = resolveBinary(plan.bin);
   if (existing && !opts?.force) {
@@ -462,9 +550,7 @@ export function installCli(
     .catch((): CliActionResult => ({
       ok: false,
       message: "CLI installation failed before verification",
-      command: process.platform === "win32"
-        ? undefined
-        : `npm install -g ${packageSpec(kind)} --prefix ${AGENTLAS_NPM_PREFIX}`,
+      command: safeManualInstallCommand(kind),
     }));
   installTail = task.then(() => undefined, () => undefined);
   installInFlight.set(key, task);
@@ -624,16 +710,19 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
  * 짧게 기다리는 이유: 실행 실패(ENOENT·EACCES)는 즉시 온다. 그 뒤에도 죽을 수는 있지만
  * 그건 터미널이 뜬 뒤의 일이라 사용자가 화면에서 본다.
  */
-async function spawnTerminalVerified(
+export async function spawnTerminalVerified(
   command: string,
   args: string[],
   options: Parameters<typeof spawn>[2],
+  verification?: { requireExit?: boolean; timeoutMs?: number },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const done = (result: { ok: true } | { ok: false; reason: string }) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       resolve(result);
     };
     let child: ReturnType<typeof spawn>;
@@ -646,15 +735,39 @@ async function spawnTerminalVerified(
     child.once("error", (error) => {
       done({ ok: false, reason: error instanceof Error ? error.message : String(error) });
     });
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        done({ ok: true });
+        return;
+      }
+      done({
+        ok: false,
+        reason: `${path.basename(command)} exited before opening the login window (${code === null ? signal ?? "unknown" : `exit ${code}`})`,
+      });
+    });
     // 실행 자체가 안 된 경우 pid 가 없다.
     if (!child.pid) {
       done({ ok: false, reason: `${path.basename(command)} did not start` });
       return;
     }
-    const timer = setTimeout(() => {
+    const requireExit = verification?.requireExit === true;
+    const timeoutMs = verification?.timeoutMs ?? (requireExit ? 60_000 : 700);
+    timer = setTimeout(() => {
+      if (requireExit) {
+        try {
+          child.kill();
+        } catch {
+          // Process may have exited at the timeout boundary.
+        }
+        done({
+          ok: false,
+          reason: `${path.basename(command)} did not finish opening the login window within ${Math.round(timeoutMs / 1000)} seconds`,
+        });
+        return;
+      }
       child.unref();
       done({ ok: true });
-    }, 700);
+    }, timeoutMs);
     timer.unref?.();
   });
 }
@@ -673,7 +786,7 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
       message: `${plan.bin} is not installed`,
       command: kind === "antigravity" || process.platform === "win32"
         ? undefined
-        : `npm install -g ${packageSpec(kind)} --prefix ${AGENTLAS_NPM_PREFIX}`,
+        : safeManualInstallCommand(kind),
     };
   }
   const selectedBase = path.basename(abs).replace(/\.(?:cmd|exe)$/i, "").toLowerCase();
@@ -695,10 +808,13 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
   // 터미널만 덜렁 뜨면 사용자가 뭘 해야 하는지 모른다 — 안내 한 줄을 먼저 찍는다.
   const guide =
     "== Agentlas: complete the login below (a browser window may open). When it says you are logged in, close this window. / 아래에서 로그인을 완료하세요(브라우저 창이 뜰 수 있습니다). 완료되면 이 창을 닫으면 됩니다. ==";
-  const runCmd = [`'${abs.replace(/'/g, "'\\''")}'`, ...loginArgs].join(" ");
-  const managedPath = managedBinDir().replace(/'/g, "'\\''");
-  const posixPath = isAgentlasManagedNpmBinary(abs) ? `export PATH='${managedPath}':$PATH; ` : "";
-  const posixCmd = `${posixPath}echo '${guide}'; ${runCmd}`;
+  const packagedNodeDir = managedNodeBinDir();
+  const loginPathDirs = [
+    ...(isAgentlasManagedNpmBinary(abs) ? [managedBinDir()] : []),
+    ...(packagedNodeDir ? [packagedNodeDir] : []),
+  ];
+  const posixCmd = buildPosixCliLoginCommand(abs, loginArgs, loginPathDirs, guide);
+  const posixFallback = buildPosixCliInvocation(abs, loginArgs, loginPathDirs);
   try {
     if (process.platform === "darwin") {
       // Terminal.app에서 실행 + 활성화. 경로는 위에서 단일인용으로 고정.
@@ -707,9 +823,9 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
         `tell application "Terminal" to do script "${posixCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
         "-e",
         `tell application "Terminal" to activate`,
-      ], { detached: true, stdio: "ignore" });
+      ], { detached: true, stdio: "ignore" }, { requireExit: true, timeoutMs: 60_000 });
       if (!started.ok) {
-        return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
+        return { ok: false, message: started.reason, command: posixFallback };
       }
     } else if (process.platform === "win32") {
       // PowerShell is built into supported Windows versions. Spawn it directly
@@ -753,7 +869,7 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
         return {
           ok: false,
           message: "No supported Linux terminal emulator was found",
-          command: `${plan.bin} ${loginArgs.join(" ")}`.trim(),
+          command: posixFallback,
         };
       }
       const started = await spawnTerminalVerified(terminal.path, terminal.args, {
@@ -762,7 +878,7 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
         stdio: "ignore",
       });
       if (!started.ok) {
-        return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
+        return { ok: false, message: started.reason, command: posixFallback };
       }
     }
     return { ok: true, message: [abs, ...loginArgs].join(" ") };
@@ -770,7 +886,9 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
     return {
       ok: false,
       message: e instanceof Error ? e.message : String(e),
-      command: `${plan.bin} ${loginArgs.join(" ")}`.trim(),
+      command: process.platform === "win32"
+        ? `${plan.bin} ${loginArgs.join(" ")}`.trim()
+        : posixFallback,
     };
   }
 }
