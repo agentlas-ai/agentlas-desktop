@@ -332,14 +332,31 @@ export function buildValueFreeEvidence({
   };
 }
 
-function run(command, args, { cwd = desktopRoot, capture = false, captureCombined = false, code, subject } = {}) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    env: process.env,
-    stdio: capture || captureCombined ? "pipe" : "ignore",
-  });
+/**
+ * 네트워크로 받아오는 명령에만 재시도를 준다(`retries`). 기본값은 0 — 판정하는 명령은
+ * 예전처럼 한 번에 끝난다.
+ *
+ * ★왜 필요한가 (2026-09-12 실측): 이 단계는 직전 릴리스 두 판의 맥 설치본(약 2.7GB)을
+ * 매번 새로 내려받는다. 빌드·서명·공증을 **전부 마친 뒤 마지막에** 도는 단계라, 일시적
+ * 내려받기 실패 한 번이 한 시간 넘게 만든 산출물을 발행 직전에 버린다. v1.1.17 이
+ * `previous-artifact-unavailable` 로 그렇게 멈췄고, 같은 파일을 직후에 받아 보니 정상이었다.
+ * 다 써도 안 되면 예전 그대로 세운다 — 재시도는 판정을 무르게 하지 않는다.
+ */
+function run(command, args, { cwd = desktopRoot, capture = false, captureCombined = false, code, subject, retries = 0, retryDelayMs = 5_000 } = {}) {
+  let result;
+  for (let attempt = 0; ; attempt += 1) {
+    result = spawnSync(command, args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      env: process.env,
+      stdio: capture || captureCombined ? "pipe" : "ignore",
+    });
+    if (result.status === 0) break;
+    if (attempt >= retries) break;
+    // 동기 대기 — 이 스크립트 전체가 동기 흐름이라 여기서만 멈춘다.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs * (attempt + 1));
+  }
   if (result.status !== 0) fail(code || "command-failed", subject || basename(command));
   if (captureCombined) return [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   return capture ? String(result.stdout || "").trim() : "";
@@ -504,7 +521,7 @@ function downloadPreviousArtifact({ repo, previous, architecture, extension, des
   run(
     "gh",
     ["release", "download", previous.tag, "--repo", repo, "--dir", destination, "--pattern", fileName],
-    { code: "previous-artifact-unavailable", subject: `previous-${extension}-${architecture}` },
+    { code: "previous-artifact-unavailable", subject: `previous-${extension}-${architecture}`, retries: 3 },
   );
   if (!existsSync(file) || statSync(file).size <= 0) fail("previous-artifact-unavailable", `previous-${extension}-${architecture}`);
   return file;
