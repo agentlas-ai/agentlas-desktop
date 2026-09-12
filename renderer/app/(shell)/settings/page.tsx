@@ -32,6 +32,7 @@ import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { LocalModelHubPanel } from "@/components/settings/LocalModelHubPanel";
+import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -339,24 +340,6 @@ export default function SettingsPage() {
     }
   }
 
-  // Ollama 모델 선택 — 같은 ollama 런타임을 model만 바꿔 활성화.
-  async function activateOllamaModel(model: string) {
-    const api = ipc();
-    if (!api) return;
-    try {
-      const updated = await api.runtime.setActive({
-        kind: "ollama",
-        backend: "ollama",
-        source: "ollama",
-        model,
-      });
-      setStatuses(updated);
-      setRuntimeMessage("");
-    } catch (err) {
-      setRuntimeMessage(locale === "ko" ? `Ollama 모델을 바꾸지 못했습니다. ${detailForUser(err)}` : `Ollama model did not change. ${detailForUser(err)}`);
-    }
-  }
-
   // BYOK 모델/1M 선택 — 해당 백엔드를 model·longContext와 함께 활성화.
   async function activateByok(backend: ByokBackend, model: string, longContext: boolean) {
     const api = ipc();
@@ -457,8 +440,6 @@ export default function SettingsPage() {
       setRuntimeMessage(locale === "ko" ? `키를 저장하지 못했습니다. 이전 값은 그대로입니다. ${detailForUser(err)}` : `Key was not saved. The previous value was kept. ${detailForUser(err)}`);
     }
   }
-
-  const ollama = statuses.find((s) => s.kind === "ollama") ?? null;
 
   return (
     <div style={{ flex: 1, background: "var(--paper-2)", overflowY: "auto" }}>
@@ -861,87 +842,7 @@ export default function SettingsPage() {
         <TerminalProfilesPanel />
 
         <LocalModelHubPanel locale={locale} />
-
-        {/* 로컬 모델 (Ollama) */}
-        <h2 id="ollama" style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
-          {t("settings.ollama.title")}
-        </h2>
-        <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
-          {t("settings.ollama.note")}
-        </p>
-        {!ollama ? (
-          <div
-            style={{
-              padding: 14,
-              border: "1px dashed var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-              color: "var(--muted-deep)",
-              fontSize: 12.5,
-              lineHeight: 1.6,
-            }}
-          >
-            {t("settings.ollama.unreachable")}
-          </div>
-        ) : (ollama.availableModels ?? []).length === 0 ? (
-          <div
-            style={{
-              padding: 14,
-              border: "1px dashed var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-              color: "var(--muted-deep)",
-              fontSize: 12.5,
-              lineHeight: 1.6,
-            }}
-          >
-            {t("settings.ollama.no_models")}
-          </div>
-        ) : (
-          <div
-            style={{
-              padding: 14,
-              border: "1px solid var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-              background: "var(--paper)",
-            }}
-          >
-            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginBottom: 8 }}>
-              {t("settings.ollama.model_label")}
-              {ollama.version && ` · Ollama v${ollama.version}`}
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {(ollama.availableModels ?? []).map((m) => {
-                const isCurrent = ollama.active && ollama.model === m;
-                return (
-                  <button
-                    key={m}
-                    onClick={() => void activateOllamaModel(m)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      fontFamily: "var(--font-mono)",
-                      fontWeight: isCurrent ? 700 : 500,
-                      background: isCurrent ? "var(--paper)" : "var(--paper-2)",
-                      color: isCurrent ? "var(--ink)" : "var(--ink-soft)",
-                      border: "1px solid var(--paper-edge)",
-                      boxShadow: isCurrent ? "var(--neu-raised)" : "none",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                    }}
-                  >
-                    {m}
-                    {isCurrent && (
-                      <span style={{ fontSize: 10, fontFamily: "var(--font-head)" }}>
-                        · {t("settings.ollama.using")}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        <OllamaMigrationPanel locale={locale} />
 
         <ConnectSection
           title={locale === "ko" ? "API 모델" : "API models"}

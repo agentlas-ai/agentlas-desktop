@@ -334,7 +334,7 @@ export function RuntimeControl() {
   }
 
   function runtimeOptionsForRole(role: RuntimeRole) {
-    return runtimesForRole(role).filter((runtime) => runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
+    return runtimesForRole(role).filter((runtime) => runtime.kind !== "ollama" && runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
       runtime,
       index,
       label: runtimeLabel(runtime),
@@ -347,6 +347,7 @@ export function RuntimeControl() {
   ): RuntimeModelPickerOption[] {
     const options: RuntimeModelPickerOption[] = [];
     for (const runtime of runtimesForRole(role)) {
+      if (runtime.kind === "ollama") continue;
       const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
       if (runtimeUsesEngineModelSetting(runtime.kind)) {
         options.push({

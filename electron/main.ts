@@ -38,6 +38,8 @@ import {
 import { registerIpcHandlers, assertTrustedSitePublishIpcSender } from "./ipc";
 import { LocalModelHubManager } from "./local-model-hub/manager";
 import { configureLocalModelHubManager } from "./local-model-hub/runtime-adapter";
+import { createOllamaMigrationService } from "./local-model-hub/migration-runtime";
+import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
@@ -1529,6 +1531,17 @@ app.whenReady().then(async () => {
   const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"));
   await localModelHubManager.initialize();
   configureLocalModelHubManager(localModelHubManager);
+  const localModelMigration = createOllamaMigrationService(localModelHubManager);
+  try {
+    await localModelMigration.reconcile();
+  } catch (error) {
+    console.error("[local-model-migration] startup_reconcile_failed", error);
+  }
+  registerOllamaMigrationIpc({
+    ipc: ipcMain,
+    service: localModelMigration,
+    assertTrustedSender: assertTrustedSitePublishIpcSender,
+  });
   localModelHubControl = registerLocalModelHubIpc({
     ipc: ipcMain,
     manager: localModelHubManager,

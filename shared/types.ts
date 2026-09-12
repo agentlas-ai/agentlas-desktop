@@ -2,6 +2,7 @@
 // renderer/lib/types.ts에서 re-export.
 import type { AutomationMonitorContract, AutomationPollState } from "./automation-monitor";
 import type { LocalModelHubAPI } from "./local-model-hub";
+import type { LocalModelMigrationAPI } from "./local-model-migration";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "./credential-recovery";
 import type {
   MultimodalProvider,
@@ -6613,6 +6614,7 @@ export interface RunAlertSettings {
 
 export interface AgentlasIpc {
   localModelHub: LocalModelHubAPI;
+  localModelMigration: LocalModelMigrationAPI;
   /**
    * 도구 승인 결정 — Main의 exact resolution 원장이 같은 request/decision/action 을
    * 확인한 뒤에만 성공이다. 응답이 유실돼도 getToolApprovalResolution 으로 재전송

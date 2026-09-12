@@ -27,7 +27,6 @@ import { runAntigravity } from "./antigravity";
 import { runKimi } from "./kimi";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
-import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
@@ -99,7 +98,7 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
 }
 
 /**
- * 로컬 추론(Ollama/LM Studio/MLX) 전용 실행 슬롯 래퍼. CLI 자식 프로세스 예산과는
+ * 로컬 추론(LM Studio/MLX/Agentlas Local) 전용 실행 슬롯 래퍼. CLI 자식 프로세스 예산과는
  * 별개의(보통 훨씬 낮은) 한도를 쓴다 — 로컬 추론 요청 1건이 이미 코어 대부분/GPU를
  * 쓰므로 CLI와 같은 예산으로 게이트하면 과다 산정되고, 아예 안 걸면 여러 에이전트가
  * 동시에 로컬 모델을 때려 컴퓨터를 못 쓰게 만들 수 있다.
@@ -131,7 +130,6 @@ const runAntigravitySlotted = withRunSlot(runAntigravity, "antigravity");
 const runKimiSlotted = withRunSlot(acpOrLegacyRunner("kimi", runKimi), "kimi");
 const runGrokSlotted = withRunSlot(acpOrLegacyRunner("grok", runGrok), "grok");
 const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor), "cursor");
-const runOllamaSlotted = withLocalInferenceSlot(runOllama);
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
 const runManagedLocalModelSlotted = withLocalInferenceSlot(runManagedLocalModel);
@@ -273,8 +271,10 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner;
       label: `${active.label ?? spec.label}${active.model ? ` · ${active.model}` : ""}`,
     };
   }
-  if (active.kind === "ollama")
-    return { runner: runOllamaSlotted, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
+  // Ollama is a migration-only stored kind. It remains decodable so existing
+  // pins can be shown and migrated, but it is never an executable product
+  // runtime after the Agentlas Local cutover.
+  if (active.kind === "ollama") return null;
   if (active.kind === "lmstudio")
     return { runner: runLMStudioSlotted, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "mlx")
@@ -339,7 +339,7 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
     return { runner: bindRuntimeSource(createAcpRunner(spec), selection.source), label: spec.label };
   }
   if (selection.kind === "agentlas") return { runner: runAgentlasServing, label: "Agentlas" };
-  if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
+  if (selection.kind === "ollama") return null;
   if (selection.kind === "agentlas-local") return { runner: runManagedLocalModel, label: "Agentlas Local" };
   if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };
@@ -733,7 +733,6 @@ function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {
   return (
     runtime.kind === "claude-code" ||
     runtime.kind === "byok" ||
-    runtime.kind === "ollama" ||
     runtime.kind === "lmstudio" ||
     runtime.kind === "mlx" ||
     runtime.kind === "agentlas-local"

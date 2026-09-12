@@ -877,8 +877,8 @@ export default function BuildPage() {
               )}
               <p className="build-autoadd-hint">
                 {ko
-                  ? "데스크톱 Build 자체는 Agentlas 크레딧 0입니다. 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Ollama로 실행되며, Hub Network 호출은 별도 견적/확인 후 크레딧을 씁니다."
-                  : "Desktop Build itself costs 0 Agentlas credits. It runs on this computer through Claude Code/Codex/Antigravity/BYOK/Ollama; Hub Network calls spend credits separately after quote and confirmation."}
+                  ? "데스크톱 Build 자체는 Agentlas 크레딧 0입니다. 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local로 실행되며, Hub Network 호출은 별도 견적/확인 후 크레딧을 씁니다."
+                  : "Desktop Build itself costs 0 Agentlas credits. It runs on this computer through Claude Code/Codex/Antigravity/BYOK/Agentlas Local; Hub Network calls spend credits separately after quote and confirmation."}
               </p>
             </div>
 

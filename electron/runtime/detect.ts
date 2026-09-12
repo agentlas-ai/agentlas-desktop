@@ -14,7 +14,6 @@ import { probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
-import { probeOllama } from "./ollama";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { probeManagedLocalRuntime } from "../local-model-hub/runtime-adapter";
@@ -209,7 +208,8 @@ function setStoredEffort(effort: string | null | undefined): void {
 
 function isActiveRuntime(status: RuntimeStatus, active: ActiveRuntimeRow | null): boolean {
   if (!active) return false;
-  // ollama/lmstudio/mlx는 단일 런타임 — kind만 맞으면 활성. 모델은 status.model로 따로 반영.
+  // migration-only Ollama와 managed/local servers are single-runtime identities;
+  // the selected model is projected separately on status.model.
   if (status.kind === "ollama" || status.kind === "lmstudio" || status.kind === "mlx" || status.kind === "agentlas-local") {
     return active.kind === status.kind;
   }
@@ -410,7 +410,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const kimiDisabled = runtimeProbeDisabled("kimi");
   const grokDisabled = runtimeProbeDisabled("grok");
   const cursorDisabled = runtimeProbeDisabled("cursor");
-  const ollamaDisabled = runtimeProbeDisabled("ollama");
   const lmstudioDisabled = runtimeProbeDisabled("lmstudio");
   const mlxDisabled = runtimeProbeDisabled("mlx");
   const agentlasLocalDisabled = runtimeProbeDisabled("agentlas-local");
@@ -423,7 +422,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     kimiCli,
     gr,
     cursor,
-    ollama,
     lmstudio,
     mlx,
     managedLocal,
@@ -449,7 +447,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     kimiDisabled ? Promise.resolve(null) : probeKimi(),
     grokDisabled ? Promise.resolve(null) : probeGrok(),
     cursorDisabled ? Promise.resolve(null) : probeCursor(),
-    ollamaDisabled ? Promise.resolve(null) : probeOllama(),
     lmstudioDisabled ? Promise.resolve(null) : probeLMStudio(),
     mlxDisabled ? Promise.resolve(null) : probeMLX(),
     agentlasLocalDisabled ? Promise.resolve(null) : probeManagedLocalRuntime(),
@@ -662,25 +659,21 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       }),
     });
   }
-  if (ollama) {
-    // 활성 모델: 이전에 고른 모델이 아직 존재하면 그대로, 아니면 첫 모델로 폴백.
-    const rememberedOllama =
-      active?.kind === "ollama"
-        ? active.model
-        : recallRuntimeSelection("ollama", "ollama")?.model;
-    const preferred =
-      rememberedOllama && ollama.models.includes(rememberedOllama)
-        ? rememberedOllama
-        : ollama.models[0] ?? null;
+  const rememberedOllama = active?.kind === "ollama"
+    ? active.model
+    : recallRuntimeSelection("ollama", "ollama")?.model;
+  if (active?.kind === "ollama" || rememberedOllama) {
+    // Migration-only projection: preserve the requested identity for status/UI
+    // readback without probing or executing the user's external Ollama server.
     list.push({
       kind: "ollama",
       backend: "ollama",
-      source: "ollama",
-      version: ollama.version,
+      source: active?.kind === "ollama" ? active.source ?? "ollama" : "ollama",
+      version: null,
       active: false,
-      model: preferred,
-      availableModels: ollama.models,
-      ...conservativeLocalRuntimeAllocation(ollama.models),
+      model: rememberedOllama,
+      availableModels: rememberedOllama ? [rememberedOllama] : [],
+      ...conservativeLocalRuntimeAllocation(rememberedOllama ? [rememberedOllama] : []),
     });
   }
   // LM Studio / MLX — OpenAI 호환 로컬 서버. Ollama와 동일한 "단일 런타임 + 동적 모델 목록" 모양.
@@ -966,7 +959,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
  */
 const QUOTA_SKIP_PERCENT = 90;
 /** 로컬 서버가 실제 보유 목록을 돌려주는 런타임 — 모델 부재를 증명할 수 있다. */
-const LOCAL_MODEL_INVENTORY_KINDS = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);
+const LOCAL_MODEL_INVENTORY_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"]);
 function rolePoolGates(list: RuntimeStatus[]): {
   isRuntimeAvailable: (selection: RuntimeSelection) => boolean;
   isModelUnavailable: (selection: RuntimeSelection) => boolean;
@@ -976,6 +969,7 @@ function rolePoolGates(list: RuntimeStatus[]): {
     list.find((runtime) => runtimeMatchesSelection(runtime, selection));
   return {
     isRuntimeAvailable: (selection) => {
+      if (selection.kind === "ollama") return false;
       const runtime = runtimeFor(selection);
       return Boolean(runtime) && !isRuntimeCredentialUnavailable(runtime);
     },

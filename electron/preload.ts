@@ -45,6 +45,12 @@ import type {
 } from "../shared/site-studio";
 
 const api: AgentlasIpc = {
+  localModelMigration: {
+    snapshot: () => ipcRenderer.invoke("localModelMigration:snapshot"),
+    reconcile: () => ipcRenderer.invoke("localModelMigration:reconcile"),
+    inspectOneSelection: (payload) => ipcRenderer.invoke("localModelMigration:inspectOneSelection", payload),
+    commitOneSelection: (payload) => ipcRenderer.invoke("localModelMigration:commitOneSelection", payload),
+  },
   localModelHub: {
     snapshot: () => ipcRenderer.invoke("localModelHub:snapshot"),
     downloadEngine: (payload) => ipcRenderer.invoke("localModelHub:downloadEngine", payload),

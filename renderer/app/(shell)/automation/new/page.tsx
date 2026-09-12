@@ -385,6 +385,7 @@ function NewAutomationPage() {
   const modelOptions = useMemo<RuntimeModelPickerOption[]>(() => {
     const options: RuntimeModelPickerOption[] = [];
     for (const runtime of runtimeOptions) {
+      if (runtime.kind === "ollama") continue;
       const key = automationRuntimeKey(runtime);
       const models = runtimeModels[key] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
       if (runtimeUsesEngineModelSetting(runtime.kind)) {

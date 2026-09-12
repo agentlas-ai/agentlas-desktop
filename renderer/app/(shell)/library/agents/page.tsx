@@ -3346,7 +3346,8 @@ function RuntimeAssignmentPanel({
     : null;
 
   useEffect(() => {
-    const fallback = runtimeStatuses.find((runtime) => runtime.active) ?? runtimeStatuses[0];
+    const selectable = runtimeStatuses.filter((runtime) => runtime.kind !== "ollama");
+    const fallback = selectable.find((runtime) => runtime.active) ?? selectable[0];
     const source = selectedOverride
       ? runtimeStatuses.find(
           (runtime) =>
@@ -3505,9 +3506,9 @@ function RuntimeAssignmentPanel({
             }}
             style={runtimeSelectStyle}
           >
-            {runtimeStatuses.map((runtime) => (
-              <option key={runtimeStatusKey(runtime)} value={runtimeStatusKey(runtime)}>
-                {runtimeDisplayName(runtime)}
+            {runtimeStatuses.filter((runtime) => runtime.kind !== "ollama" || selectedOverride?.selection.kind === "ollama").map((runtime) => (
+              <option key={runtimeStatusKey(runtime)} value={runtimeStatusKey(runtime)} disabled={runtime.kind === "ollama"}>
+                {runtimeDisplayName(runtime)}{runtime.kind === "ollama" ? ` · ${locale === "ko" ? "이전 필요" : "migration required"}` : ""}
               </option>
             ))}
           </select>

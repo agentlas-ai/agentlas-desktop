@@ -3,7 +3,7 @@
 //   · Antigravity: agy 연결 상태와 런타임이 제공한 모델 목록을 기준으로 표시한다.
 //   · API키형(DeepSeek·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
 //   · Grok CLI: 실제 402가 확인되면 소진 상태와 공식 Usage 이동 버튼.
-//   · 로컬(Ollama): "무제한".
+//   · 로컬(Agentlas Local): "무제한".
 // 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
 // 연결 액션은 대시보드에서 항상 보여야 한다. 사용자가 예전에 접은 상태 때문에
 // "LLM 연결이 사라진" 것처럼 보이지 않도록 이 표면은 접지 않는다.
@@ -64,7 +64,7 @@ const ENGINES: EngineDef[] = [
   // Copilot CLI는 실제로 실행되는데 여기 없어서 대시보드에서 연결할 길이 없었다.
   { id: "cursor", label: "Cursor", auth: "cli", detectKind: "cursor", manualSetup: "curl https://cursor.com/install -fsS | bash", logoSrc: "/brand/llm/cursor.svg", logoAlt: "Cursor" },
   { id: "github-copilot-cli", label: "GitHub Copilot", auth: "cli", acpAgentId: "github-copilot-cli", manualSetup: "gh auth login", logoSrc: "/brand/llm/githubcopilot.svg", logoAlt: "GitHub Copilot" },
-  { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },
+  { id: "agentlas-local", label: "Agentlas Local", auth: "local", logoSrc: "/brand/agentlas-mark.png", logoAlt: "Agentlas" },
 ];
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
@@ -431,7 +431,7 @@ export function EngineUsage() {
         || (e.detectKind && r.kind === e.detectKind)
         || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
     }
-    if (e.auth === "local") return runtimes.some((r) => r.kind === "ollama");
+    if (e.auth === "local") return runtimes.some((r) => r.kind === "agentlas-local");
     return !!e.keyEnv && envKeys.has(e.keyEnv);
   }
 
@@ -510,7 +510,7 @@ export function EngineUsage() {
         || (e.detectKind && r.kind === e.detectKind)
         || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
     }
-    if (e.auth === "local") return runtimes.find((r) => r.kind === "ollama");
+    if (e.auth === "local") return runtimes.find((r) => r.kind === "agentlas-local");
     return undefined; // API키형(BYOK)은 모델 선택이 필요해 세팅의 BYOK 패널이 담당
   }
   async function saveKey(e: EngineDef) {
@@ -608,7 +608,7 @@ export function EngineUsage() {
         )}
       </>
     ) : !connected ? (
-      <button onClick={() => (e.id === "ollama" ? navigate("/settings#ollama") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
+      <button onClick={() => (e.auth === "local" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
         {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
       </button>
     ) : null;
