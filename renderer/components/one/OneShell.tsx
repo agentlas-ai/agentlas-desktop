@@ -1710,6 +1710,18 @@ export function OneShell() {
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const railRevealButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!railOpen) return;
+    const closeDrawer = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.target instanceof Element && event.target.closest('[role="dialog"],[role="alertdialog"],[role="menu"]')) return;
+      event.preventDefault();
+      setRailOpen(false);
+      window.requestAnimationFrame(() => railRevealButtonRef.current?.focus());
+    };
+    document.addEventListener("keydown", closeDrawer);
+    return () => document.removeEventListener("keydown", closeDrawer);
+  }, [railOpen]);
   const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const resultTopRef = useRef<HTMLDivElement>(null);

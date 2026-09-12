@@ -178,7 +178,7 @@ export function BrowserAutofill({ open, mode, target, ko, onClose, onPrepareOver
     {!unavailable && editing === null && <button className={menu.panelMenuRow} type="button" disabled={busy} onClick={() => mode === "passwords" ? beginCredential("new") : beginContact("new")}>{ko ? "새로 저장" : "Save new"}<IconPlus size={15}/></button>}
     {!unavailable && editing !== null && <div className={styles.form}>
       <p>{editing === "new" ? (ko ? "새 항목" : "New item") : (ko ? "기존 값은 표시하지 않습니다. 새 값으로 전체 교체합니다." : "Saved values stay hidden. Enter a complete replacement.")}</p>
-      <label>{ko ? "이름" : "Label"}<input disabled={busy} ref={label} maxLength={120} autoComplete="off" /></label>
+      <label>{ko ? (mode === "contacts" ? "저장 이름" : "이름") : "Label"}<input disabled={busy} ref={label} maxLength={120} autoComplete="off" /></label>
       {mode === "passwords" ? <>
         <label>{ko ? "사이트" : "Site"}<input disabled={busy} ref={origin} maxLength={2048} inputMode="url" autoComplete="off" /></label>
         <label>{ko ? "사용자 이름" : "Username"}<input disabled={busy} ref={username} maxLength={512} autoComplete="off" /></label>

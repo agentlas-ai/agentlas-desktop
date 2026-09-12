@@ -4181,6 +4181,21 @@
  * 패치가 이 미디어 블록에 규칙을 덧대므로, 파일 맨 끝에서 덮어야 이긴다
  * (같은 특이도면 뒤에 오는 쪽이 이긴다 — 모바일이 통째로 안 먹던 그 자리). */
 @media (max-width: 760px) {
+  /* The drawer's open state owns phone hit testing, including active tasks. */
+  .body .rail[data-open="false"],
+  .body[data-task-active="true"] .rail[data-open="false"] {
+    transform: translateX(-105%);
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .body .rail[data-open="true"],
+  .body[data-task-active="true"] .rail[data-open="true"] {
+    transform: translateX(0);
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
   .rail {
     transition:
       transform var(--one-motion-overlay, 220ms) var(--one-ease-panel, ease),
