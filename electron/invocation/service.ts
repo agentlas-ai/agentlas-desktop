@@ -1,3 +1,4 @@
+import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { InvocationEffectBoundaryTracker } from "./effect-boundary";
@@ -1338,10 +1339,10 @@ export class InvocationService {
       ).get(boundGoal.id) as { n: number };
       if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
       const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
-        || (boundGoal.budget.maxCostUsd != null && boundGoal.costUsedUsd >= boundGoal.budget.maxCostUsd)
+        || Boolean(longRunMonetaryRefusal(boundGoal))
         || (boundGoal.budget.wallclockDeadline != null
           && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
-      if (budgetExhausted) throw new Error("auto_goal_budget_exhausted");
+      if (budgetExhausted) throw new Error(longRunMonetaryRefusal(boundGoal) ?? "auto_goal_budget_exhausted");
       blockedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version };
     }
     const record: RunRecord = {
@@ -2506,7 +2507,7 @@ export class InvocationService {
               ).get(current.id) as { n: number };
               if (pending.n) return null;
               const budgetExhausted = (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles)
-                || (current.budget.maxCostUsd != null && current.costUsedUsd >= current.budget.maxCostUsd)
+                || Boolean(longRunMonetaryRefusal(current))
                 || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
               if (budgetExhausted) return null;
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts

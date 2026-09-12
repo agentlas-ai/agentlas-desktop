@@ -1,3 +1,4 @@
+import { longRunMonetaryRefusal } from "./budget";
 /** Main-owned bridge from a judged user request to the existing durable ledger.
  * This module does not dispatch a provider, schedule work or grant permissions.
  */
@@ -109,8 +110,8 @@ export function controlAutomaticGoal(input: {
        * 되는 자리라, 상한을 푸는 변경에서 반드시 함께 고쳐야 한다.
        */
       const cyclesExhausted = run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles;
-      const costExhausted = run.budget.maxCostUsd !== null && run.costUsedUsd >= run.budget.maxCostUsd;
-      if (cyclesExhausted || costExhausted) throw new Error("auto_goal_budget_exhausted");
+      const costExhausted = Boolean(longRunMonetaryRefusal(run));
+      if (cyclesExhausted || costExhausted) throw new Error(longRunMonetaryRefusal(run) ?? "auto_goal_budget_exhausted");
       // The scheduler retains a blocked contract while stopping continuation.
       // Only this explicit user resume may reactivate it, within the same CAS
       // transaction and without resetting any consumed budget.

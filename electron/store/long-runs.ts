@@ -1,3 +1,4 @@
+import { normalizeLongRunUsage, readLongRunCostAccounting, longRunMonetaryRefusal, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { randomUUID } from "node:crypto";
 import {
@@ -45,6 +46,7 @@ export interface LongRunRecord {
   budget: LongRunBudget;
   cycleCount: number;
   costUsedUsd: number;
+  costAccounting: LongRunCostAccounting;
   lastProgressKey: string | null;
   stallStreak: number;
   stallWindow: number;
@@ -209,6 +211,7 @@ function rowToLongRun(row: LongRunRow | undefined): LongRunRecord | null {
     },
     cycleCount: row.cycle_count,
     costUsedUsd: row.cost_used_usd,
+    costAccounting: readLongRunCostAccounting(row.id, row.cycle_count),
     lastProgressKey: row.last_progress_key,
     stallStreak: row.stall_streak,
     stallWindow: row.stall_window,
@@ -1484,55 +1487,96 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
   if (run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles) {
     return decision(false, "budget_cycles_exhausted");
   }
-  if (run.budget.maxCostUsd != null && run.costUsedUsd >= run.budget.maxCostUsd) {
-    return decision(false, "budget_cost_exhausted");
-  }
+  const monetaryRefusal = longRunMonetaryRefusal(run);
+  if (monetaryRefusal) return decision(false, monetaryRefusal);
   if (openTaskCount <= 0) return decision(false, "no_open_tasks");
   return decision(true, "open_tasks_remain");
+}
+
+/** Usage survives failure/cancellation, but can never dispatch or change task success. */
+export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): void {
+  const usage = normalizeLongRunUsage(input);
+  const db = getDb();
+  let changedRunId: string | null = null;
+  db.transaction(() => {
+    const run = getLongRunByGoalId(goalId);
+    if (!run || run.surface === "science") throw new Error("long_run_usage_scope_invalid");
+    const invocation = db.prepare("SELECT chat_id FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
+      .get(usage.invocationRunId) as { chat_id: string | null } | undefined;
+    const child = db.prepare("SELECT id AS attempt_id FROM long_run_worker_attempts WHERE run_id = ? AND invocation_run_id = ? LIMIT 1")
+      .get(run.id, usage.invocationRunId) as { attempt_id: string } | undefined;
+    if ((!invocation || invocation.chat_id !== run.rootChatId) && !child) throw new Error("long_run_usage_invocation_mismatch");
+    if (usage.attemptId && child?.attempt_id !== usage.attemptId) throw new Error("long_run_usage_attempt_mismatch");
+    const sourceEventId = `usage:${usage.sourceId}`;
+    const prior = db.prepare("SELECT kind, payload_json FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
+      .get(run.id, sourceEventId) as { kind: string; payload_json: string } | undefined;
+    if (prior) {
+      if (prior.kind !== "run.usage_recorded" || JSON.parse(prior.payload_json).usage?.digest !== usage.digest) throw new Error("long_run_usage_source_conflict");
+      return;
+    }
+    const cost = usage.cost.status === "measured" ? usage.cost.usd! : 0;
+    if (!Number.isFinite(run.costUsedUsd + cost)) throw new Error("long_run_usage_cost_overflow");
+    db.prepare("UPDATE long_runs SET cost_used_usd = cost_used_usd + ? WHERE id = ?").run(cost, run.id);
+    appendEventInDb({runId: run.id, kind: "run.usage_recorded", actorKind: "host", sourceEventId,
+      payload: { usage, invocationRunId: usage.invocationRunId, attemptId: usage.attemptId ?? child?.attempt_id ?? null },
+      at: new Date().toISOString() });
+    changedRunId = run.id;
+  }).immediate();
+  if (changedRunId) emitDesktopStoreChange({ entity: "long-run", id: changedRunId });
 }
 
 export function recordLongRunCycle(input: {
   goalId: string;
   progressKey?: string | null;
   outcome?: string | null;
+  /** Legacy callers remain unknown unless accompanied by a real billing reference. */
   costUsd?: number;
+  usage?: LongRunUsageInput;
 }): LongRunContinueDecision | null {
-  const run = getLongRunByGoalId(input.goalId);
-  if (!run) return null;
-  if (run.surface === "science") throw new Error("science_projection_read_only");
-  if (LONG_RUN_TERMINAL_STATUSES.has(run.status) || !["queued", "running"].includes(run.status) || !goalRevisionIsCurrent(run)) {
-    return longRunContinueDecision(input.goalId);
-  }
-  const now = new Date().toISOString();
-  const sameProgress = Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
-  const stallStreak = sameProgress ? run.stallStreak + 1 : 0;
-  const shouldBlock = stallStreak >= run.stallWindow;
-  const cost = Math.max(0, Number.isFinite(input.costUsd) ? Number(input.costUsd) : 0);
   const db = getDb();
+  let changedRunId: string | null = null;
   db.transaction(() => {
+    const run = getLongRunByGoalId(input.goalId);
+    if (!run) return;
+    if (run.surface === "science") throw new Error("science_projection_read_only");
+    const usage = input.usage ? normalizeLongRunUsage(input.usage) : null;
+    if (input.costUsd !== undefined && (!Number.isFinite(input.costUsd) || input.costUsd < 0)) {
+      throw new Error("long_run_usage_cost_invalid");
+    }
+    if (input.usage) recordLongRunUsage(input.goalId, input.usage);
+    const sourceEventId = usage ? `cycle:${usage.sourceId}` : undefined;
+    if (sourceEventId) {
+      const prior = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
+        .get(run.id, sourceEventId) as { payload_json: string } | undefined;
+      if (prior) {
+        if (JSON.parse(prior.payload_json).usage?.digest !== usage!.digest) throw new Error("long_run_usage_source_conflict");
+        return;
+      }
+    }
+    if (LONG_RUN_TERMINAL_STATUSES.has(run.status) || !["queued", "running"].includes(run.status) || !goalRevisionIsCurrent(run)) return;
+    const now = new Date().toISOString();
+    const sameProgress = Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
+    const stallStreak = sameProgress ? run.stallStreak + 1 : 0;
+    const shouldBlock = stallStreak >= run.stallWindow;
     db.prepare(
       `UPDATE long_runs
-       SET cycle_count = cycle_count + 1, cost_used_usd = cost_used_usd + ?,
+       SET cycle_count = cycle_count + 1,
            last_progress_key = COALESCE(?, last_progress_key), stall_streak = ?,
            status = CASE WHEN ? THEN 'blocked' ELSE status END,
            blocked_reason = CASE WHEN ? THEN 'stall_window_exhausted' ELSE blocked_reason END,
            updated_at = ?, version = version + 1
        WHERE id = ?`,
-    ).run(cost, input.progressKey ?? null, stallStreak, shouldBlock ? 1 : 0, shouldBlock ? 1 : 0, now, run.id);
+    ).run(input.progressKey ?? null, stallStreak, shouldBlock ? 1 : 0, shouldBlock ? 1 : 0, now, run.id);
     appendEventInDb({
-      runId: run.id,
-      kind: "run.cycle_recorded",
-      actorKind: "host",
-      payload: {
-        progressKey: input.progressKey ?? null,
-        outcome: input.outcome?.slice(0, 240) ?? null,
-        stallStreak,
-        blocked: shouldBlock,
-      },
+      runId: run.id, kind: "run.cycle_recorded", actorKind: "host", sourceEventId,
+      payload: { progressKey: input.progressKey ?? null, outcome: input.outcome?.slice(0, 240) ?? null,
+        stallStreak, blocked: shouldBlock, usage,
+        ...(usage ? { invocationRunId: usage.invocationRunId, attemptId: usage.attemptId } : {}) },
       at: now,
     });
-  })();
-  emitDesktopStoreChange({ entity: "long-run", id: run.id });
+    changedRunId = run.id;
+  }).immediate();
+  if (changedRunId) emitDesktopStoreChange({ entity: "long-run", id: changedRunId });
   return longRunContinueDecision(input.goalId);
 }
 

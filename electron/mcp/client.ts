@@ -1,3 +1,4 @@
+import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -75,7 +76,7 @@ import {
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId } from "../store/long-runs";
+import { getLongRunByGoalId, recordLongRunUsage } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
@@ -5135,6 +5136,9 @@ ${effectiveUserPrompt}`;
       && !scienceRuntimePinned
       && !continuationRuntimePinned;
     let directRuntimeDispatched = false;
+    let goalResultOrdinal = 0;
+    const goalUsageInvocationId = req.runId ?? randomUUID();
+    let lastGoalUsage: LongRunUsageInput | undefined;
     const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
@@ -5247,15 +5251,27 @@ ${effectiveUserPrompt}`;
         // Only Main's first direct dispatch is admitted here. This is not a
         // new policy for revoking an already-running provider or recovery pass.
         if (!directRuntimeDispatched) assertMcpGoalSelectionCurrent();
+        const goalBudget = activeGoalId ? getLongRunByGoalId(activeGoalId) : null;
+        const monetaryRefusal = goalBudget && goalBudget.surface !== "science" ? longRunMonetaryRefusal(goalBudget) : null;
+        if (monetaryRefusal) throw new Error(monetaryRefusal);
         const attemptEvents = createAttemptRunnerEvents();
         let result: Awaited<ReturnType<Runner>>;
+        const usageSourceId = `${goalUsageInvocationId}:provider-result:${++goalResultOrdinal}`;
+        const persistGoalUsage = (observedUsage?: LongRunUsageInput["observedUsage"]): void => {
+          if (!activeGoalId || !goalBudget || goalBudget.surface === "science" || req.agentAppMode) return;
+          lastGoalUsage = { sourceId: usageSourceId, invocationRunId: goalUsageInvocationId, observedUsage };
+          recordLongRunUsage(activeGoalId, lastGoalUsage);
+        };
         try {
           const selected = picked;
           if (!selected) throw new Error("no-runner");
           directRuntimeDispatched = true;
           result = await selected.runner(requestForRuntime, attemptEvents.events);
         } catch (error) {
-          if (!directRuntimeFallbackAllowed || signal?.aborted) throw error;
+          if (!directRuntimeFallbackAllowed || signal?.aborted) {
+            persistGoalUsage();
+            throw error;
+          }
           result = {
             text: "",
             failure: runnerFailureFromError(error, active.kind),
@@ -5263,6 +5279,7 @@ ${effectiveUserPrompt}`;
         } finally {
           attemptEvents.settle();
         }
+        persistGoalUsage(result.observedUsage);
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
@@ -5475,6 +5492,7 @@ ${effectiveUserPrompt}`;
         }
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
+          usage: lastGoalUsage,
           progressKey: goalProgressKeyForText(continuation.text),
           outcome: passClaim.claimed
             ? "pass-goal-complete-claim"
@@ -5733,9 +5751,10 @@ ${effectiveUserPrompt}`;
         });
         latestGoalDecision = null;
       }
-      if (!latestGoalDecision) {
+      {
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
+          usage: lastGoalUsage,
           progressKey: goalProgressKeyForText(goalCompletion.text),
           outcome: goalCompletion.claimed
             ? "turn-goal-complete-claim"

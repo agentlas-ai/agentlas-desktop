@@ -1,3 +1,4 @@
+import { longRunMonetaryRefusal } from "../long-run/budget";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
@@ -237,8 +238,8 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   const cyclesSpent = run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles;
   const deadlinePassed = run.budget.wallclockDeadline != null
     && Date.parse(run.budget.wallclockDeadline) <= Date.now();
-  const costSpent = run.budget.maxCostUsd !== null && run.costUsedUsd >= run.budget.maxCostUsd;
-  if (cyclesSpent || deadlinePassed || costSpent) throw new Error("auto_goal_budget_exhausted");
+  const costSpent = Boolean(longRunMonetaryRefusal(run));
+  if (cyclesSpent || deadlinePassed || costSpent) throw new Error(longRunMonetaryRefusal(run) ?? "auto_goal_budget_exhausted");
   const authority = revision.authorityRefs.map((ref) => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",

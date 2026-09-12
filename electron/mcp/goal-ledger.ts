@@ -1,3 +1,4 @@
+import type { LongRunUsageInput } from "../long-run/budget";
 // Compatibility bridge from the existing Goal-mode loop to Desktop-owned
 // long-running work. Agentlas OS and its Python ledger are intentionally not
 // part of this path: One, Work, and Science must remain inspectable and
@@ -54,6 +55,7 @@ export const GOAL_HARD_STOP_REASONS: ReadonlySet<string> = new Set([
   "budget_wallclock_exhausted",
   "budget_cycles_exhausted",
   "budget_cost_exhausted",
+  "budget_cost_unavailable",
 ]);
 
 function snapshotStatus(status: string): GoalLedgerSnapshot["status"] {
@@ -206,6 +208,7 @@ export async function goalLedgerShouldContinue(
 
 export async function recordGoalLedgerCycle(input: {
   goalId: string;
+  usage?: LongRunUsageInput;
   progressKey?: string | null;
   outcome?: string | null;
   projectDir?: string | null;
@@ -215,9 +218,11 @@ export async function recordGoalLedgerCycle(input: {
       goalId: input.goalId,
       progressKey: input.progressKey,
       outcome: input.outcome,
+      usage: input.usage,
     });
     return result ? decisionForGoal(input.goalId) : null;
-  } catch {
+  } catch (error) {
+    if (input.usage) throw error;
     return null;
   }
 }

@@ -1,3 +1,4 @@
+import { longRunMonetaryRefusal, type LongRunCostAccounting } from "./budget";
 import { getDb } from "../store/db";
 import { getLongRun, type LongRunRecord } from "../store/long-runs";
 
@@ -27,6 +28,7 @@ export type StartupResumeRefusal =
   | "attempt-unsettled"
   /** Cycles, wallclock, or cost are genuinely spent. An absent limit is not a spent one. */
   | "budget-spent"
+  | "budget-cost-unavailable"
   /** Nothing left to do. */
   | "not-paused";
 
@@ -39,6 +41,7 @@ export function startupResumeDecision(input: {
   unsettledAttempts: number;
   cycleCount: number;
   costUsedUsd: number;
+  costAccounting?: LongRunCostAccounting;
   budget: { maxCycles: number | null; maxCostUsd: number | null; wallclockDeadline: string | null };
   now?: number;
 }): StartupResumeDecision {
@@ -51,8 +54,9 @@ export function startupResumeDecision(input: {
   const cyclesSpent = input.budget.maxCycles != null && input.cycleCount >= input.budget.maxCycles;
   const deadlinePassed = input.budget.wallclockDeadline != null
     && Date.parse(input.budget.wallclockDeadline) <= now;
-  const costSpent = input.budget.maxCostUsd != null && input.costUsedUsd >= input.budget.maxCostUsd;
-  if (cyclesSpent || deadlinePassed || costSpent) return { resume: false, reason: "budget-spent" };
+  const monetaryRefusal = longRunMonetaryRefusal(input);
+  if (cyclesSpent || deadlinePassed || monetaryRefusal === "budget_cost_exhausted") return { resume: false, reason: "budget-spent" };
+  if (monetaryRefusal) return { resume: false, reason: "budget-cost-unavailable" };
   return { resume: true };
 }
 
@@ -91,6 +95,7 @@ export function reconcileHostPausedLongRuns(runIds: readonly string[]): StartupR
         unsettledAttempts: n,
         cycleCount: run.cycleCount,
         costUsedUsd: run.costUsedUsd,
+        costAccounting: run.costAccounting,
         budget: {
           maxCycles: run.budget.maxCycles ?? null,
           maxCostUsd: run.budget.maxCostUsd ?? null,
