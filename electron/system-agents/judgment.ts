@@ -1,3 +1,4 @@
+import { beginAccountedInference } from "../long-run/accounting-context";
 // Resident judgment service — the invisible system agent that replaces wordlist
 // *decisions* with connected-model judgment. Wordlists stop being the decider and
 // become REFERENCE ONLY: a keyword match is not proof, and a miss is not clearance.
@@ -572,6 +573,7 @@ async function callJudgmentModelDetailed(opts: {
       const attemptTimeoutMs = runtimeIndex === ordered.length - 1
         ? remainingMs
         : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
+      const accounting = beginAccountedInference(runtime);
       const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
             systemPrompt: opts.systemPrompt,
@@ -599,6 +601,7 @@ async function callJudgmentModelDetailed(opts: {
             onTool: () => {},
           },
         ), attemptSignal));
+      accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
         lastFailure = {
@@ -647,6 +650,7 @@ async function callJudgmentModelDetailed(opts: {
         } };
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
+        const accounting = beginAccountedInference(selection);
         const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
@@ -666,6 +670,7 @@ async function callJudgmentModelDetailed(opts: {
             },
             { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
           ), attemptSignal));
+        accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;
           lastFailure = {

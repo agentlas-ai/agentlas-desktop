@@ -1,3 +1,4 @@
+import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
 import { randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
@@ -2792,11 +2793,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const { invocation, decisionAnswer } = invocationParams(request, false);
         if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
-        // Warm the judgments the synchronous invocation start path peeks.
-        await Promise.all([
+        // The host keeps this identity through preflight and actual admission.
+        invocation.runId ??= randomUUID();
+        await withInvocationPreflightAccounting({ runId: invocation.runId, chatId: invocation.chatId }, () => Promise.all([
           prejudgeOneRequestIntent(invocation, { timeoutMs: 4_000 }),
           prejudgeOneMemoryIntent(invocation, { timeoutMs: 4_000 }),
-        ]).catch(() => undefined);
+        ])).catch(() => undefined);
         const mobileOneTurn = isOneInvocationChat(invocation.chatId);
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)

@@ -5,6 +5,7 @@ export interface LongRunUsageInput {
   /** Host identity for one actual provider result, reused by every consumer. */
   sourceId: string;
   invocationRunId: string;
+  scopeAnchorId?: string;
   attemptId?: string;
   observedUsage?: { inputTokens: number; outputTokens: number } | null;
   costUsd?: number;
@@ -16,6 +17,7 @@ export interface LongRunUsageReceipt {
   schemaVersion: "agentlas.long-run-usage.v1";
   sourceId: string;
   invocationRunId: string;
+  scopeAnchorId?: string;
   attemptId: string | null;
   tokens: { inputTokens: number; outputTokens: number } | null;
   cost: { status: "measured" | "unknown"; usd: number | null; sourceRef: string | null; reasonCode: string | null };
@@ -38,6 +40,7 @@ export function normalizeLongRunUsage(input: LongRunUsageInput): LongRunUsageRec
     schemaVersion: "agentlas.long-run-usage.v1" as const,
     sourceId: input.sourceId,
     invocationRunId: input.invocationRunId,
+    ...(input.scopeAnchorId ? { scopeAnchorId: input.scopeAnchorId } : {}),
     attemptId: input.attemptId ?? null,
     tokens,
     cost: { status: measuredCost ? "measured" as const : "unknown" as const,
@@ -71,6 +74,9 @@ export function readLongRunCostAccounting(runId: string, cycleCount: number): Lo
       knownSubtotalUsd += receipt.cost.usd!;
     } else unknownCount += 1;
   }
+  const pending = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_events starts WHERE starts.run_id=? AND starts.kind='run.usage_started' AND NOT EXISTS (SELECT 1 FROM long_run_events ends WHERE ends.run_id=starts.run_id AND ends.kind='run.usage_recorded' AND json_extract(ends.payload_json,'$.usage.sourceId')=json_extract(starts.payload_json,'$.sourceId'))")
+    .get(runId) as { n: number };
+  unknownCount += pending.n;
   return { status: unknownCount ? "unknown" : "measured", knownSubtotalUsd, receiptCount, unknownCount };
 }
 

@@ -1,3 +1,4 @@
+import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
 import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { flattenAskFences } from "../../shared/ask-fence-flatten";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
@@ -2275,6 +2276,7 @@ async function runOneBindingInvocation(
   const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
   const workspaceBinding = captureTelegramOneInvocationBinding(getChatWorkingFolder(chat.id));
   const request = {
+    runId: randomUUID(),
     chatId: chat.id,
     userPrompt: userText,
     images: attachments
@@ -2287,10 +2289,10 @@ async function runOneBindingInvocation(
     oneMode: true,
   };
   // 동기 start 경로가 들여다보는 판정을 미리 데운다(모바일/렌더러 진입점과 동일).
-  await Promise.all([
+  await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
     prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
     prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
-  ]).catch(() => undefined);
+  ])).catch(() => undefined);
 
   return new Promise<string>((resolve, reject) => {
     let settled = false;
