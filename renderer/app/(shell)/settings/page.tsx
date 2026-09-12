@@ -31,6 +31,7 @@ import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRu
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
+import { LocalModelHubPanel } from "@/components/settings/LocalModelHubPanel";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -55,6 +56,7 @@ const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   ollama: "Ollama (로컬)",
   lmstudio: "LM Studio (로컬)",
   mlx: "MLX (로컬)",
+  "agentlas-local": "Agentlas 로컬 모델",
   upstage: "Upstage Solar (🇰🇷 한국 소버린)",
   custom: "Custom OpenAI (호환 모델)",
   glm: "GLM (Z.ai)",
@@ -74,6 +76,7 @@ const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
   ollama: "Ollama (local)",
   lmstudio: "LM Studio (local)",
   mlx: "MLX (local)",
+  "agentlas-local": "Agentlas local model",
   upstage: "Upstage Solar (🇰🇷 Korean sovereign)",
   custom: "Custom OpenAI (compatible model)",
   glm: "GLM (Z.ai)",
@@ -856,6 +859,8 @@ export default function SettingsPage() {
         <RunAlertsPanel locale={locale} />
 
         <TerminalProfilesPanel />
+
+        <LocalModelHubPanel locale={locale} />
 
         {/* 로컬 모델 (Ollama) */}
         <h2 id="ollama" style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>

@@ -5,7 +5,7 @@ export type RuntimeExecutionClass = "native_cli" | "managed_api" | "local_infere
 
 /** Provider identity and execution ownership are independent axes. */
 export function runtimeExecutionClass(kind: RuntimeKind): RuntimeExecutionClass {
-  if (["ollama", "lmstudio", "mlx"].includes(kind)) return "local_inference";
+  if (["ollama", "lmstudio", "mlx", "agentlas-local"].includes(kind)) return "local_inference";
   if (["byok", "agentlas"].includes(kind)) return "managed_api";
   return "native_cli";
 }

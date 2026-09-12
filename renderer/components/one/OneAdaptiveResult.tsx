@@ -47,7 +47,7 @@ import {
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
 import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
@@ -1137,20 +1137,15 @@ function AutomationBlock({
   );
 }
 
-/**
- * Promotion of the host's automation registration receipt (`automation.create`
- * / `automation.update` tool events, renderer/lib/one-activity.ts extractor)
- * into a first-class Automation card in the One conversation. The receipt args
- * carry no automation id, so the card resolves the registered row by its
- * host-idempotent name through the same preload automations API the list
- * screen uses, and enriches status/schedule from the live record.
- */
+/** Exact host-issued identity is required for actions; old name-only receipts remain readable. */
 export function OneAutomationRegistrationCard({
+  automationId,
   name,
   action,
   schedule,
   locale,
 }: {
+  automationId?: string;
   name: string;
   action: "created" | "updated";
   schedule?: string;
@@ -1161,19 +1156,18 @@ export function OneAutomationRegistrationCard({
   const [record, setRecord] = useState<Automation | null>(null);
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    setRecord(null);
+    if (!api || !automationId) return;
     let active = true;
-    void api.automations.list().then((rows) => {
-      if (!active) return;
-      const normalized = name.trim().toLowerCase();
-      setRecord(rows.find((row) => row.name.trim().toLowerCase() === normalized) ?? null);
-    }).catch(() => {
-      if (active) setRecord(null);
+    const read = () => api.automations.get(automationId).then((row) => {
+      if (active) setRecord(row?.id === automationId ? row : null);
+    }).catch(() => { if (active) setRecord(null); });
+    void read();
+    const off = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity === "automation" && (!change.id || change.id === automationId)) void read();
     });
-    return () => {
-      active = false;
-    };
-  }, [name]);
+    return () => { active = false; off?.(); };
+  }, [automationId]);
   const scheduleLine = record?.scheduleHuman || schedule || "";
   const lastRunLine = record?.nextRunAt
     ? `${ko ? "다음 실행" : "Next run"} · ${formatTimelineAt(record.nextRunAt, locale)}`
@@ -1198,7 +1192,7 @@ export function OneAutomationRegistrationCard({
               scheduleLine={scheduleLine}
               nodes={[]}
               lastRunLine={lastRunLine}
-              automationId={record?.id ?? null}
+              automationId={record && record.id === automationId ? record.id : null}
               actionMessage={message}
               onRunNow={runNow}
               onEditInChat={editInChat}

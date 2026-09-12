@@ -49,7 +49,11 @@ export async function probeOpenAiLocal(
  */
 export function makeLocalOpenAiRunner(
   hostFn: () => string,
-  runtimeKind: "lmstudio" | "mlx" = "lmstudio",
+  runtimeKind: string = "lmstudio",
+  options: {
+    chatTemplateKwargs?: Record<string, boolean | number | string>;
+    headersFn?: () => Record<string, string>;
+  } = {},
 ): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
     const host = hostFn();
@@ -122,6 +126,8 @@ export function makeLocalOpenAiRunner(
           req.locale === "ko"
             ? `로컬 서버에 연결할 수 없습니다: ${host}`
             : `Cannot reach local server: ${host}`,
+        chatTemplateKwargs: options.chatTemplateKwargs,
+        headers: options.headersFn?.(),
       },
       messages,
     );

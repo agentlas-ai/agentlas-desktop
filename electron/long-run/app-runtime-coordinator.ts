@@ -85,6 +85,7 @@ export function registerAppRuntimeParticipant(
   name: string,
   participant: AppRuntimeParticipant,
 ): () => void {
+  if (shutdownPromise) throw new Error("app_runtime_shutdown_in_progress");
   const normalized = name.trim();
   if (!normalized) throw new TypeError("app_runtime_participant_name_required");
   if (participants.has(normalized)) throw new Error(`app_runtime_participant_duplicate:${normalized}`);
@@ -131,44 +132,75 @@ export function failDesktopLongRunResumeDispatch(runId: string, reason: string):
 
 export function shutdownAppRuntimeCoordinator(timeoutMs = 15_000): Promise<AppRuntimeShutdownReport> {
   if (shutdownPromise) return shutdownPromise;
-  shutdownPromise = (async () => {
-    admissionOpen = false;
-    const pausedRunIds = pauseActiveDesktopLongRunsForAppShutdown(appInstanceId);
+  admissionOpen = false;
+  // The deadline covers interruption itself, not just the subsequent drain.
+  // A synchronous callback must still return control to the JS event loop.
+  const duration = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 15_000;
+  const deadline = performance.now() + duration;
+  // Install the single-flight promise before calling user/runtime participants:
+  // a closeAdmission callback may re-enter shutdown synchronously.
+  shutdownPromise = Promise.resolve().then(async () => {
     const entries = [...participants.entries()];
-    for (const [, participant] of entries) {
-      try { participant.closeAdmission?.(); } catch {}
+    const failures = new Map<string, string>();
+    const interruptPending = new Set(entries.map(([name]) => name));
+    let reportClosed = false;
+    const failed = (name: string, error: unknown): void => {
+      if (reportClosed || failures.has(name)) return;
+      const raw = error instanceof Error ? error.message : String(error);
+      failures.set(name, raw.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 120) || "participant_failed");
+    };
+    let pausedRunIds: string[] = [];
+    try { pausedRunIds = pauseActiveDesktopLongRunsForAppShutdown(appInstanceId); }
+    catch (error) {
+      // A storage failure cannot prevent Stop from reaching every runtime.
+      // Existing Main report consumers already handle failed participant names.
+      failed("coordinator:pause-state", error);
     }
-    const settlements = await Promise.allSettled(
-      entries.map(([, participant]) => Promise.resolve().then(() => participant.interrupt())),
-    );
-    const failedParticipantNames: string[] = [];
-    const participantErrorCodes: Record<string, string> = {};
-    settlements.forEach((settlement, index) => {
-      if (settlement.status !== "rejected") return;
-      const name = entries[index]![0];
-      failedParticipantNames.push(name);
-      const raw = settlement.reason instanceof Error ? settlement.reason.message : String(settlement.reason);
-      participantErrorCodes[name] = raw.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 120) || "participant_failed";
-    });
-
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    let unsettled = entries.filter(([, participant]) => participant.isSettled && !participant.isSettled());
-    while (unsettled.length > 0 && Date.now() < deadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      unsettled = entries.filter(([, participant]) => participant.isSettled && !participant.isSettled());
+    for (const [name, participant] of entries) {
+      try { participant.closeAdmission?.(); } catch (error) { failed(name, error); }
     }
+    for (const [name, participant] of entries) {
+      try {
+        const pending = participant.interrupt();
+        if (pending && typeof pending.then === "function") {
+          void Promise.resolve(pending).then(
+            () => { if (!reportClosed) interruptPending.delete(name); },
+            (error) => { if (!reportClosed) { failed(name, error); interruptPending.delete(name); } },
+          );
+        } else {
+          interruptPending.delete(name);
+        }
+      } catch (error) {
+        failed(name, error);
+        interruptPending.delete(name);
+      }
+    }
+    const unsettledNames = (): string[] => entries.filter(([name, participant]) => {
+      if (interruptPending.has(name)) return true;
+      try { return participant.isSettled ? !participant.isSettled() : false; }
+      catch (error) { failed(name, error); return true; }
+    }).map(([name]) => name);
+    // Let already-resolved interruption promises acknowledge even with a zero
+    // budget, while a never-resolving interrupt remains explicitly unsettled.
+    await Promise.resolve();
+    let unsettled = unsettledNames();
+    while (unsettled.length > 0 && performance.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(0, deadline - performance.now()))));
+      unsettled = unsettledNames();
+    }
+    reportClosed = true;
     removeHostShutdownHook?.();
     removeHostShutdownHook = null;
     return {
       appInstanceId,
-      pausedRunIds,
+      pausedRunIds: [...pausedRunIds],
       participantNames: entries.map(([name]) => name),
-      failedParticipantNames,
-      participantErrorCodes,
-      unsettledParticipantNames: unsettled.map(([name]) => name),
+      failedParticipantNames: [...failures.keys()],
+      participantErrorCodes: Object.fromEntries(failures),
+      unsettledParticipantNames: [...unsettled],
       timedOut: unsettled.length > 0,
     };
-  })();
+  });
   return shutdownPromise;
 }
 

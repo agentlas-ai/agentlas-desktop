@@ -209,6 +209,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   ollama: "agentlas",
   lmstudio: "agentlas",
   mlx: "agentlas",
+  "agentlas-local": "agentlas",
   acp: "runtime",
   // 서빙 실행은 세션도 압축도 우리가 들고 있다 — CLI 처럼 위임할 상대가 없다.
   agentlas: "agentlas",
@@ -223,6 +224,7 @@ const EXPLICIT_MODEL_RUNTIME_KINDS = new Set<RuntimeKind>([
   "ollama",
   "lmstudio",
   "mlx",
+  "agentlas-local",
   "agentlas",
 ]);
 

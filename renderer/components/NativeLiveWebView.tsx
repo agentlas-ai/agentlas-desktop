@@ -61,6 +61,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       return;
     }
     const viewId = viewIdRef.current;
+    const viewLeaseId = mode === "app" ? nextViewId() : undefined;
     const generation = ++generationRef.current;
     // A new document/scope cannot inherit a previous effect's ready receipt.
     statusRef.current = { viewId, taskScopeId, state: "opening", url: runtimeUrl };
@@ -102,7 +103,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       if (disposed) return;
       // Hiding never waits for a paint or a fresh layout measurement.
       if (visible) lastGeometry = bounds();
-      const next = { viewId, taskScopeId, bounds: lastGeometry, visible };
+      const next = { viewId, taskScopeId, viewLeaseId, bounds: lastGeometry, visible };
       const signature = JSON.stringify(next);
       if (signature === lastBounds) return;
       lastBounds = signature;
@@ -181,6 +182,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
     const initialBounds = lastGeometry;
     void api.open({
       viewId,
+      viewLeaseId,
       url: runtimeUrl,
       bounds: initialBounds,
       visible: false,
@@ -188,7 +190,8 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       taskScopeId,
     }).then((result) => {
       if (disposed) {
-        if (!retainOnUnmount && generationRef.current === generation) void api.close(viewId, taskScopeId);
+        if (viewLeaseId) void api.releaseLease({ viewId, viewLeaseId, taskScopeId });
+        else if (!retainOnUnmount && generationRef.current === generation) void api.close(viewId, taskScopeId);
         return;
       }
       if (!result.ok && result.reason !== "navigation-superseded") {
@@ -218,7 +221,8 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       intersection.disconnect();
       window.removeEventListener("resize", syncBounds);
       window.removeEventListener("scroll", syncBounds, true);
-      if (retainOnUnmount) void api.setBounds({ viewId, taskScopeId, bounds: bounds(), visible: false });
+      if (viewLeaseId) void api.releaseLease({ viewId, viewLeaseId, taskScopeId });
+      else if (retainOnUnmount) void api.setBounds({ viewId, taskScopeId, bounds: bounds(), visible: false });
       else void api.close(viewId, taskScopeId);
     };
   }, [mode, runtimeUrl, taskScopeId, retainOnUnmount]);

@@ -10,9 +10,13 @@
 // 실행 엔진은 손대지 않는다 — 폴 매니저는 "언제 fire하나"만 결정하고, fire는 트리거 매니저의
 // RunFn(automation-scheduler.runAutomationFromTrigger)으로 위임한다.
 //
-// nextPollAt/currentInterval은 프로세스 인메모리 상태다(앱 꺼지면 폴도 정지 — 설계 §3.1의
-// 안전장치). lastSeen 커서만 trigger_json에 영속화해 재기동 후에도 중복 발사를 막는다.
-import { randomUUID } from "node:crypto";
+// Cursor, deadline and next-check/backoff are durable in trigger_json. Quitting
+// pauses local observation; the persisted due time is checked again at launch.
+import { createHash } from "node:crypto";
+import { decodeAutomationPollState, type AutomationPollState } from "../../shared/automation-monitor";
+import { getDb } from "../store/db";
+import { getAgentSurface } from "../store/agent-surfaces";
+import { recordRunEvent } from "../store/run-events";
 import type { Automation, PollSource, Trigger } from "../../shared/types";
 import { listEnabledByTrigger } from "../store/automations";
 import { advancePollCursor, enqueueTriggerEvent } from "../store/trigger-events";
@@ -32,6 +36,12 @@ interface PollState {
 }
 
 const states = new Map<string, PollState>();
+const inFlight = new Set<string>();
+export interface PollObservationDependencies {
+  observe?: (source: PollSource) => Promise<string | null>;
+  wake?: () => void;
+  now?: () => Date;
+}
 
 /** stock 소스 게이팅용 시장 상태 캐시 — MARKET_STATUS는 자주 안 바뀌므로 5분 캐시. */
 let marketOpenCache: { open: boolean; at: number } | null = null;
@@ -41,7 +51,7 @@ const MARKET_CACHE_MS = 5 * 60 * 1000;
  * poll 트리거를 가진 enabled 자동화 중 nextPollAt<=now인 것만 폴한다.
  * 기존 60초 틱에서 호출된다(새 타이머 없음, 설계 §3.3).
  */
-export async function runPollDue(now: Date = new Date()): Promise<void> {
+export async function runPollDue(now: Date = new Date(), dependencies: PollObservationDependencies = {}): Promise<void> {
   let autos: Automation[];
   try {
     autos = listEnabledByTrigger("poll");
@@ -52,25 +62,63 @@ export async function runPollDue(now: Date = new Date()): Promise<void> {
   const nowMs = now.getTime();
   for (const a of autos) {
     if (!a.trigger || a.trigger.kind !== "poll") continue;
+    if (inFlight.has(a.id)) continue;
     const st = ensureState(a);
-    if (st.nextPollAt > nowMs) continue; // 아직 due 아님(적응형 간격이 늘려놓음)
-    await pollOne(a, a.trigger, st, now);
+    const deadline = a.monitor?.deadline ? Date.parse(a.monitor.deadline) : null;
+    const persisted = decodeAutomationPollState(a.trigger.pollState);
+    if (persisted?.status === "timed_out" || persisted?.status === "satisfied") continue;
+    if (deadline !== null && deadline <= nowMs) {
+      persistPollDeadline(a, a.trigger, st, now);
+      continue;
+    }
+    if (st.nextPollAt > nowMs) continue;
+    inFlight.add(a.id);
+    try { await pollOne(a, a.trigger, st, now, dependencies); }
+    finally { inFlight.delete(a.id); }
   }
 }
 
 /** 인메모리 상태를 준비(없으면 trigger에서 하이드레이트). */
 function ensureState(a: Automation): PollState {
-  let st = states.get(a.id);
-  if (!st) {
-    const trig = a.trigger && a.trigger.kind === "poll" ? a.trigger : null;
-    st = {
-      nextPollAt: 0, // 즉시 첫 폴(0 <= now)
-      currentIntervalMs: trig ? Math.max(30_000, trig.minIntervalMs) : 60_000,
-      lastSeen: trig?.lastSeen,
-    };
-    states.set(a.id, st);
-  }
-  return st;
+  const trigger = a.trigger?.kind === "poll" ? a.trigger : null;
+  const durable = decodeAutomationPollState(trigger?.pollState);
+  const state = {
+    nextPollAt: durable?.nextCheckAt ? Date.parse(durable.nextCheckAt) : 0,
+    currentIntervalMs: durable?.currentIntervalMs ?? Math.max(30_000, trigger?.minIntervalMs ?? 60_000),
+    lastSeen: trigger?.lastSeen,
+  };
+  states.set(a.id, state);
+  return state;
+}
+
+function nextPollState(trigger: Extract<Trigger, { kind: "poll" }>, state: PollState, now: Date,
+  status: AutomationPollState["status"] = "pending", reason?: string): AutomationPollState {
+  return { schemaVersion: "agentlas.poll-state.v1", revision: (decodeAutomationPollState(trigger.pollState)?.revision ?? 0) + 1,
+    nextCheckAt: status === "timed_out" || status === "satisfied" ? null : new Date(state.nextPollAt).toISOString(),
+    currentIntervalMs: state.currentIntervalMs, observedAt: now.toISOString(), status, ...(reason ? { reason } : {}) };
+}
+function persistPollState(a: Automation, trigger: Extract<Trigger, { kind: "poll" }>, state: PollState, now: Date,
+  status: AutomationPollState["status"] = "pending", reason?: string): boolean {
+  const next: Extract<Trigger, { kind: "poll" }> = { ...trigger, ...(state.lastSeen === undefined ? {} : { lastSeen: state.lastSeen }),
+    pollState: nextPollState(trigger, state, now, status, reason) };
+  return getDb().transaction(() => {
+    if (!advancePollCursor(a.id, trigger, next)) return false;
+    const previous = decodeAutomationPollState(trigger.pollState);
+    if (a.monitor && status === "blocked" && (previous?.status !== status || previous.reason !== reason)) {
+      const runId = `monitor:${a.id}:attention:${next.pollState!.revision}`;
+      recordRunEvent({runId,automationId:a.id,kind:"automation_monitor_attention",sourceEventId:runId,evidencePhase:"uncertain",
+        payload:{reason:reason ?? "monitor_observation_failed",status,executionAvailability:"app-running"}});
+    }
+    return true;
+  })();
+}
+function persistPollDeadline(a: Automation, trigger: Extract<Trigger, { kind: "poll" }>, state: PollState, now: Date): void {
+  getDb().transaction(() => {
+    if (!persistPollState(a, trigger, state, now, "timed_out", "monitor_deadline_reached")) return;
+    const runId = `monitor:${a.id}:deadline:${a.monitor!.deadline}`;
+    recordRunEvent({ runId, automationId: a.id, kind: "automation_monitor_attention", evidencePhase: "uncertain",
+      sourceEventId: runId, payload: { reason: "monitor_deadline_reached", status: "timed_out", executionAvailability: "app-running" } });
+  })();
 }
 
 /** 자동화가 삭제/토글off되면 상태를 버린다(트리거 매니저 재동기화에서 호출). */
@@ -87,79 +135,70 @@ export function clearPollStates(): void {
  * 한 자동화를 폴한다: 소스 값 관측 → 조건 평가 → (통과+변화면) fire → 적응형 간격 갱신.
  * 시장 게이팅: stock 소스이고 장 마감이면 간격을 강제로 max로 늘린다(설계 §3.3).
  */
-async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }>, st: PollState, now: Date): Promise<void> {
+async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }>, st: PollState, now: Date,
+  dependencies: PollObservationDependencies): Promise<void> {
   const min = Math.max(30_000, trigger.minIntervalMs);
   const max = Math.max(min, trigger.maxIntervalMs);
-  let observed: string | null = null;
-  try {
-    observed = await fetchPollValue(trigger.source);
-  } catch (err) {
-    console.error(`[poll] fetch failed (${a.name}):`, err);
-    // 소스 오류 시 백오프를 늘려 폭주 방지(장애난 소스를 30초마다 두드리지 않는다).
+  const startedAt = Date.now();
+  let observed: string | null;
+  try { observed = await (dependencies.observe ?? fetchPollValue)(trigger.source); }
+  catch {
     st.currentIntervalMs = Math.min(max, st.currentIntervalMs * 2);
     st.nextPollAt = now.getTime() + st.currentIntervalMs;
+    persistPollState(a, trigger, st, now, "blocked", "monitor_observation_failed");
     return;
   }
-
-  // 관측 불가(자격증명 미충족 등) — 다음 폴을 min으로 잡되 발사는 안 함.
-  if (observed == null) {
-    st.nextPollAt = now.getTime() + min;
+  if (observed === null) {
+    st.currentIntervalMs = Math.min(max, st.currentIntervalMs * 2);
+    st.nextPollAt = now.getTime() + st.currentIntervalMs;
+    persistPollState(a, trigger, st, now, "blocked", "monitor_observation_unavailable");
     return;
   }
-
-  const changed = st.lastSeen === undefined ? true : observed !== st.lastSeen;
-
-  // 조건 평가 — 관측값을 {{value}}로, changed 여부를 lastSeen 인자로 넘긴다.
+  now = dependencies.now?.() ?? new Date(now.getTime() + Math.max(0, Date.now() - startedAt));
+  if (a.monitor?.deadline && Date.parse(a.monitor.deadline) <= now.getTime()) {
+    persistPollDeadline(a, trigger, st, now);
+    return;
+  }
+  if (a.monitor && trigger.source.kind === "invocation" && ["failed", "cancelled", "interrupted"].includes(observed)) {
+    st.lastSeen = observed;
+    st.currentIntervalMs = max;
+    st.nextPollAt = now.getTime() + max;
+    persistPollState(a, trigger, st, now, "blocked", `monitor_invocation_${observed}`);
+    return;
+  }
+  const changed = st.lastSeen === undefined || observed !== st.lastSeen;
   const pass = evaluateCondition(trigger.cond, { value: observed }, st.lastSeen);
-
-  // dedup: 값이 그대로면(변화 없음) 발사하지 않는다(설계 §3.3 커서). changed 연산자는 위에서 처리됨.
-  if (pass && changed) {
-    try {
-      enqueueTriggerEvent({
-        automationId: a.id,
-        triggerKind: "poll",
-        dedupeKey: `poll:${randomUUID()}`,
-        payload: { output: observed, value: observed },
-        pollCursor: {
-          expectedTrigger: trigger,
-          nextTrigger: { ...trigger, lastSeen: observed },
-        },
-      });
-      st.lastSeen = observed;
-      wakeTriggerOutbox();
-    } catch (error) {
-      // The cursor remains unchanged when enqueue fails, so the next poll can
-      // deliver the same observation instead of silently losing it.
-      console.error(`[poll] durable enqueue failed (${a.name}):`, error);
-      st.currentIntervalMs = min;
-      st.nextPollAt = now.getTime() + min;
-      return;
-    }
+  // A changed-only monitor's initial sample establishes its baseline. A typed
+  // equality/completion condition may legitimately fire on the first sample.
+  const baselineOnly = Boolean(a.monitor && trigger.cond.op === "changed" && st.lastSeen === undefined
+    && !(trigger.source.kind === "invocation" && observed === "completed"));
+  st.currentIntervalMs = changed ? min : Math.min(max, st.currentIntervalMs * 2);
+  if (trigger.source.kind === "stock" && (trigger.source.gateMarket ?? true) && !dependencies.observe) {
+    if (!await isMarketOpen(now)) st.currentIntervalMs = max;
   }
-
-  // 적응형 간격: 변했으면 min으로 조이고, 아니면 2배로 늘린다(max 상한). 시장 마감 게이팅.
-  let nextInterval = changed ? min : Math.min(max, st.currentIntervalMs * 2);
-  if (trigger.source.kind === "stock" && (trigger.source.gateMarket ?? true)) {
-    const open = await isMarketOpen(now);
-    if (!open) nextInterval = max; // 장 마감/야간엔 최대 간격
-  }
-  st.currentIntervalMs = nextInterval;
-  st.nextPollAt = now.getTime() + nextInterval;
-
-  // lastSeen 커서 갱신 + 영속화(재기동 후 중복 발사 방지). 값이 바뀐 경우에만 write.
-  if (changed && !pass) {
+  st.nextPollAt = now.getTime() + st.currentIntervalMs;
+  const prior = st.lastSeen;
+  st.lastSeen = observed;
+  const satisfied = Boolean(a.monitor && trigger.source.kind === "invocation" && observed === "completed" && pass);
+  const nextTrigger: Extract<Trigger, { kind: "poll" }> = { ...trigger, lastSeen: observed,
+    pollState: nextPollState(trigger, st, now, satisfied ? "satisfied" : "pending") };
+  if (pass && changed && !baselineOnly) {
+    const observationDigest = createHash("sha256").update(observed).digest("hex");
+    const dedupeKey = `poll:${createHash("sha256").update(JSON.stringify({ automationId: a.id,
+      revision: nextTrigger.pollState!.revision, source: trigger.source, prior, observationDigest })).digest("hex")}`;
     try {
-      if (advancePollCursor(a.id, trigger, { ...trigger, lastSeen: observed })) {
-        st.lastSeen = observed;
-      } else {
-        // The automation was edited while this fetch was in flight. Discard
-        // the stale in-memory state and rehydrate the new source next tick.
-        states.delete(a.id);
-      }
+      enqueueTriggerEvent({ automationId: a.id, triggerKind: "poll", dedupeKey,
+        payload: { output: observed, value: observed, observationDigest },
+        pollCursor: { expectedTrigger: trigger, nextTrigger } });
+      (dependencies.wake ?? wakeTriggerOutbox)();
     } catch (error) {
-      console.error("[poll] persist cursor failed:", error);
+      // CAS includes enabled + exact trigger. Stop/edit races cannot dispatch
+      // an observation from a stale source or advance its deadline/cursor.
       states.delete(a.id);
+      console.error(`[poll] durable enqueue rejected (${a.id}):`, error);
     }
+  } else if (!advancePollCursor(a.id, trigger, nextTrigger)) {
+    states.delete(a.id);
   }
 }
 
@@ -168,8 +207,21 @@ async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }
 // 단발 호출한다. 서버 미설치/자격증명 미충족이면 null(폴 스킵). 서버 id는 well-known 관례.
 
 /** 소스 → 관측값 문자열. null=관측 불가(스킵). */
-async function fetchPollValue(source: PollSource): Promise<string | null> {
+export async function fetchPollValue(source: PollSource): Promise<string | null> {
   switch (source.kind) {
+    case "invocation": {
+      const rows = getDb().prepare("SELECT kind, chat_id FROM run_events WHERE run_id = ? ORDER BY seq ASC")
+        .all(source.runId) as Array<{ kind: string; chat_id: string | null }>;
+      if (!rows.some(row => row.kind === "invoke_started" && row.chat_id === source.chatId)
+        || rows.some(row => row.chat_id && row.chat_id !== source.chatId)) return null;
+      const terminal = rows.filter(row => ["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"].includes(row.kind)).at(-1);
+      return terminal ? ({ invoke_completed: "completed", invoke_failed: "failed", invoke_threw: "failed",
+        invoke_cancelled: "cancelled", invoke_interrupted: "interrupted" } as Record<string, string>)[terminal.kind] : "running";
+    }
+    case "artifact": {
+      const artifact = getAgentSurface(source.artifactId);
+      return artifact?.chatId === source.chatId ? `${artifact.artifactRevision}:${artifact.stateRevision}` : null;
+    }
     case "stock":
       return fetchStock(source);
     case "github":

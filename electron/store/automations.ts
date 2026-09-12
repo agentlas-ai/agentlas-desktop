@@ -1,3 +1,4 @@
+import { decodeAutomationMonitor, decodeAutomationPollState, type AutomationMonitorContract } from "../../shared/automation-monitor";
 // 자동화 — SQLite 영속 + 스케줄 next-run 계산. (이전 M0 in-memory stub 대체)
 // targetType: agent(개별 에이전트) | firm(CEO 호출). createdBy: user(폼) | agent(채팅 emitter).
 // 실제 실행은 automation-scheduler.ts가 dueAutomations()를 폴링해 백그라운드 chat으로 돌린다.
@@ -187,6 +188,9 @@ function toAutomation(row: AutomationRow): Automation {
   const tz = row.timezone || defaultTz();
   const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
   const triggerType = (row.trigger_type as TriggerKind) || "schedule";
+  const trigger = parseTrigger(row.trigger_json);
+  const monitor = decodeAutomationMonitor(trigger?.monitor);
+  const pollState = trigger?.kind === "poll" ? decodeAutomationPollState(trigger.pollState) : null;
   return {
     id: row.id,
     name: row.name,
@@ -205,14 +209,16 @@ function toAutomation(row: AutomationRow): Automation {
     createdBy: row.created_by,
     createdAt: row.created_at,
     lastRunAt: row.last_run_at,
-    nextRunAt: row.next_run_at,
+    nextRunAt: triggerType === "poll" ? pollState?.nextCheckAt ?? null : row.next_run_at,
     graph: parseGraph(row.graph_json),
     goal: row.goal ?? null,
     goalId: row.goal_id ?? null,
     timezone: row.timezone,
     scheduleSpec: spec,
     triggerType,
-    trigger: parseTrigger(row.trigger_json),
+    trigger,
+    ...(monitor ? { monitor } : {}),
+    executionAvailability: "app-running",
   };
 }
 
@@ -357,6 +363,7 @@ export function pinLegacyAutomationHubVersions(
 }
 
 export function createAutomation(input: {
+  monitor?: AutomationMonitorContract;
   name: string;
   scheduleHuman: string;
   targetType: AutomationTargetType;
@@ -405,7 +412,10 @@ export function createAutomation(input: {
         ? input.graphJson
         : JSON.stringify(input.graphJson);
   const triggerType: TriggerKind = input.triggerType ?? "schedule";
-  const triggerJson = input.trigger ? JSON.stringify(input.trigger) : null;
+  const monitor = input.monitor === undefined ? decodeAutomationMonitor(input.trigger?.monitor) : decodeAutomationMonitor(input.monitor);
+  if ((input.monitor !== undefined || input.trigger?.monitor !== undefined) && !monitor) throw new Error("automation_monitor_contract_invalid");
+  const effectiveTrigger = input.trigger ?? (monitor ? { kind: triggerType } : null);
+  const triggerJson = effectiveTrigger ? JSON.stringify({ ...effectiveTrigger, ...(monitor ? { monitor } : {}) }) : null;
   // 이벤트 계열 트리거(fs/chain/webhook)는 시계가 없다 → next_run_at은 null(스케줄러가 안 뜸,
   // 트리거 매니저의 리스너가 발사한다). schedule/poll만 시각 계산.
   const timeDriven = triggerType === "schedule";
@@ -513,8 +523,12 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const endAt = patch.endAt !== undefined ? patch.endAt : row.end_at;
   const maxRuns = patch.maxRuns !== undefined ? patch.maxRuns : row.max_runs;
   const triggerType: TriggerKind = patch.triggerType ?? ((row.trigger_type as TriggerKind) || "schedule");
-  const triggerJson =
-    patch.trigger !== undefined ? (patch.trigger ? JSON.stringify(patch.trigger) : null) : row.trigger_json;
+  const nextTrigger = patch.trigger !== undefined ? patch.trigger : parseTrigger(row.trigger_json);
+  const monitor = patch.monitor === undefined ? decodeAutomationMonitor(nextTrigger?.monitor) : decodeAutomationMonitor(patch.monitor);
+  if (((patch.monitor !== undefined && patch.monitor !== null) || (patch.monitor === undefined && nextTrigger?.monitor !== undefined)) && !monitor) throw new Error("automation_monitor_contract_invalid");
+  const effectiveTrigger = nextTrigger ?? (monitor ? { kind: triggerType } : null);
+  const triggerJson = effectiveTrigger ? JSON.stringify({ ...effectiveTrigger,
+    ...(monitor ? { monitor } : { monitor: undefined }) }) : null;
 
   const timeDriven = triggerType === "schedule";
   const nextRunAt = timeDriven

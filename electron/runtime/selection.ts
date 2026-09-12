@@ -30,6 +30,7 @@ import { runCursor } from "./cursor";
 import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
+import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
 import { acquireRunSlot } from "./run-slots";
 import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
 import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
@@ -133,6 +134,7 @@ const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor), "cu
 const runOllamaSlotted = withLocalInferenceSlot(runOllama);
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
+const runManagedLocalModelSlotted = withLocalInferenceSlot(runManagedLocalModel);
 
 function bindRuntimeSource(runner: Runner, source: string | undefined): Runner {
   return (req, events) => runner({ ...req, ...(source ? { runtimeSource: source } : {}) }, events);
@@ -277,6 +279,8 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner;
     return { runner: runLMStudioSlotted, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "mlx")
     return { runner: runMLXSlotted, label: `MLX${active.model ? ` · ${active.model}` : ""}` };
+  if (active.kind === "agentlas-local")
+    return { runner: runManagedLocalModelSlotted, label: `Agentlas Local${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "agentlas") {
     // 서버가 실행을 들고 있으므로 로컬 실행 슬롯을 잡지 않는다 — 이 기계의 CPU 를 쓰지 않는
     // 원격 호출이라, BYOK 와 같은 취급이 맞다.
@@ -336,6 +340,7 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   }
   if (selection.kind === "agentlas") return { runner: runAgentlasServing, label: "Agentlas" };
   if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
+  if (selection.kind === "agentlas-local") return { runner: runManagedLocalModel, label: "Agentlas Local" };
   if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };
   return null;
@@ -387,7 +392,7 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
 // A near-limit warning still leaves usable quota. Only an exhausted snapshot
 // excludes a candidate; actual provider quota/auth failures retain their cooldown.
 const QUOTA_EXHAUSTED_PERCENT = 100;
-const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx"]);
+const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx", "agentlas-local"]);
 
 function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
   const model = selectedModel?.trim();
@@ -730,7 +735,8 @@ function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {
     runtime.kind === "byok" ||
     runtime.kind === "ollama" ||
     runtime.kind === "lmstudio" ||
-    runtime.kind === "mlx"
+    runtime.kind === "mlx" ||
+    runtime.kind === "agentlas-local"
   );
 }
 

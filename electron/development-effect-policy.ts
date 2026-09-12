@@ -72,6 +72,9 @@ const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "auth:getSession", "app:getLocale", "menu:setLocale", "confirm:listPendingAskUser",
   "surfaces:get", "workspace:get",
   "fs:listDirectory", "fs:readTextFile", "chatFiles:listGroup", "oneArtifacts:issuePreview",
+  "localModelHub:snapshot", "localModelHub:cancelOperation", "localModelHub:unload",
+  "workLiveView:releaseLease",
+  "appFactory:releaseLivePreview",
   // These two handlers return explicit suppression before runtime detection.
   "usage:snapshot", "usage:retry",
   // Terminal actions retain their original ownership and argument validation.

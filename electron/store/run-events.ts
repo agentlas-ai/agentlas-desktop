@@ -1012,7 +1012,7 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
   }
 }
 
-export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent): void {
+export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent, options?: { requireDurable?: boolean }): void {
   // Skip the entire already-committed projection, including selection/failure
   // companion rows. The host assigns the source sequence before delivery.
   if (Number.isSafeInteger(ev.sequence)) {
@@ -1147,7 +1147,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     hubMode: req.hubMode,
     borrowAgents: req.borrowAgents,
   };
-  tryRecordRunEvent({
+  (options?.requireDurable ? recordRunEvent : tryRecordRunEvent)({
     runId,
     kind: `mcp_${ev.kind}`,
     sourceEventId: Number.isSafeInteger(ev.sequence) ? `invocation:${runId}:event:${ev.sequence}` : undefined,

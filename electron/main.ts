@@ -35,7 +35,10 @@ import {
   resolveInstallIdentity,
   type InstallIdentity,
 } from "./install-identity";
-import { registerIpcHandlers } from "./ipc";
+import { registerIpcHandlers, assertTrustedSitePublishIpcSender } from "./ipc";
+import { LocalModelHubManager } from "./local-model-hub/manager";
+import { configureLocalModelHubManager } from "./local-model-hub/runtime-adapter";
+import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
@@ -249,7 +252,7 @@ import type {
 import type { ProductExtensionPermission } from "../shared/product-extension";
 import { toolApprovalActionId } from "../shared/tool-approval-action";
 import type { ToolApprovalDecision } from "../shared/types";
-import type { ScienceComposerStartInput } from "agentlas-science";
+import type { ScienceComposerStartInput, ScienceSteerInput } from "agentlas-science";
 import {
   getToolApprovalResolution,
   listPendingToolApprovals,
@@ -299,6 +302,7 @@ if (app.isPackaged && process.argv.slice(1).some((arg) =>
 
 const isDev = process.env.NODE_ENV === "development";
 const ipcMain = developmentIpcBoundary(electronIpcMain);
+let localModelHubControl: ReturnType<typeof registerLocalModelHubIpc> | null = null;
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeAuthSessionRestoration: (() => void) | null = null;
@@ -1215,6 +1219,7 @@ function stopQuitServices(): Promise<void> {
   disposeMobileBridgeStateChange = null;
 
   quitServicesStopPromise = Promise.all([
+    localModelHubControl?.shutdown(),
     legacyLearningJob?.catch(() => {}),
     import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
     import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
@@ -1257,7 +1262,7 @@ function finishQuitCleanup(): Promise<void> {
     try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
     quitCleanupDone = true;
-    quitCleanupPromise = Promise.resolve();
+    quitCleanupPromise = localModelHubControl?.shutdown() ?? Promise.resolve();
     return quitCleanupPromise;
   }
   quitCleanupPromise = (async () => {
@@ -1519,6 +1524,27 @@ app.whenReady().then(async () => {
     closeAdmission: closeLongRunVerifierAdmission,
     interrupt: interruptLongRunVerifiers,
     isSettled: longRunVerifiersSettled,
+  });
+  const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"));
+  await localModelHubManager.initialize();
+  configureLocalModelHubManager(localModelHubManager);
+  localModelHubControl = registerLocalModelHubIpc({
+    ipc: ipcMain,
+    manager: localModelHubManager,
+    assertTrustedSender: assertTrustedSitePublishIpcSender,
+    selectModelFile: async (window) => {
+      const result = await dialog.showOpenDialog(window, {
+        title: "Import local model",
+        properties: ["openFile"],
+        filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+      });
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
+  });
+  registerAppRuntimeParticipant("local-model-hub", {
+    closeAdmission: localModelHubControl.closeAdmission,
+    interrupt: localModelHubControl.shutdown,
+    isSettled: localModelHubControl.isSettled,
   });
   if (longRunStartup && longRunStartup.recoveredRunIds.length > 0) {
     console.warn(
@@ -2233,7 +2259,7 @@ app.whenReady().then(async () => {
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-runtime-input-invalid");
     const record = input as Record<string, unknown>;
     if (typeof record.projectId !== "string" || typeof record.conversationId !== "string") throw new Error("science-runtime-input-invalid");
-    return { projectId: record.projectId, conversationId: record.conversationId, selection: record.selection };
+    return { projectId: record.projectId, conversationId: record.conversationId, selection: record.selection, requestId: typeof record.requestId === "string" ? record.requestId : undefined };
   };
   ipcMain.handle("science:runtime:inspect", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
@@ -2247,7 +2273,11 @@ app.whenReady().then(async () => {
     const input = scienceRuntimeInput(envelope);
     const { selectScienceRuntime } = await import("agentlas-science");
     assertScienceSender(event, envelope, "science:agent-runtime");
-    return selectScienceRuntime(scienceStore(), input);
+    const result = await selectScienceRuntime(scienceStore(), input);
+    if (result.pending && result.steering) {
+      await scienceConversationService().reconcileSteering({ ...input, turnId: result.steering.targetTurnId });
+    }
+    return result;
   });
   ipcMain.handle("science:composer:start", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");
@@ -2264,6 +2294,26 @@ app.whenReady().then(async () => {
     ensureScienceTurnProjection();
     scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
     return scienceConversationService().start({ ...input, runtimeSelection } as ScienceComposerStartInput);
+  });
+  ipcMain.handle("science:composer:steer", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    return scienceConversationService().steer(input as ScienceSteerInput);
+  });
+  ipcMain.handle("science:composer:reconcileSteering", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceConversationService().reconcileSteering({
+      projectId: String(record.projectId ?? ""), conversationId: String(record.conversationId ?? ""), turnId: String(record.turnId ?? ""),
+    });
+  });
+  ipcMain.handle("science:composer:steering", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = scienceRuntimeInput(envelope);
+    return scienceStore().listSteering(input.projectId, input.conversationId);
   });
   ipcMain.handle("science:composer:cancel", (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:agent-runtime");

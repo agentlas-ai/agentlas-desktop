@@ -17,6 +17,7 @@ import { probeCursor } from "./cursor";
 import { probeOllama } from "./ollama";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
+import { probeManagedLocalRuntime } from "../local-model-hub/runtime-adapter";
 import { hasApiKey } from "../secrets/vault";
 import { isRuntimeCredentialUnavailable, probeRuntimeCredentialAccess, type RuntimeCredentialProbe } from "./credential-access";
 import {
@@ -209,7 +210,7 @@ function setStoredEffort(effort: string | null | undefined): void {
 function isActiveRuntime(status: RuntimeStatus, active: ActiveRuntimeRow | null): boolean {
   if (!active) return false;
   // ollama/lmstudio/mlx는 단일 런타임 — kind만 맞으면 활성. 모델은 status.model로 따로 반영.
-  if (status.kind === "ollama" || status.kind === "lmstudio" || status.kind === "mlx") {
+  if (status.kind === "ollama" || status.kind === "lmstudio" || status.kind === "mlx" || status.kind === "agentlas-local") {
     return active.kind === status.kind;
   }
   if (active.source) {
@@ -412,6 +413,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const ollamaDisabled = runtimeProbeDisabled("ollama");
   const lmstudioDisabled = runtimeProbeDisabled("lmstudio");
   const mlxDisabled = runtimeProbeDisabled("mlx");
+  const agentlasLocalDisabled = runtimeProbeDisabled("agentlas-local");
 
   const [
     cc,
@@ -424,6 +426,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     ollama,
     lmstudio,
     mlx,
+    managedLocal,
     anthropicByok,
     openaiByok,
     googleByok,
@@ -449,6 +452,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     ollamaDisabled ? Promise.resolve(null) : probeOllama(),
     lmstudioDisabled ? Promise.resolve(null) : probeLMStudio(),
     mlxDisabled ? Promise.resolve(null) : probeMLX(),
+    agentlasLocalDisabled ? Promise.resolve(null) : probeManagedLocalRuntime(),
     probeRuntimeCredentialAccess(() => hasApiKey("anthropic")),
     probeRuntimeCredentialAccess(() => hasApiKey("openai")),
     probeRuntimeCredentialAccess(() => hasApiKey("google")),
@@ -714,6 +718,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       ...conservativeLocalRuntimeAllocation(mlx.models),
     });
   }
+  if (managedLocal) list.push(managedLocal);
   // kind "acp" — the open seat (PRD 2026-08-15 B-1): built-in ACP agents without a
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
@@ -961,7 +966,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
  */
 const QUOTA_SKIP_PERCENT = 90;
 /** 로컬 서버가 실제 보유 목록을 돌려주는 런타임 — 모델 부재를 증명할 수 있다. */
-const LOCAL_MODEL_INVENTORY_KINDS = new Set(["ollama", "lmstudio", "mlx"]);
+const LOCAL_MODEL_INVENTORY_KINDS = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);
 function rolePoolGates(list: RuntimeStatus[]): {
   isRuntimeAvailable: (selection: RuntimeSelection) => boolean;
   isModelUnavailable: (selection: RuntimeSelection) => boolean;

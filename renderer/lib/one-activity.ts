@@ -1276,6 +1276,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
  * report, and a refused registration (isError) stays a plain error row.
  */
 export interface OneAutomationRegistration {
+  automationId?: string;
   /** Stable per-turn identity — the source activity item's id. */
   itemId: string;
   action: "created" | "updated";
@@ -1306,6 +1307,7 @@ export function extractAutomationRegistrations(state: OneActivityState): OneAuto
     if (!name) continue;
     registrations.push({
       itemId: item.id,
+      ...(typeof args.automationId === "string" && args.automationId.trim() ? { automationId: args.automationId.trim() } : {}),
       action: match[1] === "create" ? "created" : "updated",
       name,
       ...(typeof args.schedule === "string" && args.schedule.trim() ? { schedule: args.schedule.trim() } : {}),

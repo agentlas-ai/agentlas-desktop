@@ -1,5 +1,7 @@
 // Main 프로세스 ↔ Renderer 간 공유 타입.
 // renderer/lib/types.ts에서 re-export.
+import type { AutomationMonitorContract, AutomationPollState } from "./automation-monitor";
+import type { LocalModelHubAPI } from "./local-model-hub";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "./credential-recovery";
 import type {
   MultimodalProvider,
@@ -686,7 +688,7 @@ export type {
  * through the generic ACP runner without a new RuntimeKind per vendor. Which
  * agent a status row is: `RuntimeStatus.acpAgentId`; display name: `label`.
  */
-export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "acp" | "agentlas";
+export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "agentlas-local" | "acp" | "agentlas";
 // 역할 목록·성격의 정본은 shared/runtime-roles.ts 하나다(손으로 쓴 배열 금지).
 import type { RuntimeRole } from "./runtime-roles";
 export type { RuntimeRole };
@@ -721,6 +723,7 @@ export type RuntimeBackend =
   | "ollama"
   | "lmstudio"
   | "mlx"
+  | "agentlas-local"
   | "upstage"
   | "custom"
   // Anthropic Messages API 호환 서드파티(구독/종량제 코딩 플랜)
@@ -2005,7 +2008,7 @@ export interface TriggerCondition {
 // ── 트리거 union(설계 §3.5) — "언제 fire하나"만 바꾸는 전위 레이어. 실행 엔진은 불변. ──
 // schedule = 기존 시간 트리거(scheduleSpec/scheduleHuman으로 표현, 하위호환).
 // 이벤트 계열(fs/chain)은 스케줄러가 아니라 트리거 매니저의 리스너에 등록 → 유휴 0.
-export type Trigger =
+export type Trigger = (
   | { kind: "schedule"; onlyIf?: TriggerCondition }
   // 커넥터 C47·C48 — 바깥에서 "이거 돌려줘"가 들어오는 종류. 예약처럼 시계가 부르지도,
   // 소스처럼 값이 변해 부르지도 않는다. **누군가 명시적으로 부른 것**이다.
@@ -2026,7 +2029,8 @@ export type Trigger =
       maxIntervalMs: number;
       /** dedup 커서 — 마지막으로 관측한 값(같으면 재발사 안 함). */
       lastSeen?: string;
-    };
+      pollState?: AutomationPollState;
+    }) & { monitor?: AutomationMonitorContract };
 
 export type TriggerKind = Trigger["kind"];
 
@@ -2034,6 +2038,8 @@ export type TriggerKind = Trigger["kind"];
 // 폴링은 유일한 실질 비용이므로(설계 §3.1) 적응형 간격 + lastSeen 커서로 통제한다.
 // 각 소스는 하나의 스칼라/문자열 값을 관측한다(조건 평가기가 이 값을 좌변으로 쓴다).
 export type PollSource =
+  | { kind: "invocation"; runId: string; chatId: string }
+  | { kind: "artifact"; artifactId: string; chatId: string }
   | {
       /** 주가/지표 임계값 — stock/alphavantage MCP(GLOBAL_QUOTE/RSI 등). MARKET_STATUS로 게이팅. */
       kind: "stock";
@@ -2497,6 +2503,8 @@ export interface BrowserApprovalRequestEvent {
 
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
 export interface Automation {
+  monitor?: AutomationMonitorContract;
+  executionAvailability?: "app-running";
   id: string;
   name: string;
   /** "매일 9시", "매주 월 14:00" 같은 사용자 친화 텍스트 */
@@ -2561,6 +2569,7 @@ export type AutomationCreateInput = Omit<
 
 /** 기존 자동화 편집 패치(설계 한계 #7 — 삭제-재생성 대신 in-place 수정). */
 export interface AutomationUpdatePatch {
+  monitor?: AutomationMonitorContract | null;
   name?: string;
   /** 목적 문장. 빈 문자열 = 지움, undefined = 미변경. */
   goal?: string;
@@ -6592,6 +6601,7 @@ export interface RunAlertSettings {
 }
 
 export interface AgentlasIpc {
+  localModelHub: LocalModelHubAPI;
   /**
    * 도구 승인 결정 — Main의 exact resolution 원장이 같은 request/decision/action 을
    * 확인한 뒤에만 성공이다. 응답이 유실돼도 getToolApprovalResolution 으로 재전송
@@ -8001,7 +8011,8 @@ export interface AgentlasIpc {
     runSmoke: (input: AppFactoryRootRequest) => Promise<AppFactorySmokeResult>;
     preparePreview: (input: AppFactoryRootRequest) => Promise<AppFactoryPreviewResult>;
     /** Start or reuse a real, main-owned live preview for a registered app. */
-    startLivePreview: (input: { appId: string }) => Promise<AppFactoryLivePreviewResult>;
+    startLivePreview: (input: { appId: string; viewLeaseId?: string }) => Promise<AppFactoryLivePreviewResult>;
+    releaseLivePreview: (input: { appId: string; viewLeaseId: string }) => Promise<{ ok: boolean }>;
     /** Stop the managed loopback preview. External URLs are unaffected. */
     stopLivePreview: (input: { appId: string }) => Promise<{ ok: true; stopped: boolean }>;
     openLaunchTarget: (input: AppFactoryRootRequest) => Promise<AppFactoryLaunchTargetResult>;
@@ -8025,6 +8036,7 @@ export interface AgentlasIpc {
     createTab: (input: { taskScopeId: string; url?: string }) => Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }>;
     open: (input: {
       viewId: string;
+      viewLeaseId?: string;
       taskScopeId?: string;
       url: string;
       bounds: WorkLiveViewBounds;
@@ -8033,6 +8045,7 @@ export interface AgentlasIpc {
     }) => Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }>;
     setBounds: (input: {
       viewId: string;
+      viewLeaseId?: string;
       taskScopeId?: string;
       bounds: WorkLiveViewBounds;
       visible?: boolean;
@@ -8042,6 +8055,7 @@ export interface AgentlasIpc {
     goBack: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
     goForward: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
     close: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean }>;
+    releaseLease: (input: { viewId: string; viewLeaseId: string; taskScopeId?: string }) => Promise<{ ok: boolean }>;
     capture: (viewId: string, taskScopeId?: string) => Promise<{ ok: boolean; dataUrl?: string; reason?: string }>;
     dispatchInput: (input: { viewId: string; input: WorkLiveViewInput; taskScopeId?: string }) => Promise<{ ok: boolean; reason?: string }>;
     onStatus: (handler: (status: WorkLiveViewStatus) => void) => () => void;

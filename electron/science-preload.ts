@@ -114,6 +114,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     select: (input: unknown) => ipcRenderer.invoke("science:runtime:select", { extensionId, input }),
   }),
   composer: Object.freeze({
+    reconcileSteering: (input: unknown) => ipcRenderer.invoke("science:composer:reconcileSteering", { extensionId, input }),
+    steer: (input: unknown) => ipcRenderer.invoke("science:composer:steer", { extensionId, input }),
+    steering: (input: unknown) => ipcRenderer.invoke("science:composer:steering", { extensionId, input }),
     start: (input: unknown) => ipcRenderer.invoke("science:composer:start", { extensionId, input }),
     cancel: (input: unknown) => ipcRenderer.invoke("science:composer:cancel", { extensionId, input }),
     attach: (input: unknown) => ipcRenderer.invoke("science:composer:attach", { extensionId, input }),

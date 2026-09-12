@@ -712,6 +712,8 @@ export interface RunLocalOpenAiChatOptions {
   providerLabel?: string;
   /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
   keepAlive?: string;
+  /** Publisher/model-specific chat-template controls applied by a managed adapter. */
+  chatTemplateKwargs?: Record<string, boolean | number | string>;
 }
 
 /**
@@ -791,6 +793,7 @@ export async function runLocalOpenAiChat(
             stream: true,
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
+            ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
              * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.

@@ -15,6 +15,7 @@ export const RUNTIME_BACKENDS = [
   "ollama",
   "lmstudio",
   "mlx",
+  "agentlas-local",
   "upstage",
   "custom",
   "glm",

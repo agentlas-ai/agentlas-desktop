@@ -45,6 +45,18 @@ import type {
 } from "../shared/site-studio";
 
 const api: AgentlasIpc = {
+  localModelHub: {
+    snapshot: () => ipcRenderer.invoke("localModelHub:snapshot"),
+    downloadEngine: (payload) => ipcRenderer.invoke("localModelHub:downloadEngine", payload),
+    downloadModel: (payload) => ipcRenderer.invoke("localModelHub:downloadModel", payload),
+    cancelOperation: (payload) => ipcRenderer.invoke("localModelHub:cancelOperation", payload),
+    importModel: (payload) => ipcRenderer.invoke("localModelHub:importModel", payload),
+    installEngine: (payload) => ipcRenderer.invoke("localModelHub:installEngine", payload),
+    installDownloadedModel: (payload) => ipcRenderer.invoke("localModelHub:installDownloadedModel", payload),
+    loadModel: (payload) => ipcRenderer.invoke("localModelHub:loadModel", payload),
+    unload: (payload) => ipcRenderer.invoke("localModelHub:unload", payload),
+    testCapabilities: (payload) => ipcRenderer.invoke("localModelHub:testCapabilities", payload),
+  },
   app: {
     getLocale: () => ipcRenderer.invoke("app:getLocale"),
     getVersion: () => ipcRenderer.invoke("app:getVersion"),
@@ -945,6 +957,7 @@ const api: AgentlasIpc = {
     runSmoke: (input) => ipcRenderer.invoke("appFactory:runSmoke", input),
     preparePreview: (input) => ipcRenderer.invoke("appFactory:preparePreview", input),
     startLivePreview: (input) => ipcRenderer.invoke("appFactory:startLivePreview", input),
+    releaseLivePreview: (input) => ipcRenderer.invoke("appFactory:releaseLivePreview", input),
     stopLivePreview: (input) => ipcRenderer.invoke("appFactory:stopLivePreview", input),
     openLaunchTarget: (input) => ipcRenderer.invoke("appFactory:openLaunchTarget", input),
     publishAsTool: (input) => ipcRenderer.invoke("appFactory:publishAsTool", input),
@@ -967,6 +980,7 @@ const api: AgentlasIpc = {
     goBack: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:goBack", viewId, taskScopeId),
     goForward: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:goForward", viewId, taskScopeId),
     close: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:close", viewId, taskScopeId),
+    releaseLease: (input) => ipcRenderer.invoke("workLiveView:releaseLease", input),
     capture: (viewId, taskScopeId) => ipcRenderer.invoke("workLiveView:capture", viewId, taskScopeId),
     dispatchInput: (input) => ipcRenderer.invoke("workLiveView:dispatchInput", input),
     onStatus: (handler) => {

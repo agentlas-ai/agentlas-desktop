@@ -6,6 +6,7 @@ import {
   type RuntimeFeatureSupport,
 } from "../../shared/long-run";
 import { RUNTIME_CAPABILITIES } from "../../shared/runtime-capabilities";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import type { RuntimeKind, RuntimeSelection } from "../../shared/types";
 
 export interface ResolvedDesktopRuntimeAdapter {
@@ -13,21 +14,6 @@ export interface ResolvedDesktopRuntimeAdapter {
   descriptor: RuntimeAdapterDescriptor;
   recoveryOrder: Array<"resident" | "native_resume" | "portable_resume" | "fresh_retry">;
 }
-
-const ALL_RUNTIME_KINDS: readonly RuntimeKind[] = [
-  "claude-code",
-  "codex",
-  "antigravity",
-  "kimi",
-  "grok",
-  "cursor",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-  "acp",
-  "agentlas",
-];
 
 function featureMap(
   values: Partial<Record<RuntimeFeature, RuntimeFeatureSupport>>,
@@ -113,6 +99,7 @@ const DESCRIPTORS = new Map<RuntimeKind, RuntimeAdapterDescriptor>([
   ["ollama", descriptor("ollama", HOST_MANAGED)],
   ["lmstudio", descriptor("lmstudio", HOST_MANAGED)],
   ["mlx", descriptor("mlx", HOST_MANAGED)],
+  ["agentlas-local", descriptor("agentlas-local", HOST_MANAGED)],
   ["agentlas", descriptor("agentlas", HOST_MANAGED)],
   ["antigravity", descriptor("antigravity", LEGACY_CLI)],
   ["kimi", descriptor("kimi", LEGACY_CLI)],
@@ -145,5 +132,5 @@ export function resolveDesktopRuntimeAdapter(
 }
 
 export function listDesktopRuntimeAdapterDescriptors(): ResolvedDesktopRuntimeAdapter[] {
-  return ALL_RUNTIME_KINDS.map((kind) => resolveDesktopRuntimeAdapter({ kind }));
+  return RUNTIME_KINDS.map((kind) => resolveDesktopRuntimeAdapter({ kind }));
 }

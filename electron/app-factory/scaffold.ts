@@ -21,6 +21,8 @@ import type {
 
 interface ScaffoldOptions {
   baseDir: string;
+  /** Main checks existing registry ownership before any source bytes are written. */
+  validateRoot?: (rootPath: string) => void;
   now?: string;
   /** Site-owned artifacts live directly below ~/.agentlas/site/agentapp. */
   directChild?: boolean;
@@ -56,6 +58,7 @@ export async function scaffoldServiceApp(
   const rootPath = options.directChild
     ? path.join(options.baseDir, appId)
     : path.join(options.baseDir, "agentlas-apps", appId);
+  options.validateRoot?.(rootPath);
   const localPort = validLocalPort(options.localPort) ?? localWebAppPort(manifest);
   const launchUrl = localLaunchUrl(localPort);
   const astryxProfile = astryxReactProfile(manifest);

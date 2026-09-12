@@ -32,6 +32,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
+  "agentlas-local": "Agentlas Local",
   acp: "ACP",
   agentlas: "Agentlas",
 };
@@ -43,6 +44,7 @@ const BACKEND_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
+  "agentlas-local": "Agentlas Local",
   upstage: "Upstage",
   custom: "Custom",
   glm: "GLM",
@@ -71,6 +73,7 @@ const DEFAULT_BACKEND_BY_KIND: Record<RuntimeKind, RuntimeBackend> = {
   ollama: "ollama",
   lmstudio: "lmstudio",
   mlx: "mlx",
+  "agentlas-local": "agentlas-local",
   acp: "custom",
   agentlas: "agentlas",
 };

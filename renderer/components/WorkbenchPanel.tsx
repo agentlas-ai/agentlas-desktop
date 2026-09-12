@@ -435,7 +435,8 @@ function RunningAppPreview({
       return;
     }
     setState({ pending: true, url: null, runtime: null, error: null });
-    void window.agentlas.appFactory.startLivePreview({ appId }).then((result) => {
+    const viewLeaseId = crypto.randomUUID();
+    void window.agentlas.appFactory.startLivePreview({ appId, viewLeaseId }).then((result) => {
       if (disposed) return;
       if (result.ok && result.url) {
         setState({ pending: false, url: result.url, runtime: result.runtime, error: null });
@@ -461,12 +462,8 @@ function RunningAppPreview({
     });
     return () => {
       disposed = true;
-      /*
-       * 켜기만 하고 끄는 곳이 없었다(감사 2026-08-25). 이 화면을 떠나도 앱
-       * 미리보기 서버가 계속 떠 있고, 앱 안에서 끌 방법이 없다. 이 칸이
-       * 사라질 때가 그 서버가 필요 없어지는 때다.
-       */
-      void window.agentlas?.appFactory?.stopLivePreview?.({ appId }).catch(() => undefined);
+      // Main keeps the same server while another panel acquires its view lease.
+      void window.agentlas?.appFactory?.releaseLivePreview?.({ appId, viewLeaseId }).catch(() => undefined);
     };
   }, [appId, declaredUrl, attempt]);
 

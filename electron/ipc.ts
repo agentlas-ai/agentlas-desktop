@@ -617,6 +617,7 @@ import {
   recordCloudAppManifest,
   recordAgentAppOperation,
   recordScaffoldedApp,
+  assertAgentAppRootOwner,
 } from "./store/agent-apps";
 import {
   getAgentTool,
@@ -704,6 +705,9 @@ import { scaffoldServiceApp } from "./app-factory/scaffold";
 import {
   startAppFactoryLivePreview,
   stopAppFactoryLivePreview,
+  acquireAppFactoryPreviewView,
+  releaseAppFactoryPreviewView,
+  releaseAppFactoryPreviewViewsForOwner,
 } from "./app-factory/live-preview";
 import {
   registerNativeBrowserTask,
@@ -712,6 +716,7 @@ import {
   captureWorkLiveView,
   dispatchWorkLiveViewInput,
   closeWorkLiveView,
+  releaseWorkLiveViewLease,
   closeWorkLiveViewsForOwner,
   goBackWorkLiveView,
   goForwardWorkLiveView,
@@ -1453,6 +1458,7 @@ async function seedProjectMapInBackground(folderPath: string, projectName?: stri
 const browserLiveCleanupOwners = new Set<number>();
 const fsWatchCleanupOwners = new Set<number>();
 const workLiveCleanupOwners = new Set<number>();
+const appPreviewCleanupOwners = new Set<number>();
 
 async function desktopRuntimeRolePoolState(): Promise<RuntimeRolePoolState> {
   const picks = await resolveRolePoolPicks();
@@ -5946,15 +5952,21 @@ export function registerIpcHandlers(): void {
   );
 
   // ── App Factory (agent-made service apps) ───────────────
-  ipcMain.handle("appFactory:scaffold", async (_e, input: AppFactoryScaffoldRequest) => {
+  ipcMain.handle("appFactory:scaffold", async (event, input: AppFactoryScaffoldRequest) => {
+    assertTrustedSitePublishIpcSender(event);
     const chat = getChat(input.chatId);
     if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
+    const surface = getAgentSurface(input.surfaceId);
+    if (!surface || surface.chatId !== chat.id || surface.projectId !== chat.projectId) throw new Error("artifact_owner_mismatch");
     const project = chat.projectId ? getProject(chat.projectId) : null;
     const baseDir =
       getChatWorkingFolder(chat.id) ??
       project?.folderPath ??
       userDataPath("generated-apps");
-    const result = await scaffoldServiceApp(input, { baseDir });
+    const result = await scaffoldServiceApp(input, {
+      baseDir,
+      validateRoot: (rootPath) => assertAgentAppRootOwner(rootPath, chat.id, chat.projectId, input.surfaceId),
+    });
     const record = recordScaffoldedApp({
       chatId: chat.id,
       projectId: chat.projectId,
@@ -6071,9 +6083,24 @@ export function registerIpcHandlers(): void {
     recordAppFactoryOperation(result.rootPath, "deploy-preview", true, result, "preview-ready");
     return result;
   });
-  ipcMain.handle("appFactory:startLivePreview", async (event, input: { appId: string }) => {
+  ipcMain.handle("appFactory:startLivePreview", async (event, input: { appId: string; viewLeaseId?: string }) => {
     assertTrustedSitePublishIpcSender(event);
+    if (input?.viewLeaseId) {
+      const ownerId = event.sender.id;
+      if (!appPreviewCleanupOwners.has(ownerId)) {
+        appPreviewCleanupOwners.add(ownerId);
+        event.sender.once("destroyed", () => {
+          releaseAppFactoryPreviewViewsForOwner(ownerId);
+          appPreviewCleanupOwners.delete(ownerId);
+        });
+      }
+      return acquireAppFactoryPreviewView(input.appId, input.viewLeaseId, ownerId);
+    }
     return startAppFactoryLivePreview(input?.appId);
+  });
+  ipcMain.handle("appFactory:releaseLivePreview", (event, input: { appId: string; viewLeaseId: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return releaseAppFactoryPreviewView(input?.appId, input?.viewLeaseId, event.sender.id);
   });
   ipcMain.handle("appFactory:stopLivePreview", async (event, input: { appId: string }) => {
     assertTrustedSitePublishIpcSender(event);
@@ -6108,6 +6135,7 @@ export function registerIpcHandlers(): void {
   // a different window cannot resize, reload, or close its surface by guessing an id.
   ipcMain.handle("workLiveView:open", async (event, input: {
     viewId: string;
+    viewLeaseId?: string;
     taskScopeId?: string;
     url: string;
     bounds: import("../shared/types").WorkLiveViewBounds;
@@ -6127,6 +6155,7 @@ export function registerIpcHandlers(): void {
     return openWorkLiveView({
       viewId: input?.viewId, url: input?.url, bounds: input?.bounds,
       visible: input?.visible, mode: input?.mode, taskScopeId: input?.taskScopeId,
+      viewLeaseId: input?.viewLeaseId,
       ownerId,
       window: win,
       send: (status) => {
@@ -6136,6 +6165,7 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("workLiveView:setBounds", (event, input: {
     viewId: string;
+    viewLeaseId?: string;
     taskScopeId?: string;
     bounds: import("../shared/types").WorkLiveViewBounds;
     visible?: boolean;
@@ -6162,6 +6192,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("workLiveView:close", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);
     return closeWorkLiveView(event.sender.id, viewId, taskScopeId);
+  });
+  ipcMain.handle("workLiveView:releaseLease", (event, input: { viewId: string; viewLeaseId: string; taskScopeId?: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return releaseWorkLiveViewLease(event.sender.id, input);
   });
   ipcMain.handle("workLiveView:capture", (event, viewId: string, taskScopeId?: string) => {
     assertTrustedSitePublishIpcSender(event);

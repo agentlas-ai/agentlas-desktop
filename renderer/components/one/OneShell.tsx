@@ -1,4 +1,6 @@
 "use client";
+
+import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
@@ -7562,6 +7564,7 @@ export function OneShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
+            <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId || null} locale={appLocale} />
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;

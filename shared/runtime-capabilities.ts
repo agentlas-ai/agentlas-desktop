@@ -233,6 +233,15 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     distinctiveContextFiles: [],
     hook: null,
   },
+  "agentlas-local": {
+    systemPrompt: { delivery: "native-role", evidence: "electron/local-model-hub/runner.ts uses the shared OpenAI-compatible local tool loop" },
+    resume: { kind: "none", implemented: false, evidence: "the managed llama.cpp server is stateless; Agentlas resends compacted durable history" },
+    image: { kind: "native-inline", evidence: "the wire can carry OpenAI image_url parts; model-specific support remains false until a capability receipt verifies it" },
+    commandSurfaces: [],
+    transcript: null,
+    distinctiveContextFiles: [],
+    hook: null,
+  },
   agentlas: {
     systemPrompt: { delivery: "native-role", evidence: "electron/runtime/agentlas-serving.ts sends the system prompt as its own field" },
     resume: { kind: "none", implemented: false, evidence: "each turn carries its history; the server holds no session (structural)" },
@@ -282,6 +291,7 @@ export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | n
   ollama: { via: "response-format" },
   lmstudio: { via: "response-format" },
   mlx: { via: "response-format" },
+  "agentlas-local": { via: "response-format" },
   // 서빙은 우리 서버가 본문을 만든다. 지금 창구는 대화 텍스트만 주고받는다.
   agentlas: null,
 };

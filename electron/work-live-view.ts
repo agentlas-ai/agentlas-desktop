@@ -24,6 +24,8 @@ type ActiveWorkView = {
   ownerBounds?: Rectangle;
   mode: "app" | "browser";
   taskScopeId?: string;
+  viewLeaseId?: string;
+  releaseTimer?: ReturnType<typeof setTimeout>;
   state: WorkLiveViewStatus["state"];
   navigationEpoch: number;
   pendingUrl: string;
@@ -261,6 +263,7 @@ function emit(active: ActiveWorkView, status: Omit<WorkLiveViewStatus, "viewId">
 }
 
 function closeActive(active: ActiveWorkView, notify = true): void {
+  if (active.releaseTimer) clearTimeout(active.releaseTimer);
   active.captureRestore?.();
   activeViews.delete(key(active.ownerId, active.viewId));
   try {
@@ -285,6 +288,22 @@ export function closeWorkLiveView(ownerId: number, viewId: string, taskScopeId?:
   return { ok: true };
 }
 
+/** A renderer remount releases presentation, not the still-running document. */
+export function releaseWorkLiveViewLease(ownerId: number, input: {
+  viewId: string; viewLeaseId: string; taskScopeId?: string;
+}): { ok: boolean } {
+  const active = registeredGuest(ownerId, input?.viewId, input?.taskScopeId);
+  if (!active || active.mode !== "app" || !input.viewLeaseId || active.viewLeaseId !== input.viewLeaseId) return { ok: false };
+  active.visible = false;
+  setOwnerGuestVisible(active, false);
+  if (active.releaseTimer) clearTimeout(active.releaseTimer);
+  active.releaseTimer = setTimeout(() => {
+    if (isCurrent(active) && active.viewLeaseId === input.viewLeaseId) closeActive(active);
+  }, 3_000);
+  active.releaseTimer.unref?.();
+  return { ok: true };
+}
+
 export function closeWorkLiveViewsForOwner(ownerId: number): void {
   const cleanup = ownerCleanup.get(ownerId);
   if (cleanup) {
@@ -299,12 +318,13 @@ export function closeWorkLiveViewsForOwner(ownerId: number): void {
 
 export function setWorkLiveViewBounds(
   ownerId: number,
-  input: { viewId: string; bounds: WorkLiveViewBounds; visible?: boolean; taskScopeId?: string },
+  input: { viewId: string; bounds: WorkLiveViewBounds; visible?: boolean; taskScopeId?: string; viewLeaseId?: string },
 ): { ok: boolean } {
   const viewId = sanitizeViewId(input?.viewId);
   if (!viewId) return { ok: false };
   const active = registeredGuest(ownerId, viewId, input.taskScopeId);
   if (!active || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
+  if (active.viewLeaseId && active.viewLeaseId !== input.viewLeaseId) return { ok: false };
   try {
     active.captureRestore?.();
     active.visible = input.visible !== false;
@@ -379,6 +399,7 @@ export async function openWorkLiveView(input: {
   visible?: boolean;
   mode?: "app" | "browser";
   taskScopeId?: string;
+  viewLeaseId?: string;
   send: (status: WorkLiveViewStatus) => void;
 }): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }> {
   const viewId = sanitizeViewId(input?.viewId);
@@ -388,6 +409,9 @@ export async function openWorkLiveView(input: {
   if (input.window.isDestroyed()) return { ok: false, viewId, reason: "window-closed" };
 
   const mode = input.mode === "browser" ? "browser" : "app";
+  if (input.viewLeaseId !== undefined && (mode !== "app" || !/^[A-Za-z0-9_-]{8,128}$/.test(input.viewLeaseId))) {
+    return { ok: false, viewId, reason: "invalid-view-lease" };
+  }
   if (mode === "browser" && (typeof input.taskScopeId !== "string" || !/^[A-Za-z0-9_:.-]{8,200}$/.test(input.taskScopeId))) {
     return { ok: false, viewId, reason: "task-scope-required" };
   }
@@ -395,6 +419,10 @@ export async function openWorkLiveView(input: {
   if (!existing && activeViews.has(key(input.ownerId, viewId))) return { ok: false, viewId, reason: "task-scope-mismatch" };
   if (existing) {
     if (existing.mode !== mode) return { ok: false, viewId, reason: "view-mode-mismatch" };
+    if (existing.viewLeaseId && !input.viewLeaseId) return { ok: false, viewId, reason: "view-lease-required" };
+    if (existing.releaseTimer) clearTimeout(existing.releaseTimer);
+    existing.releaseTimer = undefined;
+    existing.viewLeaseId = input.viewLeaseId;
     // Remounting the same tab preserves its document, history and storage.
     existing.send = input.send;
     setWorkLiveViewBounds(input.ownerId, input);
@@ -406,8 +434,13 @@ export async function openWorkLiveView(input: {
   if (mode === "browser" && owned.filter((active) => active.mode === "browser").length >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
     return { ok: false, viewId, reason: "browser-tab-limit" };
   }
-  // App previews retain their single-view contract; browser tabs survive preview switches.
-  if (mode === "app") for (const active of owned) if (active.mode === "app") closeActive(active);
+  // An app changing presentation retains its document during its short lease grace.
+  if (mode === "app") {
+    for (const active of owned) if (active.mode === "app" && !active.viewLeaseId) closeActive(active);
+    if (owned.filter((active) => active.mode === "app" && active.viewLeaseId).length >= 8) {
+      return { ok: false, viewId, reason: "app-view-limit" };
+    }
+  }
   const partition = mode === "browser" ? NATIVE_BROWSER_PARTITION : `agentlas-work-live-${input.ownerId}-${viewId}`;
   const view = new WebContentsView({
     webPreferences: {
@@ -423,6 +456,7 @@ export async function openWorkLiveView(input: {
   });
   const active: ActiveWorkView = {
     ownerId: input.ownerId,
+    viewLeaseId: input.viewLeaseId,
     viewId,
     view,
     window: input.window,

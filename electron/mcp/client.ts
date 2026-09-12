@@ -162,6 +162,7 @@ import {
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
+import { automationRegistrationMonitoring, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -1143,6 +1144,10 @@ function buildRouterAgentSystemPreamble(input: {
 }
 
 type AutomationRegistrationResult = {
+  automationId: string;
+  timezone: string | null;
+  notificationPolicy: "meaningful_changes" | "every_run";
+  executionAvailability: "app-running";
   action: "created" | "updated";
   name: string;
   schedule: string;
@@ -1164,9 +1169,9 @@ function automationRegistrationToolName(action: AutomationRegistrationResult["ac
 function automationRegistrationResultText(item: AutomationRegistrationResult, locale: "ko" | "en"): string {
   const action = automationActionLabel(item.action, locale);
   if (locale === "ko") {
-    return `${item.name} ${action} 완료 · ${item.schedule}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
+    return `${item.name} ${action} 완료 · 앱 실행 중 확인 · ${item.schedule}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
   }
-  return `${item.name} ${action} · ${item.schedule}${item.graph ? " · workflow graph included" : ""}`;
+  return `${item.name} ${action} · checks while app is running · ${item.schedule}${item.graph ? " · workflow graph included" : ""}`;
 }
 
 function automationFinalSummary(items: AutomationRegistrationResult[], locale: "ko" | "en"): string {
@@ -5916,13 +5921,21 @@ ${effectiveUserPrompt}`;
           const hubAgent = a.hubAgent?.trim();
           const targetType = hubAgent ? "hub" : named ? "agent" : chat.firmId ? "firm" : "agent";
           const targetId = hubAgent || (named ? named.id : (chat.firmId ?? chat.agentId));
-          // 이름 기준 idempotent 등록: 같은 이름이 이미 있으면 갱신 — 모델이 다음 턴에 다듬어
-          // 재방출할 때 같은 작업이 중복 등록되던 문제의 수정(프로토콜에도 명시).
-          const dup = listAutomations().find(
-            (x) => x.name.trim().toLowerCase() === a.name.trim().toLowerCase(),
-          );
+          let dup;
+          try {
+            dup = resolveAutomationRegistrationTarget({ parsed: a, automations: listAutomations(), chatId: chat.id,
+              ...(req.automationId ? {sessionAutomationId:req.automationId}:{}) });
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : "automation_identity_invalid";
+            automationRefusals.push(`${a.name}: ${reason}`);
+            sink({kind:"tool-use",tool:{name:"automation-registration-refused",isError:true,result:reason}});
+            continue;
+          }
+          const monitoring = automationRegistrationMonitoring({parsed:a,chatId:chat.id,messageId:persistedUserMessageId,existing:dup});
           if (dup) {
             const updated = updateAutomation(dup.id, {
+              ...monitoring,
+              ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
               // schedule 은 방출됐을 때만 — 미방출(graph-only 세션 편집)의 schedule 은
               // resolveSchedule 폴백("daily-09:00")이라, 그대로 쓰면 진짜 스케줄을 지워버린다.
               ...(a.scheduleEmitted
@@ -5943,8 +5956,12 @@ ${effectiveUserPrompt}`;
             const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
             const registration: AutomationRegistrationResult = {
               action: "updated",
+              automationId: updatedWithGraph.id,
+              timezone: updatedWithGraph.timezone ?? null,
+              notificationPolicy: updatedWithGraph.monitor?.notificationPolicy ?? "every_run",
+              executionAvailability: "app-running",
               name: updatedWithGraph.name,
-              schedule: updatedWithGraph.scheduleHuman,
+              schedule: updatedWithGraph.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : updatedWithGraph.scheduleHuman,
               targetType: updatedWithGraph.targetType,
               targetId: updatedWithGraph.targetId,
               nextRunAt: updatedWithGraph.nextRunAt,
@@ -5956,6 +5973,11 @@ ${effectiveUserPrompt}`;
               tool: {
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
+                  automationId: registration.automationId,
+                  nextRunAt: registration.nextRunAt,
+                  timezone: registration.timezone,
+                  notificationPolicy: registration.notificationPolicy,
+                  executionAvailability: registration.executionAvailability,
                   name: registration.name,
                   schedule: registration.schedule,
                   targetType: registration.targetType,
@@ -5978,6 +6000,8 @@ ${effectiveUserPrompt}`;
             });
           } else {
             const created = createAutomation({
+              ...monitoring,
+              ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
               name: a.name,
               scheduleHuman: a.schedule,
               targetType,
@@ -5991,8 +6015,12 @@ ${effectiveUserPrompt}`;
             });
             const registration: AutomationRegistrationResult = {
               action: "created",
+              automationId: created.id,
+              timezone: created.timezone ?? null,
+              notificationPolicy: created.monitor?.notificationPolicy ?? "every_run",
+              executionAvailability: "app-running",
               name: created.name,
-              schedule: created.scheduleHuman,
+              schedule: created.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : created.scheduleHuman,
               targetType: created.targetType,
               targetId: created.targetId,
               nextRunAt: created.nextRunAt,
@@ -6004,6 +6032,11 @@ ${effectiveUserPrompt}`;
               tool: {
                 name: automationRegistrationToolName(registration.action),
                 args: JSON.stringify({
+                  automationId: registration.automationId,
+                  nextRunAt: registration.nextRunAt,
+                  timezone: registration.timezone,
+                  notificationPolicy: registration.notificationPolicy,
+                  executionAvailability: registration.executionAvailability,
                   name: registration.name,
                   schedule: registration.schedule,
                   targetType: registration.targetType,

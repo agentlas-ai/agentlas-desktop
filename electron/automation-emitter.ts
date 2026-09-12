@@ -6,7 +6,7 @@
 // 방출할 수 있다. steps가 있으면 stepsToGraph로 WorkflowGraph를 합성하고, 없으면 graph=null(오늘의
 // 단일 프롬프트). 모델 생성 cron은 schedule.ts로 검증하고 파싱 실패는 표면화한다(조용히 드롭 X).
 import { validateCron, compilePreset, type SchedulePreset } from "./store/schedule";
-import type { ScheduleSpec, WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeType } from "../shared/types";
+import type { ScheduleSpec, WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeType, PollSource, TriggerCondition } from "../shared/types";
 
 export const AUTOMATION_HEADING = "## Automation";
 
@@ -44,7 +44,51 @@ export interface EmittedStep {
   label?: string;
 }
 
+export interface EmittedMonitor {
+  notificationPolicy: "meaningful_changes" | "every_run";
+  deadline: string | null;
+  source?: PollSource;
+  condition?: TriggerCondition;
+  minIntervalMs: number;
+  maxIntervalMs: number;
+}
+function parseMonitor(raw: unknown): EmittedMonitor | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (o.notificationPolicy !== undefined && o.notificationPolicy !== "meaningful_changes" && o.notificationPolicy !== "every_run") return null;
+  if (o.deadline !== undefined && o.deadline !== null && (typeof o.deadline !== "string" || !Number.isFinite(Date.parse(o.deadline)))) return null;
+  const min = o.minIntervalMs ?? 60_000; const max = o.maxIntervalMs ?? 900_000;
+  if (typeof min !== "number" || typeof max !== "number" || !Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min < 30_000 || max < min || max > 86_400_000) return null;
+  let source: PollSource | undefined;
+  if (o.source !== undefined) {
+    if (!o.source || typeof o.source !== "object" || Array.isArray(o.source)) return null;
+    const s = o.source as Record<string, unknown>;
+    const text = (key: string) => typeof s[key] === "string" && (s[key] as string).trim().length > 0 && (s[key] as string).length <= 512;
+    switch (s.kind) {
+      case "invocation": if (!text("runId") || !text("chatId")) return null; source = {kind:s.kind,runId:s.runId as string,chatId:s.chatId as string}; break;
+      case "artifact": if (!text("artifactId") || !text("chatId")) return null; source = {kind:s.kind,artifactId:s.artifactId as string,chatId:s.chatId as string}; break;
+      case "stock": if (!text("symbol") || (s.metric !== undefined && !text("metric")) || (s.gateMarket !== undefined && typeof s.gateMarket !== "boolean")) return null; source = {kind:s.kind,symbol:s.symbol as string,...(s.metric ? {metric:s.metric as string}:{}),...(typeof s.gateMarket === "boolean" ? {gateMarket:s.gateMarket}:{})}; break;
+      case "github": if (!text("repo") || !/^[^/\s]+\/[^/\s]+$/.test(s.repo as string) || (s.resource !== undefined && s.resource !== "issues" && s.resource !== "pulls")) return null; source = {kind:s.kind,repo:s.repo as string,...(s.resource ? {resource:s.resource as "issues"|"pulls"}:{})}; break;
+      case "slack": if (!text("channel")) return null; source = {kind:s.kind,channel:s.channel as string}; break;
+      case "notion": if (!text("databaseId")) return null; source = {kind:s.kind,databaseId:s.databaseId as string}; break;
+      default: return null;
+    }
+  }
+  let condition: TriggerCondition | undefined;
+  if (o.condition !== undefined) {
+    if (!source || !o.condition || typeof o.condition !== "object") return null;
+    const c = o.condition as Record<string, unknown>;
+    if (c.left !== "{{value}}" || !["eq","ne","contains","gt","lt","gte","lte","exists","changed"].includes(String(c.op)) || (c.right !== undefined && typeof c.right !== "string")) return null;
+    if (!["exists","changed"].includes(String(c.op)) && typeof c.right !== "string") return null;
+    condition = {left:"{{value}}",op:c.op as TriggerCondition["op"],...(typeof c.right === "string" ? {right:c.right}:{})};
+  }
+  return { notificationPolicy: o.notificationPolicy === "every_run" ? "every_run" : "meaningful_changes",
+    deadline: typeof o.deadline === "string" ? new Date(o.deadline).toISOString() : null,
+    minIntervalMs:min,maxIntervalMs:max,...(source ? {source}:{}),...(condition ? {condition}:{}) };
+}
 export interface ParsedAutomation {
+  automationId?: string;
+  monitor?: EmittedMonitor;
   name: string;
   /** daily-HH:MM | weekday-HH:MM | weekly-<mon..sun>-HH:MM | monthly-<day>-HH:MM (레거시 미러) */
   schedule: string;
@@ -78,7 +122,15 @@ export interface ParseAutomationsResult {
 export const AUTOMATION_PROTOCOL = [
   "## Setting up automations",
   "",
-  "If the user wants something RECURRING or SCHEDULED (every day, each morning, weekly, monthly…),",
+  "If the user asks to watch, monitor, check back, notify on completion, or do RECURRING/SCHEDULED work,",
+  "register a durable automation now; a promise to remember or a long sleep does not register it.",
+  "Monitoring runs only while the app is running (앱 실행 중 확인); never claim app-closed execution.",
+  'For monitoring include "monitor":{"notificationPolicy":"meaningful_changes","deadline":"optional ISO timestamp","source":{"kind":"invocation","runId":"actual observed run ID","chatId":"actual owner chat ID"},"condition":{"left":"{{value}}","op":"eq","right":"completed"},"minIntervalMs":60000,"maxIntervalMs":900000}. Omit deadline if none.',
+  'Typed sources also support {"kind":"artifact","artifactId":"actual ID","chatId":"actual owner chat ID"}, stock(symbol,metric), github(repo,resource), slack(channel), notion(databaseId). Use only observed IDs; never invent them. Default condition is changed; its first sample establishes a quiet baseline.',
+  "Typed source polling uses no model while unchanged. If no supported scalar source exists, omit source and supply an explicit schedule: that mode re-runs the prompt and only exact duplicate results are suppressed; do not promise zero-model checks.",
+  "Keep unchanged/non-actionable runs quiet in the saved prompt; notify on meaningful change, completion, failure or required user action. Use every_run only when explicitly requested.",
+  'When editing an existing registration include its exact "automationId" from the receipt, never infer identity from a global name.',
+  "For regular schedules (every day, each morning, weekly, monthly…),",
   "register it as an automation that re-runs YOU on that schedule. End your reply with exactly this",
   "block (omit it entirely otherwise):",
   "",
@@ -119,9 +171,8 @@ export const AUTOMATION_PROTOCOL = [
   "sends, edits files, browses) must say which tool family does it — a tool step with its catalog id,",
   "or an action step whose prompt names the concrete surface (browser, file, shell). A mutation with",
   "no named tool cannot be enforced or verified and will be judged unsupported.",
-  "Registering is idempotent by name: emitting a block with the SAME \"name\" UPDATES the existing",
-  "automation instead of creating a new one. When you refine a job you already registered, reuse the",
-  "exact same name — NEVER register a second automation for the same job under a new name.",
+  "Registering is idempotent within its origin chat; use the exact automationId from the receipt when refining a job.",
+  "Keep its name when refining the same job; do not register a duplicate under a new name.",
   "STRONGLY prefer steps[] whenever the job has phases (gather → draft → check → publish → report):",
   "steps become an editable visual workflow the user can inspect; a single monolithic prompt is a",
   "last resort for genuinely one-step jobs.",
@@ -137,7 +188,7 @@ export const AUTOMATION_PROTOCOL = [
   '             {"id":"post","kind":"output","action":"blog-post","consumes":"draft","deps":["write"]} ]',
   "  (rA and rB both depend on kw → they run as parallel branches; write fans them back in.)",
   "Legacy string schedules (\"daily-09:00\", \"weekly-mon-10:00\") are still accepted.",
-  "Times are 24-hour local. Only emit this when the user actually asked for a recurring task — never for one-off work.",
+  "Times are 24-hour local. Emit only for a user-requested schedule, reminder or monitor; immediate one-off work needs no automation.",
 ].join("\n");
 
 const DEFAULT_TZ_PLACEHOLDER = "";
@@ -428,8 +479,14 @@ export function parseAutomations(text: string): ParseAutomationsResult {
             const agent = typeof o.agent === "string" ? o.agent.trim() : "";
             const hubAgent = typeof o.hubAgent === "string" ? o.hubAgent.trim() : "";
 
+            const monitor = o.monitor === undefined ? undefined : parseMonitor(o.monitor);
+            if (o.monitor !== undefined && !monitor) { errors.push(`Automation "${name}" has invalid monitor configuration`); return null; }
+            if (monitor && !monitor.source && o.schedule === undefined) { errors.push(`Automation "${name}" needs a typed monitor source or explicit schedule`); return null; }
+            if (o.automationId !== undefined && (typeof o.automationId !== "string" || !o.automationId.trim() || o.automationId.length > 512)) { errors.push("Invalid automationId"); return null; }
             const scheduleEmitted = o.schedule !== undefined && o.schedule !== null;
+            const scheduleErrorCount = errors.length;
             const { spec, token, tz } = resolveSchedule(o.schedule, errors);
+            if (errors.length !== scheduleErrorCount) return null;
 
             // steps[] → 그래프 합성.
             let steps: EmittedStep[] | undefined;
@@ -472,6 +529,8 @@ export function parseAutomations(text: string): ParseAutomationsResult {
 
             return {
               name,
+              ...(typeof o.automationId === "string" ? { automationId: o.automationId.trim() } : {}),
+              ...(monitor ? { monitor } : {}),
               schedule: token,
               scheduleEmitted,
               prompt,

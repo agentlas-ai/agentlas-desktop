@@ -1,3 +1,4 @@
+import { InvocationEffectBoundaryTracker } from "./effect-boundary";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
@@ -1698,6 +1699,7 @@ export class InvocationService {
     recordMcpInvocationEvent(runId, runReq, lifecycleStartEvent);
     this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: lifecycleStartEvent });
 
+    const effectBoundary = new InvocationEffectBoundaryTracker(runId, runReq.chatId);
     let terminalObserved = false;
     let projectionGoalId = chat.goalId;
     if (!projectionGoalId && runReq.goalMode && (runReq.permissions === "write" || runReq.permissions === "full")) {
@@ -1871,6 +1873,7 @@ export class InvocationService {
     void runMcpInvocation(
       runReq,
       (rawEvent) => {
+        effectBoundary.observe(rawEvent);
         rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
         rawEvent = { ...rawEvent, goalResult: undefined };
         // One provider/run gets one terminal settlement. Late duplicate finals,
@@ -2331,7 +2334,13 @@ export class InvocationService {
             payload: { resultFolder: record.resultFolder },
           });
         }
-        recordMcpInvocationEvent(runId, runReq, event);
+        try {
+          recordMcpInvocationEvent(runId, runReq, event, { requireDurable: true });
+          effectBoundary.recorded(event);
+        } catch (error) {
+          effectBoundary.recordingFailed();
+          console.warn("[invocation] effect ledger write failed:", error);
+        }
         this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: wireEvent });
 
         if (event.kind === "final" || event.kind === "error") {
@@ -2859,6 +2868,10 @@ export class InvocationService {
             });
           }
         }
+        // Only runner settlement closes effect coverage. Model final can arrive
+        // while the adapter is still draining tool/transport work.
+        try { effectBoundary.persist(); }
+        catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
         this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);

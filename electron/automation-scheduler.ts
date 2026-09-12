@@ -1,3 +1,5 @@
+import { claimAutomationNotification } from "./automation-notifications";
+import { getDb } from "./store/db";
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // This is intentionally app-scoped: fully quitting Desktop stops local work.
@@ -145,32 +147,28 @@ async function runWithConcurrency<T>(
 
 /** 완료 시 OS 알림(설계 §2.7 한계 #10 — 결과 미표출 해소). Notification 미지원이면 조용히 무시. */
 function notifyDone(a: Automation, status: AutomationResultStatus, error?: string): void {
+  if (status === "skipped") return;
   try {
     if (!app.isReady()) return;
     if (!Notification.isSupported()) return;
     const ok = status === "ok";
-    const skipped = status === "skipped";
     const partial = status === "partial";
     const waiting = status === "blocked" || status === "needs_input";
     new Notification({
       title: ok
         ? `Automation ran: ${a.name}`
-        : skipped
-          ? `Automation skipped: ${a.name}`
-          : partial
-            ? `Automation partially completed: ${a.name}`
-            : waiting
-              ? `Automation needs attention: ${a.name}`
-              : `Automation failed: ${a.name}`,
+        : partial
+          ? `Automation partially completed: ${a.name}`
+          : waiting
+            ? `Automation needs attention: ${a.name}`
+            : `Automation failed: ${a.name}`,
       body: ok
         ? "Completed successfully."
         : error
           ? error.slice(0, 200)
-          : skipped
-            ? "Nothing was eligible to run."
-            : waiting
-              ? "It remains enabled and will retry on the next schedule."
-              : "See run history.",
+          : waiting
+            ? "It remains enabled and will retry on the next schedule."
+            : "See run history.",
       silent: true,
     }).show();
   } catch (err) {
@@ -1359,16 +1357,22 @@ async function runOne(
         /* best-effort 리스 해제 */
       }
     }
-    if (!parentMissing && !leaseOwnershipLost) {
-      notifyDone(a, runStatus, runError ?? undefined);
-      void notifyTelegramAutomationDone(a, runStatus, {
-        error: runError,
-        output,
-        at: new Date().toISOString(),
-      }).catch((err) => {
-        console.error("[automation] telegram report failed:", err);
-      });
-    }
+    try {
+      if (!parentMissing && !leaseOwnershipLost && currentRunId && claimAutomationNotification({
+        automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError,
+        ...(typeof opts?.triggerContext?.observationDigest === "string" ? { observationDigest: opts.triggerContext.observationDigest } : {}),
+        unchanged: opts?.triggerContext?.unchanged === true,
+      })) {
+        notifyDone(a, runStatus, runError ?? undefined);
+        void notifyTelegramAutomationDone(a, runStatus, {
+          error: runError,
+          output,
+          at: new Date().toISOString(),
+        }).catch((err) => {
+          console.error("[automation] telegram report failed:", err);
+        });
+      }
+    } catch (error) { console.error("[automation] notification claim failed:", error); }
     running.delete(a.id);
     // Durable chain fan-out은 markAutomationRun transaction에서 이미 끝났다.
     // 이 신호는 GUI outbox를 즉시 깨우는 저지연 가속일 뿐이다.
@@ -1561,6 +1565,27 @@ export async function runAutomationFromTrigger(
   return runOne(a, { claim: true, advanceSchedule: false, triggerDelivery, triggerContext: ctx });
 }
 
+/** Poll timeout is attention, not an inferred model result. Its durable event
+ * survives restart and uses the same notification attempt dedupe as executions. */
+async function notifyPendingMonitorAttention(): Promise<void> {
+  const rows = getDb().prepare(`SELECT e.run_id, e.automation_id, e.payload_json FROM run_events e JOIN automations a ON a.id = e.automation_id AND a.enabled = 1
+    WHERE e.kind = 'automation_monitor_attention' AND NOT EXISTS (
+      SELECT 1 FROM run_events n WHERE n.run_id = e.run_id AND n.kind IN ('automation_notification_attempt', 'automation_notification_suppressed'))
+    ORDER BY e.rowid ASC LIMIT 100`).all() as Array<{ run_id: string; automation_id: string; payload_json: string }>;
+  for (const row of rows) {
+    const automation = getAutomation(row.automation_id);
+    if (!automation?.enabled) continue;
+    const data = JSON.parse(row.payload_json) as { reason?: string };
+    const error = data.reason === "monitor_deadline_reached" ? "Monitoring deadline reached; the requested change was not confirmed."
+      : data.reason === "monitor_observation_unavailable" ? "The monitored source is unavailable. Check its connection or access."
+      : data.reason?.startsWith("monitor_invocation_") ? `The monitored task ${data.reason.slice("monitor_invocation_".length)}. Open the task to review it.`
+      : "The monitored source could not be checked. Review its connection or access.";
+    if (!claimAutomationNotification({ automationId: automation.id, runId: row.run_id, status: "blocked", error })) continue;
+    notifyDone(automation, "blocked", error);
+    await notifyTelegramAutomationDone(automation, "blocked", { error, output: "", at: new Date().toISOString() });
+  }
+}
+
 function tick(): void {
   if (installQuiescing) return;
   // A GUI and the optional headless runner may share this DB. Recovery only
@@ -1578,6 +1603,7 @@ function tick(): void {
     try {
       const { pollTick } = await import("./triggers/manager");
       await pollTick();
+      await notifyPendingMonitorAttention();
     } catch {
       /* 매니저 미기동이면 무시 */
     }

@@ -14,7 +14,9 @@ import type {
   OneTrustedImprovementEvidence,
   OneTrustedImprovementTaskEvidence,
 } from "../../shared/one-improvement-proof";
-import type { CanonicalTask, InvocationRunReceipt, RunEventUi, RuntimeBackend, RuntimeKind } from "../../shared/types";
+import type { CanonicalTask, InvocationRunReceipt, RunEventUi } from "../../shared/types";
+import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
@@ -174,9 +176,6 @@ interface TaskForceModelCallReceiptEvent {
   runtimeIdentity: string | null;
 }
 
-const TASK_FORCE_RUNTIME_KINDS = ["claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx", "acp", "agentlas"] as const satisfies readonly RuntimeKind[];
-const TASK_FORCE_RUNTIME_BACKENDS = ["anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm", "kimi", "deepseek", "minimax", "xai", "openrouter", "cursor", "agentlas"] as const satisfies readonly RuntimeBackend[];
-
 /** Optional diagnostics are not proof authority. Validate only the known wire
  * fields, and bind paired calls to the same runtime when that evidence exists. */
 function taskForceRuntimeMetadata(item: Record<string, unknown>, status: TaskForceModelCallStatus): { identity: string | null } | null {
@@ -184,8 +183,8 @@ function taskForceRuntimeMetadata(item: Record<string, unknown>, status: TaskFor
   const runtimeKeys = ["runtimeKind", "runtimeBackend", "runtimeSource", "runtimeModel"];
   let identity: string | null = null;
   if (runtimeKeys.some(has)) {
-    if (!(TASK_FORCE_RUNTIME_KINDS as readonly unknown[]).includes(item.runtimeKind)) return null;
-    if (has("runtimeBackend") && !(TASK_FORCE_RUNTIME_BACKENDS as readonly unknown[]).includes(item.runtimeBackend)) return null;
+    if (!(RUNTIME_KINDS as readonly unknown[]).includes(item.runtimeKind)) return null;
+    if (has("runtimeBackend") && !(RUNTIME_BACKENDS as readonly unknown[]).includes(item.runtimeBackend)) return null;
     for (const key of ["runtimeSource", "runtimeModel"]) {
       if (has(key) && (safeString(item[key], 256) === null || safeString(item[key], 256) !== item[key])) return null;
     }

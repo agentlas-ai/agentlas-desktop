@@ -25,6 +25,53 @@ type ActivePreview = {
 };
 
 const activePreviews = new Map<string, ActivePreview>();
+const previewEpochs = new Map<string, number>();
+const previewViewLeases = new Map<string, Map<string, number>>();
+const previewReleaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearPreviewRelease(appId: string): void {
+  const timer = previewReleaseTimers.get(appId);
+  if (timer) clearTimeout(timer);
+  previewReleaseTimers.delete(appId);
+}
+
+/** Leases are presentation ownership only; they never dispatch app actions. */
+export async function acquireAppFactoryPreviewView(appId: string, leaseId: string, ownerId: number): Promise<AppFactoryLivePreviewResult> {
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(leaseId) || !Number.isSafeInteger(ownerId)) throw new Error("invalid_preview_view_lease");
+  const id = String(appId ?? "").trim();
+  let leases = previewViewLeases.get(id);
+  if (!leases) { leases = new Map(); previewViewLeases.set(id, leases); }
+  if (leases.has(leaseId) && leases.get(leaseId) !== ownerId) throw new Error("preview_view_lease_owner_mismatch");
+  if (!leases.has(leaseId) && leases.size >= 64) throw new Error("preview_view_lease_limit");
+  leases.set(leaseId, ownerId);
+  clearPreviewRelease(id);
+  const result = await startAppFactoryLivePreview(id);
+  if (!result.ok) releaseAppFactoryPreviewView(id, leaseId, ownerId);
+  return result;
+}
+
+export function releaseAppFactoryPreviewView(appId: string, leaseId: string, ownerId: number): { ok: boolean } {
+  const leases = previewViewLeases.get(appId);
+  if (!leases?.has(leaseId)) return { ok: true };
+  if (leases.get(leaseId) !== ownerId) return { ok: false };
+  leases.delete(leaseId);
+  if (leases.size === 0) {
+    clearPreviewRelease(appId);
+    const timer = setTimeout(() => {
+      previewReleaseTimers.delete(appId);
+      if (previewViewLeases.get(appId)?.size === 0) void stopAppFactoryLivePreview(appId);
+    }, 3_500);
+    timer.unref?.();
+    previewReleaseTimers.set(appId, timer);
+  }
+  return { ok: true };
+}
+
+export function releaseAppFactoryPreviewViewsForOwner(ownerId: number): void {
+  for (const [appId, leases] of previewViewLeases) {
+    for (const [leaseId, owner] of leases) if (owner === ownerId) releaseAppFactoryPreviewView(appId, leaseId, ownerId);
+  }
+}
 
 const MIME_TYPES: Record<string, string> = {
   ".avif": "image/avif",
@@ -342,6 +389,7 @@ async function startManagedPreview(record: AppFactoryAppRecord): Promise<AppFact
 }
 
 async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<AppFactoryLivePreviewResult> {
+  const requestedEpoch = previewEpochs.get(record.id) ?? 0;
   const existing = activePreviews.get(record.id);
   if (existing) {
     return {
@@ -395,10 +443,10 @@ async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<App
   // 준비하는 사이에 앱이 보관됐을 수 있다. 그 경우 방금 연 서버를 그대로 닫는다 —
   // 폐기된 앱의 서버가 남는 것이 §4.28 의 다른 절반이다.
   const current = getAgentApp(record.id);
-  if (!current || current.status === "archived") {
+  if (!current || current.status === "archived" || (previewEpochs.get(record.id) ?? 0) !== requestedEpoch) {
     clearInterval(preview.heartbeat);
     server.close();
-    return { ok: false, appId: record.id, runtime: "unavailable", reason: "The app was archived while its preview was starting." };
+    return { ok: false, appId: record.id, runtime: "unavailable", reason: "The app preview was stopped or archived while starting." };
   }
   preview.watcher = watchFiles(preview);
   activePreviews.set(record.id, preview);
@@ -435,7 +483,11 @@ export async function startAppFactoryLivePreview(appId: string): Promise<AppFact
 }
 
 export async function stopAppFactoryLivePreview(appId: string): Promise<{ ok: true; stopped: boolean }> {
-  const preview = activePreviews.get(String(appId ?? "").trim());
+  const id = String(appId ?? "").trim();
+  previewEpochs.set(id, (previewEpochs.get(id) ?? 0) + 1);
+  previewViewLeases.delete(id);
+  clearPreviewRelease(id);
+  const preview = activePreviews.get(id);
   if (!preview) return { ok: true, stopped: false };
   activePreviews.delete(preview.appId);
   if (preview.reloadTimer) clearTimeout(preview.reloadTimer);
@@ -450,6 +502,12 @@ export async function stopAppFactoryLivePreview(appId: string): Promise<{ ok: tr
 }
 
 export function disposeAppFactoryLivePreviews(): void {
+  for (const id of new Set([...startingPreviews.keys(), ...activePreviews.keys()])) {
+    previewEpochs.set(id, (previewEpochs.get(id) ?? 0) + 1);
+  }
+  for (const timer of previewReleaseTimers.values()) clearTimeout(timer);
+  previewReleaseTimers.clear();
+  previewViewLeases.clear();
   for (const preview of activePreviews.values()) {
     if (preview.reloadTimer) clearTimeout(preview.reloadTimer);
     clearInterval(preview.heartbeat);

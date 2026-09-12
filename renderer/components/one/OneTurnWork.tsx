@@ -690,6 +690,7 @@ export function OneTurnWork({
     {automationRegistrations.map((registration) => (
       <OneAutomationRegistrationCard
         key={`automation-registration:${registration.itemId}`}
+        automationId={registration.automationId}
         name={registration.name}
         action={registration.action}
         schedule={registration.schedule}

@@ -1,4 +1,6 @@
 "use client";
+
+import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
@@ -6577,6 +6579,7 @@ function ChatPage() {
           }}
         />
       </div>}
+      <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
           <p>{locale === "ko" ? "화면이 바뀌어 입력을 저장하지 못했습니다. 내 입력을 다시 적용하거나 최신 저장 상태를 불러오세요." : "This surface changed. Reapply your edit or load the latest saved state."}</p>

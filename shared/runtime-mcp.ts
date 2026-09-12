@@ -100,6 +100,11 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
     extraTransports: ["sse", "http"],
     evidence: "same in-process loop as ollama",
   },
+  "agentlas-local": {
+    delivery: "in-process-loop",
+    extraTransports: ["sse", "http"],
+    evidence: "electron/local-model-hub/runner.ts dispatches through electron/runtime/local-tool-loop.ts after checking the exact resident installation receipt",
+  },
   // ★2026-08-18 반증 — "antigravity has no MCP surface" 는 틀린 근거였다.
   // 프로브 실측(agy 1.1.14): ~/.gemini/config/mcp_config.json 에 등록한 서버가
   // 실행 시작 시 initialize → tools/list 를 받았고(서버 수신 로그), agy 내장

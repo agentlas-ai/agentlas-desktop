@@ -13,7 +13,8 @@ import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
-import { installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
+import { scienceStore, installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
+import { reconcileScienceBoundary } from "./long-run/science-boundary";
 import { projectScienceLoopLongRun } from "./long-run/science-projection";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
@@ -168,7 +169,19 @@ export function installDesktopScienceHost(): void {
   } as never, {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
-    execution: { registerMcpPreparedConfig: registerScienceMcpPreparedConfig },
+    execution: {
+      registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
+      reconcileScienceBoundary: async (input) => {
+        const store = scienceStore();
+        const turn = store.getTurnForProject(input.projectId, input.turnId);
+        const binding = store.getConversationRuntimeBinding(input.projectId, input.conversationId);
+        if (!turn || !binding || turn.conversationId !== input.conversationId
+          || turn.invocationRunId !== input.invocationRunId || turn.runtimeChatId !== binding.runtimeChatId) {
+          throw new Error("science_runtime_boundary_run_binding_mismatch");
+        }
+        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: binding.runtimeChatId });
+      },
+    },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic },
     runtimeCatalog: {

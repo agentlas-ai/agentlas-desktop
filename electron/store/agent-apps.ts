@@ -58,6 +58,7 @@ export function recordScaffoldedApp(input: {
   manifest: AgentlasSurfaceManifest;
   scaffold: AppFactoryScaffoldSnapshot;
 }): AppFactoryAppRecord {
+  assertAgentAppRootOwner(input.scaffold.rootPath, input.chatId, input.projectId ?? null, input.surfaceId);
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
@@ -111,6 +112,13 @@ export function recordScaffoldedApp(input: {
   if (!app) throw new Error(`Agent app registry write failed: ${input.scaffold.rootPath}`);
   recordAgentAppOperation(app.id, "scaffold", true, scaffold, "scaffolded");
   return getAgentApp(app.id) ?? app;
+}
+
+export function assertAgentAppRootOwner(rootPath: string, chatId: string, projectId: string | null, surfaceId: string): void {
+  const existing = getAgentAppByRoot(rootPath);
+  if (existing && (existing.chatId !== chatId || existing.projectId !== projectId || existing.surfaceId !== surfaceId)) {
+    throw new Error("artifact_owner_mismatch");
+  }
 }
 
 export function cloudAppRootPath(slugOrId: string): string {
