@@ -27,6 +27,8 @@ import {
   type GoalVerificationRecoveryClass,
 } from "../../shared/long-run-checkpoint";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
+import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
+import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
 
 const controllers = new Map<string, AbortController>();
 let accepting = true;
@@ -632,6 +634,7 @@ export function exactRunAssistantResult(chatId: string, runId: string): {
 export function collectDurableGoalVerificationEvidence(
   invocationRunId?: string | null,
   priorInvocationRunIds: readonly string[] = [],
+  goalBinding?: {goalId: string; revision: number},
 ): DurableGoalVerificationEvidence {
   if (!invocationRunId?.trim()) {
     return {
@@ -653,10 +656,17 @@ export function collectDurableGoalVerificationEvidence(
       reason: receipt ? `invocation_${receipt.status}` : "invocation_receipt_missing",
     };
   }
+  const settledBoundary = (id: string): boolean => {
+    try {
+      return !!receipt.chatId && readInvocationEffectBoundary({invocationRunId: id, expectedChatId: receipt.chatId}).effects === "settled"
+        && (!goalBinding || invocationMatchesGoalRevision(id, goalBinding.goalId, goalBinding.revision));
+    } catch { return false; }
+  };
+  if (!settledBoundary(runId)) return {ready: false, refs: [], observation: "The exact host effect boundary or Goal revision binding is unconfirmed.", reason: "verification_boundary_unconfirmed"};
   const priorRunIds = [...new Set(priorInvocationRunIds)].filter((id) => id !== runId).filter((id) => {
     const prior = getInvocationRunReceipt(id);
     return prior?.status === "completed" && prior.chatId === receipt.chatId
-      && prior.resultFolder === receipt.resultFolder && prior.executionPermission === receipt.executionPermission;
+      && prior.resultFolder === receipt.resultFolder && prior.executionPermission === receipt.executionPermission && settledBoundary(id);
   });
   // A retry contributes the missing evidence to the same goal. Earlier host
   // observations remain visible, so fixing one criterion does not erase proof
@@ -955,7 +965,11 @@ export async function verifyGoalCompletionClaim(input: {
   const priorCheckpoint = latestTaskCheckpoint(input.goalId);
   const priorInvocationRunIds = (priorCheckpoint?.capsule.evidenceRefs ?? [])
     .map((ref) => /^invocation:(.+):completed$/.exec(ref)?.[1]).filter((id): id is string => Boolean(id));
-  const durableEvidence = collectDurableGoalVerificationEvidence(input.invocationRunId, priorInvocationRunIds);
+  let verificationBoundary: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
+  try { if (input.invocationRunId) verificationBoundary = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Unknown legacy or changed bindings never permit a pass. */ }
+  const durableEvidence = verificationBoundary
+    ? collectDurableGoalVerificationEvidence(input.invocationRunId, priorInvocationRunIds, {goalId: input.goalId, revision: verificationBoundary.goalRevision})
+    : {ready: false, refs: [], observation: "The current Goal, source, artifacts or effect boundary could not be pinned.", reason: "verification_boundary_unconfirmed"};
   /*
    * Evidence goes FIRST and the claim goes last.
    *
@@ -1050,6 +1064,17 @@ export async function verifyGoalCompletionClaim(input: {
         }));
     // A provider may resolve despite abort. Never persist its late verdicts.
     if (controller.signal.aborted) throw controller.signal.reason;
+    if (verificationBoundary && input.invocationRunId) {
+      let current: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
+      try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Refuse stale result. */ }
+      if (current?.digest !== verificationBoundary.digest) {
+        settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: "none", errorCode: "verification_boundary_changed"});
+        return null;
+      }
+    }
+    const boundaryEvidenceRefs = verificationBoundary ? [...verificationBoundary.refs,
+      `long-run-event:${run.id}:${appendLongRunEvent({runId: run.id, kind: "verification.boundary_observed", actorKind: "host",
+        payload: {...verificationBoundary.snapshot, observedAt: new Date().toISOString()}})}`] : [];
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
       state: "completed",
@@ -1080,7 +1105,7 @@ export async function verifyGoalCompletionClaim(input: {
         verdict: verdict.verdict,
         // A failed receipt still needs reproducible evidence. Verdict state, not
         // presence of references, controls task completion.
-        evidenceRefs: [...durableEvidence.refs, ...runtimeRefs],
+        evidenceRefs: [...durableEvidence.refs, ...boundaryEvidenceRefs, ...runtimeRefs],
         summary: verdict.reason,
       });
     }

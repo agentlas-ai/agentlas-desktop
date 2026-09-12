@@ -207,6 +207,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
       "science:artifacts:getNumericSurfaceViewState", { extensionId, projectId, artifactId, artifactVersion, artifactContentSha256 },
     ),
     persistNumericSurfaceViewState: (input: unknown) => ipcRenderer.invoke("science:artifacts:persistNumericSurfaceViewState", { extensionId, input }),
+    getViewState: (input: unknown) => ipcRenderer.invoke("science:artifacts:getViewState", { extensionId, input }),
+    persistViewState: (input: unknown) => ipcRenderer.invoke("science:artifacts:persistViewState", { extensionId, input }),
     exportNumericSurfacePng: (input: unknown) => ipcRenderer.invoke("science:artifacts:exportNumericSurfacePng", { extensionId, input }),
     exportStatisticsFigureSvg: (input: unknown) => ipcRenderer.invoke("science:artifacts:exportStatisticsFigureSvg", { extensionId, input }),
     exportStatisticsFigurePng: (input: unknown) => ipcRenderer.invoke("science:artifacts:exportStatisticsFigurePng", { extensionId, input }),

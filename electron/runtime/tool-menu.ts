@@ -36,7 +36,7 @@ const MENU_TOOLS = [
 export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean): OpenAiToolDef[] {
   const descriptors = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp").map(tool => [tool.function.name, tool]));
   if (!enabled || descriptors.size < 32 || bytes([...descriptors.values()]) < 16_384 || [...NAMES].some(name => byName.has(name))) return tools;
-  const exposed = [...tools.filter(tool => byName.get(tool.function.name)?.kind === "builtin"), ...structuredClone(MENU_TOOLS)];
+  const exposed = [...tools.filter(tool => byName.get(tool.function.name)?.kind !== "mcp"), ...structuredClone(MENU_TOOLS)];
   menus.set(byName, { descriptors, tokens: new Map(), prepared: new Map(), metrics: {
     mode: "lazy", inventoryDigest: mcpToolSchemaDigest([...descriptors.keys()].map(name => [name, (byName.get(name) as Extract<ResolvedTool, {kind:"mcp"}>).schemaDigest])),
     eagerSchemaBytes: bytes(tools), initialSchemaBytes: bytes(exposed), loadedSchemaBytes: 0, preparedCount: 0,

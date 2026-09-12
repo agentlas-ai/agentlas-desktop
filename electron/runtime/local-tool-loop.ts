@@ -10,6 +10,7 @@
 import { preparedMcpBindings, preparedMcpTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
+import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { createHash } from "node:crypto";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
@@ -328,7 +329,8 @@ export async function prepareMainToolLoop(
           req.browserOnly === true,
         );
       })();
-  const tools = installLazyToolMenu(eagerTools, byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools);
+  const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools),
+    byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools);
   return {
     tools,
     byName,
@@ -407,6 +409,12 @@ export async function runMainToolDispatch(
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
   try {
+    if (call.toolName === CODE_MODE_TOOL) {
+      if (broker) throw new Error("code_mode_broker_not_supported");
+      const result = await runMainCodeMode(byName, call.arguments, events, approval, runMainToolDispatch);
+      events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError);
+      return result;
+    }
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
       events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false);

@@ -2671,6 +2671,30 @@ app.whenReady().then(async () => {
       record as unknown as import("agentlas-science/dist/contracts/science-numeric-3d").PersistScienceNumericSurfaceViewStateInput,
     );
   });
+  for (const operation of ["getViewState", "persistViewState"] as const) {
+    ipcMain.handle(`science:artifacts:${operation}`, (event, envelope: unknown) => {
+      assertScienceSender(event, envelope, "science:artifacts");
+      if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-artifact-view-state-frame-denied");
+      const outer = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+        ? envelope as Record<string, unknown> : null;
+      if (!outer || Object.keys(outer).some((key) => key !== "extensionId" && key !== "input")) {
+        throw new Error("science-artifact-view-state-envelope-invalid");
+      }
+      const record = outer.input && typeof outer.input === "object" && !Array.isArray(outer.input)
+        ? outer.input as Record<string, unknown> : null;
+      const allowed = ["projectId", "artifactId", "artifactVersion", "artifactContentSha256", "stateSchema",
+        ...(operation === "persistViewState" ? ["requestId", "expectedRevision", "expectedStateSha256", "viewState"] : [])];
+      if (!record || Object.keys(record).length !== allowed.length
+        || Object.keys(record).some((key) => !allowed.includes(key))) {
+        throw new Error("science-artifact-view-state-input-invalid");
+      }
+      // The independent store owns exact artifact identity, schema validation,
+      // idempotent replay and state CAS. The host supplies no alternate writer.
+      return operation === "getViewState"
+        ? scienceStore().getArtifactViewState(record as unknown as import("agentlas-science/dist/contracts/science-artifact-view-state").ScienceArtifactViewStateTarget)
+        : scienceStore().persistArtifactViewState(record as unknown as import("agentlas-science/dist/contracts/science-artifact-view-state").PersistScienceArtifactViewStateInput);
+    });
+  }
   ipcMain.handle("science:artifacts:exportNumericSurfacePng", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-numeric-surface-raster-frame-denied");
