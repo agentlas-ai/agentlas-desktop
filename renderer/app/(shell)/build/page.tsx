@@ -604,9 +604,9 @@ export default function BuildPage() {
         <div className="build-shell">
           <header className="build-header">
             <div className="build-title-group">
-              <Link href="/apps" className="titlebar-nodrag build-back-link">
+              <Link href="/workspace" className="titlebar-nodrag build-back-link">
                 <IconChevronRight size={14} />
-                {locale === "ko" ? "앱" : "Apps"}
+                {locale === "ko" ? "작업공간" : "Workspace"}
               </Link>
               <div className="build-title-mark"><IconBuilding size={18} /></div>
               <div>

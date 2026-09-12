@@ -523,7 +523,7 @@ export default function DocumentStudioPage() {
     >
       <style>{RESPONSIVE_CSS}</style>
       <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
-        <Link href="/apps" className="titlebar-nodrag" style={toolbarIconButton} aria-label={locale === "ko" ? "앱으로 돌아가기" : "Back to apps"} title={locale === "ko" ? "앱으로 돌아가기" : "Back to apps"}>
+        <Link href="/workspace" className="titlebar-nodrag" style={toolbarIconButton} aria-label={locale === "ko" ? "작업공간으로 돌아가기" : "Back to workspace"} title={locale === "ko" ? "작업공간으로 돌아가기" : "Back to workspace"}>
           <IconApps size={15} />
         </Link>
         <button

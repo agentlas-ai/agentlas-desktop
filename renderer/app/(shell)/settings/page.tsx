@@ -841,7 +841,7 @@ export default function SettingsPage() {
         <TerminalProfilesPanel />
 
         <a href="/local-models" style={{ display: "block", marginTop: 24, padding: 16, border: "1px solid var(--paper-edge)", borderRadius: 12, color: "var(--ink)", textDecoration: "none" }}>
-          <strong>Local Models</strong>
+          <strong>{t("nav.localModels")}</strong>
           <span style={{ display: "block", marginTop: 6, fontSize: 12, color: "var(--muted-deep)" }}>{locale === "ko" ? "Hugging Face 모델 탐색 · 다운로드 · 실행 관리 →" : "Browse Hugging Face models · Download · Manage runtime →"}</span>
         </a>
         <OllamaMigrationPanel locale={locale} />

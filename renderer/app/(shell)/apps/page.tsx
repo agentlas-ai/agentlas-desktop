@@ -3,11 +3,11 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
-/** Legacy Agent Apps entry now resolves to the only public app surface: Sites. */
+/** Legacy app links open the current project workspace. */
 export default function AppsPage() {
   const router = useRouter();
   useEffect(() => {
-    router.replace("/site");
+    router.replace("/workspace");
   }, [router]);
   return null;
 }

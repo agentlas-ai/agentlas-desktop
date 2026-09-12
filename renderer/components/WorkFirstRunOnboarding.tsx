@@ -93,7 +93,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s3: "Agentlas는 에이전트를 만들고, 작업을 자동화하고, 팀과 공유하는 플랫폼이에요.", s3sub: "복잡한 기술을 직접 조립하지 않아도 결과 중심으로 시작할 수 있어요.",
     build: "에이전트 빌드", buildSub: "필요한 역할을 직접 만들어요.", automation: "자동화", automationSub: "자연어로 반복 작업을 맡겨요.", hub: "Agent Hub", hubSub: "검증된 에이전트를 팀에 데려와요.",
     s4: "바이브코딩 에이전트가 무료로 제공돼요.", s4sub: "필요한 역할이 위에서부터 연결되고, 하나의 팀으로 일을 시작합니다.",
-    s5: "Agentlas의 주요 공간을 한 번에 볼게요.", workspace: "작업공간", workspaceSub: "프로젝트를 만들고 에이전트를 조합해 작업을 완성해요.", agentHub: "Agent Hub", agentHubSub: "다른 사람들이 만든 에이전트를 우리 팀에 합류시켜요.", automationNav: "자동화", automationNavSub: "자연어로 에이전트 기반 작업 흐름을 만들고 실행해요.", site: "사이트", siteSub: "웹·앱 디자인을 만들고 AI와 실시간으로 수정해요.", connectNav: "커넥트", connectNavSub: "텔레그램과 브라우저 로그인을 연결해요.", cloud: "에이전트 클라우드", cloudSub: "에이전트를 만들고 다른 컴퓨터에서도 사용해요.", settings: "환경설정", settingsSub: "Gmail·Notion·커스텀 MCP를 등록해요.",
+    s5: "Agentlas의 주요 공간을 한 번에 볼게요.", workspace: "작업공간", workspaceSub: "프로젝트를 만들고 에이전트를 조합해 작업을 완성해요.", agentHub: "Agent Hub", agentHubSub: "다른 사람들이 만든 에이전트를 우리 팀에 합류시켜요.", automationNav: "자동화", automationNavSub: "자연어로 에이전트 기반 작업 흐름을 만들고 실행해요.", connectNav: "커넥트", connectNavSub: "텔레그램과 브라우저 로그인을 연결해요.", cloud: "에이전트 클라우드", cloudSub: "에이전트를 만들고 다른 컴퓨터에서도 사용해요.", settings: "환경설정", settingsSub: "Gmail·Notion·커스텀 MCP를 등록해요.",
     s6: "Agentlas는 모바일에서도 사용할 수 있어요.", s6sub: "App Store와 Play Store에서 Agentlas를 설치한 뒤, 환경설정에서 새 기기 연결을 눌러 QR 코드로 연결하세요.",
     s8: "매일 쓰는 서비스가 뭐예요?", s8sub: "고른 것은 모든 에이전트가 함께 씁니다. 나중에 환경설정에서 더 추가할 수 있어요.",
     s8search: "서비스 이름으로 찾기", s8loading: "목록을 불러오는 중…", s8empty: "표시할 서비스가 없어요.", s8none: "찾는 이름과 맞는 서비스가 없어요.",
@@ -106,7 +106,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s3: "Agentlas is a platform for building agents, automating work, and sharing teams.", s3sub: "Start with the outcome instead of assembling complex technical pieces.",
     build: "Agent Build", buildSub: "Create the role you need.", automation: "Automation", automationSub: "Delegate repeatable work in natural language.", hub: "Agent Hub", hubSub: "Bring proven agents into your team.",
     s4: "Vibe-coding agents are included for free.", s4sub: "Roles connect from the top down and become a team ready to work.",
-    s5: "Here is the rest of Agentlas at a glance.", workspace: "Workspace", workspaceSub: "Create projects, combine agents, and finish robustly.", agentHub: "Agent Hub", agentHubSub: "Bring agents made by others into your team.", automationNav: "Automation", automationNavSub: "Create and run agent workflows in natural language.", site: "Site", siteSub: "Create web and app designs and revise them with AI.", connectNav: "Connect", connectNavSub: "Connect Telegram and save browser logins.", cloud: "Agent Cloud", cloudSub: "Build agents and use them from another computer.", settings: "Settings", settingsSub: "Register Gmail, Notion, or custom MCPs.",
+    s5: "Here is the rest of Agentlas at a glance.", workspace: "Workspace", workspaceSub: "Create projects, combine agents, and finish robustly.", agentHub: "Agent Hub", agentHubSub: "Bring agents made by others into your team.", automationNav: "Automation", automationNavSub: "Create and run agent workflows in natural language.", connectNav: "Connect", connectNavSub: "Connect Telegram and save browser logins.", cloud: "Agent Cloud", cloudSub: "Build agents and use them from another computer.", settings: "Settings", settingsSub: "Register Gmail, Notion, or custom MCPs.",
     s6: "Agentlas also works on mobile.", s6sub: "Install Agentlas from the App Store or Play Store, then choose Connect new device in Settings and scan the QR code.",
     s8: "What do you use every day?", s8sub: "Every agent shares what you pick. You can add more later in Settings.",
     s8search: "Find a service by name", s8loading: "Loading…", s8empty: "Nothing to show yet.", s8none: "No service matches that name.",
@@ -250,7 +250,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const inToolStage = Boolean(loginStage || keyStage);
   const menuItems = [
     [copy.workspace, copy.workspaceSub], [copy.agentHub, copy.agentHubSub], [copy.automationNav, copy.automationNavSub],
-    [copy.site, copy.siteSub], [copy.connectNav, copy.connectNavSub], [copy.cloud, copy.cloudSub], [copy.settings, copy.settingsSub],
+    [copy.connectNav, copy.connectNavSub], [copy.cloud, copy.cloudSub], [copy.settings, copy.settingsSub],
   ];
 
   const goBack = () => {
