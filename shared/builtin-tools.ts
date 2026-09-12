@@ -427,7 +427,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
   {
     name: "browser_download",
     minPerm: "write",
-    description: "Download an explicit HTTPS URL (or allowed localhost URL) using this task’s browser session. Up to 16 MiB, saved to app-owned downloads. Returns only after completed bytes are verified. No arbitrary destination/profile inputs.",
+    description: "Download an explicit HTTPS URL (or allowed localhost URL) using this task’s browser session. Saved to app-owned downloads and verified with a bounded-memory streaming SHA-256. Active progress may continue within the Goal time budget; 60 seconds without byte progress stops the transfer. Returns only after completed bytes are verified. No arbitrary destination/profile inputs.",
     parameters: {type:"object",properties:{url:{type:"string",maxLength:8192}},required:["url"],additionalProperties:false},
     async run(args,ctx) {
       if (!ctx.browserDownload) throw new Error("browser_download_scope_unavailable");

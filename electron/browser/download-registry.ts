@@ -5,7 +5,7 @@ import { session, shell, type DownloadItem } from "electron";
 import { userDataPath } from "../runtime-paths";
 import type { BrowserDownloadState, BrowserDownloadSummary } from "../../shared/browser-ui";
 import { browserDownloadPathIsOwned, normalizeBrowserDownloadFileName } from "./download-paths";
-import { observeWorkspaceFile, FILE_OBSERVATION_MAX_BYTES } from "../../shared/file-observation";
+import { captureDownloadFile, hashDownloadFile, type DownloadFileIdentity } from "./download-file-hash";
 
 const NATIVE_BROWSER_PARTITION = "persist:agentlas-browser-default";
 const DOWNLOAD_SCHEMA_VERSION = "agentlas.browser-downloads.v1" as const;
@@ -23,6 +23,7 @@ interface DownloadRecord extends BrowserDownloadSummary, DownloadOwner {
   savePath: string | null;
   agentSource?: AgentDownloadIdentity;
   observedSha256?: string;
+  observedFileIdentity?: DownloadFileIdentity;
 }
 
 export interface AgentDownloadIdentity {
@@ -38,6 +39,8 @@ interface AgentTicket {
   acceptUrls: (urls: string[]) => boolean;
   finish: (result: AgentDownloadResult | null, reason?: string) => void;
   downloadId?: string; cancelled?: boolean;
+  signal?: AbortSignal;
+  progress?: (phase: "transfer" | "hash", bytes: number) => void;
 }
 const agentTickets = new Map<number, AgentTicket>();
 const urlDigest = (url: string) => createHash("sha256").update(url).digest("hex");
@@ -176,7 +179,7 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
     }
     try {
     if (ticket && (ticket.cancelled || ticket.downloadId || !ticket.current()
-      || item.getURLChain()[0] !== ticket.url || !ticket.acceptUrls(item.getURLChain()) || item.getTotalBytes() > FILE_OBSERVATION_MAX_BYTES)) {
+      || item.getURLChain()[0] !== ticket.url || !ticket.acceptUrls(item.getURLChain()))) {
       event.preventDefault(); ticket.finish(null, "browser_download_admission_refused"); return;
     }
     const now = new Date().toISOString();
@@ -208,11 +211,12 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
     item.on("updated", (_downloadEvent, state) => {
       const current = records.get(id);
       if (!current || !activeItems.has(id)) return;
-      if (ticket && (ticket.cancelled || !ticket.current() || item.getReceivedBytes() > FILE_OBSERVATION_MAX_BYTES)) {
+      if (ticket && (ticket.cancelled || !ticket.current())) {
         ticket.cancelled = true; item.cancel(); return;
       }
       current.state = state === "interrupted" ? "interrupted" : "progressing";
       current.receivedBytes = Math.max(0, item.getReceivedBytes());
+      ticket?.progress?.("transfer",current.receivedBytes);
       current.updatedAt = new Date().toISOString();
       try { persist(); } catch {
         if (ticket) { ticket.cancelled = true; item.cancel(); ticket.finish(null,"browser_download_receipt_failed"); }
@@ -228,14 +232,32 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
       current.savePath = browserDownloadPathIsOwned(downloadsRoot(), id, savePath) ? savePath : null;
       current.updatedAt = new Date().toISOString();
       if (ticket) {
+        // Capture final filesystem identity before the first asynchronous read.
+        // A replacement while hashing cannot become this DownloadItem's proof.
+        let captured: ReturnType<typeof captureDownloadFile> | null = null;
         try {
-          const observation = current.state === "completed" && ticket.current() && current.savePath
-            ? observeWorkspaceFile(downloadsRoot(), path.relative(downloadsRoot(),current.savePath), "write") : null;
-          if (observation && observation.bytes === current.receivedBytes
-            && (current.totalBytes === null || current.totalBytes === 0 || current.totalBytes === current.receivedBytes)) current.observedSha256 = observation.sha256;
+          if (current.state === "completed" && ticket.current() && current.savePath) {
+            captured = captureDownloadFile(downloadsRoot(),path.relative(downloadsRoot(),current.savePath));
+          }
           persist();
-          ticket.finish(readAgentBrowserDownload(id,ticket.identity), "browser_download_incomplete");
-        } catch { ticket.finish(null, "browser_download_receipt_failed"); }
+        } catch { ticket.finish(null,"browser_download_receipt_failed"); return; }
+        if (!captured || !current.savePath) { ticket.finish(null,"browser_download_incomplete"); return; }
+        const savePath = current.savePath;
+        void hashDownloadFile(downloadsRoot(),path.relative(downloadsRoot(),savePath),{
+          expectedIdentity:captured.identity,signal:ticket.signal,
+          current:()=>!ticket.cancelled && ticket.current() && records.get(id) === current && current.state === "completed",
+          onProgress:bytes=>ticket.progress?.("hash",bytes),
+        }).then(observed=>{
+          if (ticket.cancelled || !ticket.current() || records.get(id) !== current || current.state !== "completed"
+            || observed.bytes !== current.receivedBytes
+            || (current.totalBytes !== null && current.totalBytes !== 0 && current.totalBytes !== current.receivedBytes)) {
+            ticket.finish(null,"browser_download_incomplete"); return;
+          }
+          current.observedSha256 = observed.sha256; current.observedFileIdentity = observed.identity;
+          persist();
+          ticket.finish({id:current.id,fileName:current.fileName,savePath,receivedBytes:current.receivedBytes,
+            sha256:observed.sha256,sourceOrigin:current.sourceOrigin,identity:{...ticket.identity}});
+        }).catch(()=>ticket.finish(null,"browser_download_receipt_failed"));
       } else persist();
     });
     } catch {
@@ -247,17 +269,37 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
 
 /** Private immutable identity lookup; public UI summaries omit all run IDs and
  * paths. File bytes are re-read inside this operation's app-owned directory. */
-export function readAgentBrowserDownload(id: string, identity: AgentDownloadIdentity): AgentDownloadResult | null {
+export async function readAgentBrowserDownload(id: string, identity: AgentDownloadIdentity, signal?: AbortSignal): Promise<AgentDownloadResult | null> {
   load();
   const record = records.get(id);
   if (!record || record.state !== "completed" || !record.savePath || !record.observedSha256
     || JSON.stringify(record.agentSource) !== JSON.stringify(identity)
     || (record.totalBytes !== null && record.totalBytes !== 0 && record.totalBytes !== record.receivedBytes)
     || record.taskScopeId !== identity.chatId || !browserDownloadPathIsOwned(downloadsRoot(),id,record.savePath)) return null;
-  const observed = observeWorkspaceFile(downloadsRoot(),path.relative(downloadsRoot(),record.savePath),"write");
-  if (!observed || observed.bytes !== record.receivedBytes || observed.sha256 !== record.observedSha256) return null;
-  return {id:record.id,fileName:record.fileName,savePath:record.savePath,receivedBytes:record.receivedBytes,
-    sha256:record.observedSha256,sourceOrigin:record.sourceOrigin,identity:{...identity}};
+  const captured = JSON.stringify([record.agentSource,record.observedSha256,record.observedFileIdentity,record.savePath,record.receivedBytes]);
+  for (let attempt=0;attempt<2;attempt++) try {
+    if (signal?.aborted) return null;
+    const relativePath = path.relative(downloadsRoot(),record.savePath);
+    const reading = captureDownloadFile(downloadsRoot(),relativePath).identity, pinned = record.observedFileIdentity;
+    // OS download metadata may change ctime after completion without changing
+    // bytes. Pin ctime for this whole read, while immutable inode/mtime/size and
+    // the complete SHA bind separate reads to the completed download.
+    if (pinned && (reading.dev !== pinned.dev || reading.ino !== pinned.ino || reading.bytes !== pinned.bytes || reading.mtimeNs !== pinned.mtimeNs)) return null;
+    const observed = await hashDownloadFile(downloadsRoot(),relativePath,{
+      signal,expectedIdentity:reading,
+      current:()=>records.get(id) === record && record.state === "completed",
+    });
+    if (signal?.aborted || records.get(id) !== record || record.state !== "completed"
+      || captured !== JSON.stringify([record.agentSource,record.observedSha256,record.observedFileIdentity,record.savePath,record.receivedBytes])
+      || observed.bytes !== record.receivedBytes || observed.sha256 !== record.observedSha256) return null;
+    return {id:record.id,fileName:record.fileName,savePath:record.savePath,receivedBytes:record.receivedBytes,
+      sha256:record.observedSha256,sourceOrigin:record.sourceOrigin,identity:{...identity}};
+  } catch (error) {
+    // Only a previously persisted Main SHA permits one full re-read. This is
+    // never a retry of an unverified initial observation or a partial digest.
+    if (signal?.aborted || attempt !== 0 || !(error instanceof Error) || error.message !== "download_file_changed") return null;
+  }
+  return null;
 }
 
 export function listBrowserDownloads(ownerId: number, taskScopeId: string, limit = 50): BrowserDownloadSummary[] {

@@ -1020,8 +1020,9 @@ export async function verifyGoalCompletionClaim(input: {
     const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
     const fileProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
       ? currentBuiltinFileProofs(fileProofInput) : [];
-    const downloadProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "download")
-      ? await currentBrowserDownloadProofs(fileProofInput) : [];
+    const downloadRead = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "download")
+      ? await currentBrowserDownloadProofs({...fileProofInput,signal:controller.signal}) : {proofs:[],reasonCode:null};
+    const downloadProofs = downloadRead.proofs;
     const evidenceRefsByItem = Object.fromEntries(run.acceptanceCriteria.map((_,index) => [`criterion:${index}`,
       proofContracts[index] ? admissibleCriterionProofRefs(proofContracts[index],durableEvidence.refs,fileProofs,downloadProofs).slice(-32) : []]));
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
@@ -1074,7 +1075,8 @@ export async function verifyGoalCompletionClaim(input: {
       const allowedRefs=evidenceRefsByItem[`criterion:${criterionIndex}`]??[];
       const chosenRefs=judged.evidenceRefs??[];
       if(result.verdict==='passed' && (!proofContracts[criterionIndex] || !chosenRefs.length || chosenRefs.some(ref=>!allowedRefs.includes(ref)))) {
-        result={criterionIndex,verdict:'inconclusive',reason:'The pinned criterion proof contract has no matching host evidence.',recoveryClass:'unknown',prerequisiteCode:null,requiredActor:null,nextAction:null};
+        result={criterionIndex,verdict:'inconclusive',reason:proofContracts[criterionIndex]?.requiredProofKind === "download" && downloadRead.reasonCode
+          ? `Download proof unavailable (${downloadRead.reasonCode}).` : 'The pinned criterion proof contract has no matching host evidence.',recoveryClass:'unknown',prerequisiteCode:null,requiredActor:null,nextAction:null};
       }
       // Current host state is authoritative for unsafe/unavailable execution.
       // It can narrow a failed model classification, but never convert a pass or
@@ -1089,7 +1091,7 @@ export async function verifyGoalCompletionClaim(input: {
           criterionIndex,
           verdict: "inconclusive" as const,
           reason: proofContracts[criterionIndex]
-            ? `No current host proof satisfies the pinned criterion requirement (${proofContracts[criterionIndex].requiredProofKind}).`
+            ? `No current host proof satisfies the pinned criterion requirement (${proofContracts[criterionIndex].requiredProofKind}${proofContracts[criterionIndex].requiredProofKind === "download" && downloadRead.reasonCode ? `: ${downloadRead.reasonCode}` : ""}).`
             : `Durable verification evidence is unavailable (${durableEvidence.reason}).`,
           recoveryClass: "unknown" as const,
           nextAction: null,
@@ -1099,10 +1101,10 @@ export async function verifyGoalCompletionClaim(input: {
         }));
     const chosenDownloadRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("download-proof:")));
     if (chosenDownloadRefs.size) {
-      const current = fileProofInput ? await currentBrowserDownloadProofs(fileProofInput) : [];
-      const currentByRef = new Map(current.map(item => [item.ref,JSON.stringify(item)]));
+      const current = fileProofInput ? await currentBrowserDownloadProofs({...fileProofInput,signal:controller.signal}) : {proofs:[],reasonCode:"download_proof_scope_missing"};
+      const currentByRef = new Map(current.proofs.map(item => [item.ref,JSON.stringify(item)]));
       const capturedByRef = new Map(downloadProofs.map(item => [item.ref,JSON.stringify(item)]));
-      if ([...chosenDownloadRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
+      if (current.reasonCode || [...chosenDownloadRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
         settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_download_changed"});
         return null;
       }
