@@ -1,19 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import type { McpInvocationRequest, RuntimeSelection } from "../../shared/types";
+import type { McpInvocationRequest } from "../../shared/types";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getDb } from "../store/db";
-import { getInvocationRunReceipt } from "../store/run-events";
+import { prepareCheckpointContinuation } from "./continuation";
 import { appendLongRunEvent, getLongRun, listLongRuns, transitionLongRun } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
-import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 
 export interface CheckpointStartupDispatcher {
   activeChatIds(): string[];
-  start(request: McpInvocationRequest): { runId: string };
+  start(request: McpInvocationRequest, workspaceBinding?: undefined, executionContext?: undefined, questionContinuation?: undefined, hostNoticePurpose?: "goal-continuation"): { runId: string };
 }
 
 export interface CheckpointStartupResult {
@@ -71,24 +70,17 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       const newerMessage = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1")
         .get(chat.id, checkpoint.createdAt);
       if (pendingDirection || newerMessage) { refuse("newer_user_direction"); continue; }
-      const previousInvocation = checkpoint.invocationRunId ? getInvocationRunReceipt(checkpoint.invocationRunId) : null;
-      if (!previousInvocation || previousInvocation.status !== "completed" || previousInvocation.chatId !== chat.id) {
-        refuse("checkpoint_invocation_not_settled"); continue;
-      }
+      const continuation = prepareCheckpointContinuation(checkpoint);
       // The request helper revalidates the exact current revision, original
       // authority and remaining budget without mutating state or writing a user event.
       const request = automaticGoalResumeRequest(chat.id, candidate.version);
       if (!request) { refuse("goal_authority_unavailable"); continue; }
-      const worker = getDb().prepare("SELECT runtime_selection_json FROM long_run_workers WHERE run_id = ? AND role = 'controller' ORDER BY updated_at DESC LIMIT 1")
-        .get(candidate.id) as { runtime_selection_json: string } | undefined;
-      if (!worker) { refuse("runtime_binding_missing"); continue; }
-      const selection = JSON.parse(worker.runtime_selection_json) as RuntimeSelection;
-      resolveDesktopRuntimeAdapter(selection); // Reject an unknown stored runtime before admitting work.
+      const selection = continuation.runtimeSelection;
       successorRunId = randomUUID();
       const resumedRequest: McpInvocationRequest = {
         ...request, runId: successorRunId, runtimeSelection: selection,
         ...(request.oneMode ? { onePermissionMode: request.permissions } : {}),
-        userPrompt: `Resume the existing goal from host checkpoint ${checkpoint.checkpointId}. Inspect the existing workspace and gather its missing verification evidence. Preserve the goal's current criteria and original authority.`,
+        userPrompt: continuation.userPrompt,
       };
       // The event, CAS transition and fresh invocation identity commit together.
       // No await separates this claim from start, so a person cannot be raced
@@ -102,7 +94,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         appendLongRunEvent({ runId: current.id, kind: "run.checkpoint_startup", actorKind: "host",
           payload: { appInstanceId, checkpointId: checkpoint.checkpointId, invocationRunId: successorRunId, status: "claimed" } });
       })();
-      const started = dispatcher.start(resumedRequest);
+      const started = dispatcher.start(resumedRequest, undefined, undefined, undefined, "goal-continuation");
       if (started.runId !== successorRunId) throw new Error("checkpoint_startup_dispatch_identity_mismatch");
       const current = getLongRun(candidate.id);
       if (current?.status === "queued") transitionLongRun({ runId: current.id, to: "running", actorKind: "host",

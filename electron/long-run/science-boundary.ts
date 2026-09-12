@@ -1,7 +1,5 @@
-import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { createHash } from "node:crypto";
-import { getDb } from "../store/db";
-import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
+import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 
 export interface ScienceRuntimeBoundaryInput {
   projectId: string; conversationId: string; turnId: string; invocationRunId: string;
@@ -13,70 +11,17 @@ export interface ScienceRuntimeBoundary {
   invocationRunId: string; checkpointId: string | null; terminal: boolean;
   effects: "settled" | "uncertain"; artifactRefs: string[]; sourceRefs: string[]; pendingEffectRefs: string[];
 }
-interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; payload_json: string }
-const terminalKinds = new Set(["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
-function payload(row: EventRow): Record<string, unknown> {
-  const value: unknown = JSON.parse(row.payload_json);
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science_runtime_boundary_event_invalid");
-  return value as Record<string, unknown>;
-}
-/** Read-only reconciliation. Science owns steering and the only successor writer.
- * The anchor names an actual terminal ledger event plus exact effect snapshot,
- * never a fabricated task checkpoint or a model completion claim. */
+/** Read-only observer. Main validates canonical Science identity; Science owns
+ * steering and successor dispatch. The anchor is a real invocation receipt. */
 export async function reconcileScienceBoundary(input: ScienceRuntimeBoundaryInput): Promise<ScienceRuntimeBoundary> {
   for (const value of Object.values(input)) if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error("science_runtime_boundary_identity_invalid");
-  return getDb().transaction(() => {
-    const rows = getDb().prepare("SELECT id, seq, kind, chat_id, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
-      .all(input.invocationRunId) as EventRow[];
-    const start = rows.find((row) => row.kind === "invoke_started");
-    if (!start || start.chat_id !== input.expectedRuntimeChatId || payload(start).invocationSource !== "science") {
-      throw new Error("science_runtime_boundary_run_binding_mismatch");
-    }
-    if (rows.some((row) => row.chat_id !== null && row.chat_id !== input.expectedRuntimeChatId)) throw new Error("science_runtime_boundary_event_binding_mismatch");
-    const terminal = [...rows].reverse().find((row) => terminalKinds.has(row.kind));
-    const effectRow = [...rows].reverse().find(row => row.kind === "runtime_effect_boundary");
-    const boundary = effectRow ? payload(effectRow) : null;
-    const attempts = getDb().prepare("SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
-      .all(input.invocationRunId) as Array<{ id: string; state: string; side_effect_state: string }>;
-    const pending = new Set<string>();
-    if (!terminal) pending.add(`invocation:${input.invocationRunId}:terminal-pending`);
-    if (terminal && terminal.kind !== "invoke_completed") pending.add(`event:${terminal.id}:effects-unconfirmed`);
-    for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain" || attempt.side_effect_state === "uncertain") pending.add(`attempt:${attempt.id}`);
-    if (!effectRow || !boundary || boundary.schemaVersion !== "agentlas.runtime-effect-boundary.v1"
-      || boundary.terminalEventId !== terminal?.id || boundary.terminalSeq !== terminal?.seq
-      || boundary.coverage !== "complete" || boundary.ledgerComplete !== true || boundary.effects !== "settled"
-      || !Array.isArray(boundary.pendingEffectRefs) || boundary.pendingEffectRefs.length !== 0) pending.add("runtime-effect-boundary-unconfirmed");
-    if (Array.isArray(boundary?.pendingEffectRefs)) for (const ref of boundary.pendingEffectRefs) if (typeof ref === "string") pending.add(ref);
-    let toolEventCount = 0;
-    const tools = new Map<string, { row: EventRow; result: boolean; failed: boolean }>();
-    const artifactRefs = new Set<string>(); const sourceRefs = new Set<string>();
-    for (const row of rows) {
-      const data = payload(row);
-      const evidence = decodeRuntimeEvidence(data.runtimeEvidence);
-      if (evidence?.correlation.artifactVersionRef) artifactRefs.add(evidence.correlation.artifactVersionRef);
-      if (Array.isArray(data.toolSourceUrls)) for (const ref of data.toolSourceUrls) if (typeof ref === "string" && /^https?:\/\//.test(ref)) sourceRefs.add(ref);
-      if (row.kind !== "mcp_tool-use" || typeof data.toolName !== "string" || isEffectStatusOnlyTool({name:data.toolName,id:data.toolId,args:data.toolArgs,isError:data.toolIsError})) continue;
-      toolEventCount++;
-      if (effectRow && row.seq > effectRow.seq) pending.add(`event:${row.id}:after-effect-boundary`);
-      if (terminal && row.seq > terminal.seq) pending.add(`event:${row.id}:after-terminal`);
-      const toolId = typeof data.toolId === "string" && data.toolId ? data.toolId : `event:${row.id}`;
-      const previous = tools.get(toolId);
-      tools.set(toolId, { row, result: typeof data.toolResultPreview === "string" || previous?.result === true,
-        failed: data.toolIsError === true || (data.toolIsError === undefined && previous?.failed === true) });
-    }
-    // The observer never upgrades previews into receipts. The service's complete
-    // operation snapshot, produced after runner settlement, is mandatory.
-    if (boundary?.observedToolEventCount !== toolEventCount) pending.add("runtime-effect-event-count-mismatch");
-    for (const [id, tool] of tools) if (!tool.result || tool.failed) pending.add(`tool:${id}:outcome-pending`);
-    const pendingEffectRefs = [...pending].sort();
-    const result: ScienceRuntimeBoundary = { schema: "agentlas.science-runtime-boundary.v1", invocationRunId: input.invocationRunId,
-      checkpointId: null, terminal: Boolean(terminal), effects: pendingEffectRefs.length ? "uncertain" : "settled",
-      artifactRefs: [...artifactRefs].sort(), sourceRefs: [...sourceRefs].sort(), pendingEffectRefs };
-    if (terminal) {
-      const digest = createHash("sha256").update(JSON.stringify({ input, terminal, effectRow, attempts,
-        tools: [...tools].map(([id, tool]) => ({ id, ...tool })), result })).digest("hex");
-      result.checkpointId = `invocation-boundary:${terminal.id}:${digest}`;
-    }
-    return result;
-  })();
+  let boundary;
+  try { boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId,
+    expectedChatId: input.expectedRuntimeChatId, expectedSource: "science" }); }
+  catch (error) { throw new Error(error instanceof Error ? error.message.replace("runtime_effect_boundary_", "science_runtime_boundary_") : "science_runtime_boundary_unavailable"); }
+  const digest = boundary.snapshotDigest ? createHash("sha256").update(JSON.stringify({ input, snapshotDigest: boundary.snapshotDigest })).digest("hex") : null;
+  return { schema: "agentlas.science-runtime-boundary.v1", invocationRunId: input.invocationRunId,
+    checkpointId: digest ? `invocation-boundary:${boundary.terminalEventId}:${digest}` : null,
+    terminal: boundary.terminal, effects: boundary.effects, artifactRefs: boundary.artifactRefs,
+    sourceRefs: boundary.sourceRefs, pendingEffectRefs: boundary.pendingEffectRefs };
 }

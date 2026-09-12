@@ -1,3 +1,5 @@
+import { prepareCheckpointContinuation } from "./continuation";
+import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { latestInvocationInstructionSnapshot } from "./instructions";
 import { latestRuntimePlan, recordRuntimePlan } from "./plan";
@@ -28,6 +30,11 @@ export function recordTaskCheckpoint(input: {
     const revision = getChatGoalRevision(run.goalId);
     const attempts = getDb().prepare("SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')")
       .all(run.id) as Array<{ id: string; state: string; side_effect_state: string }>;
+    let boundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
+    if (input.invocationRunId && run.rootChatId) {
+      try { boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId }); }
+      catch { /* Missing or foreign producer evidence stays uncertain. */ }
+    }
     const instructionSnapshot = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
     const currentPlan = latestRuntimePlan(run.id);
     const plan = !currentPlan || currentPlan.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)
@@ -62,7 +69,12 @@ export function recordTaskCheckpoint(input: {
       nextActions: input.verdicts.filter((item) => item.verdict !== "passed"),
       recoveryFingerprint: input.recoveryFingerprint ?? null,
       recoveryStreak: Math.max(0, Math.floor(input.recoveryStreak ?? 0)),
-      sideEffects: { state: attempts.length ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id) },
+      sideEffects: { state: attempts.length || boundary?.effects !== "settled" ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id),
+        ...(boundary?.terminalEventId && boundary.receiptEventId && boundary.snapshotDigest ? { boundary: {
+          invocationRunId: boundary.invocationRunId, terminalEventId: boundary.terminalEventId,
+          receiptEventId: boundary.receiptEventId, snapshotDigest: boundary.snapshotDigest,
+        } } : {}),
+      },
       createdAt: new Date().toISOString(),
       capsule: {
         schemaVersion: "agentlas.continuity-capsule.v2", runId: run.id, workerId: input.workerId,
@@ -119,6 +131,7 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
     const checkpoint = latestTaskCheckpoint(goalId);
     if (!checkpoint || checkpoint.checkpointId !== checkpointId || checkpoint.disposition !== "retry_required"
       || checkpoint.sideEffects.state !== "settled" || !longRunContinueDecision(goalId)?.continue) return false;
+    try { prepareCheckpointContinuation(checkpoint); } catch { return false; }
     const db = getDb();
     if (db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain') LIMIT 1")
       .get(checkpoint.capsule.runId)) return false;

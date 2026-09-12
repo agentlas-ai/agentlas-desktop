@@ -71,7 +71,10 @@ export interface LongRunTaskCheckpoint {
   recoveryFingerprint?: string | null;
   recoveryStreak?: number;
   /** This is not an exactly-once cursor: unknown native effects require inspection. */
-  sideEffects: { state: "settled" | "uncertain"; attemptRefs: string[] };
+  sideEffects: { state: "settled" | "uncertain"; attemptRefs: string[];
+    /** Exact host effect receipt; absence is legacy evidence, not safe replay authority. */
+    boundary?: { invocationRunId: string; terminalEventId: string; receiptEventId: string; snapshotDigest: string };
+  };
   createdAt: string;
 }
 

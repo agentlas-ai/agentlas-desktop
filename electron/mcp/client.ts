@@ -1,3 +1,4 @@
+import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
 import { renderInstructionSnapshot } from "../../shared/runtime-instructions";
 import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
@@ -2371,6 +2372,9 @@ ${effectiveUserPrompt}`;
   // Science owns the model for the whole research session, independently of
   // Library assignments and the Work/One role pools, including error recovery.
   const scienceRuntimePinned = executionContext?.source === "science" && Boolean(req.runtimeSelection);
+  // Main-only checkpoint dispatch retains its exact producer binding. A model
+  // handoff requires a separate validated boundary, not the recovery pool.
+  const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(req.runtimeSelection);
   // One's composer selection is the controller's first runtime for both One
   // chat and One Work/graph runs. A normal Library assignment remains the
   // default for other surfaces; One only leaves its pin after a typed runtime
@@ -2378,11 +2382,11 @@ ${effectiveUserPrompt}`;
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     pinIsAuthoritative:
-      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned,
+      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || continuationRuntimePinned,
     agentAppMode: req.agentAppMode === true,
   });
   let runtimeChoice = runtimeResolution.choice;
-  if (scienceRuntimePinned && runtimeChoice) {
+  if ((scienceRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
     const selected = runtimeChoice.active;
     const modelListIsAuthoritative = ["ollama", "lmstudio", "mlx"].includes(selected.kind)
       || selected.modelDiscovery?.status === "ok";
@@ -2399,7 +2403,7 @@ ${effectiveUserPrompt}`;
    * 를 낸 뒤에야 폴백이 돌았다. 이미 아는 사실을 확인하려고 7분을 쓴 것이다.
    * 저장된 선택은 건드리지 않는다 — 시한이 지나면 다음 턴이 알아서 원래 모델로 간다.
    */
-  if (runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored) {
+  if (runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned) {
     const cooling = runtimeCooldown(runtimeChoice.active);
     if (cooling) {
       const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
@@ -2419,7 +2423,7 @@ ${effectiveUserPrompt}`;
   // A One composer pin is a preference with an ordered recovery chain, not a
   // reason to stop before a runner starts. If the selected executable vanished
   // between the picker and dispatch, begin at orchestrator priority 1.
-  if (!runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored) {
+  if (!runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned) {
     const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
     const fallbackPicked = fallback ? pickRunner(fallback) : null;
     if (fallback && fallbackPicked) {
@@ -2432,7 +2436,7 @@ ${effectiveUserPrompt}`;
       controllerFallbackBeforeRun = fallback;
     }
   }
-  if (runtimeChoice && !runtimeChoice.picked && req.oneMode === true && runtimeResolution.pinHonored) {
+  if (runtimeChoice && !runtimeChoice.picked && req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned) {
     const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
     const fallbackPicked = fallback ? pickRunner(fallback) : null;
     if (fallback && fallbackPicked) {
@@ -2455,7 +2459,7 @@ ${effectiveUserPrompt}`;
             ? "pinned-runtime-unavailable"
             : "no-runtime",
         message: runtimeResolution.pinHonored && req.runtimeSelection
-          ? `Pinned ${scienceRuntimePinned ? "Science" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
+          ? `Pinned ${scienceRuntimePinned ? "Science" : continuationRuntimePinned ? "Goal checkpoint" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
           : tStatus(locale, "errNoRuntime"),
       },
     });
@@ -4857,6 +4861,14 @@ ${effectiveUserPrompt}`;
     ) => {
       const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
       const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
+      // Runtime resolution can await capability probes. Recheck after those
+      // awaits so edits or Stop cannot silently remove the promised capsule.
+      if (continuationRuntimePinned) {
+        if (signal?.aborted) throw new Error("checkpoint_dispatch_cancelled");
+        if (!checkpoint) throw new Error("checkpoint_dispatch_context_missing");
+        if (getLongRunByGoalId(checkpoint.goalId)?.status !== "running") throw new Error("checkpoint_dispatch_goal_not_running");
+        prepareCheckpointContinuation(checkpoint);
+      }
       const runtimeTurnContext = [turnContext, checkpoint ? compileLongRunCheckpoint(checkpoint, runtime.kind) : ""].filter(Boolean).join("\n\n");
       return {
         ...runnerReq,
@@ -5103,7 +5115,8 @@ ${effectiveUserPrompt}`;
       !req.agentAppMode
       && !isUnattendedExecution(executionContext)
       && !automationRuntimePinned
-      && !scienceRuntimePinned;
+      && !scienceRuntimePinned
+      && !continuationRuntimePinned;
     let directRuntimeDispatched = false;
     const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
