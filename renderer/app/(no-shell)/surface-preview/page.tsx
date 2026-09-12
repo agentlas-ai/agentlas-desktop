@@ -8,7 +8,7 @@ function previewIsKorean(): boolean {
 }
 
 import { notFound, useSearchParams } from "next/navigation";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import type { AgentlasSurfaceAction, AgentlasSurfaceManifest, JsonObject } from "@/lib/types";
 import type { OneTaskProjection } from "@/lib/one-task-adapter";
 import { applySurfaceStatePatch } from "@/lib/surface-state";
@@ -163,6 +163,7 @@ function SurfacePreviewInner() {
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
   const [oneSurface, setOneSurface] = useState<OneSurfaceManifestV1 | null>(null);
   const [manifestText, setManifestText] = useState("");
+  const [pendingPatch, setPendingPatch] = useState<{ surface: WorkbenchSurface; patch: Parameters<SurfaceStatePatchHandler>[1] } | null>(null);
   const [message, setMessage] = useState("No surface loaded.");
   const [lastAction, setLastAction] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
@@ -214,10 +215,7 @@ function SurfacePreviewInner() {
           return;
         }
         setSurface({
-          id: record.id,
-          manifest: record.manifest,
-          state: record.state,
-          jobSummary: record.jobSummary,
+          ...record,
           ...(requestedAppId ? { liveAppId: requestedAppId } : {}),
         });
         setOneSurface(null);
@@ -232,6 +230,21 @@ function SurfacePreviewInner() {
       cancelled = true;
     };
   }, [requestedAppId, requestedSurfaceId]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !requestedSurfaceId || pendingPatch) return;
+    let cancelled = false;
+    const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity !== "surface" || change.id !== requestedSurfaceId) return;
+      void api.surfaces.getSurface(requestedSurfaceId).then((record) => {
+        if (cancelled || !record) return;
+        setSurface((current) => current?.id === record.id && (current.stateRevision ?? -1) < (record.stateRevision ?? -1)
+          ? { ...record, ...(requestedAppId ? { liveAppId: requestedAppId } : {}) } : current);
+      }).catch(() => {});
+    });
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, [requestedSurfaceId, requestedAppId, pendingPatch]);
 
   const loadFromText = useCallback(() => {
     try {
@@ -281,19 +294,27 @@ function SurfacePreviewInner() {
   const handleSurfaceStatePatch = useCallback<SurfaceStatePatchHandler>((activeSurface, patch) => {
     const api = ipc();
     if (api && !activeSurface.id.startsWith("preview-")) {
+      if (activeSurface.stateRevision === undefined || activeSurface.artifactRevision === undefined || !activeSurface.chatId) {
+        setMessage(previewIsKorean() ? "저장 버전을 확인하려면 화면을 다시 여세요." : "Reopen the surface to verify its saved revision.");
+        return;
+      }
       void api.surfaces
-        .updateState({ surfaceId: activeSurface.id, ...patch, actor: patch.actor || "user" })
+        .updateState({ surfaceId: activeSurface.id, ...patch, actor: patch.actor || "user",
+          chatId: activeSurface.chatId, projectId: activeSurface.projectId ?? null,
+          expectedStateRevision: activeSurface.stateRevision, expectedArtifactRevision: activeSurface.artifactRevision })
         .then((record) => {
           setSurface({
-            id: record.id,
-            manifest: record.manifest,
-            state: record.state,
-            jobSummary: record.jobSummary,
+            ...record,
             ...(requestedAppId ? { liveAppId: requestedAppId } : {}),
           });
+          setPendingPatch(null);
           setMessage(`Saved state: ${patch.label || patch.path}`);
         })
-        .catch((err: unknown) => setMessage(err instanceof Error ? err.message : String(err)));
+        .catch(async () => {
+          const latest = await api.surfaces.getSurface(activeSurface.id).catch(() => null);
+          if (latest && latest.chatId === activeSurface.chatId) setPendingPatch({ surface: latest, patch });
+          setMessage(previewIsKorean() ? "화면이 바뀌어 입력을 저장하지 못했습니다. 다시 적용하거나 최신 상태를 불러오세요." : "This surface changed. Reapply the edit or load the latest state.");
+        });
       return;
     }
 
@@ -364,6 +385,10 @@ function SurfacePreviewInner() {
         <div style={messageBox}>
           <strong>Status</strong>
           <span>{message}</span>
+          {pendingPatch && pendingPatch.surface.id === surface?.id && <div role="alert">
+            <button type="button" onClick={() => handleSurfaceStatePatch(pendingPatch.surface, pendingPatch.patch)}>{previewIsKorean() ? "내 입력 다시 적용" : "Reapply my edit"}</button>
+            <button type="button" onClick={() => { setSurface(pendingPatch.surface); setPendingPatch(null); }}>{previewIsKorean() ? "최신 상태 불러오기" : "Load latest state"}</button>
+          </div>}
           {lastAction && <code style={codePill}>{lastAction}</code>}
         </div>
       </section>

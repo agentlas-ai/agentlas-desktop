@@ -8,6 +8,8 @@ import {
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   MOBILE_BRIDGE_WRITE_METHODS,
+  MOBILE_BRIDGE_VISUAL_FRAME_MAGIC,
+  MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES,
   isMobileBridgeEventName,
   isMobileBridgeJsonValue,
   mobileBridgeFailure,
@@ -24,7 +26,10 @@ import {
   type MobileBridgeRpcRequest,
   type MobileBridgeServerMessage,
   type MobileBridgeSnapshot,
+  type MobileBridgeVisualFrameDto,
+  type MobileBridgeVisualSessionRefusalDto,
 } from "../../shared/mobile-bridge";
+import type { MobileBridgeVisualBinaryFrame } from "./visual-session";
 import {
   fingerprintMobileBridgeRequest,
   type MobileBridgeReplayResponse,
@@ -42,7 +47,7 @@ interface BridgeWebSocket {
   bufferedAmount: number;
   on(event: "message", listener: (data: unknown, isBinary: boolean) => void): this;
   on(event: "pong" | "close" | "error", listener: (...args: unknown[]) => void): this;
-  send(data: string, callback?: (error?: Error) => void): void;
+  send(data: string | Buffer, callback?: (error?: Error) => void): void;
   ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
@@ -124,6 +129,12 @@ export interface MobileBridgeAuthority {
     request: MobileBridgeRpcRequest,
     context: MobileBridgeConnectionContext,
   ): Promise<MobileBridgeJsonValue | undefined>;
+  capabilities?(): MobileBridgeJsonValue;
+  visualFrame?(
+    request: MobileBridgeRpcRequest,
+    context: MobileBridgeConnectionContext,
+  ): Promise<MobileBridgeVisualBinaryFrame | MobileBridgeVisualSessionRefusalDto>;
+  connectionClosed?(context: MobileBridgeConnectionContext): void;
   subscribe(listener: (event: MobileBridgeAuthorityEvent) => void): () => void;
 }
 
@@ -188,6 +199,7 @@ interface ConnectionState {
   revocationPending: boolean;
   requestWindowStartedAt: number;
   requestCount: number;
+  visualFrameInFlight: boolean;
 }
 
 interface UpgradeIdentity {
@@ -561,6 +573,7 @@ export class AgentlasMobileBridgeServer {
       revocationPending: false,
       requestWindowStartedAt: Date.now(),
       requestCount: 0,
+      visualFrameInFlight: false,
     };
     this.clients.add(state);
     this.syncAuthoritySubscription();
@@ -780,6 +793,7 @@ export class AgentlasMobileBridgeServer {
         protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
         connectionId: state.context.connectionId,
         hostId: snapshot.host.id,
+        capabilities: this.authority.capabilities?.() ?? {},
         ...(relay ? { relay } : {}),
       });
       this.sendEvent(state, "snapshot.updated", snapshot as unknown as MobileBridgeJsonValue);
@@ -854,11 +868,31 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     state.inflight.add(parsed.value.id);
-    void this.dispatch(state, parsed.value).finally(() => state.inflight.delete(parsed.value.id));
+    if (parsed.value.method === "visualSession.frame") {
+      if (state.visualFrameInFlight) {
+        state.inflight.delete(parsed.value.id);
+        this.send(state, mobileBridgeFailure(
+          parsed.value.id,
+          "too_many_requests",
+          "A visual frame is already in flight; control requests remain available",
+          true,
+        ));
+        return;
+      }
+      state.visualFrameInFlight = true;
+    }
+    void this.dispatch(state, parsed.value).finally(() => {
+      state.inflight.delete(parsed.value.id);
+      if (parsed.value.method === "visualSession.frame") state.visualFrameInFlight = false;
+    });
   }
 
   private async dispatch(state: ConnectionState, request: MobileBridgeRpcRequest): Promise<void> {
     if (state.revoked || !this.clients.has(state)) return;
+    if (request.method === "visualSession.frame") {
+      await this.dispatchVisualFrame(state, request);
+      return;
+    }
     const selfRevocation = request.method === "device.revokeSelf";
     const writeRequest = MOBILE_BRIDGE_WRITE_METHODS.has(request.method);
     const replayKey = request.idempotencyKey ?? request.id;
@@ -997,6 +1031,94 @@ export class AgentlasMobileBridgeServer {
     }
   }
 
+  private async dispatchVisualFrame(
+    state: ConnectionState,
+    request: MobileBridgeRpcRequest,
+  ): Promise<void> {
+    const producer = this.authority.visualFrame;
+    if (!producer) {
+      this.send(state, mobileBridgeFailure(
+        request.id,
+        "method_not_allowed",
+        "This Desktop does not provide visual sessions",
+      ));
+      return;
+    }
+    // A queued frame can never outrank cancellation, approval, or semantic RPC.
+    if (state.socket.bufferedAmount > MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES) {
+      this.send(state, mobileBridgeFailure(
+        request.id,
+        "too_many_requests",
+        "The visual channel is backpressured; retry after control traffic drains",
+        true,
+      ));
+      return;
+    }
+    try {
+      const result = await withTimeout(producer.call(this.authority, request, state.context), this.requestTimeoutMs);
+      if (!("metadata" in result)) {
+        this.send(state, mobileBridgeSuccess(
+          request.id,
+          result as unknown as MobileBridgeJsonValue,
+        ));
+        return;
+      }
+      this.sendVisualFrame(state, request.id, result);
+    } catch (error) {
+      const normalized = errorOf(error);
+      this.onError(normalized);
+      const timeout = normalized.message === "Mobile Bridge authority request timed out";
+      this.send(state, mobileBridgeFailure(
+        request.id,
+        timeout ? "request_timeout" : "authority_error",
+        timeout ? "Desktop did not capture the visual frame in time" : "Desktop rejected the visual frame request",
+        timeout,
+      ));
+    }
+  }
+
+  private sendVisualFrame(
+    state: ConnectionState,
+    requestId: string,
+    frame: MobileBridgeVisualBinaryFrame,
+  ): void {
+    if (state.revoked || state.socket.readyState !== WS_OPEN) return;
+    const metadata: MobileBridgeVisualFrameDto = frame.metadata;
+    if (
+      frame.bytes.byteLength !== metadata.byteLength
+      || frame.bytes.byteLength > MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES
+    ) {
+      this.send(state, mobileBridgeFailure(
+        requestId,
+        "response_too_large",
+        "Desktop produced an invalid visual frame",
+      ));
+      return;
+    }
+    const header = Buffer.from(JSON.stringify({
+      v: MOBILE_BRIDGE_PROTOCOL_VERSION,
+      type: "visual.frame",
+      id: requestId,
+      ok: true,
+      result: metadata,
+    }), "utf8");
+    if (header.byteLength > 64 * 1024) {
+      this.send(state, mobileBridgeFailure(requestId, "response_too_large", "Visual frame metadata is too large"));
+      return;
+    }
+    const prefix = Buffer.allocUnsafe(8);
+    prefix.write(MOBILE_BRIDGE_VISUAL_FRAME_MAGIC, 0, 4, "ascii");
+    prefix.writeUInt32BE(header.byteLength, 4);
+    const packet = Buffer.concat([prefix, header, frame.bytes]);
+    if (packet.byteLength > MOBILE_BRIDGE_MAX_MESSAGE_BYTES) {
+      this.send(state, mobileBridgeFailure(requestId, "response_too_large", "Visual frame exceeds the Mobile Bridge limit"));
+      return;
+    }
+    state.socket.send(packet, (error) => {
+      if (error) this.onError(error);
+    });
+  }
+
   private responseFromAuthority(
     requestId: string,
     result: MobileBridgeJsonValue | undefined,
@@ -1048,12 +1170,9 @@ export class AgentlasMobileBridgeServer {
     }
   }
 
-  /**
-   * `build.start` acknowledges an asynchronous, in-memory run. A completed
-   * replay entry would survive Desktop restart while its runId disappeared, so
-   * accepted starts are deliberately non-replayable: the first caller receives
-   * the runId, while every retry fails closed as uncertain. Refusals and
-   * pre-admission failures remain normally replayable.
+  /** Accepted responses which only name process-local state cannot be replayed
+   * after a Desktop restart. The first caller receives the live identifier and
+   * retries of that key fail closed as uncertain. Refusals remain replayable.
    */
   private settleReplay(
     request: MobileBridgeRpcRequest,
@@ -1070,14 +1189,21 @@ export class AgentlasMobileBridgeServer {
       !Array.isArray(result) &&
       typeof result.runId === "string" &&
       result.replayable === false;
-    if (!acceptedNonReplayableBuild) {
+    const acceptedNonReplayableVisualSession =
+      request.method === "visualSession.create" &&
+      result !== null &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      result.status === "live" &&
+      typeof result.visualSessionId === "string";
+    if (!acceptedNonReplayableBuild && !acceptedNonReplayableVisualSession) {
       return this.completeReplay(deviceId, key, fingerprint, response, request.id);
     }
     if (!this.replayStore) {
       return mobileBridgeFailure(
         request.id,
         "idempotency_unavailable",
-        "Desktop accepted the build but cannot preserve its non-replayable state",
+        "Desktop accepted process-local state but cannot preserve its non-replayable marker",
       );
     }
     try {
@@ -1088,7 +1214,7 @@ export class AgentlasMobileBridgeServer {
       return mobileBridgeFailure(
         request.id,
         "idempotency_unavailable",
-        "Desktop accepted the build but could not block unsafe replay; do not retry this key",
+        "Desktop accepted process-local state but could not block unsafe replay; do not retry this key",
       );
     }
   }
@@ -1115,7 +1241,12 @@ export class AgentlasMobileBridgeServer {
   }
 
   private dropClient(state: ConnectionState): void {
-    this.clients.delete(state);
+    if (!this.clients.delete(state)) return;
+    try {
+      this.authority.connectionClosed?.(state.context);
+    } catch (error) {
+      this.onError(errorOf(error));
+    }
     this.syncAuthoritySubscription();
   }
 

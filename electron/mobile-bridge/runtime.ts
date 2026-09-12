@@ -39,11 +39,13 @@ import {
   createDesktopMobileTerminalControl,
   type DesktopMobileTerminalControl,
 } from "./terminal-control";
+import type { MobileVisualSessionControl } from "./visual-session";
 
-interface MobileBridgeRuntimeOptions {
+export interface MobileBridgeRuntimeOptions {
   userDataPath: string;
   appVersion: string;
   displayName?: string;
+  visualSessionControl?: MobileVisualSessionControl;
 }
 
 interface RunningBridge {
@@ -224,6 +226,7 @@ async function startBridgeInternal(
     ontologyHubClient,
     terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
     terminalControl,
+    visualSessionControl: options.visualSessionControl,
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;

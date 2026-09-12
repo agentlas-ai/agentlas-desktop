@@ -50,6 +50,10 @@ export interface WorkbenchSurface {
   id: string;
   manifest: AgentlasSurfaceManifest;
   state?: JsonObject;
+  stateRevision?: number;
+  artifactRevision?: number;
+  chatId?: string;
+  projectId?: string | null;
   jobSummary?: SurfaceJobCostSummary;
   /** Durable generated-app record backing a real live preview, when one exists. */
   liveAppId?: string;
@@ -62,7 +66,7 @@ export type SurfaceActionHandler = (
 
 export type SurfaceStatePatchHandler = (
   surface: WorkbenchSurface,
-  patch: Omit<SurfaceStatePatchRequest, "surfaceId">,
+  patch: Omit<SurfaceStatePatchRequest, "surfaceId" | "chatId" | "projectId" | "expectedStateRevision" | "expectedArtifactRevision">,
 ) => void;
 
 /** A live app owns the result canvas; blueprint chrome belongs only to the

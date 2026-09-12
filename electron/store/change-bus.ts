@@ -17,7 +17,8 @@ export type DesktopStoreEntity =
   | "one-taskforce"
   | "long-run"
   | "automation"
-  | "runtime";
+  | "runtime"
+  | "surface";
 
 export interface DesktopStoreChange {
   entity: DesktopStoreEntity;

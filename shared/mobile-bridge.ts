@@ -32,6 +32,11 @@ export const MOBILE_BRIDGE_PROTOCOL_VERSION = 1 as const;
 // image attachments (5 MiB each, base64 encoded). Metadata snapshots remain
 // separately capped by the projector's much smaller safe-payload budget.
 export const MOBILE_BRIDGE_MAX_MESSAGE_BYTES = 30 * 1024 * 1024;
+/** Binary visual frames stay below the Cloud Relay's independent 8 MiB cap. */
+export const MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES = 4 * 1024 * 1024;
+export const MOBILE_BRIDGE_VISUAL_SESSION_VERSION = 2 as const;
+/** `AVF2` followed by a big-endian JSON-header length and the encoded image bytes. */
+export const MOBILE_BRIDGE_VISUAL_FRAME_MAGIC = "AVF2" as const;
 export const MOBILE_BRIDGE_PAIR_EXCHANGE_PATH = "/v1/mobile/pair/exchange";
 export const MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE = "agentlas_desktop_mobile_pair" as const;
 
@@ -74,6 +79,13 @@ export const MOBILE_BRIDGE_METHODS = [
   "terminal.release",
   "terminal.dispatch",
   "terminal.cancel",
+  "visualSession.create",
+  "visualSession.get",
+  "visualSession.close",
+  "visualSession.frame",
+  "visualSession.takeover",
+  "visualSession.release",
+  "visualSession.input",
   "one.artifacts.recent",
   "one.artifact.imagePreview",
   "chat.attachment.imagePreview",
@@ -148,6 +160,11 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "terminal.release",
   "terminal.dispatch",
   "terminal.cancel",
+  "visualSession.create",
+  "visualSession.close",
+  "visualSession.takeover",
+  "visualSession.release",
+  "visualSession.input",
   "one.suggestions.act",
   "workspace.setProject",
   "workspace.clear",
@@ -365,6 +382,105 @@ export interface MobileBridgeTerminalCancelDto {
   requestId: string;
   status: "cancelled";
   ownerEpoch: number;
+}
+
+export type MobileBridgeVisualInputOwner = "desktop" | "mobile";
+
+export interface MobileBridgeVisualSourceDto {
+  sourceId: "agentlas-main-window";
+  sourceGeneration: string;
+  layoutId: string;
+  width: number;
+  height: number;
+  scaleFactor: number;
+  colorSpace: "srgb";
+}
+
+export interface MobileBridgeVisualSessionDto {
+  schemaVersion: typeof MOBILE_BRIDGE_VISUAL_SESSION_VERSION;
+  visualSessionId: string;
+  sessionEpoch: string;
+  status: "live" | "stale";
+  source: MobileBridgeVisualSourceDto;
+  inputOwner: MobileBridgeVisualInputOwner;
+  ownerEpoch: number;
+  leaseExpiresAt: string | null;
+  nextInputSeq: number;
+  latestFrameId: string | null;
+  latestFrameSeq: number;
+}
+
+export type MobileBridgeVisualSessionRefusalCode =
+  | "visual_unavailable"
+  | "visual_session_not_found"
+  | "visual_session_epoch_conflict"
+  | "visual_source_changed"
+  | "visual_layout_changed"
+  | "visual_frame_stale"
+  | "visual_owner_conflict"
+  | "visual_owner_epoch_conflict"
+  | "visual_lease_expired"
+  | "visual_input_seq_conflict"
+  | "visual_input_unsupported";
+
+export interface MobileBridgeVisualSessionRefusalDto {
+  schemaVersion: typeof MOBILE_BRIDGE_VISUAL_SESSION_VERSION;
+  status: "refused";
+  code: MobileBridgeVisualSessionRefusalCode;
+  message: string;
+  visualSessionId?: string;
+  sessionEpoch?: string;
+  sourceGeneration?: string;
+  layoutId?: string;
+  ownerEpoch?: number;
+  nextInputSeq?: number;
+}
+
+export interface MobileBridgeVisualFrameDto {
+  schemaVersion: typeof MOBILE_BRIDGE_VISUAL_SESSION_VERSION;
+  visualSessionId: string;
+  sessionEpoch: string;
+  frameId: string;
+  frameSeq: number;
+  source: MobileBridgeVisualSourceDto;
+  mimeType: "image/jpeg";
+  byteLength: number;
+  contentSha256: string;
+  capturedAt: string;
+  inputOwner: MobileBridgeVisualInputOwner;
+  ownerEpoch: number;
+  leaseExpiresAt: string | null;
+  nextInputSeq: number;
+}
+
+export type MobileBridgeVisualInputActionDto =
+  | {
+      kind: "pointer";
+      phase: "move" | "click" | "doubleClick";
+      x: number;
+      y: number;
+      button?: "left" | "right" | "middle";
+    }
+  | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: "key"; key: string; modifiers?: Array<"alt" | "control" | "meta" | "shift"> }
+  | { kind: "shortcut"; key: string; modifiers: Array<"alt" | "control" | "meta" | "shift"> }
+  | { kind: "composition"; phase: "start" | "update" | "end"; text?: string }
+  | { kind: "commitText"; text: string }
+  | { kind: "focus" };
+
+export interface MobileBridgeVisualInputReceiptDto {
+  schemaVersion: typeof MOBILE_BRIDGE_VISUAL_SESSION_VERSION;
+  status: "accepted";
+  visualSessionId: string;
+  sessionEpoch: string;
+  sourceGeneration: string;
+  layoutId: string;
+  consumedFrameId: string;
+  acceptedInputSeq: number;
+  nextInputSeq: number;
+  ownerEpoch: number;
+  frameInvalidated: boolean;
+  observedAt: string;
 }
 
 export interface MobileBridgeImageAttachmentDto {
@@ -2406,6 +2522,113 @@ function validateProjectAgentPool(params: Record<string, unknown>): string | nul
   return null;
 }
 
+const VISUAL_SESSION_ID_RE = /^visual_[a-f0-9-]{36}$/;
+const VISUAL_EPOCH_RE = /^ve_[a-f0-9-]{36}$/;
+const VISUAL_GENERATION_RE = /^vg_[a-f0-9]{16,64}$/;
+const VISUAL_LAYOUT_RE = /^vl_[a-f0-9]{16,64}$/;
+const VISUAL_FRAME_ID_RE = /^vf_[a-f0-9-]{36}$/;
+
+function visualRef(value: unknown, field: string, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value)
+    ? null
+    : `${field} is not a valid visual-session identity`;
+}
+
+function requiredFiniteNumber(
+  params: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): string | null {
+  const value = params[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
+    ? null
+    : `${key} must be a finite number from ${min} to ${max}`;
+}
+
+function validateVisualSessionRef(
+  params: Record<string, unknown>,
+  allowed: readonly string[],
+): string | null {
+  if (!hasOnlyKeys(params, allowed)) return "visual session request contains unsupported fields";
+  return firstError(
+    visualRef(params.visualSessionId, "visualSessionId", VISUAL_SESSION_ID_RE),
+    visualRef(params.sessionEpoch, "sessionEpoch", VISUAL_EPOCH_RE),
+  );
+}
+
+function validateVisualObservationRef(params: Record<string, unknown>): string | null {
+  return firstError(
+    visualRef(params.sourceGeneration, "sourceGeneration", VISUAL_GENERATION_RE),
+    visualRef(params.layoutId, "layoutId", VISUAL_LAYOUT_RE),
+    visualRef(params.frameId, "frameId", VISUAL_FRAME_ID_RE),
+  );
+}
+
+function validateVisualInputAction(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    return "action must be a visual input object";
+  }
+  switch (value.kind) {
+    case "pointer":
+      return hasOnlyKeys(value, ["kind", "phase", "x", "y", "button"])
+        ? firstError(
+            validateEnum(value, "phase", ["move", "click", "doubleClick"], false),
+            requiredFiniteNumber(value, "x", 0, 16_384),
+            requiredFiniteNumber(value, "y", 0, 16_384),
+            validateEnum(value, "button", ["left", "right", "middle"]),
+          )
+        : "pointer action contains unsupported fields";
+    case "scroll":
+      return hasOnlyKeys(value, ["kind", "x", "y", "deltaX", "deltaY"])
+        ? firstError(
+            requiredFiniteNumber(value, "x", 0, 16_384),
+            requiredFiniteNumber(value, "y", 0, 16_384),
+            requiredFiniteNumber(value, "deltaX", -8_192, 8_192),
+            requiredFiniteNumber(value, "deltaY", -8_192, 8_192),
+          )
+        : "scroll action contains unsupported fields";
+    case "key":
+    case "shortcut": {
+      if (!hasOnlyKeys(value, ["kind", "key", "modifiers"])) {
+        return `${value.kind} action contains unsupported fields`;
+      }
+      const modifiers = value.modifiers;
+      if (modifiers !== undefined && (
+        !Array.isArray(modifiers)
+        || modifiers.length > 4
+        || modifiers.some((item) => !["alt", "control", "meta", "shift"].includes(String(item)))
+        || new Set(modifiers).size !== modifiers.length
+      )) {
+        return "modifiers must be unique supported modifier names";
+      }
+      if (value.kind === "shortcut" && (!Array.isArray(modifiers) || modifiers.length === 0)) {
+        return "shortcut requires at least one modifier";
+      }
+      return requiredString(value, "key", 64);
+    }
+    case "composition":
+      return hasOnlyKeys(value, ["kind", "phase", "text"])
+        ? firstError(
+            validateEnum(value, "phase", ["start", "update", "end"], false),
+            value.phase === "start"
+              ? (value.text === undefined ? null : "composition start must not include text")
+              : optionalString(value, "text", 4_000),
+          )
+        : "composition action contains unsupported fields";
+    case "commitText":
+      return hasOnlyKeys(value, ["kind", "text"])
+        ? requiredText(value, "text", 4_000)
+        : "commitText action contains unsupported fields";
+    case "focus":
+      return hasOnlyKeys(value, ["kind"])
+        ? null
+        : "focus action contains unsupported fields";
+    default:
+      return "visual input kind is unsupported";
+  }
+}
+
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (EMPTY_METHODS.has(method)) {
@@ -2413,6 +2636,63 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
   }
 
   switch (method) {
+    case "visualSession.create":
+      return hasOnlyKeys(params, ["schemaVersion", "requestedWidth", "requestedHeight", "devicePixelRatio"])
+        ? firstError(
+            params.schemaVersion === MOBILE_BRIDGE_VISUAL_SESSION_VERSION
+              ? null
+              : "visualSession.create requires schemaVersion 2",
+            optionalInteger(params, "requestedWidth", 320, 1_600),
+            optionalInteger(params, "requestedHeight", 240, 1_200),
+            params.devicePixelRatio === undefined
+              ? null
+              : requiredFiniteNumber(params, "devicePixelRatio", 0.5, 4),
+          )
+        : "visualSession.create contains unsupported fields";
+    case "visualSession.get":
+    case "visualSession.close":
+      return validateVisualSessionRef(params, ["visualSessionId", "sessionEpoch"]);
+    case "visualSession.frame":
+      return firstError(
+        validateVisualSessionRef(params, [
+          "visualSessionId", "sessionEpoch", "maxWidth", "maxHeight",
+        ]),
+        optionalInteger(params, "maxWidth", 320, 1_600),
+        optionalInteger(params, "maxHeight", 240, 1_200),
+      );
+    case "visualSession.takeover":
+      return firstError(
+        validateVisualSessionRef(params, [
+          "visualSessionId", "sessionEpoch", "sourceGeneration", "layoutId",
+          "frameId", "expectedOwnerEpoch",
+        ]),
+        validateVisualObservationRef(params),
+        params.expectedOwnerEpoch === undefined
+          ? "expectedOwnerEpoch is required"
+          : optionalInteger(params, "expectedOwnerEpoch", 0, Number.MAX_SAFE_INTEGER),
+      );
+    case "visualSession.release":
+      return firstError(
+        validateVisualSessionRef(params, ["visualSessionId", "sessionEpoch", "ownerEpoch"]),
+        params.ownerEpoch === undefined
+          ? "ownerEpoch is required"
+          : optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER),
+      );
+    case "visualSession.input":
+      return firstError(
+        validateVisualSessionRef(params, [
+          "visualSessionId", "sessionEpoch", "sourceGeneration", "layoutId", "frameId",
+          "ownerEpoch", "inputSeq", "action",
+        ]),
+        validateVisualObservationRef(params),
+        params.ownerEpoch === undefined
+          ? "ownerEpoch is required"
+          : optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER),
+        params.inputSeq === undefined
+          ? "inputSeq is required"
+          : optionalInteger(params, "inputSeq", 1, Number.MAX_SAFE_INTEGER),
+        validateVisualInputAction(params.action),
+      );
     case "chats.listRecent":
       return hasOnlyKeys(params, ["limit"])
         ? optionalInteger(params, "limit", 1, 100)

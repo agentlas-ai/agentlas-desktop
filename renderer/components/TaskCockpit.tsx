@@ -2243,6 +2243,24 @@ function ChatPage() {
   const [queuedSteers, setQueuedSteers] = useState<string[]>([]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
+  const [surfaceConflict, setSurfaceConflict] = useState<{
+    surfaceId: string; patch: Parameters<SurfaceStatePatchHandler>[1]; latest: WorkbenchSurface;
+  } | null>(null);
+  useEffect(() => {
+    const api = ipc();
+    const id = surface?.id;
+    if (!api || !id || surfaceConflict) return;
+    let disposed = false;
+    const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity !== "surface" || change.id !== id) return;
+      void api.surfaces.getSurface(id).then((record) => {
+        if (disposed || !isCurrentChat() || !record || record.chatId !== chatId) return;
+        setSurface((current) => current?.id === id && (current.stateRevision ?? -1) < (record.stateRevision ?? -1) ? record : current);
+      }).catch(() => {});
+    });
+    return () => { disposed = true; unsubscribe?.(); };
+  }, [surface?.id, surfaceConflict, chatId, isCurrentChat]);
+
   // 실행 전 API 키 요청 시트 — mcp-key-request 이벤트가 채우고, 응답/만료/런 종료가 비운다.
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
@@ -3118,6 +3136,10 @@ function ChatPage() {
         setArtifact(null);
         setMediaPreview(null);
         setSurface({ id: surfaceId, manifest: ev.surface });
+        void ipc()?.surfaces.getSurface(surfaceId).then((record) => {
+          if (!isCurrentChat() || !record || record.chatId !== chatId) return;
+          setSurface((current) => current?.id === record.id ? record : current);
+        }).catch(() => { /* Remains read-only until its revision handshake succeeds. */ });
         openPanelTab("panel");
         transcriptRevisionRef.current += 1;
         setMessages((m) =>
@@ -4009,7 +4031,7 @@ function ChatPage() {
       if (cancelled || !record || record.chatId !== chatId) return;
       setArtifact(null);
       setMediaPreview(null);
-      setSurface({ id: record.id, manifest: record.manifest, state: record.state, jobSummary: record.jobSummary });
+      setSurface(record);
       openPanelTab("panel");
     });
     return () => {
@@ -5311,37 +5333,34 @@ function ChatPage() {
 
   const handleSurfaceStatePatch = useCallback<SurfaceStatePatchHandler>((activeSurface, patch) => {
     const api = ipc();
-    if (!api) return;
-    void api.surfaces
-      .updateState({
-        surfaceId: activeSurface.id,
-        ...patch,
-        actor: patch.actor || "user",
-      })
-      .then((record) => {
-        setSurface((cur) =>
-          cur?.id === record.id
-            ? {
-                id: record.id,
-                manifest: record.manifest,
-                state: record.state,
-                jobSummary: record.jobSummary,
-              }
-            : cur,
-        );
-      })
-      .catch(() => {
-        transcriptRevisionRef.current += 1;
-        setMessages((m) => [
-          ...m,
-          {
-            id: uid(),
-            role: "system",
-            text: locale === "ko" ? "화면 상태를 저장하지 못했습니다." : "The surface state was not saved.",
-          },
-        ]);
-      });
-  }, []);
+    if (!api || !chatId) return;
+    void (async () => {
+      try {
+        if (activeSurface.stateRevision === undefined || activeSurface.artifactRevision === undefined || activeSurface.chatId !== chatId) {
+          throw new Error("artifact_revision_required");
+        }
+        const record = await api.surfaces.updateState({
+          ...patch, surfaceId: activeSurface.id, chatId,
+          projectId: activeSurface.projectId ?? null,
+          expectedStateRevision: activeSurface.stateRevision,
+          expectedArtifactRevision: activeSurface.artifactRevision,
+          actor: patch.actor || "user",
+        });
+        if (!isCurrentChat()) return;
+        setSurface((current) => current?.id === record.id ? record : current);
+        setSurfaceConflict(null);
+      } catch {
+        // Keep the attempted edit until the user chooses to reapply or reload.
+        const latest = await api.surfaces.getSurface(activeSurface.id).catch(() => null);
+        if (!isCurrentChat()) return;
+        if (latest?.chatId === chatId) {
+          setSurfaceConflict({ surfaceId: activeSurface.id, patch, latest });
+        } else {
+          setSessionNotice(locale === "ko" ? "이 화면의 저장 위치를 확인하지 못했습니다. 입력은 저장되지 않았습니다." : "The surface could not be resolved. Your edit was not saved.");
+        }
+      }
+    })();
+  }, [chatId, isCurrentChat, locale]);
 
   const handleSessionAction = useCallback(
     (action: "new" | "clear") => {
@@ -6558,6 +6577,13 @@ function ChatPage() {
           }}
         />
       </div>}
+      {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
+        <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
+          <p>{locale === "ko" ? "화면이 바뀌어 입력을 저장하지 못했습니다. 내 입력을 다시 적용하거나 최신 저장 상태를 불러오세요." : "This surface changed. Reapply your edit or load the latest saved state."}</p>
+          <button type="button" className="btn" onClick={() => handleSurfaceStatePatch(surfaceConflict.latest, surfaceConflict.patch)}>{locale === "ko" ? "내 입력 다시 적용" : "Reapply my edit"}</button>{" "}
+          <button type="button" className="btn" onClick={() => { setSurface(surfaceConflict.latest); setSurfaceConflict(null); }}>{locale === "ko" ? "최신 상태 불러오기" : "Load latest state"}</button>
+        </div>
+      )}
       {sessionNotice && (
         <div
           role="status"

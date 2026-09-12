@@ -1,3 +1,4 @@
+import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
 import { createHash, randomUUID } from "node:crypto";
@@ -2072,6 +2073,19 @@ export class InvocationService {
           }
         }
 
+        // Persist the source before publishing its ID. A stream-only surface
+        // cannot participate in durable input CAS, reopen, or model handoff.
+        if (event.kind === "surface" && event.surface) {
+          const ownerChat = getChat(runReq.chatId);
+          if (!ownerChat) throw new Error("artifact_owner_missing");
+          const persisted = recordAgentSurface({
+            id: event.surfaceId ?? `surface:${runId}`,
+            chatId: ownerChat.id, projectId: ownerChat.projectId,
+            agentId: attributedAgentId ?? record.actualAgentId ?? ownerChat.agentId,
+            manifest: event.surface,
+          });
+          event = { ...event, surfaceId: persisted.id };
+        }
         const rawSurfaceForArtifactBinding = event.kind === "surface" ? event.surface : undefined;
         // Desktop Work owns and consumes its native Work surface. Only One or
         // the separately bounded Mobile bridge receives the closed One/Mobile

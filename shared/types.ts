@@ -2962,6 +2962,10 @@ export interface AgentlasSurfaceRecord {
   layout: string;
   manifest: AgentlasSurfaceManifest;
   state: JsonObject;
+  /** Missing on a legacy projection: reload before writing, never guess. */
+  stateRevision?: number;
+  artifactRevision?: number;
+  artifactRef?: import("./artifact-revision").ArtifactRevisionV2;
   provenance: AgentlasSurfaceProvenance[];
   jobSummary?: SurfaceJobCostSummary;
   createdAt: string;
@@ -3013,6 +3017,10 @@ export interface SurfaceJobUpdateRequest {
 
 export interface SurfaceStatePatchRequest {
   surfaceId: string;
+  chatId: string;
+  projectId: string | null;
+  expectedStateRevision: number;
+  expectedArtifactRevision: number;
   /** JSON Pointer path inside the surface state overlay, e.g. /data/shots/rows/0/status. */
   path: string;
   value: JsonValue;

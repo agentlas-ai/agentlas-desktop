@@ -183,6 +183,8 @@ import {
   type MobileBridgeToolPayloadSize,
   type MobileBridgeToolPayloadSummaryDto,
   type MobileBridgeUserInputDto,
+  type MobileBridgeVisualInputActionDto,
+  type MobileBridgeVisualSessionRefusalDto,
 } from "../../shared/mobile-bridge";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
@@ -213,6 +215,11 @@ import type {
   MobileBridgeAuthorityEvent,
   MobileBridgeConnectionContext,
 } from "./server";
+import {
+  MobileVisualSessionManager,
+  type MobileBridgeVisualBinaryFrame,
+  type MobileVisualSessionControl,
+} from "./visual-session";
 
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
@@ -287,6 +294,8 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
    * that do not ship terminal support.
    */
   terminalControl?: MobileBridgeTerminalControl;
+  /** Optional bounded producer for the Agentlas main-window visual session. */
+  visualSessionControl?: MobileVisualSessionControl;
 }
 
 /**
@@ -1599,6 +1608,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly onError: (error: Error) => void;
   private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
   private readonly buildActions: MobileBridgeBuildActions;
+  private readonly visualSessions: MobileVisualSessionManager;
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
    * phone. A reconnect therefore cannot silently reuse an old takeover epoch.
@@ -1648,6 +1658,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge-authority]", error.message));
     this.cloudAgentActions = options.cloudAgentActions ?? createDesktopMobileBridgeCloudAgentActions();
     this.buildActions = options.buildActions ?? createDesktopMobileBridgeBuildActions();
+    this.visualSessions = new MobileVisualSessionManager(options.visualSessionControl);
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
     });
@@ -1681,6 +1692,31 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       sampleTaskId: sample.id,
       sampleTaskVersion: sample.version,
     };
+  }
+
+  capabilities(): MobileBridgeJsonValue {
+    return {
+      visualSessionV2: this.visualSessions.capability(),
+    };
+  }
+
+  async visualFrame(
+    request: MobileBridgeRpcRequest,
+    context: MobileBridgeConnectionContext,
+  ): Promise<MobileBridgeVisualBinaryFrame | MobileBridgeVisualSessionRefusalDto> {
+    const params = guardedParams(request, ["visualSessionId", "sessionEpoch", "maxWidth", "maxHeight"]);
+    const maxWidth = optionalInteger(params, "maxWidth", 320, 1_600);
+    const maxHeight = optionalInteger(params, "maxHeight", 240, 1_200);
+    return this.visualSessions.frame({
+      visualSessionId: requiredIdentifier(params, "visualSessionId"),
+      sessionEpoch: requiredIdentifier(params, "sessionEpoch"),
+      ...(maxWidth === undefined ? {} : { maxWidth }),
+      ...(maxHeight === undefined ? {} : { maxHeight }),
+    }, context);
+  }
+
+  connectionClosed(context: MobileBridgeConnectionContext): void {
+    this.visualSessions.closeDeviceSessions(context.deviceId);
   }
 
   private terminalLease(terminalId: string): MobileTerminalLeaseState {
@@ -2009,6 +2045,74 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
 
     switch (request.method) {
+      case "visualSession.create": {
+        guardedParams(request, ["schemaVersion", "requestedWidth", "requestedHeight", "devicePixelRatio"]);
+        return asJsonValue(this.visualSessions.create(context), request.method);
+      }
+      case "visualSession.get": {
+        const params = guardedParams(request, ["visualSessionId", "sessionEpoch"]);
+        return asJsonValue(this.visualSessions.get(
+          requiredIdentifier(params, "visualSessionId"),
+          requiredIdentifier(params, "sessionEpoch"),
+          context,
+        ), request.method);
+      }
+      case "visualSession.close": {
+        const params = guardedParams(request, ["visualSessionId", "sessionEpoch"]);
+        return asJsonValue(this.visualSessions.close(
+          requiredIdentifier(params, "visualSessionId"),
+          requiredIdentifier(params, "sessionEpoch"),
+          context,
+        ), request.method);
+      }
+      case "visualSession.takeover": {
+        const params = guardedParams(request, [
+          "visualSessionId", "sessionEpoch", "sourceGeneration", "layoutId", "frameId", "expectedOwnerEpoch",
+        ]);
+        const expectedOwnerEpoch = optionalInteger(params, "expectedOwnerEpoch", 0, Number.MAX_SAFE_INTEGER);
+        if (expectedOwnerEpoch === undefined) throw new TypeError("expectedOwnerEpoch is required");
+        return asJsonValue(this.visualSessions.takeover({
+          visualSessionId: requiredIdentifier(params, "visualSessionId"),
+          sessionEpoch: requiredIdentifier(params, "sessionEpoch"),
+          sourceGeneration: requiredIdentifier(params, "sourceGeneration"),
+          layoutId: requiredIdentifier(params, "layoutId"),
+          frameId: requiredIdentifier(params, "frameId"),
+          expectedOwnerEpoch,
+        }, context), request.method);
+      }
+      case "visualSession.release": {
+        const params = guardedParams(request, ["visualSessionId", "sessionEpoch", "ownerEpoch"]);
+        const ownerEpoch = optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER);
+        if (ownerEpoch === undefined) throw new TypeError("ownerEpoch is required");
+        return asJsonValue(this.visualSessions.release({
+          visualSessionId: requiredIdentifier(params, "visualSessionId"),
+          sessionEpoch: requiredIdentifier(params, "sessionEpoch"),
+          ownerEpoch,
+        }, context), request.method);
+      }
+      case "visualSession.input": {
+        const params = guardedParams(request, [
+          "visualSessionId", "sessionEpoch", "sourceGeneration", "layoutId", "frameId",
+          "ownerEpoch", "inputSeq", "action",
+        ]);
+        const ownerEpoch = optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER);
+        const inputSeq = optionalInteger(params, "inputSeq", 1, Number.MAX_SAFE_INTEGER);
+        if (ownerEpoch === undefined || inputSeq === undefined || !isRecord(params.action)) {
+          throw new TypeError("visualSession.input requires ownerEpoch, inputSeq, and action");
+        }
+        return asJsonValue(await this.visualSessions.input({
+          visualSessionId: requiredIdentifier(params, "visualSessionId"),
+          sessionEpoch: requiredIdentifier(params, "sessionEpoch"),
+          sourceGeneration: requiredIdentifier(params, "sourceGeneration"),
+          layoutId: requiredIdentifier(params, "layoutId"),
+          frameId: requiredIdentifier(params, "frameId"),
+          ownerEpoch,
+          inputSeq,
+          action: params.action as MobileBridgeVisualInputActionDto,
+        }, context), request.method);
+      }
+      case "visualSession.frame":
+        throw new Error("visualSession.frame must use the binary frame path");
       case "snapshot.get": {
         noParams(request);
         return asJsonValue(await this.projectSnapshot(), request.method);
@@ -3521,6 +3625,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.buildRuns.clear();
     this.detachDesktopSubscriptions();
     this.listeners.clear();
+    this.visualSessions.dispose();
     this.terminalLeases.clear();
     this.pendingAutomationIds.clear();
     this.refreshRequested = false;

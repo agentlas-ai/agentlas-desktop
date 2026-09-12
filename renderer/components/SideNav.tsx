@@ -30,8 +30,6 @@ import {
   IconHome,
   IconChat,
   IconAtSign,
-  IconBuilding,
-  IconApps,
   IconBolt,
   IconKey,
   IconNetwork,
@@ -174,9 +172,6 @@ export function SideNav({
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/workspace", icon: IconChat },
-      { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
-      { label: t("nav.automations"), href: "/automation", icon: IconBolt },
-      { label: t("nav.site"), href: "/site", icon: IconApps },
       /*
        * 프롬프트 스토어는 화면도 번역 문구도 다 있는데 들어가는 문이 없었다
        * (감사 2026-08-25: 렌더러 전체에서 /prompts 로 가는 링크 0건). 화면을
@@ -189,6 +184,20 @@ export function SideNav({
 
   const groups: Group[] = useMemo(
     () => [
+      {
+        id: "agents",
+        label: t("nav.group.agent_forge"),
+        href: "/build",
+        icon: IconUsers,
+        isActive: (p) => ["/build", "/library/agents", "/cloud", "/marketplace", "/automation"].some((route) => p === route || p.startsWith(`${route}/`)),
+        items: [
+          { label: t("nav.build"), href: "/build", icon: IconWand },
+          { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
+          { label: t("nav.agent_upload"), href: "/cloud", icon: IconFileUp },
+          { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
+          { label: t("nav.automations"), href: "/automation", icon: IconBolt },
+        ],
+      },
       {
         id: "connect",
         label: t("nav.group.connect"),
@@ -209,18 +218,6 @@ export function SideNav({
         ],
       },
       {
-        id: "agent_cloud",
-        label: t("nav.group.agent_cloud"),
-        href: "/build",
-        icon: IconBuilding,
-        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/cloud"),
-        items: [
-          { label: t("nav.build"), href: "/build", icon: IconWand },
-          { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
-          { label: t("nav.agent_upload"), href: "/cloud", icon: IconFileUp },
-        ],
-      },
-      {
         id: "environment",
         label: t("nav.group.environment"),
         href: "/library/env",
@@ -237,7 +234,7 @@ export function SideNav({
 
   // 활성 그룹은 기본으로 펼친다(사용자가 명시적으로 토글하면 그 값 우선).
   function isGroupOpen(g: Group): boolean {
-    return openGroups[g.id] ?? g.isActive(pathname);
+    return openGroups[g.id] ?? (g.id === "agents" || g.isActive(pathname));
   }
   function toggleGroup(id: string, fallbackOpen: boolean) {
     setOpenGroups((p) => ({ ...p, [id]: !(p[id] ?? fallbackOpen) }));
@@ -475,7 +472,9 @@ export function SideNav({
                   type="button"
                   className="sidenav-item sidenav-group-head"
                   data-active={active ? "true" : "false"}
-                  onClick={() => toggleGroup(g.id, active)}
+                  aria-expanded={open}
+                  aria-controls={`sidenav-group-${g.id}`}
+                  onClick={() => toggleGroup(g.id, open)}
                 >
                   <span className="sidenav-ic"><Icon size={18} /></span>
                   <span className="sidenav-label">{g.label}</span>
@@ -484,7 +483,7 @@ export function SideNav({
                   </span>
                 </button>
                 {open && (
-                  <div className="sidenav-sub">
+                  <div id={`sidenav-group-${g.id}`} className="sidenav-sub">
                     {g.items.map((sub) => {
                       const active2 = sub.onSelect ? Boolean(sub.isActive?.()) : isLeafActive(sub.href);
                       if (sub.onSelect) {

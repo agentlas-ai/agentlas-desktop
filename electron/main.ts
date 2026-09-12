@@ -39,6 +39,8 @@ import { registerIpcHandlers } from "./ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
+import { projectScienceLoopLongRun } from "./long-run/science-projection";
+import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
@@ -175,7 +177,8 @@ import {
 } from "./extensions/view-host";
 import {
   closeScienceStore,
-  recoverScienceRuntimeAtStartup,
+  createScienceDesktopLongRunAdapter,
+  resolveScienceWorkspaceBinding,
   scienceArtifactPublicationValidator,
   scienceChemistryValidator,
   scienceConversationService,
@@ -2029,20 +2032,21 @@ app.whenReady().then(async () => {
     let selectedPath: string | undefined;
     if (request.folderSelectionId !== undefined) {
       selectedPath = scienceProjectFolders.resolve(request.folderSelectionId, event.sender.id, documentId, request.requestId);
-    } else if (typeof request.folderPath === "string" && request.folderPath.trim()) {
-      let resolved = request.folderPath.trim();
-      if (resolved.startsWith("~/")) resolved = path.join(os.homedir(), resolved.slice(2));
-      else if (resolved === "~") resolved = os.homedir();
-      resolved = path.resolve(resolved);
-      if (!fs.existsSync(resolved)) {
-        try { fs.mkdirSync(resolved, { recursive: true }); } catch {}
-      }
-      const selection = scienceProjectFolders.select(event.sender.id, documentId, resolved);
-      request.folderSelectionId = selection.selectionId;
-      selectedPath = selection.path;
+    } else if (request.folderPath !== undefined) {
+      throw new Error("science-project-folder-selection-required");
     }
     const result = scienceStore().createProject(request, selectedPath);
     if (request.folderSelectionId) scienceProjectFolders.commit(request.folderSelectionId, request.requestId);
+    return result;
+  });
+  ipcMain.handle("science:projects:bindFolder", (event, envelope: unknown) => {
+    const documentId = assertScienceProjectDocument(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-project-input-invalid");
+    const request = input as Parameters<ReturnType<typeof scienceStore>["bindProjectWorkspace"]>[0];
+    const selected = scienceProjectFolders.resolve(request.folderSelectionId, event.sender.id, documentId, request.requestId);
+    const result = scienceStore().bindProjectWorkspace(request, selected);
+    scienceProjectFolders.commit(request.folderSelectionId, request.requestId);
     return result;
   });
   ipcMain.handle("science:projects:openFolder", async (event, envelope: unknown) => {
@@ -2056,8 +2060,7 @@ app.whenReady().then(async () => {
     const project = scienceStore().getProject(projectId);
     if (!project) throw new Error("science-project-not-found");
     if (!project.folderPath) throw new Error("science-project-folder-not-selected");
-    const canonical = validateScienceProjectFolderPath(project.folderPath);
-    if (canonical !== project.folderPath) throw new Error("science-project-folder-selection-changed");
+    const canonical = resolveScienceWorkspaceBinding(project);
     const error = await shell.openPath(canonical);
     if (error) throw new Error("science-project-folder-open-failed");
     return { opened: true };
@@ -3908,6 +3911,7 @@ app.whenReady().then(async () => {
       await startAgentlasMobileBridge({
         userDataPath: userDataDir(),
         appVersion: app.getVersion(),
+        visualSessionControl: createAgentlasWindowVisualSessionControl(() => mainWindow),
       });
     } catch (err) {
       lastBridgeStartupError = err;
@@ -4013,7 +4017,8 @@ app.whenReady().then(async () => {
     const scienceStatus = scienceExtensionStatus();
     if (scienceStatus.phase === "installed" && scienceStatus.enabled) {
       ensureScienceTurnProjection();
-      const recovered = await recoverScienceRuntimeAtStartup();
+      const adapter = createScienceDesktopLongRunAdapter({ project: (snapshot) => { projectScienceLoopLongRun(snapshot); } });
+      const recovered = await adapter.recoverAndProjectAtStartup();
       const recoveredTools = recovered.tools;
       if (recoveredTools.interrupted || recoveredTools.finalized || recoveredTools.alreadyCommitted || recoveredTools.quarantined) {
         console.info(`[science-tools] recovered interrupted=${recoveredTools.interrupted} finalized=${recoveredTools.finalized} committed=${recoveredTools.alreadyCommitted} quarantined=${recoveredTools.quarantined}`);

@@ -13,7 +13,8 @@ import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
-import { installScienceHost } from "agentlas-science";
+import { installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
+import { projectScienceLoopLongRun } from "./long-run/science-projection";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
 import { resolveManagedNodeRuntime } from "./runtime/managed-node";
@@ -105,8 +106,7 @@ function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration)
 /** 부팅에서 한 번만 부른다. 두 번 불러도 안전하다. */
 export function installDesktopScienceHost(): void {
   if (installed) return;
-  installed = true;
-  installScienceHost({
+  const compatibility = installScienceHost({
     // 실행
     spawnCli, killCliTree, probeCliVersion, withCliPath, detachedSpawnOpts,
     resolveManagedNodeRuntime,
@@ -165,5 +165,18 @@ export function installDesktopScienceHost(): void {
     // 런타임 탐색 — 사이언스는 이것을 동적으로만 부른다
     detectRuntimes: async (...args: unknown[]) => (await import("./runtime/detect")).detectRuntimes(...(args as Parameters<typeof import("./runtime/detect")["detectRuntimes"]>)),
     listRuntimeModels: async (...args: unknown[]) => (await import("./runtime/providers")).listRuntimeModels(...(args as Parameters<typeof import("./runtime/providers")["listRuntimeModels"]>)),
-  } as never);
+  } as never, {
+    contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
+    capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
+    execution: { registerMcpPreparedConfig: registerScienceMcpPreparedConfig },
+    workspace: { captureInvocationBinding: captureScienceInvocationBinding },
+    render: { renderManuscriptPdf, resolveTectonic },
+    runtimeCatalog: {
+      detectRuntimes: async () => (await (await import("./runtime/detect")).detectRuntimes()).map((runtime) => ({ ...runtime, availableModels: runtime.availableModels ?? [] })),
+      listRuntimeModels: async (kind, backend, models, timestamp) => (await import("./runtime/providers")).listRuntimeModels(kind, backend, models, timestamp),
+    },
+    projection: { project: (snapshot) => { projectScienceLoopLongRun(snapshot); } },
+  });
+  if (compatibility.status !== "compatible") throw new Error(compatibility.code);
+  installed = true;
 }

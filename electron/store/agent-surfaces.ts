@@ -2,6 +2,7 @@
 // Surfaces are the OS-level outcome layer before they become generated apps,
 // local tools, exports, or automations.
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import { getSurfaceJobSummary, syncSurfaceJobs } from "./agent-surface-jobs";
 import type {
   AgentlasSurfaceManifest,
@@ -12,7 +13,8 @@ import type {
   SurfaceStateEventRecord,
   SurfaceStatePatchRequest,
 } from "../../shared/types";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import type { ArtifactRevisionV2 } from "../../shared/artifact-revision";
 
 interface AgentSurfaceRow {
   id: string;
@@ -24,6 +26,8 @@ interface AgentSurfaceRow {
   layout: string;
   manifest_json: string;
   state_json: string;
+  state_revision: number;
+  artifact_revision: number;
   provenance_json: string;
   created_at: string;
   updated_at: string;
@@ -54,54 +58,62 @@ export function recordAgentSurface(input: {
   manifest: AgentlasSurfaceManifest;
   state?: JsonObject;
 }): AgentlasSurfaceRecord {
-  const now = new Date().toISOString();
-  const state = input.state ?? getExistingSurfaceState(input.id) ?? {};
-  const provenance = input.manifest.provenance ?? [];
-  getDb()
-    .prepare(
-      `INSERT INTO agent_surfaces (
-         id, chat_id, project_id, agent_id, title, domain, layout,
-         manifest_json, state_json, provenance_json, created_at, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         chat_id = excluded.chat_id,
-         project_id = excluded.project_id,
-         agent_id = excluded.agent_id,
-         title = excluded.title,
-         domain = excluded.domain,
-         layout = excluded.layout,
-         manifest_json = excluded.manifest_json,
-         state_json = excluded.state_json,
-         provenance_json = excluded.provenance_json,
-         updated_at = excluded.updated_at`,
-    )
-    .run(
-      input.id,
-      input.chatId,
-      input.projectId ?? null,
-      input.agentId,
-      input.manifest.title,
-      input.manifest.domain,
-      input.manifest.layout,
-      encodeJson(input.manifest),
-      encodeJson(state),
-      encodeJson(provenance),
-      now,
-      now,
-    );
+  const result = getDb().transaction(() => {
+    const now = new Date().toISOString();
+    const existing = getDb().prepare("SELECT * FROM agent_surfaces WHERE id = ?").get(input.id) as AgentSurfaceRow | undefined;
+    if (existing && (existing.chat_id !== input.chatId || existing.project_id !== (input.projectId ?? null))) {
+      throw new Error("artifact_owner_mismatch");
+    }
+    const manifestJson = encodeJson(input.manifest);
+    const changed = !existing || existing.manifest_json !== manifestJson;
+    const revision = existing ? existing.artifact_revision + (changed ? 1 : 0) : 1;
+    // Model updates own source, never the user's input overlay.
+    const stateJson = existing?.state_json ?? encodeJson(input.state ?? {});
+    getDb().prepare(`INSERT INTO agent_surfaces (
+      id, chat_id, project_id, agent_id, title, domain, layout, manifest_json,
+      state_json, provenance_json, created_at, updated_at, artifact_revision, state_revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ON CONFLICT(id) DO UPDATE SET
+      title=excluded.title, domain=excluded.domain, layout=excluded.layout,
+      manifest_json=excluded.manifest_json, provenance_json=excluded.provenance_json,
+      artifact_revision=excluded.artifact_revision, updated_at=excluded.updated_at`).run(
+        input.id, input.chatId, input.projectId ?? null, existing?.agent_id ?? input.agentId,
+        input.manifest.title, input.manifest.domain, input.manifest.layout, manifestJson,
+        stateJson, encodeJson(input.manifest.provenance ?? []), now, now, revision,
+      );
+    if (changed) {
+      const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+      const reference: ArtifactRevisionV2 = {
+        schemaVersion: "agentlas.artifact-revision.v2", artifactId: input.id,
+        owner: { product: "desktop", chatId: input.chatId, projectId: input.projectId ?? null, agentId: existing?.agent_id ?? input.agentId },
+        revision, parentRevision: existing?.artifact_revision ?? null,
+        sourceDigest: digest(manifestJson), dataDigest: digest(encodeJson(input.manifest.data)),
+        stateSchemaDigest: digest(encodeJson(input.manifest.stateSchema ?? {})),
+        status: "drafted", createdAt: now,
+      };
+      getDb().prepare("INSERT INTO agent_surface_revisions VALUES (?, ?, ?, ?, ?)")
+        .run(input.id, revision, manifestJson, encodeJson(reference), now);
+    }
+    syncSurfaceJobs({ chatId: input.chatId, projectId: input.projectId ?? null,
+      agentId: existing?.agent_id ?? input.agentId, surfaceId: input.id, manifest: input.manifest });
+    const surface = getAgentSurface(input.id);
+    if (!surface) throw new Error(`Agent surface registry write failed: ${input.id}`);
+    return surface;
+  })();
+  queueMicrotask(() => emitDesktopStoreChange({ entity: "surface", id: input.id }));
+  return result;
+}
 
-  syncSurfaceJobs({
-    chatId: input.chatId,
-    projectId: input.projectId ?? null,
-    agentId: input.agentId,
-    surfaceId: input.id,
-    manifest: input.manifest,
-  });
+export function getAgentSurfaceRevision(id: string, revision: number): ArtifactRevisionV2 | null {
+  const row = getDb().prepare("SELECT reference_json FROM agent_surface_revisions WHERE surface_id = ? AND revision = ?")
+    .get(id, revision) as { reference_json: string } | undefined;
+  return row ? JSON.parse(row.reference_json) as ArtifactRevisionV2 : null;
+}
 
-  const surface = getAgentSurface(input.id);
-  if (!surface) throw new Error(`Agent surface registry write failed: ${input.id}`);
-  return surface;
+export function listAgentSurfaceRevisions(id: string): ArtifactRevisionV2[] {
+  const rows = getDb().prepare("SELECT reference_json FROM agent_surface_revisions WHERE surface_id = ? ORDER BY revision")
+    .all(id) as Array<{ reference_json: string }>;
+  return rows.map((row) => JSON.parse(row.reference_json) as ArtifactRevisionV2);
 }
 
 export function listAgentSurfaces(chatId?: string): AgentlasSurfaceRecord[] {
@@ -124,11 +136,15 @@ export function getAgentSurface(id: string): AgentlasSurfaceRecord | null {
 
 export function patchAgentSurfaceState(input: SurfaceStatePatchRequest): AgentlasSurfaceRecord {
   validateStatePatch(input);
+  const result = getDb().transaction(() => {
   const row = getDb().prepare("SELECT * FROM agent_surfaces WHERE id = ?").get(input.surfaceId) as
     | AgentSurfaceRow
     | undefined;
   if (!row) throw new Error(`Agent surface not found: ${input.surfaceId}`);
 
+  if (input.chatId !== row.chat_id || input.projectId !== row.project_id) throw new Error("artifact_owner_mismatch");
+  if (input.expectedArtifactRevision !== row.artifact_revision) throw new Error("artifact_revision_conflict");
+  if (input.expectedStateRevision !== row.state_revision) throw new Error("artifact_state_conflict");
   const now = new Date().toISOString();
   const state = decodeJson(row.state_json, {}) as JsonObject;
   const previousValue = valueAtJsonPointer(state, input.path);
@@ -136,8 +152,8 @@ export function patchAgentSurfaceState(input: SurfaceStatePatchRequest): Agentla
 
   const tx = getDb().transaction(() => {
     getDb()
-      .prepare("UPDATE agent_surfaces SET state_json = ?, updated_at = ? WHERE id = ?")
-      .run(encodeJson(nextState), now, input.surfaceId);
+      .prepare("UPDATE agent_surfaces SET state_json = ?, state_revision = state_revision + 1, updated_at = ? WHERE id = ? AND state_revision = ? AND artifact_revision = ?")
+      .run(encodeJson(nextState), now, input.surfaceId, input.expectedStateRevision, input.expectedArtifactRevision);
     getDb()
       .prepare(
         `INSERT INTO agent_surface_events (
@@ -166,6 +182,9 @@ export function patchAgentSurfaceState(input: SurfaceStatePatchRequest): Agentla
   const surface = getAgentSurface(input.surfaceId);
   if (!surface) throw new Error(`Agent surface state patch failed: ${input.surfaceId}`);
   return surface;
+  })();
+  queueMicrotask(() => emitDesktopStoreChange({ entity: "surface", id: input.surfaceId }));
+  return result;
 }
 
 export function listAgentSurfaceEvents(surfaceId: string): SurfaceStateEventRecord[] {
@@ -240,6 +259,9 @@ function toSurface(row: AgentSurfaceRow): AgentlasSurfaceRecord {
     layout: row.layout,
     manifest,
     state: decodeJson(row.state_json, {}) as JsonObject,
+    stateRevision: row.state_revision,
+    artifactRevision: row.artifact_revision,
+    artifactRef: getAgentSurfaceRevision(row.id, row.artifact_revision) ?? undefined,
     provenance: decodeJson(row.provenance_json, []) as unknown as AgentlasSurfaceProvenance[],
     jobSummary: getSurfaceJobSummary(row.id, manifest.budget) ?? undefined,
     createdAt: row.created_at,
@@ -274,6 +296,10 @@ function getExistingSurfaceState(id: string): JsonObject | null {
 }
 
 function validateStatePatch(input: SurfaceStatePatchRequest): void {
+  if (!Number.isSafeInteger(input.expectedStateRevision) || input.expectedStateRevision < 0 ||
+      !Number.isSafeInteger(input.expectedArtifactRevision) || input.expectedArtifactRevision < 1) {
+    throw new Error("artifact_revision_required");
+  }
   if (!input.surfaceId.trim()) throw new Error("surfaceId is required.");
   if (!input.path.startsWith("/")) throw new Error("Surface state path must be a JSON Pointer.");
   if (FORBIDDEN_STATE_PATH_RE.test(input.path)) {
@@ -287,7 +313,12 @@ function parseJsonPointer(path: string): string[] {
   return path
     .slice(1)
     .split("/")
-    .map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
+    .map((part) => {
+      const decoded = part.replace(/~1/g, "/").replace(/~0/g, "~");
+      if (["__proto__", "prototype", "constructor"].includes(decoded)) throw new Error("artifact_state_path_invalid");
+      if (/^\d+$/.test(decoded) && (!Number.isSafeInteger(Number(decoded)) || Number(decoded) > 100000)) throw new Error("artifact_state_path_invalid");
+      return decoded;
+    });
 }
 
 function cloneJsonObject(value: JsonObject): JsonObject {

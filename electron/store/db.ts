@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 113;
+const SCHEMA_VERSION = 114;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6247,6 +6247,44 @@ export function initStore(options: StoreInitOptions = {}): void {
   // backstop above adds the nullable column for old and partially upgraded DBs.
   if (userVersion < 113 && tableExists(_db, "chat_messages")) {
     // Existing rows remain NULL; never infer a purpose from legacy text.
+  }
+
+
+  // v114: product-owned immutable surface source revisions and input CAS.
+  // Keep legacy bytes and IDs; importing never invents a render receipt.
+  if (userVersion < 114) {
+    _db.transaction(() => {
+      const columns = new Set(schemaColumns(_db!, "agent_surfaces").map((column) => column.name));
+      if (!columns.has("artifact_revision")) _db!.exec("ALTER TABLE agent_surfaces ADD COLUMN artifact_revision INTEGER NOT NULL DEFAULT 1");
+      if (!columns.has("state_revision")) _db!.exec("ALTER TABLE agent_surfaces ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0");
+      _db!.exec(`CREATE TABLE IF NOT EXISTS agent_surface_revisions (
+        surface_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision > 0),
+        manifest_json TEXT NOT NULL,
+        reference_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(surface_id, revision),
+        FOREIGN KEY(surface_id) REFERENCES agent_surfaces(id) ON DELETE CASCADE
+      )`);
+      const digest = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+      const rows = _db!.prepare("SELECT * FROM agent_surfaces").all() as Array<{
+        id: string; chat_id: string; project_id: string | null; agent_id: string;
+        artifact_revision: number; manifest_json: string; created_at: string;
+      }>;
+      const insert = _db!.prepare("INSERT OR IGNORE INTO agent_surface_revisions VALUES (?, ?, ?, ?, ?)");
+      for (const row of rows) {
+        let manifest: Record<string, unknown> = {};
+        try { manifest = JSON.parse(row.manifest_json); } catch { /* Retain invalid legacy bytes for recovery. */ }
+        insert.run(row.id, row.artifact_revision, row.manifest_json, JSON.stringify({
+          schemaVersion: "agentlas.artifact-revision.v2", artifactId: row.id,
+          owner: { product: "desktop", chatId: row.chat_id, projectId: row.project_id, agentId: row.agent_id },
+          revision: row.artifact_revision, parentRevision: null,
+          sourceDigest: digest(row.manifest_json), dataDigest: digest(JSON.stringify(manifest?.data ?? {})),
+          stateSchemaDigest: digest(JSON.stringify(manifest?.stateSchema ?? {})),
+          status: "legacy-unverified", createdAt: row.created_at,
+        }), row.created_at);
+      }
+    })();
   }
 
   } catch (error) {
