@@ -1503,8 +1503,14 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
     if (!run || run.surface === "science") throw new Error("long_run_usage_scope_invalid");
     const invocation = db.prepare("SELECT chat_id FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
       .get(usage.invocationRunId) as { chat_id: string | null } | undefined;
-    const child = db.prepare("SELECT id AS attempt_id FROM long_run_worker_attempts WHERE run_id = ? AND invocation_run_id = ? LIMIT 1")
-      .get(run.id, usage.invocationRunId) as { attempt_id: string } | undefined;
+    // Several specialist attempts may share the controller invocation ID.
+    // An explicit child identity must resolve exactly; an unqualified direct
+    // provider result may inherit only the controller attempt, never a sibling.
+    const child = (usage.attemptId
+      ? db.prepare("SELECT id AS attempt_id FROM long_run_worker_attempts WHERE run_id = ? AND invocation_run_id = ? AND id = ?")
+        .get(run.id, usage.invocationRunId, usage.attemptId)
+      : db.prepare("SELECT a.id AS attempt_id FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND a.invocation_run_id = ? AND w.role = 'controller' ORDER BY a.attempt DESC LIMIT 1")
+        .get(run.id, usage.invocationRunId)) as { attempt_id: string } | undefined;
     if ((!invocation || invocation.chat_id !== run.rootChatId) && !child) throw new Error("long_run_usage_invocation_mismatch");
     if (usage.attemptId && child?.attempt_id !== usage.attemptId) throw new Error("long_run_usage_attempt_mismatch");
     const sourceEventId = `usage:${usage.sourceId}`;
