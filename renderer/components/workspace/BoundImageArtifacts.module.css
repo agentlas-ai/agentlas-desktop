@@ -3,4 +3,7 @@
 .image img { display: block; width: 100%; height: 140px; object-fit: contain; border-radius: 5px; }
 .label { font-size: 11px; overflow-wrap: anywhere; }
 
-.pages { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 11px; }
+.pages { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; color: var(--muted-deep); font-size: 10.5px; }
+.pages button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }
+.pages button:hover:not(:disabled), .pages button:focus-visible { background: var(--fill-1); color: var(--accent); outline: none; }
+.pages button:disabled { opacity: .3; cursor: default; }

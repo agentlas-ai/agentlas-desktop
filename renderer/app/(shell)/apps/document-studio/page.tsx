@@ -28,12 +28,14 @@ import {
 } from "@/lib/document-store";
 import {
   IconApps,
+  IconAlertTriangle,
   IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconFileUp,
   IconImage,
   IconPlus,
+  IconRefresh,
   IconSparkles,
   IconTrash,
   IconClose,
@@ -73,10 +75,8 @@ export default function DocumentStudioPage() {
   const [figureCaption, setFigureCaption] = useState("");
   const [figureSrc, setFigureSrc] = useState(""); // 생성된 도표 이미지 data URI(codex/agy image_gen).
   const [figureBusy, setFigureBusy] = useState(false);
-  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [revising, setRevising] = useState<ReviseAction | null>(null);
-  const [genEngine, setGenEngine] = useState<"agy" | "codex" | null>(null);
   const [statusMsg, setStatusMsg] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
@@ -93,6 +93,7 @@ export default function DocumentStudioPage() {
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
   const [citationOpen, setCitationOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [editingRef, setEditingRef] = useState<Reference | null>(null);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -102,6 +103,8 @@ export default function DocumentStudioPage() {
   const citationTriggerRef = useRef<HTMLButtonElement>(null);
   const exportRootRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
+  const aiRootRef = useRef<HTMLDivElement>(null);
+  const aiTriggerRef = useRef<HTMLButtonElement>(null);
   const selection = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const firstSave = useRef(true); // 초기 [] 로 저장된 소스를 덮어쓰지 않도록 첫 저장을 건너뛴다.
   const draftHydratedRef = useRef(false);
@@ -123,6 +126,12 @@ export default function DocumentStudioPage() {
     roots: [exportRootRef],
     restoreFocusRef: exportTriggerRef,
     onDismiss: () => setExportOpen(false),
+  });
+  useDismissibleLayer({
+    open: aiOpen,
+    roots: [aiRootRef],
+    restoreFocusRef: aiTriggerRef,
+    onDismiss: () => setAiOpen(false),
   });
 
   if (draftHydrated) {
@@ -271,8 +280,6 @@ export default function DocumentStudioPage() {
     setFigureCaption("");
     setGoal(exampleGoal);
     setMode("paper");
-    setGeneratedAt(null);
-    setGenEngine(null);
     setStatusMsg(null);
     setExportStatus(null);
     setDraftSaving(false);
@@ -297,24 +304,20 @@ export default function DocumentStudioPage() {
         if (res.doc.title) setTitle(res.doc.title);
         setDocumentText(res.doc.body);
         if (res.doc.figureCaption) setFigureCaption(res.doc.figureCaption);
-        setGeneratedAt(new Date().toLocaleTimeString(locale === "en" ? "en-US" : "ko-KR", { hour: "2-digit", minute: "2-digit" }));
-        setGenEngine(res.engine ?? null);
-        setStatusMsg({ kind: "ok", text: locale === "en" ? `Drafted with ${res.engine}` : `${res.engine}로 작성됨` });
+        setStatusMsg({ kind: "ok", text: locale === "en" ? "Draft created" : "초안을 만들었습니다" });
         return;
       }
       // no-fallback: 미연결/실패면 가짜 초안을 만들지 않고 명시적으로 막는다.
-      setGenEngine(null);
       setError(
         res?.reason === "empty-goal"
           ? locale === "en"
             ? "Enter a document goal first."
             : "문서 목표를 먼저 입력하세요."
           : locale === "en"
-            ? "No AI runtime connected. Connect the agy or codex CLI, then generate — no template fallback."
-            : "AI 런타임이 연결되지 않았습니다. agy 또는 codex CLI를 연결한 뒤 생성하세요 — 템플릿 폴백 없음.",
+            ? "Check the AI connection, then try again."
+            : "AI 연결을 확인한 뒤 다시 시도하세요.",
       );
     } catch {
-      setGenEngine(null);
       setError(locale === "en"
         ? "The draft could not be generated. Your current document and goal are unchanged; check the AI runtime and try again."
         : "초안을 생성하지 못했습니다. 현재 문서와 목표는 그대로입니다. AI 런타임을 확인한 뒤 다시 시도하세요.");
@@ -346,12 +349,12 @@ export default function DocumentStudioPage() {
       if (res?.ok && res.text) {
         const next = hasSel ? documentText.slice(0, start) + res.text + documentText.slice(end) : res.text;
         setDocumentText(next);
-        setStatusMsg({ kind: "ok", text: locale === "en" ? `Edited with ${res.engine}` : `${res.engine}로 편집됨` });
+        setStatusMsg({ kind: "ok", text: locale === "en" ? "Edit applied" : "편집했습니다" });
       } else {
         setError(
           locale === "en"
-            ? "No AI runtime connected — cannot edit. Connect agy or codex."
-            : "AI 런타임 미연결 — 편집 불가. agy 또는 codex를 연결하세요.",
+            ? "Check the AI connection, then try again."
+            : "AI 연결을 확인한 뒤 다시 시도하세요.",
         );
       }
     } catch {
@@ -380,12 +383,12 @@ export default function DocumentStudioPage() {
       });
       if (r?.ok && r.src) {
         setFigureSrc(r.src);
-        setStatusMsg({ kind: "ok", text: locale === "en" ? `Figure via ${r.engine}` : `도표 생성 · ${r.engine}` });
+        setStatusMsg({ kind: "ok", text: locale === "en" ? "Figure created" : "도표를 만들었습니다" });
       } else {
         setError(
           locale === "en"
-            ? "No image runtime connected (codex/agy) — cannot render the figure."
-            : "이미지 런타임 미연결(codex/agy) — 도표를 만들 수 없습니다.",
+            ? "Check the image connection, then try again."
+            : "이미지 연결을 확인한 뒤 다시 시도하세요.",
         );
       }
     } catch {
@@ -520,22 +523,80 @@ export default function DocumentStudioPage() {
     >
       <style>{RESPONSIVE_CSS}</style>
       <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
-        <Link href="/apps" className="titlebar-nodrag" style={backLink}>
+        <Link href="/apps" className="titlebar-nodrag" style={toolbarIconButton} aria-label={locale === "ko" ? "앱으로 돌아가기" : "Back to apps"} title={locale === "ko" ? "앱으로 돌아가기" : "Back to apps"}>
           <IconApps size={15} />
-          {locale === "ko" ? "앱" : "Apps"}
         </Link>
         <button
           type="button"
           className="titlebar-nodrag"
           data-testid="document-studio-new-document"
           onClick={startNewDocument}
-          style={newDocumentButton}
+          style={toolbarIconButton}
+          aria-label={locale === "en" ? "New document" : "새 문서"}
+          title={locale === "en" ? "New document" : "새 문서"}
         >
-          <IconPlus size={13} />
-          {locale === "en" ? "New document" : "새 문서"}
+          <IconPlus size={15} />
         </button>
-        <div ref={citationRootRef} style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
-          <button ref={citationTriggerRef} type="button" onClick={() => { setCitationOpen((o) => !o); setExportOpen(false); }} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
+        <div ref={aiRootRef} style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
+          <button
+            ref={aiTriggerRef}
+            type="button"
+            data-testid="document-studio-ai-menu"
+            aria-haspopup="dialog"
+            aria-expanded={aiOpen}
+            onClick={() => { setAiOpen((open) => !open); setCitationOpen(false); setExportOpen(false); }}
+            style={{ ...toolbarIconButton, color: "var(--accent)" }}
+            aria-label={locale === "en" ? "Write and edit with AI" : "AI로 작성·편집"}
+            title={locale === "en" ? "Write and edit with AI" : "AI로 작성·편집"}
+          >
+            <IconSparkles size={16} />
+          </button>
+          {aiOpen && (
+            <div style={{ ...citationMenu, width: 320, display: "grid", gap: 10 }} role="dialog" aria-label={locale === "en" ? "AI writing controls" : "AI 작성 도구"}>
+              <label style={formField}>
+                <span style={formLabel}>{locale === "en" ? "Document goal" : "문서 목표"}</span>
+                <input value={goal} onChange={(event) => setGoal(event.target.value)} style={formInput} />
+              </label>
+              <div role="radiogroup" aria-label={locale === "en" ? "Document type" : "문서 유형"} style={popupButtonRow}>
+                {(["paper", "report", "brief"] as Mode[]).map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === id}
+                    onClick={() => setMode(id)}
+                    style={{ ...modeChip, color: mode === id ? "var(--accent)" : "var(--muted-deep)", background: mode === id ? "var(--fill-1)" : "transparent" }}
+                  >
+                    {labelForMode(id, locale)}
+                  </button>
+                ))}
+              </div>
+              <button type="button" onClick={() => void generate()} disabled={generating} style={{ ...generateButton, opacity: generating ? 0.6 : 1, cursor: generating ? "not-allowed" : "pointer" }}>
+                <IconSparkles size={13} />
+                {generating ? (locale === "en" ? "Generating…" : "생성 중…") : locale === "en" ? "Generate" : "생성"}
+              </button>
+              <div style={{ borderTop: "1px solid var(--paper-edge)", paddingTop: 9 }}>
+                <span style={formLabel}>{locale === "en" ? "Edit selection or document" : "선택 영역 또는 문서 편집"}</span>
+                <div style={{ ...popupButtonRow, marginTop: 7 }}>
+                  {REVISE_ACTIONS.map((action) => (
+                    <button
+                      key={action.id}
+                      type="button"
+                      onMouseDown={rememberSelection}
+                      onClick={() => void revise(action.id)}
+                      disabled={Boolean(revising)}
+                      style={{ ...editToolbarBtn, opacity: revising && revising !== action.id ? 0.4 : 1 }}
+                    >
+                      {revising === action.id ? "…" : locale === "en" ? action.en : action.ko}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <div ref={citationRootRef} style={{ position: "relative" }} className="titlebar-nodrag">
+          <button ref={citationTriggerRef} type="button" onClick={() => { setCitationOpen((o) => !o); setExportOpen(false); setAiOpen(false); }} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
             {citationStyle}
             <IconChevronDown size={13} />
           </button>
@@ -553,10 +614,8 @@ export default function DocumentStudioPage() {
           )}
         </div>
         <div ref={exportRootRef} style={{ position: "relative" }} className="titlebar-nodrag">
-          <button ref={exportTriggerRef} onClick={() => { setExportOpen((o) => !o); setCitationOpen(false); }} style={exportButton}>
+          <button ref={exportTriggerRef} onClick={() => { setExportOpen((o) => !o); setCitationOpen(false); setAiOpen(false); }} style={toolbarIconButton} aria-label={locale === "en" ? "Export" : "내보내기"} title={locale === "en" ? "Export" : "내보내기"}>
             <IconFileUp size={14} />
-            {locale === "en" ? "Export" : "내보내기"}
-            <IconChevronDown size={12} />
           </button>
           {exportOpen && (
             <div style={{ ...citationMenu, width: 180 }}>
@@ -588,27 +647,6 @@ export default function DocumentStudioPage() {
         )}
         {exportStatus && <span role="status" style={exportStatusStyle}>{exportStatus}</span>}
       </header>
-
-      <div className="document-studio-ai-toolbar" style={aiToolbar}>
-        <span style={aiBadge}>AI</span>
-        <div className="document-studio-goal" style={goalBox}>
-          <IconSparkles size={14} style={{ color: "var(--accent)" }} />
-          <input value={goal} onChange={(e) => setGoal(e.target.value)} style={goalInput} aria-label={locale === "en" ? "Document goal" : "문서 목표"} />
-        </div>
-        {(["paper", "report", "brief"] as Mode[]).map((id) => (
-          <button
-            key={id}
-            onClick={() => setMode(id)}
-            style={{ ...modeChip, color: mode === id ? "var(--accent)" : "var(--muted-deep)", background: mode === id ? "var(--fill-1)" : "transparent" }}
-          >
-            {labelForMode(id, locale)}
-          </button>
-        ))}
-        <button type="button" onClick={generate} disabled={generating} style={{ ...generateButton, opacity: generating ? 0.6 : 1, cursor: generating ? "not-allowed" : "pointer" }}>
-          <IconSparkles size={13} />
-          {generating ? (locale === "en" ? "Generating…" : "생성 중…") : locale === "en" ? "Generate" : "생성"}
-        </button>
-      </div>
 
       <main
         className="document-studio-workspace"
@@ -688,7 +726,6 @@ export default function DocumentStudioPage() {
               <span>{readingMin} {locale === "en" ? "min read" : "분 읽기"}</span>
               <span>{sectionCount} {locale === "en" ? "sections" : "섹션"}</span>
               <span>{citationStyle}</span>
-              {generatedAt ? <span>{genEngine ? `${genEngine} · ` : ""}{generatedAt}</span> : null}
               {draftPersistence ? (
                 <span
                   role="status"
@@ -706,27 +743,16 @@ export default function DocumentStudioPage() {
                             ? "var(--green-deep)"
                             : "var(--muted-deep)",
                   }}
+                  title={draftPersistence.text}
+                  aria-label={draftPersistence.text}
                 >
-                  {draftPersistence.text}
+                  {draftPersistence.state === "saving"
+                    ? <IconRefresh size={13} />
+                    : draftPersistence.state === "saved"
+                      ? <IconCheck size={13} />
+                      : <IconAlertTriangle size={13} />}
                 </span>
               ) : null}
-            </div>
-
-            {/* AI 편집 툴바 — 선택 텍스트(없으면 전체)를 개정 */}
-            <div style={editToolbar}>
-              <span style={editToolbarLabel}>{locale === "en" ? "AI edit" : "AI 편집"}</span>
-              {REVISE_ACTIONS.map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  onMouseDown={rememberSelection}
-                  onClick={() => revise(a.id)}
-                  disabled={Boolean(revising)}
-                  style={{ ...editToolbarBtn, opacity: revising && revising !== a.id ? 0.4 : 1 }}
-                >
-                  {revising === a.id ? "…" : locale === "en" ? a.en : a.ko}
-                </button>
-              ))}
             </div>
 
             {statusMsg && (
@@ -746,8 +772,8 @@ export default function DocumentStudioPage() {
               style={editor}
               placeholder={
                 locale === "en"
-                  ? "Enter a goal above and click Generate. Requires a connected AI runtime (agy/codex) — no template fallback. Select text and use AI edit to expand/rewrite/shorten."
-                  : "위에 목표를 입력하고 생성을 누르세요. 연결된 AI 런타임(agy/codex)이 필요합니다 — 템플릿 폴백 없음. 텍스트를 선택하고 AI 편집으로 확장/재작성/축약하세요."
+                  ? "Use the sparkle button to create a draft or edit selected text."
+                  : "반짝임 버튼에서 초안을 만들거나 선택한 텍스트를 편집하세요."
               }
               aria-label={locale === "en" ? "Document editor" : "문서 편집기"}
             />
@@ -1015,8 +1041,6 @@ ${bibHtml}
 const RESPONSIVE_CSS = `
   @media (max-width: 900px) {
     .document-studio-toolbar { padding-left: 16px !important; flex-wrap: wrap; min-height: auto !important; }
-    .document-studio-ai-toolbar { flex-wrap: wrap; min-height: auto !important; }
-    .document-studio-goal { min-width: min(100%, 220px) !important; flex-basis: 100%; }
     .document-studio-workspace { grid-template-columns: 1fr !important; overflow: auto !important; }
     .document-studio-workspace > aside { min-height: 160px; max-height: 320px; border-right: none !important; border-bottom: 1px solid var(--paper-edge); }
   }
@@ -1024,20 +1048,15 @@ const RESPONSIVE_CSS = `
 
 const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--paper-edge)", color: "var(--ink)" };
 const topToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 6, padding: "6px 16px 6px 90px", flexShrink: 0 };
-const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, textDecoration: "none" };
-const newDocumentButton: CSSProperties = { minHeight: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 5, padding: "0 9px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
+const toolbarIconButton: CSSProperties = { width: 30, height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-grid", placeItems: "center", padding: 0, textDecoration: "none", cursor: "pointer" };
 const citationButton: CSSProperties = { height: 32, minWidth: 84, border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 12px", color: "var(--ink)", fontWeight: 800 };
 const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid var(--paper-3)", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
 const citationList: CSSProperties = { display: "grid", gap: 1, maxHeight: 320, overflowY: "auto" };
 const citationOption: CSSProperties = { minHeight: 32, border: "none", background: "transparent", color: "var(--ink)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "0 8px", borderRadius: 6, textAlign: "left", fontSize: 13, cursor: "pointer" };
-const exportButton: CSSProperties = { height: 32, border: "none", borderRadius: 7, background: "var(--ok)", color: "var(--white)", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 12px", fontWeight: 900, cursor: "pointer" };
 const exportStatusStyle: CSSProperties = { color: "var(--green-deep)", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" };
-const aiToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 10, padding: "6px 18px", flexShrink: 0 };
-const aiBadge: CSSProperties = { minWidth: 26, height: 22, borderRadius: 7, background: "var(--warn-soft)", color: "var(--warn)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 900 };
-const goalBox: CSSProperties = { minWidth: 280, flex: 1, height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", display: "flex", alignItems: "center", gap: 8, padding: "0 9px" };
-const goalInput: CSSProperties = { minWidth: 0, flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--ink)", fontSize: 12.5 };
 const modeChip: CSSProperties = { border: "none", borderRadius: 999, padding: "6px 9px", fontSize: 11.5, fontWeight: 900, cursor: "pointer" };
 const generateButton: CSSProperties = { minHeight: 30, border: "1px solid var(--accent-soft)", borderRadius: 7, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "0 10px", fontSize: 12, fontWeight: 900 };
+const popupButtonRow: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5 };
 const workspace: CSSProperties = { flex: 1, minHeight: 0, display: "grid", overflow: "hidden" };
 const sourceRail: CSSProperties = { borderRight: "1px solid var(--paper-edge)", background: "var(--paper)", padding: 14, overflowY: "auto", display: "grid", alignContent: "start", gap: 10 };
 const railTitle: CSSProperties = { color: "var(--muted-deep)", fontSize: 11, fontWeight: 900, textTransform: "uppercase", letterSpacing: ".06em" };
@@ -1062,8 +1081,6 @@ const paper: CSSProperties = { width: "min(760px, 100%)", minHeight: "calc(100vh
 const titleInput: CSSProperties = { width: "100%", border: "none", outline: "none", background: "transparent", resize: "none", overflow: "hidden", color: "var(--ink)", fontFamily: "var(--font-head)", fontSize: 26, lineHeight: 1.2, fontWeight: 900 };
 const docMeta: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, color: "var(--muted-deep)", fontSize: 11.5, marginTop: 8 };
 const draftPersistenceStatus: CSSProperties = { fontWeight: 800, lineHeight: 1.4 };
-const editToolbar: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 16, marginBottom: 8, paddingBottom: 12, borderBottom: "1px solid var(--paper-edge)" };
-const editToolbarLabel: CSSProperties = { color: "var(--warn)", background: "var(--warn-soft)", borderRadius: 6, padding: "3px 7px", fontSize: 10.5, fontWeight: 900 };
 const editToolbarBtn: CSSProperties = { border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink-soft)", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };
 const statusBar: CSSProperties = { fontSize: 12, fontWeight: 700, marginBottom: 12 };
 const editor: CSSProperties = { width: "100%", minHeight: 480, border: "none", outline: "none", resize: "vertical", background: "var(--paper)", color: "var(--ink)", fontFamily: "var(--font-body)", fontSize: 15.5, lineHeight: 1.85 };

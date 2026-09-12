@@ -1393,6 +1393,14 @@ function TaskSidePanelContent({
               </button>
             </span>
           ))}
+          {chatFileTabs.length > 0 && <ChatFileTabs
+            inline
+            tabs={chatFileTabs.map((file) => ({ id: file.tabId, name: file.name, provenance: file.provenance }))}
+            activeId={railView === "result" ? activeChatFileTabId : null}
+            locale={locale}
+            onSelect={selectChatFileTab}
+            onClose={closeChatFileTab}
+          />}
           <div ref={setBrowserHeaderHost} className={styles.browserTabHost} />
           <span className={styles.artifactAddWrap}>
             <button
@@ -1487,13 +1495,6 @@ function TaskSidePanelContent({
           key={workerKey} selection={workerSelection} run={workerRun ?? null} locale={locale} onBack={closeWorkerTab}
         />}
         {railView === "result" && (activeChatFile || openedArtifact || result || boundImages.length > 0) && <div className={styles.resultView}>
-          {chatFileTabs.length > 0 && <ChatFileTabs
-            tabs={chatFileTabs.map((file) => ({ id: file.tabId, name: file.name, provenance: file.provenance }))}
-            activeId={activeChatFileTabId}
-            locale={locale}
-            onSelect={selectChatFileTab}
-            onClose={closeChatFileTab}
-          />}
           {activeChatFile && <ChatFileOpenViewer
             file={activeChatFile}
             locale={locale}

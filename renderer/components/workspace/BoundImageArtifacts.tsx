@@ -6,6 +6,7 @@ import type { OneActivityArtifact } from '@/lib/one-activity';
 import { boundArtifactKey, scopedBoundImages } from '@/lib/bound-image-artifacts';
 import { requestOneArtifactOpen } from '@/lib/one-artifact-open';
 import { ipc } from '@/lib/ipc';
+import { IconChevronRight } from '@/components/Icon';
 import styles from './BoundImageArtifacts.module.css';
 
 function BoundImage({ item, locale }: { item: OneActivityArtifact; locale: 'ko' | 'en' }) {
@@ -48,9 +49,21 @@ export function BoundImageArtifacts({ items, chatId, runId, locale }: {
   return images.length ? <div className={styles.list} data-bound-images="true">
     {visible.map((item) => <BoundImage key={boundArtifactKey(item)} item={item} locale={locale} />)}
     {images.length > 6 && <div className={styles.pages}>
-      <button type="button" disabled={page === 0} onClick={() => setPaging({ scope, page: page - 1 })}>{locale === 'ko' ? '최신 이미지' : 'Newer images'}</button>
-      <span>{page + 1} / {Math.ceil(images.length / 6)}</span>
-      <button type="button" disabled={(page + 1) * 6 >= images.length} onClick={() => setPaging({ scope, page: page + 1 })}>{locale === 'ko' ? '이전 이미지' : 'Older images'}</button>
+      <button
+        type="button"
+        disabled={page === 0}
+        onClick={() => setPaging({ scope, page: page - 1 })}
+        aria-label={locale === 'ko' ? '최신 이미지' : 'Newer images'}
+        title={locale === 'ko' ? '최신 이미지' : 'Newer images'}
+      ><IconChevronRight size={14} style={{ transform: 'rotate(180deg)' }} /></button>
+      <span aria-label={locale === 'ko' ? `${page + 1} / ${Math.ceil(images.length / 6)} 페이지` : `Page ${page + 1} of ${Math.ceil(images.length / 6)}`}>{page + 1} / {Math.ceil(images.length / 6)}</span>
+      <button
+        type="button"
+        disabled={(page + 1) * 6 >= images.length}
+        onClick={() => setPaging({ scope, page: page + 1 })}
+        aria-label={locale === 'ko' ? '이전 이미지' : 'Older images'}
+        title={locale === 'ko' ? '이전 이미지' : 'Older images'}
+      ><IconChevronRight size={14} /></button>
     </div>}
   </div> : null;
 }

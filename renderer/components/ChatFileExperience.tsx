@@ -59,12 +59,15 @@ export function ChatFileTabs({
   locale,
   onSelect,
   onClose,
+  inline = false,
 }: {
   tabs: ChatFileTab[];
   activeId: string | null;
   locale: "ko" | "en";
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  /** Place file tabs in an existing tab/control bar instead of adding a row. */
+  inline?: boolean;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -83,16 +86,25 @@ export function ChatFileTabs({
     else return;
     event.preventDefault();
     onSelect(tabs[next].id);
-    const controls = event.currentTarget.closest('[role="tablist"]')?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    const controls = event.currentTarget.closest('[data-chat-file-tabs]')?.querySelectorAll<HTMLButtonElement>('[data-chat-file-tab-select]');
     controls?.[next]?.focus();
   };
-  return <div ref={listRef} className={styles.tabs} role="tablist" aria-label={locale === "ko" ? "열린 파일" : "Open files"} data-chat-file-tabs="true">
+  return <div
+    ref={listRef}
+    className={`${styles.tabs}${inline ? ` ${styles.inline}` : ""}`}
+    role={inline ? "group" : "tablist"}
+    aria-label={locale === "ko" ? "열린 파일" : "Open files"}
+    data-chat-file-tabs="true"
+    data-inline={inline ? "true" : "false"}
+  >
     {tabs.map((tab, index) => (
       <span key={tab.id} className={styles.tab} data-file-tab-id={tab.id} data-active={tab.id === activeId ? "true" : "false"}>
         <button
           type="button"
-          role="tab"
-          aria-selected={tab.id === activeId}
+          role={inline ? undefined : "tab"}
+          aria-selected={inline ? undefined : tab.id === activeId}
+          aria-pressed={inline ? tab.id === activeId : undefined}
+          data-chat-file-tab-select="true"
           className={styles.tabSelect}
           onClick={() => onSelect(tab.id)}
           onKeyDown={(event) => moveWithKeyboard(event, index)}
