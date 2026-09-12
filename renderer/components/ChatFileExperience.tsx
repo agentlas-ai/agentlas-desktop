@@ -37,7 +37,7 @@ export function ChatFileCards({
         data-chat-file-id={file.id}
         data-chat-file-provenance={file.provenance}
         onClick={() => onOpen(file)}
-        title={file.sha256 ? `${file.name}\n${file.sha256}` : file.name}
+        title={file.name}
       >
         <span className={styles.cardIcon} aria-hidden="true">
           {file.kind === "directory" ? <IconFolder size={15} /> : <IconFileUp size={15} />}

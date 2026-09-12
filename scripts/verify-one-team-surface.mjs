@@ -302,8 +302,13 @@ for (const view of ["result", "activity", "terminal", "browser"]) {
 assert.match(activity, /data-one-rail-resize="true"/);
 assert.match(activity, /window\.addEventListener\("pointermove", move/);
 assert.match(activity, /drag\.rawWidth <= collapseThreshold/);
-assert.match(activity, /aria-orientation="horizontal"/);
-assert.match(activity, /className=\{styles\.artifactHistoryPane\}[\s\S]*?height:\s*historyHeight/);
+// History remains available through a compact header popup; it must not
+// reserve a permanent pane below the result canvas.
+assert.doesNotMatch(activity, /className=\{styles\.artifactHistoryPane\}/);
+assert.doesNotMatch(activity, /height:\s*historyHeight/);
+assert.match(activity, /<details[\s\S]*?ref=\{historyPopup\}[\s\S]*?<summary[\s\S]*?aria-label=[\s\S]*?<IconBrain/);
+assert.match(activity, /className=\{styles\.artifactHistoryPopup\} role="dialog"[\s\S]*?<OneComputerHistory[\s\S]*?onConsent=\{onHistoryConsent[\s\S]*?onClear=\{onHistoryClear[\s\S]*?onAsk=\{onHistoryAsk[\s\S]*?onReviewRecommendation=\{onHistoryReviewRecommendation\}/);
+assert.match(activity, /event\.key !== "Escape"[\s\S]*?event\.currentTarget\.open = false;[\s\S]*?querySelector\("summary"\)\?\.focus\(\)/);
 assert.match(activity, /<LiveOutputViewer source=\{preview\.capabilityUrl\}/);
 assert.match(liveOutputViewer, /<img src=\{source\}/);
 assert.match(liveOutputViewer, /<video src=\{source\}[\s\S]*?controls/);

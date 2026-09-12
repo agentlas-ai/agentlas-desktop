@@ -347,8 +347,8 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
       const action = toolObservationAction(cell.toolName ?? cell.label, fallbackLabel, cell.args, locale);
       return <ExpandableRow cell={cell} locale={locale}
         head={<><strong>{action.label}</strong>{action.target && <span className={styles.object}>{action.target}</span>}{statusSuffix(cell, locale)}</>}>
-        {(cell.detail || cell.args || cell.result) ? <ToolObservation toolName={cell.toolName ?? cell.label}
-          detail={cell.detail} args={cell.args} result={cell.result} locale={locale} /> : undefined}
+        {(cell.callId || cell.detail || cell.args || cell.result) ? <ToolObservation toolName={cell.toolName ?? cell.label}
+          callId={cell.callId} detail={cell.detail} args={cell.args} result={cell.result} locale={locale} /> : undefined}
       </ExpandableRow>;
     }
     case "agent":

@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { IconAlertTriangle, IconCheck, IconCopy, IconDownload } from "./Icon";
 import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
 import type { OfficeEditIntent, OfficeTaskSelection } from "@/lib/office-document-session";
 import styles from "./LiveOutputViewer.module.css";
@@ -151,14 +152,12 @@ export function LiveOutputViewer({
     >
       {stage}
       <div className={styles.imageActionBar}>
-        <button type="button" onClick={() => void runImageAction("copy")} disabled={imageActionState === "copying" || imageActionState === "saving"}>
-          {imageActionState === "copying" ? (ko ? "복사 중…" : "Copying…") : (ko ? "이미지 복사" : "Copy image")}
-        </button>
-        <button type="button" onClick={() => void runImageAction("save")} disabled={imageActionState === "copying" || imageActionState === "saving"}>
-          {imageActionState === "saving" ? (ko ? "준비 중…" : "Preparing…") : (ko ? "다운로드" : "Download")}
-        </button>
+        <button type="button" onClick={() => void runImageAction("copy")} disabled={imageActionState === "copying" || imageActionState === "saving"} aria-label={ko ? "이미지 복사" : "Copy image"} title={imageActionState === "copying" ? (ko ? "복사 중" : "Copying") : (ko ? "이미지 복사" : "Copy image")}><IconCopy size={14} /></button>
+        <button type="button" onClick={() => void runImageAction("save")} disabled={imageActionState === "copying" || imageActionState === "saving"} aria-label={ko ? "다운로드" : "Download"} title={imageActionState === "saving" ? (ko ? "준비 중" : "Preparing") : (ko ? "다운로드" : "Download")}><IconDownload size={14} /></button>
         {imageActionState === "copied" || imageActionState === "saved" || imageActionState === "error" ? <span role="status" data-error={imageActionState === "error"}>
-          {imageActionState === "copied" ? (ko ? "복사됨" : "Copied") : imageActionState === "saved" ? (ko ? "저장됨" : "Saved") : (ko ? "처리하지 못했습니다" : "Action failed")}
+          <span className={styles.imageActionStatusIcon} aria-label={imageActionState === "copied" ? (ko ? "복사됨" : "Copied") : imageActionState === "saved" ? (ko ? "저장됨" : "Saved") : (ko ? "처리하지 못했습니다" : "Action failed")} title={imageActionState === "copied" ? (ko ? "복사됨" : "Copied") : imageActionState === "saved" ? (ko ? "저장됨" : "Saved") : (ko ? "처리하지 못했습니다" : "Action failed")}>
+            {imageActionState === "error" ? <IconAlertTriangle size={13} /> : <IconCheck size={13} />}
+          </span>
         </span> : null}
       </div>
       {imageMenu ? <div ref={imageMenuRef} className={styles.imageContextMenu} role="menu" style={{ left: imageMenu.x, top: imageMenu.y }}>

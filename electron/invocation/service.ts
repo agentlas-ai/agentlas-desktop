@@ -1,3 +1,4 @@
+import { withAdapterEffectContext } from "./adapter-effect-context";
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
@@ -1880,7 +1881,8 @@ export class InvocationService {
       && (runReq.permissions ?? "read") !== "full";
     void withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
       goalLongRun && goalLongRun.surface !== "science"
-        ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => runMcpInvocation(
+        ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
+        begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => runMcpInvocation(
       runReq,
       (rawEvent) => {
         effectBoundary.observe(rawEvent);
@@ -2919,7 +2921,7 @@ export class InvocationService {
         this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);
         this.drainSteerQueue(runReq.chatId);
-      }));
+      })));
 
     return { runId };
   }

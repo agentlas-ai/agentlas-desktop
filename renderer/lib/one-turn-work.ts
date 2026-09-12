@@ -58,7 +58,7 @@ export type OneWorkCell =
   | (CellBase & { kind: "edit"; files: OneWorkEditFile[]; diff?: string })
   | (CellBase & { kind: "web_search"; query: string })
   | (CellBase & { kind: "fetch"; url: string; statusCode?: number })
-  | (CellBase & { kind: "call"; label: string; toolName?: string; detail?: string; args?: string; result?: string; failureCode?: ToolFailureCode })
+  | (CellBase & { kind: "call"; label: string; toolName?: string; callId?: string; detail?: string; args?: string; result?: string; failureCode?: ToolFailureCode })
   | (CellBase & { kind: "agent"; name: string; role?: string; phase?: OneActivityItem["phase"]; terminalObserved?: boolean })
   | (CellBase & { kind: "notice"; level: "info" | "success" | "warning" | "error"; message: string; details?: string; activityCode?: OneActivityItem["activityCode"] })
   /** Only when a turn had no thought and no tool: the one thing that happened was writing the answer. */
@@ -525,6 +525,7 @@ export function buildOneWorkPresentation(
               ...cellAttribution(item),
               label: classified.label,
               toolName: item.tool.name,
+              ...(item.tool.id ? { callId: item.tool.id } : {}),
               ...(classified.detail ? { detail: classified.detail } : {}),
               ...(item.tool.args ? { args: item.tool.args } : {}),
               ...(item.tool.result ? { result: item.tool.result } : {}),

@@ -13,12 +13,14 @@ import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 const ACTIVITY_ROW_WINDOW = 120;
 import {
   IconArrowLeft,
+  IconBrain,
   IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconClose,
   IconCode,
   IconFileUp,
+  IconExpand,
   IconMoreHorizontal,
   IconNetwork,
   IconPanelRight,
@@ -66,7 +68,6 @@ import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worke
 import styles from "./TaskSidePanel.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
-const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen";
 
@@ -97,12 +98,6 @@ function readCollapsedOutputSections(): Set<OutputSectionKey> {
   } catch {
     return new Set();
   }
-}
-
-function readOutputHistoryHeight(): number {
-  if (typeof window === "undefined") return 250;
-  const value = Number(window.localStorage.getItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY));
-  return Number.isFinite(value) ? Math.min(480, Math.max(150, Math.round(value))) : 250;
 }
 
 function elapsedLabel(ms: number): string {
@@ -549,10 +544,13 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
     </div>}
     {!preview && <div className={styles.artifactFileFallback} data-loading={!settled ? "true" : "false"}><IconFileUp size={18} /></div>}
     <div className={styles.artifactPreviewCopy}>
-      <span><strong>{item.label}</strong><small>{preview
-        ? `${preview.mimeType} · ${Math.max(1, Math.round(preview.sizeBytes / 1024))} KB`
-        : settled ? (locale === "ko" ? "파일" : "File") : (locale === "ko" ? "미리보기 준비 중…" : "Preparing preview…")}</small></span>
-      <button type="button" onClick={() => void openArtifact(item)}>{locale === "ko" ? "열기" : "Open"}</button>
+      <strong>{item.label}</strong>
+      <button
+        type="button"
+        onClick={() => void openArtifact(item)}
+        aria-label={locale === "ko" ? `${item.label} 열기` : `Open ${item.label}`}
+        title={locale === "ko" ? "열기" : "Open"}
+      ><IconExpand size={14} /></button>
     </div>
   </article>;
 }
@@ -859,10 +857,12 @@ function TaskSidePanelContent({
   onCloseWorker,
 }: TaskSidePanelProps) {
   const officeContextPopup = useRef<HTMLDetailsElement>(null);
+  const historyPopup = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
-      const popup = officeContextPopup.current;
-      if (popup?.open && !popup.contains(event.target as Node)) popup.open = false;
+      for (const popup of [officeContextPopup.current, historyPopup.current]) {
+        if (popup?.open && !popup.contains(event.target as Node)) popup.open = false;
+      }
     };
     document.addEventListener("pointerdown", outside);
     return () => document.removeEventListener("pointerdown", outside);
@@ -951,11 +951,8 @@ function TaskSidePanelContent({
     onCloseWorker?.();
   };
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
-  const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const [collapseReady, setCollapseReady] = useState(false);
-  const [historyResizing, setHistoryResizing] = useState(false);
-  const [historyHeight, setHistoryHeight] = useState(readOutputHistoryHeight);
   const [browserUrlsByScope, setBrowserUrlsByScope] = useState<Record<string, string>>({});
   const [openedArtifact, setOpenedArtifact] = useState<OneArtifactOpenRequest | null>(null);
   const [chatFileTabs, setChatFileTabs] = useState<ChatFileItem[]>([]);
@@ -966,12 +963,6 @@ function TaskSidePanelContent({
   const presentedMcpResultIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
-  const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
-  const commitHistoryHeight = (value: number) => {
-    const next = clampHistoryHeight(value);
-    setHistoryHeight(next);
-    try { window.localStorage.setItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
-  };
   const agents = useMemo(() => {
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
@@ -1285,34 +1276,6 @@ function TaskSidePanelContent({
       body.style.userSelect = priorBodyUserSelect;
     };
   }, [resizing]);
-  /**
-   * 가로 손잡이 둘(미리보기 ↔ 아래 칸 분할선, 기록 패널 높이)도 같은 계약을 쓴다.
-   * 끄는 동안 모션을 끄고 커서를 row-resize 로 잡아, 포인터가 손잡이 밖으로
-   * 나가도 화면이 흔들리지 않는다. 세로 드래그와 동시에 일어날 수 없으므로
-   * 표식은 하나로 충분하다.
-   */
-  const rowResizing = historyResizing;
-  useEffect(() => {
-    if (!rowResizing) return;
-    const root = document.documentElement;
-    const body = document.body;
-    const priorRootCursor = root.style.cursor;
-    const priorRootUserSelect = root.style.userSelect;
-    const priorBodyCursor = body.style.cursor;
-    const priorBodyUserSelect = body.style.userSelect;
-    root.setAttribute("data-one-resizing", "true");
-    root.style.cursor = "row-resize";
-    root.style.userSelect = "none";
-    body.style.cursor = "row-resize";
-    body.style.userSelect = "none";
-    return () => {
-      root.removeAttribute("data-one-resizing");
-      root.style.cursor = priorRootCursor;
-      root.style.userSelect = priorRootUserSelect;
-      body.style.cursor = priorBodyCursor;
-      body.style.userSelect = priorBodyUserSelect;
-    };
-  }, [rowResizing]);
   const sources = useMemo(() => {
     const current = activity?.sources ?? [];
     if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;
@@ -1463,6 +1426,31 @@ function TaskSidePanelContent({
           </span>
         </div>
         <div className={styles.artifactHeaderActions}>
+          {(railView === "activity" || railView === "terminal") && <details
+            ref={historyPopup}
+            className={styles.artifactHistoryDetails}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.currentTarget.open = false;
+              event.currentTarget.querySelector("summary")?.focus();
+            }}
+          >
+            <summary
+              title={locale === "ko" ? "기록과 추천" : "History and recommendations"}
+              aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}
+            ><IconBrain size={15} /></summary>
+            <div className={styles.artifactHistoryPopup} role="dialog" aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
+              <OneComputerHistory
+                compact
+                state={computerHistory ?? null}
+                locale={locale}
+                onConsent={onHistoryConsent ?? (async () => {})}
+                onClear={onHistoryClear ?? (() => {})}
+                onAsk={onHistoryAsk ?? (() => {})}
+                onReviewRecommendation={onHistoryReviewRecommendation}
+              />
+            </div>
+          </details>}
           {officeContext && <details ref={officeContextPopup} data-office-task-context style={{ position: "relative" }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}>
             <summary title={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} aria-label={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} style={{ display: "grid", placeItems: "center", width: 28, height: 28, cursor: "pointer", listStyle: "none", color: "var(--accent)" }}><IconFileUp size={15} /></summary>
             <div role="dialog" aria-label={locale === "ko" ? "문서 선택" : "Document selection"} className={panelMenu.panelPopover} style={{ position: "absolute", right: 0, top: "calc(100% + 5px)", zIndex: 25, lineHeight: 1.6, overflowWrap: "anywhere" }}>
@@ -1514,8 +1502,8 @@ function TaskSidePanelContent({
             onExpand={onResize || onRequestReadableWidth ? () => (onRequestReadableWidth ?? onResize)?.(maxWidth) : undefined}
           />}
           {!activeChatFile && openedArtifact && <>
-            <button type="button" className={styles.artifactBackButton} onClick={() => { setOpenedArtifact(null); onRestorePreferredWidth?.(); }}>
-              <IconArrowLeft size={13} /> {locale === "ko" ? "결과로 돌아가기" : "Back to result"}
+            <button type="button" className={styles.artifactBackButton} onClick={() => { setOpenedArtifact(null); onRestorePreferredWidth?.(); }} aria-label={locale === "ko" ? "결과로 돌아가기" : "Back to result"} title={locale === "ko" ? "결과로 돌아가기" : "Back to result"}>
+              <IconArrowLeft size={14} />
             </button>
             <ArtifactOpenViewer key={JSON.stringify(openedArtifact.binding)} target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560}
               onOfficeSelection={openedArtifact.binding.chatId === screenChatId ? selection => sendOfficeContext(selection) : undefined}
@@ -1578,60 +1566,6 @@ function TaskSidePanelContent({
             : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
         </div>}
       </div>
-      {(railView === "activity" || railView === "terminal") && <><div
-        className={styles.artifactHistoryResizeHandle}
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label={locale === "ko" ? "기록 패널 높이 조절" : "Resize history panel"}
-        aria-valuemin={150}
-        aria-valuemax={480}
-        aria-valuenow={historyHeight}
-        tabIndex={0}
-        data-resizing={historyResizing ? "true" : "false"}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          historyResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: historyHeight };
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setHistoryResizing(true);
-          event.preventDefault();
-        }}
-        onPointerMove={(event) => {
-          const drag = historyResizeRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          setHistoryHeight(clampHistoryHeight(drag.startHeight + (drag.startY - event.clientY)));
-        }}
-        onPointerUp={(event) => {
-          if (historyResizeRef.current?.pointerId !== event.pointerId) return;
-          historyResizeRef.current = null;
-          setHistoryResizing(false);
-          commitHistoryHeight(historyHeight);
-        }}
-        onPointerCancel={() => {
-          historyResizeRef.current = null;
-          setHistoryResizing(false);
-        }}
-        onDoubleClick={() => commitHistoryHeight(250)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp") commitHistoryHeight(historyHeight + 16);
-          else if (event.key === "ArrowDown") commitHistoryHeight(historyHeight - 16);
-          else if (event.key === "Home") commitHistoryHeight(480);
-          else if (event.key === "End") commitHistoryHeight(150);
-          else return;
-          event.preventDefault();
-        }}
-      />
-      <div className={styles.artifactHistoryPane} style={{ height: historyHeight }} aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
-        <OneComputerHistory
-          compact
-          state={computerHistory ?? null}
-          locale={locale}
-          onConsent={onHistoryConsent ?? (async () => {})}
-          onClear={onHistoryClear ?? (() => {})}
-          onAsk={onHistoryAsk ?? (() => {})}
-          onReviewRecommendation={onHistoryReviewRecommendation}
-        />
-      </div>
-      </>}
       </div>
     </aside>
   );

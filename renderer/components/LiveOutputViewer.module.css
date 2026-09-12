@@ -42,7 +42,8 @@
 .documentEngine[data-compact="true"], .documentEngine[data-compact="true"] .documentEngineRoot { min-height: 240px; max-height: 320px; }
 .documentError { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; background: rgba(250, 247, 247, .95); color: #724747; text-align: center; }
 .documentError strong { font-size: 13px; }
-.documentError small { max-width: 480px; overflow-wrap: anywhere; color: #8a6262; line-height: 1.45; }
+.documentError button { min-height: 30px; padding: 0 10px; border: 1px solid currentColor; border-radius: 7px; background: transparent; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+.documentError button:hover, .documentError button:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
 .loading { min-height: 420px; display: grid; place-items: center; background: #f2f5f3; }
 .loading > span { border-color: #c8d3cc; border-top-color: #26724e; }
 @keyframes output-spin { to { transform: rotate(360deg); } }
@@ -62,7 +63,6 @@
 .mediaStatus { background: color-mix(in srgb, var(--design-ink) 74%, transparent); color: var(--design-contrast-ink); }
 .mediaStatus[data-state="error"],
 .documentError { background: color-mix(in srgb, var(--design-danger) 12%, var(--design-bg)); color: var(--design-danger); }
-.documentError small { color: var(--design-muted); }
 .loading > span { border-color: var(--design-line-2); border-top-color: var(--design-accent); }
 
 /* Clean output surfaces: the media itself gets the light edge/shadow; the
@@ -131,8 +131,11 @@
 .imageActionShell[data-fill="true"] { width: 100%; }
 .imageActionBar { min-width: 0; min-height: 28px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .imageActionBar button {
-  min-height: 26px;
-  padding: 0 9px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 1px solid var(--design-line);
   border-radius: 999px;
   background: var(--design-bg);
@@ -145,6 +148,7 @@
 .imageActionBar button:disabled { cursor: wait; opacity: .58; }
 .imageActionBar span { color: var(--design-muted); font-size: 10px; }
 .imageActionBar span[data-error="true"] { color: var(--design-danger); }
+.imageActionStatusIcon { display: grid; place-items: center; }
 .imageContextMenu {
   position: fixed;
   z-index: 180;

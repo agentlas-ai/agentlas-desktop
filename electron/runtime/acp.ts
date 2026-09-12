@@ -1,3 +1,4 @@
+import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
 // Generic ACP runner — one client for every runtime that speaks the Agent Client
 // Protocol (PRD 2026-08-15 D-5). Replaces the weak hand-coded drivers of the
 // "B" grade runtimes (cursor: no tool display; grok: tool kind guessed from
@@ -111,7 +112,7 @@ export function normalizeToolKind(kind: unknown): string {
   return TOOL_KIND_LABEL[k] ? k : "other";
 }
 
-interface ToolState { title?: string; kind?: string; status?: string; reported?: boolean }
+interface ToolState { title?: string; kind?: string; status?: string; reported?: boolean; started?: boolean; rawInput?: unknown; rawOutput?: unknown; content?: unknown }
 
 /**
  * Live approval hook (tool-approval contract, v1.0.16). ACP asks BEFORE
@@ -135,7 +136,7 @@ export function setAcpPermissionArbiter(arbiter: AcpPermissionArbiter | null): v
 }
 
 /** Client-side handling of one session's stream. */
-class AcpSessionClient {
+export class AcpSessionClient {
   text = "";
   contextUsed?: number;
   contextSize?: number;
@@ -198,7 +199,7 @@ class AcpSessionClient {
       case "tool_call":
       case "tool_call_update": {
         this.endThinking();
-        this.handleToolCall(update);
+        this.handleToolCall(update, update.sessionUpdate === "tool_call");
         break;
       }
       case "usage_update": {
@@ -213,7 +214,7 @@ class AcpSessionClient {
     }
   }
 
-  private handleToolCall(update: any): void {
+  private handleToolCall(update: any, starts: boolean): void {
     const id = String(update.toolCallId ?? update.tool_call_id ?? "");
     if (!id) return;
     const prev = this.tools.get(id) ?? {};
@@ -222,14 +223,32 @@ class AcpSessionClient {
       kind: update.kind ?? prev.kind,
       status: update.status ?? prev.status,
       reported: prev.reported,
+      started: prev.started,
+      rawInput: update.rawInput ?? prev.rawInput,
+      rawOutput: update.rawOutput ?? prev.rawOutput,
+      content: update.content ?? prev.content,
     };
     this.tools.set(id, merged);
+    const kind = normalizeToolKind(merged.kind);
+    const label = TOOL_KIND_LABEL[kind];
+    const name = merged.title ? `${label}: ${merged.title}` : label;
+    const text = (value: unknown) => typeof value === "string" ? value : value == null ? undefined : JSON.stringify(value);
+    if (starts && !merged.started) {
+      merged.started = true;
+      this.events.onTool?.(name, text(merged.rawInput), undefined, id, false);
+    }
     const done = merged.status === "completed" || merged.status === "failed";
     if (!done || merged.reported) return;
     merged.reported = true;
-    const kind = normalizeToolKind(merged.kind);
-    const label = TOOL_KIND_LABEL[kind];
-    this.events.onTool?.(merged.title ? `${label}: ${merged.title}` : label, undefined, undefined, id, merged.status === "failed");
+    this.events.onTool?.(name, text(merged.rawInput), text(merged.rawOutput ?? merged.content) ?? "", id, merged.status === "failed");
+  }
+
+  effectReport(terminal: string | null): AdapterEffectReport {
+    // ACP v1 tool updates are optional reporting, and end_turn does not certify
+    // external/background job quiescence. Typed UI completion alone cannot upgrade this.
+    return { schemaVersion: "agentlas.adapter-effect-coverage.v1", protocol: "acp-v1", complete: false, terminal,
+      operationIds: [...this.tools.keys()].sort(), frameKinds: ["session/update"],
+      reasons: ["acp-agent-quiescence-contract-unconfirmed", ...([...this.tools.values()].some(tool => !tool.started || !tool.reported || tool.status === "failed") ? ["tool-incomplete-or-failed"] : [])] };
   }
 
   /**
@@ -907,6 +926,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let lease: AcpSessionLease<Session> | null = null;
     /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
     let broken = false;
+    let effectRun: ReturnType<typeof beginAdapterEffectRun> = null, effectTerminal: string | null = null;
     const onAbort = () => { broken = true; if (session) killCliTree(session.child); };
     req.signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -1098,11 +1118,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           schemaFallback,
         ].filter(Boolean).join("\n\n");
       nativeMcp?.assertCurrent();
+      effectRun = beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
       const result = await session.conn.request(
         "session/prompt",
         { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },
         { signal: req.signal },
       );
+      effectTerminal = typeof result?.stopReason === "string" ? result.stopReason : null;
       client.finish();
       // 세션은 이제 실재한다 — 거절/빈 답이어도 다음 턴이 이어갈 수 있게 먼저 저장한다.
       if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
@@ -1189,6 +1211,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       throw err;
     } finally {
+      effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
       req.signal?.removeEventListener("abort", onAbort);
       // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
       if (session) session.state.active = null;

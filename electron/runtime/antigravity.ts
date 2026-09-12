@@ -1,3 +1,5 @@
+import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
+import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
@@ -1576,6 +1578,9 @@ async function runPreparedAntigravity(
   }
 
   function runAgyProcess(): Promise<RunnerResult> {
+  const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
+  const effectCoverage = new AntigravityEffectCoverage(effectRun?.scopeId ?? randomUUID());
+  let effectExitCode: number | null = null, effectStdoutEnded = false;
   return new Promise<RunnerResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
     // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
@@ -1647,6 +1652,7 @@ async function runPreparedAntigravity(
     const consumeAgyLine = (line: string): void => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
+      effectCoverage.observe(trimmedLine);
       const step = reduceAgyLine(trimmedLine, agyState);
       // 도구 호출을 화면으로 올린다 — 같은 도구가 진행(ACTIVE)/완료(DONE)로 두 번 오면 같은
       // id 로 갱신된다(ACTIVE 1회 + DONE 1회만 올린다; 반복 ACTIVE는 무시).
@@ -1655,7 +1661,7 @@ async function runPreparedAntigravity(
         if (!reportedAgyTools.has(key)) {
           reportedAgyTools.add(key);
           const artifactPaths = freshAgyArtifactPaths(step.tool.artifactPaths ?? [], invocationStartedAtMs);
-          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, step.tool.id, step.tool.failed, artifactPaths);
+          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, effectCoverage.toolId(step.tool.id), step.tool.failed, artifactPaths);
         }
       }
       /*
@@ -1718,6 +1724,7 @@ async function runPreparedAntigravity(
       reject(err);
     });
     child.on("close", (code) => {
+      effectExitCode = code; effectStdoutEnded = child.stdout?.readableEnded === true;
       // A child may end on a UTF-8 code-point boundary or without a trailing
       // newline. Flush both decoder tails before deciding which result arrived.
       consumeAgyText(stdoutDecoder.end());
@@ -1892,6 +1899,12 @@ async function runPreparedAntigravity(
         });
       }
     });
+  }).then(result => {
+    effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
+    return result;
+  }, error => {
+    effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));
+    throw error;
   });
   }
 };

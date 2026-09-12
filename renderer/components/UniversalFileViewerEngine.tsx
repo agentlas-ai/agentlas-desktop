@@ -375,7 +375,6 @@ export function UniversalFileViewerEngine({
       /> : null}
         {!session.format && <div className={styles.documentIdentity}>
           <strong title={viewDocument.name}>{viewDocument.name}</strong>
-          {typeof viewDocument.size === "number" && viewDocument.size >= 0 ? <span>{viewDocument.size < 1024 ? `${viewDocument.size} B` : viewDocument.size < 1024 * 1024 ? `${Math.round(viewDocument.size / 1024)} KB` : `${(viewDocument.size / (1024 * 1024)).toFixed(1)} MB`}</span> : null}
         </div>}
         <div className={styles.documentToolbarActions}>
           {availability?.zoom !== false ? <div className={styles.documentZoom} role="group" aria-label={locale === "ko" ? "문서 확대/축소" : "Document zoom"}>
@@ -409,7 +408,12 @@ export function UniversalFileViewerEngine({
         className={styles.documentEngineRoot}
         onStateChange={handleStateChange}
       />
-      {error && <div className={styles.documentError} role="alert"><strong>{locale === "ko" ? "문서를 렌더링하지 못했습니다" : "Could not render this document"}</strong><small>{error}</small></div>}
+      {error && <div className={styles.documentError} role="alert">
+        <strong>{locale === "ko" ? "문서를 열지 못했습니다" : "Could not open this document"}</strong>
+        {onOpenExternal ? <button type="button" onClick={() => void runViewerAction("open", onOpenExternal)}>
+          {locale === "ko" ? "다른 앱에서 열기" : "Open in another app"}
+        </button> : null}
+      </div>}
     </div>
   );
 }
