@@ -235,6 +235,7 @@ import {
   type OneActivityState,
 } from "@/lib/one-activity";
 import styles from "./OneShell.module.css";
+import panelMenu from "@/components/PanelPopover.module.css";
 
 // IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
 // 리렌더를 생략하게 한다(모든 IPC 페이로드는 구조상 JSON 직렬화 가능).
@@ -1518,12 +1519,16 @@ export function OneShell() {
   }, [contextRailOpen, restorePreferredContextRailWidth]);
   useEffect(() => {
     if (!taskMenuOpen) return;
+    document.querySelector<HTMLButtonElement>('[data-one-task-menu] [role="menuitem"]:not(:disabled)')?.focus();
     const closeFromPointer = (event: PointerEvent) => {
       if (event.target instanceof Element && event.target.closest("[data-one-task-menu]")) return;
       setTaskMenuOpen(false);
     };
     const closeFromKeyboard = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setTaskMenuOpen(false);
+      if (event.key === "Escape") {
+        setTaskMenuOpen(false);
+        document.querySelector<HTMLButtonElement>('[data-one-task-menu] > button')?.focus();
+      }
     };
     document.addEventListener("pointerdown", closeFromPointer);
     document.addEventListener("keydown", closeFromKeyboard);
@@ -6701,16 +6706,18 @@ export function OneShell() {
                   <button
                     type="button"
                     aria-label={appLocale === "ko" ? "작업 메뉴" : "Task menu"}
+                    title={appLocale === "ko" ? "작업 메뉴" : "Task menu"}
                     aria-haspopup="menu"
                     aria-expanded={taskMenuOpen}
                     onClick={() => setTaskMenuOpen((value) => !value)}
-                  >{appLocale === "ko" ? "메뉴" : "MENU"}</button>
+                  ><IconMoreHorizontal size={17} /></button>
                   {taskMenuOpen && (
-                    <div className={styles.taskToolbarMenuPopover} role="menu">
+                    <div className={`${panelMenu.panelPopover} ${styles.taskToolbarMenuPopover}`} role="menu">
                       {selected && (
                         <button
                           type="button"
                           role="menuitem"
+                          className={panelMenu.panelMenuRow}
                           disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))}
                           onClick={() => {
                             setTaskMenuOpen(false);
@@ -6722,10 +6729,10 @@ export function OneShell() {
                             : tFor(appLocale, "one.shell.rail.archive_this_work")}
                         </button>
                       )}
-                      <button type="button" role="menuitem" onClick={() => { setTaskMenuOpen(false); startNewConversation(); }}>
+                      <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setTaskMenuOpen(false); startNewConversation(); }}>
                         {tFor(appLocale, "one.shell.rail.new_conversation")}
                       </button>
-                      <button type="button" role="menuitem" onClick={() => { setTaskMenuOpen(false); setSessionSheetOpen(true); }}>
+                      <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setTaskMenuOpen(false); setSessionSheetOpen(true); }}>
                         {appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}
                       </button>
                     </div>

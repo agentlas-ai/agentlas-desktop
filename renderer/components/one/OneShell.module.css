@@ -690,7 +690,6 @@
 }
 
 .taskToolbar > button,
-/* 점 세 개는 무엇을 여는지 알려주지 않는다 — 글자로 쓴다(오너 결정 2026-08-24). */
 .taskToolbarMenu > button {
   height: 40px;
   min-width: 58px;
@@ -707,6 +706,13 @@
   letter-spacing: .06em;
   text-shadow: 0 1px 0 rgba(255, 255, 255, .9), 0 1px 2px rgba(24, 29, 32, .22);
   cursor: pointer;
+}
+
+.taskToolbarMenu > button {
+  min-width: 32px;
+  width: 32px;
+  padding: 0;
+  text-shadow: none;
 }
 
 .taskToolbarMenu > button:hover {
@@ -837,42 +843,14 @@
 
 .taskToolbarMenu { position: relative; grid-column: 6; }
 
-/* ── 팝업 크기 체계 (오너 결정 2026-08-24) ────────────────────────────────
-   팝업1 = 가장 큰 것, 팝업2 = 팝업1 가로의 70%, 팝업3 = 50%.
-   메뉴 말풍선은 이 체계 밖의 작은 것이며, 글자가 잘리지 않을 만큼만 넓힌다. */
 .taskToolbarMenuPopover {
   position: absolute;
   z-index: 70;
   top: calc(100% + 6px);
   right: 0;
   left: auto;
-  width: max-content;
-  min-width: 200px;
-  max-width: 280px;
   display: grid;
-  padding: 6px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 12px;
-  background: var(--paper);
-  box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
 }
-
-.taskToolbarMenuPopover > button {
-  min-height: 36px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink-soft);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.taskToolbarMenuPopover > button:hover,
-.taskToolbarMenuPopover > button:focus-visible { background: var(--paper-3); outline: none; }
-.taskToolbarMenuPopover > button:disabled { color: var(--muted); cursor: default; }
 
 .sidebarRevealButton {
   position: absolute;
