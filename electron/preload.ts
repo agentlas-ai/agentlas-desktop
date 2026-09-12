@@ -45,6 +45,42 @@ import type {
 } from "../shared/site-studio";
 
 const api: AgentlasIpc = {
+  workStart: {
+    create: (input) => ipcRenderer.invoke("workStart:create", input),
+    get: (input) => ipcRenderer.invoke("workStart:get", input),
+    claim: (input) => ipcRenderer.invoke("workStart:claim", input),
+    settle: (input) => ipcRenderer.invoke("workStart:settle", input),
+  },
+  browserAutofill: {
+    snapshot: () => ipcRenderer.invoke("browserAutofill:snapshot"),
+    saveCredential: (input) => ipcRenderer.invoke("browserAutofill:saveCredential", input),
+    removeCredential: (input) => ipcRenderer.invoke("browserAutofill:removeCredential", input),
+    saveContact: (input) => ipcRenderer.invoke("browserAutofill:saveContact", input),
+    removeContact: (input) => ipcRenderer.invoke("browserAutofill:removeContact", input),
+    fillCredential: (input) => ipcRenderer.invoke("browserAutofill:fillCredential", input),
+    fillContact: (input) => ipcRenderer.invoke("browserAutofill:fillContact", input),
+  },
+  browserAnnotation: {
+    start: (input) => ipcRenderer.invoke("browserAnnotation:start", input),
+    stop: (input) => ipcRenderer.invoke("browserAnnotation:stop", input),
+    selection: (input) => ipcRenderer.invoke("browserAnnotation:selection", input),
+    comment: (input) => ipcRenderer.invoke("browserAnnotation:comment", input),
+  },
+  browserUi: {
+    readiness: () => ipcRenderer.invoke("browserUi:readiness"),
+    find: (input) => ipcRenderer.invoke("browserUi:find", input),
+    stopFind: (input) => ipcRenderer.invoke("browserUi:stopFind", input),
+    zoom: (input) => ipcRenderer.invoke("browserUi:zoom", input),
+    devTools: (input) => ipcRenderer.invoke("browserUi:devTools", input),
+    deviceEmulation: (input) => ipcRenderer.invoke("browserUi:deviceEmulation", input),
+    print: (input) => ipcRenderer.invoke("browserUi:print", input),
+    saveScreenshot: (input) => ipcRenderer.invoke("browserUi:saveScreenshot", input),
+    history: (input) => ipcRenderer.invoke("browserUi:history", input),
+    historyAll: (input) => ipcRenderer.invoke("browserUi:historyAll", input),
+    downloads: (input) => ipcRenderer.invoke("browserUi:downloads", input),
+    downloadAction: (input) => ipcRenderer.invoke("browserUi:downloadAction", input),
+    clearData: (input) => ipcRenderer.invoke("browserUi:clearData", input),
+  },
   localModelMigration: {
     snapshot: () => ipcRenderer.invoke("localModelMigration:snapshot"),
     reconcile: () => ipcRenderer.invoke("localModelMigration:reconcile"),
@@ -52,6 +88,9 @@ const api: AgentlasIpc = {
     commitOneSelection: (payload) => ipcRenderer.invoke("localModelMigration:commitOneSelection", payload),
   },
   localModelHub: {
+    operations: () => ipcRenderer.invoke("localModelHub:operations"),
+    installModelPackage: (payload) => ipcRenderer.invoke("localModelHub:installModelPackage", payload),
+    installEnginePackage: (payload) => ipcRenderer.invoke("localModelHub:installEnginePackage", payload),
     searchModels: (payload) => ipcRenderer.invoke("localModelHub:searchModels", payload),
     inspectRepository: (payload) => ipcRenderer.invoke("localModelHub:inspectRepository", payload),
     addModel: (payload) => ipcRenderer.invoke("localModelHub:addModel", payload),
@@ -1035,6 +1074,11 @@ const api: AgentlasIpc = {
   interview: {
     getMode: () => ipcRenderer.invoke("interview:getMode"),
     setMode: (mode: "smart" | "build-only" | "off") => ipcRenderer.invoke("interview:setMode", mode),
+  },
+  officeTaskContext: {
+    get: (chatId: string) => ipcRenderer.invoke("officeTaskContext:get", chatId),
+    submit: (input) => ipcRenderer.invoke("officeTaskContext:submit", input),
+    clear: (input) => ipcRenderer.invoke("officeTaskContext:clear", input),
   },
   invoke: {
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),

@@ -122,7 +122,14 @@ export function ScienceInstallExperience({
 
   const openFromEntry = useCallback(async () => {
     restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const current = await loadStatus().catch(() => suite);
+    let current: ScienceSuiteStatus | null;
+    try {
+      current = await loadStatus();
+    } catch {
+      setErrorCode("science-suite-status-unavailable");
+      setSurface("error");
+      return;
+    }
     if (current?.installed && current.enabled) {
       router.push("/science");
       return;
@@ -154,9 +161,9 @@ export function ScienceInstallExperience({
   }, [loadStatus, router, suite]);
 
   useEffect(() => {
-    void loadStatus();
+    void loadStatus().catch(() => setErrorCode("science-suite-status-unavailable"));
     const off = ipcEvents()?.onProductExtensionChanged?.(() => {
-      void loadStatus();
+      void loadStatus().catch(() => setErrorCode("science-suite-status-unavailable"));
     });
     return () => off?.();
   }, [loadStatus]);

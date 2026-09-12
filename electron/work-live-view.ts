@@ -109,6 +109,36 @@ export function nativeBrowserGuest(ownerId: number, taskScopeId: string, viewId:
   return active?.mode === "browser" ? active.view.webContents : null;
 }
 
+/** Main-only document identity for work that must fail closed across navigation. */
+export function nativeBrowserGuestDocument(ownerId: number, taskScopeId: string, viewId: string): {
+  webContentsId: number;
+  navigationEpoch: number;
+  state: WorkLiveViewStatus["state"];
+  url: string;
+} | null {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (active?.mode !== "browser") return null;
+  return {
+    webContentsId: active.view.webContents.id,
+    navigationEpoch: active.navigationEpoch,
+    state: active.state,
+    url: active.view.webContents.getURL() || active.pendingUrl,
+  };
+}
+
+/** Main-only reverse lookup for partition events such as `will-download`. */
+export function nativeBrowserGuestIdentity(webContentsId: number): {
+  ownerId: number;
+  taskScopeId: string;
+  viewId: string;
+} | null {
+  const matches = [...activeViews.values()].filter((active) => active.mode === "browser"
+    && isCurrent(active) && active.view.webContents.id === webContentsId && active.taskScopeId);
+  return matches.length === 1
+    ? { ownerId: matches[0].ownerId, taskScopeId: matches[0].taskScopeId!, viewId: matches[0].viewId }
+    : null;
+}
+
 
 /** Main-owned viewport includes native scrollbars, unlike CDP visualViewport. */
 export function nativeBrowserGuestViewport(ownerId: number, taskScopeId: string, viewId: string): { width: number; height: number } | null {
@@ -473,6 +503,13 @@ export async function openWorkLiveView(input: {
   };
   activeViews.set(key(input.ownerId, viewId), active);
 
+  if (mode === "browser") {
+    const { ensureBrowserDownloadRegistry } = await import("./browser/download-registry");
+    ensureBrowserDownloadRegistry(nativeBrowserGuestIdentity);
+    const { ensureBrowserHistoryForGuest } = await import("./browser/history-registry");
+    ensureBrowserHistoryForGuest(input.taskScopeId!, viewId, view.webContents);
+  }
+
   view.setBackgroundColor(active.mode === "browser" ? "#ffffff" : "#111111");
   view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   view.webContents.session.setPermissionCheckHandler(() => false);
@@ -495,6 +532,19 @@ export async function openWorkLiveView(input: {
     if (!isCurrent(active) || active.state === "error") return;
     setOwnerGuestVisible(active, active.visible);
     emit(active, { state: "ready", url: view.webContents.getURL(), title: view.webContents.getTitle() });
+  });
+  view.webContents.on("did-stop-loading", () => {
+    if (!isCurrent(active) || active.state !== "loading") return;
+    const currentUrl = view.webContents.getURL();
+    // Attachment responses can emit a main-frame navigation start without
+    // replacing the current document or emitting did-finish-load. In that
+    // bounded case, retain the document that Electron still reports. A real
+    // navigation keeps currentUrl equal to pendingUrl until its own terminal
+    // load event, and an actual failure has already moved state to error.
+    if (!currentUrl || currentUrl === active.pendingUrl) return;
+    active.pendingUrl = currentUrl;
+    setOwnerGuestVisible(active, active.visible);
+    emit(active, { state: "ready", url: currentUrl, title: view.webContents.getTitle() });
   });
   view.webContents.on("did-navigate-in-page", (_event, target, isMainFrame) => {
     if (isCurrent(active) && isMainFrame && active.state === "ready") {
@@ -527,7 +577,11 @@ export async function openWorkLiveView(input: {
     event.preventDefault();
   });
   view.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (permittedNavigation(active, target)) {
+    if (active.mode === "browser" && active.taskScopeId && permittedNavigation(active, target)) {
+      // A popup becomes another task-scoped tab. The untrusted page never gets
+      // a child BrowserWindow or a reference to the Agentlas renderer.
+      void createWorkBrowserTab(active.ownerId, active.taskScopeId, target);
+    } else if (active.mode === "app" && permittedNavigation(active, target)) {
       void view.webContents.loadURL(target).catch(() => undefined);
     }
     return { action: "deny" };

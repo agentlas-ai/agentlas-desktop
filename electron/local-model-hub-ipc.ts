@@ -1,5 +1,6 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
 import { validLocalPackageId } from "../shared/local-model-hub";
+import type { LocalModelOperationView } from "../shared/local-model-hub";
 import type { LocalModelHubManager } from "./local-model-hub/manager";
 
 type Operation = {
@@ -8,6 +9,7 @@ type Operation = {
   controller: AbortController;
   pending: boolean;
   promise: Promise<unknown>;
+  view: LocalModelOperationView;
 };
 
 function object(value: unknown): Record<string, unknown> {
@@ -56,8 +58,8 @@ export function registerLocalModelHubIpc(deps: {
     });
   }
 
-  function operate<T>(event: IpcMainInvokeEvent, input: Record<string, unknown>, material: unknown,
-    run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  function operate<T>(event: IpcMainInvokeEvent, input: Record<string, unknown>, material: readonly unknown[],
+    run: (signal: AbortSignal, phase: (value: LocalModelOperationView["phase"]) => void) => Promise<T>): Promise<T> {
     const id = identifier(input.operationId, "operation_id");
     const encoded = JSON.stringify(material);
     const existing = operations.get(id);
@@ -76,10 +78,33 @@ export function registerLocalModelHubIpc(deps: {
     const controller = new AbortController();
     const ownerDestroyed = () => controller.abort(new Error("local_model_request_owner_closed"));
     event.sender.once("destroyed", ownerDestroyed);
-    const entry: Operation = { ownerId: event.sender.id, material: encoded, controller, pending: true, promise: Promise.resolve() };
+    const kind = material[0] as LocalModelOperationView["kind"];
+    const packageOperation = kind === "downloadEngine" || kind === "downloadModel" || kind === "installModelPackage" || kind === "installEnginePackage";
+    const entry: Operation = { ownerId: event.sender.id, material: encoded, controller, pending: true, promise: Promise.resolve(), view: {
+      operationId: id, kind, packageId: packageOperation ? material[1] as string : null,
+      installationId: packageOperation ? null : material[1] as string,
+      state: "pending", phase: packageOperation ? "download" : kind === "loadModel" ? "load" : "check",
+      startedAt: new Date().toISOString(), finishedAt: null, reasonCode: null,
+    } };
     operations.set(id, entry);
-    entry.promise = Promise.resolve().then(() => run(controller.signal)).finally(() => {
+    entry.promise = Promise.resolve().then(() => run(controller.signal, phase => { entry.view.phase = phase; })).then(result => {
+      const outcome = result && typeof result === "object" ? result as Record<string, unknown> : {};
+      if (typeof outcome.installationId === "string") entry.view.installationId = outcome.installationId;
+      entry.view.state = controller.signal.aborted || outcome.state === "cancelled" ? "cancelled"
+        : outcome.state === "failed" || outcome.state === "unsupported" ? "failed" : "completed";
+      entry.view.reasonCode = entry.view.state === "cancelled" ? "local_model_operation_cancelled"
+        : entry.view.state === "failed" ? "local_model_operation_failed" : null;
+      // A late adapter result may describe an already committed installation, but must
+      // never let a cancelled renderer request continue into selection or another step.
+      controller.signal.throwIfAborted();
+      return result;
+    }, error => {
+      entry.view.state = controller.signal.aborted ? "cancelled" : "failed";
+      entry.view.reasonCode = controller.signal.aborted ? "local_model_operation_cancelled" : "local_model_operation_failed";
+      throw error;
+    }).finally(() => {
       entry.pending = false;
+      entry.view.finishedAt = new Date().toISOString();
       event.sender.removeListener("destroyed", ownerDestroyed);
     });
     return entry.promise as Promise<T>;
@@ -89,6 +114,30 @@ export function registerLocalModelHubIpc(deps: {
   handle("inspectRepository", (_event, input) => deps.manager.inspectRepository(input as unknown as Parameters<LocalModelHubManager["inspectRepository"]>[0]), { read: true });
   handle("addModel", (_event, input) => deps.manager.addModel(input as unknown as Parameters<LocalModelHubManager["addModel"]>[0]));
   handle("snapshot", () => deps.manager.snapshot(), { read: true });
+  handle("operations", event => [...operations.values()].filter(operation => operation.ownerId === event.sender.id)
+    .map(operation => ({ ...operation.view, ...(operation.pending && operation.controller.signal.aborted ? { state: "cancelling" as const } : {}) })), { read: true });
+  handle("installEnginePackage", (event, input) => {
+    const id = packageId(input.packageId);
+    return operate(event, input, ["installEnginePackage", id], async (signal, phase) => {
+      signal.throwIfAborted();
+      const download = await deps.manager.downloadEngine(id, signal);
+      signal.throwIfAborted();
+      if (download.state !== "verified") throw new Error(download.reasonCode ?? "local_engine_download_unverified");
+      phase("install");
+      return await deps.manager.installEngine(id, signal);
+    });
+  });
+  handle("installModelPackage", (event, input) => {
+    const id = packageId(input.packageId);
+    return operate(event, input, ["installModelPackage", id], async (signal, phase) => {
+      signal.throwIfAborted();
+      const download = await deps.manager.downloadModel(id, signal);
+      signal.throwIfAborted();
+      if (download.state !== "verified") throw new Error(download.reasonCode ?? "local_model_download_unverified");
+      phase("install");
+      return await deps.manager.installDownloadedModel(id, signal);
+    });
+  });
   handle("downloadEngine", (event, input) => {
     const id = packageId(input.packageId);
     return operate(event, input, ["downloadEngine", id], (signal) => deps.manager.downloadEngine(id, signal));

@@ -322,6 +322,7 @@ function ChatInputComponent({
   onToggleSwarm,
   queuedCount = 0,
   prefillText = null,
+  appendDraftRequest = null,
   activeChatId = null,
   placeholder,
   projectOrchestration = false,
@@ -380,6 +381,7 @@ function ChatInputComponent({
   queuedCount?: number;
   /** 외부 프리필(프롬프트 저장소 seedOnly) — 입력창이 비었을 때 1회 주입, 전송은 사용자가. */
   prefillText?: string | null;
+  appendDraftRequest?: { id: string; chatId: string; text: string } | null;
   /** 현재 채팅 id — 바뀌면 세션 전용 실행 상태(추천 시트·모드 토글)를 리셋해 세션 간 누수 방지. */
   activeChatId?: string | null;
   /** Product-surface specific result prompt. */
@@ -526,6 +528,17 @@ function ChatInputComponent({
     setInputState(restored.input);
     setStagedSteeringState(null);
   }, [activeChatId]);
+
+  const appendedDraftIds = useRef(new Set<string>());
+  useEffect(() => {
+    if (!appendDraftRequest || appendDraftRequest.chatId !== activeChatId
+      || appendedDraftIds.current.has(appendDraftRequest.id)) return;
+    appendedDraftIds.current.add(appendDraftRequest.id);
+    if (appendedDraftIds.current.size > 100) appendedDraftIds.current.delete(appendedDraftIds.current.values().next().value!);
+    setInput(current => current.trim() ? `${current}\n\n${appendDraftRequest.text}` : appendDraftRequest.text);
+    const frame = requestAnimationFrame(() => { const node = textareaRef.current; node?.focus(); node?.setSelectionRange(node.value.length, node.value.length); });
+    return () => cancelAnimationFrame(frame);
+  }, [appendDraftRequest, activeChatId]);
 
   // 세션 격리 — 채팅을 바꾸면 이전 세션의 실행 의도 상태(추천 시트·모드 토글·선택)를 버린다.
   // ChatInput은 채팅별로 remount되지 않아서, 이게 없으면 A에서 연 추천 바텀시트가 B로 넘어가
@@ -1826,6 +1839,9 @@ function ChatInputComponent({
             {/* 권한 칩 */}
             <button
               className="chat-input-chip"
+              aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
+              title={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
+              aria-expanded={permOpen}
               data-popover-trigger="permission"
               onClick={() => setPermOpen((v) => !v)}
               disabled={disabled}
@@ -1859,7 +1875,9 @@ function ChatInputComponent({
                   data-popover-trigger="model"
                   onClick={() => setModelOpen((v) => !v)}
                   disabled={disabled}
-                  title={t("chatinput.model")}
+                  title={`${t("chatinput.model")}: ${modelChipLabel(runtime, modelOptions ?? [])}`}
+                  aria-label={`${t("chatinput.model")}: ${modelChipLabel(runtime, modelOptions ?? [])}`}
+                  aria-expanded={modelOpen}
                   style={{
                     ...toolBtnStyle(modelOpen),
                     width: "auto",

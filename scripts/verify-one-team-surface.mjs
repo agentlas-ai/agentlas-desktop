@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import ts from "typescript";
 
 const root = resolve(new URL(".", import.meta.url).pathname, "..");
 const taskforces = readFileSync(resolve(root, "renderer/components/one/OneTaskforces.tsx"), "utf8");
@@ -264,7 +265,21 @@ assert.doesNotMatch(activity, /onBrowserObserved\?\.\(preferredBrowserUrl\)/);
 assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
 assert.match(taskBrowser, /status\.taskScopeId !== taskScopeId/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);
-assert.match(activity, /<TaskBrowser key=\{screenChatId\}/);
+const panelSyntax = ts.createSourceFile("TaskSidePanel.tsx", activity, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const taskBrowsers = [];
+function visitPanel(node) {
+  if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText(panelSyntax) === "TaskBrowser") taskBrowsers.push(node);
+  ts.forEachChild(node, visitPanel);
+}
+visitPanel(panelSyntax);
+assert.ok(taskBrowsers.length > 0, "the task panel exposes a browser");
+for (const browser of taskBrowsers) {
+  for (const name of ["key", "taskScopeId"]) {
+    const attribute = browser.attributes.properties.find(item => ts.isJsxAttribute(item) && item.name.getText(panelSyntax) === name);
+    assert.ok(attribute?.initializer && ts.isJsxExpression(attribute.initializer));
+    assert.equal(attribute.initializer.expression?.getText(panelSyntax), "screenChatId", `browser ${name} follows the active chat regardless of JSX attribute order`);
+  }
+}
 /*
  * 오너 지시 2026-08-24: 탭은 고정 목록이 아니다. 계약은 "다섯 보기가 모두
  * 도달 가능하다" 이지, "네 개가 언제나 떠 있다" 가 아니다. 결과와 Browser는

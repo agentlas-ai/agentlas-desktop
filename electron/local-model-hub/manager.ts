@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type {
   LocalEngineInstallationReceipt,
   LocalModelCapabilityReceipt,
@@ -25,6 +25,7 @@ import {
 import { LocalPackageDownloadManager, sha256File } from "./download-manager";
 import { HuggingFaceModelIndex } from "./huggingface";
 import { LocalEngineInstaller } from "./engine-installer";
+import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatchedLocalProcess } from "./platform";
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 
 interface PersistedHubState {
@@ -55,6 +56,7 @@ interface ProcessLease {
   modelSha256: string;
   port: number;
   createdAt: string;
+  processCreatedAt?: string | null;
 }
 
 export interface LocalModelHubManagerOptions {
@@ -127,13 +129,20 @@ function processAlive(pid: number): boolean {
   }
 }
 
-async function processCommand(pid: number): Promise<string | null> {
-  if (process.platform !== "darwin" && process.platform !== "linux") return null;
-  return await new Promise((resolveCommand) => {
-    execFile("/bin/ps", ["-p", String(pid), "-o", "command="], { maxBuffer: 32_768 }, (error, stdout) => {
-      resolveCommand(error ? null : stdout.trim());
-    });
+
+export async function probeLocalEngineHealth(endpoint: string, authToken: string, remainingMs: number, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const boundary = new Promise<never>((_resolve,reject) => {
+    abort = () => { controller.abort(); reject(new DOMException("Aborted","AbortError")); };
+    signal?.addEventListener("abort",abort,{once:true});
+    timer = setTimeout(() => { controller.abort(); reject(new Error("engine_health_timeout")); },Math.max(1,remainingMs));
   });
+  try {
+    return await Promise.race([boundary, fetchImpl(`${endpoint}/health`, { signal: controller.signal, headers: { authorization: `Bearer ${authToken}` } }).then(response => response.ok).catch(() => false)]);
+  } finally { if (timer) clearTimeout(timer); if (abort) signal?.removeEventListener("abort",abort); }
 }
 
 export class LocalModelHubManager {
@@ -273,11 +282,11 @@ export class LocalModelHubManager {
       await sha256File(lease.executablePath).catch(() => null) !== lease.executableSha256
       || await sha256File(lease.modelPath).catch(() => null) !== lease.modelSha256
     ) throw new Error("local_model_process_lease_hash_mismatch");
-    const command = await processCommand(lease.pid);
-    if (!command || !command.includes(lease.executablePath) || !command.includes(lease.modelPath)) {
+    const identity = await observeLocalProcessIdentity(lease.pid);
+    if (!identity || !matchesLocalProcessIdentity(identity, lease)) {
       throw new Error("local_model_process_lease_command_mismatch");
     }
-    process.kill(lease.pid, "SIGTERM");
+    await terminateMatchedLocalProcess(lease);
     await rm(this.processLeasePath, { force: true });
   }
 
@@ -411,12 +420,13 @@ export class LocalModelHubManager {
     return await this.recordModelInstallation(identity.packageId, "user-import");
   }
 
-  async installEngine(packageId: string): Promise<LocalEngineInstallationReceipt> {
+  async installEngine(packageId: string, signal?: AbortSignal): Promise<LocalEngineInstallationReceipt> {
     await this.readyForMutation();
     const identity = localEnginePackage(packageId);
     if (!identity) throw new Error("unknown_engine_package");
     const archive = this.downloader.verifiedPath(identity);
-    const receipt = await this.installer.install(identity, archive);
+    const receipt = await this.installer.install(identity, archive, signal);
+    signal?.throwIfAborted();
     this.state.engineInstallations = bounded([
       ...this.state.engineInstallations.filter((item) => item.enginePackageId !== packageId),
       receipt,
@@ -425,14 +435,16 @@ export class LocalModelHubManager {
     return receipt;
   }
 
-  async installDownloadedModel(packageId: string): Promise<LocalModelInstallationReceipt> {
+  async installDownloadedModel(packageId: string, signal?: AbortSignal): Promise<LocalModelInstallationReceipt> {
     await this.readyForMutation();
-    return await this.recordModelInstallation(packageId, "download");
+    signal?.throwIfAborted();
+    return await this.recordModelInstallation(packageId, "download", signal);
   }
 
   private async recordModelInstallation(
     packageId: string,
     source: LocalModelInstallationReceipt["source"],
+    signal?: AbortSignal,
   ): Promise<LocalModelInstallationReceipt> {
     const identity = this.modelPackage(packageId);
     if (!identity) throw new Error("unknown_model_package");
@@ -440,6 +452,8 @@ export class LocalModelHubManager {
     const file = await stat(modelPath).catch(() => null);
     if (!file?.isFile() || file.size !== identity.byteLength) throw new Error("verified_model_missing");
     if (await sha256File(modelPath) !== identity.sha256) throw new Error("verified_model_sha256_mismatch");
+    // Stop may arrive during the file hash. Refuse the installation before its durable commit.
+    signal?.throwIfAborted();
     const compatible = compatibleEnginePackage();
     const engineInstalled = compatible.item
       ? this.state.engineInstallations.find((item) => item.enginePackageId === compatible.item!.packageId)
@@ -500,7 +514,7 @@ export class LocalModelHubManager {
     if (!engineReceipt) throw new Error("engine_not_installed");
     const executable = this.installer.executablePath(compatible.item, engineReceipt);
     const modelPath = this.downloader.verifiedPath(model);
-    if (await sha256File(executable) !== engineReceipt.executableSha256) throw new Error("engine_executable_sha256_mismatch");
+    await this.installer.verifyRuntimeFiles(compatible.item, engineReceipt);
     if (await sha256File(modelPath) !== model.sha256) throw new Error("model_file_sha256_mismatch");
 
     if (this.activeInference.size > 0) throw new Error("local_model_runs_active");
@@ -534,14 +548,24 @@ export class LocalModelHubManager {
         "--jinja",
         "--no-webui",
         "--api-key", authToken,
-      ], { stdio: "ignore", windowsHide: true });
+      ], { stdio: "ignore", windowsHide: true, cwd: dirname(executable), env: { ...process.env, GGML_BACKEND_PATH: undefined } });
+      const exitPromise = new Promise<never>((_resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, exitSignal) => reject(new Error(`engine_exited_${code ?? exitSignal ?? "unknown"}`)));
+      });
+      void exitPromise.catch(() => {});
       this.residentProcess = child;
       this.residentAuthToken = authToken;
       if (!child.pid) throw new Error("engine_process_pid_missing");
+      const processIdentity = process.platform === "win32" ? await observeLocalProcessIdentity(child.pid) : null;
+      if (process.platform === "win32" && (!processIdentity || !matchesLocalProcessIdentity(processIdentity, {
+        pid: child.pid, executablePath: executable, modelPath, processCreatedAt: processIdentity.createdAt,
+      }))) throw new Error("local_model_process_identity_unavailable");
       const processLease: ProcessLease = {
         schemaVersion: 1,
         processEpoch,
         pid: child.pid,
+        processCreatedAt: processIdentity?.createdAt ?? null,
         executablePath: executable,
         executableSha256: engineReceipt.executableSha256,
         modelPath,
@@ -550,23 +574,17 @@ export class LocalModelHubManager {
         createdAt: new Date().toISOString(),
       };
       await writeFile(this.processLeasePath, `${JSON.stringify(processLease)}\n`, { encoding: "utf8", mode: 0o600 });
-      const exitPromise = new Promise<never>((_resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, exitSignal) => reject(new Error(`engine_exited_${code ?? exitSignal ?? "unknown"}`)));
-      });
       const deadline = Date.now() + this.healthTimeoutMs;
       for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         if (generation !== this.loadGeneration) throw new Error("model_load_obsolete");
         const healthy = await Promise.race([
-          this.fetchImpl(`${endpoint}/health`, {
-            signal,
-            headers: { authorization: `Bearer ${authToken}` },
-          }).then((response) => response.ok).catch(() => false),
+          probeLocalEngineHealth(endpoint, authToken, deadline - Date.now(), this.fetchImpl, signal),
           exitPromise,
         ]);
-        if (healthy) break;
+        signal?.throwIfAborted();
         if (Date.now() >= deadline) throw new Error("engine_health_timeout");
+        if (healthy) break;
         await new Promise((resolveWait) => setTimeout(resolveWait, 150));
       }
       if (generation !== this.loadGeneration) throw new Error("model_load_obsolete");
@@ -652,30 +670,38 @@ export class LocalModelHubManager {
     this.residentProcess = null;
     this.residentReceipt = null;
     this.residentAuthToken = null;
-    if (!child || child.exitCode !== null) {
-      await this.removeProcessLease(processEpoch);
+    if (!child) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      await this.removeProcessLease(processEpoch, child.pid);
       return;
     }
-    await new Promise<void>((resolveDone) => {
+    try { await new Promise<void>((resolveDone, reject) => {
+      let forced: ReturnType<typeof setTimeout> | undefined;
+      const done = () => { clearTimeout(timer); if (forced) clearTimeout(forced); resolveDone(); };
       const timer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
-        resolveDone();
-      }, 5_000);
-      child.once("exit", () => { clearTimeout(timer); resolveDone(); });
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        clearTimeout(timer);
-        resolveDone();
-      }
-    });
-    await this.removeProcessLease(processEpoch);
+        try { child.kill("SIGKILL"); } catch { /* Exit still needs observation. */ }
+        forced = setTimeout(() => {
+          child.removeListener("exit", done);
+          if (child.exitCode !== null || child.signalCode !== null) resolveDone();
+          else reject(new Error("local_model_process_shutdown_unconfirmed"));
+        }, 2000);
+      }, 5000);
+      child.once("exit", done);
+      try { child.kill("SIGTERM"); } catch { /* Keep waiting for the terminal receipt. */ }
+    }); } catch (error) {
+      // Keep a retryable handle and its durable lease, while leaving it unavailable
+      // for inference. A timeout is not evidence that the process exited.
+      if (!this.residentProcess) this.residentProcess = child;
+      throw error;
+    }
+    await this.removeProcessLease(processEpoch, child.pid);
   }
 
-  private async removeProcessLease(expectedEpoch: string | null): Promise<void> {
+  private async removeProcessLease(expectedEpoch: string | null, expectedPid?: number): Promise<void> {
     try {
       const lease = JSON.parse(await readFile(this.processLeasePath, "utf8")) as ProcessLease;
       if (expectedEpoch && lease.processEpoch !== expectedEpoch) return;
+      if (expectedPid !== undefined && lease.pid !== expectedPid) return;
       await rm(this.processLeasePath, { force: true });
     } catch {
       // Already absent.

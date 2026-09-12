@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, readdir, readlink, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { chmod, lstat, mkdir, open, readdir, readlink, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   LocalEngineInstallationReceipt,
   LocalEnginePackageIdentity,
@@ -11,6 +11,7 @@ import {
   assertLocalEnginePackageIdentity,
 } from "../../shared/local-model-hub";
 import { sha256File } from "./download-manager";
+import { extractEngineZip } from "./archive";
 
 interface CommandResult {
   exitCode: number | null;
@@ -20,7 +21,10 @@ interface CommandResult {
 
 export interface LocalEngineInstallerOptions {
   ghCandidates?: readonly string[];
-  commandRunner?: (executable: string, args: readonly string[]) => Promise<CommandResult>;
+  /** Injectable host facts for archive policy tests; production always uses actual process facts. */
+  platform?: NodeJS.Platform;
+  arch?: string;
+  commandRunner?: (executable: string, args: readonly string[], signal?: AbortSignal) => Promise<CommandResult>;
 }
 
 function boundedAppend(current: string, chunk: Buffer): string {
@@ -28,9 +32,10 @@ function boundedAppend(current: string, chunk: Buffer): string {
   return `${current}${chunk.toString("utf8")}`.slice(0, 1_048_576);
 }
 
-async function runCommand(executable: string, args: readonly string[]): Promise<CommandResult> {
+async function runCommand(executable: string, args: readonly string[], signal?: AbortSignal): Promise<CommandResult> {
   return await new Promise((resolveResult, reject) => {
-    const child = spawn(executable, [...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const boundedSignal = AbortSignal.any([AbortSignal.timeout(60000), ...(signal ? [signal] : [])]);
+    const child = spawn(executable, [...args], { signal: boundedSignal, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout = boundedAppend(stdout, chunk); });
@@ -55,6 +60,18 @@ async function findGh(candidates: readonly string[]): Promise<string | null> {
   return null;
 }
 
+export async function verifyWindowsPortableExecutable(path: string, arch: string): Promise<void> {
+  const file = await open(path,"r");
+  try {
+    const size = (await file.stat()).size, header = Buffer.alloc(64);
+    if ((await file.read(header,0,64,0)).bytesRead !== 64 || header.toString("ascii",0,2) !== "MZ") throw new Error("engine_pe_header_invalid");
+    const offset = header.readUInt32LE(60), coff = Buffer.alloc(6);
+    if (offset < 64 || offset+6 > size || (await file.read(coff,0,6,offset)).bytesRead !== 6 || coff.readUInt32LE(0) !== 0x00004550) throw new Error("engine_pe_header_invalid");
+    const machine = coff.readUInt16LE(4);
+    if (machine !== (arch === "x64" ? 0x8664 : arch === "arm64" ? 0xaa64 : -1)) throw new Error("engine_pe_architecture_mismatch");
+  } finally { await file.close(); }
+}
+
 function safeTarEntry(entry: string): boolean {
   if (entry === "." || entry === "./") return true;
   const normalized = entry.replaceAll("\\", "/").replace(/^\.\//, "");
@@ -62,7 +79,7 @@ function safeTarEntry(entry: string): boolean {
   return !normalized.split("/").some((part) => part === "..");
 }
 
-async function walkFiles(root: string): Promise<string[]> {
+async function walkFiles(root: string, rejectLinks = false): Promise<string[]> {
   const result: string[] = [];
   const pending = [root];
   const resolvedRoot = resolve(root);
@@ -72,6 +89,7 @@ async function walkFiles(root: string): Promise<string[]> {
       const path = join(current, entry.name);
       const info = await lstat(path);
       if (info.isSymbolicLink()) {
+        if (rejectLinks) throw new Error("engine_archive_symlink_rejected");
         const target = resolve(dirname(path), await readlink(path));
         if (!target.startsWith(`${resolvedRoot}${sep}`)) throw new Error("engine_archive_symlink_rejected");
         continue;
@@ -85,29 +103,41 @@ async function walkFiles(root: string): Promise<string[]> {
 }
 
 export class LocalEngineInstaller {
-  private readonly commandRunner: (executable: string, args: readonly string[]) => Promise<CommandResult>;
+  private readonly commandRunner: (executable: string, args: readonly string[], signal?: AbortSignal) => Promise<CommandResult>;
   private readonly ghCandidates: readonly string[];
+  private readonly platform: NodeJS.Platform;
+  private readonly arch: string;
 
   constructor(private readonly installRoot: string, options: LocalEngineInstallerOptions = {}) {
     this.commandRunner = options.commandRunner ?? runCommand;
-    this.ghCandidates = options.ghCandidates ?? ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+    this.platform = options.platform ?? process.platform;
+    this.arch = options.arch ?? process.arch;
+    this.ghCandidates = options.ghCandidates ?? (this.platform === "win32" ? [
+      ...(process.env.ProgramFiles ? [join(process.env.ProgramFiles,"GitHub CLI","gh.exe")] : []),
+      ...(process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA,"Microsoft","WinGet","Links","gh.exe")] : []),
+      ...(process.env.PATH ?? "").split(";").filter(value => isAbsolute(value)).map(value => join(value,"gh.exe")),
+    ] : ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]);
   }
 
   async install(
     identity: LocalEnginePackageIdentity,
     verifiedArchivePath: string,
+    signal?: AbortSignal,
   ): Promise<LocalEngineInstallationReceipt> {
+    signal?.throwIfAborted();
     assertLocalEnginePackageIdentity(identity);
-    if (identity.platform !== process.platform || identity.arch !== process.arch) {
+    if (identity.platform !== this.platform || identity.arch !== this.arch) {
       throw new Error("engine_package_host_mismatch");
     }
-    if (identity.archiveFormat !== "tar.gz") throw new Error("engine_archive_format_unsupported");
+    if (identity.archiveFormat !== (this.platform === "win32" ? "zip" : "tar.gz")) throw new Error("engine_archive_format_unsupported");
     if (basename(verifiedArchivePath) !== identity.fileName) throw new Error("engine_archive_name_mismatch");
     if (!await regularFile(verifiedArchivePath)) throw new Error("engine_archive_missing");
+    if ((await stat(verifiedArchivePath)).size !== identity.byteLength) throw new Error("engine_archive_size_mismatch");
     if (await sha256File(verifiedArchivePath) !== identity.sha256) throw new Error("engine_archive_sha256_mismatch");
 
     const gh = await findGh(this.ghCandidates);
     if (!gh) throw new Error("engine_attestation_verifier_unavailable");
+    signal?.throwIfAborted();
     const attestation = await this.commandRunner(gh, [
       "attestation",
       "verify",
@@ -116,16 +146,18 @@ export class LocalEngineInstaller {
       identity.provenance.repository,
       "--signer-repo",
       identity.provenance.signerWorkflowRepository,
-    ]);
+    ], signal);
+    signal?.throwIfAborted();
     if (attestation.exitCode !== 0) throw new Error("engine_artifact_attestation_failed");
 
     const tar = "/usr/bin/tar";
-    if (!await regularFile(tar)) throw new Error("engine_archive_reader_unavailable");
-    const listing = await this.commandRunner(tar, ["-tzf", verifiedArchivePath]);
-    if (listing.exitCode !== 0) throw new Error("engine_archive_listing_failed");
-    const entries = listing.stdout.split(/\r?\n/).filter(Boolean);
-    if (entries.length === 0 || entries.some((entry) => !safeTarEntry(entry))) {
-      throw new Error("engine_archive_path_rejected");
+    if (identity.archiveFormat === "tar.gz") {
+      if (!await regularFile(tar)) throw new Error("engine_archive_reader_unavailable");
+      const listing = await this.commandRunner(tar, ["-tzf", verifiedArchivePath], signal);
+      signal?.throwIfAborted();
+      if (listing.exitCode !== 0) throw new Error("engine_archive_listing_failed");
+      const entries = listing.stdout.split(/\r?\n/).filter(Boolean);
+      if (entries.length === 0 || entries.some((entry) => !safeTarEntry(entry))) throw new Error("engine_archive_path_rejected");
     }
 
     await mkdir(this.installRoot, { recursive: true, mode: 0o700 });
@@ -133,18 +165,27 @@ export class LocalEngineInstaller {
     const finalRoot = join(this.installRoot, identity.sha256);
     await mkdir(temp, { recursive: true, mode: 0o700 });
     try {
-      const extraction = await this.commandRunner(tar, ["-xzf", verifiedArchivePath, "-C", temp]);
-      if (extraction.exitCode !== 0) throw new Error("engine_archive_extraction_failed");
-      const files = await walkFiles(temp);
-      const executables = files.filter((file) => basename(file) === "llama-server");
+      if (identity.archiveFormat === "zip") await extractEngineZip(verifiedArchivePath, temp, signal);
+      else {
+        const extraction = await this.commandRunner(tar, ["-xzf", verifiedArchivePath, "-C", temp], signal);
+        if (extraction.exitCode !== 0) throw new Error("engine_archive_extraction_failed");
+      }
+      signal?.throwIfAborted();
+      const files = await walkFiles(temp, this.platform === "win32");
+      if (this.platform === "win32") for (const file of files) {
+        if (/\.(?:exe|dll)$/i.test(file)) await verifyWindowsPortableExecutable(file,identity.arch);
+      }
+      const executables = files.filter((file) => basename(file) === (this.platform === "win32" ? "llama-server.exe" : "llama-server"));
       if (executables.length !== 1) throw new Error("engine_executable_ambiguous");
       const executable = executables[0]!;
       const executableRelativePath = relative(temp, executable);
       if (executableRelativePath.startsWith("..") || resolve(temp, executableRelativePath) !== executable) {
         throw new Error("engine_executable_path_rejected");
       }
-      await chmod(executable, 0o700);
+      if (this.platform !== "win32") await chmod(executable, 0o700);
       const executableSha256 = await sha256File(executable);
+      const runtimeFiles = await Promise.all(files.map(async file => ({ relativePath: relative(temp,file).split(sep).join("/"), sha256: await sha256File(file), byteLength: (await stat(file)).size })));
+      signal?.throwIfAborted();
       await rm(finalRoot, { recursive: true, force: true });
       await rename(temp, finalRoot);
       return {
@@ -155,12 +196,33 @@ export class LocalEngineInstaller {
         provenanceVerified: true,
         executableSha256,
         executableRelativePath: executableRelativePath.split(sep).join("/"),
+        runtimeFiles,
         installedAt: new Date().toISOString(),
       };
     } catch (error) {
       await rm(temp, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  async verifyRuntimeFiles(identity: LocalEnginePackageIdentity, receipt: LocalEngineInstallationReceipt): Promise<void> {
+    const executable = this.executablePath(identity, receipt);
+    if (!receipt.runtimeFiles) {
+      if (identity.platform === "win32") throw new Error("engine_runtime_manifest_missing");
+      if (await sha256File(executable) !== receipt.executableSha256) throw new Error("engine_executable_sha256_mismatch");
+      return;
+    }
+    if (!receipt.runtimeFiles.length || receipt.runtimeFiles.length > 4096) throw new Error("engine_runtime_manifest_invalid");
+    const root = join(this.installRoot, identity.sha256), files = await walkFiles(root, identity.platform === "win32");
+    const actual = new Map(files.map(file => [relative(root,file).split(sep).join("/"), file]));
+    if (actual.size !== receipt.runtimeFiles.length) throw new Error("engine_runtime_files_changed");
+    for (const expected of receipt.runtimeFiles) {
+      const file = actual.get(expected.relativePath);
+      if (!file || !/^[a-f0-9]{64}$/.test(expected.sha256) || (await stat(file)).size !== expected.byteLength
+        || await sha256File(file) !== expected.sha256) throw new Error("engine_runtime_files_changed");
+      actual.delete(expected.relativePath);
+    }
+    if (actual.size || await sha256File(executable) !== receipt.executableSha256) throw new Error("engine_runtime_files_changed");
   }
 
   executablePath(

@@ -1,5 +1,8 @@
 "use client";
 
+import { useWorkStartHandoff } from "@/lib/work-start-intent";
+import { browserAnnotationDraftText } from "@shared/browser-annotation";
+
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice } from "../../shared/types";
@@ -2207,6 +2210,7 @@ function ChatPage() {
   const lastRunIdRef = useRef<string | null>(null);
   const lastFinalRunIdRef = useRef<string | null>(null);
   // 프롬프트 저장소 seedOnly 프리필 — 자동 전송 없이 입력창에만 채울 텍스트.
+  const [browserDraftRequest, setBrowserDraftRequest] = useState<{ id: string; chatId: string; text: string } | null>(null);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
   // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
@@ -4640,6 +4644,8 @@ function ChatPage() {
     ],
   );
 
+  useWorkStartHandoff({ intentId: searchParams.get("workStart"), chatId, ready: Boolean(chat && agent), send, prefill: setComposerPrefill, notice: setSessionNotice });
+
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
     const api = ipc();
@@ -6606,7 +6612,7 @@ function ChatPage() {
         <ChatInput
           onSend={handleChatInputSend}
           queuedCount={queuedSteers.length}
-          prefillText={composerPrefill}
+          prefillText={composerPrefill} appendDraftRequest={browserDraftRequest}
           activeChatId={chat.id}
           onSessionAction={handleSessionAction}
           onRecommendPreview={handleRecommendPreview}
@@ -6656,7 +6662,12 @@ function ChatPage() {
         minWidth={RIGHT_PANEL_MIN_WIDTH}
         maxWidth={clampRightPanelWidth(RIGHT_PANEL_MAX_WIDTH)}
         defaultWidth={RIGHT_PANEL_DEFAULT_WIDTH}
-        screenChatId={chat.id}
+        onBrowserAnnotation={receipt => {
+                  if (receipt.selection.taskScopeId !== chat.id) return false;
+                  setBrowserDraftRequest({ id: receipt.annotationId, chatId: chat.id, text: browserAnnotationDraftText(receipt, locale === "ko" ? "ko" : "en") });
+                  return true;
+                }}
+                screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
         browserHistoryUrl={workBrowserHistoryUrl}
         browserPreviewUrl={mediaPreview?.viewerKind === "browser" ? mediaPreview.browserUrl : undefined}

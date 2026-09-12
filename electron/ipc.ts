@@ -422,6 +422,7 @@ import {
   unarchiveChat,
 } from "./store/chats";
 import { listChatFileSnapshot, persistChatFileSnapshot, readChatFileSnapshotForExternalOpen } from "./store/chat-message-attachments";
+import { clearOfficeTaskContext, getOfficeTaskContextState, OfficeContextError, submitOfficeTaskContext } from "./office-task-context";
 import {
   deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
@@ -453,6 +454,11 @@ import {
 import { judge, judgeSubset } from "./system-agents/judgment";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
+import { withInvocationPreflightAccounting } from "./long-run/accounting-context";
+import { registerWorkStartIpc } from "./work-start";
+import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
+import { registerBrowserUiIpc } from "./browser/ui-ipc";
+import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
 import { continueOneFromTaskResult } from "./one/task-continuation";
@@ -1481,6 +1487,10 @@ async function desktopRuntimeRolePoolState(): Promise<RuntimeRolePoolState> {
 
 export function registerIpcHandlers(): void {
   const ipcMain = developmentIpcBoundary(electronIpcMain);
+  registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerWorkStartIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerBrowserAnnotationIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;
   subscribePluginBuilderProgress((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -2427,6 +2437,23 @@ export function registerIpcHandlers(): void {
   // arbitrary path into a durable chat file.
   ipcMain.handle("chatFiles:snapshot", (_e, input: unknown) => persistChatFileSnapshot(input as Parameters<typeof persistChatFileSnapshot>[0]));
   ipcMain.handle("chatFiles:listGroup", (_e, input: unknown) => listChatFileSnapshot(input as Parameters<typeof listChatFileSnapshot>[0]));
+  ipcMain.handle("officeTaskContext:get", (event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return getOfficeTaskContextState(chatId);
+  });
+  ipcMain.handle("officeTaskContext:submit", (event, input: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    try { return { ok: true, receipt: submitOfficeTaskContext(input) }; } catch (error) {
+      if (!(error instanceof OfficeContextError)) throw error;
+      const revision = error.reasonCode === "office_context_revision_conflict"
+        ? getOfficeTaskContextState((input as { chatId: string }).chatId).revision : undefined;
+      return { ok: false, reasonCode: error.reasonCode, ...(revision !== undefined ? { currentRevision: revision } : {}) };
+    }
+  });
+  ipcMain.handle("officeTaskContext:clear", (event, input: { chatId: string; expectedContextRevision: number }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return clearOfficeTaskContext(input);
+  });
   ipcMain.handle("chatFiles:appendMessage", (event, input: unknown) => {
     assertTrustedSitePublishIpcSender(event);
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("Invalid chat attachment message");
@@ -6480,10 +6507,11 @@ export function registerIpcHandlers(): void {
       }
       // Best-effort with a tight budget: a miss remains unresolved and must
       // never be replaced by a lexical or static verdict.
-      await Promise.all([
+      request.runId ??= randomUUID();
+      await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
         prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
         prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
-      ]).catch(() => undefined);
+      ])).catch(() => undefined);
     }
     return invocationService.start(request);
   });

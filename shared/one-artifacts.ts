@@ -15,6 +15,8 @@ export interface OneArtifactPreviewCapabilityV1 {
   kind: "image" | "video" | "audio" | "document" | "spreadsheet" | "archive" | "data";
   sizeBytes: number;
   expiresAt: string;
+  /** Main reopens and hashes the exact source before issuing this capability. */
+  sha256?: string;
 }
 
 export interface OneArtifactPreviewRevokeV1 extends OneArtifactBindingRequestV1 {
@@ -58,7 +60,7 @@ export function isOneArtifactPreviewRevokeV1(value: unknown): value is OneArtifa
 }
 
 export function isOneArtifactPreviewCapabilityV1(value: unknown): value is OneArtifactPreviewCapabilityV1 {
-  if (!isRecord(value) || !onlyKeys(value, ["capabilityUrl", "mimeType", "kind", "sizeBytes", "expiresAt"])) return false;
+  if (!isRecord(value) || !onlyKeys(value, ["capabilityUrl", "mimeType", "kind", "sizeBytes", "expiresAt", "sha256"])) return false;
   return typeof value.capabilityUrl === "string"
     && CAPABILITY_URL_RE.test(value.capabilityUrl)
     && typeof value.mimeType === "string"
@@ -67,5 +69,6 @@ export function isOneArtifactPreviewCapabilityV1(value: unknown): value is OneAr
     && Number.isSafeInteger(value.sizeBytes)
     && Number(value.sizeBytes) > 0
     && typeof value.expiresAt === "string"
-    && Number.isFinite(Date.parse(value.expiresAt));
+    && Number.isFinite(Date.parse(value.expiresAt))
+    && (value.sha256 === undefined || (typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256)));
 }

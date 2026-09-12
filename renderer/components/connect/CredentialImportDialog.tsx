@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { browserLoginImportDiagnostic, browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
@@ -41,7 +41,6 @@ export function CredentialImportDialog({
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
-  const [sessionDiagnostic, setSessionDiagnostic] = useState<string | null>(null);
   const [loginRequired, setLoginRequired] = useState<string[]>([]);
 
   /*
@@ -130,7 +129,6 @@ export function CredentialImportDialog({
     setError(null);
     setLoginRequired([]);
     setSessionNotice(null);
-    setSessionDiagnostic(null);
     try {
       const res = await api.browser.importCredentials(profileId, [...checked]);
       if (!res.ok) {
@@ -140,7 +138,6 @@ export function CredentialImportDialog({
       // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
       const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
       setSessionNotice(nativeNotice);
-      setSessionDiagnostic(browserLoginImportDiagnostic(res.nativeSession, ko));
       const linked = res.linkedSites.length;
       const skipped = res.skipped.length;
       const protectedSites = res.requiresLoginSites ?? [];
@@ -180,13 +177,13 @@ export function CredentialImportDialog({
 
   return (
     <div className="cid-backdrop" onClick={onClose}>
-      <div className="cid-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="cid-panel" role="dialog" aria-modal="true" aria-labelledby="credential-import-title" onClick={(e) => e.stopPropagation()}>
         <header className="cid-head">
-          <h2>{ko ? "브라우저에서 로그인 가져오기" : "Import logins from your browser"}</h2>
+          <h2 id="credential-import-title">{ko ? "브라우저에서 로그인 가져오기" : "Import logins from your browser"}</h2>
           <p>
             {ko
-              ? "평소 쓰는 브라우저에 이미 로그인된 곳입니다. 고른 곳의 세션만 Agentlas 전용 프로필로 복사합니다. 비밀번호와 결제수단은 가져오지 않습니다."
-              : "These are places you are already signed in to. Only the sessions you pick are copied into the Agentlas profile. Passwords and payment methods are never imported."}
+              ? "선택한 사이트의 로그인 상태를 가져옵니다."
+              : "Import sign-in sessions for the sites you select."}
           </p>
         </header>
 
@@ -232,8 +229,8 @@ export function CredentialImportDialog({
         {!scanning && relaxed && domains.length > 0 && (
           <div className="cid-relaxed">
             {ko
-              ? "로그인 쿠키가 뚜렷한 사이트가 적게 잡혀서, 이 프로필의 사이트를 모두 보여줍니다."
-              : "Few sites showed clear login cookies, so every site in this profile is listed."}
+              ? "로그인 여부를 확인할 수 없어 모든 사이트를 표시합니다."
+              : "Showing all sites because sign-in status could not be checked."}
           </div>
         )}
 
@@ -271,16 +268,15 @@ export function CredentialImportDialog({
         {error && <div className="cid-error">{error}</div>}
         {sessionNotice && <div className="cid-error" role="status">
           {sessionNotice}
-          {sessionDiagnostic && <details><summary>{ko ? "자세히" : "Details"}</summary><code>{sessionDiagnostic}</code></details>}
         </div>}
 
         {loginRequired.length > 0 && (
           <div className="cid-login-required">
-            <strong>{ko ? "보호된 Windows 로그인" : "Protected Windows sign-in"}</strong>
+            <strong>{ko ? "로그인 필요" : "Sign-in required"}</strong>
             <span>
               {ko
-                ? "Chrome이 이 세션을 Chrome 앱 자체에 묶어 보호하고 있어 복사본을 만들지 않았습니다. 아래에서 Agentlas 전용 로그인 창을 한 번 열면 이후 자동화가 그 세션을 계속 재사용합니다."
-                : "Chrome bound this session to the Chrome app, so Agentlas did not create a broken copy. Open the dedicated sign-in once; later automations will keep reusing that session."}
+                ? "이 사이트는 브라우저에서 한 번 로그인해 주세요."
+                : "Sign in to these sites once in the Agentlas browser."}
             </span>
             <div className="cid-login-sites">
               {loginRequired.map((site, index) => (

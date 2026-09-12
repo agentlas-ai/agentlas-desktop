@@ -1,5 +1,7 @@
 "use client";
 
+import { browserAnnotationDraftText } from "@shared/browser-annotation";
+
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
@@ -43,6 +45,7 @@ import {
   IconClose,
   IconFileUp,
   IconFolder,
+  IconCpu,
   IconMoreHorizontal,
   IconPanelRight,
   IconPlus,
@@ -4110,6 +4113,7 @@ export function OneShell() {
         requestedRunId: uid(),
       });
       setTeamPreflight(result.proposal);
+      if (result.proposal.taskforce) void refreshAll({ includeOrg: true });
       if (result.kind !== "reserved") {
         throw new Error("One could not reserve the work safely");
       }
@@ -4144,7 +4148,7 @@ export function OneShell() {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
     }
-  }, [router, startRun]);
+  }, [refreshAll, router, startRun]);
 
   /*
    * Bringing in outside help can borrow paid Hub agents, so it is the one
@@ -4209,6 +4213,7 @@ export function OneShell() {
         confirmedByUser: true,
       });
       setTeamPreflight(result.proposal);
+      if (result.proposal.taskforce) void refreshAll({ includeOrg: true });
       if (result.kind !== "reserved") throw new Error("One could not reserve the work safely");
       selectedTaskIdRef.current = proposal.binding.taskId;
       selectedConversationIdRef.current = null;
@@ -4240,7 +4245,7 @@ export function OneShell() {
     } finally {
       setTeamPreflightBusy(false);
     }
-  }, [oneRuntimeSelection, pendingTeamPrompt, router, startRun, teamPreflight]);
+  }, [oneRuntimeSelection, pendingTeamPrompt, refreshAll, router, startRun, teamPreflight]);
 
   const awaitingWorkforceConsent = Boolean(
     teamPreflight
@@ -6525,6 +6530,7 @@ export function OneShell() {
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
             </nav>}
             <div className={styles.railBottomMenu}>
+              <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />Local Models</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
               <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
               <span className={styles.connection} data-offline={!executionAvailable ? "true" : "false"} role="status"><span className={styles.connectionDot} aria-hidden="true" /><span>{connectionLabel}</span></span>
@@ -8000,6 +8006,13 @@ export function OneShell() {
               .then((draft) => setComposer(draft.prompt))
               .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
+          onBrowserAnnotation={receipt => {
+            if (receipt.selection.taskScopeId !== activeThreadChatIdRef.current) return false;
+            const text = browserAnnotationDraftText(receipt, appLocale === "ko" ? "ko" : "en");
+            setComposer(current => current.trim() ? `${current}\n\n${text}` : text);
+            requestAnimationFrame(() => composerInputRef.current?.focus());
+            return true;
+          }}
           screenChatId={activeThreadChatId}
           browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
           browserHistoryUrl={durableThreadBrowserUrl}

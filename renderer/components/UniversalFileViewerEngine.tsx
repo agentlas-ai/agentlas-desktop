@@ -22,7 +22,7 @@ import {
   type OfficeEditIntent,
   type OfficeTaskSelection,
 } from "@/lib/office-document-session";
-import { IconExpand } from "./Icon";
+import { IconExpand, IconFileUp } from "./Icon";
 import { OfficeDocumentSessionBar } from "./OfficeDocumentSessionBar";
 import styles from "./LiveOutputViewer.module.css";
 
@@ -361,34 +361,8 @@ export function UniversalFileViewerEngine({
   return (
     <div ref={hostRef} className={styles.documentEngine} data-compact={compact ? "true" : "false"} data-fill={fill ? "true" : "false"} data-testid="universal-file-viewer">
       <header className={styles.documentToolbar} data-document-viewer-toolbar="true" {...(viewDocument.fileInfo ? { "data-chat-file-header": "true" } : {})}>
-        <div className={styles.documentIdentity}>
-          <strong title={viewDocument.name}>{viewDocument.name}</strong>
-          {typeof viewDocument.size === "number" && viewDocument.size >= 0 ? <span>{viewDocument.size < 1024 ? `${viewDocument.size} B` : viewDocument.size < 1024 * 1024 ? `${Math.round(viewDocument.size / 1024)} KB` : `${(viewDocument.size / (1024 * 1024)).toFixed(1)} MB`}</span> : null}
-        </div>
-        <div className={styles.documentToolbarActions}>
-          {availability?.zoom !== false ? <div className={styles.documentZoom} role="group" aria-label={locale === "ko" ? "문서 확대/축소" : "Document zoom"}>
-            <button type="button" onClick={() => void zoom("out")} disabled={!availability?.zoomOut} aria-label={locale === "ko" ? "축소" : "Zoom out"}>−</button>
-            <button type="button" className={styles.documentZoomLabel} onClick={() => void zoom("fit")} disabled={!availability?.zoom} aria-label={locale === "ko" ? "선택 페이지 화면에 맞춤" : "Fit selected page to view"} title={locale === "ko" ? "선택 페이지 화면에 맞춤" : "Fit selected page to view"}>{zoomLabel}</button>
-            <button type="button" onClick={() => void zoom("in")} disabled={!availability?.zoomIn} aria-label={locale === "ko" ? "확대" : "Zoom in"}>+</button>
-          </div> : null}
-          <button type="button" onClick={() => void runViewerAction("download", async () => {
-            if (!viewerRef.current) throw new Error("viewer-unavailable");
-            await viewerRef.current.downloadOriginalFile();
-          })} disabled={!availability?.download || actionState === "downloading" || actionState === "opening"}>
-            {actionState === "downloading" ? (locale === "ko" ? "저장 중…" : "Saving…") : (locale === "ko" ? "다운로드" : "Download")}
-          </button>
-          {onOpenExternal ? <button type="button" onClick={() => void runViewerAction("open", onOpenExternal)} disabled={actionState === "downloading" || actionState === "opening"} aria-label={openExternalHint} title={openExternalHint}>
-            {actionState === "opening" ? (locale === "ko" ? "여는 중…" : "Opening…") : (locale === "ko" ? "열기" : "Open")}
-          </button> : null}
-          {onExpand ? <button type="button" className={styles.documentIconButton} onClick={onExpand} aria-label={locale === "ko" ? "패널 확장" : "Expand panel"} title={locale === "ko" ? "패널 확장" : "Expand panel"}><IconExpand size={14} /></button> : null}
-          {viewDocument.fileInfo ? <details className={styles.documentInfo} data-chat-file-info="true">
-            <summary aria-label={locale === "ko" ? "파일 정보" : "File info"}>i</summary>
-            <div><span>SHA-256: {viewDocument.fileInfo.sha256}</span><span>{locale === "ko" ? "바인딩" : "Binding"}: {viewDocument.fileInfo.binding}</span><span>{locale === "ko" ? "탭 ID" : "Tab ID"}: {viewDocument.fileInfo.tabId}</span></div>
-          </details> : null}
-        </div>
-        {actionState === "error" ? <span className={styles.documentActionError} role="alert">{locale === "ko" ? "파일 작업을 완료하지 못했습니다." : "The file action could not be completed."}</span> : null}
-      </header>
       {(session.format || incomingFormat.reason === "ambiguous-hwp-container" || incomingFormat.reason === "signature-conflict") ? <OfficeDocumentSessionBar
+        name={viewDocument.name}
         locale={locale}
         session={session}
         capabilities={capabilities}
@@ -399,6 +373,30 @@ export function UniversalFileViewerEngine({
         onSendSelection={onOfficeSelection}
         onSendEdit={sendEdit}
       /> : null}
+        {!session.format && <div className={styles.documentIdentity}>
+          <strong title={viewDocument.name}>{viewDocument.name}</strong>
+          {typeof viewDocument.size === "number" && viewDocument.size >= 0 ? <span>{viewDocument.size < 1024 ? `${viewDocument.size} B` : viewDocument.size < 1024 * 1024 ? `${Math.round(viewDocument.size / 1024)} KB` : `${(viewDocument.size / (1024 * 1024)).toFixed(1)} MB`}</span> : null}
+        </div>}
+        <div className={styles.documentToolbarActions}>
+          {availability?.zoom !== false ? <div className={styles.documentZoom} role="group" aria-label={locale === "ko" ? "문서 확대/축소" : "Document zoom"}>
+            <button type="button" onClick={() => void zoom("out")} disabled={!availability?.zoomOut} aria-label={locale === "ko" ? "축소" : "Zoom out"}>−</button>
+            <button type="button" className={styles.documentZoomLabel} onClick={() => void zoom("fit")} disabled={!availability?.zoom} aria-label={locale === "ko" ? "선택 페이지 화면에 맞춤" : "Fit selected page to view"} title={locale === "ko" ? "선택 페이지 화면에 맞춤" : "Fit selected page to view"}>{zoomLabel}</button>
+            <button type="button" onClick={() => void zoom("in")} disabled={!availability?.zoomIn} aria-label={locale === "ko" ? "확대" : "Zoom in"}>+</button>
+          </div> : null}
+          <button type="button" onClick={() => void runViewerAction("download", async () => {
+            if (!viewerRef.current) throw new Error("viewer-unavailable");
+            await viewerRef.current.downloadOriginalFile();
+          })} aria-label={locale === "ko" ? "원본 다운로드" : "Download original"} title={locale === "ko" ? "원본 다운로드" : "Download original"} disabled={!availability?.download || actionState === "downloading" || actionState === "opening"}>
+            <IconFileUp size={15} style={{ transform: "rotate(180deg)" }} />
+          </button>
+          {onOpenExternal ? <button type="button" onClick={() => void runViewerAction("open", onOpenExternal)} disabled={actionState === "downloading" || actionState === "opening"} aria-label={openExternalHint || (locale === "ko" ? "외부 앱에서 열기" : "Open in external app")} title={openExternalHint || (locale === "ko" ? "외부 앱에서 열기" : "Open in external app")}>
+            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 3h7v7M21 3 10 14M10 3H4a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-6"/></svg>
+          </button> : null}
+          {onExpand ? <button type="button" className={styles.documentIconButton} onClick={onExpand} aria-label={locale === "ko" ? "패널 확장" : "Expand panel"} title={locale === "ko" ? "패널 확장" : "Expand panel"}><IconExpand size={14} /></button> : null}
+
+        </div>
+        {actionState === "error" ? <span className={styles.documentActionError} role="alert">{locale === "ko" ? "파일 작업을 완료하지 못했습니다." : "The file action could not be completed."}</span> : null}
+      </header>
       <FileViewer
         ref={viewerRef}
         key={`${viewDocument.source}:${viewDocument.name}:${viewDocument.mimeType ?? ""}`}

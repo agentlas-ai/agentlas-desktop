@@ -1,318 +1,175 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentlasIpc } from "@/lib/types";
 import { ipc } from "@/lib/ipc";
-import type { LocalModelHubAPI, LocalModelHubSnapshot } from "@shared/local-model-hub";
+import { IconBolt, IconCode, IconCpu, IconImage, IconMoreHorizontal, IconPower, IconRefresh, IconSearch } from "@/components/Icon";
+import type { LocalModelHubSnapshot } from "@shared/local-model-hub";
+import menu from "@/components/PanelPopover.module.css";
+import styles from "./LocalModelHubPanel.module.css";
 
-type HubBridge = AgentlasIpc & { localModelHub: LocalModelHubAPI };
-
-const FIT_ORDER = ["recommended", "runnable", "may_be_slow", "not_recommended", "unsupported", "unknown"] as const;
-
+type Operation = { id: string; packageId: string; kind: "engine" | "model" | "load" | "capability" };
 function bytes(value: number | null): string {
-  if (value === null) return "unknown";
-  const gib = value / 1024 / 1024 / 1024;
-  return gib >= 1 ? `${gib.toFixed(1)} GiB` : `${(value / 1024 / 1024).toFixed(0)} MiB`;
+  if (value === null) return "—";
+  return value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(value / 1024 ** 2)} MiB`;
 }
-
-function machineMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function fitLabel(value: string | undefined, ko: boolean): string {
-  if (!ko) return value ?? "unknown";
-  switch (value) {
-    case "recommended": return "실행 적합";
-    case "runnable": return "실행 가능";
-    case "may_be_slow": return "느릴 수 있음";
-    case "not_recommended": return "권장하지 않음";
-    case "unsupported": return "지원하지 않음";
-    default: return "확인 필요";
-  }
+  const labels: Record<string, [string, string]> = { recommended: ["메모리 여유", "Memory available"], runnable: ["실행 가능 추정", "Estimated to fit"], may_be_slow: ["느릴 수 있음", "May be slow"], not_recommended: ["메모리 부족 가능", "Memory may be limited"], unsupported: ["지원하지 않음", "Unsupported"], unknown: ["실행 확인 필요", "Compatibility unconfirmed"] };
+  return (labels[value ?? "unknown"] ?? labels.unknown)[ko ? 0 : 1];
+}
+function checked(value: string | undefined, ko: boolean): string {
+  return value === "verified" ? ko ? "확인됨" : "Verified" : value === "failed" ? ko ? "실패" : "Failed" : ko ? "미검사" : "Not tested";
 }
 
-export function LocalModelHubPanel({ locale }: { locale: string }) {
+export function LocalModelHubPanel({ locale, standalone = false, selectedPackageId, onOperationStarted }: { locale: string; standalone?: boolean; selectedPackageId?: string; onOperationStarted?: (id: string) => void }) {
   const ko = locale === "ko";
   const [snapshot, setSnapshot] = useState<LocalModelHubSnapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [operationId, setOperationId] = useState<string | null>(null);
+  const [operation, setOperation] = useState<Operation | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  const [architecture, setArchitecture] = useState("all");
-  const [fitClass, setFitClass] = useState("all");
-
-  const bridge = useCallback(() => ipc() as HubBridge | null, []);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(selectedPackageId ?? null);
+  const [panel, setPanel] = useState<"computer" | "model" | null>(null);
+  const active = useRef(false);
+  const lastRequestedPackage = useRef(selectedPackageId);
+  const mounted = useRef(true);
+  const refreshEpoch = useRef(0);
+  const menuRoot = useRef<HTMLDivElement>(null);
+  const menuButton = useRef<HTMLElement | null>(null);
+  const bridge = useCallback(() => ipc(), []);
   const refresh = useCallback(async () => {
+    const epoch = ++refreshEpoch.current;
     const api = bridge()?.localModelHub;
-    if (!api) return;
-    try {
-      setSnapshot(await api.snapshot());
-    } catch (error) {
-      setNotice(`${ko ? "로컬 모델 상태를 읽지 못했습니다" : "Could not read local model state"}: ${machineMessage(error)}`);
-    }
+    if (!api) { setNotice(ko ? "로컬 모델 연결을 확인해 주세요." : "Check the local model connection."); return; }
+    try { const value = await api.snapshot(); if (mounted.current && epoch === refreshEpoch.current) setSnapshot(value); }
+    catch { if (mounted.current && epoch === refreshEpoch.current) setNotice(ko ? "모델 상태를 읽지 못했습니다. 다시 확인해 주세요." : "Could not read model state. Try refreshing."); }
   }, [bridge, ko]);
-
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { mounted.current = true; void refresh(); return () => { mounted.current = false; refreshEpoch.current++; }; }, [refresh]);
+  useEffect(() => { lastRequestedPackage.current = selectedPackageId; if (selectedPackageId) { setSelectedModelId(selectedPackageId); setQuery(""); void refresh(); } }, [selectedPackageId, refresh]);
+  useEffect(() => { if (!busy) return; const timer = window.setInterval(() => void refresh(), 750); return () => window.clearInterval(timer); }, [busy, refresh]);
+  const closeMenu = useCallback(() => { setPanel(null); menuButton.current?.focus(); }, []);
   useEffect(() => {
-    if (!busy) return;
-    const timer = window.setInterval(() => void refresh(), 750);
-    return () => window.clearInterval(timer);
-  }, [busy, refresh]);
-
-  const run = useCallback(async (label: string, action: (api: HubBridge) => Promise<void>) => {
-    const api = bridge();
-    if (!api || busy) return;
-    setBusy(label);
-    setNotice(null);
-    try {
-      await action(api);
-      await refresh();
-    } catch (error) {
-      setNotice(`${ko ? "작업이 완료되지 않았습니다" : "Operation did not complete"}: ${machineMessage(error)}`);
-    } finally {
-      setBusy(null);
-      setOperationId(null);
-    }
-  }, [bridge, busy, ko, refresh]);
-
-  const engine = useMemo(() => snapshot?.engineCatalog.find((item) =>
-    item.platform === snapshot.hardware.platform && item.arch === snapshot.hardware.arch) ?? null, [snapshot]);
-  const filteredModels = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    const all = snapshot?.modelCatalog ?? [];
-    return all.filter((item) => {
-      const assessment = snapshot?.fitAssessments.find((candidate) => candidate.modelPackageId === item.packageId);
-      return (architecture === "all" || item.architecture === architecture)
-        && (fitClass === "all" || (assessment?.class ?? "unknown") === fitClass)
-        && (!normalized || [item.repository, item.creator, item.converter, item.architecture, item.quantization, item.license]
-          .some((value) => value.toLowerCase().includes(normalized)));
-    }).sort((a, b) => {
-      const fitA = snapshot?.fitAssessments.find((item) => item.modelPackageId === a.packageId)?.class ?? "unknown";
-      const fitB = snapshot?.fitAssessments.find((item) => item.modelPackageId === b.packageId)?.class ?? "unknown";
-      return FIT_ORDER.indexOf(fitA) - FIT_ORDER.indexOf(fitB) || a.byteLength - b.byteLength;
-    });
-  }, [architecture, fitClass, query, snapshot]);
-  const model = filteredModels.find((item) => item.packageId === selectedModelId)
-    ?? filteredModels[0]
-    ?? null;
-  const architectures = useMemo(() => [...new Set((snapshot?.modelCatalog ?? []).map((item) => item.architecture))].sort(), [snapshot]);
-  const engineInstall = engine
-    ? snapshot?.engineInstallations.find((item) => item.enginePackageId === engine.packageId) ?? null
-    : null;
-  const modelInstall = model
-    ? snapshot?.modelInstallations.find((item) => item.modelPackageId === model.packageId) ?? null
-    : null;
-  const fit = model
-    ? snapshot?.fitAssessments.find((item) => item.modelPackageId === model.packageId) ?? null
-    : null;
-  const capability = modelInstall
-    ? [...(snapshot?.capabilityReceipts ?? [])].reverse().find((item) => item.installationId === modelInstall.installationId) ?? null
-    : null;
-
-  const installEngine = () => engine && void run("engine", async (api) => {
-    const id = crypto.randomUUID();
-    setOperationId(id);
-    const receipt = await api.localModelHub.downloadEngine({ packageId: engine.packageId, operationId: id });
-    if (receipt.state !== "verified") throw new Error(receipt.reasonCode ?? receipt.state);
-    await api.localModelHub.installEngine({ packageId: engine.packageId });
-    setNotice(ko ? "엔진의 해시와 출처 증명을 확인하고 설치했습니다." : "Engine hash and provenance were verified before installation.");
-  });
-
-  const installModel = () => model && void run("model", async (api) => {
-    const id = crypto.randomUUID();
-    setOperationId(id);
-    const receipt = await api.localModelHub.downloadModel({ packageId: model.packageId, operationId: id });
-    if (receipt.state !== "verified") throw new Error(receipt.reasonCode ?? receipt.state);
-    await api.localModelHub.installDownloadedModel({ packageId: model.packageId });
-    setNotice(ko ? "모델 파일의 크기와 SHA-256을 확인했습니다." : "Model byte length and SHA-256 were verified.");
-  });
-
-  const importModel = () => model && void run("import", async (api) => {
+    if (!panel) return;
+    menuRoot.current?.querySelector<HTMLElement>('[role="menu"] button')?.focus();
+    const outside = (event: PointerEvent) => { if (!menuRoot.current?.contains(event.target as Node)) closeMenu(); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") closeMenu(); };
+    document.addEventListener("pointerdown", outside); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
+  }, [panel, closeMenu]);
+  const run = useCallback(async (label: string, action: (api: AgentlasIpc) => Promise<void>) => {
+    const api = bridge(); if (!api || active.current) return;
+    active.current = true; setBusy(label); setNotice(null);
+    try { await action(api); }
+    catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      if (mounted.current) setNotice(/cancel/i.test(code) ? (ko ? "작업을 중지했습니다." : "Operation stopped.")
+        : code === "local_model_runs_active" ? (ko ? "실행 중인 작업을 중지한 뒤 모델을 바꿔 주세요." : "Stop the active task before switching models.")
+        : ko ? "작업이 완료되지 않았습니다. 연결과 저장 공간을 확인한 뒤 다시 시도하세요." : "The operation did not finish. Check your connection and disk space, then retry.");
+    } finally { await refresh(); active.current = false; if (mounted.current) { setBusy(null); setOperation(null); } }
+  }, [bridge, ko, refresh]);
+  const engine = useMemo(() => snapshot?.engineCatalog.find(item => item.platform === snapshot.hardware.platform && item.arch === snapshot.hardware.arch) ?? null, [snapshot]);
+  const filtered = useMemo(() => (snapshot?.modelCatalog ?? []).filter(item => !query.trim() || [item.repository,item.quantization,item.license].some(value => value.toLowerCase().includes(query.trim().toLowerCase()))), [snapshot, query]);
+  // A requested exact package never temporarily falls back to another model.
+  const requestedId = selectedPackageId !== lastRequestedPackage.current ? selectedPackageId : selectedModelId;
+  const model = requestedId ? filtered.find(item => item.packageId === requestedId) ?? null : filtered[0] ?? null;
+  const engineInstall = snapshot?.engineInstallations.find(item => item.enginePackageId === engine?.packageId);
+  const modelInstall = [...(snapshot?.modelInstallations ?? [])].reverse().find(item => item.modelPackageId === model?.packageId);
+  const fit = snapshot?.fitAssessments.find(item => item.modelPackageId === model?.packageId);
+  const resident = snapshot?.resident;
+  const residentModel = snapshot?.modelInstallations.find(item => item.installationId === resident?.installationId);
+  const selectedResident = !!modelInstall && resident?.installationId === modelInstall.installationId;
+  const capability = [...(snapshot?.capabilityReceipts ?? [])].reverse().find(item => item.installationId === modelInstall?.installationId && item.enginePackageId === engine?.packageId);
+  const progress = operation && (operation.kind === "engine" || operation.kind === "model")
+    ? [...(snapshot?.engineProgress ?? []), ...(snapshot?.modelProgress ?? [])].find(item => item.packageId === operation.packageId) : null;
+  const unavailable = !!snapshot?.unavailableReason;
+  const beginOperation = (value: Operation) => { onOperationStarted?.(value.id); setOperation(value); };
+  const installEngine = () => { if (!engine) return; closeMenu(); void run(ko ? "실행 엔진 준비 중…" : "Preparing engine…", async api => {
+    const id = crypto.randomUUID(); beginOperation({ id, packageId: engine.packageId, kind: "engine" });
+    await api.localModelHub.installEnginePackage({ packageId: engine.packageId, operationId: id });
+  }); };
+  const installModel = () => { if (!model) return; void run(ko ? "모델 다운로드 중…" : "Downloading model…", async api => {
+    const id = crypto.randomUUID(); beginOperation({ id, packageId: model.packageId, kind: "model" });
+    await api.localModelHub.installModelPackage({ packageId: model.packageId, operationId: id });
+  }); };
+  const importModel = () => { if (!model) return; closeMenu(); void run(ko ? "파일 확인 중…" : "Checking file…", async api => {
     const receipt = await api.localModelHub.importModel({ packageId: model.packageId });
-    setNotice(receipt
-      ? (ko ? "선택한 파일을 고정 패키지 해시와 대조해 가져왔습니다." : "The selected file matched the pinned package hash and was imported.")
-      : (ko ? "파일 선택을 취소했습니다." : "File selection was cancelled."));
-  });
-
-  const loadModel = () => modelInstall && void run("load", async (api) => {
-    const id = crypto.randomUUID();
-    setOperationId(id);
+    if (!receipt) setNotice(ko ? "파일 선택을 취소했습니다." : "File selection cancelled.");
+  }); };
+  const loadModel = () => { if (!modelInstall) return; void run(ko ? "모델 불러오는 중…" : "Loading model…", async api => {
+    const id = crypto.randomUUID(); beginOperation({ id, packageId: modelInstall.modelPackageId, kind: "load" });
     const receipt = await api.localModelHub.loadModel({ installationId: modelInstall.installationId, contextTokens: 8192, operationId: id });
     if (receipt.state !== "resident") throw new Error(receipt.reasonCode ?? receipt.state);
-    const source = `agentlas-local:${receipt.enginePackageId}:${receipt.installationId}`;
-    await api.runtime.setActive({ kind: "agentlas-local", backend: "agentlas-local", source, model: modelInstall.fileName });
-    setNotice(ko ? "이 모델을 메모리에 올리고 현재 엔진으로 선택했습니다." : "Loaded this model and selected it as the current engine.");
-  });
-
-  const unload = () => snapshot?.resident && void run("unload", async (api) => {
-    await api.localModelHub.unload({ processEpoch: snapshot.resident!.processEpoch, cancelActiveRuns: true });
-    setNotice(ko ? "진행 중 추론을 취소하고 모델을 메모리에서 내렸습니다." : "Cancelled active inference and unloaded the model.");
-  });
-
-  const testCapabilities = () => modelInstall && void run("capability", async (api) => {
-    const id = crypto.randomUUID();
-    setOperationId(id);
-    const receipt = await api.localModelHub.testCapabilities({
-      installationId: modelInstall.installationId,
-      strictJson: true,
-      toolUse: true,
-      cancellation: true,
-      operationId: id,
-    });
-    setNotice(`${ko ? "실측 영수증" : "Measured receipt"}: JSON ${receipt.strictJson} · tools ${receipt.toolUse} · cancel ${receipt.cancellation}`);
-  });
-
-  const cancel = () => operationId && void bridge()?.localModelHub.cancelOperation({ operationId });
-  const latestProgress = [...(snapshot?.engineProgress ?? []), ...(snapshot?.modelProgress ?? [])]
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-
-  return (
-    <section aria-labelledby="local-model-hub-title" style={{ marginTop: 32 }}>
-      <h2 id="local-model-hub-title" style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 8px" }}>
-        {ko ? "Agentlas 로컬 모델" : "Agentlas local models"}
-      </h2>
-      <p style={{ margin: "0 0 12px", color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.6 }}>
-        {ko
-          ? "고정된 엔진 릴리스와 모델 파일을 검증한 뒤 이 컴퓨터에서 직접 실행합니다. Ollama 설치와는 별도입니다."
-          : "Runs a pinned engine release and verified model file directly on this computer. This is separate from Ollama."}
-      </p>
-      <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", display: "grid", gap: 14 }}>
-        {!snapshot ? (
-          <span style={{ fontSize: 12, color: "var(--muted-deep)" }}>{ko ? "상태 확인 중…" : "Checking status…"}</span>
-        ) : (
-          <>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 11.5, color: "var(--muted-deep)" }}>
-              <span>{snapshot.hardware.cpuModel}</span>
-              <span>· {bytes(snapshot.hardware.totalMemoryBytes)} RAM</span>
-              <span>· {snapshot.hardware.accelerator}</span>
-              <span>· {fitLabel(fit?.class, ko)} ({fit?.evidence === "verified_on_this_device" ? (ko ? "이 PC에서 확인" : "measured on this PC") : (ko ? "메모리 기준 추정" : "memory-based estimate")})</span>
-            </div>
-            {snapshot.unavailableReason && !engine ? (
-              <div role="status" style={{ color: "var(--danger, #a33)", fontSize: 12 }}>
-                {ko ? "이 운영체제/CPU용 검증 엔진이 없습니다" : "No verified engine is available for this OS/CPU"}: {snapshot.unavailableReason}
-              </div>
-            ) : null}
-            {engine ? (
-              <div style={{ display: "grid", gap: 7 }}>
-                <strong style={{ fontSize: 12.5 }}>llama.cpp {engine.releaseTag} · {engine.arch}/{engine.accelerator}</strong>
-                <details style={{ fontSize: 10.5, color: "var(--muted-deep)" }}>
-                  <summary>{ko ? "엔진 기술 상세" : "Engine technical details"}</summary>
-                  <code style={{ display: "block", marginTop: 5, overflowWrap: "anywhere" }}>SHA-256 {engine.sha256}</code>
-                </details>
-                <div><button type="button" disabled={Boolean(busy)} onClick={installEngine} style={buttonStyle}>{engineInstall ? (ko ? "엔진 다시 검증" : "Reverify engine") : (ko ? "엔진 다운로드·검증" : "Download and verify engine")}</button></div>
-              </div>
-            ) : null}
-            <div style={{ display: "grid", gap: 8, borderTop: "1px solid var(--paper-edge)", paddingTop: 12 }}>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={ko ? "모델·제작자·라이선스 검색" : "Search model, creator, or license"}
-                  aria-label={ko ? "로컬 모델 검색" : "Search local models"}
-                  style={{ flex: "1 1 190px", minWidth: 0, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", color: "var(--ink)", padding: "8px 10px", fontSize: 12 }}
-                />
-                <select value={architecture} onChange={(event) => setArchitecture(event.target.value)} aria-label={ko ? "아키텍처 필터" : "Architecture filter"} style={selectStyle}>
-                  <option value="all">{ko ? "모든 아키텍처" : "All architectures"}</option>
-                  {architectures.map((item) => <option key={item} value={item}>{item}</option>)}
-                </select>
-                <select value={fitClass} onChange={(event) => setFitClass(event.target.value)} aria-label={ko ? "적합도 필터" : "Fit filter"} style={selectStyle}>
-                  <option value="all">{ko ? "모든 적합도" : "All fit classes"}</option>
-                  {FIT_ORDER.map((item) => <option key={item} value={item}>{fitLabel(item, ko)}</option>)}
-                </select>
-              </div>
-              <div role="listbox" aria-label={ko ? "검증된 모델 목록" : "Verified model catalog"} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}>
-                {filteredModels.map((item) => {
-                  const itemFit = snapshot.fitAssessments.find((assessment) => assessment.modelPackageId === item.packageId);
-                  const selected = model?.packageId === item.packageId;
-                  const recommended = item.packageId === filteredModels[0]?.packageId
-                    && (itemFit?.class === "recommended" || itemFit?.class === "runnable");
-                  return (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      key={item.packageId}
-                      onClick={() => setSelectedModelId(item.packageId)}
-                      style={{ ...buttonStyle, textAlign: "left", padding: 10, background: selected ? "var(--paper)" : "var(--paper-2)", boxShadow: selected ? "var(--neu-raised)" : "none" }}
-                    >
-                      <strong style={{ display: "block", marginBottom: 5 }}>{item.repository}</strong>
-                      {recommended ? <span style={{ display: "block", color: "var(--accent)", fontSize: 10.5, marginBottom: 3 }}>
-                        {itemFit?.evidence === "verified_on_this_device"
-                          ? (ko ? "이 PC에서 확인한 추천" : "Measured recommendation for this PC")
-                          : (ko ? "이 PC 메모리 기준 추천" : "Recommended from this PC's memory")}
-                      </span> : null}
-                      <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 10.5 }}>
-                        {item.creator} · {item.quantization} · {bytes(item.byteLength)}
-                      </span>
-                      <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 10.5, marginTop: 3 }}>
-                        {fitLabel(itemFit?.class, ko)} · {itemFit?.evidence === "verified_on_this_device" ? (ko ? "이 PC에서 확인" : "measured") : (ko ? "메모리 기준 추정" : "memory estimate")}
-                      </span>
-                    </button>
-                  );
-                })}
-                {filteredModels.length === 0 ? <span style={{ fontSize: 12, color: "var(--muted-deep)" }}>{ko ? "검색 결과가 없습니다." : "No catalog results."}</span> : null}
-              </div>
-            </div>
-            {model ? (
-              <div style={{ display: "grid", gap: 7 }}>
-                <strong style={{ fontSize: 12.5 }}>{model.repository} · {model.quantization} · {bytes(model.byteLength)}</strong>
-                <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-                  {ko ? "제작자" : "Creator"}: {model.creator} · {ko ? "변환자" : "Converter"}: {model.converter} · {ko ? "라이선스" : "License"}: {model.license}
-                </span>
-                <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>{model.architecture} · {model.format} · {model.gated ? (ko ? "접근 승인 필요" : "gated access") : (ko ? "공개 파일" : "public file")}</span>
-                <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-                  {ko ? "이 PC 적합도" : "Fit on this PC"}: {fitLabel(fit?.class, ko)} · {fit?.evidence === "verified_on_this_device" ? (ko ? "이 PC에서 확인" : "measured on this PC") : (ko ? "메모리 기준 추정" : "memory-based estimate")}
-                  {fit?.requiredBytes ? ` · ${ko ? "예상 필요" : "estimated required"} ${bytes(fit.requiredBytes)}` : ""}
-                  {fit?.availableBytes ? ` · ${ko ? "현재 가용" : "currently available"} ${bytes(fit.availableBytes)}` : ""}
-                </span>
-                <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-                  {capability
-                    ? `${ko ? "기능 확인 결과" : "Capability check"}: JSON ${capability.strictJson} · tools ${capability.toolUse} · image ${capability.imageInput} · cancel ${capability.cancellation}`
-                    : modelInstall
-                      ? (ko ? "아직 이 모델의 기능을 검사하지 않았습니다." : "This model's capabilities have not been checked yet.")
-                      : (ko ? "설치 후 기능을 확인할 수 있습니다." : "Install the model to check its capabilities.")}
-                </span>
-                <details style={{ fontSize: 10.5, color: "var(--muted-deep)" }}>
-                  <summary>{ko ? "모델 기술 상세" : "Model technical details"}</summary>
-                  <code style={{ display: "block", marginTop: 5, overflowWrap: "anywhere" }}>revision {model.revision}</code>
-                  {fit?.reasonCodes.length ? <code style={{ display: "block", marginTop: 5 }}>{fit.reasonCodes.join(" · ")}</code> : null}
-                  <code style={{ display: "block", marginTop: 5, overflowWrap: "anywhere" }}>{model.sourceUrl}</code>
-                  <code style={{ display: "block", marginTop: 5, overflowWrap: "anywhere" }}>SHA-256 {model.sha256}</code>
-                </details>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  <button type="button" disabled={Boolean(busy)} onClick={installModel} style={buttonStyle}>{modelInstall ? (ko ? "모델 다시 검증" : "Reverify model") : (ko ? "모델 다운로드·검증" : "Download and verify model")}</button>
-                  <button type="button" disabled={Boolean(busy)} onClick={importModel} style={buttonStyle}>{ko ? "파일에서 가져오기" : "Import file"}</button>
-                  {!snapshot.resident ? <button type="button" disabled={Boolean(busy) || !engineInstall || !modelInstall} onClick={loadModel} style={primaryButtonStyle}>{ko ? "메모리에 올리고 선택" : "Load and select"}</button> : null}
-                  {snapshot.resident ? <button type="button" disabled={Boolean(busy)} onClick={unload} style={buttonStyle}>{ko ? "실행 취소·모델 내리기" : "Cancel runs and unload"}</button> : null}
-                  {snapshot.resident ? <button type="button" disabled={Boolean(busy)} onClick={testCapabilities} style={buttonStyle}>{ko ? "JSON·도구·취소 실측" : "Measure JSON, tools, cancel"}</button> : null}
-                </div>
-              </div>
-            ) : null}
-            {busy && latestProgress ? (
-              <div role="status" style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-                {latestProgress.state} · {bytes(latestProgress.downloadedBytes)} / {bytes(latestProgress.totalBytes)}
-              </div>
-            ) : null}
-            {busy && operationId ? <button type="button" onClick={cancel} style={buttonStyle}>{ko ? "현재 작업 취소" : "Cancel operation"}</button> : null}
-            {notice ? <div role="status" style={{ fontSize: 12, lineHeight: 1.5, overflowWrap: "anywhere" }}>{notice}</div> : null}
-          </>
-        )}
+    if (!mounted.current) return;
+    await api.runtime.setActive({ kind: "agentlas-local", backend: "agentlas-local", source: `agentlas-local:${receipt.enginePackageId}:${receipt.installationId}`, model: modelInstall.fileName });
+    setNotice(ko ? "이 모델을 로드하고 실행 모델로 선택했습니다." : "Loaded and selected this runtime model.");
+  }); };
+  const unload = async () => {
+    if (!resident) return;
+    try { await bridge()?.localModelHub.unload({ processEpoch: resident.processEpoch, cancelActiveRuns: true }); await refresh(); }
+    catch { setNotice(ko ? "모델을 내리지 못했습니다. 다시 시도하세요." : "Could not unload the model. Try again."); }
+  };
+  const testCapabilities = () => { if (!modelInstall || !selectedResident) return; void run(ko ? "기능 확인 중…" : "Checking capabilities…", async api => {
+    const id = crypto.randomUUID(); beginOperation({ id, packageId: modelInstall.modelPackageId, kind: "capability" });
+    await api.localModelHub.testCapabilities({ installationId: modelInstall.installationId, strictJson: true, toolUse: true, cancellation: true, operationId: id });
+  }); };
+  const cancel = async () => { if (!operation) return; try { await bridge()?.localModelHub.cancelOperation({ operationId: operation.id }); } catch { setNotice(ko ? "중지 상태를 확인하지 못했습니다. 다시 시도하세요." : "Could not confirm cancellation. Try again."); } };
+  const toggleMenu = (value: "computer" | "model", button: HTMLElement) => { menuButton.current = button; setPanel(panel === value ? null : value); };
+  return <section className={styles.library} style={{ marginTop: standalone ? 0 : 32 }} aria-label={ko ? "모델 라이브러리" : "Model library"}>
+    <div className={styles.toolbar}>
+      <label className={styles.search}><IconSearch size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={ko ? "내 모델 찾기" : "Find a model"} aria-label={ko ? "로컬 모델 검색" : "Search local models"} /></label>
+      <div ref={menuRoot} className={styles.menus}>
+        <button type="button" className={styles.icon} aria-label={ko ? "컴퓨터와 실행 엔진" : "Computer and engine"} aria-expanded={panel === "computer"} onClick={event => toggleMenu("computer",event.currentTarget)}><IconCpu size={17} /></button>
+        <button type="button" className={styles.icon} aria-label={ko ? "모델 메뉴" : "Model menu"} aria-expanded={panel === "model"} disabled={!model} onClick={event => toggleMenu("model",event.currentTarget)}><IconMoreHorizontal size={18} /></button>
+        <button type="button" className={styles.icon} aria-label={ko ? "모델 상태 새로고침" : "Refresh model state"} onClick={() => void refresh()}><IconRefresh size={16} /></button>
+        {panel && <div role="menu" className={`${menu.panelPopover} ${styles.popover}`}>
+          {panel === "computer" ? <>
+            <span className={menu.panelMenuLabel}>{snapshot?.hardware.cpuModel ?? "—"}</span>
+            <span className={menu.panelMenuLabel}>{bytes(snapshot?.hardware.totalMemoryBytes ?? null)} RAM · {snapshot?.hardware.accelerator ?? "—"}</span>
+            <div className={menu.panelMenuSeparator} />
+            <span className={menu.panelMenuLabel}>{engine ? `llama.cpp ${engine.releaseTag}` : ko ? "지원 엔진 없음" : "No compatible engine"}</span>
+            <span className={menu.panelMenuLabel}>{engineInstall ? ko ? "엔진 설치됨" : "Engine installed" : ko ? "엔진 준비 필요" : "Engine setup needed"}</span>
+            <button type="button" role="menuitem" className={menu.panelMenuRow} disabled={!!busy || !engine || unavailable} onClick={installEngine}>{engineInstall ? ko ? "엔진 다시 확인" : "Recheck engine" : ko ? "실행 엔진 준비" : "Set up engine"}</button>
+          </> : model && <>
+            <button type="button" role="menuitem" className={menu.panelMenuRow} disabled={!!busy || unavailable} onClick={importModel}>{ko ? "파일에서 가져오기" : "Import file"}</button>
+            <button type="button" role="menuitem" className={menu.panelMenuRow} disabled={!!busy || model.gated || unavailable} onClick={() => { closeMenu(); installModel(); }}>{ko ? "파일 다시 확인" : "Recheck model file"}</button>
+            <div className={menu.panelMenuSeparator} />
+            <span className={menu.panelMenuLabel}>{ko ? "제작자" : "Creator"}: {model.creator === "unknown" ? ko ? "확인 필요" : "Unconfirmed" : model.creator}</span>
+            <span className={menu.panelMenuLabel}>{ko ? "변환자" : "Converter"}: {model.converter === "unknown" ? ko ? "확인 필요" : "Unconfirmed" : model.converter}</span>
+            <span className={menu.panelMenuLabel}>{model.architecture} · {model.license}</span>
+            <details className={styles.provenance}><summary>{ko ? "파일 출처" : "File provenance"}</summary><code>{model.revision}</code><code>{model.sha256}</code><a href={model.sourceUrl} target="_blank" rel="noreferrer">{ko ? "원본 저장소 보기" : "View repository"}</a></details>
+          </>}
+        </div>}
       </div>
-    </section>
-  );
+    </div>
+    {residentModel && <div className={styles.resident} data-resident-installation={resident?.installationId}><span>{ko ? "로드됨" : "Loaded"} · {residentModel.fileName}</span><button type="button" onClick={() => void unload()}>{ko ? "내리기" : "Unload"}</button></div>}
+    {!snapshot ? <p role="status" className={styles.empty}>{notice ?? (ko ? "모델 상태 확인 중…" : "Checking model state…")}</p> : <>
+      {unavailable && <p role="status" className={styles.notice}>{!engine ? ko ? "이 컴퓨터에서 사용할 실행 엔진이 아직 없습니다." : "A compatible engine is not available for this computer." : ko ? "로컬 모델 상태를 사용할 수 없습니다. 앱을 다시 열어 확인해 주세요." : "Local model state is unavailable. Reopen the app and check again."}</p>}
+      <div className={styles.layout}>
+        <div role="listbox" aria-label={ko ? "모델 목록" : "Model catalog"} className={styles.models}>
+          {filtered.map(item => {
+            const installed = snapshot.modelInstallations.some(value => value.modelPackageId === item.packageId);
+            return <button type="button" role="option" key={item.packageId} aria-selected={model?.packageId === item.packageId} data-model-package={item.packageId} className={styles.model} onClick={() => { setSelectedModelId(item.packageId); setNotice(null); }}>
+              <span>{item.repository.split("/").at(-1)}</span><small>{item.repository.split("/")[0]} · {item.quantization} · {bytes(item.byteLength)}</small><small>{installed ? ko ? "설치됨" : "Installed" : ko ? "다운로드 가능" : "Available to download"}</small>
+            </button>;
+          })}
+          {!filtered.length && <p className={styles.empty}>{ko ? "검색 결과가 없습니다." : "No matching models."}</p>}
+        </div>
+        {model ? <div className={styles.detail} data-selected-package={model.packageId}>
+          <h2>{model.repository.split("/").at(-1)}</h2><p className={styles.muted}>{model.repository.split("/")[0]} · {model.quantization} · {bytes(model.byteLength)}</p>
+          <p className={styles.muted} title={ko ? "메모리 기준 추정이며 실제 실행 확인과 다를 수 있습니다." : "Memory estimate; actual execution may differ."}>{fitLabel(fit?.class,ko)}</p>
+          <div className={styles.actions}>
+            {!modelInstall ? <button type="button" className={styles.primary} disabled={!!busy || model.gated || unavailable} onClick={installModel}>{model.gated ? ko ? "접근 승인 필요" : "Access approval required" : ko ? "다운로드" : "Download"}</button>
+              : !engineInstall ? <button type="button" className={styles.primary} disabled={!!busy || !engine || unavailable} onClick={installEngine}>{ko ? "실행 엔진 준비" : "Set up engine"}</button>
+              : <button type="button" className={styles.primary} disabled={!!busy || unavailable} onClick={loadModel}>{selectedResident ? ko ? "실행 모델로 선택" : "Select runtime model" : resident ? ko ? "이 모델로 전환" : "Switch to this model" : ko ? "사용하기" : "Use model"}</button>}
+            {selectedResident && <button type="button" className={styles.secondary} disabled={!!busy || unavailable} onClick={testCapabilities}>{ko ? "기능 확인" : "Check capabilities"}</button>}
+          </div>
+          <div className={styles.capabilities} aria-label={ko ? "모델 기능 상태" : "Model capabilities"}>
+            {[{Icon:IconCode,label:"JSON",value:capability?.strictJson},{Icon:IconBolt,label:ko ? "도구" : "Tools",value:capability?.toolUse},{Icon:IconImage,label:ko ? "이미지" : "Images",value:capability?.imageInput},{Icon:IconPower,label:ko ? "중지" : "Cancellation",value:capability?.cancellation}].map(item => <span key={item.label} role="img" title={`${item.label} · ${checked(item.value,ko)}`} aria-label={`${item.label} · ${checked(item.value,ko)}`}><item.Icon size={15} /></span>)}
+          </div>
+        </div> : <p className={styles.empty}>{ko ? "목록에서 모델을 선택해 주세요." : "Select a model from the list."}</p>}
+      </div>
+      {busy && <div role="status" className={styles.progress} data-operation-package={operation?.packageId}><span>{busy}{progress ? ` ${bytes(progress.downloadedBytes)} / ${bytes(progress.totalBytes)}` : ""}</span>{operation && <button type="button" onClick={() => void cancel()}>{ko ? "중지" : "Stop"}</button>}</div>}
+      {notice && <p role="status" className={styles.notice}>{notice}</p>}
+    </>}
+  </section>;
 }
-
-const buttonStyle = {
-  border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", color: "var(--ink)",
-  padding: "7px 10px", fontSize: 11.5, fontWeight: 650, cursor: "pointer",
-} as const;
-
-const primaryButtonStyle = {
-  ...buttonStyle, background: "var(--accent)", color: "white", borderColor: "var(--accent)",
-} as const;
-
-const selectStyle = {
-  border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", color: "var(--ink)",
-  padding: "8px 10px", fontSize: 11.5,
-} as const;

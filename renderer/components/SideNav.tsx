@@ -37,6 +37,7 @@ import {
   IconSettings,
   IconChevronDown,
   IconSidebar,
+  IconCpu,
 } from "./Icon";
 import type { MarketplaceListing } from "@/lib/types";
 import type { ComponentType } from "react";
@@ -172,6 +173,7 @@ export function SideNav({
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/workspace", icon: IconChat },
+      { label: "Local Models", href: "/local-models", icon: IconCpu },
       /*
        * 프롬프트 스토어는 화면도 번역 문구도 다 있는데 들어가는 문이 없었다
        * (감사 2026-08-25: 렌더러 전체에서 /prompts 로 가는 링크 0건). 화면을

@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 115;
+const SCHEMA_VERSION = 117;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6341,6 +6341,86 @@ export function initStore(options: StoreInitOptions = {}): void {
         CREATE INDEX IF NOT EXISTS idx_media_operation_events_created
           ON media_operation_events(operation_id, created_at);
       `);
+    })();
+  }
+
+  // v116: one durable intent owns the Work start boundary across project,
+  // chat and task creation. Existing rows are not inferred or dispatched.
+  if (userVersion < 116) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS work_start_intents (
+          intent_id TEXT PRIMARY KEY,
+          input_digest TEXT NOT NULL,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL UNIQUE REFERENCES chats(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          prompt_text TEXT NOT NULL,
+          options_json TEXT NOT NULL CHECK(json_valid(options_json)),
+          runtime_selection_json TEXT NOT NULL CHECK(json_valid(runtime_selection_json)),
+          status TEXT NOT NULL CHECK(status IN ('queued','claimed','accepted','failed')),
+          claim_token TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_work_start_intents_project
+          ON work_start_intents(project_id, created_at DESC);
+      `);
+    })();
+  }
+
+
+  // v117: Office selection acknowledgement shares the canonical chat lifetime.
+  if (userVersion < 117) {
+    _db.transaction(() => {
+      const workKeys = _db!.pragma("foreign_key_list(work_start_intents)") as Array<{ on_delete: string }>;
+      if (workKeys.some(key => key.on_delete !== "CASCADE")) {
+        _db!.exec(`ALTER TABLE work_start_intents RENAME TO work_start_intents_v116;
+          DROP INDEX IF EXISTS idx_work_start_intents_project;
+        CREATE TABLE IF NOT EXISTS work_start_intents (
+          intent_id TEXT PRIMARY KEY,
+          input_digest TEXT NOT NULL,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL UNIQUE REFERENCES chats(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          prompt_text TEXT NOT NULL,
+          options_json TEXT NOT NULL CHECK(json_valid(options_json)),
+          runtime_selection_json TEXT NOT NULL CHECK(json_valid(runtime_selection_json)),
+          status TEXT NOT NULL CHECK(status IN ('queued','claimed','accepted','failed')),
+          claim_token TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_work_start_intents_project
+          ON work_start_intents(project_id, created_at DESC);
+
+          INSERT INTO work_start_intents SELECT * FROM work_start_intents_v116;
+          DROP TABLE work_start_intents_v116;`);
+      }
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS office_task_context (
+          chat_id TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL,
+          receipt_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS office_task_context_operations (
+          operation_id TEXT PRIMARY KEY,
+          request_sha256 TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE
+        );
+      `);
+      const columns = _db!.pragma("table_info(office_task_context_operations)") as Array<{ name: string }>;
+      if (!columns.some(column => column.name === "chat_id")) {
+        _db!.exec("ALTER TABLE office_task_context_operations ADD COLUMN chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE");
+      }
+      _db!.exec(`UPDATE office_task_context_operations
+        SET chat_id=json_extract(receipt_json, '$.chatId')
+        WHERE chat_id IS NULL AND json_valid(receipt_json)
+          AND EXISTS(SELECT 1 FROM chats WHERE id=json_extract(office_task_context_operations.receipt_json, '$.chatId'));
+        CREATE INDEX IF NOT EXISTS idx_office_task_context_operations_chat ON office_task_context_operations(chat_id);`);
     })();
   }
 

@@ -8,10 +8,10 @@
 .dot { flex:0 0 auto; width:6px; height:6px; border-radius:50%; background:var(--muted,#aaa); }
 .dot[data-state=loading], .dot[data-state=opening] { background:var(--warn,#b48a35); }
 .dot[data-state=error] { background:var(--danger,#b64b42); }
-.add, .navigation button { display:grid; place-items:center; flex-shrink:0; border:0; background:transparent; color:inherit; cursor:pointer; width:28px; height:28px; border-radius:6px; }
+.add, .navigation > button, .controls > button { display:grid; place-items:center; flex-shrink:0; border:0; background:transparent; color:inherit; cursor:pointer; width:28px; height:28px; border-radius:6px; }
 .navigation { display:flex; flex-shrink:0; align-items:center; gap:3px; padding:4px 9px 8px; border-bottom:1px solid var(--line,#eee); }
-.navigation input { flex:1; min-width:0; height:29px; border:1px solid transparent; border-radius:7px; padding:0 10px; font:12px/1.5 inherit; color:inherit; background:color-mix(in srgb,var(--ink,#202124) 4%,transparent); }
-.navigation input:focus { outline:none; border-color:var(--line,#ddd); }
+.navigation > input { flex:1; min-width:0; height:29px; border:1px solid transparent; border-radius:7px; padding:0 10px; font:12px/1.5 inherit; color:inherit; background:color-mix(in srgb,var(--ink,#202124) 4%,transparent); }
+.navigation > input:focus { outline:none; border-color:var(--line,#ddd); }
 .browser button:hover { background:color-mix(in srgb,var(--ink,#202124) 7%,transparent); }
 .browser button:disabled { opacity:.3; cursor:default; }
 .browser button:focus-visible { outline:2px solid var(--accent,#777); outline-offset:1px; }
@@ -33,3 +33,28 @@
 .menu p { margin:4px 9px 7px; color:var(--muted,#888); font-size:11px; line-height:1.5; }
 
 .browser[data-inline-header=false] .menu { top:78px; }
+.controls { display:flex; align-items:center; position:relative; flex:none; }
+.controlPopover { position:absolute; z-index:30; right:0; top:calc(100% + 8px); }
+.controlPopover button { display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; width:auto; height:auto; }
+.controlPopover button[role=menuitem] { display:flex; justify-content:space-between; width:100%; min-height:var(--panel-menu-row-height); padding:var(--panel-menu-row-padding); font-size:var(--panel-menu-font-size); font-weight:400; }
+.zoomControls { display:flex; align-items:center; gap:2px; font-size:11px; }
+.zoomControls button { min-width:22px; min-height:22px; padding:2px; }
+.zoomControls span { min-width:36px; text-align:center; }
+.findPopover { display:flex; align-items:center; gap:5px; width:330px; }
+.findPopover input { min-width:0; flex:1; width:120px; padding:5px; height:26px; }
+.findPopover button { padding:4px; }
+.listPopover { width:340px; max-height:min(480px,70vh); overflow:auto; }
+.listTitle { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; font-size:12px; }
+.downloadRow { display:flex; align-items:center; gap:8px; padding:9px 12px; font-size:12px; }
+.downloadRow>div { flex:1; min-width:0; display:grid; gap:4px; }
+.downloadRow [data-browser-download-state=interrupted] { color:var(--danger,#b43f3f); }
+.downloadRow details { position:relative; }
+.downloadRow summary { display:grid; place-items:center; padding:4px; border-radius:5px; cursor:pointer; list-style:none; }
+.downloadRow details>div { position:absolute; right:0; top:24px; z-index:35; width:180px; }
+.frozenPage { position:absolute; z-index:1; inset:0; width:100%; height:100%; object-fit:fill; pointer-events:none; }
+.importBannerSpace { flex:none; padding:8px 12px; background:var(--paper,#fff); }
+.importBanner { display:flex; align-items:center; justify-content:center; gap:10px; width:fit-content; max-width:100%; margin:auto; padding:8px 10px 8px 14px; border:1px solid var(--paper-edge,#e4e4e7); border-radius:12px; box-shadow:0 3px 12px #00000009; background:var(--paper,#fff); color:var(--muted-deep,#666); font-size:12px; line-height:1.4; }
+.importBanner button { flex:none; border:0; border-radius:6px; cursor:pointer; }
+.importAction { padding:6px 8px; color:var(--accent,#615bcb); background:color-mix(in srgb,var(--accent,#615bcb) 8%,transparent); font:inherit; font-weight:550; }
+.importDismiss { display:grid; place-items:center; padding:4px; color:var(--muted-deep,#777); background:transparent; }
+@media(max-width:520px) { .importBanner { flex-wrap:wrap; gap:6px; padding:8px 10px; } .importBanner>span { flex:1 1 100%; } .importBannerSpace { padding:6px 8px; } }

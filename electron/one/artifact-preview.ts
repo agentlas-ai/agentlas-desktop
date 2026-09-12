@@ -892,7 +892,28 @@ export function issueOneArtifactPreviewCapability(
     kind: verified.row.kind,
     sizeBytes: verified.row.size_bytes,
     expiresAt: new Date(expiresAtMs).toISOString(),
+    sha256: verified.row.sha256,
   };
+}
+
+/** Main-only Office source read, under the existing exact task/run binding. */
+export function readOneArtifactOfficeSource(input: unknown, expectedSha256: string): { name: string; mediaType: string; bytes: Buffer; sha256: string } | null {
+  const verified = verifiedFile(input);
+  if (!verified) return null;
+  try {
+    const row = verified.row;
+    if (row.sha256 !== expectedSha256 || row.size_bytes > 64 * 1024 * 1024
+      || ![".pdf", ".docx", ".xlsx", ".pptx", ".hwp", ".hwpx"].includes(path.extname(row.source_path).toLowerCase())) return null;
+    const bytes = Buffer.alloc(row.size_bytes);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = fs.readSync(verified.fd, bytes, offset, bytes.length - offset, offset);
+      if (!read) return null;
+      offset += read;
+    }
+    if (createHash("sha256").update(bytes).digest("hex") !== row.sha256) return null;
+    return { name: path.basename(row.source_path), mediaType: row.mime_type, bytes, sha256: row.sha256 };
+  } finally { fs.closeSync(verified.fd); }
 }
 
 function tokenFromUrl(rawUrl: string): string | null {

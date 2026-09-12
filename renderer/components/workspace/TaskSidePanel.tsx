@@ -3,6 +3,8 @@
 import { BoundImageArtifacts } from "./BoundImageArtifacts";
 import { scopedBoundImages } from "@/lib/bound-image-artifacts";
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
+import type { OfficeEditIntent, OfficeTaskSelection } from "@shared/office-document";
+import { useOfficeTaskContext } from "@/lib/use-office-task-context";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
@@ -26,6 +28,7 @@ import {
   IconSparkles,
 } from "@/components/Icon";
 import { TaskBrowser } from "@/components/browser/TaskBrowser";
+import panelMenu from "@/components/PanelPopover.module.css";
 import { RailAgentScreen } from "@/components/browser/RailAgentScreen";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -554,7 +557,11 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
   </article>;
 }
 
-function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenRequest; locale: "ko" | "en"; wide: boolean }) {
+function ArtifactOpenViewer({ target, locale, wide, onOfficeSelection, onOfficeEditIntent }: {
+  target: OneArtifactOpenRequest; locale: "ko" | "en"; wide: boolean;
+  onOfficeSelection?: (selection: OfficeTaskSelection) => Promise<void>;
+  onOfficeEditIntent?: (intent: OfficeEditIntent) => Promise<void>;
+}) {
   const [capability, setCapability] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -617,10 +624,16 @@ function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenR
   if (failed || !capability) return <div className={styles.artifactFileFallback} role="alert"><span>{locale === "ko" ? "아티팩트를 인앱에서 열지 못했습니다." : "This artifact could not be opened in the app."}</span><button type="button" onClick={issue}>{locale === "ko" ? "다시 시도" : "Retry"}</button></div>;
   return capability.kind === "data" && isCodeArtifactName(target.label)
     ? <CodeIdeViewer source={capability.capabilityUrl} name={target.label} locale={locale} fill={wide} />
-    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill placement="sidebar" />;
+    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill placement="sidebar"
+        fileInfo={capability.sha256 ? { sha256: capability.sha256, binding: `one-artifact:${JSON.stringify(binding)}`, tabId: `one-artifact:${binding.taskId}:${binding.runId}:${binding.artifactRef}` } : undefined}
+        onOfficeSelection={onOfficeSelection} onOfficeEditIntent={onOfficeEditIntent} />;
 }
 
-function ChatFileOpenViewer({ file, locale, onExpand }: { file: ChatFileItem; locale: "ko" | "en"; onExpand?: () => void }) {
+function ChatFileOpenViewer({ file, locale, onExpand, onOfficeSelection, onOfficeEditIntent }: {
+  file: ChatFileItem; locale: "ko" | "en"; onExpand?: () => void;
+  onOfficeSelection?: (selection: OfficeTaskSelection) => Promise<void>;
+  onOfficeEditIntent?: (intent: OfficeEditIntent) => Promise<void>;
+}) {
   const preview = file.viewer;
   const liveKinds = new Set<LiveOutputKind>(["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]);
   const liveKind = liveKinds.has(preview.viewerKind as LiveOutputKind) ? preview.viewerKind as LiveOutputKind : null;
@@ -631,16 +644,7 @@ function ChatFileOpenViewer({ file, locale, onExpand }: { file: ChatFileItem; lo
     {!liveKind && <div data-chat-file-header="true" style={{ display: "grid", gap: 2, padding: "8px 10px", borderBottom: "1px solid var(--paper-edge)", fontSize: 10.5, color: "var(--muted-deep)" }}>
       <strong style={{ color: "var(--ink)", overflowWrap: "anywhere" }}>{file.name}</strong>
       <span>{file.kind === "directory" ? kindLabel : `${formatChatFileSize(file.size)} · ${kindLabel}`}</span>
-      <details data-chat-file-info="true" style={{ marginTop: 2 }}>
-        <summary style={{ cursor: "pointer", width: "fit-content", color: "var(--muted-deep)", userSelect: "none" }}>
-          {locale === "ko" ? "파일 정보" : "File info"}
-        </summary>
-        <div style={{ display: "grid", gap: 2, marginTop: 4, paddingLeft: 10, overflowWrap: "anywhere" }}>
-          <span>SHA-256: {file.sha256}</span>
-          <span>{locale === "ko" ? "바인딩" : "Binding"}: {file.chatId}/{file.groupId}/{file.id}</span>
-          <span>{locale === "ko" ? "탭 ID" : "Tab ID"}: {file.tabId}</span>
-        </div>
-      </details>
+
     </div>}
     <div style={{ minHeight: 0, flex: 1, overflow: liveKind ? "hidden" : "auto" }}>
       {file.kind === "directory" || ["markdown", "json", "text"].includes(preview.viewerKind) ? (
@@ -664,10 +668,12 @@ function ChatFileOpenViewer({ file, locale, onExpand }: { file: ChatFileItem; lo
           } : undefined}
           openExternalHint={locale === "ko" ? "검증된 읽기 전용 임시 사본 열기" : "Open a verified, temporary read-only copy"}
           fileInfo={{ sha256: file.sha256, binding: `${file.chatId}/${file.groupId}/${file.id}`, tabId: file.tabId }}
+          onOfficeSelection={onOfficeSelection}
+          onOfficeEditIntent={onOfficeEditIntent}
         />
       ) : (
         <div role="alert" style={{ padding: 16, fontSize: 12, color: "var(--red-deep)" }}>
-          {locale === "ko" ? "이 형식은 인앱 미리보기를 지원하지 않습니다. 원본 경로를 저장하지 않아 Finder 열기는 제공되지 않습니다." : "This format has no in-app preview. Finder is unavailable because the original path is not retained."}
+          {locale === "ko" ? "미리보기를 지원하지 않는 파일입니다." : "Preview is unavailable for this file."}
         </div>
       )}
     </div>
@@ -761,6 +767,7 @@ function OutputDisclosure({
 }
 
 export type TaskSidePanelProps = {
+  onBrowserAnnotation?: (receipt: import("@shared/browser-annotation").BrowserAnnotationReceipt) => boolean | Promise<boolean>;
   workerSelection?: OneWorkerPanelSelection | null;
   workerRun?: OneWorkerPanelRun | null;
   onCloseWorker?: () => void;
@@ -842,6 +849,7 @@ function TaskSidePanelContent({
   browserHistoryUrl,
   browserPreviewUrl,
   onBrowserObserved,
+  onBrowserAnnotation,
   result,
   resultKey,
   resultKind = "standard",
@@ -850,6 +858,16 @@ function TaskSidePanelContent({
   workerRun,
   onCloseWorker,
 }: TaskSidePanelProps) {
+  const officeContextPopup = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      const popup = officeContextPopup.current;
+      if (popup?.open && !popup.contains(event.target as Node)) popup.open = false;
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, []);
+  const { context: officeContext, error: officeContextError, send: sendOfficeContext, clear: clearOfficeContext } = useOfficeTaskContext(screenChatId);
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   /*
    * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
@@ -1445,6 +1463,15 @@ function TaskSidePanelContent({
           </span>
         </div>
         <div className={styles.artifactHeaderActions}>
+          {officeContext && <details ref={officeContextPopup} data-office-task-context style={{ position: "relative" }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}>
+            <summary title={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} aria-label={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} style={{ display: "grid", placeItems: "center", width: 28, height: 28, cursor: "pointer", listStyle: "none", color: "var(--accent)" }}><IconFileUp size={15} /></summary>
+            <div role="dialog" aria-label={locale === "ko" ? "문서 선택" : "Document selection"} className={panelMenu.panelPopover} style={{ position: "absolute", right: 0, top: "calc(100% + 5px)", zIndex: 25, lineHeight: 1.6, overflowWrap: "anywhere" }}>
+              <p className={panelMenu.panelMenuLabel}>{locale === "ko" ? `${officeContext.fileName} · ${officeContext.edit ? "편집 요청" : "선택 전달"}` : `${officeContext.fileName} · ${officeContext.edit ? "Edit request" : "Shared selection"}`}</p>
+              <button type="button" className={panelMenu.panelMenuRow} onClick={() => void clearOfficeContext()}>{locale === "ko" ? "전달 해제" : "Remove from context"}</button>
+              {officeContextError && <p role="alert">{locale === "ko" ? "해제하지 못했습니다. 다시 시도하세요." : "Could not remove it. Try again."}</p>}
+            </div>
+          </details>}
+
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
       </nav>
@@ -1482,13 +1509,17 @@ function TaskSidePanelContent({
           {activeChatFile && <ChatFileOpenViewer
             file={activeChatFile}
             locale={locale}
+            onOfficeSelection={activeChatFile.chatId === screenChatId ? selection => sendOfficeContext(selection) : undefined}
+            onOfficeEditIntent={activeChatFile.chatId === screenChatId ? intent => sendOfficeContext(intent.selection, intent) : undefined}
             onExpand={onResize || onRequestReadableWidth ? () => (onRequestReadableWidth ?? onResize)?.(maxWidth) : undefined}
           />}
           {!activeChatFile && openedArtifact && <>
             <button type="button" className={styles.artifactBackButton} onClick={() => { setOpenedArtifact(null); onRestorePreferredWidth?.(); }}>
               <IconArrowLeft size={13} /> {locale === "ko" ? "결과로 돌아가기" : "Back to result"}
             </button>
-            <ArtifactOpenViewer key={JSON.stringify(openedArtifact.binding)} target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560} />
+            <ArtifactOpenViewer key={JSON.stringify(openedArtifact.binding)} target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560}
+              onOfficeSelection={openedArtifact.binding.chatId === screenChatId ? selection => sendOfficeContext(selection) : undefined}
+              onOfficeEditIntent={openedArtifact.binding.chatId === screenChatId ? intent => sendOfficeContext(intent.selection, intent) : undefined} />
           </>}
           {!activeChatFile && !openedArtifact && <><BoundImageArtifacts items={boundImages} chatId={screenChatId} locale={locale} />{result}</>}
         </div>}
@@ -1542,7 +1573,7 @@ function TaskSidePanelContent({
           />
         )}
         {openTabs.includes("browser") && <div className={styles.browserPane} hidden={railView !== "browser"}>
-          {screenChatId ? <TaskBrowser key={screenChatId} active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} taskScopeId={screenChatId}
+          {screenChatId ? <TaskBrowser onAnnotation={onBrowserAnnotation} key={screenChatId} active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} taskScopeId={screenChatId}
             presentation={presentedBrowser} headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
             : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
         </div>}

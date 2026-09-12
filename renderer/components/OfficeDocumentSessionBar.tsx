@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { IconAlertTriangle, IconArrowUp, IconCheck, IconClose, IconEdit, IconMoreHorizontal } from "@/components/Icon";
 import type {
   OfficeCapabilities,
   OfficeDocumentSession,
@@ -10,8 +11,7 @@ import type {
 import { officeSelectionValue } from "@/lib/office-document-session";
 import { createOfficeEditIntent } from "@/lib/office-document-session";
 import styles from "./OfficeDocumentSessionBar.module.css";
-
-const CAPABILITY_KEYS = ["read", "structure", "render", "edit", "calculate", "export", "nativeApp"] as const;
+import menu from "./PanelPopover.module.css";
 
 function selectionLabel(selection: OfficeTaskSelection, locale: "ko" | "en"): string {
   const anchor = selection.anchor;
@@ -21,24 +21,11 @@ function selectionLabel(selection: OfficeTaskSelection, locale: "ko" | "en"): st
   return anchor.text;
 }
 
-function statusLabel(status: string, locale: "ko" | "en"): string {
-  const labels = locale === "ko"
-    ? { verified: "확인됨", available: "사용 가능", unverified: "미검증", unsupported: "지원 안 함" }
-    : { verified: "Verified", available: "Available", unverified: "Unverified", unsupported: "Unsupported" };
-  return labels[status as keyof typeof labels] ?? status;
-}
-
-function capabilityLabel(key: typeof CAPABILITY_KEYS[number], locale: "ko" | "en"): string {
-  const ko = { read: "읽기", structure: "구조", render: "화면", edit: "원본 편집", calculate: "계산", export: "내보내기", nativeApp: "외부 앱" };
-  const en = { read: "Read", structure: "Structure", render: "Render", edit: "File edit", calculate: "Calculate", export: "Export", nativeApp: "Native app" };
-  return (locale === "ko" ? ko : en)[key];
-}
-
 export function OfficeDocumentSessionBar({
   locale,
+  name,
   session,
   capabilities,
-  formatReason,
   onDraftChange,
   onClearDraft,
   onDiscardDraftAndLoad,
@@ -46,6 +33,7 @@ export function OfficeDocumentSessionBar({
   onSendEdit,
 }: {
   locale: "ko" | "en";
+  name?: string;
   session: OfficeDocumentSession;
   capabilities: OfficeCapabilities;
   formatReason?: string;
@@ -56,7 +44,12 @@ export function OfficeDocumentSessionBar({
   onSendEdit?: (intent: OfficeEditIntent) => void | Promise<void>;
 }) {
   const [selectionDelivery, setSelectionDelivery] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const [popup, setPopup] = useState<"edit" | "info" | "conflict" | null>(null);
+  const barRef = useRef<HTMLElement>(null);
+  const popupButton = useRef<HTMLButtonElement | null>(null);
   const selection = session.selection;
+  const selectionKey = `${selection?.artifactRevision?.sha256 ?? ""}:${selection?.selectionSequence ?? ""}`;
+  const selectionKeyRef = useRef(selectionKey); selectionKeyRef.current = selectionKey;
   const editableValue = officeSelectionValue(selection);
   const pending = session.pendingEdit;
   const draftValue = pending?.replacementValue ?? editableValue ?? "";
@@ -65,47 +58,55 @@ export function OfficeDocumentSessionBar({
   const editCanSend = Boolean(pending && !session.conflict && pending.delivery !== "sending" && onSendEdit);
   const detail = useMemo(() => selection ? selectionLabel(selection, locale) : null, [locale, selection]);
   const ko = locale === "ko";
+  const unboundSelectionReason = ko ? "이 파일에서는 선택 전달을 사용할 수 없습니다" : "Selection sharing is unavailable for this file";
 
   useEffect(() => {
     setSelectionDelivery("idle");
   }, [selection?.selectionSequence, selection?.artifactRevision?.sha256]);
+  useEffect(() => {
+    if (!popup) return;
+    if (popup === "edit") barRef.current?.querySelector<HTMLInputElement>("[data-office-edit-boundary] input")?.focus();
+    const outside = (event: PointerEvent) => { if (!barRef.current?.contains(event.target as Node)) setPopup(null); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); setPopup(null); popupButton.current?.focus(); } };
+    document.addEventListener("pointerdown", outside); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
+  }, [popup]);
 
   const sendSelection = async () => {
     if (!selection || !selectionCanSend || !onSendSelection) return;
+    const sentKey = selectionKeyRef.current;
     setSelectionDelivery("sending");
     try {
       await onSendSelection(selection);
-      setSelectionDelivery("sent");
+      if (selectionKeyRef.current === sentKey) setSelectionDelivery("sent");
     } catch {
-      setSelectionDelivery("failed");
+      if (selectionKeyRef.current === sentKey) setSelectionDelivery("failed");
     }
   };
 
-  return <section className={styles.bar} data-office-document-session="true" data-format={session.format ?? "unresolved"}>
+  return <section ref={barRef} className={styles.bar} data-office-document-session="true" data-format={session.format ?? "unresolved"} data-office-render={capabilities.render.status} data-office-edit={capabilities.edit.status} data-office-calculate={capabilities.calculate.status}>
     <div className={styles.summary}>
       <span className={styles.format}>{session.format?.toUpperCase() ?? (ko ? "형식 확인 필요" : "Format unresolved")}</span>
-      <span className={styles.selection} title={detail ?? undefined}>{detail ?? (ko ? "페이지·셀·문장을 선택하세요" : "Select a page, cell, slide, or sentence")}</span>
-      {selection ? <button type="button" onClick={() => void sendSelection()} disabled={!selectionCanSend || selectionDelivery === "sending"}>
-        {selectionDelivery === "sending" ? (ko ? "전달 중…" : "Sending…") : (ko ? "현재 작업에 전달" : "Send to current task")}
+      <span className={styles.selection} title={detail ?? name}>{detail ?? name ?? (ko ? "페이지·셀·문장을 선택하세요" : "Select a page, cell, slide, or sentence")}</span>
+      {selection ? <button type="button" title={selectionDelivery === "failed" ? (ko ? "전달 실패 · 다시 시도" : "Sharing failed · Retry") : !canonical ? unboundSelectionReason : ko ? "현재 작업에 전달" : "Send to current task"} aria-label={ko ? "현재 작업에 전달" : "Send to current task"} onClick={() => void sendSelection()} disabled={!selectionCanSend || selectionDelivery === "sending"}>
+        {selectionDelivery === "failed" ? <IconAlertTriangle size={15} /> : selectionDelivery === "sent" ? <IconCheck size={15} /> : <IconArrowUp size={15} />}
       </button> : null}
-      <details className={styles.capabilities}>
-        <summary>{ko ? "기능 상태" : "Capabilities"}</summary>
-        <div data-office-capabilities="true">
-          {CAPABILITY_KEYS.map((key) => <span key={key} data-capability={key} data-status={capabilities[key].status} title={capabilities[key].reason}>
-            {capabilityLabel(key, locale)} · {statusLabel(capabilities[key].status, locale)}
-          </span>)}
-          {formatReason && formatReason !== "resolved" ? <small>{formatReason}</small> : null}
-        </div>
-      </details>
+      {editableValue !== null && canonical ? <button type="button" title={pending?.delivery === "failed" ? (ko ? "편집 요청 실패 · 다시 시도" : "Edit request failed · Retry") : ko ? "선택한 내용 편집 요청" : "Edit selected content"} aria-label={ko ? "선택한 내용 편집 요청" : "Edit selected content"} aria-expanded={popup === "edit"} onClick={event => { popupButton.current = event.currentTarget; setPopup(value => value === "edit" ? null : "edit"); }}>{pending?.delivery === "failed" ? <IconAlertTriangle size={15} /> : <IconEdit size={15} />}</button> : null}
+      <button type="button" title={ko ? "문서 메뉴" : "Document menu"} aria-label={ko ? "문서 메뉴" : "Document menu"} aria-expanded={popup === "info"} aria-haspopup="dialog" onClick={event => { popupButton.current = event.currentTarget; setPopup(value => value === "info" ? null : "info"); }}><IconMoreHorizontal size={17} /></button>
+      {session.conflict ? <button type="button" className={styles.conflictIndicator} title={ko ? "편집 충돌 · 초안 확인" : "Edit conflict · Review draft"} aria-label={ko ? "편집 충돌 · 초안 확인" : "Edit conflict · Review draft"} aria-expanded={popup === "conflict"} onClick={event => { popupButton.current = event.currentTarget; setPopup(value => value === "conflict" ? null : "conflict"); }}><IconAlertTriangle size={15} /></button> : null}
+      {popup === "info" && <div className={`${menu.panelPopover} ${styles.capabilities}`} role="dialog" aria-label={ko ? "문서 메뉴" : "Document menu"}>
+        <span className={menu.panelMenuLabel}>{name ?? session.format?.toUpperCase()}</span>
+        <button type="button" className={menu.panelMenuRow} disabled={!selectionCanSend || selectionDelivery === "sending"} title={!canonical ? unboundSelectionReason : undefined} onClick={() => { setPopup(null); void sendSelection(); }}><IconArrowUp size={15} />{ko ? "선택 전달" : "Share selection"}</button>
+        <button type="button" className={menu.panelMenuRow} disabled={editableValue === null || !canonical || !onSendEdit || Boolean(session.conflict)} onClick={() => setPopup("edit")}><IconEdit size={15} />{ko ? "편집 요청" : "Request edit"}</button>
+        {pending && !session.conflict ? <button type="button" className={menu.panelMenuRow} onClick={() => { onClearDraft(); setPopup(null); }}><IconClose size={15} />{ko ? "초안 지우기" : "Clear draft"}</button> : null}
+        {session.format === "xlsx" ? <span className={menu.panelMenuLabel} data-office-calculation="unverified" title={ko ? "파일에 저장된 계산 결과를 표시합니다. 다시 계산하지 않습니다." : "Shows the calculation results saved in the file without recalculating."}>{ko ? "저장된 계산 결과" : "Saved calculation results"}</span> : null}
+      </div>}
+
     </div>
 
-    {session.format === "xlsx" ? <p className={styles.calculation} data-office-calculation="unverified">
-      {ko ? "수식과 저장된 값을 표시합니다. 이 화면에서는 수식을 다시 계산하지 않아 계산 결과는 미검증입니다." : "Formulas and stored values are shown. This viewer does not recalculate formulas, so calculation results are unverified."}
-    </p> : null}
-
-    {editableValue !== null && canonical ? <div className={styles.editRow} data-office-edit-boundary="true">
+    {popup === "edit" && editableValue !== null && canonical ? <div className={`${menu.panelPopover} ${styles.editRow}`} data-office-edit-boundary="true" role="dialog" aria-label={ko ? "편집 요청" : "Edit request"}>
       <label>
-        <span>{ko ? "편집 요청 초안" : "Edit request draft"}</span>
+        <span>{pending?.selection ? selectionLabel(pending.selection, locale) : detail}</span>
         <input value={draftValue} onChange={(event) => onDraftChange(event.currentTarget.value)} disabled={Boolean(session.conflict)} />
       </label>
       {pending ? <>
@@ -114,27 +115,20 @@ export function OfficeDocumentSessionBar({
           if (!onSendEdit) return;
           const operationId = window.crypto?.randomUUID ? window.crypto.randomUUID() : `office-${Date.now().toString(36)}`;
           const intent = createOfficeEditIntent(session, operationId);
-          if (intent) void onSendEdit(intent);
+          if (intent) void (async () => {
+            try { await onSendEdit(intent); }
+            catch { /* The document session preserves the failed draft for retry. */ }
+          })();
         }}>{ko ? "현재 작업에 편집 요청" : "Request edit in current task"}</button>
       </> : null}
-      <small>{ko ? "요청을 보내도 원본 파일이 저장된 것은 아닙니다. 새 원본이 저장됐는지 확인해야 합니다." : "Sending a request does not save the file. The saved source must be checked before the edit is complete."}</small>
     </div> : null}
 
-    {session.conflict ? <div className={styles.conflict} role="alert" data-office-revision-conflict="true">
-      <strong>{ko ? "원본이 바뀌었습니다. 편집 초안을 보존했습니다." : "The source changed. Your edit draft was preserved."}</strong>
-      <p>{ko ? `내 초안: ${pending?.replacementValue ?? ""}` : `Your draft: ${pending?.replacementValue ?? ""}`}</p>
-      <button type="button" onClick={onDiscardDraftAndLoad}>{ko ? "초안을 버리고 새 원본 열기" : "Discard draft and open new source"}</button>
-      <details>
-        <summary>{ko ? "기술 세부정보" : "Technical details"}</summary>
-        <span>{session.conflict.base.sha256.slice(0, 12)} → {session.conflict.incoming.sha256.slice(0, 12)}</span>
-      </details>
+    {session.conflict && popup === "conflict" ? <div className={`${menu.panelPopover} ${styles.conflict}`} role="dialog" aria-label={ko ? "초안 확인" : "Review draft"} data-office-revision-conflict="true">
+      <p>{ko ? "파일이 변경됐습니다. 초안은 보존했습니다." : "The file changed. Your draft is preserved."}</p>
+      <p className={styles.conflictDraft}>{pending?.replacementValue ?? ""}</p>
+      <button type="button" className={menu.panelMenuRow} onClick={() => setPopup(null)}>{ko ? "초안 유지" : "Keep draft"}</button>
+      <button type="button" className={menu.panelMenuRow} onClick={() => { onDiscardDraftAndLoad(); setPopup(null); }}>{ko ? "초안을 지우고 파일 열기" : "Discard draft and open file"}</button>
     </div> : null}
 
-    {!canonical && selection ? <p className={styles.notice} role="status">
-      {ko ? "원본 파일의 버전을 확인한 뒤 전달할 수 있습니다." : "This selection can be sent after the source file version is verified."}
-    </p> : null}
-    {selectionDelivery === "sent" || selectionDelivery === "failed" ? <span className={styles.delivery} role="status" data-status={selectionDelivery}>
-      {selectionDelivery === "sent" ? (ko ? "선택을 전달했습니다" : "Selection sent") : (ko ? "선택을 전달하지 못했습니다" : "Selection failed")}
-    </span> : null}
   </section>;
 }

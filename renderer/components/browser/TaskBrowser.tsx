@@ -1,13 +1,18 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconArrowLeft, IconChevronRight, IconClose, IconMoreHorizontal, IconPlus, IconRefresh } from "@/components/Icon";
+import { IconAlertTriangle, IconArrowLeft, IconChevronRight, IconClose, IconPlus, IconRefresh } from "@/components/Icon";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
-import { browserLoginImportDiagnostic, browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type { WorkLiveViewStatus } from "@/lib/types";
 import styles from "./TaskBrowser.module.css";
+import { BrowserControls } from "./BrowserControls";
+import { BrowserAnnotation } from "./BrowserAnnotation";
+import type { BrowserAnnotationReceipt } from "@shared/browser-annotation";
+import { BrowserImportBanner } from "./BrowserImportBanner";
+import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
+const IMPORT_DISMISSED = "agentlas.browser.import-banner.v1.dismissed";
 
 type BrowserTab = { id: string; initialUrl: string; status: WorkLiveViewStatus };
 const tabHost = (url: string) => { try { return new URL(url).host; } catch { return "Agentlas Browser"; } };
@@ -21,7 +26,8 @@ function navigationUrl(input: string): string | null {
 }
 
 /** Main owns the tabs. One, Work and their tools attach to the same scoped guests. */
-export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0, presentation }: {
+export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0, presentation, onAnnotation }: {
+  onAnnotation?: (receipt: BrowserAnnotationReceipt) => boolean | Promise<boolean>;
   taskScopeId: string; preferredUrl?: string; locale: "ko" | "en"; active?: boolean;
   headerHost?: HTMLElement | null; onActivate?: () => void; newTabRequest?: number; presentation?: { viewId: string; id: string };
 }) {
@@ -32,13 +38,16 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuButton = useRef<HTMLButtonElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [importBanner, setImportBanner] = useState(false);
+  const [frozenPage, setFrozenPage] = useState<{ viewId: string; dataUrl: string } | null>(null);
+  const frozenPageRef = useRef<{ viewId: string; dataUrl: string } | null>(null);
+  const overlayEpoch = useRef(0);
+  const pendingCapture = useRef<{ viewId: string; epoch: number; promise: Promise<void> } | null>(null);
   const createInFlight = useRef(false);
+  const pagesRef = useRef<HTMLDivElement>(null);
   const current = tabs.find((tab) => tab.id === selectedId) ?? tabs[0];
   const loginNotice = browserLoginImportNotice(current?.status.nativeSession, ko);
-  const loginDiagnostic = browserLoginImportDiagnostic(current?.status.nativeSession, ko);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const mounted = useRef(false);
@@ -57,20 +66,38 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     consumedPresentation.current = presentation.id;
     setSelectedId(presentation.viewId);
   }, [presentation, tabs.length]);
-  useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
-  useEffect(() => {
-    if (!menuOpen) return;
-    menuRef.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
-    const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !menuButton.current?.contains(event.target)) setMenuOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { setMenuOpen(false); menuButton.current?.focus(); }
-    };
-    document.addEventListener("pointerdown", dismiss);
-    document.addEventListener("keydown", escape);
-    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
-  }, [menuOpen]);
+  const refreshImportReadiness = useCallback(async () => {
+    try {
+      if (window.localStorage.getItem(IMPORT_DISMISSED) === "1") return;
+      const result = await window.agentlas?.browserUi.readiness();
+      setImportBanner(result?.state === "confirmed-empty");
+    } catch { /* Unknown connection state does not imply empty cookies. */ }
+  }, []);
+  useEffect(() => { if (connected && active) void refreshImportReadiness(); }, [connected, active, refreshImportReadiness]);
+  const dismissImportBanner = () => {
+    setImportBanner(false);
+    try { window.localStorage.setItem(IMPORT_DISMISSED, "1"); } catch { /* Session-only dismissal. */ }
+  };
+  const prepareOverlay = useCallback(async () => {
+    const id = currentId.current;
+    if (!id || frozenPageRef.current?.viewId === id) return;
+    const epoch = overlayEpoch.current;
+    if (pendingCapture.current?.viewId === id && pendingCapture.current.epoch === epoch) return pendingCapture.current.promise;
+    const promise = (async () => {
+      try {
+        const capture = await window.agentlas?.workLiveView.capture(id, taskScopeId);
+        if (capture?.ok && capture.dataUrl && currentId.current === id && overlayEpoch.current === epoch && mounted.current) {
+          const frame = { viewId: id, dataUrl: capture.dataUrl };
+          frozenPageRef.current = frame; setFrozenPage(frame);
+        }
+      } catch { /* Overlay controls remain available when capture is unavailable. */ }
+    })();
+    pendingCapture.current = { viewId: id, epoch, promise };
+    await promise;
+    if (pendingCapture.current?.promise === promise) pendingCapture.current = null;
+  }, [taskScopeId]);
+  const overlayClosed = useCallback(() => { overlayEpoch.current++; frozenPageRef.current = null; setFrozenPage(null); }, []);
+  const openImport = () => { void prepareOverlay().finally(() => setImporting(true)); };
 
   const acceptStatus = useCallback((status: WorkLiveViewStatus) => {
     if (status.taskScopeId !== taskScopeId) return;
@@ -224,18 +251,16 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       <button type="button" disabled={!current?.status?.canGoForward} aria-label={ko ? "앞으로" : "Forward"} onClick={() => void history("forward")}><IconChevronRight size={16}/></button>
       <button type="button" disabled={!current?.initialUrl} aria-label={ko ? "새로고침" : "Reload"} onClick={() => void history("reload")}><IconRefresh size={15}/></button>
       <input aria-label={ko ? "브라우저 주소" : "Browser address"} placeholder={ko ? "주소 입력" : "Enter address"} value={address} onChange={(event) => setAddress(event.target.value)} onFocus={(event) => event.target.select()} spellCheck={false}/>
-      <button ref={menuButton} type="button" aria-label={ko ? "브라우저 메뉴" : "Browser menu"} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={16}/></button>
+      {loginNotice && !importBanner && <button type="button" title={ko ? "로그인 연결 확인" : "Check sign-in connection"} aria-label={ko ? "로그인 연결 확인" : "Check sign-in connection"} onClick={() => void openImport()}><IconAlertTriangle size={15}/></button>}
+      {onAnnotation && <BrowserAnnotation target={current && active ? { viewId: current.id, taskScopeId } : null} ko={ko} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} onComment={onAnnotation} getViewportBounds={() => pagesRef.current?.getBoundingClientRect() ?? null} />}
+      <BrowserControls target={current ? { viewId: current.id, taskScopeId } : null} ko={ko} onImport={openImport} onNavigate={url => void navigate(current?.id, url)} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} />
     </form>
-    {menuOpen && <div ref={menuRef} className={styles.menu} role="menu" aria-label={ko ? "브라우저 메뉴" : "Browser menu"}>
-      <Link href="/browser" role="menuitem" onClick={() => setMenuOpen(false)}>{ko ? "로그인 연결 관리" : "Manage browser logins"}</Link>
-      <p>{ko ? "커넥트 → 브라우저에서 가져온 로그인을 함께 사용합니다." : "Uses logins imported in Connect → Browser."}</p>
-    </div>}
-    {loginNotice && <p className={styles.notice} role="status">
-      {ko ? "이 브라우저를 열 때 확인한 로그인 연결: " : "Login transfer checked when opening this browser: "}{loginNotice}
-      {loginDiagnostic && <details><summary>{ko ? "자세히" : "Details"}</summary><code>{loginDiagnostic}</code></details>}
-    </p>}
+    {importBanner && <BrowserImportBanner ko={ko} onImport={openImport} onDismiss={dismissImportBanner} />}
+    {importing && <CredentialImportDialog ko={ko} onClose={() => { setImporting(false); overlayClosed(); }} onDone={message => { setImporting(false); overlayClosed(); setNotice(message); void refreshImportReadiness(); }} />}
+
     {notice && <p className={styles.notice} role="status">{notice}</p>}
-    <div className={styles.pages}>
+    <div ref={pagesRef} className={styles.pages}>
+      {frozenPage && frozenPage.viewId === current?.id && <img className={styles.frozenPage} src={frozenPage.dataUrl} alt="" aria-hidden="true" />}
       {tabs.filter((tab) => tab.initialUrl).map((tab) => <div key={tab.id} className={styles.page} hidden={tab.id !== current?.id}>
         <NativeLiveWebView mode="browser" bare stableNavigation retainOnUnmount viewId={tab.id} taskScopeId={taskScopeId} url={tab.initialUrl}
           title={tab.status?.title ?? "Agentlas Browser"} active={active && tab.id === current?.id && tab.status.url !== "about:blank"} onStatus={acceptStatus}/>

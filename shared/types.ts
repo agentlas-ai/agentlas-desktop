@@ -6619,6 +6619,10 @@ export interface RunAlertSettings {
 }
 
 export interface AgentlasIpc {
+  browserUi: import("./browser-ui").BrowserUiAPI;
+  browserAnnotation: import("./browser-annotation").BrowserAnnotationAPI;
+  browserAutofill: import("./browser-autofill").BrowserAutofillAPI;
+  workStart: import("./work-start").WorkStartAPI;
   localModelHub: LocalModelHubAPI;
   localModelMigration: LocalModelMigrationAPI;
   /**
@@ -8123,6 +8127,7 @@ export interface AgentlasIpc {
     getMode: () => Promise<"smart" | "build-only" | "off">;
     setMode: (mode: "smart" | "build-only" | "off") => Promise<"smart" | "build-only" | "off">;
   };
+  officeTaskContext: import("./office-task-context").OfficeTaskContextAPI;
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;

@@ -1,5 +1,6 @@
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
+import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
@@ -4655,6 +4656,11 @@ ${effectiveUserPrompt}`;
     }
   }
   if (!req.agentAppMode && executionContext?.source !== "automation" && (chat.kind !== "division" || req.automationId)) {
+    const officeContext = officeTaskContextForInvocation(chat.id);
+    if (officeContext) {
+      systemPrompt = `${systemPrompt}\n\n${officeContext}`;
+      turnContextParts.push(officeContext);
+    }
     const lifecycleContext = automationLifecycleContext(chat.id, req.automationId);
     if (lifecycleContext) {
       systemPrompt = `${systemPrompt}\n\n${lifecycleContext}`;

@@ -131,6 +131,8 @@ export interface LocalEngineInstallationReceipt {
   provenanceVerified: boolean;
   executableSha256: string;
   executableRelativePath: string;
+  /** Exact files from the attested archive; required before loading Windows DLLs. */
+  runtimeFiles?: Array<{ relativePath: string; sha256: string; byteLength: number }>;
   installedAt: string;
 }
 
@@ -254,12 +256,28 @@ export interface HuggingFaceRepositoryInspection extends HuggingFaceCatalogStatu
   reasonCodes: string[];
 }
 
+/** Main-session operations belong to one trusted webContents; never infer these IDs from package progress. */
+export interface LocalModelOperationView {
+  operationId: string;
+  kind: "downloadEngine" | "downloadModel" | "installEnginePackage" | "installModelPackage" | "loadModel" | "testCapabilities";
+  packageId: string | null;
+  installationId: string | null;
+  state: "pending" | "cancelling" | "completed" | "cancelled" | "failed";
+  phase: "download" | "install" | "load" | "check";
+  startedAt: string;
+  finishedAt: string | null;
+  reasonCode: "local_model_operation_cancelled" | "local_model_operation_failed" | null;
+}
+
 /** Renderer-facing API. Main owns operation controllers and the import dialog. */
 export interface LocalModelHubAPI {
   searchModels: (payload: { query: string; cursor?: string; refresh?: boolean }) => Promise<HuggingFaceSearchResult>;
   inspectRepository: (payload: { repository: string; refresh?: boolean }) => Promise<HuggingFaceRepositoryInspection>;
   addModel: (payload: { repository: string; revision: string; fileName: string }) => Promise<LocalModelPackageIdentity>;
   snapshot: () => Promise<LocalModelHubSnapshot>;
+  operations: () => Promise<LocalModelOperationView[]>;
+  installEnginePackage: (payload: { packageId: string; operationId: string }) => Promise<LocalEngineInstallationReceipt>;
+  installModelPackage: (payload: { packageId: string; operationId: string }) => Promise<LocalModelInstallationReceipt>;
   downloadEngine: (payload: { packageId: string; operationId: string }) => Promise<LocalPackageDownloadReceipt>;
   downloadModel: (payload: { packageId: string; operationId: string }) => Promise<LocalPackageDownloadReceipt>;
   cancelOperation: (payload: { operationId: string }) => Promise<{ cancelled: boolean }>;

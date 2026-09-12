@@ -56,6 +56,8 @@ export const IconStore = (p: Props) =>
   svg("M3 9l1.5-4h15L21 9M3 9v11h18V9M3 9h18M9 14h6", p);
 export const IconApps = (p: Props) =>
   svg("M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z", p);
+export const IconCpu = (p: Props) =>
+  svg("M6 6h12v12H6zM9 9h6v6H9zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4", p);
 export const IconTrash = (p: Props) =>
   svg("M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", p);
 export const IconRefresh = (p: Props) =>

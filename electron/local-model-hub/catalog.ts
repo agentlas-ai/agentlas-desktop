@@ -13,6 +13,48 @@ import {
  * release API. A new release is a new row; package ids are never retargeted.
  */
 const ENGINE_CATALOG: readonly LocalEnginePackageIdentity[] = [
+{
+  "schemaVersion": LOCAL_MODEL_HUB_SCHEMA_VERSION,
+  "packageId": "llama.cpp:b10903:win32-x64-cpu",
+  "engine": "llama.cpp",
+  "releaseTag": "b10903",
+  "sourceCommit": "481c65f091f74c5e7089dd0a3a1cc6b50cced31e",
+  "platform": "win32",
+  "arch": "x64",
+  "accelerator": "cpu",
+  "archiveFormat": "zip",
+  "fileName": "llama-b10903-bin-win-cpu-x64.zip",
+  "byteLength": 18423911,
+  "sha256": "b009259d362662f4d73633773080e0ce5d748b8556290b7973fc7249b3b83806",
+  "downloadUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10903/llama-b10903-bin-win-cpu-x64.zip",
+  "sourceUrl": "https://github.com/ggml-org/llama.cpp/releases/tag/b10903",
+  "provenance": {
+    "kind": "github-artifact-attestation",
+    "repository": "ggml-org/llama.cpp",
+    "signerWorkflowRepository": "ggml-org/llama.cpp"
+  }
+},
+{
+  "schemaVersion": LOCAL_MODEL_HUB_SCHEMA_VERSION,
+  "packageId": "llama.cpp:b10903:win32-arm64-cpu",
+  "engine": "llama.cpp",
+  "releaseTag": "b10903",
+  "sourceCommit": "481c65f091f74c5e7089dd0a3a1cc6b50cced31e",
+  "platform": "win32",
+  "arch": "arm64",
+  "accelerator": "cpu",
+  "archiveFormat": "zip",
+  "fileName": "llama-b10903-bin-win-cpu-arm64.zip",
+  "byteLength": 11990079,
+  "sha256": "4a9a371eb789d05699b088305c564bc81e2936287bcf2b8899cbee025349d1b4",
+  "downloadUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10903/llama-b10903-bin-win-cpu-arm64.zip",
+  "sourceUrl": "https://github.com/ggml-org/llama.cpp/releases/tag/b10903",
+  "provenance": {
+    "kind": "github-artifact-attestation",
+    "repository": "ggml-org/llama.cpp",
+    "signerWorkflowRepository": "ggml-org/llama.cpp"
+  }
+},
   {
     schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
     packageId: "llama.cpp:b10903:darwin-arm64-metal",

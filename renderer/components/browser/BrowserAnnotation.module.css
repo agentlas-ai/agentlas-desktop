@@ -1,0 +1,12 @@
+.root { display:inline-flex; align-items:center; position:relative; }
+.button { display:flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:0; border-radius:6px; background:transparent; color:inherit; cursor:pointer; }
+.button:hover,.button[aria-pressed="true"] { background:var(--fill-2,rgba(0,0,0,.06)); }
+.button:disabled { opacity:.45; cursor:default; }
+.button:focus-visible { outline:2px solid var(--accent,#7774ef); outline-offset:1px; }
+.popover { position:fixed; z-index:10000; width:274px; }
+.popover textarea { display:block; width:100%; min-height:72px; max-height:160px; resize:vertical; padding:8px 12px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; font-size:var(--panel-menu-font-size); font-weight:400; line-height:1.5; outline:none; }
+.popover textarea:focus-visible { outline:1px solid var(--accent,#7774ef); outline-offset:-1px; }
+.actions { display:flex; justify-content:flex-end; gap:2px; }
+.actions button { width:auto; white-space:nowrap; }
+.message { margin:0; padding:6px 12px; color:var(--muted-deep,#777); font:inherit; }
+.notice { position:absolute; top:100%; right:0; min-width:190px; max-width:280px; padding:6px 8px; background:var(--paper,#fff); color:var(--muted-deep,#777); font-size:12px; font-weight:400; z-index:10; }

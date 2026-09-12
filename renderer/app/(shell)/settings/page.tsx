@@ -31,7 +31,6 @@ import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRu
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
-import { LocalModelHubPanel } from "@/components/settings/LocalModelHubPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
@@ -841,7 +840,10 @@ export default function SettingsPage() {
 
         <TerminalProfilesPanel />
 
-        <LocalModelHubPanel locale={locale} />
+        <a href="/local-models" style={{ display: "block", marginTop: 24, padding: 16, border: "1px solid var(--paper-edge)", borderRadius: 12, color: "var(--ink)", textDecoration: "none" }}>
+          <strong>Local Models</strong>
+          <span style={{ display: "block", marginTop: 6, fontSize: 12, color: "var(--muted-deep)" }}>{locale === "ko" ? "Hugging Face 모델 탐색 · 다운로드 · 실행 관리 →" : "Browse Hugging Face models · Download · Manage runtime →"}</span>
+        </a>
         <OllamaMigrationPanel locale={locale} />
 
         <ConnectSection
