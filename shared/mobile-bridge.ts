@@ -122,6 +122,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "runtime.listRoleMembers",
   "runtime.setRoleMembers",
   "hub.borrowable.list",
+  "hub.search",
+  "hub.detail",
+  "hub.leasePreview",
   "billing.credits",
   "hephaestus.engineToggles",
   "hephaestus.routePreview",
@@ -1858,6 +1861,72 @@ export interface MobileBridgeHubPublishDto {
   };
 }
 
+export interface MobileBridgeHubReleaseIdentityDto {
+  agentDefinitionId: string;
+  agentReleaseId: string;
+  packageHash: string;
+}
+
+export interface MobileBridgeHubPermissionPolicyDto {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+/** Public Hub metadata only. Owner shelves, package bytes and prompts never cross this bridge. */
+export interface MobileBridgeHubMarketListingDto {
+  slug: string;
+  name: string;
+  nameEn: string;
+  tagline: string;
+  taglineEn: string;
+  entityKind: "agent" | "team";
+  trustGrade: "A" | "B" | "C" | "unknown";
+  ownerName: string | null;
+  category: string | null;
+  callable: boolean;
+  perCallCredits: number | null;
+  verifiedInvocations: number | null;
+  rating: number | null;
+  release: MobileBridgeHubReleaseIdentityDto | null;
+  permissions: MobileBridgeHubPermissionPolicyDto | null;
+}
+
+export interface MobileBridgeHubMarketSearchDto {
+  schemaVersion: 1;
+  status: "ready" | "empty" | "unavailable";
+  query: string;
+  items: MobileBridgeHubMarketListingDto[];
+  sourceOnline: boolean;
+  /** Null means the existing Hub source did not prove whether these rows came from its cache. */
+  freshness: "stale" | null;
+  checkedAt: string;
+}
+
+export interface MobileBridgeHubMarketDetailDto {
+  schemaVersion: 1;
+  status: "ready" | "not-found" | "unavailable" | "identity-conflict";
+  listing: MobileBridgeHubMarketListingDto | null;
+  checkedAt: string;
+}
+
+export interface MobileBridgeHubLeasePreviewDto {
+  schemaVersion: 1;
+  status: "ready" | "unavailable" | "exact-release-required";
+  listing: MobileBridgeHubMarketListingDto | null;
+  lease: {
+    offered: boolean;
+    active: boolean;
+    perDayCredits: number | null;
+    leasedUntil: string | null;
+    code: string | null;
+  } | null;
+  checkedAt: string;
+  /** A read never authorizes a charge or a lease. */
+  explicitConfirmationRequired: true;
+  purchaseAuthorized: false;
+}
+
 export const MOBILE_BRIDGE_HUB_PRICE_KINDS = ["RENT", "INGEST", "FORK"] as const;
 export type MobileBridgeHubPriceKind = (typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number];
 
@@ -3028,6 +3097,18 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         validateRuntimeRoleMembers(params.selections),
       );
     }
+    case "hub.search":
+      return hasOnlyKeys(params, ["query", "limit"])
+        ? firstError(
+            optionalString(params, "query", 200),
+            optionalInteger(params, "limit", 1, 30),
+          )
+        : "hub.search accepts only query and limit";
+    case "hub.detail":
+    case "hub.leasePreview":
+      return hasOnlyKeys(params, ["slug"])
+        ? requiredString(params, "slug", 160)
+        : `${method} accepts only slug`;
     case "hephaestus.routePreview":
       return hasOnlyKeys(params, ["query", "scope", "allowLocal", "offline"])
         ? firstError(

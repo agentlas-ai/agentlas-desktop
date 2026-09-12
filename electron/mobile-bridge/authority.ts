@@ -128,6 +128,10 @@ import {
   type MobileBridgeBuildActions,
   type MobileBridgeCloudAgentActions,
 } from "./cloud-actions";
+import {
+  createDesktopMobileHubMarketService,
+  type MobileHubMarketService,
+} from "./hub-market";
 import { getUsageSnapshot } from "../usage";
 import { getBillingCredits } from "../billing";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
@@ -288,6 +292,8 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   cloudAgentActions?: MobileBridgeCloudAgentActions;
   /** Hephaestus build runner adapter. Same injection rule as cloudAgentActions. */
   buildActions?: MobileBridgeBuildActions;
+  /** Public Hub read adapter. Tests inject fixtures; production reuses Desktop's Hub and lease authorities. */
+  hubMarket?: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview">;
   /**
    * Desktop-owned terminal authority. Production injects the persistent
    * terminal controller (PTY capability is implementation-specific); tests may
@@ -1609,6 +1615,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly onError: (error: Error) => void;
   private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
   private readonly buildActions: MobileBridgeBuildActions;
+  private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview">;
   private readonly visualSessions: MobileVisualSessionManager;
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -1659,6 +1666,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge-authority]", error.message));
     this.cloudAgentActions = options.cloudAgentActions ?? createDesktopMobileBridgeCloudAgentActions();
     this.buildActions = options.buildActions ?? createDesktopMobileBridgeBuildActions();
+    this.hubMarket = options.hubMarket ?? createDesktopMobileHubMarketService();
     this.visualSessions = new MobileVisualSessionManager(options.visualSessionControl);
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
@@ -3147,6 +3155,26 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "hub.borrowable.list": {
         noParams(request);
         return asJsonValue(projectBorrowableHubAgents(), request.method);
+      }
+      case "hub.search": {
+        const params = guardedParams(request, ["query", "limit"]);
+        const query = optionalText(params, "query", 200) ?? "";
+        const limit = optionalInteger(params, "limit", 1, 30) ?? 20;
+        return asJsonValue(await this.hubMarket.search(query, limit), request.method);
+      }
+      case "hub.detail": {
+        const params = guardedParams(request, ["slug"]);
+        return asJsonValue(
+          await this.hubMarket.detail(requiredBoundedString(params, "slug", 160)),
+          request.method,
+        );
+      }
+      case "hub.leasePreview": {
+        const params = guardedParams(request, ["slug"]);
+        return asJsonValue(
+          await this.hubMarket.leasePreview(requiredBoundedString(params, "slug", 160)),
+          request.method,
+        );
       }
       case "billing.credits": {
         noParams(request);

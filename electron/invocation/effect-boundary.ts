@@ -3,6 +3,7 @@ import type { McpInvocationEvent } from "../../shared/types";
 import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
+import { boundEffectBoundary } from "./effect-metadata";
 
 // These adapters forward a provider tool-result block or a completed Main tool
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
@@ -104,9 +105,9 @@ export class InvocationEffectBoundaryTracker {
       const ledgerComplete=this.ledgerComplete && this.observedTools===this.durableTools;
       if (!ledgerComplete) pending.add("runtime-effect-ledger-incomplete");
       for(const operation of this.operations.values()) if(operation.outcome!=="succeeded") pending.add(`operation:${operation.key}:${operation.outcome}`);
-      const receipt:RuntimeEffectBoundaryReceipt={schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
+      const receipt=boundEffectBoundary({schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
         adapterKinds:[...this.adapters].sort(),coverage,effects:pending.size?"uncertain":"settled",ledgerComplete,observedToolEventCount:this.observedTools,
-        operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()]};
+        operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()]},this.runId);
       recordRunEvent({runId:this.runId,chatId:this.chatId,kind:"runtime_effect_boundary",sourceEventId:`runtime-effect-boundary:${this.runId}:${terminal.id}`,
         evidencePhase:receipt.effects==="settled"?"executed":"uncertain",payload:{...receipt}});
       return receipt;

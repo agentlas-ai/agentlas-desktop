@@ -1,4 +1,5 @@
 import { getLongRunAttemptGoalRevision } from "./long-runs";
+import { parseEffectMetadata } from "../invocation/effect-metadata";
 import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
@@ -377,6 +378,14 @@ function safePayload(
   input: Record<string, unknown> | undefined,
   context?: SafePayloadContext,
 ): Record<string, unknown> {
+  if (context && input) {
+    const { runtimeEvidence, ...metadata } = input;
+    const exact = parseEffectMetadata(context.kind, metadata, context.runId);
+    if (exact) {
+      const evidence = decodeRuntimeEvidence(runtimeEvidence);
+      return { ...exact, ...(evidence ? { runtimeEvidence: evidence } : {}) };
+    }
+  }
   const canonicalReply = context && input
     ? canonicalQuestionContinuationReply(input, context)
     : undefined;
