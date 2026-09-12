@@ -60,6 +60,10 @@ const api: AgentlasIpc = {
     fillCredential: (input) => ipcRenderer.invoke("browserAutofill:fillCredential", input),
     fillContact: (input) => ipcRenderer.invoke("browserAutofill:fillContact", input),
   },
+  browserProfileImport: {
+    scan: (input) => ipcRenderer.invoke("browserProfileImport:scan", input),
+    import: (input) => ipcRenderer.invoke("browserProfileImport:import", input),
+  },
   browserAnnotation: {
     start: (input) => ipcRenderer.invoke("browserAnnotation:start", input),
     stop: (input) => ipcRenderer.invoke("browserAnnotation:stop", input),

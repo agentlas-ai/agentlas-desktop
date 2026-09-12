@@ -173,6 +173,66 @@ export function saveBrowserCredential(input: { id?: string; origin: string; labe
   });
 }
 
+export interface ImportedBrowserCredential {
+  origin: string;
+  label: string;
+  username: string;
+  /** Main-only transient plaintext. The caller must zero this buffer after this promise settles. */
+  password: Buffer;
+}
+
+/** Atomically merges an explicit profile-import selection into the encrypted vault. */
+export function importBrowserCredentialRecords(inputs: ImportedBrowserCredential[]) {
+  return enqueue(async (): Promise<BrowserAutofillResult & { imported: number; updated: number }> => {
+    if (!Array.isArray(inputs) || inputs.length > MAX_RECORDS) {
+      return { ok: false, reason: "invalid-request", imported: 0, updated: 0 };
+    }
+    const normalizedByIdentity = new Map<string, { origin: string; label: string; username: string; password: string }>();
+    for (const input of inputs) {
+      const origin = normalizeOrigin(input?.origin);
+      const label = clean(input?.label, 120);
+      const username = clean(input?.username, 512);
+      if (!origin || !label || !Buffer.isBuffer(input?.password)
+        || input.password.length < 1 || input.password.length > 4096) {
+        return { ok: false, reason: "invalid-request", imported: 0, updated: 0 };
+      }
+      const password = input.password.toString("utf8");
+      if (!password || Buffer.byteLength(password, "utf8") > 4096) {
+        return { ok: false, reason: "invalid-request", imported: 0, updated: 0 };
+      }
+      normalizedByIdentity.set(`${origin}\0${username}`, { origin, label, username, password });
+    }
+    const normalized = [...normalizedByIdentity.values()];
+
+    const read = await readState();
+    if (!read.ok) return { ok: false, reason: read.reason, imported: 0, updated: 0 };
+    const now = new Date().toISOString();
+    let imported = 0;
+    let updated = 0;
+    for (const input of normalized) {
+      const existing = read.state.credentials.find((row) => row.origin === input.origin && row.username === input.username);
+      const record: CredentialRecord = {
+        id: existing?.id ?? `browser_credential_${randomUUID().replace(/-/gu, "")}`,
+        origin: input.origin,
+        label: input.label,
+        username: input.username,
+        password: input.password,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      read.state.credentials = [...read.state.credentials.filter((row) => row.id !== record.id), record];
+      if (existing) updated += 1;
+      else imported += 1;
+    }
+    if (read.state.credentials.length > MAX_RECORDS) {
+      return { ok: false, reason: "invalid-request", imported: 0, updated: 0 };
+    }
+    try { await writeState(read.state); }
+    catch { return { ok: false, reason: "vault-unavailable", imported: 0, updated: 0 }; }
+    return { ok: true, imported, updated };
+  });
+}
+
 export function removeBrowserCredential(input: { id: string }) {
   return enqueue(async (): Promise<BrowserAutofillResult> => {
     if (!validId(input?.id, "credential")) return { ok: false, reason: "invalid-request" };

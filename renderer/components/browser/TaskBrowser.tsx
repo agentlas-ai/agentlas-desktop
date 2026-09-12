@@ -256,7 +256,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       <BrowserControls target={current ? { viewId: current.id, taskScopeId } : null} ko={ko} onImport={openImport} onNavigate={url => void navigate(current?.id, url)} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} />
     </form>
     {importBanner && <BrowserImportBanner ko={ko} onImport={openImport} onDismiss={dismissImportBanner} />}
-    {importing && <CredentialImportDialog ko={ko} onClose={() => { setImporting(false); overlayClosed(); }} onDone={message => { setImporting(false); overlayClosed(); setNotice(message); void refreshImportReadiness(); }} />}
+    {importing && <CredentialImportDialog taskScopeId={taskScopeId} ko={ko} onClose={() => { setImporting(false); overlayClosed(); }} onDone={message => { setImporting(false); overlayClosed(); setNotice(message); void refreshImportReadiness(); }} />}
 
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     <div ref={pagesRef} className={styles.pages}>

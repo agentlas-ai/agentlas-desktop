@@ -1,20 +1,20 @@
 "use client";
 
-// 평소 쓰는 브라우저에서 이미 로그인된 도메인을 목록으로 보여주고, 체크한 것만 Agentlas
-// 전용 프로필로 가져온다. 가져온 도메인은 곧바로 Connect 사이트 목록에 나타나므로,
-// 사용자는 주소를 손으로 치고 전용 창에서 다시 로그인하는 일을 하지 않아도 된다.
+// 평소 쓰는 브라우저 프로필의 로그인 상태·저장된 비밀번호·방문 기록을 나누어 보여주고,
+// 사용자가 체크한 항목만 각각 전용 세션·암호화된 autofill vault·현재 작업 기록으로 가져온다.
 //
 // 목록은 "로그인 쿠키가 있는 사이트"만, **사이트 이름과 주소만** 보여준다(오너 결정 2026-08-20).
 // 쿠키 개수·"로그인됨"·"연동됨" 같은 메타 배지는 렌더하지 않는다 — 그 숫자로 줄을 세우면
 // 광고·분석 도메인이 1등이 되고(googleadservices 23개 실측), 사용자에게도 아무 의미가 없다.
 // 한 줄은 호스트가 아니라 사이트(등록 가능 도메인)이고, 고르면 그 사이트 쿠키가 전부 복사된다.
-// 쿠키 값은 화면/로그/응답에 노출하지 않는다. macOS 메인 프로세스는 고른 쿠키만 메모리에서
-// 전용 Chromium 키로 재암호화하고 즉시 폐기한다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
+// 쿠키·비밀번호 값은 화면/로그/응답에 노출하지 않는다. 비밀번호는 explicit import 동작 뒤
+// Main에서만 복호화되어 기존 암호화 vault로 저장되고, 임시 바이트는 즉시 지운다.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
 import type {
+  BrowserProfileDataScanResult,
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
 } from "@/lib/types";
@@ -22,10 +22,12 @@ import { siteDisplayName } from "@shared/registrable-domain";
 
 export function CredentialImportDialog({
   ko,
+  taskScopeId,
   onClose,
   onDone,
 }: {
   ko: boolean;
+  taskScopeId?: string;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -34,6 +36,10 @@ export function CredentialImportDialog({
   const [profileId, setProfileId] = useState<string | null>(null);
   const [domains, setDomains] = useState<DiscoveredCredentialDomain[]>([]);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [profileData, setProfileData] = useState<BrowserProfileDataScanResult | null>(null);
+  const [passwordChecked, setPasswordChecked] = useState<Set<string>>(new Set());
+  const [historyChecked, setHistoryChecked] = useState<Set<string>>(new Set());
+  const [tab, setTab] = useState<"cookies" | "passwords" | "history">("cookies");
   const [query, setQuery] = useState("");
   const [scanning, setScanning] = useState(true);
   // 로그인 쿠키 필터가 너무 적게 잡아 메인이 필터를 푼 경우 — 화면이 그 사실을 말한다.
@@ -42,6 +48,7 @@ export function CredentialImportDialog({
   const [error, setError] = useState<string | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [loginRequired, setLoginRequired] = useState<string[]>([]);
+  const scanRevision = useRef(0);
 
   /*
    * ★대화상자는 Escape 로 닫혀야 한다 (실측 2026-09-08).
@@ -66,7 +73,7 @@ export function CredentialImportDialog({
       const res = await api.browser.scanCredentials(null);
       if (!alive) return;
       setProfiles(res.profiles);
-      const first = res.profiles.find((p) => p.readable) ?? null;
+      const first = res.profiles.find((p) => p.readable) ?? res.profiles[0] ?? null;
       setProfileId(first?.id ?? null);
       if (!first) {
         setScanning(false);
@@ -82,89 +89,144 @@ export function CredentialImportDialog({
     };
   }, [api, ko]);
 
-  // 2단계: 고른 프로필의 도메인 목록.
-  const loadDomains = useCallback(
+  // 2단계: 고른 프로필의 쿠키·비밀번호·방문 기록 메타데이터.
+  const loadProfile = useCallback(
     async (id: string) => {
       if (!api) return;
+      const revision = ++scanRevision.current;
       setScanning(true);
       setError(null);
-      const res = await api.browser.scanCredentials(id);
-      setDomains(res.domains);
-      setRelaxed(Boolean(res.loginFilterRelaxed));
+      const [cookieResult, dataResult] = await Promise.allSettled([
+        api.browser.scanCredentials(id),
+        api.browserProfileImport.scan({ profileId: id }),
+      ]);
+      if (scanRevision.current !== revision) return;
+      const cookieOk = cookieResult.status === "fulfilled" && cookieResult.value.ok;
+      const dataOk = dataResult.status === "fulfilled" && dataResult.value.ok;
+      if (cookieResult.status === "fulfilled") {
+        setDomains(cookieResult.value.domains);
+        setRelaxed(Boolean(cookieResult.value.loginFilterRelaxed));
+      } else {
+        setDomains([]);
+        setRelaxed(false);
+      }
+      if (dataResult.status === "fulfilled") setProfileData(dataResult.value);
+      else setProfileData(null);
+      if (!cookieOk && !dataOk) {
+        setError(ko ? "이 프로필을 읽지 못했습니다." : "Could not read this profile.");
+      }
       setChecked(new Set());
-      if (!res.ok && res.error) setError(res.error);
+      setPasswordChecked(new Set());
+      setHistoryChecked(new Set());
       setScanning(false);
     },
-    [api],
+    [api, ko],
   );
 
   useEffect(() => {
-    if (profileId) void loadDomains(profileId);
-  }, [profileId, loadDomains]);
+    if (profileId) void loadProfile(profileId);
+    return () => { scanRevision.current += 1; };
+  }, [profileId, loadProfile]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return domains;
-    return domains.filter(
+    if (tab === "cookies") return q ? domains.filter(
       (d) => d.domain.includes(q) || siteDisplayName(d.domain).toLowerCase().includes(q),
-    );
-  }, [domains, query]);
+    ) : domains;
+    if (tab === "passwords") return (profileData?.passwords ?? []).filter((item) => !q
+      || `${item.label}\n${item.origin}\n${item.maskedUsername ?? ""}`.toLowerCase().includes(q));
+    return (profileData?.history ?? []).filter((item) => !q
+      || `${item.title}\n${item.url}`.toLowerCase().includes(q));
+  }, [domains, profileData, query, tab]);
+  const visibleItemIds = useMemo(() => new Set(visible.flatMap((item) => "id" in item ? [item.id] : [])), [visible]);
 
   // Existing connections can be selected again to recover an incomplete transfer.
-  const selectable = visible;
-  const allVisibleChecked = selectable.length > 0 && selectable.every((d) => checked.has(d.domain));
+  const selectableIds = useMemo(() => visible.flatMap((item) => {
+    if (tab === "cookies") return [(item as DiscoveredCredentialDomain).domain];
+    if (tab === "passwords") return (item as NonNullable<typeof profileData>["passwords"][number]).importable
+      ? [(item as NonNullable<typeof profileData>["passwords"][number]).id] : [];
+    return taskScopeId ? [(item as NonNullable<typeof profileData>["history"][number]).id] : [];
+  }), [profileData, tab, taskScopeId, visible]);
+  const activeChecked = tab === "cookies" ? checked : tab === "passwords" ? passwordChecked : historyChecked;
+  const setActiveChecked = tab === "cookies" ? setChecked : tab === "passwords" ? setPasswordChecked : setHistoryChecked;
+  const allVisibleChecked = selectableIds.length > 0 && selectableIds.every((id) => activeChecked.has(id));
 
-  const toggle = (domain: string) => {
-    setChecked((prev) => {
+  const toggle = (id: string) => {
+    setActiveChecked((prev) => {
       const next = new Set(prev);
-      if (next.has(domain)) next.delete(domain);
-      else next.add(domain);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
   const run = async () => {
-    if (!api || !profileId || checked.size === 0) return;
+    if (!api || !profileId || checked.size + passwordChecked.size + historyChecked.size === 0) return;
     setImportingNow(true);
     setError(null);
     setLoginRequired([]);
     setSessionNotice(null);
     try {
-      const res = await api.browser.importCredentials(profileId, [...checked]);
-      if (!res.ok) {
-        setError(res.error ?? (ko ? "가져오지 못했습니다." : "Import failed."));
-        return;
+      let linked = 0;
+      let passwordCount = 0;
+      let historyCount = 0;
+      let skipped = 0;
+      let nativeNotice: string | null = null;
+      let protectedSites: string[] = [];
+      if (checked.size > 0) {
+        const res = await api.browser.importCredentials(profileId, [...checked]);
+        if (!res.ok) {
+          setError(res.error ?? (ko ? "로그인 상태를 가져오지 못했습니다." : "Could not import sign-in sessions."));
+          return;
+        }
+        nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
+        linked = res.linkedSites.length;
+        skipped += res.skipped.length;
+        protectedSites = res.requiresLoginSites ?? [];
       }
-      // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
-      const nativeNotice = browserLoginImportNotice(res.nativeSession, ko);
+      if (passwordChecked.size > 0 || historyChecked.size > 0) {
+        const data = await api.browserProfileImport.import({
+          profileId,
+          passwordIds: [...passwordChecked],
+          historyIds: [...historyChecked],
+          ...(taskScopeId ? { taskScopeId } : {}),
+          userConfirmed: true,
+        });
+        passwordCount = data.passwords.imported + data.passwords.updated;
+        historyCount = data.history.imported;
+        skipped += data.skipped.length;
+        if (!data.ok && passwordCount + historyCount === 0) {
+          setError(ko ? "선택한 항목을 가져오지 못했습니다." : "Could not import the selected items.");
+          return;
+        }
+      }
       setSessionNotice(nativeNotice);
-      const linked = res.linkedSites.length;
-      const skipped = res.skipped.length;
-      const protectedSites = res.requiresLoginSites ?? [];
       if (protectedSites.length > 0) {
         // Windows Chrome can bind modern cookies to Chrome's own executable.
         // That is a normal protected-session path, not an import error: keep the
         // dialog open and transition the selected site to the dedicated login UI.
         setChecked(new Set());
         setLoginRequired(protectedSites);
-        void loadDomains(profileId);
+        void loadProfile(profileId);
         return;
       }
       const msg = ko
-        ? `${linked}개 연동됨${skipped > 0 ? ` · ${skipped}개 건너뜀` : ""}`
-        : `Linked ${linked}${skipped > 0 ? ` · skipped ${skipped}` : ""}`;
+        ? `로그인 ${linked} · 비밀번호 ${passwordCount} · 기록 ${historyCount}${skipped > 0 ? ` · ${skipped}개 제외` : ""}`
+        : `Sign-ins ${linked} · passwords ${passwordCount} · history ${historyCount}${skipped > 0 ? ` · ${skipped} skipped` : ""}`;
       if (skipped > 0) {
-        setError(
-          (ko ? "건너뛴 항목: " : "Skipped: ") +
-            res.skipped.map((s) => `${s.domain} (${s.reason})`).join(", "),
-        );
+        setError(ko ? "일부 항목은 브라우저 보호 또는 변경 때문에 제외됐습니다." : "Some items were skipped because they are protected or changed.");
         // 사유를 읽을 수 있게 창은 열어 두고, 목록만 새로 고친다.
-        void loadDomains(profileId);
+        setChecked(new Set());
+        setPasswordChecked(new Set());
+        setHistoryChecked(new Set());
+        void loadProfile(profileId);
         return;
       }
       if (nativeNotice) {
         setChecked(new Set());
-        void loadDomains(profileId);
+        setPasswordChecked(new Set());
+        setHistoryChecked(new Set());
+        void loadProfile(profileId);
         return;
       }
       onDone(msg);
@@ -179,11 +241,11 @@ export function CredentialImportDialog({
     <div className="cid-backdrop" onClick={onClose}>
       <div className="cid-panel" role="dialog" aria-modal="true" aria-labelledby="credential-import-title" onClick={(e) => e.stopPropagation()}>
         <header className="cid-head">
-          <h2 id="credential-import-title">{ko ? "브라우저에서 로그인 가져오기" : "Import logins from your browser"}</h2>
+          <h2 id="credential-import-title">{ko ? "브라우저에서 가져오기" : "Import from your browser"}</h2>
           <p>
             {ko
-              ? "선택한 사이트의 로그인 상태를 가져옵니다."
-              : "Import sign-in sessions for the sites you select."}
+              ? "가져올 항목만 선택하세요."
+              : "Choose only the items you want to import."}
           </p>
         </header>
 
@@ -193,31 +255,42 @@ export function CredentialImportDialog({
               <button
                 key={p.id}
                 className={p.id === profileId ? "on" : ""}
-                disabled={!p.readable}
-                title={p.reason ?? p.path}
+                disabled={importingNow}
                 onClick={() => setProfileId(p.id)}
               >
                 <span className="pname">{p.displayName}</span>
-                <span className="pmeta">{p.accountEmail ?? p.browser}</span>
+                <span className="pmeta">{p.browser}</span>
               </button>
             ))}
           </div>
         )}
 
+        <div className="cid-tabs" role="tablist" aria-label={ko ? "가져올 데이터" : "Data to import"}>
+          {([
+            ["cookies", ko ? "로그인" : "Sign-ins", domains.length],
+            ["passwords", ko ? "비밀번호" : "Passwords", profileData?.passwords.length ?? 0],
+            ["history", ko ? "방문 기록" : "History", profileData?.history.length ?? 0],
+          ] as const).map(([id, label, count]) => (
+            <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? "on" : ""} onClick={() => { setTab(id); setQuery(""); }}>
+              {label}<span>{count}</span>
+            </button>
+          ))}
+        </div>
+
         <div className="cid-tools">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={ko ? "도메인·이름으로 찾기" : "Filter by domain or name"}
+            placeholder={ko ? "목록에서 찾기" : "Filter this list"}
           />
           <button
             className="cid-linkbtn"
-            disabled={selectable.length === 0}
+            disabled={selectableIds.length === 0}
             onClick={() => {
-              setChecked((prev) => {
+              setActiveChecked((prev) => {
                 const next = new Set(prev);
-                if (allVisibleChecked) selectable.forEach((d) => next.delete(d.domain));
-                else selectable.forEach((d) => next.add(d.domain));
+                if (allVisibleChecked) selectableIds.forEach((id) => next.delete(id));
+                else selectableIds.forEach((id) => next.add(id));
                 return next;
               });
             }}
@@ -226,7 +299,7 @@ export function CredentialImportDialog({
           </button>
         </div>
 
-        {!scanning && relaxed && domains.length > 0 && (
+        {!scanning && tab === "cookies" && relaxed && domains.length > 0 && (
           <div className="cid-relaxed">
             {ko
               ? "로그인 여부를 확인할 수 없어 모든 사이트를 표시합니다."
@@ -238,11 +311,11 @@ export function CredentialImportDialog({
           {scanning && <div className="cid-note">{ko ? "찾는 중…" : "Scanning…"}</div>}
           {!scanning && visible.length === 0 && (
             <div className="cid-note">
-              {ko ? "표시할 로그인이 없습니다." : "No logins to show."}
+              {ko ? "표시할 항목이 없습니다." : "No items to show."}
             </div>
           )}
-          {!scanning &&
-            visible.map((d) => (
+          {!scanning && tab === "cookies" &&
+            (visible as DiscoveredCredentialDomain[]).map((d) => (
               <label key={d.domain} className="cid-row">
                 <input
                   type="checkbox"
@@ -263,6 +336,23 @@ export function CredentialImportDialog({
                 <span className="cid-domain">{d.domain}</span>
               </label>
             ))}
+          {!scanning && tab === "passwords" && profileData?.passwords.filter((item) => visibleItemIds.has(item.id)).map((item) => (
+            <label key={item.id} className="cid-row">
+              <input type="checkbox" checked={passwordChecked.has(item.id)} disabled={importingNow || !item.importable}
+                aria-label={`${item.label} ${ko ? "비밀번호" : "password"}`} onChange={() => toggle(item.id)} />
+              <span className="cid-title">{item.label}</span>
+              <span className="cid-domain">{item.maskedUsername ?? item.origin}</span>
+              {!item.importable && <span className="cid-unavailable" title={ko ? "브라우저 보호로 가져올 수 없습니다." : "Protected by the browser and unavailable for import."}>!</span>}
+            </label>
+          ))}
+          {!scanning && tab === "history" && profileData?.history.filter((item) => visibleItemIds.has(item.id)).map((item) => (
+            <label key={item.id} className="cid-row" title={!taskScopeId ? (ko ? "방문 기록은 작업 브라우저에서 가져올 수 있습니다." : "History can be imported from a task browser.") : undefined}>
+              <input type="checkbox" checked={historyChecked.has(item.id)} disabled={importingNow || !taskScopeId}
+                aria-label={`${item.title} ${ko ? "방문 기록" : "history"}`} onChange={() => toggle(item.id)} />
+              <span className="cid-title">{item.title}</span>
+              <span className="cid-domain">{item.url}</span>
+            </label>
+          ))}
         </div>
 
         {error && <div className="cid-error">{error}</div>}
@@ -307,12 +397,12 @@ export function CredentialImportDialog({
 
         <footer className="cid-foot">
           <span className="cid-count">
-            {ko ? `${checked.size}개 선택됨` : `${checked.size} selected`}
+            {ko ? `${checked.size + passwordChecked.size + historyChecked.size}개 선택` : `${checked.size + passwordChecked.size + historyChecked.size} selected`}
           </span>
           <div className="cid-actions">
             <button onClick={onClose}>{ko ? "닫기" : "Close"}</button>
-            <button className="accent" disabled={checked.size === 0 || importingNow} onClick={run}>
-              {importingNow ? (ko ? "연동 중…" : "Linking…") : ko ? "연동하기" : "Link selected"}
+            <button className="accent" disabled={checked.size + passwordChecked.size + historyChecked.size === 0 || importingNow} onClick={run}>
+              {importingNow ? (ko ? "가져오는 중…" : "Importing…") : ko ? "가져오기" : "Import selected"}
             </button>
           </div>
         </footer>
@@ -331,6 +421,7 @@ export function CredentialImportDialog({
         }
         .cid-panel {
           width: var(--popup-2-width);
+          max-width: calc(100vw - 32px);
           max-height: 82vh;
           display: flex;
           flex-direction: column;
@@ -382,6 +473,30 @@ export function CredentialImportDialog({
           opacity: 0.6;
           font-size: 11px;
         }
+        .cid-tabs {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 4px;
+          padding: 3px;
+          border-radius: 10px;
+          background: var(--paper-soft);
+        }
+        .cid-tabs button {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          min-width: 0;
+          padding: 7px 8px;
+          border: 0;
+          border-radius: 8px;
+          color: inherit;
+          background: transparent;
+          font-size: 12px;
+          cursor: pointer;
+        }
+        .cid-tabs button.on { background: var(--paper); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); }
+        .cid-tabs button span { opacity: 0.55; font-size: 11px; }
         .cid-tools {
           display: flex;
           gap: 8px;
@@ -417,7 +532,7 @@ export function CredentialImportDialog({
         }
         .cid-row {
           display: grid;
-          grid-template-columns: auto 1fr auto;
+          grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
           align-items: center;
           gap: 10px;
           padding: 8px 11px;
@@ -434,9 +549,14 @@ export function CredentialImportDialog({
           white-space: nowrap;
         }
         .cid-domain {
+          max-width: 180px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
           opacity: 0.62;
           font-size: 11.5px;
         }
+        .cid-unavailable { font-weight: 700; color: var(--danger); }
         .cid-note {
           padding: 22px 12px;
           text-align: center;

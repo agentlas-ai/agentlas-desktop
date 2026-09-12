@@ -14,6 +14,7 @@ import type {
   BrowserCredentialImportResult,
   BrowserCredentialScanResult,
 } from "./browser-credentials";
+import type { BrowserProfileImportAPI } from "./browser-profile-import";
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { DurableOneSurfaceResult } from "./one-surface-durable";
@@ -6622,6 +6623,7 @@ export interface AgentlasIpc {
   browserUi: import("./browser-ui").BrowserUiAPI;
   browserAnnotation: import("./browser-annotation").BrowserAnnotationAPI;
   browserAutofill: import("./browser-autofill").BrowserAutofillAPI;
+  browserProfileImport: BrowserProfileImportAPI;
   workStart: import("./work-start").WorkStartAPI;
   localModelHub: LocalModelHubAPI;
   localModelMigration: LocalModelMigrationAPI;

@@ -559,6 +559,13 @@ export type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
 } from "@shared/browser-credentials";
+export type {
+  BrowserProfileDataImportInput,
+  BrowserProfileDataImportResult,
+  BrowserProfileDataScanResult,
+  BrowserProfileHistoryItem,
+  BrowserProfilePasswordItem,
+} from "@shared/browser-profile-import";
 
 export type LocalizedItem = {
   name: string;

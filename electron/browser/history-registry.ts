@@ -45,7 +45,7 @@ function safeParameters(input: string): { value: string; redacted: boolean } {
   return { value: output.toString(), redacted };
 }
 
-function safeUrl(value: string): { url: string; redactedQuery: boolean } | null {
+export function sanitizeBrowserHistoryUrl(value: string): { url: string; redactedQuery: boolean } | null {
   try {
     const parsed = new URL(value);
     const local = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
@@ -79,7 +79,7 @@ function validRecord(value: unknown): value is HistoryRecord {
     && typeof row.id === "string" && /^history_[a-f0-9]{32}$/u.test(row.id)
     && typeof row.taskScopeId === "string" && /^[A-Za-z0-9_:.-]{8,200}$/u.test(row.taskScopeId)
     && typeof row.viewId === "string" && /^[A-Za-z0-9_-]{8,80}$/u.test(row.viewId)
-    && safeUrl(String(row.url ?? ""))?.url === row.url
+    && sanitizeBrowserHistoryUrl(String(row.url ?? ""))?.url === row.url
     && typeof row.title === "string" && row.title.length <= 512
     && typeof row.redactedQuery === "boolean"
     && Number.isSafeInteger(row.visitCount) && Number(row.visitCount) > 0
@@ -115,6 +115,10 @@ function persist(): void {
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
   fs.renameSync(temp, file);
+  if (records.size > all.length) {
+    records.clear();
+    for (const record of all) records.set(record.id, record);
+  }
 }
 
 function recordId(taskScopeId: string, url: string): string {
@@ -124,7 +128,7 @@ function recordId(taskScopeId: string, url: string): string {
 function recordVisit(taskScopeId: string, viewId: string, contents: WebContents, increment: boolean): void {
   load();
   if (unavailable || contents.isDestroyed()) return;
-  const safe = safeUrl(contents.getURL());
+  const safe = sanitizeBrowserHistoryUrl(contents.getURL());
   if (!safe) return;
   const id = recordId(taskScopeId, safe.url);
   const prior = records.get(id);
@@ -163,6 +167,71 @@ export function listBrowserHistory(taskScopeId: string, query = "", limit = 100)
     .sort((a, b) => b.lastVisitedAt.localeCompare(a.lastVisitedAt))
     .slice(0, bounded)
     .map(({ id, url, title, lastVisitedAt, visitCount, redactedQuery }) => ({ id, url, title, lastVisitedAt, visitCount, redactedQuery }));
+}
+
+export interface ImportedBrowserHistoryEntry {
+  url: string;
+  title: string;
+  lastVisitedAt: string;
+  visitCount: number;
+  redactedQuery: boolean;
+}
+
+/**
+ * Adds an explicit browser-profile selection to the same task-scoped history
+ * authority as native tab visits. Re-importing the same source is idempotent:
+ * it keeps the newest timestamp and largest source visit count.
+ */
+export function importBrowserHistory(
+  taskScopeId: string,
+  sourceProfileId: string,
+  entries: ImportedBrowserHistoryEntry[],
+): { ok: true; imported: number } | { ok: false; reason: "invalid-request" | "history-unavailable" } {
+  load();
+  if (unavailable) return { ok: false, reason: "history-unavailable" };
+  if (!/^[A-Za-z0-9_:.-]{8,200}$/u.test(taskScopeId)
+    || !sourceProfileId || entries.length > 500) return { ok: false, reason: "invalid-request" };
+
+  const sourceViewId = `imported_${createHash("sha256").update(sourceProfileId).digest("hex").slice(0, 24)}`;
+  const prior = new Map<string, HistoryRecord | undefined>();
+  const changedIds = new Set<string>();
+  for (const entry of entries) {
+    const safe = sanitizeBrowserHistoryUrl(entry.url);
+    const visitedAt = new Date(entry.lastVisitedAt);
+    if (!safe || safe.url !== entry.url || safe.redactedQuery !== entry.redactedQuery
+      || !Number.isFinite(visitedAt.valueOf())
+      || !Number.isSafeInteger(entry.visitCount) || entry.visitCount < 1) {
+      for (const [id, row] of prior) row ? records.set(id, row) : records.delete(id);
+      return { ok: false, reason: "invalid-request" };
+    }
+    const id = recordId(taskScopeId, safe.url);
+    if (!prior.has(id)) prior.set(id, records.get(id));
+    const existing = records.get(id);
+    const next: HistoryRecord = {
+      schemaVersion: HISTORY_SCHEMA_VERSION,
+      id,
+      taskScopeId,
+      viewId: existing?.viewId ?? sourceViewId,
+      url: safe.url,
+      title: clean(entry.title, 512) || existing?.title || safe.url,
+      lastVisitedAt: existing && existing.lastVisitedAt > entry.lastVisitedAt
+        ? existing.lastVisitedAt : entry.lastVisitedAt,
+      visitCount: Math.max(existing?.visitCount ?? 0, entry.visitCount),
+      redactedQuery: Boolean(existing?.redactedQuery || entry.redactedQuery),
+    };
+    if (!existing || JSON.stringify(existing) !== JSON.stringify(next)) {
+      records.set(id, next);
+      changedIds.add(id);
+    }
+  }
+  if (changedIds.size > 0) {
+    try { persist(); }
+    catch {
+      for (const [id, row] of prior) row ? records.set(id, row) : records.delete(id);
+      return { ok: false, reason: "history-unavailable" };
+    }
+  }
+  return { ok: true, imported: [...changedIds].filter((id) => records.has(id)).length };
 }
 
 export function clearBrowserHistory(taskScopeId: string): number | null {

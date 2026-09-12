@@ -457,6 +457,7 @@ import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { withInvocationPreflightAccounting } from "./long-run/accounting-context";
 import { registerWorkStartIpc } from "./work-start";
 import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
+import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
 import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
@@ -1489,6 +1490,7 @@ export function registerIpcHandlers(): void {
   const ipcMain = developmentIpcBoundary(electronIpcMain);
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerBrowserProfileImportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerWorkStartIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAnnotationIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;

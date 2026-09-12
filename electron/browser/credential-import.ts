@@ -154,7 +154,8 @@ export function listDiscoverableProfiles(): DiscoveredBrowserProfile[] {
   return out;
 }
 
-function findProfile(profileId: string): DiscoveredBrowserProfile | null {
+/** Main-only profile resolver. The absolute path must never cross IPC. */
+export function resolveDiscoveredBrowserProfile(profileId: string): DiscoveredBrowserProfile | null {
   return listDiscoverableProfiles().find((p) => p.id === profileId) ?? null;
 }
 
@@ -163,7 +164,8 @@ function findProfile(profileId: string): DiscoveredBrowserProfile | null {
  * 본체 + -wal + -shm 을 함께 복사한 뒤 사본을 열어 WAL 을 재생시키고 무결성을 확인한다.
  * 무결성이 깨지면 null — 호출자는 조용한 빈 결과 대신 실패로 다뤄야 한다.
  */
-function snapshotSqlite(src: string, workDir: string, basename: string): string | null {
+/** Main-only safe copy used by cookie, saved-password, and history readers. */
+export function snapshotBrowserSqlite(src: string, workDir: string, basename: string): string | null {
   const dst = path.join(workDir, basename);
   try {
     fs.copyFileSync(src, dst);
@@ -186,7 +188,7 @@ function snapshotSqlite(src: string, workDir: string, basename: string): string 
   }
 }
 
-function makeWorkDir(): string {
+export function makeBrowserProfileImportWorkDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-credimport-"));
   try {
     fs.chmodSync(dir, 0o700);
@@ -196,7 +198,7 @@ function makeWorkDir(): string {
   return dir;
 }
 
-function removeWorkDir(dir: string): void {
+export function removeBrowserProfileImportWorkDir(dir: string): void {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch {
@@ -233,7 +235,7 @@ function readDomainHistory(profileDir: string, workDir: string, wanted: Set<stri
   const out = new Map<string, DomainHistory>();
   const historySrc = path.join(profileDir, "History");
   if (!fs.existsSync(historySrc)) return out;
-  const snap = snapshotSqlite(historySrc, workDir, "History.snapshot");
+  const snap = snapshotBrowserSqlite(historySrc, workDir, "History.snapshot");
   if (!snap) return out;
   try {
     const db = new Database(snap, { readonly: true });
@@ -290,9 +292,9 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
     return { ok: false, profiles, domains: [], profileId, error: "이 프로필에는 쿠키 저장소가 없습니다." };
   }
 
-  const workDir = makeWorkDir();
+  const workDir = makeBrowserProfileImportWorkDir();
   try {
-    const snap = snapshotSqlite(store, workDir, "Cookies.snapshot");
+    const snap = snapshotBrowserSqlite(store, workDir, "Cookies.snapshot");
     if (!snap) {
       return {
         ok: false,
@@ -380,7 +382,7 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
     // 너무 적게 잡혔다(또는 판단할 칸이 없다) — 필터를 풀고, 풀었다는 사실을 말한다.
     return { ok: true, profiles, domains: all, profileId, loginFilterRelaxed: true };
   } finally {
-    removeWorkDir(workDir);
+    removeBrowserProfileImportWorkDir(workDir);
   }
 }
 
@@ -908,7 +910,7 @@ export async function importBrowserCredentials(
   if (wanted.length === 0) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "가져올 도메인을 하나 이상 골라 주세요." };
   }
-  const profile = findProfile(profileId);
+  const profile = resolveDiscoveredBrowserProfile(profileId);
   if (!profile) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "그 브라우저 프로필을 찾지 못했습니다." };
   }
@@ -926,9 +928,9 @@ export async function importBrowserCredentials(
     listBrowserSites().map((row) => [normalizeSite(row.site), row.session.status] as const),
   );
 
-  const workDir = makeWorkDir();
+  const workDir = makeBrowserProfileImportWorkDir();
   try {
-    const snap = snapshotSqlite(sourceStore, workDir, "Cookies.snapshot");
+    const snap = snapshotBrowserSqlite(sourceStore, workDir, "Cookies.snapshot");
     if (!snap) {
       return {
         ok: false,
@@ -1208,7 +1210,7 @@ export async function importBrowserCredentials(
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    removeWorkDir(workDir);
+    removeBrowserProfileImportWorkDir(workDir);
   }
 }
 

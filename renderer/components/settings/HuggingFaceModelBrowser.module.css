@@ -34,11 +34,15 @@
 .file>div { flex:1; min-width:0; }
 .file strong { display:block; font-size:12px; overflow-wrap:anywhere; font-weight:550; }
 .file span { display:block; font-size:11px; color:var(--muted-deep); margin-top:6px; }
-.file details { color:var(--muted-deep); font-size:10px; margin-top:7px; }
-.file code { display:block; margin-top:6px; overflow-wrap:anywhere; }
 .file button { border:1px solid var(--paper-edge); border-radius:8px; padding:8px 10px; color:var(--ink); background:var(--paper-2); font-size:11px; cursor:pointer; flex:none; }
 .file button:disabled { opacity:.45; cursor:default; }
 .downloadStatus { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:14px; margin-top:18px; border:1px solid var(--paper-edge); border-radius:10px; font-size:12px; overflow-wrap:anywhere; }
 .downloadStatus button { border:0; color:var(--accent); background:transparent; white-space:nowrap; cursor:pointer; }
 .sourceLink { display:inline-block; margin-top:18px; font-size:12px; color:var(--accent); }
 @media(max-width:600px) { .backdrop { padding:10px; } .detail { padding:18px; max-height:calc(100dvh - 20px); border-radius:16px; } .detail h2 { font-size:17px; } .file { flex-wrap:wrap; } .file>div { flex-basis:100%; } }
+
+.pending { display:inline-flex; align-items:center; color:var(--muted-deep); padding:8px 0; }
+.pending svg { animation:metadata-spin 1.2s linear infinite; }
+.stale { display:inline-flex; color:var(--muted-deep); padding:8px 0; }
+@keyframes metadata-spin { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .pending svg { animation:none; } }
