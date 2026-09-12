@@ -1093,35 +1093,13 @@ button.artifactVisual { cursor: pointer; }
 .artifactAddWrap > button:hover { background: var(--paper-3); color: var(--ink); }
 
 .artifactAddMenu {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 6px);
-  right: 0;
-  min-width: 156px;
+  /* A portal escapes the horizontal tab scroller and the output rail clip. */
+  position: fixed;
+  z-index: 1200;
   display: grid;
-  gap: 1px;
-  padding: 6px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 12px;
-  background: var(--paper);
-  box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
 }
-
-.artifactAddMenu > button {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink);
-  font-size: 12.5px;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.artifactAddMenu > button:hover:not(:disabled) { background: var(--paper-2); }
-.artifactAddMenu > button:disabled { color: var(--muted); cursor: default; }
 
 /* 아무 탭도 없을 때 — 빈 채로 두지 않고 무엇을 열 수 있는지 보여준다. */
 .artifactEmptyStage {

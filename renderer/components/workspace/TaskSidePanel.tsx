@@ -6,7 +6,8 @@ import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
 import type { OfficeEditIntent, OfficeTaskSelection } from "@shared/office-document";
 import { useOfficeTaskContext } from "@/lib/use-office-task-context";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 
 /** 한 번에 그리는 활동 줄 수. 나머지는 "이전 N개 더 보기"로 이어 붙인다. */
@@ -877,6 +878,34 @@ function TaskSidePanelContent({
   const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const [addMenuPosition, setAddMenuPosition] = useState({ left: 12, top: 12 });
+  useLayoutEffect(() => {
+    if (!addMenuOpen || !visible) return;
+    const position = () => {
+      const anchor = addMenuButtonRef.current?.getBoundingClientRect();
+      const menu = addMenuRef.current?.getBoundingClientRect();
+      if (!anchor || !menu) return;
+      const left = Math.max(12, Math.min(anchor.left, window.innerWidth - menu.width - 12));
+      const top = Math.max(12, Math.min(anchor.bottom + 6, window.innerHeight - menu.height - 12));
+      setAddMenuPosition({ left, top });
+    };
+    position();
+    addMenuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!addMenuRef.current?.contains(target) && !addMenuButtonRef.current?.contains(target)) setAddMenuOpen(false);
+    };
+    window.addEventListener('resize', position);
+    document.addEventListener('scroll', position, true);
+    document.addEventListener('pointerdown', outside, true);
+    return () => {
+      window.removeEventListener('resize', position);
+      document.removeEventListener('scroll', position, true);
+      document.removeEventListener('pointerdown', outside, true);
+    };
+  }, [addMenuOpen, visible]);
+  useEffect(() => { if (!visible) setAddMenuOpen(false); }, [visible]);
   const [browserHeaderHost, setBrowserHeaderHost] = useState<HTMLDivElement | null>(null);
   const [browserNewTabRequest, setBrowserNewTabRequest] = useState(0);
   const [railView, setRailView] = useState<OutputRailView | null>(null);
@@ -1411,13 +1440,24 @@ function TaskSidePanelContent({
               aria-expanded={addMenuOpen}
               onClick={() => setAddMenuOpen((value) => !value)}
             ><IconPlus size={15} /></button>
-            {addMenuOpen && (
-              <div className={styles.artifactAddMenu} role="menu">
+            {addMenuOpen && createPortal(
+              <div ref={addMenuRef} className={`${panelMenu.panelPopover} ${styles.artifactAddMenu}`} role="menu"
+                aria-label={locale === "ko" ? "보기 추가" : "Add view"}
+                style={addMenuPosition}
+                onKeyDown={(event) => {
+                  const buttons = [...(addMenuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
+                  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                  const next = event.key === 'ArrowDown' ? (index + 1) % buttons.length
+                    : event.key === 'ArrowUp' ? (index - 1 + buttons.length) % buttons.length
+                    : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : null;
+                  if (next !== null) { event.preventDefault(); buttons[next]?.focus(); }
+                }}>
                 {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
                   <button
                     key={view}
                     type="button"
                     role="menuitem"
+                    className={panelMenu.panelMenuRow}
                     disabled={view !== "browser" && openTabs.includes(view)}
                     onClick={() => { setAddMenuOpen(false); if (view === "browser") setBrowserNewTabRequest((value) => value + 1); openRailTab(view); }}
                   >
@@ -1425,11 +1465,11 @@ function TaskSidePanelContent({
                   </button>
                 ))}
                 {onAdd && (
-                  <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAdd(); }}>
+                  <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setAddMenuOpen(false); onAdd(); }}>
                     {locale === "ko" ? "파일 추가" : "Add file"}
                   </button>
                 )}
-              </div>
+              </div>, document.body
             )}
           </span>
         </div>
