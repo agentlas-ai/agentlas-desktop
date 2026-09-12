@@ -154,7 +154,7 @@ export class AcpSessionClient {
     private readonly events: RunnerEvents,
     private readonly permission: RunnerRequest["permission"],
     private readonly locale: "ko" | "en",
-    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean } = { runtime: "acp", sessionKey: "acp" },
+    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
   /** Everything between these two calls is history replay, not this turn. */
@@ -269,6 +269,8 @@ export class AcpSessionClient {
       (session ? find("allow_always", "allow_once") : find("allow_once", "allow_always")) ?? options.find((o) => /allow/i.test(String(o?.optionId)));
     const selected = (option: any) => (option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
 
+    if (this.approval.planMode && mutating) return selected(rejectOption());
+
     const permissionArbiter = getRuntimeToolPermissionArbiter();
     if (permissionArbiter) {
       let decision: AcpPermissionDecision = "deny";
@@ -281,6 +283,7 @@ export class AcpSessionClient {
           detail: typeof params?.toolCall?.rawInput === "string" ? params.toolCall.rawInput : undefined,
           cwd: this.approval.cwd,
           permission: this.permission,
+          ...(this.approval.planMode ? { planMode: true as const } : {}),
           mutating,
           chatId: this.approval.chatId,
           agentId: this.approval.agentId,
@@ -838,6 +841,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
     if (!executableIdentity) throw new Error(`ACP executable unavailable: ${configuredCommand}`);
     const client = new AcpSessionClient(events, req.permission, locale, {
+      ...(req.planMode ? { planMode: true as const } : {}),
       runtime: spec.id,
       sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
       cwd,
@@ -869,6 +873,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         // 권한은 세션 모드로 굳는다(session/set_mode 는 새 세션에서만 고를 수 있다).
         // 권한이 바뀌면 지문이 달라져 그 권한에 맞는 새 세션이 열린다.
         .update(req.permission ?? "")
+        .update(req.planMode ? "\0plan-read-only" : "")
         .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
         .update("\0executable\0")
         .update(executableIdentity.fingerprint)

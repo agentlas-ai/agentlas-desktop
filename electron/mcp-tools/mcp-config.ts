@@ -175,6 +175,8 @@ export interface McpConfigBuildOptions {
    * 배선된 런타임에도 붙여 두면 두 관문이 같은 답을 내므로 해롭지 않다.
    */
   toolGate?: {
+    /** Main-authored Plan ceiling, independent of per-tool approval grants. */
+    planMode?: true;
     runtime: string;
     sessionKey: string;
     permission?: "read" | "write" | "full";
@@ -198,12 +200,19 @@ function mcpProxySpec(
   actual: { command: string; args: string[]; env: Record<string, string> },
   opts: McpConfigBuildOptions | undefined,
   catalogId: string | null,
+  planReadAuthority?: "agentlas-browser" | "cua-driver",
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const gate = opts?.toolGate;
   if (!gate) return null;
-  if (mcpProxyApprovalPort() <= 0) return null;
+  if (mcpProxyApprovalPort() <= 0) {
+    if (gate.planMode) throw new Error("plan_mode_mcp_gate_unavailable");
+    return null;
+  }
   const childPath = path.join(__dirname, "proxy-child.cjs");
-  if (!fs.existsSync(childPath)) return null;
+  if (!fs.existsSync(childPath)) {
+    if (gate.planMode) throw new Error("plan_mode_mcp_proxy_unavailable");
+    return null;
+  }
   // The proxy inherits resolved aliases from its own environment. Repeating
   // ${ALIAS} inside this serialized JSON lets provider string interpolation
   // corrupt the JSON when a vault value contains quotes or backslashes.
@@ -215,15 +224,13 @@ function mcpProxySpec(
     command: process.execPath,
     args: [childPath],
     env: {
+      ...actual.env,
       ELECTRON_RUN_AS_NODE: "1",
       [MCP_PROXY_CONTROL_FILE_ENV]: mcpProxyControlInfoPath(),
       [MCP_PROXY_TARGET_ENV]: JSON.stringify({ ...actual, env: targetEnv }),
       [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
-      [MCP_PROXY_SESSION_ENV]: JSON.stringify({ ...gate, catalogId }),
-      ...(gate.planPath ? { [MCP_PROXY_PLAN_ENV]: gate.planPath } : {}),
-      // 실제 서버가 쓰는 alias 참조는 프록시가 그대로 물려줘야 한다 — 프록시는
-      // 자기 env 를 자식에게 펼쳐 준다(proxy-child.cjs).
-      ...actual.env,
+      [MCP_PROXY_SESSION_ENV]: JSON.stringify({ ...gate, catalogId, planReadAuthority }),
+      [MCP_PROXY_PLAN_ENV]: gate.planPath ?? "",
     },
   };
 }
@@ -789,7 +796,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const inlineEnv = { ELECTRON_RUN_AS_NODE: "1", ...builtInEnv };
         const direct = { command: process.execPath, args, env: inlineEnv };
         const isComputerUse = isAuthenticComputerUseMcpLaunch(command, args);
-        const proxied = isComputerUse ? mcpProxySpec(key, direct, opts, s.catalogId) : null;
+        const proxied = isComputerUse || opts?.toolGate?.planMode
+          ? mcpProxySpec(key, direct, opts, s.catalogId, isComputerUse ? "cua-driver" : undefined) : null;
         if (isComputerUse && opts?.toolGate && !proxied) {
           throw new Error("computer-use-tool-gate-unavailable");
         }
@@ -829,7 +837,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           command: process.execPath,
           args: wrapperArgs,
           env: wrapperEnv,
-        }, opts, s.catalogId);
+        }, opts, s.catalogId, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -838,19 +846,23 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // External stdio MCPs launch through the least-privilege wrapper. The
         // child gets OS necessities and only its own mapped credentials, never
         // LLM auth or another MCP's opaque alias.
-        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
-        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(wrapperArgs));
+        const codexLaunch = opts?.toolGate?.planMode ? proxied : null;
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexLaunch?.command ?? process.execPath));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexLaunch?.args ?? wrapperArgs));
         pushCodexConfig(
           codexConfigArgs,
           key,
           "env",
-          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1", ...builtInEnv }),
+          tomlInlineStringTable(codexLaunch?.env ?? { ELECTRON_RUN_AS_NODE: "1", ...builtInEnv }),
         );
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
         }
       }
     } else if (s.url) {
+      // Native remote transports have no Main per-call approval proxy. Do not
+      // silently pass an unenforced Plan context to a provider-owned client.
+      if (opts?.toolGate?.planMode) throw new Error("plan_mode_remote_mcp_gate_unavailable");
       // Claude Code는 HTTP/SSE, 현재 Codex CLI는 Streamable HTTP URL을
       // 네이티브로 지원한다. Codex 0.144.1의 `codex mcp add --help` 계약에
       // 맞춰 legacy SSE와 임의 헤더 인증은 Claude-only로 둔다.

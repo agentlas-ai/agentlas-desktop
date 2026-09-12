@@ -1425,6 +1425,7 @@ async function runCodexResidentTurn(input: {
   };
 
   const approvalCtx = {
+    ...(req.planMode ? { planMode: true as const } : {}),
     runtime: KIND,
     sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
     cwd,
@@ -1454,6 +1455,7 @@ async function runCodexResidentTurn(input: {
           };
         }
         const ask: RuntimeToolPermissionAsk = {
+          ...(req.planMode ? { planMode: true as const } : {}),
           runtime: KIND,
           sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
           tool: CODEX_IMAGE_TOOL_NAME,

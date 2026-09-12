@@ -12,6 +12,8 @@ import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 
 export interface RunnerRequest {
+  /** Main-authored Plan ceiling; mutation cannot be approved within this run. */
+  planMode?: true;
   systemPrompt: string;
   history: ChatHistoryEntry[];
   userPrompt: string;

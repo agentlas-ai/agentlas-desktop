@@ -59,6 +59,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
   PERMISSION_ESCALATION_TOOL,
@@ -1325,11 +1326,14 @@ export class InvocationService {
       // invoke paths warm the judgment cache (prejudgeOneRequestIntent) and this
       // sync site peeks it; without a judged verdict the intent remains undecided.
       taskIntent: effectiveTaskIntent,
-      ...(!workspaceBinding && requestedOneMode
-        ? { permissions: preparedOneBriefingAction
+      permissions: effectiveInvocationPermission(
+        !workspaceBinding && requestedOneMode
+          ? preparedOneBriefingAction
             ? "read"
-            : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent) }
-        : {}),
+            : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent)
+          : invocationRequest.permissions,
+        invocationRequest.planMode,
+      ),
       ...(oneProfileContext ? { oneProfileContext } : {}),
       ...(claimedOneAttachments ? {
         images: claimedOneAttachments.images,
@@ -2443,6 +2447,7 @@ export class InvocationService {
           }
           if (
             permissionEscalationRequested
+            && !runReq.planMode
             /*
              * 완주한 턴만 물었다. 그런데 승인이 없어 막힌 도구는 그 턴을 **실패로 끝내기도**
              * 한다 — 그때가 사람이 가장 도움이 필요한 순간인데 아무것도 안 물었다.
@@ -3239,9 +3244,10 @@ export class InvocationService {
     if (req.oneAttachmentRef) {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
     }
-    const steerRequest = workspaceBinding
-      ? { ...req, permissions: normalizeRemoteInvocationPermission(req.permissions) }
-      : req;
+    const steerRequest = {
+      ...req,
+      permissions: effectiveInvocationPermission(req.permissions, req.planMode),
+    };
     const active = [...this.activeRuns.entries()].find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId) {
       throw new Error("Steering target is stale; attach to the current Desktop run and retry");

@@ -42,6 +42,9 @@ interface ProxyApprovalRequest {
   runtime?: string;
   permission?: RuntimeToolPermissionAsk["permission"];
   simulation?: boolean;
+  planMode?: boolean;
+  planReadAuthority?: "agentlas-browser" | "cua-driver";
+  planArguments?: unknown;
   cwd?: string;
   chatId?: string;
   unattended?: boolean;
@@ -92,6 +95,38 @@ export function mcpToolIsMutating(input: {
   return !(browserRead || nativeRead);
 }
 
+/** Plan observation authority is minted from the actual host launcher, not a
+ * catalog label. Closed arguments prevent read tools' save/close overloads. */
+export function planMcpToolIsMutating(input: {
+  authority?: unknown; toolName: string; args?: unknown;
+}): boolean {
+  const args = input.args;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return true;
+  const a = args as Record<string, unknown>;
+  const keys = (...allowed: string[]) => Object.keys(a).every(key => allowed.includes(key));
+  const optional = (key: string, type: string) => a[key] === undefined || typeof a[key] === type;
+  if (input.authority === "cua-driver") {
+    // Only argument-free status/list observation is admitted here. Other native
+    // methods retain their ordinary approval behavior outside Plan.
+    return !(["computer_status", "list_apps"].includes(input.toolName) && keys());
+  }
+  if (input.authority !== "agentlas-browser") return true;
+  switch (input.toolName) {
+    case "browser_tabs": return !(keys("action") && a.action === "list");
+    case "browser_snapshot": return !(keys("target", "depth", "boxes")
+      && optional("target", "string") && optional("boxes", "boolean")
+      && (a.depth === undefined || (Number.isSafeInteger(a.depth) && Number(a.depth) >= 0)));
+    case "browser_network_request": return !(keys("index", "part")
+      && Number.isSafeInteger(a.index) && Number(a.index) > 0
+      && (a.part === undefined || ["request-headers", "request-body", "response-headers", "response-body"].includes(String(a.part))));
+    case "browser_network_requests": return !(keys("static", "filter")
+      && optional("static", "boolean") && optional("filter", "string"));
+    case "browser_console_messages": return !(keys("level", "all") && optional("all", "boolean")
+      && (a.level === undefined || ["error", "warning", "info", "debug"].includes(String(a.level))));
+    default: return true;
+  }
+}
+
 /**
  * A simulation is already an explicit promise that external state will not be
  * changed. Asking the user to approve a mutating call at this point both breaks
@@ -118,6 +153,9 @@ async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
     catalogId: parsed.catalogId,
     toolName,
   })) return "deny";
+  if (parsed.planMode === true && planMcpToolIsMutating({
+    authority: parsed.planReadAuthority, toolName, args: parsed.planArguments,
+  })) return "deny";
   const serverKey = parsed.serverKey?.trim() || "mcp";
   const ask: RuntimeToolPermissionAsk = {
     runtime: parsed.runtime?.trim() || "mcp-proxy",
@@ -130,6 +168,7 @@ async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
     kind: "other",
     cwd: parsed.cwd,
     permission: parsed.permission,
+    ...(parsed.planMode === true ? { planMode: true as const } : {}),
     mutating: mcpToolIsMutating({ catalogId: parsed.catalogId, toolName }),
     ...(parsed.chatId ? { chatId: parsed.chatId } : {}),
     ...(parsed.unattended ? { unattended: true as const } : {}),

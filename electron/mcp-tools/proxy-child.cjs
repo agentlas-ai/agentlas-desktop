@@ -93,7 +93,7 @@ function planRefusal(toolName) {
   return null;
 }
 
-function askApproval(toolName) {
+function askApproval(toolName, args) {
   return new Promise((resolve) => {
     const info = control();
     if (!info) {
@@ -110,6 +110,8 @@ function askApproval(toolName) {
       runtime: session.runtime,
       permission: session.permission,
       simulation: session.simulation === true,
+      planMode: session.planMode === true,
+      ...(session.planMode === true ? { planReadAuthority: session.planReadAuthority, planArguments: args } : {}),
       cwd: session.cwd,
       chatId: session.chatId,
       unattended: session.unattended === true,
@@ -211,7 +213,7 @@ process.stdin.on("data", (chunk) => {
       });
       continue;
     }
-    void askApproval(String(toolName)).then((outcome) => {
+    void askApproval(String(toolName), message?.params?.arguments ?? {}).then((outcome) => {
       const generation = process.env.AGENTLAS_AGY_MCP_GENERATION;
       if (generation && outcome.decision === "allow") {
         try {

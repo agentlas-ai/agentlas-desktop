@@ -10,6 +10,7 @@ import { beginBuiltinFileProof } from "../long-run/file-proof";
 // 파일이다(mcp-config.ts). Main이 작성할 때 봉인한 실제 transport를 사용한다.
 // key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
 import { preparedMcpBindings, preparedMcpTransport, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
+import { planMcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
@@ -291,6 +292,7 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
+  planMode?: true;
   runtimeKind: string;
   sessionKey: string;
   permission: RunnerRequest["permission"];
@@ -348,6 +350,7 @@ export async function prepareMainToolLoop(
       ? { broker: new MainWorkforceBroker(req, runtimeKind, mainToolBrokerInventory(tools, byName)) }
       : {}),
     approval: {
+      ...(req.planMode ? { planMode: true as const } : {}),
       runtimeKind,
       sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
       permission: req.permission,
@@ -379,6 +382,7 @@ async function approveLocalToolCall(
         : ("edit" as const)
     : null;
   const ask: RuntimeToolPermissionAsk = {
+    ...(ctx.planMode ? { planMode: true as const } : {}),
     runtime: ctx.runtimeKind,
     sessionKey: ctx.sessionKey,
     tool: toolName,
@@ -488,7 +492,24 @@ export async function runMainToolDispatch(
     };
   }
   approval.signal?.throwIfAborted();
-  if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
+  const planTransport = resolved.kind === "mcp" ? preparedMcpTransport(resolved.prepared, resolved.server) : null;
+  let planReadAuthority: unknown;
+  if (approval.planMode && planTransport?.kind === "stdio") {
+    try { planReadAuthority = JSON.parse(planTransport.env.AGENTLAS_MCP_PROXY_SESSION ?? "{}").planReadAuthority; } catch { /* unknown authority is denied */ }
+  }
+  // Resolve against Main's dispatcher identity, never a tool's name or claimed
+  // annotations. Plan cannot borrow an existing mutation approval.
+  // minPerm is an approval profile, not an effect declaration (image generation
+  // currently has minPerm=read). Only these host implementations are observational.
+  const planMutation = resolved.kind === "builtin"
+    ? !["list_dir", "read_file", "ask_user"].includes(resolved.builtinName)
+    : planMcpToolIsMutating({ authority: planReadAuthority, toolName: resolved.serverToolName, args });
+  if (approval.planMode && planMutation) {
+    const content = "Error: plan_mode_mutation_denied";
+    if (actionId) broker?.finishAction(actionId, "denied");
+    events.onTool?.(call.toolName, call.arguments, content, eventCallId, true);
+    return { content, visionMessage: null, isError: true };
+  }
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
   let approvalDecision: RuntimeToolPermissionDecision | null = null;
   const actionApproval: LocalToolApprovalContext = actionId

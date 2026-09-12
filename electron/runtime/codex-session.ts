@@ -644,6 +644,7 @@ export function codexPoolKey(input: {
 /* ──────────────────────── 실행 전 승인 (이번 작업의 핵심) ──────────────────────── */
 
 export interface CodexApprovalContext {
+  planMode?: true;
   runtime: string;
   sessionKey: string;
   cwd?: string;
@@ -757,6 +758,7 @@ export function codexApprovalAsk(
     ...(detail ? { detail } : {}),
     ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
     permission: ctx.permission,
+    ...(ctx.planMode ? { planMode: true as const } : {}),
     // 기본 규칙: read 외의 모든 요청은 바깥을 바꾸거나 경계를 넓힌다(위 두 예외는 명시).
     mutating: mutating ?? kind !== "read",
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),

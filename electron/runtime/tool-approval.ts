@@ -54,6 +54,8 @@ export type ToolApprovalRequest = ToolApprovalRequestEvent;
  * 아무것도 import 하지 않아서, 러너들이 Electron 없이도 그대로 테스트된다.
  */
 export interface RuntimeToolPermissionAsk {
+  /** Main-authored hard read boundary, independent of existing capability grants. */
+  planMode?: true;
   runtime: string;
   sessionKey: string;
   tool: string;
@@ -161,7 +163,9 @@ function persistAlwaysGrant(request: ToolApprovalRequest): ToolApprovalDurableCo
 }
 
 export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
-  return runtimeToolPermissionArbiter;
+  const arbiter = runtimeToolPermissionArbiter;
+  return arbiter ? (ask) => ask.planMode && ask.mutating
+    ? Promise.resolve("deny") : arbiter(ask) : null;
 }
 
 /**
@@ -170,8 +174,9 @@ export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter 
  * 이 함수를 부르지 말고 곧장 deny 다(실패가 허용으로 바뀌면 안 된다).
  */
 export function defaultRuntimeToolPermission(
-  ask: Pick<RuntimeToolPermissionAsk, "permission" | "mutating">,
+  ask: Pick<RuntimeToolPermissionAsk, "permission" | "mutating" | "planMode">,
 ): RuntimeToolPermissionDecision {
+  if (ask.planMode && ask.mutating) return "deny";
   const readOnly = ask.permission === "read" || ask.permission === undefined;
   return readOnly && ask.mutating ? "deny" : "allow_once";
 }

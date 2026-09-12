@@ -206,8 +206,8 @@ import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
 import { browserCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
+import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import {
-  normalizeRemoteInvocationPermission,
   revalidateInvocationWorkspaceBinding,
   assertInvocationWorkspaceSourceContext,
   type InvocationWorkspaceBinding,
@@ -1610,6 +1610,7 @@ async function runMcpInvocationInContext(
   // site generation, legacy scripts) still receive one internal identity so their
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  const planReadOnly = req.planMode === true;
   if (req.agentAppMode) {
     /*
      * ★오너 결정 2026-08-20 — Site 축 전부 개방.
@@ -1631,7 +1632,7 @@ async function runMcpInvocationInContext(
       taskForceTargets: undefined,
       pipelineStages: undefined,
       routerAgent: undefined,
-      planMode: false,
+      planMode: planReadOnly,
       goalMode: false,
       appsGenerateMode: false,
       targetAppId: undefined,
@@ -1641,7 +1642,7 @@ async function runMcpInvocationInContext(
   }
   // Every caller, including legacy/direct integrations, crosses the same
   // fail-closed boundary. Unknown or omitted permission is read-only.
-  const normalizedPermission = normalizeRemoteInvocationPermission(req.permissions);
+  const normalizedPermission = effectiveInvocationPermission(req.permissions, planReadOnly);
   if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
   const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
   // A Mobile run consumes only the main-owned snapshot captured at the Bridge
@@ -3137,6 +3138,7 @@ ${effectiveUserPrompt}`;
          * 그 차이가 사라진다(mcp-config.ts mcpProxySpec → proxy-child.cjs).
          */
         toolGate: {
+          ...(planReadOnly ? { planMode: true as const } : {}),
           runtime: active.kind,
           // 승인 세션 키는 러너들과 같은 규칙이라야 "이번 세션 동안 허용"이 이어진다.
           sessionKey: `${active.kind}:${req.chatId ?? workingFolder ?? "default"}`,
@@ -3220,7 +3222,7 @@ ${effectiveUserPrompt}`;
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
                 ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
-                toolGate: { runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
+                toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
               childPreviewCapabilityCleanup = childConfig?.workspacePreviewCapabilityCleanup;
@@ -3466,6 +3468,7 @@ ${effectiveUserPrompt}`;
         assertMcpGoalSelectionCurrent();
         const decisionResult = await picked.runner(
           {
+            ...(planReadOnly ? { planMode: true as const } : {}),
             systemPrompt: [
               "You are the active Agentlas Desktop host deciding one turn of a durable Workforce goal.",
               "Decide the STAFFING SOURCE only. Never decompose the task or assign roles — the executing model owns that.",
@@ -3702,6 +3705,7 @@ ${effectiveUserPrompt}`;
           assertMcpGoalSelectionCurrent();
           const result = await pickedForWorkforceLeader.runner(
             {
+              ...(planReadOnly ? { planMode: true as const } : {}),
               systemPrompt: turn.systemPrompt,
               history: [],
               userPrompt: turn.userPrompt,
@@ -4816,6 +4820,7 @@ ${effectiveUserPrompt}`;
         : active.effort ?? undefined,
       signal,
       permission: req.permissions,
+      ...(planReadOnly ? { planMode: true as const } : {}),
       ...(req.simulation === true ? { simulation: true as const } : {}),
       ...(browserOnly ? { browserOnly: true as const } : {}),
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
