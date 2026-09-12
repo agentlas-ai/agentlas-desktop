@@ -5494,6 +5494,7 @@ export interface MultimodalVideoRequest {
   aspectRatio?: "16:9" | "9:16" | "1:1";
   durationSec?: number;
   model?: string;
+  outputRequirements?: { minWidth?: number; minHeight?: number; requireAudio?: boolean };
 }
 
 export interface MultimodalVideoFile {
@@ -5504,10 +5505,11 @@ export interface MultimodalVideoFile {
   url: string;
   mime: string;
   sizeBytes: number;
+  verification?: import("./media-output").MediaOutputVerification;
 }
 
 export interface OberonAnimateProgress {
-  phase: "queued" | "submitting" | "generating" | "downloading" | "complete" | "failed" | "cancelled";
+  phase: "queued" | "submitting" | "generating" | "downloading" | "verifying" | "complete" | "failed" | "cancelled";
   percent: number;
 }
 

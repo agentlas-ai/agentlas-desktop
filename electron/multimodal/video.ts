@@ -22,6 +22,7 @@ import type {
 import { grokAuthSource } from "./availability";
 import { resolveGrokBin, runGrokImagine } from "./grok-imagine";
 import { userDataPath } from "../runtime-paths";
+import { MediaVerificationError, verifyVideoOutput } from "./output-verification";
 
 // provider별 허용 env 키 — 멀티모달 레지스트리(shared/multimodal.ts) 키명을 먼저,
 // 레거시/실동작 키명을 폴백으로. "멀티모달로 연결한 키"를 animate가 그대로 인식하도록 정렬.
@@ -58,6 +59,7 @@ const MAX_POLLS = 120; // ~10분
 
 const jobs = new Map<string, MultimodalVideoJob>();
 const cancelledJobs = new Set<string>();
+const verificationControllers = new Map<string, AbortController>();
 
 async function hasAnyEnvVar(keys: string[]): Promise<boolean> {
   const checks = await Promise.all(keys.map((key) => hasEnvVar(key)));
@@ -114,6 +116,7 @@ export function cancelVideoJob(id: string): MultimodalVideoJob | null {
   if (!job) return null;
   const ko = currentUiLocale() === "ko";
   cancelledJobs.add(id);
+  verificationControllers.get(id)?.abort();
   job.status = "cancelled";
   job.progress.phase = "cancelled";
   job.message = ko ? "취소됨" : "Cancelled";
@@ -184,7 +187,8 @@ async function runAnimateJob(id: string, request: MultimodalVideoRequest): Promi
 
   assertNotCancelled(id);
   updateJob(job, { phase: "downloading", message: ko ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
-  const file = await downloadVideo(job, videoUrl);
+  const file = await downloadVideo(job, videoUrl, request);
+  assertNotCancelled(id);
   job.files.push(file);
   updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
 }
@@ -220,16 +224,9 @@ async function runGrokAnimate(
   });
   assertNotCancelled(id);
   if (!generated) throw new Error(ko ? "Grok Imagine이 사용 가능한 영상을 반환하지 않았습니다." : "Grok Imagine returned no usable video.");
-  const stat = await fs.stat(generated);
-  job.files.push({
-    id: randomUUID(),
-    kind: "animation_mp4",
-    name: path.basename(generated),
-    absPath: generated,
-    url: pathToFileURL(generated).href,
-    mime: "video/mp4",
-    sizeBytes: stat.size,
-  });
+  const file = await verifiedVideoFile(job, generated, request);
+  assertNotCancelled(id);
+  job.files.push(file);
   updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "Grok 애니메이션 완료" : "Grok animation complete", percent: 100 });
 }
 
@@ -314,16 +311,9 @@ async function runVeo(
   } else {
     throw new Error(ko ? "Veo가 uri/바이트 없는 영상을 반환했습니다." : "Veo returned a video without uri or videoBytes.");
   }
-  const stat = await fs.stat(absPath);
-  job.files.push({
-    id: randomUUID(),
-    kind: "animation_mp4",
-    name,
-    absPath,
-    url: pathToFileURL(absPath).href,
-    mime: "video/mp4",
-    sizeBytes: stat.size,
-  });
+  const file = await verifiedVideoFile(job, absPath, request);
+  assertNotCancelled(id);
+  job.files.push(file);
   updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
 }
 
@@ -603,22 +593,66 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
 }
 
 // ── 공통 ─────────────────────────────────────────────────────
-async function downloadVideo(job: MultimodalVideoJob, url: string): Promise<MultimodalVideoFile> {
+async function downloadVideo(job: MultimodalVideoJob, url: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
   const ko = currentUiLocale() === "ko";
   const res = await fetch(url);
   if (!res.ok) throw new Error(ko ? `결과 영상 다운로드 실패 (HTTP ${res.status})` : `Failed to download the result video (HTTP ${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const limit = 1024 * 1024 * 1024;
+  if (Number(res.headers.get("content-length")) > limit) {
+    await res.body?.cancel();
+    throw new Error(ko ? "영상 파일이 허용된 크기를 초과했습니다." : "The video exceeds the file size limit.");
+  }
   const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
   const absPath = path.join(job.outputDir, name);
-  await fs.writeFile(absPath, buf);
+  if (!res.body) throw new Error(ko ? "영상 응답이 비어 있습니다." : "The video response has no body.");
+  const reader = res.body.getReader();
+  const output = await fs.open(absPath, "wx", 0o600);
+  let size = 0;
+  try {
+    for (;;) {
+      assertNotCancelled(job.id);
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > limit) throw new Error(ko ? "영상 파일이 허용된 크기를 초과했습니다." : "The video exceeds the file size limit.");
+      let written = 0;
+      while (written < next.value.byteLength) written += (await output.write(next.value, written, next.value.byteLength - written)).bytesWritten;
+    }
+    await output.sync();
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    await output.close();
+  }
+  return verifiedVideoFile(job, absPath, request);
+}
+
+async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
+  assertNotCancelled(job.id);
+  const ko = currentUiLocale() === "ko";
+  updateJob(job, { phase: "verifying", percent: 96, message: ko ? "영상 재생·길이·크기 확인 중" : "Checking video playback, duration and dimensions" });
+  const controller = new AbortController();
+  verificationControllers.set(job.id, controller);
+  let verified: Awaited<ReturnType<typeof verifyVideoOutput>>;
+  try {
+    verified = await verifyVideoOutput({ sourcePath: absPath, allowedRoot: job.outputDir, signal: controller.signal,
+      criteria: { durationSec: request.durationSec, aspectRatio: request.aspectRatio ?? "16:9", ...request.outputRequirements } });
+  } catch (error) {
+    if (error instanceof MediaVerificationError) {
+      job.warnings.push(error.reasonCode);
+      throw new Error(ko ? `영상 결과를 확인하지 못했습니다. ${error.reasonCode === "media_verifier_unavailable" ? "FFmpeg와 ffprobe 설치가 필요합니다." : error.reasonCode === "media_output_criteria_mismatch" ? "요청한 길이·크기·오디오 조건과 다릅니다." : "파일이 완전한 영상인지 확인해 주세요."}` : error.message);
+    }
+    throw error;
+  } finally { if (verificationControllers.get(job.id) === controller) verificationControllers.delete(job.id); }
+  assertNotCancelled(job.id);
   return {
     id: randomUUID(),
     kind: "animation_mp4",
-    name,
-    absPath,
-    url: pathToFileURL(absPath).href,
+    name: path.basename(verified.path),
+    absPath: verified.path,
+    url: pathToFileURL(verified.path).href,
     mime: "video/mp4",
-    sizeBytes: buf.byteLength,
+    sizeBytes: verified.verification.sizeBytes,
+    verification: verified.verification,
   };
 }
 
