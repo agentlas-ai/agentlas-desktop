@@ -15,11 +15,11 @@ export function modelFitState(snapshot: LocalModelHubSnapshot | null, packageId?
   if (model?.gated) return "blocked";
   const fit = snapshot.fitAssessments.find(row => row.modelPackageId === packageId && row.hardwareProfileId === snapshot.hardware.profileId);
   if (fit?.class === "unsupported") return "blocked";
+  // 적합도의 기준은 총 메모리다(오너 결정 2026-09-13) — 판정이 실린 값이 실제 총 메모리와 같을 때만 믿는다.
   const known = Number.isFinite(fit?.requiredBytes) && Number.isFinite(fit?.availableBytes)
     && (fit?.requiredBytes ?? 0) > 0 && (fit?.availableBytes ?? 0) >= (fit?.requiredBytes ?? Infinity)
-    && Number.isFinite(snapshot.hardware.availableMemoryBytes) && snapshot.hardware.availableMemoryBytes > 0
-    && fit?.availableBytes === snapshot.hardware.availableMemoryBytes
-    && Number.isFinite(snapshot.hardware.totalMemoryBytes) && snapshot.hardware.totalMemoryBytes >= snapshot.hardware.availableMemoryBytes;
+    && Number.isFinite(snapshot.hardware.totalMemoryBytes) && snapshot.hardware.totalMemoryBytes > 0
+    && fit?.availableBytes === snapshot.hardware.totalMemoryBytes;
   return known && fit?.class === "recommended" ? "comfortable" : "caution";
 }
 

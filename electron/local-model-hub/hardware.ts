@@ -96,9 +96,12 @@ export function estimateLocalModelFit(
   const runtimeReserve = Math.max(1_073_741_824, Math.ceil(hardware.totalMemoryBytes * 0.15));
   const kvAndScratch = Math.max(536_870_912, contextTokens * 131_072);
   const requiredBytes = model.byteLength + runtimeReserve + kvAndScratch;
-  const memoryAvailable = hardware.availableMemoryBytes;
+  // ★ 오너 결정 2026-09-13: 적합도는 "지금 남은 메모리"가 아니라 이 컴퓨터의 **총 메모리**로 잰다.
+  //   48GB 맥이면 48GB 기준이다 — 사용자가 내일 재부팅하고 쓸지 지금 쓸지는 우리가 모르며,
+  //   순간 사용량으로 "비권장"을 찍으면 멀쩡한 기계를 못 쓰게 한다. 남은 메모리는 정보로만 보여 준다.
+  const memoryAvailable = hardware.totalMemoryBytes;
   const diskAvailable = hardware.diskAvailableBytes;
-  const reasonCodes: string[] = ["fit_is_estimated"];
+  const reasonCodes: string[] = ["fit_is_estimated", "fit_basis_total_memory"];
   let fit: LocalModelFitAssessment["class"];
   if (diskAvailable !== null && diskAvailable < model.byteLength * 1.1) {
     fit = "unsupported";

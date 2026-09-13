@@ -129,6 +129,9 @@ const base = { schemaVersion: 1, profileId: "hardware:test", observedAt: new Dat
   totalMemoryBytes: 32 * 2 ** 30, availableMemoryBytes: 24 * 2 ** 30, memoryKind: "system", vramBytes: null, diskAvailableBytes: 500 * 2 ** 30, engineDevices: [] };
 eq(hardware.estimateLocalModelFit({ ...base, accelerator: "unknown", acceleratorEvidence: "not-observed" }, model).class, "runnable", "GPU 를 본 적 없으면 '권장' 이 아니다");
 eq(hardware.estimateLocalModelFit({ ...base, accelerator: "vulkan", acceleratorEvidence: "engine-observed", vramBytes: 12 * 2 ** 30 }, model).class, "recommended", "엔진이 GPU 를 보고했으면 권장");
+// 오너 결정: 기준은 총 메모리. 지금 1 GiB 만 남았어도 48 GiB 기계는 48 GiB 로 판정한다.
+const busy = hardware.estimateLocalModelFit({ ...base, totalMemoryBytes: 48 * 2 ** 30, availableMemoryBytes: 1 * 2 ** 30, accelerator: "vulkan", acceleratorEvidence: "engine-observed", vramBytes: 12 * 2 ** 30 }, model);
+eq(busy.class, "recommended", "순간 사용량으로 '비권장'을 찍지 않는다"); eq(busy.availableBytes, 48 * 2 ** 30); ok(busy.reasonCodes.includes("fit_basis_total_memory"));
 const tiny = hardware.estimateLocalModelFit({ ...base, accelerator: "vulkan", acceleratorEvidence: "engine-observed", vramBytes: 256 * 2 ** 20 }, model);
 eq(tiny.class, "may_be_slow", "GPU 메모리가 모델보다 작으면 느릴 수 있음");
 ok(tiny.reasonCodes.includes("gpu_memory_smaller_than_model"));
