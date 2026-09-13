@@ -148,6 +148,19 @@ export async function probeLocalEngineHealth(endpoint: string, authToken: string
   } finally { if (timer) clearTimeout(timer); if (abort) signal?.removeEventListener("abort",abort); }
 }
 
+/** Realistic, unforced tool-selection probes. All must pass; a model that picks the wrong tool is not "verified". */
+const TOOL_USE_PROBE_TOOLS = [
+  { type: "function", function: { name: "browser_navigate", description: "Open a URL in the browser tab", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } } },
+  { type: "function", function: { name: "write_file", description: "Write text to a file in the project folder", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { type: "function", function: { name: "run_shell", description: "Run a shell command in the project folder", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
+  { type: "function", function: { name: "computer_screenshot", description: "Take a screenshot of the desktop", parameters: { type: "object", properties: {} } } },
+] as const;
+const TOOL_USE_PROBES: ReadonlyArray<{ user: string; expect: string; check: (args: unknown) => boolean }> = [
+  { user: "Open https://example.com in the browser and tell me the page title.", expect: "browser_navigate", check: (args) => /^https?:\/\/example\.com\/?$/.test(String((args as { url?: unknown })?.url ?? "")) },
+  { user: "Create a file named hello.txt in the project folder containing the text hi.", expect: "write_file", check: (args) => /hello\.txt$/.test(String((args as { path?: unknown })?.path ?? "")) && typeof (args as { content?: unknown })?.content === "string" },
+  { user: "Count how many files are in the project folder.", expect: "run_shell", check: (args) => typeof (args as { command?: unknown })?.command === "string" && (args as { command: string }).command.length > 0 },
+];
+
 export class LocalModelHubManager {
   private readonly packageRoot: string;
   private readonly engineRoot: string;
@@ -912,18 +925,28 @@ export class LocalModelHubManager {
       if (strictJson === "failed") reasonCodes.push("strict_json_probe_failed");
     }
     if (selection.toolUse) {
+      // 강제(tool_choice)로 한 도구를 부르게 하면 0.6B 도 "확인됨"이 된다 — 실측 2026-09-13 에서 그 모델은
+      // 실제 과제 4개 중 2개에서 엉뚱한 도구를 골랐다(4B 는 4/4). 그래서 강제 없이 도구 여러 개를 주고
+      // 과제에 맞는 도구를 올바른 인자로 고르는지 본다. 이것이 채팅에서 실제로 겪는 일이다.
       try {
-        const response = await complete({
-          messages: [{ role: "user", content: "Call receipt_ping exactly once with value ok." }],
-          tools: [{ type: "function", function: { name: "receipt_ping", description: "Capability probe", parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } } }],
-          tool_choice: { type: "function", function: { name: "receipt_ping" } },
-        });
-        const calls = response.choices?.[0]?.message?.tool_calls;
-        toolUse = Array.isArray(calls) && calls.length > 0 ? "verified" : "failed";
+        const passed = await Promise.all(TOOL_USE_PROBES.map(async (probe) => {
+          const response = await complete({
+            messages: [
+              { role: "system", content: "You are a desktop agent. Use a tool when the task needs the browser, files or the shell." },
+              { role: "user", content: probe.user },
+            ],
+            tools: TOOL_USE_PROBE_TOOLS,
+          });
+          const call = response.choices?.[0]?.message?.tool_calls?.[0] as { function?: { name?: string; arguments?: string } } | undefined;
+          if (call?.function?.name !== probe.expect) return false;
+          try { return probe.check(JSON.parse(call.function.arguments ?? "")); } catch { return false; }
+        }));
+        toolUse = passed.every(Boolean) ? "verified" : "failed";
+        if (toolUse === "failed") reasonCodes.push(`tool_use_probe_failed:${passed.filter(Boolean).length}/${passed.length}`);
       } catch {
         toolUse = "failed";
+        reasonCodes.push("tool_use_probe_failed");
       }
-      if (toolUse === "failed") reasonCodes.push("tool_use_probe_failed");
     }
     if (selection.cancellation) {
       const controller = new AbortController();
