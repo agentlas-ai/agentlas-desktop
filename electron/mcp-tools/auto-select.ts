@@ -518,6 +518,20 @@ export async function autoSelectMcpTools(input: {
   // Agentlas Browser can safely complete. Explicit Computer Use selections
   // remain strict and never receive this browser fallback.
   const automaticHostDecision = input.toolMode == null || input.toolMode === "auto";
+  /*
+   * ★ 요청이 URL 이나 "브라우저로/에서" 를 직접 말하면 호스트 결정(브라우저 vs 컴퓨터 유즈)을 판정기에 맡기지
+   *   않는다 — 명시 증거는 사용자가 브라우저 모드를 고른 것과 같다. 판정기가 작은 로컬 모델일 때 실측
+   *   (2026-09-13, Qwen3-4B): "Agentlas 브라우저로 https://example.com 을 열고 …" 에 agentlas-time 을 골라
+   *   도구 호출만 4번 반복하고 실패했다. 선택 대상은 설치·활성·설정 유효한 정본 브라우저(agentlas-browser)뿐이고,
+   *   없으면 아무것도 바꾸지 않는다(막다른 길 금지). 키워드 점수화가 아니라 호스트 바인딩의 명시 증거 하나다.
+   */
+  const explicitBrowserEvidence = automaticHostDecision && effectiveToolMode === "auto"
+    && (/https?:\/\/[^\s)]+/i.test(input.userPrompt)
+      // 스킴 없는 도메인("example.com 화면 찍어줘")도 웹 대상의 명시 증거다 — 판정기 없이도 브라우저.
+      || /(^|[\s"'(])[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|ai|dev|app|co|kr|jp|edu|gov)(\/[^\s)]*)?(?=$|[\s)"',.!?])/i.test(input.userPrompt)
+      || /(브라우저(로|에서|를 열)|in the browser|with the browser|open (the )?browser)/i.test(input.userPrompt))
+    && initialInstalledServers.some((server) => server.catalogId === "agentlas-browser" && server.enabled && server.configurationValid !== false);
+  if (explicitBrowserEvidence) effectiveToolMode = "browser";
 
   // ── ① 프로젝트 우선 (project-first narrowing) ────────────────────────────
   // 프로젝트를 여는 이유는 그 안에 이미 갖춰 둔 것을 먼저 쓰라는 뜻이다. 그런데 이 선택기는
@@ -563,7 +577,9 @@ export async function autoSelectMcpTools(input: {
     pinnedReasons.set("hephaestus-network", "always available routing/plugin resolver");
   }
   if (effectiveToolMode === "browser") {
-    pinnedReasons.set("agentlas-browser", "Browser plugin (real-login CDP) for this automation");
+    pinnedReasons.set("agentlas-browser", explicitBrowserEvidence
+      ? "Browser plugin (real-login CDP): the request names a URL or the browser explicitly"
+      : "Browser plugin (real-login CDP) for this automation");
   }
   if (effectiveToolMode === "computer-use") {
     pinnedReasons.set(
