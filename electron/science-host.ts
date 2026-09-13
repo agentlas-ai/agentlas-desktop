@@ -1,3 +1,4 @@
+import { scienceCriterionReviewHost } from "./science-host/criterion-review";
 /*
  * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
  *
@@ -172,6 +173,7 @@ export function installDesktopScienceHost(): void {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      criterionReview: scienceCriterionReviewHost,
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
       reconcileScienceBoundary: async (input) => {
         const store = scienceStore();

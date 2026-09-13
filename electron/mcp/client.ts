@@ -1344,6 +1344,8 @@ export async function pickActiveRunner(): Promise<
  *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
+  /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
+  scienceReview?: object;
   source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science";
   /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
   science?: Readonly<{
@@ -1641,6 +1643,9 @@ async function runMcpInvocationInContext(
   // site generation, legacy scripts) still receive one internal identity so their
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  const scienceReview = executionContext?.scienceReview
+    ? (await import("../science-host/criterion-review")).resolveScienceReviewAuthority(executionContext.scienceReview,req.runId!,req.chatId) : null;
+  if (scienceReview && (executionContext?.source!=="science" || req.planMode!==true || req.permissions!=="read")) throw new Error("science-review-read-ceiling-required");
   const planReadOnly = req.planMode === true;
   if (req.agentAppMode) {
     /*
@@ -2004,7 +2009,7 @@ async function runMcpInvocationInContext(
   }
   let effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
-    : req.planMode
+    : req.planMode && !scienceReview
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
   if (oneTeamExecutionPolicy) {
@@ -2885,7 +2890,7 @@ ${effectiveUserPrompt}`;
    */
   // ★Site 도 같은 자동 선택을 지난다(오너 결정 2026-08-20). 예전에는 agentAppMode 가
   // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
-  if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
+  if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
     try {
       if (req.forceBrowserCredentialRefresh) {
         const report = await refreshBrowserCredentialsIfDue({ force: true });
@@ -3311,8 +3316,8 @@ ${effectiveUserPrompt}`;
   // short-lived bridge carries only a loopback endpoint and an opaque grant;
   // project/turn authority remains in Main and is revalidated by ScienceStore.
   if (executionContext?.source === "science") {
-    if (!executionContext.science) throw new Error("science-execution-context-missing");
-    const { materializeScienceMcpGrant } = await import("agentlas-science");
+    if (!executionContext.science && !scienceReview) throw new Error("science-execution-context-missing");
+    const { materializeScienceMcpGrant, materializeScienceReviewMcpGrant } = await import("agentlas-science");
     // Science turns use the Main-owned catalog as their single tool boundary.
     // Keeping the auto-selected standalone domain servers in the same config
     // creates duplicate tools (for example PBDB's low-level occurrence call
@@ -3321,7 +3326,7 @@ ${effectiveUserPrompt}`;
     // downstream Science receipts. The built-in catalog already contains the
     // trusted adapters for every installed Science Lab; other MCP servers are
     // intentionally not carried into this turn.
-    const scienceGrant = await materializeScienceMcpGrant(
+    const scienceGrant = scienceReview ? await materializeScienceReviewMcpGrant(executionContext.scienceReview!,req.runId!,req.chatId) : await materializeScienceMcpGrant(
       executionContext.science, undefined, undefined, { planMode: planReadOnly },
     );
     mcpConfigPath = scienceGrant.configPath;
@@ -3329,7 +3334,7 @@ ${effectiveUserPrompt}`;
     mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
     mcpRuntimeEnv = scienceGrant.runtimeEnv;
     mcpIncludedServers = [scienceGrant.includedServer];
-    mcpAutoSelectionPrompt = planReadOnly
+    mcpAutoSelectionPrompt = scienceReview ? "Independently assess the reserved scientific input. All tools and native runtime actions remain read-only. Only read_criterion_review_input is granted; do not create research state or borrow another agent. Return the exact requested findings JSON." : planReadOnly
       ? "Agentlas Science Plan mode is read-only for files, shell, and research state. Only the exact granted discovery tools may be called. Describe a plan without creating contracts, hypotheses, studies, artifacts, approvals, downloads, or other state. Unavailable research tools remain unavailable until a separate execution turn."
       : `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report the returned analytic false-alarm upper bound, model period standard error, assumptions, and warnings without upgrading a grid peak into a confirmed physical period or a standard error into a confidence interval. Call analyze_light_curve_periodicity_depth with explicit inputs when the frozen plan requires sampling-window, alias, bootstrap, or robustness analysis; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix. The turn's sandbox is read-only for FILES and SHELL, and that is deliberate: this work is not done by writing files. Recording research state through the Agentlas Science tools above -- proposing a research contract, recording hypotheses, freezing an analysis plan, running a Lab, appending a lifecycle revision, composing a manuscript version -- is the sanctioned way to do this work, and every one of those writes is validated by the host, not by the sandbox. Call them. Do not treat them as forbidden external state, and do not ask to escalate to full access in order to use them: a study that stops for that never leaves intake. Escalate only if you genuinely need to write a file or run a command outside these tools.`.trim();
   }
