@@ -27,10 +27,11 @@ export function ProjectSourceChoices({ onSelect }: { onSelect: (source: NewProje
   </div>;
 }
 
-export function ProjectSettingsModal({ request, onClose, onSaved }: {
+export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundError }: {
   request: ProjectSettingsRequest;
   onClose: () => void;
   onSaved: (project: Project) => void;
+  onBackgroundError?: (message: string) => void;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -55,9 +56,16 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
   const nameEdited = useRef(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onBackgroundErrorRef = useRef(onBackgroundError);
+  onBackgroundErrorRef.current = onBackgroundError;
 
   function requestClose() {
     onCloseRef.current();
+  }
+
+  function reportFailure(visibleMessage: string, backgroundMessage: string) {
+    if (mounted.current) setError(visibleMessage);
+    else onBackgroundErrorRef.current?.(backgroundMessage);
   }
 
   useEffect(() => {
@@ -123,7 +131,10 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
       setFolderGrant(picked); setFolderPath(picked.path);
       if (!editing && !nameEdited.current) setName(picked.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
     } catch {
-      if (mounted.current) setError(ko ? "폴더를 연결하지 못했습니다. 다시 선택해 주세요." : "Could not connect the folder. Please select it again.");
+      reportFailure(
+        ko ? "폴더를 연결하지 못했습니다. 다시 선택해 주세요." : "Could not connect the folder. Please select it again.",
+        ko ? "백그라운드 폴더 연결에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background folder connection failed. Reopen project settings to try again.",
+      );
     } finally {
       operation.current = false;
       if (mounted.current) setPending(null);
@@ -150,14 +161,20 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
       const api = ipc();
       if (!api) throw new Error("bridge unavailable");
       const result = await api.projects.connectGithub(githubUrl.trim());
-      if (!mounted.current) return;
       if (result.status === "connected") {
+        if (!mounted.current) return;
         setGithubUrl(result.repositoryUrl); setConnectedGithub(result.repositoryUrl);
         setFolderGrant(result.folderGrant); setFolderPath(result.folderGrant.path);
         if (!editing && !nameEdited.current) setName(result.folderGrant.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
-      } else if (result.status === "action_required") setError(githubFailure(result.capability));
+      } else if (result.status === "action_required") {
+        const message = githubFailure(result.capability);
+        reportFailure(message, ko ? `백그라운드 GitHub 연결 실패: ${message}` : `Background GitHub connection failed: ${message}`);
+      }
     } catch {
-      if (mounted.current) setError(ko ? "저장소를 연결하지 못했습니다. 주소와 연결 상태를 확인해 주세요." : "Could not connect the repository. Check its URL and your connection.");
+      reportFailure(
+        ko ? "저장소를 연결하지 못했습니다. 주소와 연결 상태를 확인해 주세요." : "Could not connect the repository. Check its URL and your connection.",
+        ko ? "백그라운드 GitHub 연결에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background GitHub connection failed. Reopen project settings to try again.",
+      );
     } finally {
       operation.current = false;
       if (mounted.current) setPending(null);
@@ -179,7 +196,10 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
       window.dispatchEvent(new CustomEvent("agentlas:projects-changed", { detail: { projectId: saved.id } }));
       if (mounted.current) onSaved(saved);
     } catch {
-      if (mounted.current) setError(ko ? "저장하지 못했습니다. 입력은 유지되어 있으니 다시 시도해 주세요." : "Could not save. Your entries are preserved; please try again.");
+      reportFailure(
+        ko ? "저장하지 못했습니다. 입력은 유지되어 있으니 다시 시도해 주세요." : "Could not save. Your entries are preserved; please try again.",
+        ko ? "백그라운드 저장에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background save failed. Reopen project settings to try again.",
+      );
     } finally {
       operation.current = false;
       if (mounted.current) setPending(null);

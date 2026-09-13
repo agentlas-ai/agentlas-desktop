@@ -46,6 +46,9 @@
 .footer { padding:17px 30px; border-top:1px solid var(--paper-edge); display:flex; align-items:center; gap:9px; flex-shrink:0; }
 .feedback { min-width:0; flex:1; font-size:11px; line-height:1.6; color:var(--muted-deep); }
 .error { color:var(--danger,#b44335); }
+.backgroundError { position:fixed; right:22px; bottom:22px; z-index:1200; display:flex; align-items:flex-start; gap:14px; width:min(420px,calc(100vw - 44px)); box-sizing:border-box; padding:14px 16px; border:1px solid color-mix(in srgb,var(--danger,#b44335) 35%,var(--paper-edge)); border-radius:10px; background:var(--paper); color:var(--ink); box-shadow:0 14px 38px #0002; font:12px/1.6 var(--font-body); }
+.backgroundError span { flex:1; }
+.backgroundError button { border:0; background:none; color:var(--ink-soft); cursor:pointer; font:18px/1 var(--font-body); }
 .choices { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
 .choice { position:relative; display:flex; flex-direction:column; align-items:flex-start; padding:25px 22px; gap:9px; text-align:left; min-width:0; border:1px solid var(--paper-edge); border-radius:14px; background:var(--paper); color:var(--ink); cursor:pointer; font:inherit; transition:border-color .15s, background .15s; }
 .choice:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 3%,var(--paper)); }
