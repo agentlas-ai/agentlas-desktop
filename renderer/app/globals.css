@@ -4131,6 +4131,8 @@ button[data-toggle-state="on"] {
 .dashboard-projects > div > button > span[data-active="true"] { background: var(--dash-teal-2); box-shadow: 0 0 0 3px color-mix(in oklch, var(--dash-teal-2) 12%, transparent); }
 .dashboard-projects > div > button > div { display: grid; gap: 4px; min-width: 0; }
 .dashboard-projects > div > button small { color: var(--dash-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 프로젝트 이름도 한 줄 — 긴 이름(문장으로 만든 프로젝트 등)이 카드를 여섯 줄로 키우지 않게(2026-09-13 실측). */
+.dashboard-projects > div > button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-projects > div > button em { color: var(--dash-muted); font-size: 10px; font-style: normal; }
 .dashboard-projects .dashboard-projects-empty { width: 100%; min-height: 72px; border: 1px dashed var(--dash-line); border-radius: 10px; background: transparent; color: var(--dash-muted); cursor: pointer; }
 
