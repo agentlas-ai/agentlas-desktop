@@ -2121,8 +2121,8 @@ function ComposerGoalBar({
    *   그리고 일시정지 사유도 둘(app_closed·crash_recovery)만 알아서, 실제로 걸려 있던
    *   `budget`(예산 소진)은 그냥 "일시정지됨" 으로만 나왔다 — 무엇을 하면 되는지가 없다.
    *
-   *   멈춘 이유는 지어내지 않는다. 아는 사유는 사람 말로, 모르는 사유는 **원문 그대로**
-   *   보여 준다(그래야 물어볼 수 있다). 이유 자체가 없으면 없다고 말한다.
+   *   Known reasons have concise product copy. Diagnostic codes stay in the
+   *   tooltip instead of taking over the input bar.
    */
   const paused = runStatus === "paused";
   const pausing = runStatus === "pausing";
@@ -2154,11 +2154,11 @@ function ComposerGoalBar({
       "verification_prerequisite:environment_unavailable": ["필요한 실행 환경을 사용할 수 없어 멈춤", "Stopped because a required environment is unavailable"],
       "verification_prerequisite:user_stopped": ["사용자 요청으로 멈춤", "Stopped at your request"],
       "verification_prerequisite:uncertain_side_effect": ["이전 작업의 실행 결과를 확인해야 해 멈춤", "Stopped because an earlier action's outcome needs confirmation"],
+      "checkpoint_side_effects_uncertain": ["이전 작업의 실행 결과를 확인해야 해 멈춤", "Stopped because an earlier action's outcome needs confirmation"],
     };
     const verificationReason = verificationReasons[reason];
     if (verificationReason) return verificationReason[locale === "ko" ? 0 : 1];
-    // 모르는 사유는 지어내지 않고 그대로 보여 준다.
-    return locale === "ko" ? `멈춤 — 사유: ${reason}` : `Stopped — reason: ${reason}`;
+    return locale === "ko" ? "작업이 멈췄습니다" : "The task stopped";
   };
   const stoppedCopy = knownReason(blocked ? (blockedReason ?? pauseReason) : pauseReason)
     ?? (blocked
@@ -2178,7 +2178,7 @@ function ComposerGoalBar({
     <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite" data-chat-goal-bar="true">
       <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
       <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
-      <span className="chat-composer-progress-label" title={title}>{title}</span>
+      <span className="chat-composer-progress-label" title={(paused || blocked) ? [title, blockedReason ?? pauseReason].filter(Boolean).join("\n") : title}>{title}</span>
       {(criteria?.length ?? 0) > 0 && (
         <span className="chat-composer-goal-criteria" title={criteriaTitle}>
           {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
