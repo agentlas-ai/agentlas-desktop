@@ -53,6 +53,8 @@ export function makeLocalOpenAiRunner(
   options: {
     chatTemplateKwargs?: Record<string, boolean | number | string>;
     headersFn?: () => Record<string, string>;
+    /** Exact resident Main receipt; generic OpenAI-compatible providers do not opt in. */
+    contextWindowFn?: () => number | Promise<number>;
   } = {},
 ): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
@@ -65,10 +67,12 @@ export function makeLocalOpenAiRunner(
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
     // 로컬 모델은 컨텍스트 윈도우가 천차만별 — 보수적 기본값으로 무한 성장/거부 방지.
-    const { recent, digest, droppedCount } = compactHistory(req.history, {
-      contextWindow: 32_000,
-      locale: req.locale,
-    });
+    const contextWindow = await options.contextWindowFn?.();
+    // Managed local preserves every user/history instruction. Exact template admission
+    // below refuses overflow instead of silently dropping or summarizing those inputs.
+    const { recent, digest, droppedCount } = contextWindow !== undefined
+      ? { recent: req.history, digest: null, droppedCount: 0 }
+      : compactHistory(req.history, { contextWindow: 32_000, locale: req.locale });
     if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
     if (digest) {
       // 압축은 지나가는 상태가 아니라 대화에 남아야 하는 사실이다.
@@ -91,10 +95,13 @@ export function makeLocalOpenAiRunner(
         systemText,
         req.locale,
         req.permission,
-        cumulativeSurfaceGateText(recent, req.userPrompt),
+        cumulativeSurfaceGateText(recent, contextWindow !== undefined ? req.surfaceUserPrompt ?? req.userPrompt : req.userPrompt),
         req.forceSurface,
         req.restrictedReadBoundary,
         req.untrustedNoTools,
+        undefined,
+        undefined,
+        contextWindow !== undefined ? "managed-local" : undefined,
       ),
     }];
     for (const m of recent) {
@@ -129,6 +136,7 @@ export function makeLocalOpenAiRunner(
             : `Cannot reach local server: ${host}`,
         chatTemplateKwargs: options.chatTemplateKwargs,
         headers: options.headersFn?.(),
+        contextWindow,
       },
       messages,
     );

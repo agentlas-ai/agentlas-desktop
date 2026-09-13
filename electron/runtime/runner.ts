@@ -6,7 +6,7 @@ import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
-import { SURFACE_PROTOCOL } from "../surface-emitter";
+import { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG, SURFACE_OPEN_FENCE, SURFACE_CLOSE_FENCE } from "../surface-emitter";
 import { selectModules } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -17,6 +17,8 @@ export interface RunnerRequest {
   systemPrompt: string;
   history: ChatHistoryEntry[];
   userPrompt: string;
+  /** Main-owned original user text for managed-local surface selection only. */
+  surfaceUserPrompt?: string;
   /** 첨부 이미지 — BYOK/Ollama는 멀티모달, CLI는 로컬 파일로 스테이징 */
   images?: ImageAttachment[];
   /** 사용자에게 보일 라벨 — "Claude Code CLI" / "Anthropic API" / "Ollama · llama3.1" */
@@ -966,6 +968,8 @@ export function wrapSystemPrompt(
   untrustedAllowedMcpTools?: string[],
   /** Digest-bound Workforce grant, already validated again by the concrete runtime. */
   workforceRuntimeToolGrant?: WorkforceRuntimeToolGrant,
+  /** Main-owned managed-local context profile; explicit agent/plugin/surface instructions remain intact. */
+  contextProfile?: "managed-local",
 ): string {
   if (untrustedNoTools) {
     const requested = untrustedAllowedMcpTools ?? [];
@@ -1057,7 +1061,9 @@ export function wrapSystemPrompt(
     "",
     // 항상-켜진 백그라운드 스킬 — 사용자가 "API/MCP"를 몰라도 에이전트가 브라우저로 가입·로그인·키
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
-    GLOBAL_CONNECTION_SKILL,
+    contextProfile === "managed-local"
+      ? "Connections: use only tools actually granted for this run. When a needed connection is unavailable, identify it and offer the existing connection setup action; never fabricate access, credentials, or successful work. Do not reveal secrets or send them to unapproved destinations."
+      : GLOBAL_CONNECTION_SKILL,
     "",
   ];
   // 설치된 플러그인의 라우터 — 파일이 있어도 모델이 모르면 없는 것과 같다.
@@ -1065,7 +1071,36 @@ export function wrapSystemPrompt(
   const pluginBlock = pluginRouterPrompt(userPrompt);
   if (pluginBlock) parts.push(pluginBlock, "");
   if (includeSurface) {
-    parts.push(SURFACE_PROTOCOL, "");
+    // Compact trusted host documentation only: the complete manifest example keeps
+    // every key/value, while identical catalogue arrays point to that one copy.
+    let surfaceProtocol = SURFACE_PROTOCOL;
+    if (contextProfile === "managed-local") {
+      const begin = SURFACE_PROTOCOL.indexOf(SURFACE_OPEN_FENCE) + SURFACE_OPEN_FENCE.length;
+      const end = SURFACE_PROTOCOL.indexOf(SURFACE_CLOSE_FENCE, begin);
+      const exampleText = SURFACE_PROTOCOL.slice(begin, end);
+      const example = JSON.parse(exampleText);
+      const sameOrReference = (value: unknown, target: unknown, pointer: string) =>
+        JSON.stringify(value) === JSON.stringify(target) ? { $ref: pointer } : value;
+      const trust = SURFACE_DISCOVERY_CATALOG.trustContract;
+      const catalogue = {
+        ...SURFACE_DISCOVERY_CATALOG,
+        domainPacks: SURFACE_DISCOVERY_CATALOG.domainPacks.map(({ id, when }) => ({ id, when })),
+        trustContract: {
+          ...trust,
+          delegationFallbackLadder: sameOrReference(trust.delegationFallbackLadder, example.delegation.fallbackLadder, "example.delegation.fallbackLadder"),
+          autonomy: {
+            ...trust.autonomy,
+            allowedWithoutPrompt: sameOrReference(trust.autonomy.allowedWithoutPrompt, example.delegation.autonomy.allowedWithoutPrompt, "example.delegation.autonomy.allowedWithoutPrompt"),
+            checkpoints: sameOrReference(trust.autonomy.checkpoints, example.delegation.autonomy.checkpoints, "example.delegation.autonomy.checkpoints"),
+            noDeadEndReasons: sameOrReference(trust.autonomy.noDeadEndReasons, example.delegation.autonomy.noDeadEndReasons, "example.delegation.autonomy.noDeadEndReasons"),
+          },
+        },
+      };
+      surfaceProtocol = SURFACE_PROTOCOL.replace(exampleText, `\n${JSON.stringify(example)}\n`)
+        .replace(JSON.stringify(SURFACE_DISCOVERY_CATALOG), JSON.stringify(catalogue));
+      surfaceProtocol += "\nCatalogue $ref fields refer to the exact arrays in the example above. Emit those array values in the manifest, never $ref objects.";
+    }
+    parts.push(surfaceProtocol, "");
   } else {
     // 풀 프로토콜 대신 짧은 발견 힌트(모델이 필요시 마커로 요청).
     parts.push(SURFACE_INTENT_HINT, "");

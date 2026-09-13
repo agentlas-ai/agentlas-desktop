@@ -11,6 +11,11 @@ export function createManagedLocalModelRunner(manager: LocalModelHubManager): Ru
   const runner = makeLocalOpenAiRunner(() => manager.endpoint(), "agentlas-local", {
     chatTemplateKwargs: { enable_thinking: false },
     headersFn: () => manager.authorizationHeaders(),
+    contextWindowFn: async () => {
+      const receipt = (await manager.snapshot()).resident;
+      if (!receipt || receipt.state !== "resident") throw new Error("local_model_not_resident");
+      return receipt.contextTokens;
+    },
   });
   return async (request, events) => {
     const installation = manager.residentInstallation();

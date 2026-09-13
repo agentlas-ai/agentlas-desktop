@@ -627,6 +627,14 @@ class InvocationRunnerFailureError extends Error {
       || failure.source !== "marker" || failure.providerCode !== "local_model_image_input_unsupported") return null;
     return { code: failure.providerCode, message: failure.message };
   }
+
+  static localContextFailure(error: unknown): { code: string; message: string } | null {
+    if (!(error instanceof InvocationRunnerFailureError) || !(#failure in error)) return null;
+    const failure = error.#failure;
+    if (failure.kind !== "refused" || failure.runtime !== "agentlas-local" || failure.source !== "marker"
+      || (failure.providerCode !== "local_context_limit_exceeded" && failure.providerCode !== "local_context_measurement_unavailable")) return null;
+    return { code: failure.providerCode, message: failure.message };
+  }
 }
 
 function invocationFailure(
@@ -635,7 +643,7 @@ function invocationFailure(
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
-  const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error);
+  const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error) ?? InvocationRunnerFailureError.localContextFailure(error);
   if (capabilityFailure) return capabilityFailure;
   const raw = error instanceof Error ? error.message : String(error);
   if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
@@ -4716,23 +4724,22 @@ ${effectiveUserPrompt}`;
   if (!req.agentAppMode && executionContext?.source !== "automation" && (chat.kind !== "division" || req.automationId)) {
     const officeContext = officeTaskContextForInvocation(chat.id);
     if (officeContext) {
-      systemPrompt = `${systemPrompt}\n\n${officeContext}`;
       turnContextParts.push(officeContext);
     }
     const lifecycleContext = automationLifecycleContext(chat.id, req.automationId);
     if (lifecycleContext) {
-      systemPrompt = `${systemPrompt}\n\n${lifecycleContext}`;
       turnContextParts.push(lifecycleContext);
     }
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division" && canWrite) {
-    systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
     // 2026-08-20: 단어장 게이트(isAutomationSetupRequest — ko/en AND 매칭) 제거.
     // 제3언어 자동화 요청은 그 게이트에 영구 미도달이었다. write 권한의 사용자 턴에는
-    // 계약을 턴 컨텍스트로도 무조건 전달한다 — read 권한으로 시작해 protocol 없이
+    // 계약을 턴 컨텍스트로 무조건 전달한다 — read 권한으로 시작해 protocol 없이
     // 생성된 resume 세션에서도 계약이 이번 턴에 도달하고, 이 턴이 자동화 요청인지는
     // 모델이 스스로 판단해 ## Automation 블록을 낼지 결정한다. 단어장 판정은 없다.
+    // Fresh/sessionless requests already merge this into the system prompt;
+    // resumed sessions receive it with their turn. Do not inject it twice.
     turnContextParts.push(AUTOMATION_PROTOCOL);
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
@@ -4845,6 +4852,7 @@ ${effectiveUserPrompt}`;
       // the whole chat into a fresh native session is neither recovery nor state.
       history: activeGoalId ? [] : history,
       userPrompt: runtimeUserPrompt,
+      surfaceUserPrompt: req.oneUserAuthoredPrompt ?? req.userPrompt,
       images: req.images,
       backendLabel: picked.label,
       model: active.model ?? undefined,
@@ -5372,6 +5380,9 @@ ${effectiveUserPrompt}`;
         // outage. Keep the selected binding; forwarding the attachment to a
         // different provider requires a new model choice.
         if (result.failure?.kind === "unsupported" && request.images?.length) return result;
+        // A measured context refusal must retain the user's exact local binding.
+        if (result.failure?.kind === "refused" && result.failure.runtime === "agentlas-local" && result.failure.source === "marker"
+          && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable")) return result;
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
         // First failure: this is when recovery actually begins.

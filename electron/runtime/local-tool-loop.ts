@@ -1,3 +1,4 @@
+import { localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof } from "../long-run/file-proof";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
@@ -718,6 +719,7 @@ async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unkno
 }
 
 interface StreamTurnResult {
+  finishReason?: string;
   text: string;
   toolCalls: OpenAiToolCall[];
 }
@@ -728,6 +730,7 @@ async function streamChatTurn(
   onThinking?: RunnerEvents["onThinking"],
 ): Promise<StreamTurnResult> {
   let acc = "";
+  let finishReason: string | undefined;
   let lastEmit = 0;
   // OpenAI-호환 로컬 서버(ollama·LM Studio·MLX)는 생각을 delta.reasoning_content(또는
   // ollama의 delta.reasoning / delta.thinking)로 따로 준다. 자기 행으로 흘린다.
@@ -741,6 +744,7 @@ async function streamChatTurn(
     try {
       const event = JSON.parse(payload) as {
         choices?: Array<{
+          finish_reason?: string;
           delta?: {
             content?: string;
             reasoning_content?: string;
@@ -754,6 +758,7 @@ async function streamChatTurn(
           };
         }>;
       };
+      if (typeof event.choices?.[0]?.finish_reason === "string") finishReason = event.choices[0].finish_reason;
       const delta = event.choices?.[0]?.delta;
       const thought = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
       if (typeof thought === "string" && thought) {
@@ -795,7 +800,7 @@ async function streamChatTurn(
       type: "function" as const,
       function: { name: entry.name, arguments: entry.args },
     }));
-  return { text: acc.trim(), toolCalls };
+  return { text: acc.trim(), toolCalls, finishReason };
 }
 
 export interface RunLocalOpenAiChatOptions {
@@ -817,6 +822,8 @@ export interface RunLocalOpenAiChatOptions {
   keepAlive?: string;
   /** Publisher/model-specific chat-template controls applied by a managed adapter. */
   chatTemplateKwargs?: Record<string, boolean | number | string>;
+  /** Main resident receipt, present only for managed llama.cpp. */
+  contextWindow?: number;
 }
 
 /**
@@ -885,13 +892,7 @@ export async function runLocalOpenAiChat(
   let identicalToolTurns = 0;
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
-    let resp: Response;
-    try {
-      resp = await fetch(chatEndpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...opts.headers },
-        signal: req.signal,
-          body: JSON.stringify({
+    const requestBody: Record<string, unknown> = {
             model,
             stream: true,
             messages,
@@ -919,7 +920,24 @@ export async function runLocalOpenAiChat(
                   },
                 }
               : {}),
-        }),
+        };
+    if (opts.contextWindow !== undefined) {
+      try {
+        const measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+        if (!measured.fits) return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        requestBody.max_tokens = measured.maxOutputTokens;
+      } catch {
+        if (req.signal?.aborted) throw abortReasonError(req);
+        return {text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)};
+      }
+    }
+    let resp: Response;
+    try {
+      resp = await fetch(chatEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...opts.headers },
+        signal: req.signal,
+          body: JSON.stringify(requestBody),
       });
     } catch (err) {
       // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
@@ -933,8 +951,10 @@ export async function runLocalOpenAiChat(
     }
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
-      // 도구 스키마를 이해 못 하는 서버/모델은 종종 400을 낸다 — tools 없이 한 번 더 시도.
-      if (tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
+      const failureClass = localHttpFailureClass(errText);
+      if (failureClass === "context") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+      // Only explicit structured unsupported-tools markers permit the legacy downgrade.
+      if (failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
         // A host-broker receipt must describe the inventory admitted to the
         // provider invocation. Retrying this Workforce turn without that
         // inventory would make a later success receipt false.
@@ -945,13 +965,14 @@ export async function runLocalOpenAiChat(
           method: "POST",
           headers: { "content-type": "application/json", ...opts.headers },
           signal: req.signal,
-            body: JSON.stringify({ model, stream: true, messages, ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}) }),
+            body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
         });
         if (!fallback.ok) {
           const fallbackErrText = await fallback.text().catch(() => "");
           throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
         }
         const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
+        if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
         finalText = result.text;
         reachedAnswer = true;
         break;
@@ -960,6 +981,7 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
+    if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
     // A provider is allowed to hallucinate a tool_calls block even though it
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
