@@ -33,6 +33,18 @@ const INITIAL_OPEN_SOURCES: Record<ProjectRosterSource, boolean> = {
   hub: false,
 };
 
+const CATALOG_REQUEST_TIMEOUT_MS = 15_000;
+
+function withCatalogTimeout<T>(request: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("project_agent_catalog_timeout")), CATALOG_REQUEST_TIMEOUT_MS);
+    request.then(
+      (value) => { window.clearTimeout(timer); resolve(value); },
+      (error) => { window.clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 function candidateCount(sections: ProjectRosterSection[]): number {
   return sections.reduce(
     (total, section) => total + section.standalone.length
@@ -73,6 +85,13 @@ function memberIdentitySeed(member: ProjectAgentPoolMember): string {
   return `${member.source}:${member.entityKind}:${member.targetId}`;
 }
 
+function candidateMatchesMember(candidate: ProjectRosterCandidate, member: ProjectAgentPoolMember): boolean {
+  if (candidate.source !== member.source || candidate.member.entityKind !== member.entityKind) return false;
+  const target = member.targetId.trim().toLowerCase();
+  return (candidate.identityAliases?.length ? candidate.identityAliases : [candidate.member.targetId])
+    .some((alias) => alias.trim().toLowerCase() === target);
+}
+
 export function ProjectAgentPicker({
   value,
   onChange,
@@ -86,6 +105,8 @@ export function ProjectAgentPicker({
   const ko = locale === "ko";
   const pickerId = useId().replace(/:/g, "");
   const requestRef = useRef(0);
+  const selectedListRef = useRef<HTMLDivElement>(null);
+  const catalogRef = useRef<HTMLElement>(null);
   const [catalog, setCatalog] = useState<CatalogState>({ status: "loading", sections: null, failure: null });
   const [query, setQuery] = useState("");
   const [openSources, setOpenSources] = useState<Record<ProjectRosterSource, boolean>>(INITIAL_OPEN_SOURCES);
@@ -106,17 +127,17 @@ export function ProjectAgentPicker({
       // rows, but their failure must never be presented as zero availability.
       const [localData, remoteResults] = await Promise.all([
         Promise.all([
-          api.team.list(),
-          api.firms.list(),
-          api.agents.exactBindings(),
+          withCatalogTimeout(api.team.list()),
+          withCatalogTimeout(api.firms.list()),
+          withCatalogTimeout(api.agents.exactBindings()),
         ] as [
           Promise<InstalledAgent[]>,
           Promise<InstalledFirm[]>,
           Promise<InstalledAgentExactBinding[]>,
         ]),
         Promise.allSettled([
-          api.marketplace.listMine(),
-          api.marketplace.bookmarks(),
+          withCatalogTimeout(api.marketplace.listMine()),
+          withCatalogTimeout(api.marketplace.bookmarks()),
         ] as [Promise<MarketplaceListing[]>, Promise<HubAgentBookmark[]>]),
       ]);
       if (requestRef.current !== requestId) return;
@@ -143,7 +164,12 @@ export function ProjectAgentPicker({
     return () => { requestRef.current += 1; };
   }, [loadCatalog]);
 
-  const selectedKeys = useMemo(() => new Set(value.map(projectPoolMemberKey)), [value]);
+  const catalogCandidates = useMemo(() => catalog.status === "ready"
+    ? catalog.sections.flatMap((item) => [
+      ...item.firms.flatMap((firm) => [firm.team, ...firm.members]),
+      ...item.standalone,
+    ])
+    : [], [catalog]);
   const filterActive = query.trim().length > 0;
   const visibleSections = useMemo(() => {
     if (catalog.status !== "ready") return [];
@@ -178,15 +204,26 @@ export function ProjectAgentPicker({
     }
   }
 
-  function removeMember(member: ProjectAgentPoolMember) {
+  function memberUnavailable(member: ProjectAgentPoolMember): boolean {
+    if (catalog.status !== "ready" || catalog.failedSources.includes(member.source as "cloud" | "hub")) return false;
+    return !catalogCandidates.some((candidate) => candidateMatchesMember(candidate, member));
+  }
+
+  function removeMember(member: ProjectAgentPoolMember, trigger: HTMLButtonElement) {
     if (disabled) return;
     const key = projectPoolMemberKey(member);
+    const buttons = Array.from(selectedListRef.current?.querySelectorAll<HTMLButtonElement>("[data-remove-project-agent]") ?? []);
+    const index = Math.max(0, buttons.indexOf(trigger));
     onChange(value.filter((item) => projectPoolMemberKey(item) !== key));
     setFeedback(ko ? `${member.nameSnapshot}을(를) 제거했습니다.` : `Removed ${member.nameSnapshot}.`);
+    window.requestAnimationFrame(() => {
+      const remaining = Array.from(selectedListRef.current?.querySelectorAll<HTMLButtonElement>("[data-remove-project-agent]") ?? []);
+      (remaining[Math.min(index, remaining.length - 1)] ?? catalogRef.current?.querySelector<HTMLInputElement>('input[type="search"]'))?.focus();
+    });
   }
 
   function renderCandidate(candidate: ProjectRosterCandidate) {
-    const selected = selectedKeys.has(candidate.key);
+    const selected = value.some((member) => candidateMatchesMember(candidate, member));
     const candidateDisabled = disabled || selected || !candidate.callable;
     const helper = selected
       ? (ko ? "프로젝트에 연결됨" : "Connected to project")
@@ -230,17 +267,19 @@ export function ProjectAgentPicker({
             <p>{ko ? "에이전트 없이 프로젝트를 먼저 만들 수 있어요." : "You can create the project first without agents."}</p>
           </div>
         ) : (
-          <div className={styles.selectedList}>
+          <div className={styles.selectedList} ref={selectedListRef}>
             {value.map((member) => {
               const key = projectPoolMemberKey(member);
+              const unavailable = memberUnavailable(member);
               return (
-                <div className={styles.selectedRow} key={key}>
+                <div className={styles.selectedRow} data-unavailable={unavailable} key={key}>
                   <PixelCat seed={memberIdentitySeed(member)} size={34} />
                   <span className={styles.selectedCopy}>
                     <strong>{member.nameSnapshot}</strong>
                     <small>{sourceName(member.source, ko)} · {member.entityKind === "team" ? (ko ? "팀" : "Team") : (ko ? "에이전트" : "Agent")}</small>
+                    {unavailable ? <small className={styles.unavailable}>{ko ? "현재 목록에서 찾을 수 없음" : "No longer present in this catalog"}</small> : null}
                   </span>
-                  <button type="button" disabled={disabled} onClick={() => removeMember(member)} aria-label={ko ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`}>
+                  <button type="button" data-remove-project-agent disabled={disabled} onClick={(event) => removeMember(member, event.currentTarget)} aria-label={ko ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`}>
                     {ko ? "제거" : "Remove"}
                   </button>
                 </div>
@@ -250,7 +289,7 @@ export function ProjectAgentPicker({
         )}
       </div>
 
-      <aside className={styles.panel} data-project-agent-catalog aria-label={ko ? "팀과 에이전트 목록" : "Team and agent catalog"}>
+      <aside className={styles.panel} ref={catalogRef} data-project-agent-catalog aria-label={ko ? "팀과 에이전트 목록" : "Team and agent catalog"}>
         <div className={styles.catalogHead}>
           <div className={styles.panelHead}>
             <div><strong>{ko ? "팀과 에이전트" : "Teams and agents"}</strong><small>{ko ? "소스별 목록" : "Grouped by source"}</small></div>
@@ -324,7 +363,7 @@ export function ProjectAgentPicker({
                     {section.firms.map((firm, firmIndex) => {
                       const firmOpen = filterActive || openFirms[firm.id] === true;
                       const firmPanelId = `${pickerId}-firm-${sectionIndex}-${firmIndex}`;
-                      const teamSelected = selectedKeys.has(firm.team.key);
+                      const teamSelected = value.some((member) => candidateMatchesMember(firm.team, member));
                       return (
                         <div className={styles.firm} key={firm.id}>
                           <div className={styles.firmRow}>

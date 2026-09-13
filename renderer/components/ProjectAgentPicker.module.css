@@ -126,6 +126,15 @@
   background: var(--paper);
 }
 
+.selectedRow[data-unavailable="true"] {
+  border-color: color-mix(in srgb, var(--danger, #b44335) 32%, var(--paper-edge));
+}
+
+.selectedCopy .unavailable {
+  color: var(--danger, #b44335);
+  white-space: normal;
+}
+
 .selectedCopy,
 .candidateCopy,
 .firmCopy {

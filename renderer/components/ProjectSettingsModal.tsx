@@ -56,6 +56,10 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  function requestClose() {
+    onCloseRef.current();
+  }
+
   useEffect(() => {
     mounted.current = true;
     const element = dialogRef.current;
@@ -193,18 +197,18 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
   </details>;
 
   return typeof document === "undefined" ? null : createPortal(
-    <dialog ref={dialogRef} className={styles.dialog} aria-labelledby="project-settings-title" data-project-settings
-      onCancel={(event) => { event.preventDefault(); event.stopPropagation(); onCloseRef.current(); }}>
+    <dialog ref={dialogRef} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings
+      onCancel={(event) => { event.preventDefault(); event.stopPropagation(); requestClose(); }}>
       <div className={styles.layout}>
         <aside className={styles.nav}>
           <div className={styles.projectMark}><IconFolder size={20} /></div>
           <strong className={styles.projectName}>{project?.name || (ko ? "새 프로젝트" : "New project")}</strong>
           <span className={styles.navCaption}>{editing ? (ko ? "프로젝트 설정" : "Project settings") : source === "github" ? "GitHub" : source === "local" ? (ko ? "로컬 폴더 연결" : "Local folder") : source ? (ko ? "빈 프로젝트" : "Empty project") : "Agentlas Work"}</span>
           <nav aria-label={ko ? "프로젝트 설정 메뉴" : "Project settings sections"}>
-            {source && !managed && <button type="button" aria-current={section === "source" ? "page" : undefined} onClick={() => setSection("source")}>
+            {source && !managed && <button type="button" aria-current={section === "source" ? "page" : undefined} disabled={Boolean(pending)} onClick={() => setSection("source")}>
               {source === "github" ? <IconGithub size={17} /> : <IconFolder size={17} />}{source === "github" ? (ko ? "저장소 연결" : "Repository") : (ko ? "폴더 선택" : "Folder")}{sourceReady && <span className={styles.navCheck}><IconCheck size={13} /></span>}
             </button>}
-            {source && <button type="button" aria-current={section === "agents" ? "page" : undefined} onClick={() => setSection("agents")}><IconUsers size={17} />{ko ? "에이전트 연결" : "Agents"}</button>}
+            {source && <button type="button" aria-current={section === "agents" ? "page" : undefined} disabled={Boolean(pending)} onClick={() => setSection("agents")}><IconUsers size={17} />{ko ? "에이전트 연결" : "Agents"}</button>}
           </nav>
           <div className={styles.navFoot}>
             {!editing && source && <button type="button" onClick={() => { setSource(null); setError(""); }} disabled={Boolean(pending)}><IconArrowLeft size={13} />{ko ? "시작 방법 변경" : "Change source"}</button>}
@@ -216,7 +220,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
             <div><h2 id="project-settings-title">{!source ? (ko ? "어디서 시작할까요?" : "Where would you like to start?") : section === "agents" ? (ko ? "에이전트 연결" : "Connect agents") : source === "github" ? (ko ? "GitHub 저장소 연결" : "Connect a GitHub repository") : (ko ? "로컬 폴더 연결" : "Connect a local folder")}</h2>
               <p>{!source ? (ko ? "프로젝트에 필요한 파일과 에이전트를 한곳에 모으세요." : "Bring your project's files and agents together.") : section === "agents" ? (ko ? "함께할 팀과 에이전트를 골라 주세요. 나중에 바꿀 수 있어요." : "Choose your teams and agents. You can change them later.") : source === "github" ? (ko ? "저장소를 내 컴퓨터에 복제해 작업합니다." : "Work with a local clone of your repository.") : (ko ? "작업할 폴더를 연결하세요. 원래 위치에서 이어서 작업합니다." : "Connect a folder to work with its files in place.")}</p>
             </div>
-            <button className={styles.close} type="button" onClick={onClose} aria-label={ko ? "프로젝트 설정 닫기" : "Close project settings"}><IconClose size={19} /></button>
+            <button className={styles.close} type="button" onClick={requestClose} aria-label={pending ? (ko ? "설정을 닫고 작업은 백그라운드에서 계속" : "Close settings; operation continues in background") : (ko ? "프로젝트 설정 닫기" : "Close project settings")}><IconClose size={19} /></button>
           </header>
           <div className={styles.content}>
             {loading ? <p role="status">{ko ? "프로젝트를 불러오는 중…" : "Loading project…"}</p> : editing && !project ? <div role="alert"><p>{error}</p><button className={styles.secondary} onClick={() => setLoadAttempt((value) => value + 1)}>{ko ? "다시 시도" : "Retry"}</button></div> : !source ? <ProjectSourceChoices onSelect={selectSource} /> : <>
@@ -242,8 +246,8 @@ export function ProjectSettingsModal({ request, onClose, onSaved }: {
             </>}
           </div>
           {source && !loading && (!editing || project) && <footer className={styles.footer}>
-            <div className={styles.feedback} aria-live="polite">{error ? <span role="alert" className={styles.error}>{error}</span> : !sourceReady ? (ko ? "먼저 작업할 폴더를 연결해 주세요." : "Connect your project folder first.") : !name.trim() ? (ko ? "프로젝트 이름을 적어 주세요." : "Give your project a name.") : managed && !editing ? (ko ? "폴더는 자동으로 준비됩니다." : "Your folder will be prepared automatically.") : (ko ? "저장 후 프로젝트에 적용됩니다." : "Changes apply after saving.")}</div>
-            <button className={styles.secondary} type="button" onClick={onClose}>{ko ? "취소" : "Cancel"}</button>
+            <div className={styles.feedback} aria-live="polite">{error ? <span role="alert" className={styles.error}>{error}</span> : pending ? (ko ? "닫아도 작업은 백그라운드에서 계속됩니다." : "You can close this window; the operation will continue in the background.") : !sourceReady ? (ko ? "먼저 작업할 폴더를 연결해 주세요." : "Connect your project folder first.") : !name.trim() ? (ko ? "프로젝트 이름을 적어 주세요." : "Give your project a name.") : managed && !editing ? (ko ? "폴더는 자동으로 준비됩니다." : "Your folder will be prepared automatically.") : (ko ? "저장 후 프로젝트에 적용됩니다." : "Changes apply after saving.")}</div>
+            <button className={styles.secondary} type="button" onClick={requestClose}>{pending ? (ko ? "백그라운드에서 계속" : "Continue in background") : (ko ? "취소" : "Cancel")}</button>
             {!editing && section === "source" ? <button className={styles.primary} type="button" onClick={() => setSection("agents")} disabled={!sourceReady || !name.trim() || Boolean(pending)}>{ko ? "에이전트 연결" : "Connect agents"}<IconChevronRight size={15} /></button>
               : <button className={styles.primary} type="button" onClick={() => void save()} disabled={!canSave}>{pending === "save" ? (ko ? "저장 중…" : "Saving…") : editing ? (ko ? "저장" : "Save changes") : (ko ? "프로젝트 만들기" : "Create project")}</button>}
           </footer>}
