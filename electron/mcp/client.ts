@@ -99,6 +99,7 @@ import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cl
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
+import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
 import {
@@ -5599,7 +5600,15 @@ ${effectiveUserPrompt}`;
       const continuation = { text: passClaim.text, shouldContinue: rawContinuation.shouldContinue };
       let passShouldContinue = continuation.shouldContinue;
       let goalDrivenPass = false;
-      if (activeGoalId && continuousMode && !signal?.aborted) {
+      /*
+       * 질문을 냈으면 이 턴은 사람 차례다 — 목표가 미달이라도 다음 패스를 돌리지 않는다.
+       * 실측(페르소나 루프 2026-09-14, 오너 직접 지적): 목표 연속 실행이 질문 카드를 띄운 뒤에도 계속 돌아
+       * 대화가 '실행 중'으로 남았고, 질문 시트는 "실행이 정리되면 전송"만 보이며 고른 답을 보내지 못했다.
+       * 답이 오면 질문 연속 실행(questionContinuation)이 같은 목표를 이어간다.
+       */
+      const asksUser = extractAskFences(continuation.text).questions.length > 0;
+      if (asksUser) passShouldContinue = false;
+      if (activeGoalId && continuousMode && !signal?.aborted && !asksUser) {
         if (passClaim.claimed) {
           await closeOpenGoalLedgerTasks({
             goalId: activeGoalId,

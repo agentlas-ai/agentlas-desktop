@@ -5126,6 +5126,13 @@ export function OneShell() {
     const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
     const isActiveOneConversation = conversation?.id === confirmation.chatId
       && conversation.originSurface === "one";
+    // 실행 중이라 못 보내면 말해야 한다 — 조용히 돌아가면 "골랐는데 전송이 안 된다"로 보인다(오너 지적 2026-09-14).
+    if (api && busy) {
+      setError(appLocale === "ko"
+        ? "실행이 아직 도는 중이라 답을 보내지 못했습니다. 실행이 끝나면 같은 선택을 다시 눌러 주세요."
+        : "The run is still going, so the answer was not sent. Press the same choice again once it finishes.");
+      return;
+    }
     if (
       !api
       || busy
