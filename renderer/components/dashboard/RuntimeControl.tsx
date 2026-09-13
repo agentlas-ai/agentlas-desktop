@@ -337,6 +337,39 @@ export function RuntimeControl() {
     return role === "multimodal" ? multimodalRuntimes : runtimes;
   }
 
+  /*
+   * ★모델 목록이 비어 있으면 "왜" 가 화면에 있어야 한다.
+   *   RuntimeStatus.modelDiscovery 는 2026-08-15 부터 실패 사유를 실어 왔는데 화면은 한 번도
+   *   읽지 않았다 — 새 맥에서 코덱스 CLI 가 로그인 전이라 모델 캐시가 없으면 목록이 그냥 비었고,
+   *   오너는 "gpt 6.0 이 안 보인다" 로 읽었다(2026-09-13, f-6d 진단). 비어 있는 이유와 채우는 길을 적는다.
+   */
+  function discoveryNotesForRole(role: RuntimeRole): Array<{ key: string; text: string }> {
+    const notes: Array<{ key: string; text: string }> = [];
+    for (const runtime of runtimesForRole(role)) {
+      if (runtime.kind === "ollama" || runtime.credentialAccess?.status === "unavailable") continue;
+      const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
+      if (models.length > 0 || runtime.model?.trim()) continue;
+      const discovery = runtime.modelDiscovery;
+      if (!discovery || discovery.status !== "failed") continue;
+      const label = runtimeLabel(runtime);
+      const reason = discovery.reason ?? "unknown";
+      if (runtime.kind === "codex" && reason === "no-cache") {
+        notes.push({
+          key: runtimeKey(runtime),
+          text: ko
+            ? `${label}: 모델 목록이 비어 있음 — 터미널에서 codex login 을 마치면 채워집니다.`
+            : `${label}: no models yet — finish codex login in a terminal and the list fills in.`,
+        });
+        continue;
+      }
+      notes.push({
+        key: runtimeKey(runtime),
+        text: ko ? `${label}: 모델 목록을 읽지 못함 (${reason})` : `${label}: model list could not be read (${reason})`,
+      });
+    }
+    return notes;
+  }
+
   function runtimeOptionsForRole(role: RuntimeRole) {
     return runtimesForRole(role).filter((runtime) => runtime.kind !== "ollama" && runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
       runtime,
@@ -974,6 +1007,13 @@ export function RuntimeControl() {
               })}
             </ol>
           </>
+        )}
+        {discoveryNotesForRole(role).length > 0 && (
+          <ul className="dashboard-runtime-discovery-notes" role="status">
+            {discoveryNotesForRole(role).map((note) => (
+              <li key={note.key}>{note.text}</li>
+            ))}
+          </ul>
         )}
         <button
           type="button"

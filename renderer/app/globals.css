@@ -2242,6 +2242,17 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   background: color-mix(in oklch, var(--dash-line) 22%, var(--paper));
 }
 
+.dashboard-runtime-discovery-notes {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  color: var(--dash-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .dashboard-runtime-pool-list {
   list-style: none;
   margin: 0;
