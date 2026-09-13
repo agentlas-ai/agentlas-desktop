@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 — 2026-09-13
+
+- Antigravity(agy)에 사용자가 직접 등록한 MCP 서버와 같은 이름의 도구가 있으면 Agentlas가 agy 실행 전체를 거절하고 다른 런타임으로 넘어가던 문제를 고칩니다. 1.2.0 프로덕션 실측에서 `opencrab` 하나 때문에 모든 Work 실행이 agy 대신 Codex로 돌았습니다. 이제 사용자 항목은 그대로 두고 그 이름의 Agentlas 항목만 빼고 실행하며, 뺀 항목은 실행 상태에 적습니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.0 — 2026-09-13
 
 - 로컬 모델이 Ollama 대신 앱이 직접 관리하는 llama.cpp 실행기로 바뀝니다. 사이드바의 로컬 모델 화면에서 Hugging Face 모델을 찾아 내려받고 검증한 뒤 바로 선택해 씁니다. 예전 Ollama 선택은 같은 모델이 설치돼 있으면 자동으로 옮겨집니다.
