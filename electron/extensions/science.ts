@@ -57,7 +57,7 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<{
     id: "agentlas-science-renderer-molstar",
     version: "1.2.1",
     displayName: "Molecular Visualization",
-    description: "Mol* protein and molecular structure viewer",
+    description: "Mol* protein and molecular structure viewer (visualization only; no docking or dynamics engine)",
     packageBytes: 5_144_268,
     sourceEnv: "AGENTLAS_SCIENCE_MOLSTAR_RENDERER_SOURCE_DIR",
   },

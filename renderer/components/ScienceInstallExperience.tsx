@@ -43,7 +43,7 @@ const FALLBACK_COMPONENTS = [
   {
     id: "agentlas-science-renderer-molstar",
     displayName: "Molecular Visualization",
-    description: "Mol* protein and molecular structure viewer",
+    description: "Mol* protein and molecular structure viewer (visualization only; no docking or dynamics engine)",
     packageBytes: 1_533_924,
   },
 ] as const;
@@ -56,7 +56,7 @@ function componentCopy(id: string, ko: boolean, fallbackName: string, fallbackDe
   if (!ko) return { name: fallbackName, description: fallbackDescription };
   if (id === "agentlas-science") return { name: "Science 작업 공간", description: "프로젝트, 문헌, 근거 그래프, 통계 분석, 연구 문서" };
   if (id === "agentlas-science-renderer-ketcher") return { name: "화학 구조 도구", description: "Ketcher 구조 편집기와 Indigo 화학 런타임" };
-  if (id === "agentlas-science-renderer-molstar") return { name: "분자 시각화", description: "Mol* 단백질·분자 구조 뷰어" };
+  if (id === "agentlas-science-renderer-molstar") return { name: "분자 시각화", description: "Mol* 단백질·분자 구조 뷰어 (시각화 전용, 도킹·동역학 시뮬레이션은 미지원)" };
   return { name: fallbackName, description: fallbackDescription };
 }
 
