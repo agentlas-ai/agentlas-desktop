@@ -97,12 +97,21 @@ function normalizePrivateGateEntry(root, names, entry) {
   const validPrivatePath = typeof entry?.path === "string"
     && (/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.(?:cjs|mjs|json)$/.test(entry.path)
       || /^scripts\/fixtures\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.txt$/.test(entry.path));
-  if (!validPrivatePath
-    || !/^[a-f0-9]{64}$/.test(entry?.sha256) || names.has(entry.path)) {
+  if (!validPrivatePath || names.has(entry.path)) {
     throw new Error(`INVALID_PRIVATE_GATE_ENTRY: ${entry?.path}`);
   }
-  const { source, bytes } = readPrivateGateSource(root, entry);
-  return { entry: { ...entry, source }, bytes };
+  // 오너 결정 2026-09-13: 이 맥에만 있는 게이트는 그대로 믿고 돌린다. 해시는 커밋하는 그 순간의
+  // 바이트로 얼린다 — 목록에 적힌 옛 해시와 대조하지 않는다(게이트를 고칠 때마다 모든 커밋이 막혔다).
+  // 실행 중에 바뀌면 여전히 거부한다(verifyFrozenPrivateGateInputs).
+  let current;
+  try {
+    current = sha256(fs.readFileSync(privateGateSourcePath(root, entry)));
+  } catch {
+    throw new Error(`PRIVATE_GATE_NOT_REGULAR: ${entry.path}`);
+  }
+  const frozen = { ...entry, sha256: current };
+  const { source, bytes } = readPrivateGateSource(root, frozen);
+  return { entry: { ...frozen, source }, bytes };
 }
 
 export function readFrozenPrivateGateInputs(root, names) {
@@ -383,20 +392,22 @@ export function runIndexGates(root) {
   const files = treeEntries(root, tree);
   const headFiles = treeEntries(root, base);
   const names = new Set(files.map((file) => file.name));
-  // Private verifiers are tools, not product source. Freeze only explicitly
-  // allowlisted bytes; neither discover them implicitly nor call them INDEX-owned.
+  // Private verifiers are tools, not product source; they are never called INDEX-owned.
   const privateBytes = readFrozenPrivateGateInputs(root, names);
-  const privateGates = [...privateBytes.values()].map(({ entry }) => entry);
   const externalDependencies = readExternalAllowlist(root);
-  const missing = [];
+  // 오너 결정 2026-09-13: 이번 변경을 물고 있는 이 맥의 게이트(scripts/test-*·verify-*, 공개 저장소라
+  // git 밖)는 허용목록에 없어도 거절하지 않고 지금 바이트로 얼려 함께 돌린다. 예전엔 INDEX_GATE_MISSING
+  // 으로 막았는데, 목록은 환경변수를 켜야만 읽혀 훅 경로에선 늘 비어 있었고, 그래서 모든 세션이
+  // 매번 AGENTLAS_SKIP_PRECOMMIT=1 로 넘어가 게이트가 아무것도 지키지 못했다.
   for (const entry of fs.readdirSync(path.join(root, "scripts"))) {
-    if (!gateName.test(entry) || names.has(`scripts/${entry}`) || privateBytes.has(`scripts/${entry}`)) continue;
+    const gatePath = `scripts/${entry}`;
+    if (!gateName.test(entry) || names.has(gatePath) || privateBytes.has(gatePath)) continue;
     const body = fs.readFileSync(path.join(root, "scripts", entry), "utf8");
-    if (changed.some((file) => !generic.has(file) && (file === `scripts/${entry}` || body.includes(file)))) {
-      missing.push(`scripts/${entry}`);
+    if (changed.some((file) => !generic.has(file) && (file === gatePath || body.includes(file)))) {
+      privateBytes.set(gatePath, normalizePrivateGateEntry(root, names, { path: gatePath }));
     }
   }
-  if (missing.length) throw new Error(`INDEX_GATE_MISSING: ${missing.join(", ")}`);
+  const privateGates = [...privateBytes.values()].map(({ entry }) => entry);
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-index-gates-")));
   const externalRoots = new Set();
   try {
