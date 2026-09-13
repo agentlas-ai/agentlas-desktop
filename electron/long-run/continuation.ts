@@ -10,6 +10,8 @@ import { listAgentSurfaces } from "../store/agent-surfaces";
 import { compileProjectInstructionSnapshot } from "./instructions";
 import { latestRuntimePlan } from "./plan";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
+import { ExactDesktopRuntimeBindingError, restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
+import type { LongRunRuntimeSelection } from "../../shared/long-run";
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /** Pure host admission check, shared by live and startup continuation. It uses
@@ -72,10 +74,25 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const worker = getDb().prepare("SELECT runtime_selection_json FROM long_run_workers WHERE run_id = ? AND role = 'controller' ORDER BY updated_at DESC LIMIT 1")
     .get(run.id) as { runtime_selection_json: string } | undefined;
   if (!worker) throw new Error("checkpoint_runtime_binding_missing");
-  const runtimeSelection = JSON.parse(worker.runtime_selection_json) as RuntimeSelection;
-  const producer = getDb().prepare("SELECT runtime_selection_json FROM long_run_worker_attempts WHERE invocation_run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY attempt DESC LIMIT 1")
-    .get(checkpoint.invocationRunId, run.id) as { runtime_selection_json: string } | undefined;
-  if (!producer || !same(runtimeSelection, JSON.parse(producer.runtime_selection_json))) throw new Error("checkpoint_runtime_binding_changed");
+  const storedRuntimeSelection = JSON.parse(worker.runtime_selection_json) as LongRunRuntimeSelection;
+  const producer = getDb().prepare("SELECT id, runtime_selection_json FROM long_run_worker_attempts WHERE invocation_run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY attempt DESC LIMIT 1")
+    .get(checkpoint.invocationRunId, run.id) as { id: string; runtime_selection_json: string } | undefined;
+  if (!producer || !same(storedRuntimeSelection, JSON.parse(producer.runtime_selection_json))) throw new Error("checkpoint_runtime_binding_changed");
+  let runtimeSelection: RuntimeSelection;
+  try {
+    runtimeSelection = restoreExactDesktopRuntimeSelection({
+      stored: storedRuntimeSelection,
+      context: {
+        invocationRunId: checkpoint.invocationRunId,
+        longRunId: run.id,
+        attemptId: producer.id,
+        chatId: chat.id,
+      },
+    });
+  } catch (error) {
+    if (error instanceof ExactDesktopRuntimeBindingError) throw new Error(`checkpoint_${error.reasonCode}`);
+    throw error;
+  }
   resolveDesktopRuntimeAdapter(runtimeSelection);
   const context = compileLongRunCheckpoint(checkpoint, runtimeSelection.kind);
   return { runtimeSelection, context,

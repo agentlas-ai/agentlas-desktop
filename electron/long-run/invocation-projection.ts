@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { LongRunRuntimeSelection, LongRunWorkspaceBinding } from "../../shared/long-run";
+import type { LongRunWorkspaceBinding } from "../../shared/long-run";
 import type { McpInvocationEvent, RuntimeSelection } from "../../shared/types";
 import {
   addLongRunTask,
@@ -9,6 +9,7 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
 } from "../store/long-runs";
+import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 
 interface ProjectedWorker {
@@ -28,21 +29,6 @@ export interface DesktopInvocationProjectionInput {
 
 function stableId(prefix: string, value: string): string {
   return `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
-}
-
-function longRunSelection(selection: RuntimeSelection): LongRunRuntimeSelection {
-  const adapter = resolveDesktopRuntimeAdapter(selection);
-  const source = selection.source === "cloud" || selection.source === "hub" || selection.source === "builtin"
-    ? selection.source
-    : "local";
-  return {
-    kind: selection.kind,
-    backend: selection.backend ?? null,
-    model: selection.model ?? null,
-    effort: selection.effort ?? null,
-    source,
-    capabilityDescriptorId: adapter.id,
-  };
 }
 
 function eventAgentId(event: McpInvocationEvent): string | null {
@@ -88,7 +74,7 @@ export class DesktopLongRunInvocationProjection {
     if (!selection || !this.controllerWorkerId) return null;
     const workerId = stableId("worker", `${this.input.longRunId}:${this.input.invocationRunId}:${agentId}`);
     const taskId = stableId("task", `${this.input.longRunId}:${this.input.invocationRunId}:${agentId}`);
-    const resolved = longRunSelection(selection);
+    const resolved = captureLongRunRuntimeSelection(selection);
     try {
       addLongRunTask({
         runId: this.input.longRunId,

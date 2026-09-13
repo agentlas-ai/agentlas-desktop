@@ -8,6 +8,7 @@ import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
+import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
 import { InvocationEffectBoundaryTracker } from "./effect-boundary";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
@@ -1807,11 +1808,8 @@ export class InvocationService {
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
       const workerId = `controller_${goalLongRun.id}`;
-      const source = selection.source === "cloud" || selection.source === "hub" || selection.source === "builtin"
-        ? selection.source
-        : "local";
       try {
-        const adapter = resolveDesktopRuntimeAdapter(selection);
+        const longRunRuntimeSelection = captureLongRunRuntimeSelection(selection, { requireExact: true });
         bindLongRunWorker({
           workerId,
           runId: goalLongRun.id,
@@ -1820,14 +1818,7 @@ export class InvocationService {
           role: "controller",
           agentDefinitionId: chat.agentId,
           agentRelease: null,
-          runtimeSelection: {
-            kind: selection.kind,
-            backend: selection.backend ?? null,
-            model: selection.model ?? null,
-            effort: selection.effort ?? null,
-            source,
-            capabilityDescriptorId: adapter.id,
-          },
+          runtimeSelection: longRunRuntimeSelection,
           workspaceBinding: {
             projectId: chat.projectId,
             cwd: getChatWorkingFolder(chat.id),
@@ -1841,14 +1832,7 @@ export class InvocationService {
           workerId,
           taskId: goalLongRunTask.id,
           invocationRunId: runId,
-          runtimeSelection: {
-            kind: selection.kind,
-            backend: selection.backend ?? null,
-            model: selection.model ?? null,
-            effort: selection.effort ?? null,
-            source,
-            capabilityDescriptorId: adapter.id,
-          },
+          runtimeSelection: longRunRuntimeSelection,
         }).attemptId;
         goalInvocationProjection?.bindController(workerId, chat.agentId ?? `controller:${chat.id}`);
       } catch (error) {

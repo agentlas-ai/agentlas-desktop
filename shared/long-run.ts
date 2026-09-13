@@ -209,6 +209,22 @@ export interface LongRunWorkspaceBinding {
   revision: string | null;
 }
 
+/**
+ * Desktop-local selector identity captured from Main after runtime selection.
+ * `LongRunRuntimeSelection.source` remains a topology scope; this separate
+ * binding is the exact executable/provider selection that may be replayed.
+ */
+export interface DesktopExactRuntimeBinding {
+  schemaVersion: "agentlas.desktop-exact-runtime-binding.v1";
+  kind: string;
+  backend: string | null;
+  source: string;
+  model: string | null;
+  effort: string | null;
+  longContext: boolean;
+  acpAgentId: string | null;
+}
+
 export interface LongRunRuntimeSelection {
   kind: string;
   backend?: string | null;
@@ -216,6 +232,7 @@ export interface LongRunRuntimeSelection {
   effort?: string | null;
   source: "local" | "cloud" | "hub" | "builtin";
   capabilityDescriptorId?: string | null;
+  desktopRuntimeBinding?: DesktopExactRuntimeBinding;
 }
 
 export interface LongRunWorkerBinding {

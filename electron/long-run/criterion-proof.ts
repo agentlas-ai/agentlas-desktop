@@ -2,11 +2,13 @@ import type { CurrentDownloadProof } from "./download-proof";
 import type { CurrentFileProof } from "./file-proof";
 import { createHash } from "node:crypto";
 import type { RuntimeSelection } from "../../shared/types";
+import type { LongRunRuntimeSelection } from "../../shared/long-run";
 import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRunByGoalId } from "../store/long-runs";
 import { judgeRequiredBatch } from "../system-agents/judgment";
 import { withInvocationAccounting } from "./accounting-context";
+import { ExactDesktopRuntimeBindingError, restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 
 export const CRITERION_PROOF_KINDS = ["answer", "file", "download", "build", "execution", "artifact", "semantic", "unknown"] as const;
 const CLASSIFICATION_LABELS = [...CRITERION_PROOF_KINDS, "file_read", "file_write", "file_edit"] as const;
@@ -20,10 +22,13 @@ function context(goalId: string, invocationRunId: string) {
   const attempts = getDb().prepare(`SELECT a.id,a.runtime_selection_json FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id=a.worker_id
     WHERE a.run_id=? AND a.invocation_run_id=? AND w.role='controller' ORDER BY a.rowid DESC`).all(run.id, invocationRunId) as {id:string;runtime_selection_json: string}[];
   const selections=attempts.map(row=>{
-    const value=JSON.parse(row.runtime_selection_json);
-    if(!value || typeof value.kind!=="string" || !value.kind || typeof value.source!=="string")throw new Error("criterion_proof_runtime_unbound");
-    // Attempt metadata (e.g. capabilityDescriptorId) is not a model selector.
-    return {kind:value.kind,source:value.source,...Object.fromEntries(["backend","model","effort","longContext"].filter(key=>value[key]!=null).map(key=>[key,value[key]]))} as RuntimeSelection;
+    const value=JSON.parse(row.runtime_selection_json) as LongRunRuntimeSelection;
+    try {
+      return restoreExactDesktopRuntimeSelection({stored:value,context:{invocationRunId,longRunId:run.id,attemptId:row.id,chatId:run.rootChatId!}});
+    } catch (error) {
+      if (error instanceof ExactDesktopRuntimeBindingError) throw new Error(`criterion_proof_${error.reasonCode}`);
+      throw error;
+    }
   });
   if (!selections.length || new Set(selections.map(value => JSON.stringify(value))).size !== 1) throw new Error("criterion_proof_runtime_unbound");
   const runtime=selections[0];
