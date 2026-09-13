@@ -3,7 +3,11 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button { font: inherit; }
 .pack-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: #fff; }
-.artifact-bar { position: absolute; z-index: 5; right: 12px; bottom: 12px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; border: 0; background: transparent; }
+.result-summary { position: absolute; z-index: 6; top: 0; right: 0; left: 0; min-height: 116px; padding: 26px 32px 22px; border-bottom: 1px solid #e5e3df; background: #fff; }
+.result-summary > span { display: block; color: #77716c; font-size: 9px; font-weight: 760; letter-spacing: .12em; }
+.result-summary > strong { display: block; margin-top: 7px; color: #242321; font-size: 18px; line-height: 1.35; }
+.result-summary > p { max-width: 560px; margin: 8px 0 0; overflow: hidden; color: #67635f; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-bar { position: absolute; z-index: 7; right: 24px; bottom: 24px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; border: 0; background: transparent; }
 .artifact-bar > div:first-child { display: none; }
 .artifact-bar strong { font-size: 15px; line-height: 20px; }
 .artifact-bar small { color: #67635f; font-size: 11px; }
@@ -15,7 +19,7 @@ button { font: inherit; }
 .phase { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5e5a56; font: 600 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .phase-ready-to-save, .phase-version-saved { color: #17633a; }
 .phase-validation-failed, .phase-failed { color: #9a2f29; }
-.editor-frame { position: absolute; inset: 0; min-height: 0; padding: 0; background: #fff; }
+.editor-frame { position: absolute; top: 116px; right: 24px; left: 24px; width: auto; max-height: calc(100% - 212px); aspect-ratio: 1 / 1; min-height: 300px; padding: 0; overflow: hidden; border: 1px solid #e5e3df; border-radius: 10px; background: #fff; }
 .ketcher-host { width: 100%; height: 100%; min-height: 240px; overflow: hidden; border: 0; border-radius: 0; background: #fff; box-shadow: none; }
 .ketcher-host > div { width: 100%; height: 100%; }
 .receipt-bar { position: absolute; z-index: 6; right: 12px; bottom: 62px; width: min(420px, calc(100% - 24px)); padding: 10px 12px; border: 1px solid #e2c9c6; border-radius: 10px; background: rgba(255,255,255,.97); color: #3d2927; box-shadow: 0 5px 16px rgba(70,36,32,.09); font-size: 12px; line-height: 1.4; }
@@ -27,10 +31,11 @@ button { font: inherit; }
 .dot.error { background: #b8443c; box-shadow: 0 0 0 3px #f9e9e7; }
 .error-copy { display: block; max-height: 72px; margin-top: 5px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #8f302b; font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
 @media (max-width: 720px) {
-  .artifact-bar { right: 7px; bottom: 7px; align-items: flex-start; }
+  .result-summary { min-height: 104px; padding: 22px 24px 18px; }
+  .artifact-bar { right: 24px; bottom: 18px; align-items: flex-start; }
   .artifact-bar small, .phase { display: none; }
   .actions button { padding: 0 8px; }
-  .editor-frame { padding: 0; }
+  .editor-frame { top: 104px; right: 24px; left: 24px; max-height: calc(100% - 188px); min-height: 260px; padding: 0; }
   .receipt-bar { right: 7px; bottom: 55px; width: calc(100% - 14px); }
 }
 @media (max-width: 520px) {

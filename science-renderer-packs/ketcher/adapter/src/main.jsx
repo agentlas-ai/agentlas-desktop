@@ -39,7 +39,8 @@ function App() {
   const draftRevisionRef = useRef(0);
   const changeSubscriptionRef = useRef(null);
   const [phase, setPhase] = useState("launching");
-  const [, setMessage] = useState("Loading the signed chemistry runtime…");
+  const [message, setMessage] = useState("Loading the signed chemistry runtime…");
+  const [documentMeta, setDocumentMeta] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [, setSavedVersion] = useState(null);
   const [error, setError] = useState(null);
@@ -170,6 +171,11 @@ function App() {
       setMessage("Rendering the verified KET document…");
       await report("rendering", "Rendering verified KET document");
       const initial = await validateCurrent();
+      setDocumentMeta({
+        atomCount: initial.validation.atomCount,
+        bondCount: initial.validation.bondCount,
+        canonicalSmiles: initial.document.canonicalSmiles,
+      });
       // Ketcher normalizes KET serialization when it loads a document, so the
       // editor export is not byte-identical to the stored source. Chemical
       // identity is checked through Indigo's canonical SMILES instead.
@@ -234,6 +240,11 @@ function App() {
 
   return (
     <main className="pack-shell">
+      <section className="result-summary" aria-label="Chemistry result summary">
+        <span>CHEMISTRY STRUCTURE</span>
+        <strong>{documentMeta ? `${documentMeta.atomCount} atoms · ${documentMeta.bondCount} bonds` : "Validated molecular document"}</strong>
+        <p>{documentMeta?.canonicalSmiles || message}</p>
+      </section>
       <header className="artifact-bar">
         <div>
           <span className="eyebrow">CHEMISTRY DOCUMENT</span>

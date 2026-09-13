@@ -22,6 +22,8 @@
   const resetViewButton = document.getElementById("reset-view");
   const saveVersionButton = document.getElementById("save-version");
   const editorNote = document.getElementById("editor-note");
+  const structureSummary = document.getElementById("structure-summary");
+  const structureMeta = document.getElementById("structure-meta");
   let viewer = null;
   let sequence = 0;
   let request = null;
@@ -498,6 +500,8 @@
       atomCount: sourceCounts?.atomCount || viewer.plugin.managers.structure.hierarchy.current.structures[0]?.cell?.obj?.data?.elementCount || 0,
     };
     if (counts.atomCount < 1) throw new Error("molstar-structure-empty");
+    structureSummary.textContent = `${counts.residueCount.toLocaleString()} residues · ${counts.chainCount.toLocaleString()} chains`;
+    structureMeta.textContent = `${counts.atomCount.toLocaleString()} atoms · ${String(request.input.format).toUpperCase()} source · Mol* ${window.molstar.version}`;
     const sceneRevision = await sha256Text(JSON.stringify({
       artifact: request.artifactContentSha256,
       representation: baseViewState.representation,
