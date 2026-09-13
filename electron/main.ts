@@ -3606,6 +3606,8 @@ app.whenReady().then(async () => {
       journalProfileId: typeof input.journalProfileId === "string" ? input.journalProfileId : undefined,
       expectedJournalProfileVersion: typeof input.expectedJournalProfileVersion === "number" ? input.expectedJournalProfileVersion : undefined,
       expectedJournalProfileContentSha256: typeof input.expectedJournalProfileContentSha256 === "string" ? input.expectedJournalProfileContentSha256 : undefined,
+      // 원고별 단 수(오너 2026-09-14): 저널 프로파일 조판 위에 덮는다. 1·2 외의 값은 무시.
+      ...(input.columnCount === 1 || input.columnCount === 2 ? { columnCount: input.columnCount as 1 | 2 } : {}),
       metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as ScienceSubmissionMetadata : null,
     };
     if (typeof input.manuscriptId === "string") return service.renderStored(input.projectId, input.manuscriptId, options);
