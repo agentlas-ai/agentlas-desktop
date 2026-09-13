@@ -824,6 +824,11 @@ export interface RunLocalOpenAiChatOptions {
   chatTemplateKwargs?: Record<string, boolean | number | string>;
   /** Main resident receipt, present only for managed llama.cpp. */
   contextWindow?: number;
+  /**
+   * Same system prompt without the optional keyword-gated Surface protocol. Used once,
+   * only when the measured request does not fit; the swap is reported as a notice.
+   */
+  systemPromptFallback?: string;
 }
 
 /**
@@ -890,6 +895,8 @@ export async function runLocalOpenAiChat(
   let toolTurnsTaken = 0;
   let lastToolSignature = "";
   let identicalToolTurns = 0;
+  /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
+  let surfaceFallbackApplied = false;
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     const requestBody: Record<string, unknown> = {
@@ -923,7 +930,28 @@ export async function runLocalOpenAiChat(
         };
     if (opts.contextWindow !== undefined) {
       try {
-        const measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+        let measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+        if (!measured.fits && opts.systemPromptFallback && !surfaceFallbackApplied
+          && messages[0]?.role === "system" && messages[0].content !== opts.systemPromptFallback) {
+          // Drop only the optional host Surface documentation, then measure again with
+          // the same template and tokenizer. Nothing the user or agent wrote changes.
+          messages[0] = { role: "system", content: opts.systemPromptFallback };
+          surfaceFallbackApplied = true;
+          measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+          if (measured.fits) {
+            events.onNotice?.({
+              level: "info",
+              code: "surface-protocol-dropped-for-capacity",
+              message: req.locale === "ko"
+                ? "이 모델의 용량에 맞추기 위해 화면 제작 안내(Surface)를 이번 턴에서 뺐습니다. 요청·대화·지시는 그대로입니다."
+                : "The Surface builder guide was left out of this turn to fit the model context. Your request, history and instructions are unchanged.",
+              i18n: {
+                ko: "이 모델의 용량에 맞추기 위해 화면 제작 안내(Surface)를 이번 턴에서 뺐습니다. 요청·대화·지시는 그대로입니다.",
+                en: "The Surface builder guide was left out of this turn to fit the model context. Your request, history and instructions are unchanged.",
+              },
+            });
+          }
+        }
         if (!measured.fits) return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
         requestBody.max_tokens = measured.maxOutputTokens;
       } catch {

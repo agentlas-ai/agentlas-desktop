@@ -5,6 +5,7 @@ import {
   type McpGoalNeedContext,
   type McpNeedCandidate,
   type McpRuntimeCapabilities,
+  type McpTaskContext,
   type ResolvedMcpNeeds,
 } from "./need-resolver";
 import os from "node:os";
@@ -120,6 +121,7 @@ export interface AutoSelectMcpDependencies {
   /** The only thing allowed to pick an optional tool. Injectable so tests can pin a verdict. */
   resolveNeeds: (input: {
     task: string;
+    taskContext?: McpTaskContext;
     candidates: McpNeedCandidate[];
     goal?: McpGoalNeedContext;
     runtimeCapabilities?: McpRuntimeCapabilities;
@@ -660,7 +662,14 @@ export async function autoSelectMcpTools(input: {
   const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates];
   const needsCandidateCount = needsCandidates.length;
   const needs = await deps.resolveNeeds({
-    task: taskText,
+    // The judge reads this turn's request on its own; agent name, folder and the
+    // standing system prompt travel as separate background (see McpTaskContext).
+    task: input.userPrompt,
+    taskContext: {
+      agentName: input.agentName,
+      workingFolder: input.workingFolder ?? null,
+      agentInstructions: input.systemPrompt,
+    },
     candidates: needsCandidates,
     ...(activeGoalScope?.objective && activeGoalScope.acceptanceCriteria ? { goal: {
       objective: activeGoalScope.objective,

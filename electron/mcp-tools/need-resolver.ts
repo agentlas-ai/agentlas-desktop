@@ -50,6 +50,20 @@ export interface McpGoalNeedContext {
   acceptanceCriteria: readonly string[];
 }
 
+/**
+ * Standing context around the current request. It is rendered apart from the
+ * CURRENT TASK so the judge does not read an agent's general instructions,
+ * session policy, or capability catalogue as this turn's request. A bare
+ * "answer READY" turn used to trigger a credential prompt because the agent's
+ * standing instructions mentioned a credentialed service (2026-09-12).
+ */
+export interface McpTaskContext {
+  agentName?: string;
+  workingFolder?: string | null;
+  /** Effective agent system prompt, session policy and similar standing text. */
+  agentInstructions?: string;
+}
+
 export interface McpRuntimeCapabilities {
   /** Host-proven native browser access for this exact invocation. */
   nativeBrowser: "available" | "unavailable" | "unknown";
@@ -85,8 +99,22 @@ export const MCP_NEED_JUDGMENT_GUIDANCE = [
   "Do not select a browser merely because the task mentions an app, Flutter, frontend, or a website. Source-only implementation, build, or test criteria may need no browser.",
   "Return an empty list only when every capability required for the complete Goal is either explicitly available in the runtime context or needs none of the offered tools.",
   "An entry marked 'needs credential' costs the user a blocking API-key prompt before the run starts, so name it only when the task is impossible without it.",
+  "AGENT CONTEXT is standing background (who the agent is, its general instructions, session policy, working folder). It describes what the agent may do in general and is never this turn's request: a service, site, or credential mentioned only there must not be selected unless the CURRENT TASK itself requires it.",
   "Err toward returning fewer tools.",
 ].join(" ");
+
+/** Render the standing agent context as background, clearly separated from the current task. */
+export function renderMcpTaskContext(context?: McpTaskContext): string {
+  const instructions = context?.agentInstructions?.trim();
+  const lines = [
+    "AGENT CONTEXT (standing background; NOT this turn's request):",
+    `Agent: ${context?.agentName?.trim() || "unspecified"}`,
+    `Working folder: ${context?.workingFolder?.trim() || "none"}`,
+    "Standing instructions and session policy:",
+    instructions || "none",
+  ];
+  return lines.join("\n");
+}
 
 /** Preserve the complete Goal contract; a later criterion may be the one that requires a tool. */
 export function renderMcpGoalNeedContext(goal?: McpGoalNeedContext): string {
@@ -113,7 +141,10 @@ function renderMcpRuntimeCapabilities(capabilities?: McpRuntimeCapabilities): st
  * Never falls back to keyword scoring: an undecided run attaches no optional tool.
  */
 export async function resolveMcpNeeds(input: {
+  /** The request for this turn only (user text plus attachment summary). */
   task: string;
+  /** Standing agent/session context, rendered apart from the task. Omitted means legacy single-blob callers. */
+  taskContext?: McpTaskContext;
   candidates: McpNeedCandidate[];
   goal?: McpGoalNeedContext;
   runtimeCapabilities?: McpRuntimeCapabilities;
@@ -143,7 +174,8 @@ export async function resolveMcpNeeds(input: {
     input: [
       renderMcpGoalNeedContext(input.goal),
       renderMcpRuntimeCapabilities(input.runtimeCapabilities),
-      `CURRENT TASK:\n${input.task.trim()}`,
+      ...(input.taskContext ? [renderMcpTaskContext(input.taskContext)] : []),
+      `CURRENT TASK${input.taskContext ? " (the user's request for this turn; judge this)" : ""}:\n${input.task.trim()}`,
       `AVAILABLE TOOLS:\n${inventory}`,
     ].join("\n\n"),
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,

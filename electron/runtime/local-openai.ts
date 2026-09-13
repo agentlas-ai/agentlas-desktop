@@ -89,21 +89,29 @@ export function makeLocalOpenAiRunner(
     }
     const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
 
-    const messages: ChatMessage[] = [{
-      role: "system",
-      content: wrapSystemPrompt(
-        systemText,
-        req.locale,
-        req.permission,
-        cumulativeSurfaceGateText(recent, contextWindow !== undefined ? req.surfaceUserPrompt ?? req.userPrompt : req.userPrompt),
-        req.forceSurface,
-        req.restrictedReadBoundary,
-        req.untrustedNoTools,
-        undefined,
-        undefined,
-        contextWindow !== undefined ? "managed-local" : undefined,
-      ),
-    }];
+    const surfaceGateText = cumulativeSurfaceGateText(recent, contextWindow !== undefined ? req.surfaceUserPrompt ?? req.userPrompt : req.userPrompt);
+    const wrapped = (surfaceGate?: "exclude") => wrapSystemPrompt(
+      systemText,
+      req.locale,
+      req.permission,
+      surfaceGateText,
+      req.forceSurface,
+      req.restrictedReadBoundary,
+      req.untrustedNoTools,
+      undefined,
+      undefined,
+      contextWindow !== undefined ? "managed-local" : undefined,
+      surfaceGate,
+    );
+    const systemContent = wrapped();
+    // Managed local only: when the keyword-gated Surface protocol is what pushes the
+    // request over the measured context, the loop may retry once with the same prompt
+    // minus that optional host documentation. User text, history, agent instructions
+    // and tool schemas are never trimmed; a forced Surface pass has no fallback.
+    const systemPromptFallback = contextWindow !== undefined && req.forceSurface !== true
+      ? (() => { const compact = wrapped("exclude"); return compact !== systemContent ? compact : undefined; })()
+      : undefined;
+    const messages: ChatMessage[] = [{ role: "system", content: systemContent }];
     for (const m of recent) {
       if (m.role === "user" || m.role === "assistant") {
         messages.push({ role: m.role, content: m.text });
@@ -137,6 +145,7 @@ export function makeLocalOpenAiRunner(
         chatTemplateKwargs: options.chatTemplateKwargs,
         headers: options.headersFn?.(),
         contextWindow,
+        ...(systemPromptFallback ? { systemPromptFallback } : {}),
       },
       messages,
     );

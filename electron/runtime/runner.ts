@@ -7,7 +7,7 @@ import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
 import { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG, SURFACE_OPEN_FENCE, SURFACE_CLOSE_FENCE } from "../surface-emitter";
-import { selectModules } from "../system-agents";
+import { selectModules, tokenize } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 
@@ -940,6 +940,33 @@ function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): str
  * 누적 판정은 단조라(한 번 켜지면 그 대화에서 유지) 프리픽스가 안정된다. 한 런타임에서
  * 배운 수리는 러너 공통으로 둔다 — 특례는 특례가 안 붙은 형제를 지뢰로 남긴다.
  */
+/**
+ * Surface fast-path gate. BM25 alone let one generic noun open the ~16KB Surface
+ * protocol: "도구를 호출할 필요는 없습니다" scored .41 on the keyword "도구" and,
+ * on an 8K local model, overflowed the context before inference (2026-09-12).
+ * A generic noun (tool/app/manage/track…) is only a build signal when it is
+ * accompanied by a second, distinct Surface noun; a strong noun (dashboard,
+ * mini-app, inventory, 워크플로우…) still opens the protocol on its own.
+ */
+const SURFACE_GENERIC_KEYWORDS = new Set([
+  "app", "tool", "board", "store", "shop", "chart", "operating", "operate", "monitor",
+  "track", "manage", "organize", "interactive",
+  "앱", "도구", "보드", "차트", "스토어", "운영", "관리", "추적", "정리",
+]);
+export function surfaceFastPathHit(userPrompt: string): boolean {
+  if (selectModules(userPrompt, [SURFACE_MODULE], { threshold: 0.4 }).selected.length === 0) return false;
+  const present = new Set(tokenize(userPrompt));
+  // One-character Korean keywords ("앱") tokenize to nothing — an empty `every` would match
+  // vacuously — so they are matched as a standalone syllable in the raw text instead.
+  const matched = SURFACE_MODULE.keywords.filter((keyword) => {
+    const tokens = tokenize(keyword);
+    if (tokens.length > 0) return tokens.every((token) => present.has(token));
+    return /^[가-힣]$/.test(keyword) && new RegExp(`(^|[^가-힣])${keyword}(?![가-힣])`).test(userPrompt);
+  });
+  const strong = matched.filter((keyword) => !SURFACE_GENERIC_KEYWORDS.has(keyword));
+  return strong.length > 0 || new Set(matched).size >= 2;
+}
+
 export function cumulativeSurfaceGateText(
   history: RunnerRequest["history"],
   userPrompt: string,
@@ -970,6 +997,8 @@ export function wrapSystemPrompt(
   workforceRuntimeToolGrant?: WorkforceRuntimeToolGrant,
   /** Main-owned managed-local context profile; explicit agent/plugin/surface instructions remain intact. */
   contextProfile?: "managed-local",
+  /** "exclude" builds the same prompt without the optional Surface protocol (capacity fallback); forceSurface still wins. */
+  surfaceGate?: "auto" | "exclude",
 ): string {
   if (untrustedNoTools) {
     const requested = untrustedAllowedMcpTools ?? [];
@@ -1049,8 +1078,7 @@ export function wrapSystemPrompt(
   // 놓쳐도 two-pass(모델 판단)가 잡고, 헛발동해도 모델이 surface를 안 내면 그만이라 다운사이드 작음.
   const includeSurface =
     forceSurface === true ||
-    userPrompt === undefined ||
-    selectModules(userPrompt, [SURFACE_MODULE], { threshold: 0.4 }).selected.length > 0;
+    (surfaceGate !== "exclude" && (userPrompt === undefined || surfaceFastPathHit(userPrompt)));
 
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
