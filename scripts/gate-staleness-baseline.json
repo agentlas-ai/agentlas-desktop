@@ -2,14 +2,14 @@
   "note": "이미 낡아 있던 게이트 원장. 새 항목이 생기면 커밋이 거부된다 — 코드를 바꿨으면 그 게이트도 같은 커밋에서 고쳐라. 줄이는 것만 환영.",
   "generatedFrom": "node scripts/verify-gate-freshness.mjs --update-baseline",
   "entries": [
-    "STALE-ANCHOR|scripts/test-chat-session-reset.cjs|\\[busy, receipt\\?\\.runId, receipt\\?\\.status\\]",
-    "STALE-ANCHOR|scripts/test-chat-session-reset.cjs|aria-expanded=\\{expanded\\}",
-    "STALE-ANCHOR|scripts/test-chat-session-reset.cjs|setOpenError\\(null\\);[\\s\\S]{0,80}\\[receipt\\?\\.runId\\]",
-    "STALE-ANCHOR|scripts/test-final-display-hygiene.cjs|className=\"agentlas-work-activity-row\"",
-    "STALE-ANCHOR|scripts/test-ime-submit-guards.cjs|if \\(composing \\|\\| event\\.nativeEvent\\.isComposing \\|\\| event\\.keyCode === 229\\) return;[\\s\\S]{0,180}action\\(\\);",
-    "STALE-ANCHOR|scripts/test-project-first-v84.cjs|if \\(requestedOneMode \\|\\| runWorkspaceBinding\\) \\{\\s*event = attachOneSurfaceProjection",
-    "STALE-ANCHOR|scripts/verify-live-renderers.cjs|<ChatRightPanel[\\s\\S]{0,500}surface=\\{liveWorkbenchSurface\\}",
-    "STALE-ANCHOR|scripts/verify-live-renderers.cjs|activeTab === \"panel\"[\\s\\S]{0,1500}<WorkbenchPanel",
-    "STALE-ANCHOR|scripts/verify-live-renderers.cjs|return <NativeLiveWebView url=\\{source\\}"
+    "STALE-ANCHOR|scripts/test-site-agent-app-prebuild-mcp.cjs|MCP 없이 계속 만듭니다|keep building without MCP",
+    "STALE-ANCHOR|scripts/test-site-agent-app-publish.cjs|deployment-verification-required[\\s\\S]{0,600}아직 Live가 아닙니다",
+    "STALE-ANCHOR|scripts/test-site-landing-ui.cjs|readonlyMcpCatalogIds\\.length[\\s\\S]{0,160}capabilities\\?\\.unavailable\\.length",
+    "STALE-ANCHOR|scripts/test-site-landing-ui.cjs|recommendAgentAppMcp\\(\\{ projectId: candidate\\.id \\}\\)",
+    "STALE-ANCHOR|scripts/test-site-landing-ui.cjs|setAgentAppMcpLiveStates\\(\\{\\}\\)[\\s\\S]*agentAppMcpRecommendation",
+    "STALE-ANCHOR|scripts/test-site-studio-store.cjs|remoteOperation !== null",
+    "STALE-ANCHOR|scripts/test-site-studio-store.cjs|site\\?\\.operationStatus",
+    "STALE-ANCHOR|scripts/test-site-studio-store.cjs|프로젝트를 삭제하지 못했습니다|Could not delete the project",
+    "STALE-ANCHOR|scripts/test-site-studio-store.cjs|화면을 삭제하지 못했습니다|Could not delete the screen"
   ]
 }
