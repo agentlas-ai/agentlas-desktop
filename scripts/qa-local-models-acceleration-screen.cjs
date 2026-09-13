@@ -67,9 +67,17 @@ async function run(browser, baseUrl, locale, mode) {
   await context.addInitScript({ content: `(${setupMockAgentlasBridge.toString()})(${JSON.stringify(mockBridgeOptions({}))});
     window.localStorage.setItem("agentlas.locale",${JSON.stringify(locale)});window.localStorage.setItem("agentlas.onboarded","1");
     const snapshot = ${JSON.stringify(snapshot)};
+    const hfModels = (query) => [
+      { repository: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", author: "unsloth", gated: false, tags: ["text-generation"], downloads: 120000, license: "apache-2.0" },
+      { repository: "bartowski/Llama-3.1-8B-Instruct-GGUF", author: "bartowski", gated: false, tags: ["text-generation"], downloads: 90000, license: "llama3.1" },
+      { repository: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", author: "ggml-org", gated: false, tags: ["image-text-to-text"], downloads: 40000, license: "apache-2.0" },
+    ].filter((m) => !query || m.repository.toLowerCase().includes(query.toLowerCase()));
+    window.__hfSearchCalls = [];
     window.agentlas.localModelHub = { snapshot: async () => snapshot, operations: async () => [],
-      searchModels: async () => ({ models: [], syncedAt: new Date().toISOString(), source: "live", stale: false }),
-      inspectRepository: async () => ({ repository: "x/y", revision: null, publisher: null, creator: null, converter: null, architecture: null, license: null, gated: "unknown", files: [], reasonCodes: [], syncedAt: null, source: "cache", stale: true }),
+      searchModels: async ({ query }) => { window.__hfSearchCalls.push(query); await new Promise((r) => setTimeout(r, 400)); return { models: hfModels(query), syncedAt: new Date().toISOString(), source: "live", stale: false }; },
+      inspectRepository: async ({ repository }) => ({ repository, revision: "a".repeat(40), publisher: repository.split("/")[0], creator: null, converter: null, architecture: "llama", license: "apache-2.0", gated: false,
+        files: [{ fileName: "model-Q4_K_M.gguf", byteLength: 4.9 * 2 ** 30, sha256: "b".repeat(64), quantization: "Q4_K_M", downloadable: true, reasonCodes: [] }, { fileName: "model-Q8_0.gguf", byteLength: 8.5 * 2 ** 30, sha256: "c".repeat(64), quantization: "Q8_0", downloadable: true, reasonCodes: [] }],
+        reasonCodes: [], syncedAt: new Date().toISOString(), source: "live", stale: false }),
       addModel: async () => { throw new Error("qa"); }, installEnginePackage: async () => { throw new Error("qa"); }, installModelPackage: async () => { throw new Error("qa"); },
       downloadEngine: async () => { throw new Error("qa"); }, downloadModel: async () => { throw new Error("qa"); }, cancelOperation: async () => ({ cancelled: false }),
       importModel: async () => null, installEngine: async () => { throw new Error("qa"); }, installDownloadedModel: async () => { throw new Error("qa"); },
@@ -103,13 +111,38 @@ async function run(browser, baseUrl, locale, mode) {
   const libraryCards = await page.locator("[data-model-package]").count();
   const libraryLabels = await page.locator("[data-model-package] small").allInnerTexts();
   await page.getByRole("button", { name: ko ? "탐색" : "Explore" }).click();
-  const sourceTitle = await page.locator("section[aria-label] >> text=/GGUF/").first().getAttribute("title");
-  await page.locator("[data-recommended-models]").waitFor({ state: "visible", timeout: 10000 });
-  const recommendedCards = await page.locator("[data-recommended-package]").count();
-  const recommendedButtons = await page.locator("[data-recommended-package] button").allInnerTexts();
+  const table = page.locator("[data-hf-table]");
+  await table.waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll("[data-hf-table] tbody tr").length >= 6, null, { timeout: 10000 });
+  const recommendedCards = await page.locator("[data-hf-table] tbody tr[data-curated=true]").count();
+  const recommendedButtons = await page.locator("[data-hf-table] tbody tr[data-curated=true] button").allInnerTexts();
+  const sourceTitle = "table";
+  const fitLevels = await page.locator("[data-hf-table] tbody tr").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-fit")));
+  const fitTitles = await page.locator("[data-hf-table] tbody td:nth-child(5) span").evaluateAll((els) => els.map((el) => el.getAttribute("title") || ""));
+  const roles = await page.locator("[data-hf-table] tbody td:nth-child(2) span").allInnerTexts();
+  // 검색 중에도 표가 비지 않는다: 글자를 치고 400ms 로딩 동안 이전 행이 남아 있어야 한다.
+  const input = page.getByRole("textbox", { name: ko ? "Hugging Face 모델 검색" : "Search Hugging Face models" });
+  await input.click(); await input.type("qwen");
+  await page.waitForTimeout(350);
+  const rowsWhileLoading = await page.locator("[data-hf-table] tbody tr").count();
+  const focusedWhileLoading = await input.evaluate((el) => document.activeElement === el);
+  await page.waitForFunction(() => document.querySelectorAll("[data-hf-table] tbody tr").length === 2, null, { timeout: 10000 });
+  const rowsAfterSearch = await page.locator("[data-hf-table] tbody tr").count();
+  await input.fill(""); await page.waitForFunction(() => document.querySelectorAll("[data-hf-table] tbody tr").length >= 6, null, { timeout: 10000 });
+  // 필터: 이미지 역할만
+  await page.locator('[data-filter-role="vision"]').click();
+  const visionRows = await page.locator("[data-hf-table] tbody tr").count();
+  await page.locator('[data-filter-role="all"]').click();
+  // 팝업: HF 행의 다운로드 → 파일 표
+  await page.locator('[data-hf-repository="bartowski/Llama-3.1-8B-Instruct-GGUF"] button').click();
+  await page.locator("[data-hf-files]").waitFor({ state: "visible", timeout: 10000 });
+  const popupFiles = await page.locator("[data-hf-files] tbody tr").count();
+  const popupFits = await page.locator("[data-hf-files] tbody tr").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-fit")));
+  await page.screenshot({ path: path.join(outDir, `${locale}-${mode}-popup.png`) });
+  await page.keyboard.press("Escape");
   await page.screenshot({ path: path.join(outDir, `${locale}-${mode}-explore.png`) });
   await context.close();
-  return { locale, mode, chipState, chipText, chipTitle, deviceText, deviceTitle, sourceTitle, libraryCards, libraryLabels, recommendedCards, recommendedButtons, errors };
+  return { locale, mode, chipState, chipText, chipTitle, deviceText, deviceTitle, sourceTitle, libraryCards, libraryLabels, recommendedCards, recommendedButtons, fitLevels, fitTitles, roles, rowsWhileLoading, focusedWhileLoading, rowsAfterSearch, visionRows, popupFiles, popupFits, errors };
 }
 
 async function main() {
@@ -132,11 +165,19 @@ async function main() {
       assert.match(result.deviceText, result.locale === "ko" ? /GPU 없음/ : /No GPU/);
     }
     assert.ok(result.deviceTitle && result.deviceTitle.length > 10, "장치 줄에 마우스 안내가 있어야 한다");
-    assert.match(result.sourceTitle || "", result.locale === "ko" ? /복제·재배포하지 않으며/ : /Nothing is mirrored/);
+    assert.ok(result.fitLevels.every((level) => ["smooth", "caution", "risky", "unknown"].includes(level)), "모든 행에 추천 판정");
+    assert.ok(result.fitTitles.every((title) => title.length > 10), "추천 칩마다 마우스 안내(근거)");
+    assert.ok(result.roles.includes(result.locale === "ko" ? "이미지" : "Vision") && result.roles.includes(result.locale === "ko" ? "코딩" : "Coding"), "역할 열이 이름·태그에서 분류된다");
+    assert.ok(result.rowsWhileLoading >= 6, `검색 중에도 이전 행이 남는다(${result.rowsWhileLoading})`);
+    assert.equal(result.focusedWhileLoading, true, "검색 중 입력창 초점이 유지된다");
+    assert.equal(result.rowsAfterSearch, 2, "검색 결과로 바뀐다(qwen 2건, 추천은 검색 중 숨김)");
+    assert.equal(result.visionRows, 1, "이미지 필터 → 1행");
+    assert.equal(result.popupFiles, 2, "팝업에 파일 2행");
+    assert.ok(result.popupFits.every((level) => level === (result.mode === "gpu" ? "smooth" : "caution")), `48GiB 기계에서 4.9/8.5GiB 파일은 GPU 면 원활, GPU 없으면 주의 (${result.popupFits})`);
     assert.equal(result.libraryCards, 1, "내 모델에는 설치된 모델만(픽스처 1개)");
     assert.ok(result.libraryLabels.every((label) => !/다운로드 가능|Available to download/.test(label)), "내 모델에 '다운로드 가능' 줄이 없다");
-    assert.equal(result.recommendedCards, 3, "탐색 위 추천에는 설치 안 된 내장 모델 3개");
-    assert.ok(result.recommendedButtons.every((text) => /다운로드|Download/.test(text)), "추천 카드마다 다운로드 단추");
+    assert.equal(result.recommendedCards, 3, "표 위쪽에 설치 안 된 내장 모델 3행");
+    assert.ok(result.recommendedButtons.every((text) => /다운로드|Download/.test(text)), "추천 행마다 다운로드 단추");
     // 화면 글자는 짧고, 설명은 마우스 안내에만 있다.
     assert.ok(result.chipText.length <= 3 && result.chipTitle.length > result.chipText.length);
   }
