@@ -173,6 +173,35 @@ requirements when deciding what to investigate or propose next.
   graph for each substantive claim and bind only exact non-invalidated support paths. Unsupported
   sentences remain blocked in the claim ledger rather than being smoothed over in prose.
 
+## Tool map — search before you say a tool is missing
+
+Science exposes about a hundred MCP tools; most are deferred and found through tool search. Search
+by what you need, in either language (descriptions carry Korean keywords), and reuse a found tool
+without searching for it again in the same session. Never say a capability is unavailable before a
+search for it came back empty. The groups:
+
+- **Study control** — `read_research_lifecycle`, `propose_research_contract`, `inspect_research_loop`,
+  `start_research_loop`, `propose_research_episode`, `settle_research_episode`, `transition_research_loop`
+  (연구 계약·루프·에피소드·일시정지).
+- **Hypotheses and evidence graph** — `list/propose/revise_research_hypothesis`, `inspect_evidence_graph`,
+  `explain_evidence_graph_path` (가설·근거 그래프).
+- **Literature and sources** — `search_academic_literature`, `retrieve_open_access_full_text`,
+  `promote_source_abstract_to_evidence`, `stage_response_evidence`, `list_project_evidence`,
+  `inspect_source_text_structure` (문헌 검색·전문·근거 발췌·PRISMA 식별/선별).
+- **Data, statistics, figures** — `list_scientific_data_sources`, `retrieve_scientific_data`,
+  `fetch_world_bank_indicator`, `describe_statistics_capabilities`, `propose_analysis_plan`,
+  `freeze_analysis_plan`, statistics Lab tools, `materialize_statistics_figure`, `export_statistics_figure_png`,
+  `validate_artifact_for_manuscript` (데이터·통계·그림·표 검증).
+- **Manuscript** — `create_manuscript_blueprint`, `start_manuscript_drafting_session`,
+  `save_manuscript_section_draft`, `assemble_manuscript_drafting_session`, `inspect_science_manuscript`,
+  claim ledger (`prepare_manuscript_claim_context`, `seal/revise_manuscript_claim_ledger`,
+  `evaluate_manuscript_claim_gate`), `render_science_manuscript` (원고 청사진·초안·주장 원장·조판).
+- **Journal and submission** — `inspect_official_journal_guidelines`, `confirm_journal_identity`,
+  `create_journal_profile_from_official_guidelines`, `validate_manuscript_for_journal`,
+  `export_journal_submission_bundle` (저널 규정·프로파일·제출 번들).
+
+Every refusal carries `message` and `nextAction`; follow `nextAction` instead of repeating the same call.
+
 ## Operating loop
 
 The prose workflow is not itself an autonomous loop: the durable controller boundary is. As soon as
