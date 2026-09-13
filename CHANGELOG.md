@@ -6,6 +6,7 @@
 - 로컬 모델 도구 사용을 여러 번 반복해도 오류가 나지 않게 합니다. 파일 같은 로컬 MCP 서버의 연결 확인 제한을 3초에서 12초로 늘려 두 번째 실행부터 후보에서 빠지던 문제, 화면을 못 보는 모델이 브라우저 스크린샷을 반복하던 문제, 그런 실행에 캡처 산출을 요구해 정직한 답을 실패로 찍던 문제를 고쳤습니다. 격리 앱 실측: 4과제 3회 연속 12/12 완주, 오류 0.
 - Work: 앱 재시작 뒤 목표 실행이 영구 막다른 길에 빠지던 문제, 쓰기 모드 샌드박스 거부 오진, 승인 문구, 이미지 역할 미반영, 기억 줄 영어 노출, 대시보드 역할 후보 단추 라벨을 고칩니다(페르소나 루프 라운드 1).
 - Science 서비스: 가설을 기각하면 이후 모든 턴이 실패하던 막다른 길, 원고 조판 기본(두 단 10pt), 한글 PDF 글꼴, 재시작 복구를 고칩니다.
+- Science 서비스: 주장 원장을 새 원고 판으로 다시 봉인할 때 옛 인용 목록을 물려받아 영원히 거부되던 문제(초안 워터마크가 안 벗겨짐), 한글·그리스 문자 소제목을 거부하던 검사, 저널 언어 요건(원고 언어가 저널과 다르면 제출 점검에서 알림)을 고칩니다.
 - Work 페르소나 라운드 2: 재개 때 판 번호를 잃던 문제, 샌드박스 종료를 권한 경계로 표시, 기억 줄을 읽을 때 현지화합니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
