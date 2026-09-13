@@ -12,6 +12,7 @@ import { MathSpan } from "./MathSpan";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
 import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
+import { absoluteFileRefsWithSpaces, maskSpans } from "@/lib/local-file-refs";
 
 export interface CodeArtifact {
   /** 채팅 내 안정적 id — 메시지id + 블록 인덱스 조합 */
@@ -1353,8 +1354,14 @@ function localFileRefsFromText(text: string): string[] {
     if (next && looksLikeLocalFileRef(next) && !refs.includes(next)) refs.push(next);
   };
   for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) push(match[1]);
+  // 공백이 든 절대 경로("…/Application Support/…/hello.txt")를 먼저 통째로 잡고 가린다.
+  // 아래 낱말 단위 스캐너가 그 꼬리("Support/…/hello.txt")를 상대 경로로 오독해 작업 폴더에 다시 붙이면
+  // 존재하지 않는 경로가 결과 레일에 "있던 자리에 없습니다" 로 그려진다(프로덕션 1.2.0 실측).
+  const spaced = absoluteFileRefsWithSpaces(text);
+  for (const span of spaced) push(span.ref);
+  const scanned = maskSpans(text, spaced);
   const fileRef = /(?:^|[\s(`])((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg|pdf|html?|mdx?|jsonl?|txt|csv|tsv|docx?|xlsx?|pptx?|zip|mp4|webm|mov|m4v|ogv|mp3|wav|rtf|pages))(?=$|[\s`).,;:])/gi;
-  for (const match of text.matchAll(fileRef)) push(match[1]);
+  for (const match of scanned.matchAll(fileRef)) push(match[1]);
   return refs;
 }
 
