@@ -272,6 +272,29 @@ export function recordCommittedAnswerReceipt(
   });
 }
 
+
+/**
+ * 지금 답할 수 있는 질문 메시지 — "마지막 메시지"가 아니라 "그 뒤에 사용자 메시지가 없는 질문"이다.
+ * 라운드 3 실측(2026-09-14): 목표 연속 실행이 질문 뒤에 말풍선을 붙여 질문이 마지막이 아니게 되자 세 자리(확정·미루기·모바일
+ * 접수)가 모두 "만료"로 버렸다. 세 자리가 같은 규칙을 써야 한 창에서는 받고 다른 창에서는 버리는 일이 없다.
+ */
+function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id: string; role: string; text: string; createdAt: string } | null {
+  const last = getLastChatMessage(chatId);
+  const source: { id: string; role: string; text: string; createdAt: string } | null = sourceMessageId && last?.id !== sourceMessageId
+    ? (() => {
+        const row = getDb().prepare("SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id = ?")
+          .get(chatId, sourceMessageId) as { id: string; role: string; text: string; created_at: string } | undefined;
+        return row ? { id: row.id, role: row.role, text: row.text, createdAt: row.created_at } : null;
+      })()
+    : last;
+  if (!source || source.role !== "assistant" || !source.text.includes(OPEN) || !firstQuestion(source.text)) return null;
+  if (last?.id !== source.id) {
+    const userLater = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(chatId, source.createdAt);
+    if (userLater) return null;
+  }
+  return source;
+}
+
 /**
  * Desktop 바텀시트가 답변을 제출한 순간 호출 — 지금 대기 중인 정확한 질문을 확인하고
  * 확정 영수증을 남긴다. 이후 후속 실행이 어떤 분기로 빠지든 이 질문은 다시 뜨지 않는다.
@@ -288,27 +311,8 @@ export function commitPendingConfirmationAnswer(
    * "아직 답을 기다린다"는 말풍선을 붙이면 질문은 더 이상 마지막이 아니었고, 사람이 고른 답은 만료로 버려졌다.
    * 질문은 그 뒤에 **사용자** 메시지가 없고 아직 확정 답이 없는 한 살아 있다.
    */
-  const last = getLastChatMessage(chatId);
-  const source: { id: string; role: string; text: string; createdAt: string } | null = sourceMessageId && last?.id !== sourceMessageId
-    ? (() => {
-        const row = getDb().prepare("SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id = ?")
-          .get(chatId, sourceMessageId) as { id: string; role: string; text: string; created_at: string } | undefined;
-        return row ? { id: row.id, role: row.role, text: row.text, createdAt: row.created_at } : null;
-      })()
-    : last;
-  const answeredByUserLater = source && last?.id !== source.id
-    ? Boolean(getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1")
-        .get(chatId, source.createdAt))
-    : false;
-  if (
-    !source ||
-    answeredByUserLater ||
-    source.role !== "assistant" ||
-    !source.text.includes(OPEN) ||
-    !firstQuestion(source.text)
-  ) {
-    throw new Error("Question is stale or no longer pending");
-  }
+  const source = pendingQuestionMessage(chatId, sourceMessageId);
+  if (!source) throw new Error("Question is stale or no longer pending");
   const normalizedReply = reply.trim();
   if (!normalizedReply) throw new Error("Decision response is empty");
   if (normalizedReply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH) {
@@ -442,13 +446,8 @@ export function snoozePendingConfirmation(
   if (!Number.isFinite(resumeTime) || resumeTime < now + 60_000 || resumeTime > now + 30 * 24 * 60 * 60 * 1_000) {
     throw new Error("Decision snooze must be between 1 minute and 30 days");
   }
-  const last = getLastChatMessage(chatId);
   if (
-    !last
-    || last.id !== sourceMessageId
-    || last.role !== "assistant"
-    || !last.text.includes(OPEN)
-    || !firstQuestion(last.text)
+    !pendingQuestionMessage(chatId, sourceMessageId)
     || listCommittedQuestionAnswers(chatId).some((receipt) => receipt.sourceMessageId === sourceMessageId)
   ) {
     throw new Error("Question is stale or no longer pending");
@@ -553,14 +552,7 @@ export function claimPendingConfirmationAnswer(
   if (claimedQuestionMessages.has(key)) {
     throw new Error("This question answer was already accepted");
   }
-  const last = getLastChatMessage(chatId);
-  if (
-    !last ||
-    last.id !== sourceMessageId ||
-    last.role !== "assistant" ||
-    !last.text.includes(OPEN) ||
-    !firstQuestion(last.text)
-  ) {
+  if (!pendingQuestionMessage(chatId, sourceMessageId)) {
     throw new Error("Question is stale or no longer pending");
   }
   // A successful Mobile admission seals a digest-only receipt after claiming.

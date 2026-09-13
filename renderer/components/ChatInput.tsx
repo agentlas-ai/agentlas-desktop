@@ -2132,7 +2132,11 @@ function ComposerGoalBar({
     if (!reason) return null;
     if (reason === "app_closed") return locale === "ko" ? "앱이 종료되어 멈춤" : "Stopped when the app closed";
     if (reason === "crash_recovery") return locale === "ko" ? "이전 실행 중단을 감지해 멈춤" : "Stopped after recovering an interrupted run";
-    if (reason === "budget") return locale === "ko" ? "정해 둔 예산·횟수를 다 써서 멈춤" : "Stopped after using the set budget";
+    if (reason === "budget" || reason.startsWith("budget_")) return locale === "ko" ? "정해 둔 예산·횟수를 다 써서 멈춤 — 새 목표로 이어가 주세요" : "Stopped after using the set budget — continue as a new goal";
+    // 원장이 실제로 적는 정지 사유(2026-09-14 실측: 셋 다 "작업이 멈췄습니다"로만 보였다).
+    if (reason === "stall_window_exhausted") return locale === "ko" ? "같은 결과가 세 번 반복돼 멈춤 — 무엇이 막혔는지 알려 주면 이어갑니다" : "Stopped after the same result three times — tell me what is blocking and I will continue";
+    if (reason === "goal_wait_deadline") return locale === "ko" ? "기다리던 조건이 기한 안에 오지 않아 멈춤 — 다시 보내면 이어갑니다" : "Stopped because the awaited condition did not arrive in time — send again to continue";
+    if (reason.startsWith("goal_wait_")) return locale === "ko" ? "기다리던 실행·파일을 더 지켜볼 수 없어 멈춤 — 다시 보내면 이어갑니다" : "Stopped because the awaited run or file could no longer be watched — send again to continue";
     if (reason === "runtime_unavailable") return locale === "ko" ? "실행할 엔진이 없어 멈춤" : "Stopped because no runtime was available";
     if (reason === "approval_required") return locale === "ko" ? "승인이 필요해 멈춤" : "Stopped waiting for approval";
     if (reason === "user") return locale === "ko" ? "직접 멈춤" : "Stopped by you";
