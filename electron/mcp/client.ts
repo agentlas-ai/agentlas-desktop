@@ -823,6 +823,7 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
         "새 지시가 목표와 충돌하면 목표를 조용히 덮어쓰지 말고, 목표 종료 후 새 Goal이 필요하다고 명시하라.",
         "처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧고 명확하게 사용자에게 보여라.",
         "완료 전에 각 성공 기준을 증거로 대조하고, 확인되지 않은 항목은 완료라고 말하지 마라.",
+        "완료를 보고할 때는 사용자의 원래 요청·기획(요청이 가리키는 기획서·프로젝트 기억 포함)의 항목을 산출물과 하나씩 대조해, 빠진 것·미완 항목을 먼저 말하고 그다음 된 것을 말하라. 좁은 성공 기준만 통과했다고 '완료'라 부르지 마라.",
       ].join("\n")
     : [
         "## Active Goal contract (host-owned; objective is immutable)",
@@ -833,6 +834,7 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
         "If a new instruction conflicts with the objective, do not overwrite it silently; state that the current Goal must end before a new one begins.",
         "At initial kickoff, show the objective, acceptance criteria, and verification surfaces briefly before using tools.",
         "Before completion, audit every criterion against evidence and never mark an unverified item complete.",
+        "When reporting completion, compare the delivered result item by item against the user's original request and plan (including any spec document or project memory the request points to); state what is missing or partial first, then what is done. Passing a narrow criterion is not 'complete'.",
       ].join("\n");
 }
 
@@ -4686,7 +4688,7 @@ ${effectiveUserPrompt}`;
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
   if (!req.agentAppMode && !restrictedReadBoundary) {
-    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt));
+    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req)));
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
   if (!req.agentAppMode && chat.kind === "division" && (req.toolMode || req.hubMode)) {

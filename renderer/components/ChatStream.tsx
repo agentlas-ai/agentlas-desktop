@@ -381,8 +381,15 @@ export function ChatStream({
     return () => window.cancelAnimationFrame(handle);
   }, [messages.length, scrollSignal]);
 
+  /*
+   * 딥링크 초점은 한 번만 — focus 는 URL 에 남아 있고 hasFocusMessage 는 기록이 재수화될 때마다 다시 참이 되어,
+   * "맨 아래로"를 눌러도 옛 메시지로 되돌아갔다(페르소나 루프 라운드 2, 긴 대화 실측).
+   */
+  const handledFocusRef = useRef<string | null>(null);
   useEffect(() => {
     if (!focusMessageId || !hasFocusMessage) return;
+    if (handledFocusRef.current === focusMessageId) return;
+    handledFocusRef.current = focusMessageId;
     stickToBottomRef.current = false;
     scrollingToBottomRef.current = false;
     setHasNewContent(false);

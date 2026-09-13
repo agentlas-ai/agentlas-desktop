@@ -29,10 +29,15 @@ const PREFERENCE_SIGNAL_RE =
   /\b(?:call me|from now on|always|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|항상|불러|말투|반말|존댓말|내 이름|나를|프로필|선호/i;
 
 /** Full schema is loaded when the task is about memory, or states a durable preference/identity. */
-export function memoryEmitterPromptFor(request: string): string {
-  return MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
+export function memoryEmitterPromptFor(request: string, locale?: "ko" | "en"): string {
+  const block = MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
     ? MEMORY_EMITTER_BLOCK
     : MEMORY_CORE;
+  // turn_summary 는 프로젝트 기억란에 사람에게 그대로 보이는 한 줄이다 — 화면 언어로(페르소나 루프 라운드 2 실측:
+  // 한국어 화면의 기억란에 모델이 영어로 쓴 요약이 계속 쌓였다). 후보 content 도 같은 언어.
+  return locale === "ko"
+    ? `${block}\nWrite turn_summary and every candidate content in Korean — the user reads them verbatim in the app's project memory.`
+    : block;
 }
 
 /** 온디맨드 — 전체 스키마(kinds/scopes enum, request_context 필드, JSON 포맷 예시). emit 시점에만 필요. */

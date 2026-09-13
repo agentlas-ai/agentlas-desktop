@@ -2515,26 +2515,35 @@ export class InvocationService {
         }
         if (blockedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
+          /*
+           * 왜 안 이어졌는지는 사람에게 말해야 한다 — 페르소나 루프 라운드 2(2026-09-14): 재시작 뒤 막힌 목표에
+           * 세 번 말을 걸었는데 셋 다 "목표 상태가 바뀌어…"만 보였다. 실제 원인은 여기 있던 옛 '미정산' 조회가
+           * 사람이 이미 인지한 불확실 시도까지 세어 조용히 null 을 돌려준 것(위에서 인지 이벤트까지 남긴 뒤에).
+           */
+          const stall: { reason: "not-blocked" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" } = { reason: "not-blocked" };
           try {
             resumed = getDb().transaction(() => {
               const current = getLongRun(blockedGoalReactivation!.runId);
               if (!current || current.status !== "blocked" || current.version !== blockedGoalReactivation!.version) return null;
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
+              stall.reason = "revision";
               if (!revision || revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision) return null;
-              const pending = getDb().prepare(
-                "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
-              ).get(current.id) as { n: number };
-              if (pending.n) return null;
+              // 불확실한 부작용은 위에서 사람이 인지했다(원장 run.user_control). 실제로 돌고 있는 시도만 막는다.
+              stall.reason = "attempt-live";
+              if (liveLongRunAttemptCount(current.id)) return null;
+              stall.reason = "budget";
               const budgetExhausted = (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles)
                 || Boolean(longRunMonetaryRefusal(current))
                 || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
               if (budgetExhausted) return null;
+              stall.reason = "contract";
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
                 WHERE goal_id = ? AND chat_id = ? AND status IN ('active', 'blocked')`)
                 .run(new Date().toISOString(), current.goalId, chat.id);
               if (contractChanged.changes !== 1) throw new Error("auto_goal_resume_contract_not_blocked");
+              stall.reason = "not-ready";
               const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), current.version);
               if (!longRunContinueDecision(queued.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");
               return transitionLongRun({
@@ -2554,12 +2563,24 @@ export class InvocationService {
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
             projectionGoalId = null;
+            const ko = stall.reason === "attempt-live"
+              ? "이 목표의 이전 실행이 아직 돌고 있어 이번 메시지를 시작하지 않았습니다. 그 실행이 끝난 뒤 다시 보내 주세요."
+              : stall.reason === "budget"
+                ? "이 목표의 예산(반복 횟수·시간)이 다 써서 이번 메시지를 시작하지 않았습니다. 목표 칩에서 새 목표로 이어가 주세요."
+                : stall.reason === "revision"
+                  ? "이 목표의 기준이 다른 대화에서 바뀌어 이번 메시지를 시작하지 않았습니다. 그 대화에서 이어가거나 여기서 새 목표로 시작해 주세요."
+                  : "목표 상태가 방금 바뀌어 이번 메시지를 시작하지 않았습니다. 목표 칩의 현재 상태를 확인한 뒤 다시 보내 주세요.";
+            const en = stall.reason === "attempt-live"
+              ? "An earlier run of this Goal is still going, so this message did not start. Send it again once that run finishes."
+              : stall.reason === "budget"
+                ? "This Goal's budget (cycles or time) is used up, so this message did not start. Continue as a new Goal from the goal chip."
+                : stall.reason === "revision"
+                  ? "This Goal's terms were changed in another chat, so this message did not start. Continue there, or start a new Goal here."
+                  : "The Goal just changed state, so this message did not start. Check the goal chip and send it again.";
             return {
               blockInvocation: true as const,
               code: "automatic-goal-resume-state-changed" as const,
-              message: pickLocale(runReq) === "ko"
-                ? "목표 상태가 바뀌어 이번 후속 작업을 시작하지 않았습니다. 현재 상태를 확인한 뒤 다시 시도해 주세요."
-                : "The Goal changed state, so this follow-up did not start. Check its current state and try again.",
+              message: pickLocale(runReq) === "ko" ? ko : en,
             };
           }
           boundGoal = resumed;
