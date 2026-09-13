@@ -9,10 +9,11 @@ import { boundEffectBoundary } from "./effect-metadata";
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
 // adapters have incomplete result coverage and cannot attest quiescence here.
 const RESULT_COVERAGE = new Set(["claude-code", "codex", "byok", "ollama", "lmstudio", "mlx", "agentlas-local"]);
-/** Host capability notices lack provider operation identity, arguments and
+/** Host capability/Goal notices lack provider operation identity, arguments and
  * typed outcome. A real provider operation sharing the display name still counts. */
 export function isEffectStatusOnlyTool(tool: {name:string;id?:unknown;args?:unknown;isError?:unknown}): boolean {
-  return isHostPreflightTool(tool.name) && tool.id === undefined && tool.args === undefined && tool.isError === undefined;
+  return (isHostPreflightTool(tool.name) || tool.name === "Goal")
+    && tool.id === undefined && tool.args === undefined && tool.isError === undefined;
 }
 interface Operation {
   key: string; toolId: string | null; startObserved: boolean; resultObserved: boolean;

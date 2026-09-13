@@ -970,7 +970,18 @@ export async function verifyGoalCompletionClaim(input: {
   const priorInvocationRunIds = (priorCheckpoint?.capsule.evidenceRefs ?? [])
     .map((ref) => /^invocation:(.+):completed$/.exec(ref)?.[1]).filter((id): id is string => Boolean(id));
   let verificationBoundary: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
-  try { if (input.invocationRunId) verificationBoundary = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Unknown legacy or changed bindings never permit a pass. */ }
+  try {
+    if (input.invocationRunId) verificationBoundary = captureGoalVerificationBoundary(input.goalId, input.invocationRunId);
+  } catch (error) {
+    // Preserve the machine-readable cause without exposing raw error text or
+    // letting a diagnostic failure upgrade an unconfirmed boundary to a pass.
+    const reasonCode = error instanceof Error && /^verification_[a-z_]+$/.test(error.message)
+      ? error.message : "verification_boundary_unconfirmed";
+    try {
+      appendLongRunEvent({ runId: run.id, kind: "verification.boundary_unavailable", actorKind: "host",
+        payload: { invocationRunId: input.invocationRunId ?? null, reasonCode } });
+    } catch { /* The boundary stays unconfirmed even if diagnosis cannot be persisted. */ }
+  }
   const durableEvidence = verificationBoundary
     ? collectDurableGoalVerificationEvidence(input.invocationRunId, priorInvocationRunIds, {goalId: input.goalId, revision: verificationBoundary.goalRevision})
     : {ready: false, refs: [], observation: "The current Goal, source, artifacts or effect boundary could not be pinned.", reason: "verification_boundary_unconfirmed"};
