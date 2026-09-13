@@ -11,6 +11,11 @@ export function createManagedLocalModelRunner(manager: LocalModelHubManager): Ru
   const runner = makeLocalOpenAiRunner(() => manager.endpoint(), "agentlas-local", {
     chatTemplateKwargs: { enable_thinking: false },
     headersFn: () => manager.authorizationHeaders(),
+    // The managed loader starts a text GGUF without a vision projector: tool screenshots stay text-only.
+    acceptsImageResults: false,
+    // Tool agents need determinism more than variety; llama-server's default 0.8 made the same task
+    // succeed or fail run to run (isolated app measurement 2026-09-13).
+    temperature: 0.2,
     contextWindowFn: async () => {
       const receipt = (await manager.snapshot()).resident;
       if (!receipt || receipt.state !== "resident") throw new Error("local_model_not_resident");

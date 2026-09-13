@@ -552,7 +552,9 @@ export class LocalModelHubManager {
     signal?: AbortSignal,
   ): Promise<LocalModelLoadReceipt> {
     await this.readyForMutation();
-    if (!Number.isSafeInteger(contextTokens) || contextTokens < 512 || contextTokens > 131_072) {
+    // 0 = 자동: 엔진이 모델의 학습 문맥(n_ctx_train)을 쓰되 장치 메모리에 맞춰 줄인다(--fit on 기본).
+    // 8192 고정은 오케스트레이터 프롬프트+도구 스키마만으로 넘쳐 4B 모델이 파일 과제조차 못 시작했다(격리 앱 실측 2026-09-13).
+    if (!Number.isSafeInteger(contextTokens) || (contextTokens !== 0 && (contextTokens < 512 || contextTokens > 131_072))) {
       throw new Error("invalid_local_model_context_tokens");
     }
     const installation = this.state.modelInstallations.find((item) => item.installationId === installationId);
@@ -653,8 +655,13 @@ export class LocalModelHubManager {
       for (let i = 0; i < 20 && !/model loaded|listening on/.test(engineLog); i += 1) {
         await new Promise((resolveWait) => setTimeout(resolveWait, 50));
       }
+      // The receipt carries the context the server actually allocated (auto mode asks the engine).
+      const properties = await this.fetchImpl(`${endpoint}/props`, { headers: { authorization: `Bearer ${authToken}` }, signal }).then(response => response.ok ? response.json() : null).catch(() => null) as { default_generation_settings?: { n_ctx?: unknown } } | null;
+      const actualContext = properties?.default_generation_settings?.n_ctx;
+      if (!Number.isSafeInteger(actualContext) || (actualContext as number) < 512) throw new Error("engine_context_unreadable");
       const receipt: LocalModelLoadReceipt = {
         ...receiptBase,
+        contextTokens: actualContext as number,
         state: "resident",
         finishedAt: new Date().toISOString(),
         reasonCode: null,

@@ -3301,6 +3301,8 @@ ${effectiveUserPrompt}`;
         && err.code === "mcp-goal-tool-scope-changed";
       const code = scopeChanged ? "mcp-goal-tool-scope-changed" : "mcp-runtime-config-unavailable";
       console.error("[mcp]", { code, diagnostic });
+      // 진단이 { unknown, unknown } 뿐이면 원인을 알 길이 없다(격리 앱 실측 2026-09-13). 개발 진단용으로만 원문을 남긴다.
+      if (process.env.AGENTLAS_MCP_CONFIG_DEBUG === "1") console.error("[mcp] config failure detail:", err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err));
       sink({ kind: "error", error: {
         code,
         message: locale === "ko"
@@ -6460,7 +6462,12 @@ ${effectiveUserPrompt}`;
           : curateReply(displayText, curationContext, semanticOptions);
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
-        displayText = projectReadOnlyBoundary ? cleanedText : cleanedText || displayText;
+        // 소형 로컬 모델은 답 전체를 Memory Events 봉투로만 내기도 한다(격리 앱 실측 2026-09-13, Qwen3-4B).
+        // 그때 원문(봉투)을 되살리면 제어 블록이 화면에 그대로 뜬다. 봉투의 turn_summary 가 유일한 사람 말이면 그것을 답으로.
+        const envelopeOnlySummary = !cleanedText.trim()
+          ? (parseMemoryEvents(displayText).turnSummary?.trim() || /turn_summary\s*:\s*"([^"\n]{1,300})"/.exec(displayText)?.[1]?.trim() || "")
+          : "";
+        displayText = projectReadOnlyBoundary ? cleanedText : cleanedText || envelopeOnlySummary || displayText;
       } catch (err) {
         console.error("[architecture] curateReply failed:", err);
         try {

@@ -321,6 +321,7 @@ export interface LocalModelHubAPI {
   importModel: (payload: { packageId: string }) => Promise<LocalModelInstallationReceipt | null>;
   installEngine: (payload: { packageId: string }) => Promise<LocalEngineInstallationReceipt>;
   installDownloadedModel: (payload: { packageId: string }) => Promise<LocalModelInstallationReceipt>;
+  /** contextTokens 0 = auto (the engine uses the model's trained context, shrunk to fit device memory); the receipt reports the actual value. */
   loadModel: (payload: { installationId: string; contextTokens: number; operationId: string }) => Promise<LocalModelLoadReceipt>;
   unload: (payload: { processEpoch: string; cancelActiveRuns: boolean }) => Promise<void>;
   testCapabilities: (payload: {

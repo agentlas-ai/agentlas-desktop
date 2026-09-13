@@ -170,7 +170,7 @@ export function registerLocalModelHubIpc(deps: {
   handle("loadModel", (event, input) => {
     const id = identifier(input.installationId, "installation_id");
     const context = input.contextTokens;
-    if (typeof context !== "number" || !Number.isSafeInteger(context) || context < 512 || context > 131072) {
+    if (typeof context !== "number" || !Number.isSafeInteger(context) || (context !== 0 && (context < 512 || context > 131072))) {
       throw new TypeError("invalid_local_model_context_tokens");
     }
     return operate(event, input, ["loadModel", id, context], (signal) => deps.manager.loadModel(id, context, signal));

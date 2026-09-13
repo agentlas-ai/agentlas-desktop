@@ -131,7 +131,7 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
   }); };
   const loadModel = () => { if (!modelInstall) return; void run(ko ? "모델 불러오는 중…" : "Loading model…", async api => {
     const id = crypto.randomUUID(); beginOperation({ id, packageId: modelInstall.modelPackageId, kind: "load" });
-    const receipt = await api.localModelHub.loadModel({ installationId: modelInstall.installationId, contextTokens: 8192, operationId: id });
+    const receipt = await api.localModelHub.loadModel({ installationId: modelInstall.installationId, contextTokens: 0, operationId: id });
     if (receipt.state !== "resident") throw new Error(receipt.reasonCode ?? receipt.state);
     if (!mounted.current) return;
     await api.runtime.setActive({ kind: "agentlas-local", backend: "agentlas-local", source: `agentlas-local:${receipt.enginePackageId}:${receipt.installationId}`, model: modelInstall.fileName });

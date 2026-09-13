@@ -35,7 +35,7 @@ export function LocalModelMiniCards({ ko, snapshot, refresh }: { ko: boolean; sn
     const api = ipc(); if (!api || busy) return;
     setBusy(installationId); setNotice(null);
     try {
-      const receipt = await api.localModelHub.loadModel({ installationId, contextTokens: 8192, operationId: crypto.randomUUID() });
+      const receipt = await api.localModelHub.loadModel({ installationId, contextTokens: 0, operationId: crypto.randomUUID() });
       if (receipt.state !== "resident") throw new Error(receipt.reasonCode ?? receipt.state);
       await api.runtime.setActive({ kind: "agentlas-local", backend: "agentlas-local", source: `agentlas-local:${receipt.enginePackageId}:${receipt.installationId}`, model: fileName });
     } catch (error) {

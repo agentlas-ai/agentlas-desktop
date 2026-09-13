@@ -343,8 +343,12 @@ export async function prepareMainToolLoop(
           await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
-  const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools),
-    byName, !req.workforceRuntimeToolGrant && !req.untrustedNoTools);
+  // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
+  //   (list→prepare→call 세 홉)는 큰 모델용 간접층인데, 격리 앱 실측(Qwen3-4B, 2026-09-13)에서 모델이
+  //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
+  //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
+  const indirectToolSurface = !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local";
+  const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, indirectToolSurface);
   return {
     tools,
     byName,
@@ -804,6 +808,14 @@ async function streamChatTurn(
 }
 
 export interface RunLocalOpenAiChatOptions {
+  /**
+   * false = 이 런타임은 이미지를 입력으로 못 받는다(agentlas-local: 비전 프로젝터 없음). 스크린샷 도구 결과의
+   * 이미지를 대화에 넣지 않는다 — 넣으면 문맥 측정(/apply-template)이 깨져 local_context_measurement_unavailable
+   * 로 실행이 죽었다(격리 앱 실측 2026-09-13, cua-driver get_screen). 텍스트 결과(저장 경로·좌표)는 그대로 간다.
+   */
+  acceptsImageResults?: boolean;
+  /** Sampling temperature for the chat request. Small local tool agents need a low value (server default is 0.8). */
+  temperature?: number;
   req: RunnerRequest;
   events: RunnerEvents;
   runtimeKind: string;
@@ -874,7 +886,27 @@ export async function runLocalOpenAiChat(
   // descriptors: those are all tool-surface admission work. An empty request
   // payload alone is insufficient because it still leaves host-side tool
   // discovery and a later tool-call dispatch path alive.
-  const { tools, byName, broker, approval: approvalContext } = await prepareMainToolLoop(req, runtimeKind);
+  const prepared = await prepareMainToolLoop(req, runtimeKind);
+  const { byName, broker, approval: approvalContext } = prepared;
+  let tools = prepared.tools;
+  if (opts.acceptsImageResults === false) {
+    // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
+    // (격리 앱 실측 2026-09-13: get_screen 21회, 4분 타임아웃). 도구를 빼고 사람에게 이유를 말한다.
+    const blind = tools.filter((tool) => tool.function.name.startsWith("mcp__cua-driver__"));
+    if (blind.length > 0) {
+      tools = tools.filter((tool) => !tool.function.name.startsWith("mcp__cua-driver__"));
+      for (const tool of blind) byName.delete(tool.function.name);
+      events.onNotice?.({
+        level: "info",
+        code: "computer-use-needs-vision-model",
+        message: req.locale === "ko" ? "이 로컬 모델은 화면을 볼 수 없어 컴퓨터 유즈 도구를 이번 실행에서 뺐습니다. 브라우저·파일·셸 도구는 그대로입니다." : "This local model cannot see the screen, so Computer Use tools were left out of this run. Browser, file and shell tools are unchanged.",
+        i18n: {
+          ko: "이 로컬 모델은 화면을 볼 수 없어 컴퓨터 유즈 도구를 이번 실행에서 뺐습니다. 브라우저·파일·셸 도구는 그대로입니다.",
+          en: "This local model cannot see the screen, so Computer Use tools were left out of this run. Browser, file and shell tools are unchanged.",
+        },
+      });
+    }
+  }
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
     if (req.cwd) {
@@ -888,6 +920,7 @@ export async function runLocalOpenAiChat(
   }
   let finalText = "";
   let sawAnyToolCall = false;
+  let summaryTurnRequested = false;
   let sawUnsupportedToolCallAttempt = false;
   /** 루프가 답에 도달해서 끝났는가. false로 빠져나오면 도구 왕복만 하다 멈춘 것. */
   let reachedAnswer = false;
@@ -905,6 +938,7 @@ export async function runLocalOpenAiChat(
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
+            ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
              * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
@@ -1014,8 +1048,21 @@ export async function runLocalOpenAiChat(
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
     if (result.toolCalls.length === 0 || req.untrustedNoTools) {
+      // 소형 로컬 모델은 도구를 다 쓴 뒤 빈 답으로 끝내기도 한다(격리 앱 실측 2026-09-13: 파일은 만들었는데
+      // 화면엔 아무 말도 없음). CLI 래핑은 늘 말로 끝난다 — 한 번만 "사람에게 결과를 말하라" 고 다시 묻는다.
+      // 소형 모델은 답 대신 시스템 프롬프트의 "## Memory Events" 봉투만 따라 쓰기도 한다(같은 실측). 그것도 빈 답이다.
+      const envelopeOnly = /^\s*#{1,6}\s*Memory Events/i.test(result.text) || /^\s*\{\s*"?schema_version"?\s*:\s*"?agentlas\.memory-ticket/i.test(result.text);
+      if ((!result.text.trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
+        summaryTurnRequested = true;
+        messages.push({ role: "assistant", content: result.text });
+        messages.push({ role: "user", content: req.locale === "ko"
+          ? "도구 실행은 끝났습니다. 이제 사용자에게 무엇을 했고 결과가 무엇인지 한국어 평문으로 짧게 답하세요. 도구를 더 부르지 말고, Memory Events 블록이나 JSON 은 쓰지 마세요."
+          : "Tool execution is finished. Now tell the user in plain prose, briefly, what was done and the result. Do not call more tools and do not write a Memory Events block or JSON." });
+        continue;
+      }
       finalText = result.text;
       reachedAnswer = true;
+      if (process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
       break;
     }
     sawAnyToolCall = true;
@@ -1036,7 +1083,7 @@ export async function runLocalOpenAiChat(
     for (const call of result.toolCalls) {
       const outcome = await runOneToolCall(byName, call, events, approvalContext, broker);
       messages.push(outcome.toolMessage);
-      if (outcome.visionMessage) visionMessages.push(outcome.visionMessage);
+      if (outcome.visionMessage && opts.acceptsImageResults !== false) visionMessages.push(outcome.visionMessage);
     }
     // Keep every protocol-required tool response directly after the assistant
     // tool_calls message, then provide screenshots as normal vision input.

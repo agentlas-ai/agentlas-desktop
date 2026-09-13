@@ -55,6 +55,9 @@ export function makeLocalOpenAiRunner(
     headersFn?: () => Record<string, string>;
     /** Exact resident Main receipt; generic OpenAI-compatible providers do not opt in. */
     contextWindowFn?: () => number | Promise<number>;
+    /** See RunLocalOpenAiChatOptions.acceptsImageResults. Default true (Ollama/LM Studio vision models). */
+    acceptsImageResults?: boolean;
+    temperature?: number;
   } = {},
 ): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
@@ -145,6 +148,8 @@ export function makeLocalOpenAiRunner(
         chatTemplateKwargs: options.chatTemplateKwargs,
         headers: options.headersFn?.(),
         contextWindow,
+        ...(options.acceptsImageResults === false ? { acceptsImageResults: false } : {}),
+        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(systemPromptFallback ? { systemPromptFallback } : {}),
       },
       messages,
