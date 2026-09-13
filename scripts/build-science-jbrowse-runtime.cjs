@@ -7,13 +7,28 @@ const os = require("node:os");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
-const manifest = require("../node_modules/agentlas-science/src/contracts/science-jbrowse-runtime.json");
+
+function readRuntimeManifest(scienceRoot) {
+  const candidates = [
+    path.join(scienceRoot, "src", "contracts", "science-jbrowse-runtime.json"),
+    path.join(scienceRoot, "dist", "contracts", "science-jbrowse-runtime.json"),
+  ];
+  const manifestPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!manifestPath) {
+    throw new Error(`science-jbrowse-runtime-manifest-not-found:${JSON.stringify(candidates)}`);
+  }
+  return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+}
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-async function buildScienceJBrowseRuntime(outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-jbrowse-core-"))) {
+async function buildScienceJBrowseRuntime(
+  outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-jbrowse-core-")),
+  scienceRoot = path.join(root, "node_modules", "agentlas-science"),
+) {
+  const manifest = readRuntimeManifest(scienceRoot);
   const { build } = await import("vite");
   await build({
     configFile: false,
