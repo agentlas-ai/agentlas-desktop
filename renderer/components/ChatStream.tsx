@@ -2000,9 +2000,14 @@ function userFacingAssistantText(text: string, streaming = false): string {
   // 캡처 정본 사고): 이 치환이 ![screen](/Users/…/x.png) 을 "!screen" 으로 바꿔
   // 채팅의 캡처가 항상 깨졌다. 이미지 src는 텍스트로 노출되는 경로가 아니라
   // <img> 로만 쓰이므로, 경로 축약은 이미지 밖 텍스트에만 적용한다.
+  //
+  // ★디렉터리 이름의 공백(macOS `Application Support`)을 지나야 한다(프로덕션 1.2.0 실측 2026-09-13):
+  // 낱말 경계에서 끊으면 "/Users/x/Library/Application" 까지만 축약돼 "Application Support/…/a.pdf" 가
+  // 남았다. Work 가 새 프로젝트에 쓰는 기본 폴더가 바로 그 자리라 모든 새 사용자의 답변에 보였다.
+  // 규칙: 슬래시로 끝나는 디렉터리 조각에만 한 칸 공백을 허용하고, 마지막 파일 이름 조각에는 허용하지 않는다.
   const shortenLocalPaths = (chunk: string) => chunk
     .replace(/\[([^\]]+)\]\((?:file:\/\/)?\/Users\/[^)\n]+\)/g, "$1")
-    .replace(/(?:file:\/\/)?\/Users\/[^\s)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "");
+    .replace(/(?:file:\/\/)?\/Users\/(?:[^\s\/)\]}>`,]+(?: [^\s\/)\]}>`,]+)*\/)*[^\s\/)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "");
   return visible
     .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
     .map((segment, index) => (index % 2 === 1 ? segment : shortenLocalPaths(segment)))

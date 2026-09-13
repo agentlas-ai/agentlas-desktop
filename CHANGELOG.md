@@ -5,7 +5,7 @@
 - Antigravity(agy)에 사용자가 직접 등록한 MCP 서버와 같은 이름의 도구가 있으면 Agentlas가 agy 실행 전체를 거절하고 다른 런타임으로 넘어가던 문제를 고칩니다. 1.2.0 프로덕션 실측에서 `opencrab` 하나 때문에 모든 Work 실행이 agy 대신 Codex로 돌았습니다. 이제 사용자 항목은 그대로 두고 그 이름의 Agentlas 항목만 빼고 실행하며, 뺀 항목은 실행 상태에 적습니다.
 - 모델 선택의 "엔진 설정 사용" 행이 무슨 모델인지 스스로 말합니다. "Claude Code 기본값 · Opus"처럼 CLI가 자기 설정 파일에 적어 둔 기본 모델을 붙이고, 한 번이라도 돌린 뒤에는 실제로 쓰인 모델 id(예: claude-opus-5)까지 보입니다. Claude Code는 모델 목록 명령이 없어 별칭(Opus·Fable)만 보낼 수 있고, 세대 번호는 실행 결과에서만 읽습니다.
 - 작업공간 첫 화면의 프로젝트 메뉴가 모델 감지(첫 실행 최대 10초)를 기다리느라 비어 있던 것을 고칩니다. 프로젝트 목록은 바로 뜹니다.
-- 작업 결과 레일이 "…/Application Support/…" 처럼 공백이 든 경로의 파일을 "있던 자리에 없습니다"로 잘못 표시하던 것을 고칩니다. 답변 속 경로를 공백에서 끊어 읽어 뒷부분을 작업 폴더에 다시 붙이던 문제로, Work가 새 프로젝트에 쓰는 기본 폴더가 바로 그 자리라 모든 새 프로젝트에서 일어났습니다.
+- 작업 결과 레일이 "…/Application Support/…" 처럼 공백이 든 경로의 파일을 "있던 자리에 없습니다"로 잘못 표시하고, 답변 본문에서는 그 경로가 "Application Support/…/파일"로 잘려 보이던 것을 고칩니다. 경로를 공백에서 끊어 읽던 문제로, Work가 새 프로젝트에 쓰는 기본 폴더가 바로 그 자리라 모든 새 프로젝트에서 일어났습니다. 이제 본문에는 파일 이름만, 레일에는 실제 파일이 보입니다.
 - One에서 말로 등록한 자동화가 예약 시간이나 "지금 실행"에서 "저장된 실행 환경 설정이 올바르지 않아 사용자가 실행 환경을 직접 선택해야 합니다"로 멈추던 것을 고칩니다. One이 저장한 모델 선택에 든 역할 표식을 자동화 실행 계약이 몰라서 생긴 문제로, 이미 등록된 자동화도 그대로 다시 돕니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
