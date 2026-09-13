@@ -31,6 +31,7 @@
 .chipGpu { color:#258449; }
 .resident button,.progress button { flex:none; border:0; background:transparent; color:var(--accent); font:inherit; cursor:pointer; padding:4px 7px; }
 .empty { color:var(--muted-deep); padding:16px 0; line-height:1.6; }
+.link { border:0; background:transparent; color:var(--accent); font:inherit; cursor:pointer; padding:0; }
 .notice { padding:12px 0; margin:0; color:var(--muted-deep); line-height:1.6; }
 .library button:disabled { opacity:.45; cursor:default; }
 .library button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

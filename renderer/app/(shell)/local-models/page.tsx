@@ -27,6 +27,6 @@ export default function LocalModelsPage() {
     </nav>
     <LocalModelOperations ko={ko} hiddenIds={ownedOperations} onViewModel={onViewModel} />
     <div hidden={view !== "browse"}><HuggingFaceModelBrowser ko={ko} onInstalled={onViewModel} onOperationStarted={onOperationStarted} /></div>
-    <div hidden={view !== "library"}><LocalModelHubPanel locale={locale} standalone selectedPackageId={selectedPackageId} onOperationStarted={onOperationStarted} /></div>
+    <div hidden={view !== "library"}><LocalModelHubPanel locale={locale} standalone selectedPackageId={selectedPackageId} onOperationStarted={onOperationStarted} onExplore={() => setView("browse")} /></div>
   </div>;
 }

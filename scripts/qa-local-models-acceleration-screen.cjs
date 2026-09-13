@@ -99,11 +99,17 @@ async function run(browser, baseUrl, locale, mode) {
   fs.mkdirSync(outDir, { recursive: true });
   await page.screenshot({ path: path.join(outDir, `${locale}-${mode}-library.png`) });
   await page.keyboard.press("Escape");
+  // "내 모델" 에는 설치된 것만(픽스처: 1개) — 받을 수 있는 추천 모델은 여기 없어야 한다.
+  const libraryCards = await page.locator("[data-model-package]").count();
+  const libraryLabels = await page.locator("[data-model-package] small").allInnerTexts();
   await page.getByRole("button", { name: ko ? "탐색" : "Explore" }).click();
   const sourceTitle = await page.locator("section[aria-label] >> text=/GGUF/").first().getAttribute("title");
+  await page.locator("[data-recommended-models]").waitFor({ state: "visible", timeout: 10000 });
+  const recommendedCards = await page.locator("[data-recommended-package]").count();
+  const recommendedButtons = await page.locator("[data-recommended-package] button").allInnerTexts();
   await page.screenshot({ path: path.join(outDir, `${locale}-${mode}-explore.png`) });
   await context.close();
-  return { locale, mode, chipState, chipText, chipTitle, deviceText, deviceTitle, sourceTitle, errors };
+  return { locale, mode, chipState, chipText, chipTitle, deviceText, deviceTitle, sourceTitle, libraryCards, libraryLabels, recommendedCards, recommendedButtons, errors };
 }
 
 async function main() {
@@ -127,6 +133,10 @@ async function main() {
     }
     assert.ok(result.deviceTitle && result.deviceTitle.length > 10, "장치 줄에 마우스 안내가 있어야 한다");
     assert.match(result.sourceTitle || "", result.locale === "ko" ? /복제·재배포하지 않으며/ : /Nothing is mirrored/);
+    assert.equal(result.libraryCards, 1, "내 모델에는 설치된 모델만(픽스처 1개)");
+    assert.ok(result.libraryLabels.every((label) => !/다운로드 가능|Available to download/.test(label)), "내 모델에 '다운로드 가능' 줄이 없다");
+    assert.equal(result.recommendedCards, 3, "탐색 위 추천에는 설치 안 된 내장 모델 3개");
+    assert.ok(result.recommendedButtons.every((text) => /다운로드|Download/.test(text)), "추천 카드마다 다운로드 단추");
     // 화면 글자는 짧고, 설명은 마우스 안내에만 있다.
     assert.ok(result.chipText.length <= 3 && result.chipTitle.length > result.chipText.length);
   }

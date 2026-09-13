@@ -42,7 +42,7 @@ function checked(value: string | undefined, ko: boolean): string {
   return value === "verified" ? ko ? "확인됨" : "Verified" : value === "failed" ? ko ? "실패" : "Failed" : ko ? "미검사" : "Not tested";
 }
 
-export function LocalModelHubPanel({ locale, standalone = false, selectedPackageId, onOperationStarted }: { locale: string; standalone?: boolean; selectedPackageId?: string; onOperationStarted?: (id: string) => void }) {
+export function LocalModelHubPanel({ locale, standalone = false, selectedPackageId, onOperationStarted, onExplore }: { locale: string; standalone?: boolean; selectedPackageId?: string; onOperationStarted?: (id: string) => void; onExplore?: () => void }) {
   const ko = locale === "ko";
   const [snapshot, setSnapshot] = useState<LocalModelHubSnapshot | null>(null);
   const [confirmation, setConfirmation] = useState<{ packageId?: string; engineOnly: boolean } | null>(null);
@@ -90,7 +90,12 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
     } finally { await refresh(); active.current = false; if (mounted.current) { setBusy(null); setOperation(null); } }
   }, [bridge, ko, refresh]);
   const engine = useMemo(() => snapshot?.engineCatalog.find(item => item.platform === snapshot.hardware.platform && item.arch === snapshot.hardware.arch) ?? null, [snapshot]);
-  const filtered = useMemo(() => (snapshot?.modelCatalog ?? []).filter(item => !query.trim() || [item.repository,item.quantization,item.license].some(value => value.toLowerCase().includes(query.trim().toLowerCase()))), [snapshot, query]);
+  // "내 모델" 은 설치된 것만 (오너 2026-09-13: 받을 수 있는 추천 모델이 섞여 있어 헷갈렸다 — 추천은 탐색 탭 위로).
+  const filtered = useMemo(() => {
+    const installed = new Set((snapshot?.modelInstallations ?? []).map(item => item.modelPackageId));
+    return (snapshot?.modelCatalog ?? []).filter(item => installed.has(item.packageId))
+      .filter(item => !query.trim() || [item.repository,item.quantization,item.license].some(value => value.toLowerCase().includes(query.trim().toLowerCase())));
+  }, [snapshot, query]);
   // A requested exact package never temporarily falls back to another model.
   const requestedId = selectedPackageId !== lastRequestedPackage.current ? selectedPackageId : selectedModelId;
   const model = requestedId ? filtered.find(item => item.packageId === requestedId) ?? null : filtered[0] ?? null;
@@ -186,12 +191,14 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
       <div className={styles.layout}>
         <div role="listbox" aria-label={ko ? "모델 목록" : "Model catalog"} className={styles.models}>
           {filtered.map(item => {
-            const installed = snapshot.modelInstallations.some(value => value.modelPackageId === item.packageId);
+            const active = resident?.installationId && snapshot.modelInstallations.some(value => value.modelPackageId === item.packageId && value.installationId === resident.installationId);
             return <button type="button" role="option" key={item.packageId} aria-selected={model?.packageId === item.packageId} data-model-package={item.packageId} className={styles.model} onClick={() => { setSelectedModelId(item.packageId); setNotice(null); }}>
-              <span>{item.repository.split("/").at(-1)} <LocalModelFitIcon snapshot={snapshot} packageId={item.packageId} ko={ko}/></span><small>{item.repository.split("/")[0]} · {item.quantization} · {bytes(item.byteLength)}</small><small>{installed ? ko ? "설치됨" : "Installed" : ko ? "다운로드 가능" : "Available to download"}</small>
+              <span>{item.repository.split("/").at(-1)} <LocalModelFitIcon snapshot={snapshot} packageId={item.packageId} ko={ko}/></span><small>{item.repository.split("/")[0]} · {item.quantization} · {bytes(item.byteLength)}{active ? ` · ${ko ? "사용 중" : "in use"}` : ""}</small>
             </button>;
           })}
-          {!filtered.length && <p className={styles.empty}>{ko ? "검색 결과가 없습니다." : "No matching models."}</p>}
+          {!filtered.length && (query.trim()
+            ? <p className={styles.empty}>{ko ? "검색 결과가 없습니다." : "No matching models."}</p>
+            : <p className={styles.empty} data-no-installed-models>{ko ? "아직 설치된 모델이 없습니다." : "No models installed yet."}{onExplore && <> <button type="button" className={styles.link} onClick={onExplore}>{ko ? "탐색에서 받기 →" : "Get one in Explore →"}</button></>}</p>)}
         </div>
         {model ? <div className={styles.detail} data-selected-package={model.packageId}>
           <h2>{model.repository.split("/").at(-1)}</h2><p className={styles.muted}>{model.repository.split("/")[0]} · {model.quantization} · {bytes(model.byteLength)}</p>

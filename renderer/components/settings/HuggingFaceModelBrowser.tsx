@@ -104,6 +104,14 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
       if (mounted.current) setError(failure instanceof Error && failure.message === "cancelled" ? (ko ? "취소했습니다." : "Cancelled.") : (ko ? "파일 정보를 확인하지 못했습니다." : "Could not confirm file metadata."));
     } finally { if (mounted.current) setRegistering(false); }
   };
+  // 추천: 내장 카탈로그(출처·변환자가 확인된 것) 중 아직 설치 안 된 모델. "내 모델" 에서 옮겨 왔다(오너 2026-09-13).
+  const recommended = (hardwareSnapshot?.modelCatalog ?? []).filter(model => model.creator !== "unknown" && !hardwareSnapshot?.modelInstallations.some(item => item.modelPackageId === model.packageId));
+  const installRecommended = (packageId: string) => {
+    if (installing.current) return;
+    installing.current = true; setError(null); setProgress(null);
+    intent.current = { cancelled: false };
+    setConfirmation(packageId);
+  };
   const dismissConfirmation = () => { setConfirmation(null); installing.current = false; if (intent.current) intent.current.cancelled = true; intent.current = null; };
   const confirmInstall = async (plan: LocalModelInstallPlan) => {
     const api = ipc()?.localModelHub, request = intent.current;
@@ -125,7 +133,10 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
       close(); onInstalled(plan.model.packageId);
     } catch (failure) {
       if (mounted.current) setError(request.cancelled ? (ko ? "설치를 중지했습니다." : "Installation stopped.") : (ko ? "설치를 완료하지 못했습니다. 작업 상태를 확인하고 다시 시도하세요." : "Installation did not finish. Check operation status and retry."));
-    } finally { installing.current = false; intent.current = null; if (mounted.current) setOperation(null); }
+    } finally {
+      installing.current = false; intent.current = null;
+      if (mounted.current) { setOperation(null); void api.snapshot().then(value => { if (mounted.current) setHardwareSnapshot(value); }).catch(() => {}); }
+    }
   };
 
   const cancel = async () => {
@@ -142,6 +153,17 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
       <button className={styles.refresh} type="button" disabled={loading} title={result?.syncedAt ? `${ko ? "확인" : "Checked"} ${new Date(result.syncedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : undefined} aria-label={ko ? "모델 목록 새로고침" : "Refresh model catalog"} onClick={() => void search(undefined, true)}><IconRefresh size={17} /></button></div>
     <div className={styles.source}><span title={ko ? "Hugging Face 공개 목록을 조회만 하고, 파일은 원본 저장소에서 이 컴퓨터로 직접 내려받습니다. 복제·재배포하지 않으며 라이선스 표기는 원본 그대로 둡니다." : "Only the public Hugging Face listing is queried; files download straight from the source repository to this computer. Nothing is mirrored or redistributed, and licenses stay as published."}>{status} · GGUF</span></div>
     {error && !selected && <p className={styles.error} role="alert">{error}</p>}
+    {recommended.length > 0 && <>
+      <div className={styles.source}><span title={ko ? "출처·변환자·라이선스가 확인된 모델. 이 컴퓨터에 맞는지는 아이콘에 마우스를 올려 보세요." : "Models with verified source, converter and license. Hover the icon to see the fit for this computer."}>{ko ? "추천" : "Recommended"}</span></div>
+      <div className={styles.grid} data-recommended-models>
+        {recommended.map(model => <div key={model.packageId} className={styles.card} data-recommended-package={model.packageId} title={`${model.repository} · ${model.quantization} · ${model.license}`}>
+          <span className={styles.modelMark}><IconCpu size={22} /><LocalModelFitIcon snapshot={hardwareSnapshot} packageId={model.packageId} ko={ko}/></span><span className={styles.publisher}>{model.creator}</span>
+          <strong>{model.repository.split("/").at(-1)}</strong>
+          <span className={styles.tags}>{model.quantization} · {size(model.byteLength)} · {model.license}</span>
+          <span className={styles.cardFooter}><span /><button type="button" className={styles.recommendedDownload} disabled={model.gated || operation !== null || confirmation !== null} onClick={() => installRecommended(model.packageId)}>{ko ? "다운로드" : "Download"}</button></span>
+        </div>)}
+      </div>
+    </>}
     <div className={styles.grid} aria-busy={loading}>
       {result?.models.map(model => <button key={model.repository} type="button" data-hf-repository={model.repository} className={styles.card} onClick={event => { opener.current = event.currentTarget; setSelected(model.repository); }}>
         <span className={styles.modelMark}><IconCpu size={22} /><LocalModelFitIcon snapshot={hardwareSnapshot} blocked={model.gated === true} ko={ko}/></span><span className={styles.publisher}>{model.author ?? model.repository.split("/")[0]}</span>

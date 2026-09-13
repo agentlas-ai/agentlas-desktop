@@ -15,6 +15,8 @@
 .tags { font-size:11px; color:var(--muted-deep); margin:9px 0 20px; }
 .cardFooter { margin-top:auto; width:100%; display:flex; justify-content:space-between; gap:8px; color:var(--muted-deep); font-size:11px; }
 .cardFooter>span:last-child { color:var(--accent); }
+.recommendedDownload { border:1px solid var(--paper-edge); border-radius:8px; padding:6px 12px; color:var(--ink); background:var(--paper-2); font:inherit; font-size:11px; cursor:pointer; }
+.recommendedDownload:disabled { opacity:.45; cursor:default; }
 .empty { padding:36px 8px; text-align:center; color:var(--muted-deep); font-size:13px; }
 .error { color:var(--danger,#a43b3b); font-size:13px; line-height:1.5; }
 .more { display:block; margin:20px auto; padding:10px 26px; border:1px solid var(--paper-edge); border-radius:9px; background:var(--paper); color:var(--ink); cursor:pointer; }
