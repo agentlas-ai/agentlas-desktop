@@ -98,6 +98,7 @@ import { ExperienceCloudHttpClient } from "../experience/cloud";
 import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cloud-roster";
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
+import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
 import {
@@ -5636,7 +5637,8 @@ ${effectiveUserPrompt}`;
        * Without it, raising the pass cap would hand a stuck model the person's machine.
        */
       if (!continuousMode) {
-        const passFingerprint = continuation.text.trim();
+        // 숫자만 바뀐 "변화 없음"도 같은 결과다(goalProgressKeyForText 와 같은 정규화).
+        const passFingerprint = continuation.text.trim() ? goalProgressKeyForText(continuation.text) : "";
         if (passFingerprint && passFingerprint === lastPassFingerprint) {
           identicalPassStreak += 1;
         } else {
@@ -5671,7 +5673,7 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(chat.id, "assistant", stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text))));
+        appendChatMessage(chat.id, "assistant", stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
@@ -6638,7 +6640,7 @@ ${effectiveUserPrompt}`;
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
     });
-    const persistedDisplay = stripPermissionEscalationMarker(finalDisplay.durableText);
+    const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(finalDisplay.durableText));
     const finalWorkImages = (!req.agentAppMode && !req.oneMode)
       ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
       : [];

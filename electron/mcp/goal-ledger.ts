@@ -265,8 +265,22 @@ export async function completeGoalLedgerGoal(input: {
   }
 }
 
+/**
+ * 진전 판별용 지문 — 원문 해시가 아니라 **뜻이 같으면 같은 키**.
+ *
+ * 실측(페르소나 루프 2026-09-14): 자동 목표 연속 실행이 "Computer Use 도구가 6번째 확인에도 연결되지 않습니다 … 변화 없음"을
+ * 7번째·8번째·…·20번째로 숫자만 바꿔 20턴 넘게 반복했다(15초 간격). 정체 판별(stall_window=3)이 원문 sha256 이라 숫자 하나로
+ * 매번 '새 진전'이 되었고, 순환 상한(maxCycles)은 null 이라 멈출 것이 없었다. 숫자·기억 이벤트 블록·공백·문장부호를 걷어낸 뒤 해시한다.
+ */
 export function goalProgressKeyForText(text: string): string {
-  return `sha256:${createHash("sha256").update((text ?? "").trim()).digest("hex").slice(0, 40)}`;
+  const normalized = (text ?? "")
+    .replace(/## Memory Events[\s\S]*$/i, "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .toLowerCase()
+    .replace(/\d+/g, "#")
+    .replace(/[^\p{L}\p{N}#]+/gu, " ")
+    .trim();
+  return `sha256:${createHash("sha256").update(normalized).digest("hex").slice(0, 40)}`;
 }
 
 export async function listGoalLedgerTasks(

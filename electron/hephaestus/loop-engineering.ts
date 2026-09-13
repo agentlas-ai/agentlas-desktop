@@ -214,6 +214,7 @@ export function buildGoalDrivenContinuationPrompt(input: {
     `Optional evidence form: ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified and where>>")}`,
     "Never emit that marker for a partially finished goal — it closes the remaining ledger tasks.",
     `If more safe work remains after this pass, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
+    "If nothing can progress right now — you are waiting on the user, an approval, or an external fix — do not report 'no change' again: ask the user with the question card, or name the exact blocker once and end without the continuation marker. A pass whose result matches the previous pass counts as no progress and the host stops cycling after three.",
     "",
     "Previous assistant output:",
     input.previousOutput,
