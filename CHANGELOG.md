@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.5 — 2026-09-14
+
+- Science 서비스: 저널 프로파일을 챗에서 만들 수 있게 합니다. 승인 정책이 저널 정체성을 자율 범위로 두고도 그 영수증을 만드는 도구가 없어 화면의 "투고 저널 설정" 단추로만 됐습니다(페르소나 루프 라운드 3). 새 도구가 자율 정책이면 바로 발급하고, 확인 정책이면 화면 경로를 오류에 적습니다. 프로파일 목록에 영수증을 함께 돌려줍니다.
+- Science 서비스: 원고에 그림이 들어가는 길(아티팩트 검증 → 결속 → `{{figure:…}}` 표식)과 원고 마크다운 문법이 소스 주석에만 있어 연구 디렉터가 "캡처 미지원"으로 판단해 그림 0장으로 조판하던 문제를 도구 설명에 적어 고칩니다.
+- Science 설치 안내의 "분자 시각화"에 도킹·동역학 시뮬레이션은 지원하지 않는다고 적습니다(연구자가 도킹까지 되는 줄 알았던 오해).
+- 대시보드 역할 풀: 모델 목록이 비어 있을 때 그 이유를 적습니다. 코덱스는 로그인 전이라 모델 캐시가 없으면 목록이 아무 말 없이 비었습니다("gpt 6.0 안 보임"). 이제 "codex login 을 마치면 채워집니다"라고 알립니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.4 — 2026-09-14
 
 - Science 챗의 작업 블록이 도구 이름만 반복하던 문제를 고칩니다. 실행 기록에 "무엇에 썼는가" 한 줄(비밀 마스킹, 160자)을 함께 보내고 Science 화면이 그것을 씁니다. 인자 원문과 결과는 여전히 보내지 않습니다.
@@ -8,6 +17,7 @@
 - Science 서비스: 가설을 기각하면 이후 모든 턴이 실패하던 막다른 길, 원고 조판 기본(두 단 10pt), 한글 PDF 글꼴, 재시작 복구를 고칩니다.
 - Science 서비스: 주장 원장을 새 원고 판으로 다시 봉인할 때 옛 인용 목록을 물려받아 영원히 거부되던 문제(초안 워터마크가 안 벗겨짐), 한글·그리스 문자 소제목을 거부하던 검사, 저널 언어 요건(원고 언어가 저널과 다르면 제출 점검에서 알림)을 고칩니다.
 - Work 페르소나 라운드 2: 재개 때 판 번호를 잃던 문제, 샌드박스 종료를 권한 경계로 표시, 기억 줄을 읽을 때 현지화합니다.
+- Work 쓰기 모드에서 open·osascript 같은 OS 런처로 샌드박스 밖 실행이 되던 것을 막고 승격 질문으로 돌립니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
