@@ -2549,7 +2549,7 @@ export class InvocationService {
               if (budgetExhausted) return null;
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
-                WHERE goal_id = ? AND chat_id = ? AND status = 'blocked'`)
+                WHERE goal_id = ? AND chat_id = ? AND status IN ('active', 'blocked')`)
                 .run(new Date().toISOString(), current.goalId, chat.id);
               if (contractChanged.changes !== 1) throw new Error("auto_goal_resume_contract_not_blocked");
               const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), current.version);
