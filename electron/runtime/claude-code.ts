@@ -59,6 +59,7 @@ import {
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
+import { bindNativeFileProofObserver } from "../long-run/file-proof";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
  * tool_result. Admit only exact paths from known mutation tools; Main still
@@ -136,6 +137,34 @@ export function claudeArtifactPathsFromToolResult(name: string, content: unknown
 
 const KIND = "claude-code";
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
+type NativeFileProofInput = Parameters<NativeFileProofObserver>[0];
+type NativeFileProofTicket = Exclude<ReturnType<NativeFileProofObserver>, null>;
+
+/** Map only Claude's raw structured native file-tool input. */
+export function claudeNativeFileProofCandidate(
+  toolId: string | undefined,
+  toolName: string,
+  rawInput: unknown,
+  runReq: Pick<RunnerRequest, "chatId" | "cwd" | "permission">,
+): NativeFileProofInput | null {
+  if (!toolId || !rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) return null;
+  const input = rawInput as Record<string, unknown>;
+  if (typeof input.file_path !== "string") return null;
+  const base = { runtimeKind: KIND, chatId: runReq.chatId, cwd: runReq.cwd,
+    permission: runReq.permission, toolId, toolName, filePath: input.file_path } as const;
+  if (toolName === "Read") {
+    if (input.offset !== undefined || input.limit !== undefined) return null;
+    return { ...base, action: "read" };
+  }
+  if (toolName === "Write" && typeof input.content === "string") {
+    return { ...base, action: "write", expectedText: input.content };
+  }
+  if (toolName === "Edit" && typeof input.old_string === "string" && typeof input.new_string === "string"
+    && input.old_string !== input.new_string) return { ...base, action: "edit" };
+  return null;
+}
 
 const CLAUDE_WORKSPACE_SANDBOX_SETTINGS = {
   sandbox: {
@@ -679,6 +708,7 @@ const runClaudeTurn = async (
   req: RunnerRequest,
   events: RunnerEvents,
   allowResidency: boolean,
+  observeNativeFile: NativeFileProofObserver,
 ): Promise<RunnerResult> => {
   if (req.restrictedReadBoundary) {
     throw new Error(
@@ -1240,6 +1270,14 @@ const runClaudeTurn = async (
 
     const toolNameById = new Map<string, string>();
     const toolInputById = new Map<string, unknown>();
+    const nativeFileProofById = new Map<string, NativeFileProofTicket>();
+    const settledToolResultSignatures = new Map<string, string>();
+    const settleNativeFileProof = (toolId: string | undefined, isError: boolean): void => {
+      if (!toolId) return;
+      const ticket = nativeFileProofById.get(toolId);
+      try { if (!isError) ticket?.complete(); }
+      finally { nativeFileProofById.delete(toolId); }
+    };
     /*
      * ★무엇이 막혔는지는 거부 문구가 아니라 **그 호출**이 안다.
      *
@@ -1583,10 +1621,17 @@ const runClaudeTurn = async (
               block.id,
               false,
             );
+            if (block.id) {
+              const candidate = claudeNativeFileProofCandidate(block.id, block.name, block.input, runReq);
+              const ticket = candidate ? observeNativeFile(candidate) : null;
+              if (ticket) nativeFileProofById.set(block.id, ticket);
+            }
           } else if (block.type === "tool_result") {
             const toolId = block.tool_use_id;
             const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
             const result = truncateUi(stringifyToolPayload(block.content));
+            const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
+            if (toolId && settledToolResultSignatures.get(toolId) === resultSignature) continue;
             if (block.is_error === true) announceApprovalBlock(result, toolId);
             const artifactPaths = toolId && block.is_error !== true
               ? [
@@ -1595,6 +1640,8 @@ const runClaudeTurn = async (
                 ]
               : [];
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+            settleNativeFileProof(toolId, block.is_error === true);
+            if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
             if (toolId) toolInputById.delete(toolId);
           }
         }
@@ -1604,6 +1651,8 @@ const runClaudeTurn = async (
           const toolId = block.tool_use_id;
           const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
           const result = truncateUi(stringifyToolPayload(block.content));
+          const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
+          if (toolId && settledToolResultSignatures.get(toolId) === resultSignature) continue;
           if (block.is_error === true) announceApprovalBlock(result, toolId);
           const artifactPaths = toolId && block.is_error !== true
             ? [
@@ -1612,6 +1661,8 @@ const runClaudeTurn = async (
               ]
             : [];
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+          settleNativeFileProof(toolId, block.is_error === true);
+          if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
           if (toolId) toolInputById.delete(toolId);
         }
       } else if (ev.type === "rate_limit_event") {
@@ -1727,7 +1778,7 @@ const runClaudeTurn = async (
           console.warn(`[residency] claude-code degraded to one-shot: ${why.trim().slice(0, 200)}`);
           events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
         }
-        void runClaudeTurn(req, events, false).then(resolve, reject);
+        void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
         return;
       }
       if (
@@ -1747,7 +1798,7 @@ const runClaudeTurn = async (
           untrustedAllowedMcpTools: undefined,
           env: stripAgentAppMcpSecretAliases(runReq.env),
           agentAppMcpFallbackAttempted: true,
-        }, events, false).then(resolve, reject);
+        }, events, false, observeNativeFile).then(resolve, reject);
         return;
       }
       if (code === 0) {
@@ -1845,7 +1896,7 @@ const runClaudeTurn = async (
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
         if (executableState.includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
           executableState.includePartialMessagesSupported = false;
-          void runClaudeTurn(req, events, false).then(resolve, reject);
+          void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
           return;
         }
         // Build continuation recovery is Main-owned and can change the exact
@@ -1867,7 +1918,7 @@ const runClaudeTurn = async (
             return;
           }
           // Interactive chat may recover with full durable history after the receipt.
-          void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false).then(resolve, reject);
+          void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false, observeNativeFile).then(resolve, reject);
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
@@ -1921,5 +1972,7 @@ const runClaudeTurn = async (
  * Claude Code 러너. 상주(프로세스 재사용)를 먼저 시도하고, 그 경로가 막히면 조용히
  * 기존 1회성 `-p --resume` 경로로 떨어진다 — 사용자에게는 아무 차이가 없어야 한다.
  */
-export const runClaudeCode: Runner = (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> =>
-  runClaudeTurn(req, events, true);
+export const runClaudeCode: Runner = (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  const observeNativeFile = bindNativeFileProofObserver();
+  return runClaudeTurn(req, events, true, observeNativeFile);
+};

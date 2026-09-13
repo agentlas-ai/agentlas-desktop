@@ -65,6 +65,7 @@ import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-res
 import type { AcpSessionLease } from "./acp-session-pool";
 import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
+import { bindNativeFileProofObserver } from "../long-run/file-proof";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -74,6 +75,49 @@ import {
 const KIND = "codex";
 const CODEX_IMAGE_TOOL_NAME = "generate_image";
 const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
+
+type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
+type NativeFileProofInput = Parameters<NativeFileProofObserver>[0];
+type NativeFileProofTicket = Exclude<ReturnType<NativeFileProofObserver>, null>;
+
+/** Admit only paths that Codex included in a structured FileChange start. */
+export function codexNativeFileProofCandidates(
+  toolId: string | undefined,
+  rawItem: unknown,
+  runReq: Pick<RunnerRequest, "chatId" | "cwd" | "permission">,
+): NativeFileProofInput[] {
+  if (!toolId || !rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) return [];
+  const item = rawItem as Record<string, unknown>;
+  if (!["fileChange", "FileChange", "file_change"].includes(String(item.type ?? ""))) return [];
+  const rows: Array<{ filePath: string; kind: string }> = [];
+  if (Array.isArray(item.changes)) {
+    for (const raw of item.changes) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const change = raw as Record<string, unknown>;
+      if (typeof change.path === "string" && typeof change.kind === "string") {
+        rows.push({ filePath: change.path, kind: change.kind });
+      }
+    }
+  } else if (item.changes && typeof item.changes === "object") {
+    for (const [filePath, raw] of Object.entries(item.changes as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const change = raw as Record<string, unknown>;
+      const kind = typeof change.type === "string" ? change.type : change.kind;
+      if (typeof kind === "string") rows.push({ filePath, kind });
+    }
+  }
+  const candidates = new Map<string, NativeFileProofInput>();
+  for (const row of rows) {
+    const action = row.kind.toLowerCase() === "add" ? "write"
+      : row.kind.toLowerCase() === "update" ? "edit" : null;
+    if (!action) continue;
+    const candidate: NativeFileProofInput = { runtimeKind: KIND, chatId: runReq.chatId,
+      cwd: runReq.cwd, permission: runReq.permission, toolId, toolName: "apply_patch",
+      filePath: row.filePath, action };
+    candidates.set(`${action}\0${row.filePath}`, candidate);
+  }
+  return [...candidates.values()];
+}
 
 const CODEX_IMAGE_DYNAMIC_TOOL = {
   type: "function",
@@ -520,6 +564,7 @@ function runCodexProcess(
   req: RunnerRequest,
   events: RunnerEvents,
   usageBaseline: CodexUsageBaseline,
+  observeNativeFile: NativeFileProofObserver,
 ): Promise<CodexRunResult> {
   const reportedOutputTokenBaseline = usageBaseline.output;
   return new Promise((resolve, reject) => {
@@ -566,6 +611,13 @@ function runCodexProcess(
     const responseTools = new Map<string, { name: string; args?: string }>();
     const settledResponseToolIds = new Set<string>();
     const itemCapturePaths = new Map<string, string[]>();
+    const nativeFileProofById = new Map<string, NativeFileProofTicket[]>();
+    const settleNativeFileProof = (toolId: string | undefined, isError: boolean): void => {
+      if (!toolId) return;
+      const tickets = nativeFileProofById.get(toolId) ?? [];
+      try { if (!isError) for (const ticket of tickets) ticket.complete(); }
+      finally { nativeFileProofById.delete(toolId); }
+    };
     // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
     // 단일 open/close 플래그다(깊이 카운터가 아니다): 이 구간은 진짜 `reasoning`
     // 아이템으로도 열리고, reasoning 아이템을 전혀 내보내지 않는 codex 빌드에서는
@@ -599,7 +651,8 @@ function runCodexProcess(
     };
     const isToolItem = (type: string | undefined): boolean => {
       if (!type || type === "agent_message" || type === "reasoning") return false;
-      return /tool|function|command|shell|exec|mcp/i.test(type);
+      return ["fileChange", "FileChange", "file_change"].includes(type)
+        || /tool|function|command|shell|exec|mcp/i.test(type);
     };
     const record = (value: unknown): Record<string, unknown> | null => (
       value && typeof value === "object" && !Array.isArray(value)
@@ -659,6 +712,7 @@ function runCodexProcess(
         input?: unknown;
         args?: unknown;
         arguments?: unknown;
+        changes?: unknown;
         output?: unknown;
         result?: unknown;
         error?: unknown;
@@ -763,6 +817,7 @@ function runCodexProcess(
       } else if ((ev.type === "item.started" || ev.type === "item.completed") && isToolItem(ev.item?.type)) {
         closeThinking();
         const item = ev.item!;
+        const nativeFileChange = ["fileChange", "FileChange", "file_change"].includes(item.type ?? "");
         // `codex exec --json` serializes MCP calls as snake_case
         // `mcp_tool_call` items. Their executable identity lives in
         // `server` + `tool`; `item.type` is only the envelope name. Keeping
@@ -774,13 +829,15 @@ function runCodexProcess(
             ? item.server ? `${item.server}.${item.tool}` : item.tool
             : undefined;
         const name =
-          exactMcpName ??
+          nativeFileChange ? "apply_patch" : exactMcpName ??
           item.name ??
           (item.command ? "bash" : undefined) ??
           item.type ??
           "tool";
         const argPayload =
-          item.command != null
+          nativeFileChange
+            ? item.changes
+            : item.command != null
             ? { command: item.command }
             : (item.input ?? item.args ?? item.arguments);
         // codex 0.144+의 command_execution은 output/result 없이 aggregated_output/exit_code만
@@ -799,6 +856,7 @@ function runCodexProcess(
         const isError =
           item.error != null ||
           item.status === "failed" ||
+          item.status === "declined" ||
           (item.type === "mcp_tool_call" && codexMcpResultFailed(item.result)) ||
           (typeof item.exit_code === "number" && item.exit_code !== 0);
         // exec emits native MCP results through item.completed as well as
@@ -825,6 +883,14 @@ function runCodexProcess(
           isError,
           artifactPaths,
         );
+        if (ev.type === "item.started" && item.id) {
+          const tickets = codexNativeFileProofCandidates(item.id, item, req)
+            .map((candidate) => observeNativeFile(candidate))
+            .filter((ticket): ticket is NativeFileProofTicket => Boolean(ticket));
+          if (tickets.length > 0 && !nativeFileProofById.has(item.id)) nativeFileProofById.set(item.id, tickets);
+        } else if (ev.type === "item.completed") {
+          settleNativeFileProof(item.id, isError);
+        }
       } else if (ev.type === "turn.completed") {
         closeThinking();
         turnCompleted = true;
@@ -1146,8 +1212,9 @@ async function runCodexResidentTurn(input: {
   gapContext: string;
   mcpArgs: string[];
   appliedEffort: string | null;
+  observeNativeFile: NativeFileProofObserver;
 }): Promise<ResidentTurnOutcome> {
-  const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort } = input;
+  const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
@@ -1212,6 +1279,12 @@ async function runCodexResidentTurn(input: {
   const messageOrder: string[] = [];
   const messages = new Map<string, string>();
   const startedTools = new Set<string>();
+  const nativeFileProofById = new Map<string, NativeFileProofTicket[]>();
+  const settleNativeFileProof = (toolId: string, isError: boolean): void => {
+    const tickets = nativeFileProofById.get(toolId) ?? [];
+    try { if (!isError) for (const ticket of tickets) ticket.complete(); }
+    finally { nativeFileProofById.delete(toolId); }
+  };
   const dynamicToolArtifactPaths = new Map<string, string[]>();
   // Resident app-server MCP completions can be replayed by the session
   // transport. Keep the capture receipt keyed by the provider item id so the
@@ -1310,6 +1383,11 @@ async function runCodexResidentTurn(input: {
           if (bodyText()) emitPartial(true);
           startedTools.add(String(item.id ?? ""));
           events.onTool?.(tool.name, tool.args, undefined, String(item.id ?? ""), false);
+          const itemId = String(item.id ?? "");
+          const tickets = codexNativeFileProofCandidates(itemId, item, req)
+            .map((candidate) => observeNativeFile(candidate))
+            .filter((ticket): ticket is NativeFileProofTicket => Boolean(ticket));
+          if (itemId && tickets.length > 0 && !nativeFileProofById.has(itemId)) nativeFileProofById.set(itemId, tickets);
         }
         break;
       }
@@ -1371,6 +1449,7 @@ async function runCodexResidentTurn(input: {
             tool.isError,
             artifactPaths,
           );
+          settleNativeFileProof(itemId, tool.isError);
           if (item?.type === "dynamicToolCall") dynamicToolArtifactPaths.delete(itemId);
         }
         break;
@@ -1844,6 +1923,7 @@ export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
     (Boolean(req.mcpConfigPath) ||
@@ -2021,6 +2101,7 @@ export const runCodex: Runner = async (
       gapContext,
       mcpArgs,
       appliedEffort,
+      observeNativeFile,
     });
     if (attempt.result) return attempt.result;
   }
@@ -2088,6 +2169,7 @@ export const runCodex: Runner = async (
       runReq,
       events,
       usageBaseline,
+      observeNativeFile,
     );
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
@@ -2144,7 +2226,7 @@ export const runCodex: Runner = async (
     ...schemaArgs,
     "-",
   ];
-  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 });
+  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });

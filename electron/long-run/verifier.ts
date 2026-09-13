@@ -905,17 +905,45 @@ export function verificationRecoveryFingerprint(verdicts: readonly CheckpointCri
     : null;
 }
 
-function countInconclusiveRetries(runId: string): number {
+interface VerificationRecoveryEpoch {
+  inconclusiveRetries: number;
+  priorCheckpointInEpoch: boolean;
+}
+
+/** A person may explicitly retry a blocked campaign, and a new Goal revision
+ * is a new verification contract. Both boundaries are durable host facts. An
+ * automatic transition or model-authored text can never mint a fresh budget. */
+function verificationRecoveryEpoch(runId: string): VerificationRecoveryEpoch {
   try {
     const row = getDb().prepare(
-      `SELECT COUNT(*) AS n FROM long_run_events
-        WHERE run_id = ? AND kind = 'run.status_changed'
-          AND payload_json LIKE '%verification_inconclusive_retry%'`,
-    ).get(runId) as { n: number } | undefined;
-    return Number(row?.n ?? 0);
+      `WITH recovery_boundary AS (
+         SELECT COALESCE(MAX(seq), 0) AS start_seq
+         FROM long_run_events
+         WHERE run_id = ? AND (
+           (kind = 'run.goal_revision_bound' AND actor_kind = 'host')
+           OR (kind = 'run.status_changed' AND actor_kind = 'user'
+             AND json_extract(payload_json, '$.reason') = 'user-resume')
+         )
+       )
+       SELECT recovery_boundary.start_seq,
+         COALESCE(SUM(CASE WHEN event.seq > recovery_boundary.start_seq
+           AND event.kind = 'run.status_changed' AND event.actor_kind = 'host'
+           AND json_extract(event.payload_json, '$.reason') GLOB 'verification_inconclusive_retry:[0-9]*'
+           THEN 1 ELSE 0 END), 0) AS retries,
+         COALESCE(MAX(CASE WHEN event.kind = 'run.task_checkpoint' THEN event.seq ELSE 0 END), 0) AS checkpoint_seq
+       FROM recovery_boundary
+       LEFT JOIN long_run_events AS event ON event.run_id = ?
+       GROUP BY recovery_boundary.start_seq`,
+    ).get(runId, runId) as { start_seq: number; retries: number; checkpoint_seq: number } | undefined;
+    const startSeq = Number(row?.start_seq);
+    const retries = Number(row?.retries);
+    const checkpointSeq = Number(row?.checkpoint_seq);
+    if (![startSeq, retries, checkpointSeq].every(Number.isSafeInteger)
+      || startSeq < 0 || retries < 0 || checkpointSeq < 0) throw new Error("verification_retry_epoch_invalid");
+    return { inconclusiveRetries: retries, priorCheckpointInEpoch: checkpointSeq > startSeq };
   } catch {
     // 셀 수 없으면 재시도하지 않는다 — 모르는 채로 무한히 도는 것보다 멈추는 편이 낫다.
-    return INCONCLUSIVE_RETRY_LIMIT;
+    return { inconclusiveRetries: INCONCLUSIVE_RETRY_LIMIT, priorCheckpointInEpoch: false };
   }
 }
 
@@ -966,6 +994,7 @@ export async function verifyGoalCompletionClaim(input: {
   input.signal?.addEventListener("abort", interrupt, { once: true });
   if (input.signal?.aborted) interrupt();
   controllers.set(attempt.attemptId, controller);
+  const recoveryEpoch = verificationRecoveryEpoch(run.id);
   const priorCheckpoint = latestTaskCheckpoint(input.goalId);
   const priorInvocationRunIds = (priorCheckpoint?.capsule.evidenceRefs ?? [])
     .map((ref) => /^invocation:(.+):completed$/.exec(ref)?.[1]).filter((id): id is string => Boolean(id));
@@ -1184,7 +1213,7 @@ export async function verifyGoalCompletionClaim(input: {
     // become actionable blocked states.
     const recoveryFingerprint = verificationRecoveryFingerprint(checkpointVerdicts);
     const recoveryStreak = recoveryFingerprint
-      ? priorCheckpoint?.recoveryFingerprint === recoveryFingerprint
+      ? recoveryEpoch.priorCheckpointInEpoch && priorCheckpoint?.recoveryFingerprint === recoveryFingerprint
         ? Math.max(0, priorCheckpoint.recoveryStreak ?? 0) + 1
         : 1
       : 0;
@@ -1192,7 +1221,7 @@ export async function verifyGoalCompletionClaim(input: {
       && verdict.recoveryClass === "repairable");
     const retryLimit = hasRepairableFailure ? REPAIRABLE_FAILURE_STREAK_LIMIT : INCONCLUSIVE_RETRY_LIMIT;
     let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts,
-      retriesSoFar: countInconclusiveRetries(run.id), retryLimit,
+      retriesSoFar: recoveryEpoch.inconclusiveRetries, retryLimit,
       recoveryStreak });
     if (!completed) {
       const current = getLongRunByGoalId(input.goalId);
@@ -1204,7 +1233,7 @@ export async function verifyGoalCompletionClaim(input: {
           .filter((verdict) => verdict.verdict === "failed")
           .every((verdict) => verdict.recoveryClass === "repairable");
         const prerequisite = checkpointVerdicts.find((verdict) => verdict.verdict === "failed" && verdict.prerequisiteCode);
-        const retriesSoFar = countInconclusiveRetries(current.id);
+        const retriesSoFar = recoveryEpoch.inconclusiveRetries;
         const canRetry = disposition === "retry_required";
         try {
           transitionLongRun({
