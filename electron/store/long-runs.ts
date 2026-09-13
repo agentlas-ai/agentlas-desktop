@@ -344,15 +344,31 @@ function appendEventInDb(input: {
  * 재개 단추·타이핑·자동 재개가 전부 auto_goal_resume_attempt_unsettled 로 거부됐고, 그 상태를 풀 길이
  * 아무 데도 없어 대화가 영구 막다른 길이 됐다. 살아 있는(state='running') 시도만 진짜로 막는다.
  */
-export function acknowledgeUncertainLongRunAttempts(runId: string): string[] {
+export function acknowledgeUncertainLongRunAttempts(runId: string): { attemptIds: string[]; version: number } {
   const db = getDb();
   const rows = db.prepare(
     "SELECT id FROM long_run_worker_attempts WHERE run_id = ? AND state <> 'running' AND (state = 'uncertain' OR side_effect_state = 'uncertain')",
   ).all(runId) as { id: string }[];
-  if (!rows.length) return [];
   const attemptIds = rows.map((row) => row.id);
-  appendLongRunEvent({ runId, kind: "run.user_control", actorKind: "user", payload: { action: "acknowledge_uncertain_attempts", attemptIds } });
-  return attemptIds;
+  /*
+   * 인지 이벤트는 원장 판번호를 올린다(appendLongRunEvent). 라운드 2 실측(2026-09-14): 호출부가 사람이 보낸
+   * 옛 판번호로 그다음 재개를 시도해 long_run_resume_version_conflict 로 두 번 다 거부됐다. 그래서 인지 뒤의
+   * 판번호를 함께 돌려주고, 호출부는 그 값으로 이어간다 — 사람이 확인한 판은 위에서 이미 대조했다.
+   */
+  if (attemptIds.length) {
+    appendLongRunEvent({ runId, kind: "run.user_control", actorKind: "user", payload: { action: "acknowledge_uncertain_attempts", attemptIds } });
+  }
+  const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
+  if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
+  return { attemptIds, version };
+}
+
+/** 자동 재개(재시작 체크포인트 등)가 보는 수 — 불확실한 부작용은 사람만 풀 수 있으므로 그것도 센다. */
+export function unsettledLongRunAttemptCount(runId: string): number {
+  const row = getDb().prepare(
+    "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
+  ).get(runId) as { n: number };
+  return row.n;
 }
 
 /** 아직 실제로 돌고 있는 시도 수 — 명시적 재개는 이것만 본다. */

@@ -1348,14 +1348,15 @@ export class InvocationService {
         throw new Error("goal_control_scope_mismatch");
       }
       // 사람이 멈춘 목표에 말을 걸었다: 끊긴 시도의 불확실성은 인지된 것으로 적고, 살아 있는 시도만 막는다.
-      acknowledgeUncertainLongRunAttempts(boundGoal.id);
+      const acknowledged = acknowledgeUncertainLongRunAttempts(boundGoal.id);
       if (liveLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
       const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
         || Boolean(longRunMonetaryRefusal(boundGoal))
         || (boundGoal.budget.wallclockDeadline != null
           && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
       if (budgetExhausted) throw new Error(longRunMonetaryRefusal(boundGoal) ?? "auto_goal_budget_exhausted");
-      blockedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version };
+      // 인지 이벤트가 판번호를 올렸다 — 옛 판번호로 CAS 하면 재활성화가 조용히 건너뛰어진다(라운드 2 실측).
+      blockedGoalReactivation = { runId: boundGoal.id, version: acknowledged.version };
     }
     const record: RunRecord = {
       controller,

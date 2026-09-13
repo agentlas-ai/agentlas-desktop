@@ -23,6 +23,8 @@ import {
 } from "./safe-project-read";
 import { listProjectMemoryEpisodes } from "./tickets";
 import { summarizeCompletedWork } from "./work-summary";
+import { localizePolicyTurnSummary } from "./policy-turn-summary";
+import { currentUiLocale } from "../ui-locale";
 
 const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
 const CODE_MAP_FULL_FILE = "code-map/project-map.json";
@@ -216,7 +218,8 @@ export function getProjectTimelineSnapshot(
 
   for (const episode of episodes) {
     const fallback = "작업 기록";
-    const summary = summarizeCompletedWork(episode.summary, fallback);
+    // 정책이 적은 문장("답이 나오기 전에 …")은 저장 당시 언어라 — 지금 화면 언어로 바꿔 보여준다.
+    const summary = summarizeCompletedWork(localizePolicyTurnSummary(episode.summary, currentUiLocale()), fallback);
     if (!episode.chatId) {
       entries.push({
         id: episode.id,

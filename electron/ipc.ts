@@ -4366,11 +4366,9 @@ export function registerIpcHandlers(): void {
       throw new Error("long_run_resume_version_conflict");
     }
     if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
-    // 사람이 누른 재개다: 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고, 살아 있는 시도만 막는다.
-    acknowledgeUncertainLongRunAttempts(context.runId);
-    if (liveLongRunAttemptCount(context.runId)) throw new Error("auto_goal_resume_attempt_unsettled");
     const continuation = findAutomationByGoalId(chat.goalId);
     if (!continuation) {
+      // 사람이 누른 재개다: 인지 이벤트·판번호 갱신·재개를 한 트랜잭션으로(queueAutomaticGoalResume).
       const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);
       try {
         confirmDesktopLongRunResumeDispatched(queued.id);
@@ -4381,7 +4379,10 @@ export function registerIpcHandlers(): void {
       }
       return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     }
-    const queued = resumeDesktopLongRunManually(context.runId, expectedVersion);
+    // 사람이 누른 재개다: 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고(판번호가 오른다), 살아 있는 시도만 막는다.
+    const acknowledged = acknowledgeUncertainLongRunAttempts(context.runId);
+    if (liveLongRunAttemptCount(context.runId)) throw new Error("auto_goal_resume_attempt_unsettled");
+    const queued = resumeDesktopLongRunManually(context.runId, acknowledged.version);
     try {
       if (!continuation.enabled) toggleAutomation(continuation.id, true);
       const { enqueueAutomationRunNow } = await import("./automation-scheduler");

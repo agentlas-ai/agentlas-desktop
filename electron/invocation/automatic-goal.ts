@@ -1,7 +1,7 @@
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId, getLongRunGoalRevisionBinding, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "../store/long-runs";
+import { getLongRunByGoalId, getLongRunGoalRevisionBinding, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -215,7 +215,12 @@ export async function prepareInvocationAutomaticGoal(input: {
 
 /** Explicit UI resume reuses the same campaign and remaining budget. It never
  * reclassifies the synthetic continuation as a new user request. */
-export function automaticGoalResumeRequest(chatId: string, expectedVersion: number): import("../../shared/types").McpInvocationRequest | null {
+/**
+ * 재개 요청을 만든다 — 상태를 바꾸지 않는다(재시작 체크포인트 경로가 그 전제로 판번호를 다시 대조한다).
+ * actor "user": 사람이 누른 재개. 호출부가 acknowledgeUncertainLongRunAttempts 를 먼저 적고 그 뒤 판번호를 넘긴다.
+ * actor "host": 자동 재개. 불확실한 부작용은 사람만 풀 수 있으므로 그것이 남아 있으면 거부한다.
+ */
+export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host"): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
   const revision = getChatGoalRevision(chat.goal_id);
@@ -225,9 +230,9 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
-  // 명시적 재개(사람의 클릭): 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고, 살아 있는 시도만 막는다.
-  acknowledgeUncertainLongRunAttempts(run.id);
-  if (liveLongRunAttemptCount(run.id)) throw new Error("auto_goal_resume_attempt_unsettled");
+  if (actor === "user" ? liveLongRunAttemptCount(run.id) : unsettledLongRunAttemptCount(run.id)) {
+    throw new Error("auto_goal_resume_attempt_unsettled");
+  }
   /*
    * An absent limit is no limit, not a spent one.
    *
@@ -248,14 +253,19 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     userPrompt: `Resume the existing goal within its remaining budget and original permissions. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion.\n\n${revision.objective}` };
 }
 
+/** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */
 export function queueAutomaticGoalResume(chatId: string, expectedVersion: number) {
   return getDb().transaction(() => {
-    const request = automaticGoalResumeRequest(chatId, expectedVersion);
+    const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
+    const before = chat?.goal_id ? getLongRunByGoalId(chat.goal_id) : null;
+    if (!before) throw new Error("long_run_resume_dispatch_unavailable");
+    if (before.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+    // 끊긴 시도의 불확실성은 인지된 것으로 원장에 적는다 — 그 이벤트가 판번호를 올리므로 이후는 새 판번호로.
+    const { version } = acknowledgeUncertainLongRunAttempts(before.id);
+    const request = automaticGoalResumeRequest(chatId, version, "user");
     if (!request) throw new Error("long_run_resume_dispatch_unavailable");
-    const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string };
-    const run = getLongRunByGoalId(chat.goal_id)!;
     getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
-      .run(new Date().toISOString(), run.goalId);
-    return { request, queued: resumeDesktopLongRunManually(run.id, expectedVersion) };
+      .run(new Date().toISOString(), before.goalId);
+    return { request, queued: resumeDesktopLongRunManually(before.id, version) };
   })();
 }

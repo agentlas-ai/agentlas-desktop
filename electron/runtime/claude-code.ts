@@ -20,6 +20,7 @@ import {
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
+import { detectSandboxDeath, sandboxDeathNotice } from "./sandbox-death";
 import { announceToolDenied } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
@@ -833,8 +834,8 @@ const runClaudeTurn = async (
   const writeSandboxNotice =
     !runReq.untrustedNoTools && req.permission === "write"
       ? (runReq.locale === "ko"
-        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패 등) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
-        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start), that is this run's permission boundary, not a limit of this computer. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
+        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패, 프로세스가 시작하자마자 SIGILL·exit 132 로 즉사하는 것 포함) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
+        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start, a process dying immediately with SIGILL / exit 132), that is this run's permission boundary, not a limit of this computer. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
       : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
@@ -1354,6 +1355,39 @@ const runClaudeTurn = async (
       });
     };
 
+    /*
+     * 샌드박스 즉사(SIGILL·exit 132 등)는 권한 거절 문장이 없어 위 판별을 지나친다 — 라운드 2 실측:
+     * 에뮬레이터가 seatbelt 안에서 가상화 엔진을 올리다 132 로 죽었고 배너가 안 떠 사람이 누를 것이 없었다.
+     * 쓰기 샌드박스가 실제로 켜진 실행에서만, Bash 결과에 한해, 같은 approval-required 통로로 승격 칩을 띄운다.
+     * (전체 액세스에는 샌드박스가 없으니 거기서의 132 는 진짜 기계 문제다 — 부르지 않는다.)
+     */
+    const sandboxActive = Boolean(executionSettings) && req.permission === "write";
+    const announceSandboxDeath = (resultText: string, toolId?: string): void => {
+      if (!sandboxActive) return;
+      const call = toolId ? toolCallById.get(toolId) : undefined;
+      if (call && call.name !== "Bash") return;
+      const signal = detectSandboxDeath(resultText);
+      if (!signal) return;
+      const key = `${toolId ?? ""}|sandbox-death|${signal.evidence}`;
+      if (announcedApprovalBlocks.has(key)) return;
+      announcedApprovalBlocks.add(key);
+      announceToolDenied({
+        runtime: KIND,
+        sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
+        tool: call?.name ?? "Bash",
+        detail: call?.detail,
+        cwd: runReq.cwd,
+        deniedBy: "runtime-headless",
+      });
+      const notice = sandboxDeathNotice(signal, call?.detail, runReq.locale);
+      events.onNotice?.({
+        level: "warning",
+        code: "approval-required",
+        message: notice.message,
+        i18n: { ko: notice.ko, en: notice.en },
+      });
+    };
+
     let agentAppMcpInitFailed = false;
     let agentAppMcpInitConnected = false;
     let agentAppMcpUnavailableNotified = false;
@@ -1646,6 +1680,7 @@ const runClaudeTurn = async (
             const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
             if (toolId && settledToolResultSignatures.get(toolId) === resultSignature) continue;
             if (block.is_error === true) announceApprovalBlock(result, toolId);
+            announceSandboxDeath(result, toolId);
             const artifactPaths = toolId && block.is_error !== true
               ? [
                   ...claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId)),
@@ -1667,6 +1702,7 @@ const runClaudeTurn = async (
           const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
           if (toolId && settledToolResultSignatures.get(toolId) === resultSignature) continue;
           if (block.is_error === true) announceApprovalBlock(result, toolId);
+          announceSandboxDeath(result, toolId);
           const artifactPaths = toolId && block.is_error !== true
             ? [
                 ...claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId)),
