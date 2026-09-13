@@ -346,8 +346,12 @@ export class LocalModelHubManager {
     const fitAssessments = models.map((model) => {
       const fit = estimateLocalModelFit(hardware, model);
       const loaded = this.state.loadReceipts.some(receipt => receipt.state === "resident" && this.state.modelInstallations.some(installation => installation.installationId === receipt.installationId && installation.modelPackageId === model.packageId));
+      // A registered Hugging Face model that has not been loaded yet keeps its measured
+      // memory fit; only the engine-compatibility caveat is added as a reason code.
+      // Forcing class "unknown" here made every HF download show the amber icon, so
+      // "원활" was unreachable before the first load (2026-09-13).
       return this.state.registeredModels?.some(registered => registered.packageId === model.packageId) && !loaded
-        ? { ...fit, class: "unknown" as const, reasonCodes: [...fit.reasonCodes, "hf_engine_compatibility_unverified"] }
+        ? { ...fit, reasonCodes: [...fit.reasonCodes, "hf_engine_compatibility_unverified"] }
         : fit;
     });
     const compatible = compatibleEnginePackage();

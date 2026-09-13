@@ -32,6 +32,8 @@ export function OllamaMigrationPanel({ locale }: { locale: string }) {
   if (!snapshot && !notice) return null;
   const entries = [...new Map([...(snapshot?.entries ?? []), ...(oneEntry ? [oneEntry] : [])]
     .map(entry => [entry.referenceHash, entry])).values()];
+  // 옮길 Ollama 설정이 하나도 없는 사용자에게는 이 절 자체가 소음이다 — 알림이 있을 때만 남긴다.
+  if (entries.length === 0 && !notice) return null;
   const count = (state: OllamaMigrationEntry["state"]) => entries.filter(entry => entry.state === state).length;
   const unresolved = count("migration-needed") + count("paused-migration-needed") + count("conflict");
   return (

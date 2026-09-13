@@ -436,7 +436,8 @@ export function RuntimeControl() {
   }
 
   function runtimeForSelection(selection: RuntimeSelection): RuntimeStatus | null {
-    const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator");
+    // The migration-only Ollama projection is not an executable runtime (same filter as the option lists).
+    const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator").filter((runtime) => runtime.kind !== "ollama");
     return roleRuntimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ?? null;
   }
 
@@ -1006,7 +1007,7 @@ export function RuntimeControl() {
                     ? "이미지 생성 CLI 우선순위 — 영상·API 공급자는 설정 > 멀티모달에서 관리"
                     : "Image-generation CLI priority — manage video and API providers in Settings > Multimodal"
                 : ko
-                  ? "N개 Worker 실행이 공유하는 모델 우선순위 — 행 수는 Worker 수가 아님"
+                  ? "N개 워커 실행이 공유하는 모델 우선순위 — 행 수는 워커 수가 아님"
                   : "Shared model priority for N worker executions — rows are not worker count"}
             </span>
           </div>
@@ -1028,7 +1029,7 @@ export function RuntimeControl() {
     );
   }
 
-  const anyActive = runtimes.length > 0;
+  const anyActive = runtimes.some((runtime) => runtime.kind !== "ollama");
   return (
     <div
       className="dashboard-module dashboard-runtime-control"
@@ -1038,7 +1039,7 @@ export function RuntimeControl() {
         <span>{ko ? "역할별 기본 모델" : "Role model defaults"}</span>
         <small>
           {ko
-            ? "1 Orchestrator : N Workers · 행은 역할별 모델 우선순위"
+            ? "오케스트레이터 1 : 워커 N · 행은 역할별 모델 우선순위"
             : "1 Orchestrator : N Workers · rows are role model priorities"}
         </small>
         <button

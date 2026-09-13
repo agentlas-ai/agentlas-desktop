@@ -549,7 +549,7 @@ export function SideNav({
                   ? (locale === "ko" ? "복구" : "Repair")
                   : scienceSuite?.installed
                     ? (locale === "ko" ? "켜기" : "Enable")
-                    : "Download"}</span>
+                    : (locale === "ko" ? "받기" : "Download")}</span>
             </span>
           )}
           {collapsed && (

@@ -72,20 +72,31 @@ function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
+const RUNTIME_KIND_LABELS: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  grok: "Grok",
+  kimi: "Kimi Code",
+  cursor: "Cursor Agent",
+  byok: "BYOK API",
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
+  "agentlas-local": "Agentlas Local",
+  acp: "ACP",
+  agentlas: "Agentlas",
+};
+
+/** The migration-only Ollama projection is a stored pin, not a runtime that can run. */
+function executableRuntimes(runtimes: RuntimeStatus[]): RuntimeStatus[] {
+  return runtimes.filter((runtime) => runtime.kind !== "ollama");
+}
+
 function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
   const active = runtimes.find((runtime) => runtime.active) ?? runtimes[0];
   if (!active) return ko ? "연결된 로컬 LLM 런타임이 없습니다." : "No local LLM runtime is connected.";
-  const labels: Record<string, string> = {
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    antigravity: "Antigravity",
-    grok: "Grok",
-    byok: "BYOK API",
-    ollama: "Ollama",
-    lmstudio: "LM Studio",
-    mlx: "MLX",
-    agentlas: "Agentlas",
-  };
+  const labels = RUNTIME_KIND_LABELS;
   const model = active.model?.trim();
   const version = active.version && active.version !== "unknown" ? active.version : "";
   const detail = model || version || active.source;
@@ -102,7 +113,8 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
  * 실행이 실제로 낸 인증 실패는 이제 런타임 상태에 실려 온다. 그 사실이 있으면 초록불이 아니라
  * 할 일을 말한다.
  */
-function runtimeItem(runtimes: RuntimeStatus[], ko: boolean): ReadinessItem {
+function runtimeItem(allRuntimes: RuntimeStatus[], ko: boolean): ReadinessItem {
+  const runtimes = executableRuntimes(allRuntimes);
   const signedOut = runtimes.filter((runtime) => runtime.signInRequired);
   if (runtimes.length === 0) {
     return {
@@ -113,7 +125,7 @@ function runtimeItem(runtimes: RuntimeStatus[], ko: boolean): ReadinessItem {
     };
   }
   if (signedOut.length > 0) {
-    const names = signedOut.map((runtime) => runtime.label ?? runtime.kind).join(" · ");
+    const names = signedOut.map((runtime) => runtime.label ?? RUNTIME_KIND_LABELS[runtime.kind] ?? runtime.kind).join(" · ");
     return {
       id: "runtime",
       label: ko ? "로컬 LLM 런타임" : "Local LLM runtime",

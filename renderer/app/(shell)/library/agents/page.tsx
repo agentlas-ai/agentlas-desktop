@@ -3252,20 +3252,33 @@ function runtimeStatusKey(runtime: Pick<RuntimeStatus, "kind" | "backend">): str
   return `${runtime.kind}:${runtime.backend}`;
 }
 
+const RUNTIME_KIND_DISPLAY: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  grok: "Grok",
+  kimi: "Kimi Code",
+  cursor: "Cursor Agent",
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
+  "agentlas-local": "Agentlas Local",
+  acp: "ACP",
+  agentlas: "Agentlas",
+};
+
 function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "model">): string {
-  if (runtime.kind === "claude-code") return "Claude Code";
-  if (runtime.kind === "codex") return "Codex";
-  if (runtime.kind === "antigravity") return "Antigravity";
   if (runtime.kind === "ollama") return runtime.model ? `Ollama · ${runtime.model}` : "Ollama";
   if (runtime.kind === "byok") return `BYOK · ${runtime.backend}`;
-  return runtime.kind;
+  return RUNTIME_KIND_DISPLAY[runtime.kind] ?? runtime.kind;
 }
 
 function selectionSummary(selection?: RuntimeSelection | null, locale: Locale = "ko"): string {
   if (!selection) return locale === "ko" ? "역할별 기본값" : "Role defaults";
-  const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : selection.kind;
+  const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : (RUNTIME_KIND_DISPLAY[selection.kind] ?? selection.kind);
   const model = selection.model ?? runtimeModelFallbackLabel(selection.kind, locale);
-  return [base, model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
+  const effort = selection.effort ? (locale === "ko" ? `노력 ${selection.effort}` : `effort ${selection.effort}`) : "";
+  return [base, model, effort].filter(Boolean).join(" · ");
 }
 
 function effortsForModel(

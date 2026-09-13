@@ -694,7 +694,14 @@ export default function SettingsPage() {
                   .then((result) => {
                     setDaemonAutostart(Boolean(result?.enabled));
                     // 값은 저장됐는데 부팅 항목을 못 고친 경우를 조용히 넘기지 않는다.
-                    if (result && result.reconciled === false) {
+                    if (next && result && !result.enabled && result.reconciled !== false) {
+                      // Main 이 앱 범위(app-scoped)라 로그인 자동 시작을 받지 않는다 — 체크가 조용히 풀리던 자리.
+                      setDaemonAutostartNotice(
+                        locale === "ko"
+                          ? "이 앱 버전에서는 로그인 시 자동 시작을 지원하지 않습니다. 앱을 열어 두면 자동화가 돕니다."
+                          : "Login autostart is not supported in this app version. Automations run while the app is open.",
+                      );
+                    } else if (result && result.reconciled === false) {
                       setDaemonAutostartNotice(
                         (locale === "ko" ? "설정은 저장했지만 부팅 항목을 바꾸지 못했습니다: " : "Saved, but the login item could not be updated: ")
                         + (result.reason ?? ""),
@@ -2228,7 +2235,7 @@ function CoreEngineLine({
 }
 
 function UpdatePanel() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
   const [installDeferred, setInstallDeferred] = useState(false);
@@ -2259,7 +2266,7 @@ function UpdatePanel() {
   // version on screen must be the new one, not the one we read at mount.
   const refreshCore = useCallback(async () => {
     try {
-      const s = await ipc()?.hephaestus.status();
+      const s = await ipc()?.hephaestus.status(locale);
       setCore({
         version: s?.version ?? null,
         root: s?.root ?? null,
@@ -2270,7 +2277,7 @@ function UpdatePanel() {
     } catch {
       setCore({ version: null, root: null, source: null, available: false, reason: null });
     }
-  }, []);
+  }, [locale]);
 
   useEffect(() => {
     let cancelled = false;
