@@ -892,9 +892,12 @@ export async function runLocalOpenAiChat(
   if (opts.acceptsImageResults === false) {
     // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
     // (격리 앱 실측 2026-09-13: get_screen 21회, 4분 타임아웃). 도구를 빼고 사람에게 이유를 말한다.
-    const blind = tools.filter((tool) => tool.function.name.startsWith("mcp__cua-driver__"));
+    // 브라우저 스크린샷도 같은 이유로 뺀다 — 3회 반복 실측(2026-09-13)에서 비전 없는 모델이
+    // browser_take_screenshot 을 8번 부르고 screen_capture_unavailable 로 실패했다.
+    const isBlindTool = (name: string) => name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
+    const blind = tools.filter((tool) => isBlindTool(tool.function.name));
     if (blind.length > 0) {
-      tools = tools.filter((tool) => !tool.function.name.startsWith("mcp__cua-driver__"));
+      tools = tools.filter((tool) => !isBlindTool(tool.function.name));
       for (const tool of blind) byName.delete(tool.function.name);
       events.onNotice?.({
         level: "info",

@@ -53,11 +53,14 @@ async function main() {
   if (!fs.existsSync(path.join(distDir, "one.html"))) throw new Error("먼저 npm run build:renderer");
   fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
   const { server, baseUrl } = await startServer();
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-local-tools-"));
-  const userData = path.join(scratch, "userData"); fs.mkdirSync(userData);
-  const project = path.join(scratch, "project"); fs.mkdirSync(project);
+  // QA_SCRATCH: 같은 스크래치를 다시 쓰면 엔진·모델 다운로드(3.3GB)를 건너뛴다 — 라운드를 나눠 돌릴 때(메모리 감시가
+  // 긴 백그라운드 작업을 죽이는 기계, 2026-09-13).
+  const scratch = process.env.QA_SCRATCH ? path.resolve(process.env.QA_SCRATCH) : fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-local-tools-"));
+  const userData = path.join(scratch, "userData"); fs.mkdirSync(userData, { recursive: true });
+  const project = path.join(scratch, "project"); fs.mkdirSync(project, { recursive: true });
   // 격리: HOME 을 스크래치로 — 프로젝트 없는 채팅의 작업 폴더가 홈이 되어 오너 홈에 파일이 생겼다(실측 hello.txt).
-  const home = path.join(scratch, "home"); fs.mkdirSync(home);
+  const home = path.join(scratch, "home"); fs.mkdirSync(home, { recursive: true });
+  for (const dir of [project, home]) { try { fs.rmSync(path.join(dir, "hello.txt"), { force: true }); } catch {} }
   const desktop = await electron.launch({
     args: [root, `--user-data-dir=${userData}`], cwd: root, timeout: 90_000,
     env: {
@@ -108,7 +111,10 @@ async function main() {
 
   // 2. 과제마다 새 Work 채팅 → 실행 → 이벤트 수집.
   const only = (process.env.QA_TASKS || "").split(",").filter(Boolean);
-  for (const task of TASKS.filter((row) => !only.length || only.includes(row.name))) {
+  // QA_ROUNDS: 같은 과제 묶음을 여러 번 돌려 "여러 번 도구를 유도해도 오류 0" 을 잰다(오너 목표 2026-09-13).
+  const rounds = Math.max(1, Number(process.env.QA_ROUNDS || 1) || 1);
+  const selected = TASKS.filter((row) => !only.length || only.includes(row.name));
+  for (const [round, task] of Array.from({ length: rounds }, (_, r) => selected.map((task) => [r + 1, task])).flat()) {
     const started = Date.now();
     const result = await page.evaluate(async ({ prompt, toolMode }) => {
       const api = window.agentlas;
@@ -134,7 +140,7 @@ async function main() {
     }, { prompt: task.prompt, toolMode: task.toolMode });
     const toolUses = result.events.filter((event) => event.kind === "tool-use");
     const summary = {
-      name: task.name, prompt: task.prompt, status: result.receiptStatus, ms: Date.now() - started,
+      round, name: task.name, prompt: task.prompt, status: result.receiptStatus, ms: Date.now() - started,
       toolUses: toolUses.map((event) => ({ tool: event.tool?.name ?? event.toolName ?? event.name ?? null, server: event.tool?.server ?? event.server ?? null, ok: event.tool?.ok ?? event.ok ?? null, raw: JSON.stringify(event).slice(0, 400) })),
       errors: result.events.filter((event) => event.kind === "error").map((event) => JSON.stringify(event).slice(0, 300)),
       notices: result.events.filter((event) => event.kind === "notice").map((event) => JSON.stringify(event).slice(0, 300)),
@@ -143,11 +149,11 @@ async function main() {
       historyRoles: result.history.map((entry) => entry.role),
     };
     report.tasks.push(summary);
-    console.log(`[${task.name}] ${summary.status} ${summary.ms}ms tools=${summary.toolUses.map((t) => t.tool).join(",")} | ${summary.assistant.slice(0, 120).replace(/\n/g, " ")}`);
+    console.log(`[r${round} ${task.name}] ${summary.status} ${summary.ms}ms tools=${summary.toolUses.map((t) => t.tool).join(",")} | ${summary.assistant.slice(0, 120).replace(/\n/g, " ")}`);
     try {
       await page.goto(`${baseUrl}/workspace/task?id=${encodeURIComponent(result.chatId)}`, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(3000);
-      await page.screenshot({ path: path.join(outDir, `${task.name}.png`) });
+      await page.screenshot({ path: path.join(outDir, `r${round}-${task.name}.png`) });
     } catch (error) { summary.screenshotError = String(error).slice(0, 200); }
     if (task.name === "file") { const found = [project, home].map((dir) => path.join(dir, "hello.txt")).find((file) => fs.existsSync(file)); summary.fileCreated = found ? `${found}: ${fs.readFileSync(found, "utf8").slice(0, 40)}` : null; }
   }

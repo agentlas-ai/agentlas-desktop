@@ -3409,6 +3409,7 @@ ${effectiveUserPrompt}`;
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
   let nativeCaptureBound = false;
+  let blindVisionRuntime = false;
   const publishNativeCapture = createNativeCapturePublisher({
     task: canonicalTask, chatId: chat.id, runId: req.runId ?? "", signal,
     emit: (event) => { sink(event); nativeCaptureBound = true; },
@@ -5173,7 +5174,13 @@ ${effectiveUserPrompt}`;
       },
       // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
       // 상태줄과 달리 대화에 남는다.
-      onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
+      onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => {
+        // 러너가 "이 모델은 화면을 볼 수 없어 컴퓨터 유즈·스크린샷 도구를 뺐다" 고 알렸으면, 그 실행에
+        // 캡처 산출을 요구하는 것은 성립하지 않는다 — 안내를 남기고도 끝에서 screen_capture_unavailable 로
+        // 실패시키던 것(3회 반복 실측 2026-09-13: 컴퓨터 유즈 과제 3/3 실패). 답은 정직한 텍스트로 끝난다.
+        if (notice.code === "computer-use-needs-vision-model") blindVisionRuntime = true;
+        sink({ kind: "notice", notice });
+      },
     };
     // Direct interactive fallback is a recovery chain, not an unbounded retry
     // loop. The set lives for the whole invocation so a later Stormbreaker or
@@ -6634,7 +6641,7 @@ ${effectiveUserPrompt}`;
       throw new Error("image_tool_unavailable: the generated image was not durably bound");
     }
     // 찍어 달라고 한 실행이 이미지 하나 없이 끝나면, 답이 무슨 말을 했든 사실이 아니다.
-    if (screenCaptureRequired && !nativeCaptureBound && finalWorkImages.length === 0 && !signal?.aborted) {
+    if (screenCaptureRequired && !blindVisionRuntime && !nativeCaptureBound && finalWorkImages.length === 0 && !signal?.aborted) {
       throw new Error("screen_capture_unavailable: the requested screen capture was never produced");
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;

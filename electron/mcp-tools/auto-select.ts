@@ -187,7 +187,7 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
     // A missing uv runtime is provisioned inside this same cancellable deadline.
     timeoutMs: server.command === "uvx" || server.command === "uv"
       ? 45_000
-      : server.catalogId === "agentlas-browser" || server.catalogId === "playwright" ? 20_000 : 3_000,
+      : server.catalogId === "agentlas-browser" || server.catalogId === "playwright" ? 20_000 : 12_000,
   }),
   resolveNeeds: resolveMcpNeeds,
 };
