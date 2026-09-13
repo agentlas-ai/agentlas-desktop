@@ -19,6 +19,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconSettings,
   IconSparkles,
   IconTrash,
   IconUsers,
@@ -26,6 +27,7 @@ import {
 import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
+import { openProjectSettings } from "@/lib/project-settings";
 import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { judgeSubsetViaBridge } from "@/lib/judgment";
@@ -396,6 +398,12 @@ function ProjectPage() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const onChanged = () => { void refresh(); };
+    window.addEventListener("agentlas:projects-changed", onChanged);
+    return () => window.removeEventListener("agentlas:projects-changed", onChanged);
   }, [refresh]);
 
   useEffect(() => {
@@ -897,6 +905,7 @@ function ProjectPage() {
           <IconPlus size={14} />
           {locale === "ko" ? "새 작업" : "New task"}
         </button>
+        <button type="button" className="titlebar-nodrag" style={raisedButton} onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={locale === "ko" ? "프로젝트 설정" : "Project settings"} aria-haspopup="dialog"><IconSettings size={16} /></button>
         <button
           onClick={() => void removeProject()}
           className="titlebar-nodrag"
@@ -1201,7 +1210,7 @@ function ProjectPage() {
               </>
             ) : project.systemPrompt ? (
               <div
-                onDoubleClick={() => setEditingNote(true)}
+                onDoubleClick={() => openProjectSettings({ mode: "edit", projectId: project.id })}
                 style={{
                   whiteSpace: "pre-wrap",
                   fontSize: 13,
@@ -1215,7 +1224,7 @@ function ProjectPage() {
               </div>
             ) : (
               <button
-                onClick={() => setEditingNote(true)}
+                onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })}
                 style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600 }}
               >
                 {t("project.add_note")}
@@ -1236,7 +1245,7 @@ function ProjectPage() {
                 <span style={{ color: "var(--muted-deep)", fontSize: 10, fontWeight: 650 }}>{agentPoolDraft.length}</span>
               </button>
               {!editingTeam ? (
-                <button type="button" onClick={() => { setTeamSaveError(""); setEditingTeam(true); setTeamTreeOpen(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                <button type="button" onClick={() => openProjectSettings({ mode: "edit", projectId: project.id, section: "agents" })} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}

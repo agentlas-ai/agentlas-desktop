@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProjectSidebar } from "./ProjectSidebar";
+import { ProjectSettingsHost } from "./ProjectSettingsHost";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import TelegramOneDialog from "./connect/TelegramOneDialog";
@@ -307,6 +308,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
+      <ProjectSettingsHost />
       <PageTour pathname={pathname} autoOpenSuspended={pageTourAutoOpenSuspended} />
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />

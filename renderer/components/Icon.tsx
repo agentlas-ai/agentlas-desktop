@@ -53,6 +53,8 @@ export const IconChat = (p: Props) =>
   svg("M21 12c0 4.4-4 8-9 8-1.4 0-2.7-.3-3.9-.8L3 21l1.9-4.4C3.7 15 3 13.6 3 12c0-4.4 4-8 9-8s9 3.6 9 8z", p);
 export const IconFolder = (p: Props) =>
   svg("M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z", p);
+export const IconGithub = (p: Props) =>
+  svg("M9 19c-4 1-4-2-6-2M15 22v-3.9c0-1.1-.4-1.7-.8-2 2.7-.3 5.6-1.3 5.6-6a4.7 4.7 0 0 0-1.3-3.3 4.3 4.3 0 0 0-.1-3.3s-1-.3-3.4 1.3a11.4 11.4 0 0 0-6 0C6.6 3.2 5.6 3.5 5.6 3.5a4.3 4.3 0 0 0-.1 3.3A4.7 4.7 0 0 0 4.2 10c0 4.7 2.9 5.7 5.6 6-.4.3-.8 1-.8 2V22", p);
 export const IconBolt = (p: Props) => svg("M13 2 4 14h7l-1 8 9-12h-7l1-8z", p);
 export const IconLibrary = (p: Props) =>
   svg("M4 5v14M9 4v16M14 7v13M19 5v14", p);
