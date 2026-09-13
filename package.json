@@ -229,6 +229,7 @@
     "test:long-run-startup-resume": "node scripts/local/long-run-startup-resume-contract.cjs",
     "test:resume-after-restart": "npx electron scripts/local/qa-resume-after-restart-acknowledges-attempts.cjs",
     "test:sandbox-death-boundary": "node scripts/local/qa-sandbox-death-is-a-permission-boundary.cjs",
+    "test:write-sandbox-launch-guard": "node scripts/local/qa-write-sandbox-launch-guard.cjs",
     "test:session-continuity": "node scripts/local/session-continuity-contract.cjs",
     "test:runtime-sign-in-honesty": "node scripts/local/runtime-sign-in-honesty-contract.cjs",
     "test:one-transcript-monotonic": "node scripts/local/one-transcript-monotonic-contract.cjs",

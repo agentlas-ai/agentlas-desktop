@@ -12,6 +12,8 @@
  *  - 모델이 스스로 붙인 "EXIT=132"
  * 이 판별은 쓰기 샌드박스가 실제로 켜진 실행에서만 부른다 — 전체 액세스(샌드박스 없음)의 132 는 진짜 기계 문제다.
  */
+import { WRITE_SANDBOX_LAUNCH_DENIAL_CODE } from "../../shared/write-sandbox-launch-guard";
+
 export interface SandboxDeathSignal {
   /** 무엇으로 죽었는가 — 화면 문장에 그대로 쓴다. */
   kind: "SIGILL" | "SIGTRAP" | "hypervisor";
@@ -52,5 +54,21 @@ export function sandboxDeathNotice(signal: SandboxDeathSignal, command: string |
   const how = signal.exitCode !== null ? `${signal.kind}, exit ${signal.exitCode}` : signal.kind;
   const ko = `이 명령이 샌드박스 안에서 시작하자마자 죽었습니다(${how})${what}. 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계입니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 샌드박스 없이 여기서부터 이어집니다.`;
   const en = `This command died as soon as it started inside the sandbox (${how})${what}. That is this run's permission boundary, not a limit of this computer — allow it in "Continue with full access?" below and it resumes from here without the sandbox.`;
+  return { ko, en, message: locale === "ko" ? ko : en };
+}
+
+/** 런처 관문(PreToolUse 훅)의 거절문이 도구 결과에 들어왔는가 — 그 거절은 곧 승격 요청이다. */
+export function detectSandboxLaunchDenial(toolResultText: string): { launcher: string } | null {
+  const text = String(toolResultText || "");
+  const at = text.indexOf(WRITE_SANDBOX_LAUNCH_DENIAL_CODE);
+  if (at < 0) return null;
+  const launcher = text.slice(at).match(/'([^']{1,40})'/)?.[1] ?? "launcher";
+  return { launcher };
+}
+
+export function sandboxLaunchDenialNotice(launcher: string, command: string | undefined, locale: "ko" | "en" | undefined): { ko: string; en: string; message: string } {
+  const what = command ? `: ${command}` : "";
+  const ko = `샌드박스 밖에서 프로세스를 띄우는 명령(${launcher})을 막았습니다${what}. 사용자는 파일 편집까지만 허용했습니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 샌드박스 없이 여기서부터 이어집니다.`;
+  const en = `Blocked a command that would start a process outside the sandbox (${launcher})${what}. Only file edits were allowed — allow it in "Continue with full access?" below and it resumes from here without the sandbox.`;
   return { ko, en, message: locale === "ko" ? ko : en };
 }

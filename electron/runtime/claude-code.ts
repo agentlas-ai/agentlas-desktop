@@ -20,7 +20,8 @@ import {
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
-import { detectSandboxDeath, sandboxDeathNotice } from "./sandbox-death";
+import { detectSandboxDeath, detectSandboxLaunchDenial, sandboxDeathNotice, sandboxLaunchDenialNotice } from "./sandbox-death";
+import { writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
 import { announceToolDenied } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
@@ -313,9 +314,20 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
     hooks = parsed.hooks;
   }
 
+  /*
+   * 런처 관문(2026-09-14, 페르소나 라운드 2 재시험): seatbelt 는 `open`·osascript·launchctl 같은 OS 런처가
+   * 샌드박스 밖에 프로세스를 만드는 것을 막지 못한다(실측: .command 를 open → 터미널 앱이 에뮬레이터를 띄움,
+   * 승격 0건). 쓰기 실행은 그런 Bash 호출을 실행 전에 거부하고, 거부문이 승격 요청으로 이어진다.
+   * 관문 스크립트가 없으면 쓰기 실행을 시작하지 않는다 — 관문 없이 "샌드박스"라고 부르는 것이 그 구멍이다.
+   */
+  const launchGuard = writeSandboxLaunchGuardHook();
+  if (!launchGuard) throw new Error("claude_write_sandbox_launch_guard_missing");
+  const brokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
+  const brokerPreToolUse = Array.isArray(brokerHooks.PreToolUse) ? brokerHooks.PreToolUse as unknown[] : [];
+  const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, launchGuard] };
   const encoded = JSON.stringify({
     ...CLAUDE_WORKSPACE_SANDBOX_SETTINGS,
-    ...(hooks ? { hooks } : {}),
+    hooks: mergedHooks,
   });
   if (Buffer.byteLength(encoded, "utf8") > 40_960) {
     throw new Error("claude_execution_settings_too_large");
@@ -834,8 +846,8 @@ const runClaudeTurn = async (
   const writeSandboxNotice =
     !runReq.untrustedNoTools && req.permission === "write"
       ? (runReq.locale === "ko"
-        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패, 프로세스가 시작하자마자 SIGILL·exit 132 로 즉사하는 것 포함) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
-        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start, a process dying immediately with SIGILL / exit 132), that is this run's permission boundary, not a limit of this computer. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
+        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패, 프로세스가 시작하자마자 SIGILL·exit 132 로 즉사하는 것 포함) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. open·osascript·launchctl·.command·tmux 처럼 샌드박스 밖에 프로세스를 만드는 길로 우회하지 마라 — 막히며 그것도 같은 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
+        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start, a process dying immediately with SIGILL / exit 132), that is this run's permission boundary, not a limit of this computer. Do not route around it through launchers that start processes outside the sandbox (open, osascript, launchctl, .command files, tmux) — they are blocked and are the same boundary. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
       : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
@@ -1366,6 +1378,23 @@ const runClaudeTurn = async (
       if (!sandboxActive) return;
       const call = toolId ? toolCallById.get(toolId) : undefined;
       if (call && call.name !== "Bash") return;
+      const denial = detectSandboxLaunchDenial(resultText);
+      if (denial) {
+        const key = `${toolId ?? ""}|sandbox-launch|${denial.launcher}`;
+        if (announcedApprovalBlocks.has(key)) return;
+        announcedApprovalBlocks.add(key);
+        announceToolDenied({
+          runtime: KIND,
+          sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
+          tool: call?.name ?? "Bash",
+          detail: call?.detail,
+          cwd: runReq.cwd,
+          deniedBy: "runtime-headless",
+        });
+        const notice = sandboxLaunchDenialNotice(denial.launcher, call?.detail, runReq.locale);
+        events.onNotice?.({ level: "warning", code: "approval-required", message: notice.message, i18n: { ko: notice.ko, en: notice.en } });
+        return;
+      }
       const signal = detectSandboxDeath(resultText);
       if (!signal) return;
       const key = `${toolId ?? ""}|sandbox-death|${signal.evidence}`;

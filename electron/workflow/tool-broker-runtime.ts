@@ -59,8 +59,8 @@ function shellCommandArg(value: string): string {
 }
 
 /** Render a hook command that cannot accidentally enter Electron's GUI. */
-function nodeHookCommand(script: string, planPath: string): string {
-  const command = [process.execPath, script, planPath].map(shellCommandArg).join(" ");
+export function nodeHookCommand(script: string, planPath?: string): string {
+  const command = [process.execPath, script, ...(planPath ? [planPath] : [])].map(shellCommandArg).join(" ");
   return process.platform === "win32"
     ? `set "ELECTRON_RUN_AS_NODE=1" && ${command}`
     : `ELECTRON_RUN_AS_NODE=1 ${command}`;
