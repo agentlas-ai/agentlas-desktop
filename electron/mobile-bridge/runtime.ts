@@ -280,6 +280,7 @@ async function startBridgeInternal(
       localEndpoint: manifest.url,
       certificateDer: tls.certificateDer,
       onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
+      onPairFrame: (frameText) => server!.handleRelayPairFrame(frameText),
     });
     running = { authority, pairing, accountPairing, server, relay, manifest, terminalLoadoutFeedWriter, terminalControl };
     relay.start();

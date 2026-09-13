@@ -36,6 +36,14 @@ import {
   type MobileBridgeRequestReplayStore,
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
+import {
+  RELAY_PAIR_CODE_PLACEHOLDER,
+  parseRelayPairRequestFrame,
+  relayPairMacMatches,
+  relayPairRefusedFrame,
+  relayPairRequestMac,
+  relayPairResponseFrame,
+} from "./relay-pairing";
 import type { MobileBridgeRevocationCause } from "./pairing";
 
 // `ws` is currently present only as a transitive dependency of @google/genai.
@@ -146,11 +154,15 @@ export interface MobileBridgeAuthenticatedDevice {
 
 export interface MobileBridgePairingAuthority {
   authenticate(token: string): Promise<MobileBridgeAuthenticatedDevice | null> | MobileBridgeAuthenticatedDevice | null;
-  exchange(request: MobileBridgePairExchangeRequest): Promise<{
+  exchange(request: MobileBridgePairExchangeRequest, options?: { verifiedCodeHash?: Buffer }): Promise<{
     deviceId: string;
     token: string;
     issuedAt: string;
   }>;
+  /** 중계로 온 첫 페어링의 서명 키 — 진행 중인 QR 이 없으면 null. relay-pairing.ts 참고. */
+  relayPairingKey?(): Buffer | null;
+  /** 중계 요청 서명이 틀렸을 때 틀린 코드와 똑같이 셈한다. */
+  recordRelayPairingMismatch?(): void;
   /** Roll back a credential if post-exchange verification cannot be produced. */
   revokeDevice(deviceId: string, cause?: MobileBridgeRevocationCause): boolean;
   /**
@@ -637,18 +649,64 @@ export class AgentlasMobileBridgeServer {
       this.sendPairResponse(response, 400, parsed.error);
       return;
     }
+    const outcome = await this.completePairExchange(this.pairing, parsed.value, request.socket.remoteAddress ?? null);
+    this.sendPairResponse(response, outcome.status, outcome.payload);
+  }
+
+  /**
+   * 중계로 들어온 첫 페어링 요청 한 프레임을 처리하고, 폰에 돌려줄 한 프레임을 만든다.
+   * LAN 창구와 같은 교환 본체를 쓰고, 달라지는 것은 코드 대신 서명으로 확인한다는 점뿐이다.
+   */
+  async handleRelayPairFrame(frameText: string): Promise<string> {
+    const pairing = this.pairing;
+    const key = pairing?.relayPairingKey?.() ?? null;
+    if (!pairing || !key) return relayPairRefusedFrame("pairing_unavailable");
+    // LAN 창구와 같은 분당 상한. 중계로 오는 요청은 주소가 전부 중계라 한 칸으로 센다.
+    if (!this.consumePairAttempt("relay")) return relayPairRefusedFrame("pairing_unavailable");
+    const frame = parseRelayPairRequestFrame(frameText);
+    if (!frame) return relayPairRefusedFrame("invalid_pairing_request");
+    if (!relayPairMacMatches(relayPairRequestMac(key, frame.body), frame.mac)) {
+      pairing.recordRelayPairingMismatch?.();
+      return relayPairRefusedFrame("pairing_denied");
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(frame.body);
+    } catch {
+      return relayPairRefusedFrame("invalid_pairing_request");
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || "code" in raw) {
+      return relayPairRefusedFrame("invalid_pairing_request");
+    }
+    const parsed = parseMobileBridgePairExchangeRequest({ ...raw, code: RELAY_PAIR_CODE_PLACEHOLDER });
+    const outcome = parsed.ok
+      ? await this.completePairExchange(pairing, parsed.value, "mobile-relay", key)
+      : { status: 400, payload: parsed.error };
+    return relayPairResponseFrame(key, frame.mac, outcome.status, JSON.stringify(outcome.payload));
+  }
+
+  /**
+   * 페어링 교환의 본체 — LAN 창구와 중계 창구가 같은 판정을 쓴다. 한쪽만 고치면 두 길의 결과가
+   * 달라지므로 응답을 만드는 곳은 여기 하나다.
+   */
+  private async completePairExchange(
+    pairing: MobileBridgePairingAuthority,
+    value: MobileBridgePairExchangeRequest,
+    remoteAddress: string | null,
+    verifiedCodeHash?: Buffer,
+  ): Promise<{ status: number; payload: MobileBridgePairExchangeResponse }> {
     let issuedCredential: Awaited<ReturnType<MobileBridgePairingAuthority["exchange"]>> | null = null;
     try {
       const relay = this.relayPairingInfo?.() ?? null;
-      const credential = await this.pairing.exchange(parsed.value);
+      const credential = await pairing.exchange(value, verifiedCodeHash ? { verifiedCodeHash } : undefined);
       issuedCredential = credential;
       const pairingContext: MobileBridgeConnectionContext = {
         connectionId: `pair-exchange:${credential.deviceId}`,
-        remoteAddress: request.socket.remoteAddress ?? null,
+        remoteAddress: remoteAddress,
         connectedAt: credential.issuedAt,
         deviceId: credential.deviceId,
-        deviceName: parsed.value.device.name,
-        devicePlatform: parsed.value.device.platform,
+        deviceName: value.device.name,
+        devicePlatform: value.device.platform,
         devBootstrap: false,
       };
       const seed = this.authority.pairingVerification
@@ -657,7 +715,7 @@ export class AgentlasMobileBridgeServer {
       const verification = seed
         ? {
             verificationId: `pairing_${createHash("sha256")
-              .update(`${parsed.value.id}:${credential.deviceId}:${credential.issuedAt}`)
+              .update(`${value.id}:${credential.deviceId}:${credential.issuedAt}`)
               .digest("hex")
               .slice(0, 32)}`,
             hostId: seed.hostId,
@@ -666,19 +724,19 @@ export class AgentlasMobileBridgeServer {
             sampleTaskVersion: seed.sampleTaskVersion,
           }
         : null;
-      this.sendPairResponse(response, 200, {
+      return { status: 200, payload: {
         v: MOBILE_BRIDGE_PROTOCOL_VERSION,
         type: "pair.exchange.response",
-        id: parsed.value.id,
+        id: value.id,
         ok: true,
         credential,
         ...(verification ? { verification } : {}),
         ...(relay ? { relay } : {}),
-      });
+      } };
     } catch (error) {
       if (issuedCredential) {
         try {
-          this.pairing.revokeDevice(issuedCredential.deviceId, "pairing_rollback");
+          pairing.revokeDevice(issuedCredential.deviceId, "pairing_rollback");
         } catch {
           // The original failure remains authoritative. A production pairing
           // manager persists revocation synchronously; never expose the token.
@@ -695,11 +753,10 @@ export class AgentlasMobileBridgeServer {
             : code === "assertion_replayed"
               ? 409
               : 503;
-      this.sendPairResponse(
-        response,
+      return {
         status,
-        mobileBridgePairFailure(
-          parsed.value.id,
+        payload: mobileBridgePairFailure(
+          value.id,
           code,
           code === "pairing_expired"
             ? "Pairing code expired"
@@ -715,7 +772,7 @@ export class AgentlasMobileBridgeServer {
                       ? "Mobile account assertion was already used"
                       : "Agentlas account pairing authority is unavailable",
         ),
-      );
+      };
     }
   }
 

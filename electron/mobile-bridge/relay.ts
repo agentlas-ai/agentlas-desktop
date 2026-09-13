@@ -71,6 +71,11 @@ export interface MobileBridgeCloudRelayOptions {
   localEndpoint: string;
   certificateDer: string;
   onStatusChanged?: () => void;
+  /**
+   * 중계로 들어온 첫 페어링 요청 한 프레임 → 폰에 돌려줄 한 프레임. relay-pairing.ts 참고.
+   * 없으면 중계 페어링 신호를 무시한다(폰은 제한 시간 뒤 실패로 끝난다).
+   */
+  onPairFrame?: (frameText: string) => Promise<string>;
 }
 
 function relayFilePath(userDataPath: string): string {
@@ -346,6 +351,11 @@ export class MobileBridgeCloudRelay {
     try { parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)); } catch { return; }
     if (!parsed || typeof parsed !== "object") return;
     const message = parsed as Record<string, unknown>;
+    if (message.type === "relay.pair") {
+      if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
+      this.openPairTunnel(message.channelId);
+      return;
+    }
     if (message.type !== "relay.device") return;
     if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
     if (typeof message.deviceToken !== "string" || !TOKEN_PATTERN.test(message.deviceToken)) return;
@@ -363,6 +373,59 @@ export class MobileBridgeCloudRelay {
     if (!this.repairRequiredRefusal) return;
     this.repairRequiredRefusal = null;
     console.info("[mobile-bridge-relay] re-pairing latch cleared; tunnels may open again");
+  }
+
+  /**
+   * 첫 페어링 한 번을 위한 터널. 폰의 요청 한 프레임을 받아 페어링 창구에 넘기고, 응답 한
+   * 프레임을 돌려준 뒤 닫는다. 로컬 브리지로 이어 붙이지 않는다 — 아직 기기 토큰이 없다.
+   */
+  private openPairTunnel(channelId: string): void {
+    const onPairFrame = this.options.onPairFrame;
+    const cookie = getSessionCookieHeader();
+    if (!onPairFrame || !cookie || this.stopped) return;
+    const cloud = new RelayWebSocket(relayUrl(this.endpoint, {
+      role: "tunnel",
+      hostId: this.options.hostId,
+      channelId,
+    }), {
+      headers: { Cookie: cookie, "x-agentlas-relay-secret": this.secret },
+      handshakeTimeout: 8_000,
+      perMessageDeflate: false,
+    });
+    this.tunnels.add(cloud);
+    let handled = false;
+    let finished = false;
+    const finish = (why: string) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      this.tunnels.delete(cloud);
+      console.info(`[mobile-bridge-relay] pairing tunnel ${channelId} closed: ${why}`);
+      if (cloud.readyState === WS_OPEN) cloud.close(1000, "pairing done");
+    };
+    const timer = setTimeout(() => finish("no pairing request arrived in time"), 30_000);
+    timer.unref?.();
+    cloud.on("open", () => console.info(`[mobile-bridge-relay] pairing tunnel ${channelId} opened`));
+    cloud.on("message", (data, isBinary) => {
+      if (handled) return;
+      handled = true;
+      if (isBinary || rawBytes(data) > 64 * 1024) {
+        finish("pairing request frame rejected");
+        return;
+      }
+      const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+      void onPairFrame(text)
+        .then((reply) => {
+          if (cloud.readyState === WS_OPEN) cloud.send(reply);
+          finish("pairing reply sent");
+        })
+        .catch((error) => finish(`pairing handler failed: ${error instanceof Error ? error.message : String(error)}`));
+    });
+    cloud.on("close", () => finish("relay side closed"));
+    cloud.on("error", (error) => finish(`relay side failed: ${error instanceof Error ? error.message : String(error)}`));
+    cloud.on("unexpected-response", (_request, response) =>
+      finish(`relay refused the pairing tunnel (HTTP ${upgradeStatus(response)})`),
+    );
   }
 
   private openTunnel(channelId: string, deviceToken: string): void {

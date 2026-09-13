@@ -742,11 +742,39 @@ export class MobileBridgePairingManager {
   }
 
   /**
+   * 중계로 들어오는 첫 페어링의 서명 키 (2026-09-13).
+   *
+   * 폰이 다른 네트워크에 있으면 QR 의 LAN 주소로 요청을 못 보낸다. 그래서 요청이 우리 중계를
+   * 지나는데, 중계가 요청·응답을 바꿔치지 못하게 둘이 서명한다. 둘만 아는 값은 QR 코드뿐이고
+   * 메모리에는 그 SHA-256 만 남아 있으므로 키는 sha256(code) 다. 폰은 코드를 중계에 보내지 않는다.
+   */
+  relayPairingKey(): Buffer | null {
+    const challenge = this.activeChallenge;
+    if (!challenge || this.now().getTime() >= challenge.expiresAtMs) return null;
+    return Buffer.from(challenge.codeHash);
+  }
+
+  /** 중계 요청의 서명이 틀렸다 — 틀린 코드와 똑같이 셈해 반복 시도를 막는다. */
+  recordRelayPairingMismatch(): void {
+    const challenge = this.activeChallenge;
+    if (!challenge) return;
+    challenge.attempts += 1;
+    if (challenge.attempts >= this.maxAttempts) {
+      this.activeChallenge = null;
+      this.clearChallengeTimer();
+      this.emitChanged("challenge-invalidated");
+    }
+  }
+
+  /**
    * DESKTOP_MOBILE_BRIDGE: A challenge expires after two minutes, is consumed
    * before disk writes, and is invalidated after bounded wrong attempts. The
    * plaintext device token is returned once and only its hash is persisted.
    */
-  async exchange(request: MobileBridgePairExchangeRequest): Promise<MobileBridgeIssuedCredential> {
+  async exchange(
+    request: MobileBridgePairExchangeRequest,
+    options: { verifiedCodeHash?: Buffer } = {},
+  ): Promise<MobileBridgeIssuedCredential> {
     const challenge = this.activeChallenge;
     if (!challenge) {
       throw new MobileBridgePairingError("pairing_unavailable", "Pairing is not currently available");
@@ -758,7 +786,11 @@ export class MobileBridgePairingManager {
       this.emitChanged("challenge-expired");
       throw new MobileBridgePairingError("pairing_expired", "Pairing code has expired");
     }
-    const matches = timingSafeEqual(challenge.codeHash, hashSecret(request.code));
+    // 중계로 온 요청은 코드 대신 코드 해시로 서명돼 있다. 서명 검증에 쓴 해시를 그대로 대조한다.
+    const verified = options.verifiedCodeHash;
+    const matches = verified
+      ? verified.length === challenge.codeHash.length && timingSafeEqual(challenge.codeHash, verified)
+      : timingSafeEqual(challenge.codeHash, hashSecret(request.code));
     if (!matches) {
       challenge.attempts += 1;
       if (challenge.attempts >= this.maxAttempts) {
