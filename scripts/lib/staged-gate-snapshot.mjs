@@ -408,6 +408,30 @@ export function runIndexGates(root) {
     }
   }
   const privateGates = [...privateBytes.values()].map(({ entry }) => entry);
+  // 같은 이유로, 그 게이트들이 읽는 형제 저장소 파일(허용된 범위만)도 목록 없이 지금 바이트로 복사한다.
+  // 없으면 스냅샷 안에서 ../mobile/... 을 못 찾아, 직접 돌리면 통과하는 게이트가 커밋 때만 실패했다.
+  const externalTargets = new Set(externalDependencies.map((entry) => entry.target));
+  const siblingReference = /\.\.\/(?:mobile|agentlas_terminal|docs)\/[A-Za-z0-9_./-]+/g;
+  for (const { bytes } of privateBytes.values()) {
+    for (const target of new Set(bytes.toString("utf8").match(siblingReference) || [])) {
+      if (externalTargets.has(target)) continue;
+      try {
+        validateExternalTarget(target);
+      } catch {
+        continue;
+      }
+      const source = path.resolve(root, target);
+      let stat;
+      try {
+        stat = fs.lstatSync(source);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile() || fs.realpathSync(source) !== source) continue;
+      externalDependencies.push({ target, kind: "file", source, sha256: sha256(fs.readFileSync(source)) });
+      externalTargets.add(target);
+    }
+  }
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-index-gates-")));
   const externalRoots = new Set();
   try {
