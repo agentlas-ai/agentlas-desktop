@@ -220,13 +220,27 @@ export function observedClaudeModelId(modelUsage: unknown): string | null {
   return best ? best.id : null;
 }
 
+/** 헤드리스 쓰기 실행에 허용하는 임시 폴더 — OS 임시 폴더와 Claude CLI 자체 스크래치(/tmp). */
+export function claudeScratchDirArgs(): string[] {
+  const dirs = new Set<string>();
+  for (const candidate of [os.tmpdir(), "/tmp"]) {
+    if (candidate && path.isAbsolute(candidate)) dirs.add(candidate);
+  }
+  return [...dirs].flatMap((dir) => ["--add-dir", dir]);
+}
+
 export function claudePermissionArgs(
   permission: RunnerRequest["permission"],
   opts: { browserOnly?: boolean; untrustedNoTools?: boolean } = {},
 ): string[] {
   if (opts.browserOnly || opts.untrustedNoTools) return [];
   if (permission === "full") return ["--permission-mode", "bypassPermissions"];
-  if (permission === "write") return ["--permission-mode", "acceptEdits"];
+  if (permission === "write") {
+    // 쓰기 실행은 프로젝트 폴더 밖 임시 파일(/tmp/claude-<uid>/…, TMPDIR)을 쓰려다 "requested permissions
+    // to write … but you haven't granted it yet" 로 헤드리스 거절을 맞았다(Science 연구 실측 2026-09-13,
+    // 프로덕션과 격리 앱 모두). 임시 폴더는 사용자 콘텐츠가 아니므로 추가 작업 폴더로 허용한다.
+    return ["--permission-mode", "acceptEdits", ...claudeScratchDirArgs()];
+  }
   return ["--disallowed-tools", ...READ_ONLY_DENIED_TOOLS];
 }
 
