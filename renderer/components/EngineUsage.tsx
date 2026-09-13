@@ -14,6 +14,7 @@ import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
+import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -321,6 +322,8 @@ export function EngineUsage() {
     });
   }, [loadConnections]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
+  // 로컬 묶음은 엔진 카드가 아니라 설치된 모델 카드(한 행 두 장)를 그린다 — 2026-09-13.
+  const localModels = useLocalModelSnapshot();
 
   // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(15초 × 12 = 3분).
   const pollGen = useRef(0);
@@ -735,10 +738,13 @@ export function EngineUsage() {
               >
                 <span className="dashboard-engine-group-chevron" data-collapsed={collapsed ? "true" : "false"} aria-hidden="true">▾</span>
                 <span className="dashboard-engine-group-label">{group.label}</span>
-                <span className="dashboard-engine-group-count">{connectedCount}/{group.engines.length}</span>
+                <span className="dashboard-engine-group-count" title={group.key === "local" ? (ko ? "사용 중 / 설치됨" : "in use / installed") : undefined}>{group.key === "local"
+                  ? `${localModels.snapshot?.resident ? 1 : 0}/${localModels.snapshot?.modelInstallations.length ?? 0}`
+                  : `${connectedCount}/${group.engines.length}`}</span>
               </button>
-              {!collapsed && (
-                <div className="dashboard-engine-grid">
+              {!collapsed && (group.key === "local"
+                ? <LocalModelMiniCards ko={ko} snapshot={localModels.snapshot} refresh={localModels.refresh} />
+                : <div className="dashboard-engine-grid">
                   {group.engines.map((e) => renderEngineCard(e))}
                 </div>
               )}

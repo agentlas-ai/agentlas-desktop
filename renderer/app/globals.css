@@ -2008,6 +2008,33 @@ button[data-dashboard-import="true"]:disabled {
   background: var(--dash-surface);
 }
 
+/* 로컬 모델 미니 카드 — 가로형, 글자는 이름·메타뿐. 근거는 title 로. (2026-09-13) */
+.dashboard-local-model-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 52px;
+  padding: 9px 12px 9px 13px;
+  border: 1px solid var(--dash-line);
+  border-radius: 14px;
+  background: var(--dash-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.dashboard-local-model-card[data-active="true"] { border-color: color-mix(in oklch, var(--dash-teal-2) 30%, var(--dash-line)); }
+button.dashboard-local-model-card { cursor: pointer; }
+button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--dash-surface) 92%, var(--dash-teal-2)); }
+.dashboard-local-model-main { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dashboard-local-model-name { font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dashboard-local-model-meta { font-size: 11px; color: var(--dash-muted, var(--muted-deep)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dashboard-local-model-use { flex: none; padding: 5px 11px; border: 1px solid var(--dash-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.dashboard-local-model-use:hover { border-color: var(--dash-teal-2); }
+.dashboard-local-model-use:disabled { opacity: .45; cursor: default; }
+.dashboard-local-model-arrow { margin-left: auto; color: var(--dash-muted, var(--muted-deep)); }
+.dashboard-local-model-card[data-empty="true"] { justify-content: space-between; }
+
 .dashboard-engine-card[data-connected="true"] {
   border-color: color-mix(in oklch, var(--dash-teal-2) 30%, var(--dash-line));
 }
