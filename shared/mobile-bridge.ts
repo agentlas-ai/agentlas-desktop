@@ -1069,8 +1069,8 @@ export interface MobileBridgeProjectDto {
   id: string;
   name: string;
   description: string | null;
-  sourceType: "local" | "github" | "sample";
-  /** Safe source identity only: folder basename, repository host/path, or sample id. */
+  sourceType: "local" | "github" | "empty" | "sample";
+  /** Safe source identity only: local/managed folder basename, repository host/path, or sample id. */
   sourceLabel: string | null;
   systemPrompt: string | null;
   agentPool: Array<{

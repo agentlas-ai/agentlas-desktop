@@ -687,7 +687,7 @@ function firmsDto(): MobileBridgeFirmDto[] {
 }
 
 function projectSourceLabel(project: ReturnType<typeof listProjects>[number]): string | null {
-  if (project.sourceType === "local") {
+  if (project.sourceType === "local" || project.sourceType === "empty") {
     return project.folderPath ? displayText(path.basename(project.folderPath), 512) : null;
   }
   if (!project.sourceRef?.trim()) return null;
