@@ -1953,7 +1953,7 @@ export class InvocationService {
           event = { ...event, text: stripPermissionEscalationMarker(event.text) };
         }
         // 형식을 안 지킨 맨 프로토콜 토큰(<<agentlas-goal-wait>> 등)은 사람에게 보여줄 문장이 아니다 — 최종 본문에서 지운다.
-        if (!event.agentId && event.kind === "final" && typeof event.text === "string" && event.text.includes("<<agentlas-")) {
+        if (!event.agentId && event.kind === "final" && typeof event.text === "string" && event.text.includes("<<")) {
           event = { ...event, text: stripStrayProtocolTokens(event.text) };
         }
         /*

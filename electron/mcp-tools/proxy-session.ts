@@ -73,7 +73,11 @@ function graphAllows(gate: Readonly<Gate>, tool: string): boolean {
 export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.ServerResponse, policy: Policy): void {
   const handle = (req.url ?? "").slice("/bridge/".length);
   const registration = launches.get(handle), candidate = registration?.binding;
-  if (!registration || !candidate || !/^[a-f0-9-]{36}$/.test(handle)) { res.writeHead(403).end("mcp_proxy_launch_unapproved"); return; }
+  if (!registration || !candidate || !/^[a-f0-9-]{36}$/.test(handle)) {
+    // 실측(2026-09-14): 컴퓨터 유즈가 한 앱 세션 안에서 35번 "not connected" 였는데 앱 로그엔 프록시 줄이 0건이었다.
+    console.warn(`[mcp-proxy] bridge refused handle=${handle.slice(0, 8)} reason=${!registration ? "launch_unknown_or_expired" : !candidate ? "launch_not_activated" : "handle_invalid"}`);
+    res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
+  }
   const entry = registration, binding: PreparedMcpBinding = candidate, gate = entry.gate, lifetime = new AbortController();
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
@@ -92,8 +96,10 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       || stat.dev !== entry.cwd.dev || stat.ino !== entry.cwd.ino) throw new Error("mcp_proxy_cwd_changed");
     fs.accessSync(entry.cwd.path, fs.constants.R_OK | fs.constants.X_OK);
   };
-  const close = () => {
+  const close = (cause?: unknown) => {
     if (closed) return; closed = true; clearInterval(revalidate);
+    const reason = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : initialized ? "wire_closed" : "closed_before_initialize";
+    console.warn(`[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`);
     lifetime.abort(new Error("mcp_proxy_closed"));
     for (const pending of internal.values()) { pending.cleanup(); pending.reject(new Error("mcp_proxy_closed")); } internal.clear();
     for (const pending of native.values()) { pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
@@ -102,9 +108,10 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     entry.connections.delete(close); if (!entry.connections.size) expireUnused(handle, entry);
     req.destroy(); res.destroy();
   };
-  const revalidate = setInterval(() => { try { validate(); } catch { close(); } }, 1000); revalidate.unref?.();
+  const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error); } }, 1000); revalidate.unref?.();
   entry.connections.add(close); if (entry.timer) clearTimeout(entry.timer);
-  req.on("aborted", close); req.on("end", close); req.on("error", close); res.on("close", close); res.on("error", close);
+  req.on("aborted", () => close("wire_aborted")); req.on("end", () => close("wire_ended")); req.on("error", (error) => close(error));
+  res.on("close", () => close("wire_response_closed")); res.on("error", (error) => close(error));
   const down = (frame: Frame) => {
     if (closed) return;
     const line = JSON.stringify(frame) + "\n";
@@ -195,7 +202,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   req.pause();
   void (async () => {
     validate(); transport = await createPreparedMcpTargetTransport(binding, lifetime.signal, entry.cwd.path); validate();
-    transport.onclose = close; transport.onerror = close;
+    transport.onclose = () => close("upstream_transport_closed"); transport.onerror = (error) => close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error");
     transport.onmessage = message => {
       const frame = message as Frame;
       if (closed) return;

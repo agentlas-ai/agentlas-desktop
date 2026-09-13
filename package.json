@@ -231,6 +231,7 @@
     "test:sandbox-death-boundary": "node scripts/local/qa-sandbox-death-is-a-permission-boundary.cjs",
     "test:write-sandbox-launch-guard": "node scripts/local/qa-write-sandbox-launch-guard.cjs",
     "test:goal-loop-no-progress": "node scripts/local/qa-goal-loop-no-progress-fingerprint.cjs",
+    "test:last-round-question-mcp-outage": "node scripts/local/qa-last-round-question-and-mcp-outage.cjs",
     "test:session-continuity": "node scripts/local/session-continuity-contract.cjs",
     "test:runtime-sign-in-honesty": "node scripts/local/runtime-sign-in-honesty-contract.cjs",
     "test:one-transcript-monotonic": "node scripts/local/one-transcript-monotonic-contract.cjs",

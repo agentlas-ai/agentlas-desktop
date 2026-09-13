@@ -282,13 +282,30 @@ export function commitPendingConfirmationAnswer(
   sourceMessageId?: string,
   continuation?: QuestionContinuationOptions,
 ): { chatId: string; sourceMessageId: string; continuationRunId: string } {
+  /*
+   * 질문이 "마지막 메시지"여야 한다는 규칙이 답을 버리고 있었다(라운드 3 실측 2026-09-14, app-stdout:
+   * `confirm:commitAnswer … Question is stale or no longer pending` ×3). 목표 연속 실행이 질문 뒤에
+   * "아직 답을 기다린다"는 말풍선을 붙이면 질문은 더 이상 마지막이 아니었고, 사람이 고른 답은 만료로 버려졌다.
+   * 질문은 그 뒤에 **사용자** 메시지가 없고 아직 확정 답이 없는 한 살아 있다.
+   */
   const last = getLastChatMessage(chatId);
+  const source: { id: string; role: string; text: string; createdAt: string } | null = sourceMessageId && last?.id !== sourceMessageId
+    ? (() => {
+        const row = getDb().prepare("SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id = ?")
+          .get(chatId, sourceMessageId) as { id: string; role: string; text: string; created_at: string } | undefined;
+        return row ? { id: row.id, role: row.role, text: row.text, createdAt: row.created_at } : null;
+      })()
+    : last;
+  const answeredByUserLater = source && last?.id !== source.id
+    ? Boolean(getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1")
+        .get(chatId, source.createdAt))
+    : false;
   if (
-    !last ||
-    (sourceMessageId && last.id !== sourceMessageId) ||
-    last.role !== "assistant" ||
-    !last.text.includes(OPEN) ||
-    !firstQuestion(last.text)
+    !source ||
+    answeredByUserLater ||
+    source.role !== "assistant" ||
+    !source.text.includes(OPEN) ||
+    !firstQuestion(source.text)
   ) {
     throw new Error("Question is stale or no longer pending");
   }
@@ -298,21 +315,21 @@ export function commitPendingConfirmationAnswer(
     throw new Error(`Decision response exceeds the ${QUESTION_CONTINUATION_REPLY_MAX_LENGTH} character limit`);
   }
   const existing = listCommittedQuestionAnswers(chatId)
-    .filter((receipt) => receipt.sourceMessageId === last.id)
+    .filter((receipt) => receipt.sourceMessageId === source.id)
     .at(-1);
   if (existing) {
     // The renderer can lose the IPC reply after Main committed it. Retrying the
     // exact answer is acknowledgement recovery, not a second user decision.
     if (existing.reply !== normalizedReply) throw new Error("This question answer was already accepted");
     if (existing.continuationRunId) {
-      claimedQuestionMessages.add(`${chatId}\0${last.id}`);
-      return { chatId, sourceMessageId: last.id, continuationRunId: existing.continuationRunId };
+      claimedQuestionMessages.add(`${chatId}\0${source.id}`);
+      return { chatId, sourceMessageId: source.id, continuationRunId: existing.continuationRunId };
     }
   }
-  if (!existing && claimedQuestionMessages.has(`${chatId}\0${last.id}`)) {
+  if (!existing && claimedQuestionMessages.has(`${chatId}\0${source.id}`)) {
     throw new Error("This question answer was already accepted");
   }
-  const continuationRunId = questionContinuationRunId(chatId, last.id);
+  const continuationRunId = questionContinuationRunId(chatId, source.id);
   const request = continuationRequest(chatId, normalizedReply, continuation);
   const normalizedContinuation = normalizeContinuationOptions(continuation);
   // Unlike the Mobile helper's best-effort diagnostic write, Desktop commit is
@@ -322,7 +339,7 @@ export function commitPendingConfirmationAnswer(
     kind: ANSWER_RECEIPT_KIND,
     chatId,
     payload: {
-      sourceMessageId: last.id,
+      sourceMessageId: source.id,
       [CANONICAL_REPLY_FIELD]: Buffer.from(normalizedReply, "utf8").toString("base64"),
       continuationReplySha256: continuationReplySha256(normalizedReply),
       continuationRunId,
@@ -335,29 +352,29 @@ export function commitPendingConfirmationAnswer(
       continuationRequestHash: continuationRequestHash(request),
     },
   });
-  claimedQuestionMessages.add(`${chatId}\0${last.id}`);
+  claimedQuestionMessages.add(`${chatId}\0${source.id}`);
   invalidatePendingConfirmationsCache();
   // A committed user answer is the real approval-resolution boundary. This
   // evidence does not imply that an external action or outcome subsequently ran.
   const task = ensureCanonicalTaskForChat(chatId);
   if (task) {
     tryRecordOneDomainEvent({
-      eventId: approvalEventId(last.id),
+      eventId: approvalEventId(source.id),
       eventType: "approval.resolved",
       actor: "user",
-      entityId: decisionEntityId(last.id),
+      entityId: decisionEntityId(source.id),
       ...(task.projectId ? { projectId: task.projectId } : {}),
       taskId: task.id,
       version: 1,
       visibility: task.projectId ? "project" : "personal",
       entries: [
-        { name: "decisionId", value: last.id },
+        { name: "decisionId", value: source.id },
         { name: "selectedOption", value: decisionOptionRef(normalizedReply) },
         { name: "actor", value: "user" },
       ],
     });
   }
-  return { chatId, sourceMessageId: last.id, continuationRunId };
+  return { chatId, sourceMessageId: source.id, continuationRunId };
 }
 
 /** Main-only exact request bound to the accepted source question and answer. */

@@ -22,6 +22,7 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
 import { detectSandboxDeath, detectSandboxLaunchDenial, sandboxDeathNotice, sandboxLaunchDenialNotice } from "./sandbox-death";
 import { writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
+import { detectMcpServerDisconnected, mcpOutageNotice, toolOutageGuidance } from "./mcp-outage";
 import { announceToolDenied } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
@@ -851,7 +852,7 @@ const runClaudeTurn = async (
       : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
-    : systemPrompt) + readOnlyToolNotice + writeSandboxNotice;
+    : systemPrompt) + readOnlyToolNotice + writeSandboxNotice + (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale));
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -1374,7 +1375,21 @@ const runClaudeTurn = async (
      * (전체 액세스에는 샌드박스가 없으니 거기서의 132 는 진짜 기계 문제다 — 부르지 않는다.)
      */
     const sandboxActive = Boolean(executionSettings) && req.permission === "write";
+    /*
+     * 끊긴 MCP 서버(실측: 컴퓨터 유즈 35건 "is not connected")는 이 턴 안에서 못 살린다 — 사람에게 한 번 말하고,
+     * 앱 로그에 남긴다. 모델 쪽은 시스템 프롬프트 꼬리(toolOutageGuidance)가 "반복하지 말고 끝내라"를 맡는다.
+     */
+    const announcedOutages = new Set<string>();
+    const announceMcpOutage = (resultText: string): void => {
+      const outage = detectMcpServerDisconnected(resultText);
+      if (!outage || announcedOutages.has(outage.serverKey)) return;
+      announcedOutages.add(outage.serverKey);
+      console.warn(`[mcp-proxy] tool result reports server disconnected server=${outage.serverKey} chat=${runReq.chatId ?? "-"}`);
+      const notice = mcpOutageNotice(outage.serverKey, runReq.locale);
+      events.onNotice?.({ level: "warning", code: "mcp-server-disconnected", message: notice.message, i18n: { ko: notice.ko, en: notice.en } });
+    };
     const announceSandboxDeath = (resultText: string, toolId?: string): void => {
+      announceMcpOutage(resultText);
       if (!sandboxActive) return;
       const call = toolId ? toolCallById.get(toolId) : undefined;
       if (call && call.name !== "Bash") return;
