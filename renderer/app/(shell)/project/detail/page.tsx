@@ -654,7 +654,9 @@ function ProjectPage() {
     setTeamSaveError("");
     try {
       const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
-      setProject(updated);
+      // 읽기 경로(refresh)와 같은 필터를 건다 — 저장 직후엔 main 이 돌려준 원본 풀을 그대로 두어
+      // 배경/비공개 HQ 칸이 카드로 되살아났다(2026-09-13 조사: "지운 행이 돌아온다").
+      setProject({ ...updated, agentPool: (updated.agentPool ?? []).filter((member) => isUserFacingProjectPoolMember(member, agents)) });
       setEditingTeam(false);
       setRecoveryPending(false);
     } catch (error) {
@@ -1246,7 +1248,7 @@ function ProjectPage() {
                 disabled={editingTeam}
                 title={editingTeam ? (locale === "ko" ? "현재 도구 편집을 먼저 저장하거나 취소하세요." : "Save or cancel the current tool edits first.") : undefined}
                 onClick={() => void openHubRecommendations()}
-                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 30, padding: "0 9px", border: "1px solid color-mix(in srgb, var(--accent) 30%, var(--paper-edge))", borderRadius: 8, background: "color-mix(in srgb, var(--accent) 5%, var(--paper))", color: "var(--accent)", fontSize: 11.5, fontWeight: 720 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 30, padding: "0 9px", border: "1px solid color-mix(in srgb, var(--accent) 30%, var(--paper-edge))", borderRadius: 8, background: "var(--black, #111)", color: "var(--white, #fff)", fontSize: 11.5, fontWeight: 720 }}
               >
                 <IconSparkles size={13} />
                 {locale === "ko" ? "Hub 추천" : "Recommend from Hub"}

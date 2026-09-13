@@ -221,6 +221,9 @@ export default function NewProjectPage() {
   }
 
   function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, kind: "candidate" | "member", id: string) {
+    // 행 안의 버튼("제거" 등)에서 시작한 누름은 드래그가 아니다. 여기서 포인터를 잡아 두면
+    // 버튼의 click 이 행으로 넘어가 아무 일도 안 일어난다(오너 신고 2026-09-13: 프로젝트 도구 제거 무반응).
+    if ((event.target as HTMLElement | null)?.closest("button, a, input, select, textarea")) return;
     pointerDragRef.current = { kind, id, startX: event.clientX, startY: event.clientY };
     if (kind === "candidate") setDraggedCandidateKey(id);
     else setDraggedMemberKey(id);
@@ -486,7 +489,7 @@ export default function NewProjectPage() {
                               order that changes nothing. */}
                           <span className="project-agent-order" aria-hidden="true">·</span>
                           <span className="project-team-create-copy"><strong>{member.nameSnapshot}</strong><small>{ko ? "프로젝트 도구 · 필요할 때 호출" : "Project tool · invoked when needed"}</small></span>
-                          <span className="project-team-create-actions">
+                          <span className="project-team-create-actions" onPointerDown={(event) => event.stopPropagation()}>
                             <button type="button" onClick={() => setAgentPool((current) => current.filter((item) => projectPoolMemberKey(item) !== key))}>{ko ? "제거" : "Remove"}</button>
                           </span>
                         </div>
