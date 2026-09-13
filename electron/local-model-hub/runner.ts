@@ -8,11 +8,11 @@ import { LocalModelHubManager } from "./manager";
  * only after detect exposes the resident receipt as an available runtime.
  */
 export function createManagedLocalModelRunner(manager: LocalModelHubManager): Runner {
-  const runner = makeLocalOpenAiRunner(() => manager.endpoint(), "agentlas-local", {
+  const makeRunner = (acceptsImageResults: boolean) => makeLocalOpenAiRunner(() => manager.endpoint(), "agentlas-local", {
     chatTemplateKwargs: { enable_thinking: false },
     headersFn: () => manager.authorizationHeaders(),
-    // The managed loader starts a text GGUF without a vision projector: tool screenshots stay text-only.
-    acceptsImageResults: false,
+    // 비전 프로젝터(mmproj)가 붙어 로드된 모델만 도구 스크린샷을 본다. 텍스트 GGUF 는 텍스트 전용.
+    acceptsImageResults,
     // Tool agents need determinism more than variety; llama-server's default 0.8 made the same task
     // succeed or fail run to run (isolated app measurement 2026-09-13).
     temperature: 0.2,
@@ -22,16 +22,20 @@ export function createManagedLocalModelRunner(manager: LocalModelHubManager): Ru
       return receipt.contextTokens;
     },
   });
+  const textRunner = makeRunner(false);
+  const visionRunner = makeRunner(true);
   return async (request, events) => {
     const installation = manager.residentInstallation();
     if (request.model !== installation.fileName) {
       throw new Error("resident_model_selection_mismatch");
     }
-    // The managed loader currently starts a text GGUF without a vision
-    // projector. An OpenAI-compatible image envelope does not add that support.
-    // Refuse before inference/receipts; never discard attachments or pretend
-    // the selected model processed them.
-    if (request.images?.length) {
+    const vision = Boolean(installation.projectorFileName);
+    const runner = vision ? visionRunner : textRunner;
+    // A text GGUF loaded without a vision projector cannot process images. An
+    // OpenAI-compatible image envelope does not add that support. Refuse before
+    // inference/receipts; never discard attachments or pretend the selected
+    // model processed them.
+    if (request.images?.length && !vision) {
       return {
         text: "",
         failure: {

@@ -184,10 +184,12 @@ export function registerLocalModelHubIpc(deps: {
     for (const field of ["strictJson", "toolUse", "cancellation"] as const) {
       if (typeof input[field] !== "boolean") throw new TypeError(`invalid_local_model_${field}`);
     }
+    if (input.imageInput !== undefined && typeof input.imageInput !== "boolean") throw new TypeError("invalid_local_model_imageInput");
     const selection = {
       strictJson: input.strictJson as boolean,
       toolUse: input.toolUse as boolean,
       cancellation: input.cancellation as boolean,
+      imageInput: input.imageInput === true,
     };
     return operate(event, input, ["testCapabilities", id, selection], (signal) => deps.manager.testCapabilities(id, selection, signal));
   });

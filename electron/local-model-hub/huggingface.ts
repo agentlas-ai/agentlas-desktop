@@ -178,6 +178,20 @@ export class HuggingFaceModelIndex {
       sha256: file.sha256, license: inspection.license ?? "unknown", gated: false, creator: "unknown", converter: "unknown",
       downloadUrl: `${ORIGIN}/${repo}/resolve/${input.revision}/${file.fileName}`, sourceUrl: `${ORIGIN}/${repo}/tree/${input.revision}`,
     };
+    // 같은 저장소에 mmproj 동반 파일이 있으면 붙인다 — 같은 양자화 이름을 우선, 없으면 f16, 그다음 아무거나.
+    // 프로젝터 자체는 단독 설치 대상이 아니지만(hf_projector_unsupported), 동반으로는 sha·크기만 있으면 된다.
+    const projectors = inspection.files.filter(v => /mmproj/i.test(v.fileName) && v.sha256 && v.byteLength
+      && !v.reasonCodes.some(code => code !== "hf_projector_unsupported"));
+    const quant = (file.quantization ?? "").toUpperCase();
+    const projector = projectors.find(v => (v.quantization ?? "").toUpperCase() === quant)
+      ?? projectors.find(v => /f16/i.test(v.fileName)) ?? projectors[0] ?? null;
+    if (projector) {
+      identity.projector = {
+        packageId: `hf:${digest(JSON.stringify([repo, input.revision, projector.fileName, projector.sha256]))}`,
+        fileName: projector.fileName, byteLength: projector.byteLength!, sha256: projector.sha256!,
+        downloadUrl: `${ORIGIN}/${repo}/resolve/${input.revision}/${projector.fileName}`,
+      };
+    }
     assertLocalModelPackageIdentity(identity);
     return identity;
   }

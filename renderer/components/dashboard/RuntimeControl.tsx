@@ -214,8 +214,12 @@ export function RuntimeControl() {
   const multimodalRuntimes = useMemo(
     // The local generate_image tool has executable adapters only for these
     // two CLIs. Input-vision support on a chat model is not image generation.
+    // 로컬 모델은 비전 프로젝터(mmproj)가 붙어 이미지를 읽을 수 있을 때만 이 자리에 온다
+    // (오너 2026-09-13: "로컬 멀티모달 모델 있으면 등록되야함").
     () => runtimes.filter(
-      (runtime) => runtime.kind === "codex" || runtime.kind === "antigravity",
+      (runtime) => runtime.kind === "codex" || runtime.kind === "antigravity"
+        || (runtime.kind === "agentlas-local"
+          && Object.values(runtime.allocationModelProfiles ?? {}).some((profile) => profile.supportsMultimodal === true)),
     ),
     [runtimes],
   );

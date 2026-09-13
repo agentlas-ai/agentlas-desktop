@@ -37,12 +37,11 @@ export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> 
       allocationModelProfiles: {
         [installation.fileName]: {
           contextWindow: resident.contextTokens,
-          capabilities: [],
+          // 비전 프로젝터가 붙어 로드된 모델은 이미지 입력을 받는다 — 대시보드 멀티모달 자리에 앉을 수 있다.
+          capabilities: installation.projectorFileName ? ["multimodal"] : [],
           supportsTools: snapshot.capabilityReceipts.some((receipt) =>
             receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
-          // The managed loader has no vision projector; old/imported receipts
-          // cannot make the current executable path support image input.
-          supportsMultimodal: false,
+          supportsMultimodal: Boolean(installation.projectorFileName),
         },
       },
       effort: null,

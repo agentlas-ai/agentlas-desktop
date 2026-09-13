@@ -15,7 +15,7 @@ import type {
   LocalPackageDownloadReceipt,
   LocalPackageProgress,
 } from "../../shared/local-model-hub";
-import { assertLocalModelPackageIdentity, LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
+import { assertLocalModelPackageIdentity, localModelProjectorIdentity, LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
 import {
   compatibleEnginePackage,
   localEngineCatalog,
@@ -73,6 +73,8 @@ export interface LocalCapabilityTestSelection {
   strictJson?: boolean;
   toolUse?: boolean;
   cancellation?: boolean;
+  /** 프로젝터가 붙은 모델에만 실제 이미지를 보내 본다. 없으면 not_tested. */
+  imageInput?: boolean;
 }
 
 function emptyState(): PersistedHubState {
@@ -160,6 +162,9 @@ const TOOL_USE_PROBES: ReadonlyArray<{ user: string; expect: string; check: (arg
   { user: "Create a file named hello.txt in the project folder containing the text hi.", expect: "write_file", check: (args) => /hello\.txt$/.test(String((args as { path?: unknown })?.path ?? "")) && typeof (args as { content?: unknown })?.content === "string" },
   { user: "Count how many files are in the project folder.", expect: "run_shell", check: (args) => typeof (args as { command?: unknown })?.command === "string" && (args as { command: string }).command.length > 0 },
 ];
+
+/** 32×32 단색 빨강 PNG — 이미지 입력 능력 검사용. 모델이 "red" 라고 답하면 프로젝터가 실제로 작동한 것이다. */
+const RED_SQUARE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAJ0lEQVR42u3NsQkAAAjAsP7/tF7hIASyp6lTCQQCgUAgEAgEgi/BAjLD/C5w/SM9AAAAAElFTkSuQmCC";
 
 export class LocalModelHubManager {
   private readonly packageRoot: string;
@@ -451,6 +456,19 @@ export class LocalModelHubManager {
     });
     this.state.downloadReceipts = bounded([...this.state.downloadReceipts, result.receipt]);
     await this.save();
+    // 비전 프로젝터 동반 파일은 본체 뒤에 같은 절차로 받는다. 실패하면 본체 영수증이 아니라 이 영수증이 실패로 남는다.
+    const projector = localModelProjectorIdentity(identity);
+    if (projector && result.receipt.state === "verified") {
+      signal?.throwIfAborted();
+      const projectorResult = await this.downloader.download(projector, "model", {
+        signal,
+        fetchImpl: this.fetchImpl,
+        onProgress: (progress) => this.progress.set(packageId, { ...progress, packageId }),
+      });
+      this.state.downloadReceipts = bounded([...this.state.downloadReceipts, projectorResult.receipt]);
+      await this.save();
+      if (projectorResult.receipt.state !== "verified") return projectorResult.receipt;
+    }
     return result.receipt;
   }
 
@@ -503,6 +521,13 @@ export class LocalModelHubManager {
     const file = await stat(modelPath).catch(() => null);
     if (!file?.isFile() || file.size !== identity.byteLength) throw new Error("verified_model_missing");
     if (await sha256File(modelPath) !== identity.sha256) throw new Error("verified_model_sha256_mismatch");
+    const projector = localModelProjectorIdentity(identity);
+    if (projector) {
+      const projectorPath = this.downloader.verifiedPath(projector);
+      const projectorFile = await stat(projectorPath).catch(() => null);
+      if (!projectorFile?.isFile() || projectorFile.size !== projector.byteLength) throw new Error("verified_projector_missing");
+      if (await sha256File(projectorPath) !== projector.sha256) throw new Error("verified_projector_sha256_mismatch");
+    }
     // Stop may arrive during the file hash. Refuse the installation before its durable commit.
     signal?.throwIfAborted();
     const compatible = compatibleEnginePackage();
@@ -521,6 +546,8 @@ export class LocalModelHubManager {
       enginePackageId: engineInstalled?.enginePackageId ?? null,
       installedAt: new Date().toISOString(),
       source,
+      projectorFileName: projector?.fileName ?? null,
+      projectorSha256: projector?.sha256 ?? null,
     };
     this.state.modelInstallations = bounded([
       ...this.state.modelInstallations.filter((item) => item.modelPackageId !== packageId),
@@ -569,6 +596,15 @@ export class LocalModelHubManager {
     const modelPath = this.downloader.verifiedPath(model);
     await this.installer.verifyRuntimeFiles(compatible.item, engineReceipt);
     if (await sha256File(modelPath) !== model.sha256) throw new Error("model_file_sha256_mismatch");
+    // 비전 프로젝터: 설치 영수증과 패키지 정체성이 같은 파일을 가리켜야 --mmproj 로 붙인다.
+    const projectorIdentity = localModelProjectorIdentity(model);
+    let projectorPath: string | null = null;
+    if (installation.projectorFileName) {
+      if (!projectorIdentity || projectorIdentity.fileName !== installation.projectorFileName
+        || projectorIdentity.sha256 !== installation.projectorSha256) throw new Error("projector_installation_identity_mismatch");
+      projectorPath = this.downloader.verifiedPath(projectorIdentity);
+      if (await sha256File(projectorPath) !== projectorIdentity.sha256) throw new Error("projector_file_sha256_mismatch");
+    }
 
     if (this.activeInference.size > 0) throw new Error("local_model_runs_active");
     await this.terminateResidentProcess();
@@ -598,6 +634,7 @@ export class LocalModelHubManager {
       // 2026-09-13: ~24 KB per load, ~3 KB per request, no prompt text).
       const child = this.spawnImpl(executable, [
         "--model", modelPath,
+        ...(projectorPath ? ["--mmproj", projectorPath] : []),
         "--host", "127.0.0.1",
         "--port", String(port),
         "--ctx-size", String(contextTokens),
@@ -975,10 +1012,31 @@ export class LocalModelHubManager {
       }
       if (cancellation === "failed") reasonCodes.push("cancellation_probe_failed");
     }
+    // 이미지 입력: 프로젝터가 붙은 모델에만 실제로 그림을 보내 본다 — 단색 빨강 정사각형의 색을 묻는다.
+    // 프로젝터가 없으면 not_tested 로 남긴다(텍스트 모델에 이미지를 보내는 것은 검사가 아니다).
+    let imageInput: LocalModelCapabilityReceipt["imageInput"] = "not_tested";
+    if (selection.imageInput && installation.projectorFileName) {
+      try {
+        const response = await complete({
+          messages: [{ role: "user", content: [
+            { type: "text", text: "What is the dominant color of this image? Answer with a single English color word." },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${RED_SQUARE_PNG_BASE64}` } },
+          ] }],
+          max_tokens: 16,
+        });
+        const answer = String(response.choices?.[0]?.message?.content ?? "");
+        imageInput = /red|crimson|scarlet|빨강|빨간|적색/i.test(answer) ? "verified" : "failed";
+        if (imageInput === "failed") reasonCodes.push(`image_input_probe_answer:${answer.replace(/[^\p{L}\p{N} ._-]/gu, "").slice(0, 60)}`);
+      } catch (error) {
+        imageInput = "failed";
+        reasonCodes.push(`image_input_probe_error:${String(error instanceof Error ? error.message : error).replace(/[^\p{L}\p{N} ._:-]/gu, "").slice(0, 80)}`);
+      }
+      if (imageInput === "failed") reasonCodes.push("image_input_probe_failed");
+    }
     if (!selection.strictJson) reasonCodes.push("strict_json_not_tested");
     if (!selection.toolUse) reasonCodes.push("tool_use_not_tested");
     if (!selection.cancellation) reasonCodes.push("cancellation_not_tested");
-    reasonCodes.push("image_input_not_tested");
+    if (imageInput === "not_tested") reasonCodes.push(installation.projectorFileName ? "image_input_not_tested" : "image_input_no_projector");
     const receipt: LocalModelCapabilityReceipt = {
       schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
       receiptId: randomUUID(),
@@ -989,7 +1047,7 @@ export class LocalModelHubManager {
       contextTokens: resident.contextTokens,
       toolUse,
       strictJson,
-      imageInput: "not_tested",
+      imageInput,
       cancellation,
       reasonCodes,
     };

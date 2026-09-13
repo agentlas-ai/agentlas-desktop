@@ -43,6 +43,19 @@ export interface LocalModelPackageIdentity {
   converter: string;
   downloadUrl: string;
   sourceUrl: string;
+  /**
+   * 같은 저장소·판의 비전 프로젝터(mmproj) 동반 파일. 있으면 이 모델은 이미지 입력을 받는
+   * 멀티모달 모델로 설치·로드된다(llama-server --mmproj). 없으면 텍스트 전용.
+   */
+  projector?: LocalModelProjectorIdentity | null;
+}
+
+export interface LocalModelProjectorIdentity {
+  packageId: string;
+  fileName: string;
+  byteLength: number;
+  sha256: string;
+  downloadUrl: string;
 }
 
 export type LocalModelFitClass =
@@ -179,6 +192,9 @@ export interface LocalModelInstallationReceipt {
   enginePackageId: string | null;
   installedAt: string;
   source: "download" | "user-import";
+  /** 설치 시 검증된 비전 프로젝터 파일. 있으면 로드 때 --mmproj 로 붙는다. */
+  projectorFileName?: string | null;
+  projectorSha256?: string | null;
 }
 
 export interface LocalModelLoadReceipt {
@@ -389,4 +405,32 @@ export function assertLocalModelPackageIdentity(value: LocalModelPackageIdentity
   ) throw new TypeError("invalid_local_model_package_identity");
   const expected = `https://huggingface.co/${value.repository}/resolve/${value.revision}/${value.fileName}`;
   if (value.downloadUrl !== expected) throw new TypeError("invalid_local_model_download_url");
+  if (value.projector !== undefined && value.projector !== null) {
+    const projector = value.projector;
+    if (
+      !validLocalPackageId(projector.packageId)
+      || projector.packageId === value.packageId
+      || !SAFE_FILE_RE.test(projector.fileName)
+      || projector.fileName === value.fileName
+      || !Number.isSafeInteger(projector.byteLength)
+      || projector.byteLength < 1
+      || !validLocalPackageSha256(projector.sha256)
+      || projector.downloadUrl !== `https://huggingface.co/${value.repository}/resolve/${value.revision}/${projector.fileName}`
+    ) throw new TypeError("invalid_local_model_projector_identity");
+  }
+}
+
+/** 프로젝터를 내려받기·검증용 독립 패키지 정체성으로 편다(같은 저장소·판, 자기 packageId·자기 파일). */
+export function localModelProjectorIdentity(model: LocalModelPackageIdentity): LocalModelPackageIdentity | null {
+  const projector = model.projector;
+  if (!projector) return null;
+  return {
+    ...model,
+    packageId: projector.packageId,
+    fileName: projector.fileName,
+    byteLength: projector.byteLength,
+    sha256: projector.sha256,
+    downloadUrl: projector.downloadUrl,
+    projector: null,
+  };
 }
