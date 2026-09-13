@@ -65,6 +65,8 @@ export interface LocalModelHubManagerOptions {
   spawnImpl?: typeof spawn;
   engineInstaller?: LocalEngineInstaller;
   healthTimeoutMs?: number;
+  /** Pinned CRT DLL directory for Windows app-local deployment (see engine-installer.ts). */
+  windowsRuntimeDir?: string;
 }
 
 export interface LocalCapabilityTestSelection {
@@ -184,7 +186,7 @@ export class LocalModelHubManager {
     this.spawnImpl = options.spawnImpl ?? spawn;
     this.healthTimeoutMs = options.healthTimeoutMs ?? 60_000;
     this.downloader = new LocalPackageDownloadManager(this.packageRoot);
-    this.installer = options.engineInstaller ?? new LocalEngineInstaller(this.engineRoot);
+    this.installer = options.engineInstaller ?? new LocalEngineInstaller(this.engineRoot, { windowsRuntimeDir: options.windowsRuntimeDir });
   }
 
   async initialize(): Promise<void> {

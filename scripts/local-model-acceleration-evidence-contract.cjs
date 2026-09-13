@@ -68,9 +68,62 @@ const winX64 = catalog.compatibleEnginePackage("win32", "x64").item;
 ok(winX64 && winX64.accelerator !== "cpu", "윈도우 x64 엔진은 GPU 가능 빌드여야 한다(CPU 빌드는 가속이 원리적으로 없다)");
 ok(/vulkan/.test(winX64.fileName), "윈도우 x64 는 Vulkan 아카이브(NVIDIA·AMD·Intel 공통 드라이버)");
 eq(catalog.compatibleEnginePackage("darwin", "arm64").item.accelerator, "metal");
-eq(catalog.compatibleEnginePackage("linux", "x64").item, null, "리눅스 행이 없으면 지어내지 않는다");
+const linux = catalog.compatibleEnginePackage("linux", "x64").item;
+ok(linux && linux.accelerator === "vulkan" && /ubuntu-vulkan/.test(linux.fileName), "리눅스 x64 도 Vulkan 아카이브로 GPU 가능(AppImage/deb 가 실제로 배포된다)");
+eq(catalog.compatibleEnginePackage("linux", "arm64").item, null, "없는 행은 지어내지 않는다");
+
+// ── 2b. 내장 Node 리눅스 잠금 = fetch 스크립트와 동일 ─────────────────────────
+const fetcher = fs.readFileSync(path.join(root, "scripts/fetch-node-runtime.mjs"), "utf8");
+const linuxBlock = /"linux:x64":\s*\{([\s\S]*?)\n\s*\},/.exec(fetcher)?.[1] ?? "";
+const managedSource = fs.readFileSync(path.join(root, "electron/runtime/managed-node.ts"), "utf8");
+const managedLinux = /"linux:x64":\s*\{([\s\S]*?)\n\s*\},/.exec(managedSource)?.[1] ?? "";
+for (const key of ["nodeSha256", "npmCliSha256", "runtimeTreeSha256"]) {
+  const expected = new RegExp(`${key}:\\s*"([a-f0-9]{64})"`).exec(linuxBlock)?.[1];
+  const actual = new RegExp(`${key}:\\s*"([a-f0-9]{64})"`).exec(managedLinux)?.[1];
+  ok(expected && actual === expected, `리눅스 내장 Node 잠금 ${key} 는 fetch 스크립트와 같아야 한다`);
+}
+ok(/archiveSha256:\s*"783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8"/.test(managedLinux), "리눅스 tarball 해시 잠금");
+
+// ── 2c. 윈도우 앱-로컬 VC++ 런타임 ─────────────────────────────────────────
+const installer = require(path.join(root, "dist/electron/local-model-hub/engine-installer.js"));
+const redistRoot = path.join(root, "build-resources/vc-redist");
+const manifest = JSON.parse(fs.readFileSync(path.join(redistRoot, "manifest.json"), "utf8"));
+const { createHash } = require("node:crypto");
+eq(installer.WINDOWS_CRT_FILES.length, 3);
+for (const item of installer.WINDOWS_CRT_FILES) {
+  const file = path.join(redistRoot, "x64", item.fileName);
+  const bytes = fs.readFileSync(file);
+  eq(createHash("sha256").update(bytes).digest("hex"), item.sha256, `${item.fileName} 는 소스 잠금 해시와 같아야 한다`);
+  eq(bytes.byteLength, item.byteLength);
+  eq(manifest.files[item.fileName].sha256, item.sha256, `${item.fileName} 매니페스트 해시`);
+  // PE32+ x64
+  eq(bytes.toString("ascii", 0, 2), "MZ"); const pe = bytes.readUInt32LE(60);
+  eq(bytes.readUInt16LE(pe + 4), 0x8664, `${item.fileName} 는 x64 PE`);
+}
+ok(/electron\/local-model-hub\/engine-installer/.test(fs.readFileSync(path.join(root, "electron-builder.yml"), "utf8")) || /vc-redist/.test(fs.readFileSync(path.join(root, "electron-builder.yml"), "utf8")), "빌더가 vc-redist 를 리소스로 싣는다");
+async function windowsRuntimeChecks() {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "lmh-crt-"));
+  try {
+    const sysRoot = path.join(temp, "Windows"); fs.mkdirSync(path.join(sysRoot, "System32"), { recursive: true });
+    const engineDir = path.join(temp, "engine"); fs.mkdirSync(engineDir);
+    const make = (opts) => new installer.LocalEngineInstaller(path.join(temp, "engines"), { platform: "win32", arch: "x64", windowsRuntimeDir: path.join(redistRoot, "x64"), windowsSystemRoot: sysRoot, ...opts });
+    const placed = await make().placeWindowsRuntime(engineDir);
+    eq(placed.length, 3, "시스템에 없으면 세 DLL 을 실행파일 옆에 놓는다");
+    ok(fs.existsSync(path.join(engineDir, "msvcp140.dll")));
+    fs.writeFileSync(path.join(sysRoot, "System32", "msvcp140.dll"), "system");
+    const engineDir2 = path.join(temp, "engine2"); fs.mkdirSync(engineDir2);
+    const placed2 = await make().placeWindowsRuntime(engineDir2);
+    eq(placed2.join(","), "vcruntime140.dll,vcruntime140_1.dll", "시스템에 있는 DLL 은 건드리지 않는다");
+    const bad = path.join(temp, "bad"); fs.mkdirSync(bad);
+    for (const item of installer.WINDOWS_CRT_FILES) fs.writeFileSync(path.join(bad, item.fileName), "tampered");
+    await assert.rejects(make({ windowsRuntimeDir: bad }).placeWindowsRuntime(path.join(temp, "engine3")), /engine_windows_runtime_sha256_mismatch/);
+    checks += 1;
+    eq((await make({ platform: "darwin", arch: "arm64" }).placeWindowsRuntime(engineDir)).length, 0, "맥에서는 아무것도 안 한다");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
 
 // ── 3. 하드웨어 적합도: 관측된 GPU 만 '권장' ────────────────────────────────
+// (2c 의 비동기 검사는 파일 끝에서 await 한다)
 const model = catalog.localModelCatalog()[0];
 const base = { schemaVersion: 1, profileId: "hardware:test", observedAt: new Date().toISOString(), platform: "win32", arch: "x64", cpuModel: "x", logicalCpuCount: 8,
   totalMemoryBytes: 32 * 2 ** 30, availableMemoryBytes: 24 * 2 ** 30, memoryKind: "system", vramBytes: null, diskAvailableBytes: 500 * 2 ** 30, engineDevices: [] };
@@ -123,4 +176,4 @@ if (process.platform === "darwin" && fs.existsSync(path.join(installed, "agentla
   console.log("[skip] 설치된 Agentlas.app 이 없어 실제 codesign 경로는 건너뜀");
 }
 
-console.log(JSON.stringify({ ok: true, checks }));
+windowsRuntimeChecks().then(() => { console.log(JSON.stringify({ ok: true, checks })); }).catch((error) => { console.error(error); process.exit(1); });

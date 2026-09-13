@@ -63,6 +63,34 @@ const ENGINE_CATALOG: readonly LocalEnginePackageIdentity[] = [
     "signerWorkflowRepository": "ggml-org/llama.cpp"
   }
 },
+  /*
+   * Linux x64 (2026-09-13): the AppImage/deb builds shipped with no engine row, so
+   * the screen said "no compatible engine" forever. Same rule as Windows: Vulkan
+   * archive (CPU archive + libggml-vulkan.so), backend loaded dynamically, silent
+   * CPU fallback without libvulkan. Needs glibc ≥ 2.34, libgomp, OpenSSL 3
+   * (Ubuntu 22.04+ / Debian 12+ / Fedora 36+); rpath $ORIGIN verified.
+   */
+  {
+    schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
+    packageId: "llama.cpp:b10903:linux-x64-vulkan",
+    engine: "llama.cpp",
+    releaseTag: "b10903",
+    sourceCommit: "481c65f091f74c5e7089dd0a3a1cc6b50cced31e",
+    platform: "linux",
+    arch: "x64",
+    accelerator: "vulkan",
+    archiveFormat: "tar.gz",
+    fileName: "llama-b10903-bin-ubuntu-vulkan-x64.tar.gz",
+    byteLength: 30_156_287,
+    sha256: "6af6c0ae06324383be576260baab958e73e5e31c22d8e897eb961daf1e15dc37",
+    downloadUrl: "https://github.com/ggml-org/llama.cpp/releases/download/b10903/llama-b10903-bin-ubuntu-vulkan-x64.tar.gz",
+    sourceUrl: "https://github.com/ggml-org/llama.cpp/releases/tag/b10903",
+    provenance: {
+      kind: "github-artifact-attestation",
+      repository: "ggml-org/llama.cpp",
+      signerWorkflowRepository: "ggml-org/llama.cpp",
+    },
+  },
   {
     schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
     packageId: "llama.cpp:b10903:darwin-arm64-metal",

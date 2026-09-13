@@ -87,6 +87,20 @@ const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
     npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
     runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
   },
+  /*
+   * Linux — 2026-09-13 추가. fetch-node-runtime.mjs 는 2026-08-24 부터 리눅스 런타임을 싣고
+   * 있었지만 이 표에는 없어서, 리눅스 배포본(AppImage/deb)에서 내장 Node 검증이 "manifest does
+   * not match this app/platform" 으로 항상 실패했다 — 로컬 모델 엔진 설치도 함께. 값은 업스트림
+   * tarball 을 내려받아 다시 계산해 fetch 스크립트와 같음을 확인했다.
+   */
+  "linux:x64": {
+    archiveName: "node-v24.18.0-linux-x64.tar.gz",
+    archiveSha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+    nodeSha256: "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c",
+    nodeByteLength: 123_655_872,
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "0cf5b57f8ee6e3adef701ba484b82921e6bbb65c17b7020a7bcdac72bbbc0488",
+  },
   "darwin:x64": {
     archiveName: "node-v24.18.0-darwin-x64.tar.gz",
     archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",

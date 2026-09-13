@@ -71,6 +71,9 @@ function failureReason(code: string | null | undefined, ko: boolean): string {
     model_file_sha256_mismatch: ["모델 파일이 내려받은 뒤 바뀌었습니다. 다시 내려받아 주세요", "The model file changed after download. Download it again"],
     engine_package_host_mismatch: ["이 컴퓨터용 엔진이 아닙니다", "This engine package is not for this computer"],
     local_model_hub_owned_by_other_process: ["다른 Agentlas 창이 로컬 모델을 쓰고 있습니다", "Another Agentlas window is using local models"],
+    engine_exited_3221225781: ["실행 엔진에 필요한 시스템 파일(Visual C++ 런타임)을 찾지 못했습니다. 앱을 다시 설치하면 함께 들어갑니다", "A system file the engine needs (Visual C++ runtime) was not found. Reinstalling the app includes it"],
+    engine_exited_127: ["실행 엔진에 필요한 시스템 라이브러리(libgomp, OpenSSL 3, libstdc++)가 없습니다", "A system library the engine needs (libgomp, OpenSSL 3, libstdc++) is missing"],
+    engine_windows_runtime_missing: ["앱에 들어 있어야 할 런타임 파일이 없습니다. 앱을 다시 설치해 주세요", "A runtime file that ships with the app is missing. Reinstall the app"],
   };
   const text = known[code]?.[ko ? 0 : 1] ?? code;
   return ` · ${text}`;

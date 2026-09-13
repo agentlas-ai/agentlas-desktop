@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, open, readdir, readlink, rename, rm, stat } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type {
   LocalEngineDevice,
@@ -22,8 +22,29 @@ interface CommandResult {
   stderr: string;
 }
 
+/*
+ * ★ 윈도우 새 PC 에는 VC++ 런타임(msvcp140.dll 등)이 없을 수 있다 (2026-09-13 실측).
+ *
+ * llama-server.exe·llama.dll 은 MSVCP140/VCRUNTIME140/VCRUNTIME140_1 을 import 하는데, 그 세
+ * DLL 은 윈도우에 기본 포함이 아니고(UCRT 만 포함) Electron 배포본에도 없다(43.4.1 zip 실측:
+ * d3dcompiler·libEGL·vulkan-1 뿐). 그래서 방금 산 PC 에서는 엔진이 시작조차 못 한다
+ * (STATUS_DLL_NOT_FOUND = 3221225781). Microsoft 의 앱-로컬 배포 방식대로, 재배포 패키지에서
+ * 꺼낸 DLL 세 개를 앱 리소스(vc-redist/x64)에 싣고 시스템에 없을 때만 실행파일 옆에 놓는다.
+ * 해시는 여기 소스에 잠근다. 14.44.35211 이 b10903 바이너리가 import 하는 심볼 1,126개를 전부
+ * 내보내는 것을 PE 테이블로 확인했다.
+ */
+export const WINDOWS_CRT_FILES: ReadonlyArray<{ fileName: string; sha256: string; byteLength: number }> = [
+  { fileName: "msvcp140.dll", sha256: "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9", byteLength: 557728 },
+  { fileName: "vcruntime140.dll", sha256: "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066", byteLength: 124544 },
+  { fileName: "vcruntime140_1.dll", sha256: "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f", byteLength: 49792 },
+];
+
 export interface LocalEngineInstallerOptions {
   attestationVerifier?: typeof verifyManagedEngineAttestation;
+  /** Directory holding the pinned CRT DLLs (production: <resources>/vc-redist/x64). Windows only. */
+  windowsRuntimeDir?: string;
+  /** Injectable for tests; production reads %SystemRoot%. */
+  windowsSystemRoot?: string;
   /** Injectable host facts for archive policy tests; production always uses actual process facts. */
   platform?: NodeJS.Platform;
   arch?: string;
@@ -103,12 +124,38 @@ export class LocalEngineInstaller {
   private readonly attestationVerifier: typeof verifyManagedEngineAttestation;
   private readonly platform: NodeJS.Platform;
   private readonly arch: string;
+  private readonly windowsRuntimeDir: string | null;
+  private readonly windowsSystemRoot: string | null;
 
   constructor(private readonly installRoot: string, options: LocalEngineInstallerOptions = {}) {
     this.commandRunner = options.commandRunner ?? runCommand;
     this.platform = options.platform ?? process.platform;
     this.arch = options.arch ?? process.arch;
     this.attestationVerifier = options.attestationVerifier ?? verifyManagedEngineAttestation;
+    this.windowsRuntimeDir = options.windowsRuntimeDir ?? null;
+    this.windowsSystemRoot = options.windowsSystemRoot ?? process.env.SystemRoot ?? null;
+  }
+
+  /**
+   * App-local CRT: copy each pinned DLL next to llama-server.exe only when
+   * System32 lacks it, so a machine with a (possibly newer) system runtime keeps
+   * using that. Returns the file names placed. A hash mismatch refuses the copy —
+   * an unpinned DLL never enters an attested engine directory.
+   */
+  async placeWindowsRuntime(executableDir: string): Promise<string[]> {
+    if (this.platform !== "win32" || this.arch !== "x64" || !this.windowsRuntimeDir) return [];
+    const placed: string[] = [];
+    for (const item of WINDOWS_CRT_FILES) {
+      const system = this.windowsSystemRoot ? join(this.windowsSystemRoot, "System32", item.fileName) : null;
+      if (system && await regularFile(system)) continue;
+      const source = join(this.windowsRuntimeDir, item.fileName);
+      if (!await regularFile(source)) throw new Error("engine_windows_runtime_missing");
+      const bytes = await readFile(source);
+      if (bytes.byteLength !== item.byteLength || createHash("sha256").update(bytes).digest("hex") !== item.sha256) throw new Error("engine_windows_runtime_sha256_mismatch");
+      await copyFile(source, join(executableDir, item.fileName));
+      placed.push(item.fileName);
+    }
+    return placed;
   }
 
   async install(
@@ -130,7 +177,8 @@ export class LocalEngineInstaller {
     const provenanceVerification = await this.attestationVerifier(identity, verifiedArchivePath, join(this.installRoot, ".verification"), signal);
     signal?.throwIfAborted();
 
-    const tar = "/usr/bin/tar";
+    // macOS keeps tar in /usr/bin; Linux distributions without merged /usr only have /bin/tar.
+    const tar = await regularFile("/usr/bin/tar") ? "/usr/bin/tar" : "/bin/tar";
     if (identity.archiveFormat === "tar.gz") {
       if (!await regularFile(tar)) throw new Error("engine_archive_reader_unavailable");
       const listing = await this.commandRunner(tar, ["-tzf", verifiedArchivePath], signal);
@@ -151,6 +199,11 @@ export class LocalEngineInstaller {
         if (extraction.exitCode !== 0) throw new Error("engine_archive_extraction_failed");
       }
       signal?.throwIfAborted();
+      const extracted = await walkFiles(temp, this.platform === "win32");
+      const serverName = this.platform === "win32" ? "llama-server.exe" : "llama-server";
+      const extractedExecutables = extracted.filter((file) => basename(file) === serverName);
+      if (extractedExecutables.length !== 1) throw new Error("engine_executable_ambiguous");
+      await this.placeWindowsRuntime(dirname(extractedExecutables[0]!));
       const files = await walkFiles(temp, this.platform === "win32");
       if (this.platform === "win32") for (const file of files) {
         if (/\.(?:exe|dll)$/i.test(file)) await verifyWindowsPortableExecutable(file,identity.arch);
