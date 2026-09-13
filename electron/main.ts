@@ -1535,7 +1535,10 @@ app.whenReady().then(async () => {
     interrupt: interruptLongRunVerifiers,
     isSettled: longRunVerifiersSettled,
   });
-  const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"));
+  const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"), {
+    // Windows app-local VC++ runtime for llama-server.exe; harmless elsewhere (never read).
+    windowsRuntimeDir: path.join(process.resourcesPath, "vc-redist", "x64"),
+  });
   await localModelHubManager.initialize();
   configureLocalModelHubManager(localModelHubManager);
   const localModelMigration = createOllamaMigrationService(localModelHubManager);

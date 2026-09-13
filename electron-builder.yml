@@ -295,6 +295,13 @@ win:
       to: node-runtime/node_modules
       filter:
         - "**/*"
+    # App-local VC++ runtime (msvcp140/vcruntime140/vcruntime140_1) for the local
+    # model engine on machines without the redistributable. Pinned by hash in
+    # electron/local-model-hub/engine-installer.ts; manifest.json records the source.
+    - from: build-resources/vc-redist
+      to: vc-redist
+      filter:
+        - "**/*"
   target:
     - target: nsis
       arch:
