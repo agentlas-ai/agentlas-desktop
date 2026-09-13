@@ -1,4 +1,4 @@
-import { preparedMcpTransport, type PreparedMcpBinding } from "./prepared-transport";
+import { preparedMcpTransport, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 // 실제 MCP 클라이언트 — @modelcontextprotocol/sdk로 외부 서버에 붙어 tools/list.
 // 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
@@ -512,16 +512,19 @@ async function createTransport(
   runtimeRootOverride?: string | null,
   signal?: AbortSignal,
   prepared?: PreparedMcpBinding,
+  actualTarget = false,
+  targetCwd?: string,
 ): Promise<CreatedTransport> {
   signal?.throwIfAborted();
   if (prepared) {
-    const launch = preparedMcpTransport(prepared, server);
+    const launch = actualTarget ? preparedMcpTargetTransport(prepared, server) : preparedMcpTransport(prepared, server);
     if (launch.kind === "stdio") {
       const base = await withUvxPath(launch.command, withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }), { signal });
       signal?.throwIfAborted();
       preparedMcpTransport(prepared, server);
       Object.assign(resolved, launch.env);
       return { transport: new StdioClientTransport({ command: launch.command, args: launch.args,
+        ...(actualTarget ? { cwd: targetCwd } : {}),
         env: stdioEnvironmentForCommand(launch.command, {
           ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
           ...launch.env,
@@ -676,7 +679,7 @@ async function closeMcpProbeBounded(client: Client, transport: Transport | null)
   }
 }
 
-async function listCompleteToolInventory(client: Client, signal: AbortSignal): Promise<Awaited<ReturnType<Client["listTools"]>>> {
+export async function listCompleteToolInventory(client: Pick<Client, "listTools">, signal: AbortSignal): Promise<Awaited<ReturnType<Client["listTools"]>>> {
   const tools: Awaited<ReturnType<Client["listTools"]>>["tools"] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
@@ -1058,4 +1061,10 @@ export async function statusAllServers(
       ? deferredInteractiveStatus(server, checkedAt)
       : probe(server),
   ));
+}
+
+/** One Main-owned transport per native proxy attachment, never an arbitrary launch spec. */
+export async function createPreparedMcpTargetTransport(binding: PreparedMcpBinding, signal: AbortSignal, cwd: string): Promise<Transport> {
+  if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
+  return (await createTransport(binding.server, {}, undefined, signal, binding, true, cwd)).transport;
 }

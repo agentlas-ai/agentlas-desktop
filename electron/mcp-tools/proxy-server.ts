@@ -1,4 +1,5 @@
-// MCP 프록시 승인 서버 — 프록시 자식(proxy-child.cjs)이 도구 실행 직전에 때리는 엔드포인트.
+import { handleMcpProxyBridge, stopMcpProxySessions } from "./proxy-session";
+// MCP 프록시 서버 — 등록된 stdio wire의 실제 upstream과 도구 승인을 Main이 소유한다.
 //
 // 판단은 새로 만들지 않는다. ACP·로컬 루프와 **같은 중재자 한 벌**
 // (runtime/tool-approval.ts)이 답을 낸다 — 승인 정책이 표면마다 갈리면 사용자가
@@ -187,12 +188,16 @@ export function startMcpProxyApprovalServer(): Promise<number> {
   token = randomUUID();
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
-      if (req.method !== "POST" || !(req.url ?? "").startsWith("/approve")) {
+      if (req.method !== "POST" || (!(req.url ?? "").startsWith("/approve") && !(req.url ?? "").startsWith("/bridge/"))) {
         res.writeHead(404).end("not found");
         return;
       }
       if ((req.headers["authorization"] ?? "") !== `Bearer ${token}`) {
         res.writeHead(401).end("unauthorized");
+        return;
+      }
+      if ((req.url ?? "").startsWith("/bridge/")) {
+        handleMcpProxyBridge(req, res, { mutating: mcpToolIsMutating, planMutating: planMcpToolIsMutating });
         return;
       }
       void readBody(req).then(async (body) => {
@@ -243,6 +248,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
 }
 
 export function stopMcpProxyApprovalServer(): void {
+  stopMcpProxySessions();
   if (server) {
     try { server.close(); } catch { /* ignore */ }
   }

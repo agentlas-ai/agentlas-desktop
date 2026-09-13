@@ -10,7 +10,7 @@ export type PreparedMcpTransport =
   | { kind: "http" | "sse"; url: string; headers: Record<string, string>; runtimeRoot: null };
 type Seal = { path: string; digest: string; current: () => boolean; invalid?: boolean; bindings: PreparedMcpBinding[] };
 const seals = new Map<string, Seal>();
-const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; consentResource: string }>();
+const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; targetTransport: PreparedMcpTransport; consentResource: string }>();
 function fileDigest(path: string): string {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -69,12 +69,12 @@ export function registerPreparedMcpConfig(input: {
   };
   for (const row of input.servers) {
     const transport = resolveTransport(row.transport, row.runtimeRoot ?? null);
+    const targetTransport = row.consentTransport === undefined ? transport : resolveTransport(row.consentTransport, row.runtimeRoot ?? null);
     const consentResource = mainToolConsentDigest({ configKey: row.configKey,
-      configuration: mcpServerConfigurationDigest(row.server),
-      transport: row.consentTransport === undefined ? transport : resolveTransport(row.consentTransport, row.runtimeRoot ?? null) });
+      configuration: mcpServerConfigurationDigest(row.server), transport: targetTransport });
     const server = Object.freeze({ ...row.server, args: Object.freeze([...row.server.args]) as unknown as string[], envKeys: Object.freeze([...row.server.envKeys]) as unknown as string[] });
     const binding = Object.freeze({ configKey: row.configKey, server });
-    bindings.set(binding, { seal, transport, consentResource }); seal.bindings.push(binding);
+    bindings.set(binding, { seal, transport, targetTransport, consentResource }); seal.bindings.push(binding);
   }
   if (!seal.current()) throw new Error("mcp_prepared_scope_changed");
   seals.set(input.path, seal);
@@ -105,4 +105,14 @@ export function preparedMcpConsentResource(binding: PreparedMcpBinding, server: 
   if (!row || binding.server !== server) throw new Error("mcp_prepared_binding_unapproved");
   validate(row.seal);
   return row.consentResource;
+}
+
+/** Main-only actual upstream; the same opaque binding/seal fences proxy recursion. */
+export function preparedMcpTargetTransport(binding: PreparedMcpBinding, server: InstalledMcpServer): PreparedMcpTransport {
+  const row = bindings.get(binding);
+  if (!row || binding.server !== server) throw new Error("mcp_prepared_binding_unapproved");
+  validate(row.seal);
+  return row.targetTransport.kind === "stdio"
+    ? { ...row.targetTransport, args: [...row.targetTransport.args], env: { ...row.targetTransport.env } }
+    : { ...row.targetTransport, headers: { ...row.targetTransport.headers } };
 }

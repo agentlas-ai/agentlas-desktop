@@ -1,3 +1,4 @@
+import { prepareMcpProxyLaunch, activateMcpProxyLaunch } from "./proxy-session";
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
 // - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
 // - Codex CLI: `-c mcp_servers.<name>...` config overrides (시크릿 값 없는 이름/경로만 전달)
@@ -7,7 +8,7 @@
 //
 // 이게 없으면 카탈로그의 Playwright(브라우저) 서버가 "설치"만 되고 채팅 중 호출되지 않았다.
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
-import { registerPreparedMcpConfig, mcpServerConfigurationDigest } from "./prepared-transport";
+import { registerPreparedMcpConfig, preparedMcpBindings, mcpServerConfigurationDigest } from "./prepared-transport";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
@@ -37,10 +38,7 @@ import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../co
 import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
-  MCP_PROXY_SERVER_KEY_ENV,
-  MCP_PROXY_PLAN_ENV,
-  MCP_PROXY_SESSION_ENV,
-  MCP_PROXY_TARGET_ENV,
+  MCP_PROXY_LAUNCH_ENV,
   mcpProxyControlInfoPath,
 } from "./proxy-channel";
 import { mcpProxyApprovalPort } from "./proxy-server";
@@ -191,13 +189,11 @@ export interface McpConfigBuildOptions {
 }
 
 /**
- * stdio 서버 하나를 프록시로 감싼다. 승인 서버가 떠 있지 않거나 이 실행이 관문 정보를
- * 주지 않았으면 `null` — 그때는 감싸지 않는다. 관문 없는 프록시는 통과 파이프일 뿐이고,
- * 한 겹 늘린 만큼 손해만 본다.
+ * stdio 서버 하나를 Main 소유 프록시로 감싼다. 관문을 요청하지 않은 기존
+ * 호출만 null을 받는다. 관문이 필요한 실행은 채널이 없다고 직접 실행하지 않는다.
  */
 function mcpProxySpec(
   serverKey: string,
-  actual: { command: string; args: string[]; env: Record<string, string> },
   opts: McpConfigBuildOptions | undefined,
   catalogId: string | null,
   planReadAuthority?: "agentlas-browser" | "cua-driver",
@@ -205,32 +201,21 @@ function mcpProxySpec(
   const gate = opts?.toolGate;
   if (!gate) return null;
   if (mcpProxyApprovalPort() <= 0) {
-    if (gate.planMode) throw new Error("plan_mode_mcp_gate_unavailable");
-    return null;
+    throw new Error(gate.planMode ? "plan_mode_mcp_gate_unavailable" : "mcp_proxy_gate_unavailable");
   }
   const childPath = path.join(__dirname, "proxy-child.cjs");
   if (!fs.existsSync(childPath)) {
-    if (gate.planMode) throw new Error("plan_mode_mcp_proxy_unavailable");
-    return null;
+    throw new Error(gate.planMode ? "plan_mode_mcp_proxy_unavailable" : "mcp_proxy_child_unavailable");
   }
-  // The proxy inherits resolved aliases from its own environment. Repeating
-  // ${ALIAS} inside this serialized JSON lets provider string interpolation
-  // corrupt the JSON when a vault value contains quotes or backslashes.
-  // Keep only exact self-references out of the nested overlay; the outer env
-  // and the wrapper's validated target-key mapping retain the same binding.
-  const targetEnv = Object.fromEntries(Object.entries(actual.env).filter(([key, value]) =>
-    !(/^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key) && value === envReference(key))));
+  const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
+    cwd: gate.cwd === undefined ? (opts?.workingFolder ?? process.cwd()) : gate.cwd, catalogId, planReadAuthority });
   return {
     command: process.execPath,
     args: [childPath],
     env: {
-      ...actual.env,
       ELECTRON_RUN_AS_NODE: "1",
       [MCP_PROXY_CONTROL_FILE_ENV]: mcpProxyControlInfoPath(),
-      [MCP_PROXY_TARGET_ENV]: JSON.stringify({ ...actual, env: targetEnv }),
-      [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
-      [MCP_PROXY_SESSION_ENV]: JSON.stringify({ ...gate, catalogId, planReadAuthority }),
-      [MCP_PROXY_PLAN_ENV]: gate.planPath ?? "",
+      [MCP_PROXY_LAUNCH_ENV]: handle,
     },
   };
 }
@@ -799,7 +784,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         consentTransport = direct;
         const isComputerUse = isAuthenticComputerUseMcpLaunch(command, args);
         const proxied = isComputerUse || opts?.toolGate?.planMode
-          ? mcpProxySpec(key, direct, opts, s.catalogId, isComputerUse ? "cua-driver" : undefined) : null;
+          ? mcpProxySpec(key, opts, s.catalogId, isComputerUse ? "cua-driver" : undefined) : null;
         if (isComputerUse && opts?.toolGate && !proxied) {
           throw new Error("computer-use-tool-gate-unavailable");
         }
@@ -832,8 +817,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
          *
          * 그래서 서버를 런타임에 직접 주지 않고 프록시를 준다. 누가 부르든 모든
          * tools/call 이 우리 프로세스를 지나고, 우리는 ACP·로컬 루프와 같은 중재자에게
-         * 묻는다. 프록시를 붙이는 조건은 하나 — 승인 서버가 **실제로 떠 있을 때만**.
-         * 관문 없는 프록시는 통과 파이프일 뿐이라 한 겹만 늘리는 손해다.
+         * 묻는다. Main 관문을 요청한 실행은 승인 채널이 없으면 명시적으로 거절한다.
+         * 아래 Codex non-Plan 직접 설정은 기존 벤더 소유 경로를 유지한다.
          */
         const actual = {
           command: process.execPath,
@@ -841,7 +826,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           env: wrapperEnv,
         };
         consentTransport = actual;
-        const proxied = mcpProxySpec(key, actual, opts, s.catalogId, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
+        const proxied = mcpProxySpec(key, opts, s.catalogId, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -1005,6 +990,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     const current = new Map(listInstalledServers().map((server) => [server.id, mcpServerConfigurationDigest(server)]));
     return configurations.every(([id, digest]) => current.get(id) === digest);
   } });
+  for (const binding of preparedMcpBindings(configPath)) {
+    const entry = mcpServers[binding.configKey] as { env?: Record<string, string> };
+    const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
+    if (handle) activateMcpProxyLaunch(handle, binding);
+  }
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers,
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),
     ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}) };
