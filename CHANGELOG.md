@@ -8,6 +8,7 @@
 - Science 원고 조립 관문이 비교논문이 한 편일 때 "정확히 그 단어 수"를 요구해 7개 절이 모두 준비된 원고를 거절하던 문제를 고칩니다(바닥은 코퍼스 하한의 절반, 얇은 코퍼스는 ±30% 범위). 격리 앱 실측: 거절되던 세션이 조립되어 원고 v1이 생겼습니다.
 - Science 원고 PDF에서 한글이 전부 빠지던 문제를 고칩니다. LaTeX 조판(tectonic)에 한글·한자·가나가 있으면 시스템 CJK 글꼴을 붙이고 띄어쓰기를 지킵니다. 격리 앱 실측: 한국어 원고 8쪽 PDF, 빠진 글자 0.
 - Science 앱을 다시 켠 뒤 이전 실행이 영원히 "취소 중"에 남아 새 요청이 막히던 문제를 고칩니다. 부팅 복구가 옛 배달 하나에서 멈추던 원인이었습니다.
+- Science 원고 본문에서 `render_table_as_vega` 같은 밑줄 이름이 기울임으로 쪼개지던 문제와, 한글 기울임이 경고를 내던 문제를 고칩니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
