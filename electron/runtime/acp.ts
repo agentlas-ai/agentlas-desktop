@@ -233,10 +233,11 @@ export class AcpSessionClient {
     const label = TOOL_KIND_LABEL[kind];
     const name = merged.title ? `${label}: ${merged.title}` : label;
     const text = (value: unknown) => typeof value === "string" ? value : value == null ? undefined : JSON.stringify(value);
-    if (starts && !merged.started) {
-      merged.started = true;
-      this.events.onTool?.(name, text(merged.rawInput), undefined, id, false);
-    }
+    // A tool is reported to the host exactly once, at completion, like every
+    // other runner (Claude Code, Codex, local). Emitting a second event at start
+    // doubled every tool row and success counter downstream (2026-09-13). The
+    // start is still recorded for the effect report.
+    if (starts && !merged.started) merged.started = true;
     const done = merged.status === "completed" || merged.status === "failed";
     if (!done || merged.reported) return;
     merged.reported = true;
