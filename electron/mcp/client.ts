@@ -824,6 +824,8 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
         "처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧고 명확하게 사용자에게 보여라.",
         "완료 전에 각 성공 기준을 증거로 대조하고, 확인되지 않은 항목은 완료라고 말하지 마라.",
         "완료를 보고할 때는 사용자의 원래 요청·기획(요청이 가리키는 기획서·프로젝트 기억 포함)의 항목을 산출물과 하나씩 대조해, 빠진 것·미완 항목을 먼저 말하고 그다음 된 것을 말하라. 좁은 성공 기준만 통과했다고 '완료'라 부르지 마라.",
+        // 오너 결정 2026-09-14: 게임·앱·UI 같은 시각 산출물은 그래픽 품질이 합격 기준이다. 동작만 되는 플레이스홀더는 실패.
+        "게임·앱·UI 같은 시각 산출물은 그래픽 품질 자체가 합격 기준이다. 플레이스홀더 도형, 기본색 사각형, 빠진 스프라이트, 겹치거나 어긋난 에셋, 빈 배경, 글자만 있는 화면은 '동작하지만 미완'이 아니라 실패다. 이미지 생성 도구로 기획에 맞는 아트를 만들고, 완료 전에 실제 화면 캡처를 직접 열어 보고 품질을 판정해 미달이면 실패로 보고하라.",
       ].join("\n")
     : [
         "## Active Goal contract (host-owned; objective is immutable)",
@@ -835,6 +837,7 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
         "At initial kickoff, show the objective, acceptance criteria, and verification surfaces briefly before using tools.",
         "Before completion, audit every criterion against evidence and never mark an unverified item complete.",
         "When reporting completion, compare the delivered result item by item against the user's original request and plan (including any spec document or project memory the request points to); state what is missing or partial first, then what is done. Passing a narrow criterion is not 'complete'.",
+        "For games, apps and UI, graphic quality is itself an acceptance criterion. Placeholder shapes, default-colored rectangles, missing sprites, overlapping or misaligned assets, empty backgrounds or text-only screens are a failure, not 'working but unfinished'. Produce art that matches the plan with the image generation tool, open the actual screen captures yourself before completion, and report a failure when the quality falls short.",
       ].join("\n");
 }
 
