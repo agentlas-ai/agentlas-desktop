@@ -1,7 +1,7 @@
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
+import { getLongRunByGoalId, getLongRunGoalRevisionBinding, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -225,8 +225,9 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
-  const pending = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')").get(run.id) as { n: number };
-  if (pending.n) throw new Error("auto_goal_resume_attempt_unsettled");
+  // 명시적 재개(사람의 클릭): 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고, 살아 있는 시도만 막는다.
+  acknowledgeUncertainLongRunAttempts(run.id);
+  if (liveLongRunAttemptCount(run.id)) throw new Error("auto_goal_resume_attempt_unsettled");
   /*
    * An absent limit is no limit, not a spent one.
    *

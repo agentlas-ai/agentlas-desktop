@@ -1,5 +1,5 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
-import { getLongRunByGoalId } from "./store/long-runs";
+import { getLongRunByGoalId, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "./store/long-runs";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -4366,9 +4366,9 @@ export function registerIpcHandlers(): void {
       throw new Error("long_run_resume_version_conflict");
     }
     if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
-    const unsettled = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')")
-      .get(context.runId) as { n: number };
-    if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
+    // 사람이 누른 재개다: 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고, 살아 있는 시도만 막는다.
+    acknowledgeUncertainLongRunAttempts(context.runId);
+    if (liveLongRunAttemptCount(context.runId)) throw new Error("auto_goal_resume_attempt_unsettled");
     const continuation = findAutomationByGoalId(chat.goalId);
     if (!continuation) {
       const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);

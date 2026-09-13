@@ -227,6 +227,7 @@
     "test:chat-notice-honesty": "node scripts/local/chat-notice-and-preview-honesty-contract.cjs",
     "test:goal-pass-failure": "node scripts/local/goal-pass-failure-contract.cjs",
     "test:long-run-startup-resume": "node scripts/local/long-run-startup-resume-contract.cjs",
+    "test:resume-after-restart": "npx electron scripts/local/qa-resume-after-restart-acknowledges-attempts.cjs",
     "test:session-continuity": "node scripts/local/session-continuity-contract.cjs",
     "test:runtime-sign-in-honesty": "node scripts/local/runtime-sign-in-honesty-contract.cjs",
     "test:one-transcript-monotonic": "node scripts/local/one-transcript-monotonic-contract.cjs",

@@ -14,6 +14,7 @@ import {
   type MultimodalSettings,
 } from "../../shared/multimodal";
 import { hasEnvVar } from "../secrets/vault";
+import { multimodalImageSlot } from "./slot";
 
 /** cli-subscription provider id → 찾을 실행 파일 이름 + 흔한 설치 경로. */
 const CLI_BINS: Record<string, { name: string; extra: string[] }> = {
@@ -158,8 +159,8 @@ export interface ResolvedProvider {
   /** 확정된 엔진. auto인데 가용한 게 하나도 없으면 null. */
   provider: MultimodalProvider | null;
   ready: boolean;
-  /** "explicit" = 사용자가 직접 고름, "auto" = 사다리에서 자동 선택. */
-  via: "explicit" | "auto";
+  /** "explicit" = 사용자가 직접 고름, "role" = 대시보드 역할 배정, "auto" = 사다리에서 자동 선택. */
+  via: "explicit" | "role" | "auto";
 }
 
 /**
@@ -167,6 +168,13 @@ export interface ResolvedProvider {
  *  - 명시 선택: 그 provider 그대로 반환(+ready 여부). 사용자의 의도를 존중.
  *  - "auto": 사다리(키리스 우선)에서 처음으로 ready인 것을 고른다. 없으면 provider=null, ready=false.
  */
+/** 역할 슬롯의 런타임 → 그 런타임이 내장한 이미지 엔진의 provider id. 그릴 수 없는 런타임이면 null. */
+function imageProviderIdForRoleSlot(): string | null {
+  const slot = multimodalImageSlot();
+  if (!slot) return null;
+  return slot.runtimeKind === "codex" ? "codex-cli-image" : slot.runtimeKind === "antigravity" ? "nanobanana-image" : null;
+}
+
 export async function resolveActiveProvider(
   modality: MultimodalModality,
   settings: MultimodalSettings,
@@ -183,6 +191,13 @@ export async function resolveActiveProvider(
     if (provider) return { provider, ready: await isProviderReady(provider), via: "explicit" };
   }
 
+  // auto: 대시보드 "이미지 생성" 역할에 배정된 런타임이 있으면 그것이 먼저다(오너가 고른 것).
+  // 실측(페르소나 루프 라운드 1): 역할은 Antigravity 였는데 사다리가 codex 를 골라 실행에 반영되지 않았다.
+  if (modality === "image") {
+    const roleProviderId = imageProviderIdForRoleSlot();
+    const provider = roleProviderId ? getMultimodalProvider(roleProviderId) : null;
+    if (provider) return { provider, ready: await isProviderReady(provider), via: "role" };
+  }
   // auto (또는 알 수 없는 값): 사다리를 키리스-우선 순서로 걸어 첫 ready를 채택.
   for (const provider of providerLadder(modality)) {
     if (await isProviderReady(provider)) {

@@ -825,9 +825,20 @@ const runClaudeTurn = async (
         ? `\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기·실행이 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다. 읽기·검색·분석은 평소대로 하면 된다.`
         : `\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing or shell execution, say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume. Reading, searching, and analysis work as usual.`)
       : "";
+  /*
+   * 쓰기 실행은 작업 폴더 샌드박스 안에서 돈다. 샌드박스·승인 거부를 말해 주지 않으면 모델은 그것을
+   * "이 기계의 한계"로 진단한다 — 실측(페르소나 루프 2026-09-13): 에뮬레이터·GUI 실행이 샌드박스에 막히자
+   * 15분간 네 방법을 시도한 뒤 "하이퍼바이저 접근 권한이 없다"고 사용자에게 보고했다(기계는 멀쩡했다).
+   */
+  const writeSandboxNotice =
+    !runReq.untrustedNoTools && req.permission === "write"
+      ? (runReq.locale === "ko"
+        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패 등) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
+        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start), that is this run's permission boundary, not a limit of this computer. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
+      : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
-    : systemPrompt) + readOnlyToolNotice;
+    : systemPrompt) + readOnlyToolNotice + writeSandboxNotice;
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -1331,8 +1342,10 @@ const runClaudeTurn = async (
         deniedBy: "runtime-headless",
       });
       const what = what0 ? `: ${what0}` : "";
-      const ko = `승인이 필요해 중단된 단계가 있습니다${what}. 이 실행에는 승인할 사람이 붙어 있지 않아 자동으로 거부됐습니다 — 사용자가 거절한 것이 아닙니다. 권한을 올리거나 다시 요청해 주세요.`;
-      const en = `A step was blocked because it needs approval${what}. This run has nobody to approve it, so it was auto-denied — you did not reject it. Raise the permission or ask again.`;
+      // "자동으로 거부됐다"는 문장은 사람에게 '끝났다'로 읽힌다(페르소나 루프 라운드 1: 배너가 떠 있었는데도 실패로 기록).
+      // 다음 행동 — 아래 승인 배너에서 허용 — 을 문장 안에 넣는다.
+      const ko = `권한이 필요해 이 단계가 멈췄습니다${what}. 사용자가 거절한 것이 아닙니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 여기서부터 이어집니다.`;
+      const en = `This step stopped because it needs permission${what}. You did not reject it — allow it in "Continue with full access?" below and it resumes from here.`;
       events.onNotice?.({
         level: "warning",
         code: "approval-required",

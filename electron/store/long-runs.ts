@@ -336,6 +336,31 @@ function appendEventInDb(input: {
   return seq;
 }
 
+/**
+ * 사람이 직접 "재개"를 누르거나 멈춘 목표에 말을 건 순간, 재시작으로 끊긴 시도의 불확실한 부작용은
+ * 그 사람이 인지한 것으로 본다. 이 함수는 그 인지를 원장에 남기고 그 시도 id 를 돌려준다.
+ *
+ * 실측(페르소나 루프 라운드 1, 2026-09-13): 앱 재시작 뒤 'interrupted'+side_effect 'uncertain' 시도가 남아
+ * 재개 단추·타이핑·자동 재개가 전부 auto_goal_resume_attempt_unsettled 로 거부됐고, 그 상태를 풀 길이
+ * 아무 데도 없어 대화가 영구 막다른 길이 됐다. 살아 있는(state='running') 시도만 진짜로 막는다.
+ */
+export function acknowledgeUncertainLongRunAttempts(runId: string): string[] {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT id FROM long_run_worker_attempts WHERE run_id = ? AND state <> 'running' AND (state = 'uncertain' OR side_effect_state = 'uncertain')",
+  ).all(runId) as { id: string }[];
+  if (!rows.length) return [];
+  const attemptIds = rows.map((row) => row.id);
+  appendLongRunEvent({ runId, kind: "run.user_control", actorKind: "user", payload: { action: "acknowledge_uncertain_attempts", attemptIds } });
+  return attemptIds;
+}
+
+/** 아직 실제로 돌고 있는 시도 수 — 명시적 재개는 이것만 본다. */
+export function liveLongRunAttemptCount(runId: string): number {
+  const row = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state = 'running'").get(runId) as { n: number };
+  return row.n;
+}
+
 export function appendLongRunEvent(input: Omit<Parameters<typeof appendEventInDb>[0], "at"> & { at?: string }): number {
   const db = getDb();
   const run = db.transaction(() => appendEventInDb({ ...input, at: input.at ?? new Date().toISOString() }));

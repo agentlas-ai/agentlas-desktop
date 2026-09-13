@@ -746,6 +746,11 @@ export function RuntimeControl() {
   function renderPool(role: RuntimeRole) {
     const members = pool?.members[role] ?? [];
     const runtimeOptions = runtimeOptionsForRole(role);
+    const sectionRoleLabel = role === "orchestrator"
+      ? (ko ? "오케스트레이터" : "orchestrator")
+      : role === "multimodal"
+        ? (ko ? "이미지 생성" : "image generation")
+        : (ko ? "워커" : "worker");
     return (
       <div className="dashboard-runtime-pool">
         {members.length === 0 ? (
@@ -975,8 +980,10 @@ export function RuntimeControl() {
           className="dashboard-runtime-pool-add"
           onClick={() => void addMember(role)}
           disabled={busy || runtimeOptions.length === 0}
+          // 역할마다 같은 이름의 단추가 있어 어느 역할의 것인지 헷갈렸다(페르소나 루프 라운드 1, 2026-09-13) — 역할 이름을 붙인다.
+          aria-label={ko ? `${sectionRoleLabel} 후보 행 추가` : `Add ${sectionRoleLabel} candidate row`}
         >
-          {ko ? "+ 후보 행 추가" : "+ Add candidate row"}
+          {ko ? `+ ${sectionRoleLabel} 후보 추가` : `+ Add ${sectionRoleLabel} candidate`}
         </button>
       </div>
     );

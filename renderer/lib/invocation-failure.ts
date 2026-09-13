@@ -80,3 +80,21 @@ export function detailForUser(error: unknown): string {
   const detail = failureMessage(error);
   return !detail || looksLikeMachineText(detail) ? "" : detail;
 }
+
+/**
+ * 시작 실패 코드 → 사람 문장. 실측(페르소나 루프 라운드 1, 2026-09-13): 멈춘 목표 대화에 "이어서"를 치면
+ * goal_explicit_resume_required 가 그대로 떨어져 "이유가 오지 않았습니다"만 4번 반복됐다. 다음 행동을 말해 준다.
+ */
+export function knownStartFailureHuman(error: unknown, ko: boolean): string | null {
+  const code = failureMessage(error).split(/[\s:]/, 1)[0] ?? "";
+  switch (code) {
+    case "goal_explicit_resume_required":
+      return ko ? "이 작업은 멈춰 있어요. 위 목표 칩의 '재개'를 누르면 여기서부터 이어집니다." : "This task is paused. Press 'Resume' on the goal chip above to continue from here.";
+    case "auto_goal_resume_attempt_unsettled":
+      return ko ? "이전 실행이 아직 정리되지 않았어요. 잠시 뒤 다시 시도해 주세요." : "The previous run is still settling. Try again in a moment.";
+    case "auto_goal_resume_chat_busy":
+      return ko ? "이 대화가 아직 앞 요청을 돌리는 중이에요." : "This chat is still running an earlier request.";
+    default:
+      return null;
+  }
+}

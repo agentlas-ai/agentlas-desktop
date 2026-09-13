@@ -15,7 +15,7 @@ import { InactiveToolNotice } from "@/components/InactiveToolNotice";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
-import { detailForUser, failureMessage, isChatBusyFailure, looksLikeMachineText } from "@/lib/invocation-failure";
+import { detailForUser, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
@@ -147,8 +147,8 @@ function startFailureText(cause: unknown, locale: string, hadImages: boolean): s
    *   그대로 뜬다(실측 2026-09-08, 실제로 화면에 나왔다). 읽어도 할 일을 알 수 없다.
    *   사람 문장일 때만 붙인다.
    */
-  const raw = detailForUser(cause);
   const ko = locale === "ko";
+  const raw = knownStartFailureHuman(cause, ko) ?? detailForUser(cause);
   const restored = ko
     ? `입력은 작성창에 되돌려 놓았습니다${hadImages ? " (사진은 다시 첨부해 주세요)" : ""}.`
     : `Your text is back in the composer${hadImages ? " (please attach the image again)" : ""}.`;

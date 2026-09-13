@@ -22,6 +22,7 @@ import {
 } from "./events";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import { tryRecordRunEvent } from "../store/run-events";
+import { currentUiLocale } from "../ui-locale";
 
 // Secret/credential detection — events matching these are dropped, never stored.
 // Shared with every other write boundary; this file used to carry its own shorter list that
@@ -182,11 +183,18 @@ export function recordTerminalMemoryTurn(
     context: ctx,
     emitterStatus: "missing",
     candidateCount: 0,
-    turnSummary: status === "cancelled"
-      ? "The model turn was cancelled before a final response."
-      : status === "curation_failed"
-        ? "The model turn completed but its semantic memory review was unavailable."
-        : "The model turn ended without a final response.",
+    // 사람이 읽는 "프로젝트 기억" 줄이다 — 화면 언어로(실측: 한국어 화면에 영어 문장이 그대로 떴다, 2026-09-13).
+    turnSummary: currentUiLocale() === "ko"
+      ? (status === "cancelled"
+        ? "답이 나오기 전에 이 턴이 중단되었습니다."
+        : status === "curation_failed"
+          ? "이 턴은 끝났지만 기억 정리를 할 수 없었습니다."
+          : "이 턴은 최종 답 없이 끝났습니다.")
+      : (status === "cancelled"
+        ? "The model turn was cancelled before a final response."
+        : status === "curation_failed"
+          ? "The model turn completed but its semantic memory review was unavailable."
+          : "The model turn ended without a final response."),
   });
   if (ticket.created) {
     completeMemoryTicket(ticket.ticketId, report, "policy", {

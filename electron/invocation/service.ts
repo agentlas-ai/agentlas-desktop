@@ -35,8 +35,7 @@ import {
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
-  transitionLongRun,
-} from "../store/long-runs";
+  transitionLongRun, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
@@ -1348,10 +1347,9 @@ export class InvocationService {
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
         throw new Error("goal_control_scope_mismatch");
       }
-      const unsettled = getDb().prepare(
-        "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
-      ).get(boundGoal.id) as { n: number };
-      if (unsettled.n) throw new Error("auto_goal_resume_attempt_unsettled");
+      // 사람이 멈춘 목표에 말을 걸었다: 끊긴 시도의 불확실성은 인지된 것으로 적고, 살아 있는 시도만 막는다.
+      acknowledgeUncertainLongRunAttempts(boundGoal.id);
+      if (liveLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
       const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
         || Boolean(longRunMonetaryRefusal(boundGoal))
         || (boundGoal.budget.wallclockDeadline != null
