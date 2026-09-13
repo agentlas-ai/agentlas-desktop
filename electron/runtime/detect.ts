@@ -7,6 +7,7 @@ import { readCodexModelDiscovery } from "./codex-models";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
 import { reportDiscoveryLoudly , storedResolvedAliases } from "./model-discovery-store";
+import { cliConfiguredDefaultModel } from "./cli-default-model";
 import { registerProbeModels } from "./model-catalog";
 import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
@@ -328,7 +329,12 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
      */
     const list = markSignedOutRuntimes(await flight).map((runtime) => {
       const observed = resolvedCliModelAlias(runtime.kind, "");
-      return observed ? { ...runtime, observedDefaultModel: observed } : runtime;
+      const configured = cliConfiguredDefaultModel(runtime.kind);
+      return {
+        ...runtime,
+        ...(observed ? { observedDefaultModel: observed } : {}),
+        ...(configured ? { cliDefaultModel: configured } : {}),
+      };
     });
     // A runtime update/store change may have invalidated this probe while it
     // was running. Let its caller finish, but never make that old generation

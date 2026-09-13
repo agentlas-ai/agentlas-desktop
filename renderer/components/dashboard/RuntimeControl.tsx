@@ -355,9 +355,16 @@ export function RuntimeControl() {
           label: "",
           runtime,
           isDefault: true,
-          // "엔진 설정 사용"이 실제로 무엇으로 풀렸는지 — 실행이 알려준 값만 붙는다.
-          // 기본값으로 쓰는 사람이 대다수라, 이 행이 비어 있으면 아무도 실제 모델을 못 본다.
-          ...(runtime.observedDefaultModel ? { resolvedId: runtime.observedDefaultModel } : {}),
+          // 기본값 행이 실제로 무엇으로 풀렸는지 — 실행이 알려준 값, 없으면 CLI 설정 파일의
+          // 기본 모델이 카탈로그에서 풀린 값만 붙는다. 기본값으로 쓰는 사람이 대다수라,
+          // 이 행이 비어 있으면 아무도 실제 모델을 못 본다.
+          ...((): { resolvedId?: string } => {
+            const fromCatalog = runtime.cliDefaultModel
+              ? models.find((model) => model.id === runtime.cliDefaultModel)?.resolvedId
+              : undefined;
+            const resolved = runtime.observedDefaultModel ?? fromCatalog;
+            return resolved ? { resolvedId: resolved } : {};
+          })(),
         });
       }
       for (const model of models) {

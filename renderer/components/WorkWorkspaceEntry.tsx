@@ -23,7 +23,9 @@ export function WorkWorkspaceEntry(){
   useEffect(()=>{
     let disposed=false;
     const refresh=()=>{const request=++generation.current;const api=ipc();if(!api){setError(ko?'앱 연결을 확인한 뒤 다시 시도해 주세요.':'The app bridge is unavailable.');return;}
-      void Promise.all([api.projects.list(),api.team.list(),api.runtime.detect()]).then(([p,a,r])=>{if(disposed||request!==generation.current)return;setProjects(p);setAgents(a);setRuntimeLoaded(true);const pin=selectionRef.current;setRuntime((pin?r.find(item=>item.kind===pin.kind&&item.backend===pin.backend&&item.source===pin.source):r.find(item=>item.active))??null);}).catch(()=>{if(!disposed)setError(ko?'프로젝트와 모델 상태를 읽지 못했습니다.':'Project and model status could not be read.');});};
+      // 프로젝트 목록은 런타임 감지(첫 실행 최대 10초)를 기다리지 않는다 — 실측(2026-09-13 프로덕션): 감지가 끝나기 전엔 프로젝트 메뉴가 비어 있었다.
+      void Promise.all([api.projects.list(),api.team.list()]).then(([p,a])=>{if(disposed||request!==generation.current)return;setProjects(p);setAgents(a);}).catch(()=>{if(!disposed)setError(ko?'프로젝트 목록을 읽지 못했습니다.':'Projects could not be read.');});
+      void api.runtime.detect().then(r=>{if(disposed||request!==generation.current)return;setRuntimeLoaded(true);const pin=selectionRef.current;setRuntime((pin?r.find(item=>item.kind===pin.kind&&item.backend===pin.backend&&item.source===pin.source):r.find(item=>item.active))??null);}).catch(()=>{if(!disposed)setError(ko?'모델 상태를 읽지 못했습니다.':'Model status could not be read.');});};
     refresh();const off=ipcEvents()?.onStoreChanged?.(event=>{if(['project','runtime','agent'].includes(event.entity))refresh();});
     const pending=pendingWorkStart();if(pending){setPrefill(pending.prompt);setProjectId(pending.projectId??null);setSelection(pending.runtimeSelection);}
     return()=>{disposed=true;off?.();};

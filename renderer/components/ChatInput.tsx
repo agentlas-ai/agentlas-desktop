@@ -21,6 +21,7 @@ import type {
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY, runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeModelFallbackLabel } from "./dashboard/RuntimeModelPicker";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
@@ -3040,6 +3041,7 @@ function ModelMenu({
   onSelectEffort: (id: string) => void;
   t: TFunction;
 }) {
+  const { locale } = useT();
   const efforts = effortOptionsForModel(runtime);
   const currentEffort = efforts.some((effort) => effort.id === runtime.effort)
     ? runtime.effort
@@ -3057,7 +3059,7 @@ function ModelMenu({
         <Row
           onClick={() => onSelectModel("")}
           icon={modelIcon}
-          title={t("chat.model.engine_setting")}
+          title={runtimeModelFallbackLabel(runtime.kind, locale === "ko" ? "ko" : "en", runtime)}
           right={!runtime.model ? check : undefined}
         />
       )}

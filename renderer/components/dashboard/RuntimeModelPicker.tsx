@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { RuntimeBackend, RuntimeKind, RuntimeSelection, RuntimeStatus } from "@/lib/types";
-import { cliModelTagLabel, runtimeUsesEngineModelSetting } from "@shared/models";
+import { cliModelTagLabel, cliModels, runtimeUsesEngineModelSetting } from "@shared/models";
 import { llmLogoSrc } from "@/lib/llm-logo";
 
 export type RuntimeModelPickerOption = {
@@ -114,16 +114,33 @@ function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en")
   if (option.runtime.credentialAccess?.status === "unavailable") {
     return `${option.label} · ${locale === "ko" ? "API 키 접근 불가" : "API key unavailable"}`;
   }
-  if (option.isDefault) return runtimeModelFallbackLabel(option.runtime.kind, locale);
+  if (option.isDefault) return runtimeModelFallbackLabel(option.runtime.kind, locale, option.runtime);
   if (option.unavailable) return `${option.label} · ${locale === "ko" ? "연결 안 됨" : "unavailable"}`;
   return option.label;
 }
 
-export function runtimeModelFallbackLabel(kind: RuntimeKind, locale: "ko" | "en"): string {
-  if (runtimeUsesEngineModelSetting(kind)) {
-    return locale === "ko" ? "엔진 설정 사용" : "Use engine setting";
+/*
+ * 모델 미지정 행의 이름. 예전 이름 "엔진 설정 사용"은 무슨 모델인지 아무도 몰랐다(오너 2026-09-13).
+ * 이제 행이 스스로 말한다 — "Claude Code 기본값 · Opus" 처럼 CLI 가 자기 설정 파일에 적어 둔
+ * 기본 모델(cliDefaultModel)을, 그것도 없으면 마지막 실행이 실제로 쓴 모델(observedDefaultModel)을
+ * 붙인다. 둘 다 모르면 모른다고 적는다. 짐작해서 채우지 않는다.
+ */
+export function runtimeModelFallbackLabel(
+  kind: RuntimeKind,
+  locale: "ko" | "en",
+  runtime?: Pick<RuntimeStatus, "cliDefaultModel" | "observedDefaultModel" | "label"> | null,
+): string {
+  if (!runtimeUsesEngineModelSetting(kind)) {
+    return locale === "ko" ? "모델 미지정" : "Model not specified";
   }
-  return locale === "ko" ? "모델 미지정" : "Model not specified";
+  const engine = runtime?.label ?? RUNTIME_LABEL[kind] ?? kind;
+  const configured = runtime?.cliDefaultModel
+    ? (cliModels(kind).find((option) => option.id === runtime.cliDefaultModel)?.label ?? runtime.cliDefaultModel)
+    : "";
+  const model = configured || runtime?.observedDefaultModel || "";
+  if (model) return locale === "ko" ? `${engine} 기본값 · ${model}` : `${engine} default · ${model}`;
+  // 좁은 목록에서 잘리지 않게 짧게 — 무엇인지는 첫 실행이 알려 준다.
+  return locale === "ko" ? `${engine} 기본값 · 모델 미확인` : `${engine} default · model unknown`;
 }
 
 export function RuntimeBrandIdentity({

@@ -3543,7 +3543,7 @@ function RuntimeAssignmentPanel({
             style={runtimeSelectStyle}
           >
             {allowsEngineModelSetting && selectedRuntime && (
-              <option value="">{runtimeModelFallbackLabel(selectedRuntime.kind, locale)}</option>
+              <option value="">{runtimeModelFallbackLabel(selectedRuntime.kind, locale, selectedRuntime)}</option>
             )}
             {missingRequiredModel && (
               <option value="" disabled>{locale === "ko" ? "모델 선택 필요" : "Model required"}</option>

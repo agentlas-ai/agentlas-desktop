@@ -286,7 +286,7 @@ export function OneComposerControls({
             {activeMenu === "model" && (
               <>
                 {runtime && runtimeUsesEngineModelSetting(runtime.kind) && (
-                  <ComposerRow icon={<IconSparkles size={15} />} title={runtimeModelFallbackLabel(runtime.kind, locale)} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
+                  <ComposerRow icon={<IconSparkles size={15} />} title={runtimeModelFallbackLabel(runtime.kind, locale, runtime)} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
                 )}
                 {filteredModels.map((item) => (
                   <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={item.logo

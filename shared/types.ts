@@ -806,6 +806,13 @@ export interface RuntimeStatus {
    */
   observedDefaultModel?: string;
 
+  /**
+   * 모델을 지정하지 않으면 CLI 가 쓰는 **자기 설정 파일의 기본 모델**(claude `~/.claude/settings.json`
+   * 의 model, codex `~/.codex/config.toml` 의 model). 감지 때 파일에서 읽는다 — 없으면 미설정.
+   * 화면의 "기본값" 행은 이 값으로 자기가 무슨 모델인지 말한다.
+   */
+  cliDefaultModel?: string;
+
   /** Credential access is separate from runtime/model discovery; absence has no runtime row. */
   credentialAccess?:
     | { status: "available" }

@@ -420,7 +420,7 @@ export function OneCreateAgentDialog({
           : runtime.model
             ? [{ model: runtime.model, label: runtime.model, tag: undefined }]
             : runtimeUsesEngineModelSetting(runtime.kind)
-              ? [{ model: undefined, label: runtimeModelFallbackLabel(runtime.kind, ko ? "ko" : "en"), tag: undefined }]
+              ? [{ model: undefined, label: runtimeModelFallbackLabel(runtime.kind, ko ? "ko" : "en", runtime), tag: undefined }]
               : [];
         return selections.map((model) => {
           const selection: RuntimeSelection = {
