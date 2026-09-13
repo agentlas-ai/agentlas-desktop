@@ -13,20 +13,28 @@ import {
  * release API. A new release is a new row; package ids are never retargeted.
  */
 const ENGINE_CATALOG: readonly LocalEnginePackageIdentity[] = [
+/*
+ * Windows x64 ships the Vulkan build, not the CPU build (2026-09-13). The two
+ * archives are byte-identical except for one extra ggml-vulkan.dll; llama-server
+ * loads backends dynamically, so a machine without a Vulkan driver silently runs
+ * on the same CPU kernels the CPU build has (verified: only ggml-vulkan.dll
+ * imports vulkan-1.dll). With a driver — NVIDIA, AMD and Intel all ship one —
+ * layers land on the GPU. The CPU build could never accelerate anything.
+ */
 {
   "schemaVersion": LOCAL_MODEL_HUB_SCHEMA_VERSION,
-  "packageId": "llama.cpp:b10903:win32-x64-cpu",
+  "packageId": "llama.cpp:b10903:win32-x64-vulkan",
   "engine": "llama.cpp",
   "releaseTag": "b10903",
   "sourceCommit": "481c65f091f74c5e7089dd0a3a1cc6b50cced31e",
   "platform": "win32",
   "arch": "x64",
-  "accelerator": "cpu",
+  "accelerator": "vulkan",
   "archiveFormat": "zip",
-  "fileName": "llama-b10903-bin-win-cpu-x64.zip",
-  "byteLength": 18423911,
-  "sha256": "b009259d362662f4d73633773080e0ce5d748b8556290b7973fc7249b3b83806",
-  "downloadUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10903/llama-b10903-bin-win-cpu-x64.zip",
+  "fileName": "llama-b10903-bin-win-vulkan-x64.zip",
+  "byteLength": 31666998,
+  "sha256": "8f89871e31198136c0f1db81de69c7b9adffebf02d4cbfe71442475a906cadba",
+  "downloadUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10903/llama-b10903-bin-win-vulkan-x64.zip",
   "sourceUrl": "https://github.com/ggml-org/llama.cpp/releases/tag/b10903",
   "provenance": {
     "kind": "github-artifact-attestation",
@@ -175,6 +183,10 @@ const MODEL_CATALOG: readonly LocalModelPackageIdentity[] = [
 ] as const;
 
 for (const item of ENGINE_CATALOG) assertLocalEnginePackageIdentity(item);
+// One row per platform/arch: compatibleEnginePackage() and every receipt lookup take the first match.
+if (new Set(ENGINE_CATALOG.map((item) => `${item.platform}:${item.arch}`)).size !== ENGINE_CATALOG.length) {
+  throw new TypeError("duplicate_local_engine_platform_row");
+}
 for (const item of MODEL_CATALOG) assertLocalModelPackageIdentity(item);
 
 export function localEngineCatalog(): LocalEnginePackageIdentity[] {

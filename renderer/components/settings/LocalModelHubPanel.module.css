@@ -27,6 +27,8 @@
 .capabilities { display:flex; flex-wrap:wrap; gap:10px 16px; color:var(--muted-deep); font-size:11px; }
 .resident,.progress { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--paper-edge); }
 .resident span,.progress span { min-width:0; overflow-wrap:anywhere; }
+.chip { display:inline-flex; align-items:center; gap:4px; flex:none; margin-left:auto; padding:2px 7px; border-radius:6px; background:var(--paper-2); color:var(--muted-deep); font-size:11px; line-height:16px; cursor:default; }
+.chipGpu { color:#258449; }
 .resident button,.progress button { flex:none; border:0; background:transparent; color:var(--accent); font:inherit; cursor:pointer; padding:4px 7px; }
 .empty { color:var(--muted-deep); padding:16px 0; line-height:1.6; }
 .notice { padding:12px 0; margin:0; color:var(--muted-deep); line-height:1.6; }

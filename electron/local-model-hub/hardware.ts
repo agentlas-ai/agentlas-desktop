@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { cpus, freemem, totalmem } from "node:os";
 import { statfs } from "node:fs/promises";
 import type {
+  LocalEngineDevice,
   LocalHardwareProfile,
   LocalModelFitAssessment,
   LocalModelPackageIdentity,
@@ -12,7 +14,37 @@ function digest(parts: readonly (string | number)[]): string {
   return createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
-export async function observeLocalHardware(storagePath: string): Promise<LocalHardwareProfile> {
+let darwinAvailable: { at: number; bytes: number } | null = null;
+
+/**
+ * macOS: `os.freemem()` counts only truly free pages. On a 48 GB Mac it read
+ * 2.0 GiB while 13.9 GiB were reclaimable (inactive + speculative + purgeable,
+ * vm_stat 2026-09-13), so a 0.6 B model was rated "not recommended". Activity
+ * Monitor's "available" is the reclaimable figure; use it, cached for 2 s.
+ */
+async function observeAvailableMemory(): Promise<number> {
+  if (process.platform !== "darwin") return freemem();
+  if (darwinAvailable && Date.now() - darwinAvailable.at < 2_000) return darwinAvailable.bytes;
+  const bytes = await new Promise<number>((resolveBytes) => {
+    execFile("/usr/bin/vm_stat", [], { timeout: 1_500, maxBuffer: 65_536 }, (error, stdout) => {
+      if (error) return resolveBytes(freemem());
+      const pageSize = Number(/page size of (\d+) bytes/.exec(stdout)?.[1]);
+      const pages = (label: string) => Number(new RegExp(`^Pages ${label}:\\s+(\\d+)\\.`, "m").exec(stdout)?.[1] ?? NaN);
+      const reclaimable = pages("free") + pages("inactive") + pages("speculative") + pages("purgeable");
+      resolveBytes(Number.isFinite(pageSize) && Number.isFinite(reclaimable) && pageSize > 0 ? Math.min(totalmem(), reclaimable * pageSize) : freemem());
+    });
+  });
+  darwinAvailable = { at: Date.now(), bytes };
+  return bytes;
+}
+
+/**
+ * `engineDevices` is what the installed llama-server listed with `--list-devices`.
+ * Without it, only Apple Silicon can be called accelerated (Metal is always
+ * present there). Windows and Intel Macs stay "not-observed" until the engine
+ * itself has listed a GPU — a CPU-only guess must never turn into "recommended".
+ */
+export async function observeLocalHardware(storagePath: string, engineDevices: LocalEngineDevice[] = []): Promise<LocalHardwareProfile> {
   const cpuList = cpus();
   let diskAvailableBytes: number | null = null;
   try {
@@ -26,7 +58,10 @@ export async function observeLocalHardware(storagePath: string): Promise<LocalHa
   const appleSilicon = platform === "darwin" && arch === "arm64";
   const observedAt = new Date().toISOString();
   const totalMemoryBytes = totalmem();
-  const availableMemoryBytes = freemem();
+  const availableMemoryBytes = await observeAvailableMemory();
+  const gpu = engineDevices.find((device) => device.gpu) ?? null;
+  const accelerator = gpu ? gpu.accelerator : appleSilicon ? "metal" : "unknown";
+  const acceleratorEvidence = gpu ? "engine-observed" : appleSilicon ? "host-observed" : "not-observed";
   return {
     schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
     profileId: `hardware:${digest([platform, arch, cpuList[0]?.model ?? "unknown", totalMemoryBytes])}`,
@@ -38,10 +73,11 @@ export async function observeLocalHardware(storagePath: string): Promise<LocalHa
     totalMemoryBytes,
     availableMemoryBytes,
     memoryKind: appleSilicon ? "unified" : "system",
-    accelerator: appleSilicon ? "metal" : "unknown",
-    acceleratorEvidence: appleSilicon ? "host-observed" : "not-observed",
-    vramBytes: appleSilicon ? totalMemoryBytes : null,
+    accelerator,
+    acceleratorEvidence,
+    vramBytes: gpu?.memoryBytes ?? (appleSilicon ? totalMemoryBytes : null),
     diskAvailableBytes,
+    engineDevices: engineDevices.map((device) => ({ ...device })),
   };
 }
 
@@ -73,9 +109,14 @@ export function estimateLocalModelFit(
   } else if (memoryAvailable < requiredBytes) {
     fit = "may_be_slow";
     reasonCodes.push("memory_pressure_likely");
-  } else if (hardware.accelerator === "metal") {
-    fit = "recommended";
-    reasonCodes.push("metal_observed");
+  } else if (hardware.acceleratorEvidence !== "not-observed" && hardware.accelerator !== "unknown" && hardware.accelerator !== "cpu") {
+    // A GPU backend the host or the engine itself observed (Metal on Apple Silicon,
+    // or any device the installed engine listed). Discrete GPUs also need the model
+    // to fit their own memory, not only system RAM.
+    const vramShort = hardware.memoryKind !== "unified" && hardware.vramBytes !== null && hardware.vramBytes < model.byteLength + kvAndScratch;
+    fit = vramShort ? "may_be_slow" : "recommended";
+    reasonCodes.push(`${hardware.accelerator}_observed`);
+    if (vramShort) reasonCodes.push("gpu_memory_smaller_than_model");
   } else {
     fit = "runnable";
     reasonCodes.push("accelerator_not_verified");

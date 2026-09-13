@@ -90,6 +90,7 @@
     "test:goal-loop": "npm run build:electron && node scripts/goal-loop-contract.cjs && electron scripts/goal-reinjection-contract.cjs",
     "test:provider-health-ui": "npm run build:renderer && node scripts/qa-provider-health-dashboard.cjs",
     "test:local-import": "npm run build:electron && electron scripts/smoke-local-import.cjs",
+    "test:local-model-acceleration": "tsc -p electron/tsconfig.json && node scripts/local-model-acceleration-evidence-contract.cjs",
     "test:one-team-cloud-publish": "npm run build:electron && electron scripts/gate-one-team-cloud-publish.cjs",
     "test:mac-install-transaction": "node scripts/verify-mac-install-boundary.mjs --self-test",
     "test:agent-control-block-parity": "npm run build:electron && node scripts/agent-control-block-parity-contract.cjs",

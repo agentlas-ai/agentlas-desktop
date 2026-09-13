@@ -79,4 +79,20 @@ module.exports = async function afterSignTrust(context) {
   if (!installableRequirement.ok) {
     throw new Error("Squirrel-installable runtime permissions invalidated the official macOS code signature");
   }
+
+  /*
+   * ★ 서명 뒤의 bin/node 를 실행 시 검증기로 한 번 더 통과시킨다 (2026-09-13).
+   *
+   * afterPack 은 서명 **전** 트리를 업스트림 해시와 대조한다. 그 뒤 osx-sign 이 bin/node 를 우리
+   * Developer ID 로 다시 서명해 해시가 바뀌었고, 앱 안의 검증기(managed-node.ts)는 그 파일을
+   * 영원히 거부했다 — 1.2.0 까지 맥 배포본에서 내장 Node·로컬 모델 엔진 설치가 한 번도 성공하지
+   * 못한 이유. 이제 검증기는 우리 팀 서명을 받아들이지만, 그 규칙이 다시 어긋나면 여기서 릴리스가 멈춘다.
+   */
+  const verifier = require(path.join(context.packager.projectDir, "dist", "electron", "runtime", "managed-node.js"));
+  const arch = context.arch === 3 || String(context.arch).toLowerCase() === "arm64" ? "arm64" : "x64";
+  const runtimeRoot = path.join(appPath, "Contents", "Resources", "node-runtime");
+  const resolution = verifier.validateManagedNodeRuntimeRoot(runtimeRoot, "darwin", arch);
+  if (!resolution.ok) {
+    throw new Error(`signed macOS bundle's Node runtime would be rejected by the app itself: ${resolution.reason}`);
+  }
 };

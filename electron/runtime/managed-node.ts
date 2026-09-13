@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,8 +10,51 @@ interface LockedNodeAsset {
   archiveName: string;
   archiveSha256: string;
   nodeSha256: string;
+  /** Upstream `bin/node` size. Needed to rebuild the tree digest when macOS re-signing changed the file. */
+  nodeByteLength?: number;
   npmCliSha256: string;
   runtimeTreeSha256: string;
+}
+
+/*
+ * ★ macOS 배포본의 bin/node 는 업스트림 파일이 아니다 (2026-09-13 실측).
+ *
+ * electron-builder 가 공증을 위해 번들 안의 모든 Mach-O 를 우리 Developer ID 로 다시 서명한다.
+ * 그래서 설치된 1.2.0 의 bin/node 는 sha256 이 38707d62…(잠금값 ee6fb0e0…과 다름, 288바이트 큼)이고
+ * 서명 주체는 "Developer ID Application: … (F469CGM7T5)" 다. 이 파일은 맥 서명 배포본에서는
+ * **절대로** 잠금 해시와 같을 수 없었고, 그 결과 내장 Node 검증 → 로컬 모델 엔진 서명검증 →
+ * 엔진 설치가 맥 프로덕션에서 단 한 번도 성공한 적이 없다(로그: engine_attestation_managed_runtime_unavailable,
+ * 검증 자식의 실제 사유는 "checksum verification failed" — 타임아웃이 아니었다).
+ *
+ * 규칙: 내용 해시가 다르면, 맥에서는 그 파일이 우리 팀의 Developer ID 로 서명된 Mach-O 일 때만 받는다.
+ * 릴리스 파이프라인은 서명 전에 업스트림 해시를 검사(after-pack-clean.cjs)하고, 서명 뒤에 이 검증기를
+ * 다시 돌린다(after-sign-trust.cjs). 사슬: 업스트림 해시 → 우리 서명 → 실행 시 서명 검증.
+ * 트리 지문은 그 파일 자리에 잠금 해시·잠금 크기를 대입해 계산하므로 잠금 상수는 그대로다.
+ */
+const MAC_RELEASE_TEAM_IDENTIFIER = "F469CGM7T5";
+export const MAC_RELEASE_NODE_REQUIREMENT = `identifier "node" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${MAC_RELEASE_TEAM_IDENTIFIER}"`;
+const MACHO_MAGICS = new Set([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca]);
+
+function defaultMacReleaseNodeSignatureVerifier(node: string): boolean {
+  try {
+    const header = Buffer.alloc(4);
+    const fd = fs.openSync(node, "r");
+    try { if (fs.readSync(fd, header, 0, 4, 0) !== 4) return false; } finally { fs.closeSync(fd); }
+    if (!MACHO_MAGICS.has(header.readUInt32BE(0))) return false;
+    const result = spawnSync("/usr/bin/codesign", ["--verify", "--strict", `-R=${MAC_RELEASE_NODE_REQUIREMENT}`, node], {
+      stdio: ["ignore", "ignore", "ignore"], timeout: 30_000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+let macReleaseNodeSignatureVerifier = defaultMacReleaseNodeSignatureVerifier;
+
+/** Contract-test seam only: production always runs /usr/bin/codesign against the pinned requirement. */
+export function setMacReleaseNodeSignatureVerifierForTests(verifier: ((node: string) => boolean) | null): void {
+  macReleaseNodeSignatureVerifier = verifier ?? defaultMacReleaseNodeSignatureVerifier;
 }
 
 const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
@@ -40,6 +83,7 @@ const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
     archiveName: "node-v24.18.0-darwin-arm64.tar.gz",
     archiveSha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
     nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
+    nodeByteLength: 120_965_360,
     npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
     runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
   },
@@ -47,6 +91,7 @@ const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
     archiveName: "node-v24.18.0-darwin-x64.tar.gz",
     archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
     nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
+    nodeByteLength: 123_320_000,
     npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
     runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
   },
@@ -177,7 +222,14 @@ function sha256File(file: string): string {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-function runtimeTreeSha256(root: string): string {
+interface TreeRecordSubstitute { relative: string; size: number; sha256: string }
+
+/**
+ * `substitute` stands in for one file whose bytes were verified another way
+ * (the re-signed macOS node): its locked size and hash enter the digest so the
+ * pinned tree constant keeps meaning "the upstream tree, nothing added".
+ */
+function runtimeTreeSha256(root: string, substitute?: TreeRecordSubstitute): string {
   const records: Array<
     | { kind: "L"; relative: string; target: string }
     | { kind: "F"; relative: string; absolute: string; size: number }
@@ -204,6 +256,9 @@ function runtimeTreeSha256(root: string): string {
   for (const record of records.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0)) {
     if (record.kind === "L") {
       digest.update("L\0").update(record.relative).update("\0").update(record.target).update("\n");
+    } else if (substitute && record.relative === substitute.relative) {
+      digest.update("F\0").update(record.relative).update("\0")
+        .update(String(substitute.size)).update("\0").update(substitute.sha256).update("\n");
     } else {
       digest.update("F\0").update(record.relative).update("\0")
         .update(String(record.size)).update("\0").update(sha256File(record.absolute)).update("\n");
@@ -321,10 +376,17 @@ export function validateManagedNodeRuntimeRoot(
     if (!isInside(nodeReal, rootReal) || !isInside(npmReal, rootReal)) {
       return { ok: false, reason: "managed Node executable resolves outside its runtime root" };
     }
+    let substitute: TreeRecordSubstitute | undefined;
+    if (sha256File(node) !== locked.nodeSha256) {
+      // Only a macOS release bundle may differ, and only because our own Developer ID re-signed it.
+      if (platform !== "darwin" || !locked.nodeByteLength || !macReleaseNodeSignatureVerifier(node)) {
+        return { ok: false, reason: "managed Node runtime checksum verification failed" };
+      }
+      substitute = { relative: manifest.nodeRelativePath, size: locked.nodeByteLength, sha256: locked.nodeSha256 };
+    }
     if (
-      sha256File(node) !== locked.nodeSha256 ||
       sha256File(npmCli) !== locked.npmCliSha256 ||
-      runtimeTreeSha256(root) !== locked.runtimeTreeSha256
+      runtimeTreeSha256(root, substitute) !== locked.runtimeTreeSha256
     ) {
       return { ok: false, reason: "managed Node runtime checksum verification failed" };
     }

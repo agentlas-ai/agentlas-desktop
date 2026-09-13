@@ -67,6 +67,10 @@ function failureReason(code: string | null | undefined, ko: boolean): string {
     engine_attestation_rate_limited: ["GitHub 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도해 주세요", "GitHub rate limit reached. Try again later"],
     engine_attestation_bundle_missing: ["이 판의 서명 증명이 없습니다", "No signed attestation exists for this build"],
     engine_not_installed: ["실행 엔진이 아직 설치되지 않았습니다", "The execution engine is not installed yet"],
+    engine_health_timeout: ["실행 엔진이 제때 응답하지 않았습니다. 메모리 여유를 확인하고 다시 시도해 주세요", "The engine did not respond in time. Check free memory and retry"],
+    model_file_sha256_mismatch: ["모델 파일이 내려받은 뒤 바뀌었습니다. 다시 내려받아 주세요", "The model file changed after download. Download it again"],
+    engine_package_host_mismatch: ["이 컴퓨터용 엔진이 아닙니다", "This engine package is not for this computer"],
+    local_model_hub_owned_by_other_process: ["다른 Agentlas 창이 로컬 모델을 쓰고 있습니다", "Another Agentlas window is using local models"],
   };
   const text = known[code]?.[ko ? 0 : 1] ?? code;
   return ` · ${text}`;

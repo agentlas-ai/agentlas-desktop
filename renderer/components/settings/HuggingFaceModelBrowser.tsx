@@ -140,7 +140,7 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
   return <section className={styles.browser} aria-label={ko ? "Hugging Face 모델 탐색" : "Browse Hugging Face models"}>
     <div className={styles.searchRow}><label className={styles.search}><IconSearch size={18} /><input aria-label={ko ? "Hugging Face 모델 검색" : "Search Hugging Face models"} placeholder={ko ? "모델이나 제작자를 검색하세요" : "Search models or publishers"} value={query} onChange={event => { searchEpoch.current++; setResult(null); setQuery(event.target.value); }} /></label>
       <button className={styles.refresh} type="button" disabled={loading} title={result?.syncedAt ? `${ko ? "확인" : "Checked"} ${new Date(result.syncedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : undefined} aria-label={ko ? "모델 목록 새로고침" : "Refresh model catalog"} onClick={() => void search(undefined, true)}><IconRefresh size={17} /></button></div>
-    <div className={styles.source}><span>{status} · GGUF</span></div>
+    <div className={styles.source}><span title={ko ? "Hugging Face 공개 목록을 조회만 하고, 파일은 원본 저장소에서 이 컴퓨터로 직접 내려받습니다. 복제·재배포하지 않으며 라이선스 표기는 원본 그대로 둡니다." : "Only the public Hugging Face listing is queried; files download straight from the source repository to this computer. Nothing is mirrored or redistributed, and licenses stay as published."}>{status} · GGUF</span></div>
     {error && !selected && <p className={styles.error} role="alert">{error}</p>}
     <div className={styles.grid} aria-busy={loading}>
       {result?.models.map(model => <button key={model.repository} type="button" data-hf-repository={model.repository} className={styles.card} onClick={event => { opener.current = event.currentTarget; setSelected(model.repository); }}>

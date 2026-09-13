@@ -65,9 +65,37 @@ export interface LocalHardwareProfile {
   availableMemoryBytes: number;
   memoryKind: "unified" | "system" | "unknown";
   accelerator: LocalModelAccelerator | "unknown";
-  acceleratorEvidence: "host-observed" | "not-observed";
+  /**
+   * "host-observed": inferred from the host (Apple Silicon → Metal).
+   * "engine-observed": the installed engine listed this device itself (`--list-devices`).
+   * "not-observed": nothing has proven a GPU backend on this machine.
+   */
+  acceleratorEvidence: "host-observed" | "engine-observed" | "not-observed";
   vramBytes: number | null;
   diskAvailableBytes: number | null;
+  /** Devices the installed engine reported; empty until an engine is installed. */
+  engineDevices?: LocalEngineDevice[];
+}
+
+/** One device row from `llama-server --list-devices`, e.g. "MTL0: Apple M4 Max (38338 MiB, 38338 MiB free)". */
+export interface LocalEngineDevice {
+  id: string;
+  name: string;
+  accelerator: LocalModelAccelerator | "unknown";
+  gpu: boolean;
+  memoryBytes: number | null;
+  freeMemoryBytes: number | null;
+}
+
+/** Proof from the resident server's own load log, never from host heuristics. */
+export interface LocalModelAccelerationEvidence {
+  evidence: "engine-log";
+  backend: LocalModelAccelerator | "unknown";
+  /** True only when the log shows at least one layer placed on a GPU device. */
+  gpu: boolean;
+  devices: LocalEngineDevice[];
+  offloadedLayers: number | null;
+  totalLayers: number | null;
 }
 
 export interface LocalModelFitAssessment {
@@ -134,6 +162,8 @@ export interface LocalEngineInstallationReceipt {
   executableRelativePath: string;
   /** Exact files from the attested archive; required before loading Windows DLLs. */
   runtimeFiles?: Array<{ relativePath: string; sha256: string; byteLength: number }>;
+  /** What the installed executable itself listed with `--list-devices`; absent when the probe did not run. */
+  devices?: LocalEngineDevice[];
   installedAt: string;
 }
 
@@ -164,6 +194,8 @@ export interface LocalModelLoadReceipt {
   startedAt: string;
   finishedAt: string;
   reasonCode: string | null;
+  /** Present on a resident receipt when the engine log was captured; absent means unproven, not CPU. */
+  acceleration?: LocalModelAccelerationEvidence;
 }
 
 export interface LocalModelCapabilityReceipt {

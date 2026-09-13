@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, open, readdir, readlink, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type {
+  LocalEngineDevice,
   LocalEngineInstallationReceipt,
   LocalEnginePackageIdentity,
 } from "../../shared/local-model-hub";
@@ -13,6 +14,7 @@ import {
 import { sha256File } from "./download-manager";
 import { extractEngineZip } from "./archive";
 import { verifyManagedEngineAttestation } from "./attestation";
+import { parseEngineDeviceList } from "./acceleration";
 
 interface CommandResult {
   exitCode: number | null;
@@ -166,6 +168,7 @@ export class LocalEngineInstaller {
       signal?.throwIfAborted();
       await rm(finalRoot, { recursive: true, force: true });
       await rename(temp, finalRoot);
+      const devices = await this.probeDevices(resolve(finalRoot, executableRelativePath), signal);
       return {
         schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
         receiptId: randomUUID(),
@@ -176,11 +179,29 @@ export class LocalEngineInstaller {
         executableSha256,
         executableRelativePath: executableRelativePath.split(sep).join("/"),
         runtimeFiles,
+        ...(devices ? { devices } : {}),
         installedAt: new Date().toISOString(),
       };
     } catch (error) {
       await rm(temp, { recursive: true, force: true });
       throw error;
+    }
+  }
+
+  /**
+   * Asks the installed executable which compute devices it can see. This is the
+   * only honest source for "is there a GPU" on Windows and Intel Macs; the host
+   * cannot tell whether a Vulkan/Metal backend will actually load. A probe
+   * failure leaves `devices` absent — never an empty "no GPU" claim.
+   */
+  async probeDevices(executable: string, signal?: AbortSignal): Promise<LocalEngineDevice[] | undefined> {
+    try {
+      const result = await this.commandRunner(executable, ["--list-devices"], signal);
+      if (result.exitCode !== 0) return undefined;
+      return parseEngineDeviceList(`${result.stdout}\n${result.stderr}`);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return undefined;
     }
   }
 

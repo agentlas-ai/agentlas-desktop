@@ -27,6 +27,7 @@ import { HuggingFaceModelIndex } from "./huggingface";
 import { LocalEngineInstaller } from "./engine-installer";
 import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatchedLocalProcess } from "./platform";
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
+import { parseEngineLoadLog } from "./acceleration";
 
 interface PersistedHubState {
   schemaVersion: 1;
@@ -169,6 +170,7 @@ export class LocalModelHubManager {
   private residentAuthToken: string | null = null;
   private lifecycleChain: Promise<void> = Promise.resolve();
   private loadGeneration = 0;
+  private deviceProbe: Promise<void> | null = null;
   private readonly activeInference = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
   constructor(readonly rootPath: string, options: LocalModelHubManagerOptions = {}) {
@@ -339,9 +341,39 @@ export class LocalModelHubManager {
     });
   }
 
+  /**
+   * Engines installed before device probing existed carry no `devices`. Ask the
+   * installed executable once per app session and persist the answer, so an
+   * upgraded install shows the same GPU truth as a fresh one.
+   */
+  private async ensureEngineDevices(): Promise<void> {
+    if (this.unavailableReason || this.shutdownPromise) return;
+    const compatible = compatibleEnginePackage();
+    const receipt = compatible.item ? this.state.engineInstallations.find((item) => item.enginePackageId === compatible.item!.packageId) : null;
+    if (!compatible.item || !receipt || receipt.devices) return;
+    if (!this.deviceProbe) {
+      this.deviceProbe = (async () => {
+        const executable = this.installer.executablePath(compatible.item!, receipt);
+        await this.installer.verifyRuntimeFiles(compatible.item!, receipt);
+        const devices = await this.installer.probeDevices(executable);
+        if (!devices) return;
+        this.state.engineInstallations = this.state.engineInstallations.map((item) => item.receiptId === receipt.receiptId ? { ...item, devices } : item);
+        await this.save();
+      })().catch(() => undefined);
+    }
+    await this.deviceProbe;
+  }
+
+  private installedEngineDevices() {
+    const compatible = compatibleEnginePackage();
+    const receipt = compatible.item ? this.state.engineInstallations.find((item) => item.enginePackageId === compatible.item!.packageId) : null;
+    return receipt?.devices ?? [];
+  }
+
   async snapshot(): Promise<LocalModelHubSnapshot> {
     await this.ready();
-    const hardware = await observeLocalHardware(this.rootPath);
+    await this.ensureEngineDevices();
+    const hardware = await observeLocalHardware(this.rootPath, this.installedEngineDevices());
     const models = this.modelCatalog();
     const fitAssessments = models.map((model) => {
       const fit = estimateLocalModelFit(hardware, model);
@@ -543,6 +575,10 @@ export class LocalModelHubManager {
     try {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       if (generation !== this.loadGeneration) throw new Error("model_load_obsolete");
+      // Machine-readable log at trace level: this is where llama.cpp prints which
+      // device each layer landed on ("offloaded 29/29 layers to GPU"). Default
+      // verbosity hides it, and prompts are not logged at this level (measured
+      // 2026-09-13: ~24 KB per load, ~3 KB per request, no prompt text).
       const child = this.spawnImpl(executable, [
         "--model", modelPath,
         "--host", "127.0.0.1",
@@ -552,7 +588,12 @@ export class LocalModelHubManager {
         "--jinja",
         "--no-webui",
         "--api-key", authToken,
-      ], { stdio: "ignore", windowsHide: true, cwd: dirname(executable), env: { ...process.env, GGML_BACKEND_PATH: undefined } });
+        "--log-jsonl",
+        "--verbosity", "4",
+      ], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, cwd: dirname(executable), env: { ...process.env, GGML_BACKEND_PATH: undefined } });
+      let engineLog = "";
+      // Always drain: a full pipe would block the server. Only the load window is kept.
+      child.stdout?.on("data", (chunk: Buffer) => { if (engineLog.length < 262_144) engineLog += chunk.toString("utf8"); });
       const exitPromise = new Promise<never>((_resolve, reject) => {
         child.once("error", reject);
         child.once("exit", (code, exitSignal) => reject(new Error(`engine_exited_${code ?? exitSignal ?? "unknown"}`)));
@@ -592,11 +633,17 @@ export class LocalModelHubManager {
         await new Promise((resolveWait) => setTimeout(resolveWait, 150));
       }
       if (generation !== this.loadGeneration) throw new Error("model_load_obsolete");
+      // The load lines are written before the server listens; give the pipe a
+      // moment to deliver them so the receipt does not miss its own evidence.
+      for (let i = 0; i < 20 && !/model loaded|listening on/.test(engineLog); i += 1) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      }
       const receipt: LocalModelLoadReceipt = {
         ...receiptBase,
         state: "resident",
         finishedAt: new Date().toISOString(),
         reasonCode: null,
+        acceleration: parseEngineLoadLog(engineLog),
       };
       this.residentReceipt = receipt;
       child.once("exit", (code, exitSignal) => {

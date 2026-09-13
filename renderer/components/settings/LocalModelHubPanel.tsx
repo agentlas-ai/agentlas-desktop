@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentlasIpc } from "@/lib/types";
 import { ipc } from "@/lib/ipc";
 import { IconBolt, IconCode, IconCpu, IconImage, IconMoreHorizontal, IconPower, IconRefresh, IconSearch } from "@/components/Icon";
-import type { LocalModelHubSnapshot } from "@shared/local-model-hub";
+import type { LocalEngineDevice, LocalModelAccelerationEvidence, LocalModelHubSnapshot } from "@shared/local-model-hub";
 import menu from "@/components/PanelPopover.module.css";
 import styles from "./LocalModelHubPanel.module.css";
 import { LocalModelFitIcon, LocalModelInstallDialog, type LocalModelInstallPlan } from "./LocalModelInstallDialog";
@@ -13,6 +13,30 @@ type Operation = { id: string; packageId: string; kind: "engine" | "model" | "lo
 function bytes(value: number | null): string {
   if (value === null) return "—";
   return value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(value / 1024 ** 2)} MiB`;
+}
+function gib(value: number | null | undefined): string { return typeof value === "number" && value > 0 ? `${(value / 1024 ** 3).toFixed(0)} GiB` : "—"; }
+/**
+ * 가속 표시는 짧게, 근거는 마우스를 올리면. 근거는 엔진 자신의 로그(몇 층이 GPU 에 올랐는지)뿐이며
+ * 호스트 추정으로 "GPU" 라고 적지 않는다 — 윈도우 CPU 빌드는 영원히 CPU 였다(2026-09-13).
+ */
+export function AccelerationChip({ evidence, ko }: { evidence: LocalModelAccelerationEvidence | undefined; ko: boolean }) {
+  const gpu = evidence?.devices.find(device => device.gpu);
+  const layers = evidence && evidence.offloadedLayers !== null && evidence.totalLayers !== null ? `${evidence.offloadedLayers}/${evidence.totalLayers}` : null;
+  const state = !evidence ? "unknown" : evidence.gpu ? "gpu" : "cpu";
+  const label = state === "gpu" ? `${ko ? "GPU 가속" : "GPU accelerated"} · ${gpu?.name ?? evidence!.backend}${layers ? ` · ${layers} ${ko ? "층 GPU 에 올림" : "layers on GPU"}` : ""}`
+    : state === "cpu" ? (gpu ? (ko ? `CPU 실행 · ${gpu.name} 에 층이 올라가지 않음` : `Running on CPU · no layers placed on ${gpu.name}`) : (ko ? "CPU 실행 · 이 엔진이 GPU 장치를 찾지 못함" : "Running on CPU · the engine found no GPU device"))
+    : ko ? "가속 여부 미확인 · 모델을 다시 불러오면 확인됨" : "Acceleration unverified · reload the model to check";
+  return <span role="img" data-acceleration={state} className={`${styles.chip} ${state === "gpu" ? styles.chipGpu : ""}`} title={label} aria-label={label}>
+    {state === "gpu" ? <IconBolt size={12} /> : <IconCpu size={12} />}<span>{state === "gpu" ? "GPU" : state === "cpu" ? "CPU" : "?"}</span>
+  </span>;
+}
+function deviceSummary(snapshot: LocalModelHubSnapshot | null, engineInstalled: boolean, ko: boolean): { text: string; title: string } {
+  const devices: LocalEngineDevice[] = snapshot?.hardware.engineDevices ?? [];
+  const gpu = devices.find(device => device.gpu);
+  if (gpu) return { text: `GPU · ${gpu.name}`, title: ko ? `실행 엔진이 감지한 장치 · 메모리 ${gib(gpu.memoryBytes)} · ${gpu.accelerator}` : `Device listed by the engine · memory ${gib(gpu.memoryBytes)} · ${gpu.accelerator}` };
+  if (engineInstalled && devices.length) return { text: ko ? "GPU 없음 · CPU 실행" : "No GPU · CPU only", title: ko ? "실행 엔진이 GPU 장치를 찾지 못했습니다. 그래픽 드라이버(Vulkan)를 확인해 주세요." : "The engine found no GPU device. Check the graphics driver (Vulkan)." };
+  if (snapshot?.hardware.accelerator === "metal") return { text: "Metal", title: ko ? "Apple Silicon · 엔진 설치 후 장치를 다시 확인합니다" : "Apple Silicon · rechecked after the engine is installed" };
+  return { text: ko ? "GPU · 엔진 설치 후 확인" : "GPU · checked after engine setup", title: ko ? "실행 엔진이 설치되면 어떤 장치가 보이는지 엔진에게 직접 묻습니다" : "Once the engine is installed it reports the devices it can use" };
 }
 function checked(value: string | undefined, ko: boolean): string {
   return value === "verified" ? ko ? "확인됨" : "Verified" : value === "failed" ? ko ? "실패" : "Failed" : ko ? "미검사" : "Not tested";
@@ -138,7 +162,8 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
         {panel && <div role="menu" className={`${menu.panelPopover} ${styles.popover}`}>
           {panel === "computer" ? <>
             <span className={menu.panelMenuLabel}>{snapshot?.hardware.cpuModel ?? "—"}</span>
-            <span className={menu.panelMenuLabel}>{bytes(snapshot?.hardware.totalMemoryBytes ?? null)} RAM · {snapshot?.hardware.accelerator ?? "—"}</span>
+            <span className={menu.panelMenuLabel} title={ko ? `지금 쓸 수 있는 메모리 ${bytes(snapshot?.hardware.availableMemoryBytes ?? null)}` : `Available now ${bytes(snapshot?.hardware.availableMemoryBytes ?? null)}`}>{bytes(snapshot?.hardware.totalMemoryBytes ?? null)} RAM</span>
+            {(() => { const device = deviceSummary(snapshot, !!engineInstall, ko); return <span className={menu.panelMenuLabel} data-engine-device title={device.title}>{device.text}</span>; })()}
             <div className={menu.panelMenuSeparator} />
             <span className={menu.panelMenuLabel}>{engine ? `llama.cpp ${engine.releaseTag}` : ko ? "지원 엔진 없음" : "No compatible engine"}</span>
             <span className={menu.panelMenuLabel}>{engineInstall ? ko ? "엔진 설치됨" : "Engine installed" : ko ? "엔진 준비 필요" : "Engine setup needed"}</span>
@@ -155,7 +180,7 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
         </div>}
       </div>
     </div>
-    {residentModel && <div className={styles.resident} data-resident-installation={resident?.installationId}><span>{ko ? "로드됨" : "Loaded"} · {residentModel.fileName}</span><button type="button" onClick={() => void unload()}>{ko ? "내리기" : "Unload"}</button></div>}
+    {residentModel && <div className={styles.resident} data-resident-installation={resident?.installationId}><span>{ko ? "로드됨" : "Loaded"} · {residentModel.fileName}</span><AccelerationChip evidence={resident?.acceleration} ko={ko} /><button type="button" onClick={() => void unload()}>{ko ? "내리기" : "Unload"}</button></div>}
     {!snapshot ? <p role="status" className={styles.empty}>{notice ?? (ko ? "모델 상태 확인 중…" : "Checking model state…")}</p> : <>
       {unavailable && <p role="status" className={styles.notice}>{!engine ? ko ? "이 컴퓨터에서 사용할 실행 엔진이 아직 없습니다." : "A compatible engine is not available for this computer." : ko ? "로컬 모델 상태를 사용할 수 없습니다. 앱을 다시 열어 확인해 주세요." : "Local model state is unavailable. Reopen the app and check again."}</p>}
       <div className={styles.layout}>
