@@ -4840,7 +4840,12 @@ function ChatPage() {
         effort: selection.effort ?? null,
         longContextEnabled: selection.longContext,
       });
-      setSessionNotice(null);
+      // 실행 중 변경은 지금 도는 실행(연속 패스 포함)엔 안 붙고 다음 실행부터다 — 언제 적용되는지, 바로 바꾸려면 무엇을 하는지 말한다(오너 원칙 2026-09-14).
+      setSessionNotice(busy
+        ? (locale === "ko"
+          ? "모델 변경을 저장했습니다. 지금 도는 실행은 시작할 때 고른 모델로 끝나고, 다음 메시지·재개부터 새 모델을 씁니다. 바로 바꾸려면 중지한 뒤 다시 보내 주세요."
+          : "Model change saved. The current run finishes with the model it started with; the next message or resume uses the new one. To switch now, stop the run and send again.")
+        : null);
     } catch (cause) {
       /*
        * ★"연결을 확인하라"는 **모르는 원인을 지어낸 것**이었다 (2026-09-08).

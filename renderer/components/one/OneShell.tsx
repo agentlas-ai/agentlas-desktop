@@ -3853,6 +3853,11 @@ export function OneShell() {
         ));
         if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
         acknowledgedSelection = receipt;
+        if (busy) {
+          setActionNotice(appLocale === "ko"
+            ? "모델 변경을 저장했습니다. 지금 도는 실행은 시작할 때 고른 모델로 끝나고, 다음 메시지부터 새 모델을 씁니다. 바로 바꾸려면 중지한 뒤 다시 보내 주세요."
+            : "Model change saved. The current run finishes with the model it started with; the next message uses the new one. To switch now, stop the run and send again.");
+        }
         acknowledgedRuntime = withOneRuntimeSelection(
           { ...receiptRuntime, active: true },
           receipt.model ?? receiptRuntime.model ?? null,
