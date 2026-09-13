@@ -23,6 +23,7 @@ import { toolObservationAction } from "@/lib/tool-observation";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
+  terminalFailureCopy,
   cellVerb,
   cellObject,
   groupOneWorkerWork,
@@ -653,20 +654,20 @@ export function OneTurnWork({
           {inlineCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
         </div>
       )}
-      {/* ★ 실패 사유는 접힘과 무관하게 보인다 (2026-08-23).
-          이 블록은 실행이 끝나는 순간 스스로 접힌다(위 useEffect). 그래서 사유가
-          펼침 안에만 있던 동안에는, 사유를 적어 두고도 **적는 순간 감췄다.**
-          사용자에게 남는 것은 "실패" 배지 하나뿐이고 왜인지는 눌러야 나왔다.
-          낸 오류에는 푸는 길이 있어야 한다 — 사유는 길의 첫 칸이다.
-          행 목록은 그대로 접어 둔다. 감춰서 문제였던 것은 사유 한 줄이다. */}
+      {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}
       {presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
         <div className={styles.rows}>
-          <div className={styles.row} data-kind="notice" data-status="failed">
-            <span className={styles.rowHead}>
-              <span className={styles.rowMark} data-status="failed" aria-hidden="true" />
-              <span className={styles.rowText}><span className={styles.notice} data-level="error">{presentation.terminalMessage}</span></span>
-            </span>
-          </div>
+          <details className={styles.row} data-kind="notice" data-status="failed" data-terminal-error={presentation.terminalErrorCode ?? "unknown"}>
+            <summary className={styles.rowHead} style={{ cursor: "pointer", listStyle: "none" }}>
+              <IconAlertTriangle size={14} aria-hidden="true" />
+              <span className={styles.rowText}><span className={styles.notice} data-level="error">{terminalFailureCopy(presentation.terminalErrorCode, locale)}</span></span>
+              <IconChevronDown size={12} aria-hidden="true" />
+            </summary>
+            <div style={{ padding: "6px 0 0 22px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, color: "var(--muted-deep)" }}>
+              {presentation.terminalErrorCode && <code>{presentation.terminalErrorCode}</code>}
+              <div>{presentation.terminalMessage}</div>
+            </div>
+          </details>
         </div>
       )}
       {/* ★ 답이 사라진 자리에는 사라졌다고 적는다 (UX-D-1).

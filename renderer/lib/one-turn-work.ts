@@ -1,7 +1,7 @@
 import type { OneActivityItem, OneActivityState } from "./one-activity";
 import { normalizeToolCall, mcpServerName, stripCwdPrefix, type ToolCallDetail } from "@shared/tool-call-detail";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
-import type { ToolFailureCode } from "@shared/tool-failure";
+import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
 /**
@@ -91,6 +91,20 @@ export interface OneWorkPresentation {
   terminal?: "completed" | "failed" | "cancelled";
   /** Message carried by a failed/cancelled terminal row, if any. */
   terminalMessage?: string;
+  terminalErrorCode?: string;
+}
+
+/** Unknown provider prose remains available in details, never used to guess a cause. */
+export function terminalFailureCopy(code: string | undefined, locale: "ko" | "en"): string {
+  const toolCopy = toolFailureCopy(code, locale);
+  if (toolCopy) return toolCopy;
+  if (code === "local_context_limit_exceeded") return locale === "ko"
+    ? "선택한 모델의 문맥 한도를 넘었습니다. 입력을 줄이거나 모델 설정을 확인하세요."
+    : "The selected model's context limit was exceeded. Reduce the input or check its settings.";
+  if (code === "local_context_measurement_unavailable") return locale === "ko"
+    ? "선택한 모델의 문맥 한도를 확인하지 못했습니다. 로컬 모델 상태를 확인하세요."
+    : "The selected model's context capacity could not be checked. Check the local model's status.";
+  return locale === "ko" ? "작업을 마치지 못했습니다. 상세 내용을 확인하세요." : "The task could not finish. Open the details.";
 }
 
 export function formatWorkElapsed(ms: number): string {
@@ -399,6 +413,7 @@ export function buildOneWorkPresentation(
   let durationMs: number | undefined;
   let terminal: OneWorkPresentation["terminal"];
   let terminalMessage: string | undefined;
+  let terminalErrorCode: string | undefined;
 
   for (const item of state.items) {
     switch (item.kind) {
@@ -406,6 +421,7 @@ export function buildOneWorkPresentation(
         if (item.durationMs != null) durationMs = item.durationMs;
         if (item.status === "failed") {
           terminal = "failed";
+          terminalErrorCode = item.errorCode ?? item.failureCode;
           if (item.message?.trim()) terminalMessage = item.message.trim();
         } else if (item.status === "cancelled") terminal = "cancelled";
         else if (item.status === "completed") terminal = "completed";
@@ -413,6 +429,7 @@ export function buildOneWorkPresentation(
       }
       case "terminal": {
         terminal = item.status === "failed" ? "failed" : item.status === "cancelled" ? "cancelled" : "completed";
+        terminalErrorCode = item.errorCode ?? item.failureCode;
         if (item.message?.trim()) terminalMessage = item.message.trim();
         break;
       }
@@ -569,6 +586,7 @@ export function buildOneWorkPresentation(
     ...(state.model ? { model: state.model } : {}),
     ...(terminal ? { terminal } : {}),
     ...(terminalMessage ? { terminalMessage } : {}),
+    ...(terminalErrorCode ? { terminalErrorCode } : {}),
   };
 }
 

@@ -170,10 +170,6 @@ function taskTitleFromFirstPrompt(value: string): string {
   return condensed.length > 36 ? `${condensed.slice(0, 34)}…` : condensed;
 }
 
-function userFacingFolderName(value: string): string {
-  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
-  return normalized.split("/").filter(Boolean).at(-1) || normalized;
-}
 
 function isInternalLoopStatus(value: string): boolean {
   return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|(?:^|\s)codex:\s|skill descriptions were shortened|sessionend hook|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|antigravity|kimi|grok)\s+cli\b/i.test(value);
@@ -2449,8 +2445,8 @@ function ChatPage() {
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
   // 슬래시 명령(/folder·/global)으로 워킹 폴더를 바꾸면 하단 폴더 바를 다시 읽게 하는 토큰
   const [folderReload, setFolderReload] = useState(0);
-  // ContinuityReceipt(복원 배너)용 — 채팅 진입 시 ipc().workspace.get으로 복원된 마지막 작업 폴더.
-  // 기기 간 클라우드 복원 여부는 백엔드 미확인이므로, 실제로 알 수 있는 사실(로컬 복원 경로)만 보여준다.
+  // Main-owned working folder used by attachments and the file panel.
+  // Its existence alone does not prove that an earlier session was restored.
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
   // /clear 뒤에 메시지를 다시 적재하지 않고도 실제 컨텍스트 리셋이 끝났음을 알려준다.
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
@@ -3967,7 +3963,7 @@ function ChatPage() {
         } else if (rightPanelPreference?.tab !== "panel") {
           setRightPanelOpen(false);
         }
-        // ContinuityReceipt — 복원된 작업 폴더가 있을 때만 배너를 띄운다(없으면 null → 렌더 안 함).
+        // Keep the actual folder binding without inferring a previous session.
         setRestoredFolder(savedFolder ?? null);
       }).catch(() => undefined);
       if (c.projectId) {
@@ -6452,7 +6448,7 @@ function ChatPage() {
           이 배너만 감싸는 것이 없어 창 양끝에 그대로 붙었고, 바로 아래 배너는
           margin 0 16px 라 두 줄이 서로 어긋나 보였다. */}
       <div style={{ margin: "0 16px" }}>
-        <KeyStatusBanner mode="banner" compact />
+        <KeyStatusBanner mode="banner" compact relevantRuntime={activeRuntime} />
       </div>
 
       <div style={{ margin: "0 16px" }}>
@@ -6492,66 +6488,6 @@ function ChatPage() {
           </span>
           <button
             onClick={() => setRecap(null)}
-            title={locale === "ko" ? "배너 닫기" : "Dismiss"}
-            style={{
-              marginLeft: "auto",
-              flexShrink: 0,
-              width: 20,
-              height: 20,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              border: "none",
-              background: "transparent",
-              color: "var(--muted-deep)",
-              borderRadius: 6,
-              cursor: "pointer",
-            }}
-          >
-            <IconClose size={12} />
-          </button>
-        </div>
-      )}
-
-      {restoredFolder && (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            margin: "8px 16px 0",
-            padding: "7px 11px",
-            borderRadius: 8,
-            border: "1px solid var(--paper-edge)",
-            background: "var(--paper-2)",
-            color: "var(--muted-deep)",
-            fontSize: 11.5,
-            lineHeight: 1.4,
-            minWidth: 0,
-          }}
-        >
-          <IconFolder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
-          <span style={{ flexShrink: 0, color: "var(--ink-soft)", fontWeight: 700 }}>
-            {locale === "ko" ? "이전 작업 폴더에서 이어집니다" : "Continuing from your last working folder"}
-          </span>
-          <code
-            style={{
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10.5,
-              color: "var(--muted-deep)",
-            }}
-            title={userFacingFolderName(restoredFolder)}
-          >
-            {userFacingFolderName(restoredFolder)}
-          </code>
-          <button
-            onClick={() => setRestoredFolder(null)}
-            aria-label={locale === "ko" ? "폴더 안내 닫기" : "Dismiss folder notice"}
             title={locale === "ko" ? "배너 닫기" : "Dismiss"}
             style={{
               marginLeft: "auto",

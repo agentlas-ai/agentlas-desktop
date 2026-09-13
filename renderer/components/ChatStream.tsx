@@ -59,6 +59,7 @@ export function workActivityStateFromMessage(message: StreamMessage): OneActivit
     id: "run:lifecycle",
     kind: "run",
     status: cancelled ? "cancelled" : message.failure ? "failed" : settled ? "completed" : "running",
+    ...(message.failure ? { message: message.failure.message, errorCode: message.failure.code } : {}),
     observedAt: startedIso,
     ...(finishedIso ? { completedAt: finishedIso } : {}),
     ...(message.finishedAt != null ? { durationMs: Math.max(0, message.finishedAt - startedAt) } : {}),
@@ -121,16 +122,6 @@ export function workActivityStateFromMessage(message: StreamMessage): OneActivit
       detail: notice.details,
       noticeLevel: notice.level,
       noticeDisplay: notice.display,
-    });
-  }
-  if (message.failure && !items.some((item) => item.kind === "notice" && item.message === message.failure?.message)) {
-    items.push({
-      id: `failure:${message.id}`,
-      kind: "notice",
-      status: "failed",
-      observedAt: finishedIso ?? startedIso,
-      message: message.failure.message,
-      noticeLevel: "error",
     });
   }
   return {

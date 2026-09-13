@@ -76,6 +76,8 @@ export interface OneActivityItem {
   /** True only for an explicit worker terminal envelope, never whole-turn closure. */
   agentTerminalObserved?: boolean;
   message?: string;
+  /** Exact terminal code retained independently of the tool-outcome vocabulary. */
+  errorCode?: string;
   failureCode?: ToolFailureCode;
   detail?: string;
   noticeLevel?: "info" | "success" | "warning" | "error";
@@ -809,7 +811,7 @@ export function reduceOneActivity(
     if (!cancelled && event.error?.message?.trim()) {
       const reason = event.error.message.trim();
       items = items.map((item) => item.kind === "run" && item.status === "failed" && !item.message
-        ? { ...item, message: reason, ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}) }
+        ? { ...item, message: reason, errorCode: event.error?.code, ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}) }
         : item);
     }
     if (!items.some((item) => item.kind === "run")) {
@@ -820,6 +822,7 @@ export function reduceOneActivity(
         observedAt,
         completedAt: observedAt,
         message: event.error?.message,
+        errorCode: event.error?.code,
         ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}),
       });
     }

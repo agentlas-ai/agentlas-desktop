@@ -7,7 +7,8 @@ import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { deriveKeyStatus, type KeyStatus } from "@/lib/key-status";
+import { deriveKeyStatus } from "@/lib/key-status";
+import type { RuntimeStatus, UsageSnapshot } from "@/lib/types";
 import { IconBolt, IconShield, IconCheck } from "@/components/Icon";
 
 const REFRESH_MS = 60_000;
@@ -15,26 +16,29 @@ const REFRESH_MS = 60_000;
 export function KeyStatusBanner({
   mode = "banner",
   relevantProvider,
+  relevantRuntime,
   problemsInBanner = false,
   compact = false,
 }: {
   mode?: "banner" | "pill";
   relevantProvider?: string | null;
+  /** undefined is the global view; null is an unresolved selection. */
+  relevantRuntime?: Pick<RuntimeStatus, "kind" | "backend"> | null;
   /** Build shows one full warning banner; do not repeat the same warning in its header pill. */
   problemsInBanner?: boolean;
   compact?: boolean;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [status, setStatus] = useState<KeyStatus | null>(null);
+  const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const snap = await ipc()?.usage.snapshot();
-      setStatus(deriveKeyStatus(snap ?? null));
+      setSnapshot(snap ?? null);
     } catch {
-      setStatus({ health: "unknown", affected: [], connected: 0 });
+      setSnapshot(null);
     }
   }, []);
 
@@ -44,7 +48,11 @@ export function KeyStatusBanner({
   }, [load]);
   useVisibleInterval(() => void load(), REFRESH_MS);
 
-  if (!status || status.health === "unknown") return null;
+  const status = deriveKeyStatus(snapshot, relevantRuntime === undefined
+    ? undefined
+    : relevantRuntime === null ? null
+      : relevantRuntime.kind === "byok" ? relevantRuntime.backend : relevantRuntime.kind);
+  if (status.health === "unknown") return null;
 
   const providerNeedle = relevantProvider?.trim().toLowerCase() ?? "";
   const relevantAffected = providerNeedle
@@ -53,10 +61,8 @@ export function KeyStatusBanner({
         return candidate.includes(providerNeedle) || providerNeedle.includes(candidate);
       })
     : status.affected;
-  // A warning about a different engine must not interrupt the selected Build.
-  // deriveKeyStatus only reports error when every provider is dead, so errors
-  // remain globally relevant even when a specific engine label was supplied.
-  if (status.health === "warning" && providerNeedle && relevantAffected.length === 0) return null;
+  // Usage only observes its own provider inventory, not every runnable engine.
+  if (status.health !== "ok" && providerNeedle && relevantAffected.length === 0) return null;
   const affected = relevantAffected.join(", ");
 
   if (mode === "pill") {
@@ -107,7 +113,7 @@ export function KeyStatusBanner({
       <div className="key-status-banner-copy">
         <strong>
           {isError
-            ? ko ? "BYOC 키 연결이 끊겼습니다 — 모든 에이전트가 멈춥니다." : "BYOC keys disconnected — all workers stall."
+            ? ko ? "키 연결을 확인하세요." : "Check your key connection."
             : ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit."}
         </strong>
         <span>

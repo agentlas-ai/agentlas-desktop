@@ -35,11 +35,13 @@ function isKeyDeath(status: string, error?: UsageProviderErrorCode): boolean {
   return status === "error" && !!error && KEY_DEATH_ERRORS.has(error);
 }
 
-export function deriveKeyStatus(snap: UsageSnapshot | null | undefined): KeyStatus {
+export function deriveKeyStatus(snap: UsageSnapshot | null | undefined, provider?: string | null): KeyStatus {
   if (!snap || !Array.isArray(snap.providers)) {
     return { health: "unknown", affected: [], connected: 0 };
   }
-  const providers = snap.providers;
+  // An explicit null means that this surface has no selected runtime yet.
+  // Missing usage for a local/API runtime cannot establish its key health.
+  const providers = provider === undefined ? snap.providers : snap.providers.filter((p) => p.provider === provider);
   if (providers.length === 0) return { health: "unknown", affected: [], connected: 0 };
 
   const dead = providers.filter((p) => isKeyDeath(p.status, p.error));
