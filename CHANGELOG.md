@@ -13,6 +13,7 @@
 - Science 화면을 개편했습니다. 연구분야 카드가 네 배 커지고, 연구일지·문헌·가설·실행·결과가 우측 패널에 열리며, 챗 헤더의 목록 아이콘으로 오갑니다. 원고 편집과 PDF·DOCX 출력, 이전 판 보존, 재시작 복원까지 이어집니다.
 - 실행이 멈췄다가 이어질 때 정확한 확인 지점만 다시 쓰고, 승인 범위가 바뀐 도구는 예전 승인을 재사용하지 않습니다. 실행 정산과 비용 집계가 시도 단위로 정확해집니다.
 - 모바일에서 데스크탑 화면을 실시간으로 보고 조작할 수 있는 원격 세션이 추가됩니다(설정 화면에서 시작).
+- Grok·Cursor·Kimi·OpenCode 같은 ACP 런타임의 도구 호출이 화면과 집계에 두 번씩 잡히던 것을 고칩니다. 도구는 끝났을 때 한 번만 보고합니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
