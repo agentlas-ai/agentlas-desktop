@@ -1004,7 +1004,7 @@ export function inheritAgyMcpSecretAliases(
   return result;
 }
 
-async function reconcileAgyMcpServers(
+export async function reconcileAgyMcpServers(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
@@ -1114,7 +1114,7 @@ async function reconcileAgyMcpServersUnderLease(
       },
     };
   }
-  const entries = Object.entries(requested.mcpServers ?? {});
+  let entries = Object.entries(requested.mcpServers ?? {});
   // 요청한 서버가 하나도 없어도 그냥 나가지 않는다 — 공용 설정에 남은 브라우저 항목을
   // 격리해야 할 수 있다. 정말 할 일이 없으면 아래에서 (added 0 + 변경 없음) 로 빠진다.
 
@@ -1147,6 +1147,7 @@ async function reconcileAgyMcpServersUnderLease(
   // exact transport entry is already active; a matching key alone can point
   // at another chat's approval proxy. Refuse the later run before spawning
   // instead of lending it the first run's authority.
+    const collidedWithUserEntry: string[] = [];
     for (const [key, server] of entries) {
     const live = AGY_MCP_REFCOUNT.get(key);
     const requestedEntry = requestedAgyMcpEntry(server);
@@ -1155,10 +1156,14 @@ async function reconcileAgyMcpServersUnderLease(
       // 거절하지 말고 아래에서 이번 실행의 항목으로 갈아 끼운다.
       if (isAgentlasWrittenMcpEntry(parsed.mcpServers[key] ?? {})) continue;
       if (!parsed.mcpServers[key] || isAgyMcpEntryEqual(parsed.mcpServers[key], requestedEntry ?? undefined)) continue;
-      // Preserve user entries without borrowing their different scope. This
-      // preflight must precede any process refcount or global-file mutation.
-      return { cleanup: async () => {}, failure: { kind: "refused", source: "marker", runtime: "antigravity",
-        providerCode: "agy_mcp_scope_conflict", message: "An existing MCP key belongs to a different transport scope." } };
+      // A user's own Antigravity entry shares this key with a different
+      // transport. That entry is theirs; we neither overwrite nor borrow it.
+      // Refusing the whole run here made agy unusable for anyone whose global
+      // mcp_config.json had a same-named server (production, 2026-09-13:
+      // `opencrab` → every Work run fell back to another runtime). The run
+      // continues with the user's entry in place and without ours for that key.
+      collidedWithUserEntry.push(key);
+      continue;
     }
     const activeEntry = AGY_MCP_ACTIVE_ENTRIES.get(key);
     if (requestedEntry && isAgyMcpEntryEqual(activeEntry, requestedEntry)
@@ -1174,6 +1179,11 @@ async function reconcileAgyMcpServersUnderLease(
       },
     };
     }
+
+  if (collidedWithUserEntry.length) {
+    entries = entries.filter(([key]) => !collidedWithUserEntry.includes(key));
+    onStatus(`antigravity: ${collidedWithUserEntry.join(", ")} — 사용자가 Antigravity에 직접 등록한 같은 이름의 MCP 항목이 있어 이번 실행에는 Agentlas 쪽 항목을 붙이지 않습니다`);
+  }
 
   const writeGlobal = async (value: typeof parsed): Promise<void> => {
     // 임시 파일 + rename — 시작 중인 다른 agy 가 반쯤 쓰인 파일을 읽지 않게 한다.
