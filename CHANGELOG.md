@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.3 — 2026-09-13
+
+- 로컬 비전 모델을 멀티모달로 등록합니다. Hugging Face 저장소에 비전 프로젝터(mmproj) 파일이 있으면 모델과 함께 받아 검증하고 llama-server에 붙입니다. 프로젝터가 붙은 모델만 이미지 입력·컴퓨터 유즈 스크린샷을 받고, 대시보드 멀티모달 자리에 올 수 있습니다. 능력 검사는 실제 이미지를 보내 답을 확인합니다. 격리 앱 실측(SmolVLM 256M): 이미지 입력 검증됨, 멀티모달 역할 등록 확인.
+- 로컬 모델 탐색 화면을 카드 대신 필터 있는 표로 바꾸고, 검색 중 깜빡임을 없애고, 추천을 원활·주의·위험 세 단계로 표시합니다.
+- Science 원고의 기본 조판을 학회 논문 모양으로 바꿉니다(두 단 10pt, 절 제목 위계, 회색 초안 표식, 표 폭 맞춤). 저널 프로파일을 고르면 그 규칙이 우선합니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.2 — 2026-09-13
 
 - Science 연구 서비스(0.1.20)를 싣습니다. 서비스 코드는 이 앱 안에 묶여 나가므로 Science 확장만 갱신해서는 닿지 않던 수리들입니다: "연구 중지" 뒤 "연구 계속"이 영원히 거절되던 막다른 길, 자율 승인 정책이 결과 검토·후속 분석 계획·재시작 뒤 재개까지 덮음(사람이 누를 승인 없이 진행), 원고 청사진이 비교 논문 1편부터 만들어지고 서술적 종설도 비교 논문으로 인정, 후속 분석 계획으로 실행 단계 전환, 소스 구조 도구가 바이트 범위를 줘 인용 실패를 줄임, 옛 프로젝트 폴더 결속 자가 수리.
