@@ -127,11 +127,17 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
 
 const RUNTIME_KINDS = new Set<string>(SHARED_RUNTIME_KINDS);
 const RUNTIME_BACKENDS = new Set<string>(SHARED_RUNTIME_BACKENDS);
-const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "model", "longContext", "effort"]);
+/*
+ * RuntimeSelection 의 키 전부. `role`·`inherit` 는 타입에 있는데 여기 빠져 있어서, One 이 만든
+ * 자동화(One 은 선택에 role:"orchestrator", inherit:false 를 항상 실어 보낸다)는 저장은 되고
+ * 예약 실행 때마다 pinned_runtime_contract_invalid 로 죽었다(2026-09-13 프로덕션 1.2.0 실측:
+ * "오늘 할 일 3개" 자동화의 즉시 실행이 실패 보고만 남겼다). 타입이 아는 키는 계약도 안다.
+ */
+const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "model", "longContext", "effort", "role", "inherit"]);
 
 type StoredContractState = "missing" | "valid" | "invalid";
 
-function decodeRuntimeSelection(raw: string | null | undefined): {
+export function decodeRuntimeSelection(raw: string | null | undefined): {
   state: StoredContractState;
   value?: RuntimeSelection;
 } {
@@ -149,7 +155,9 @@ function decodeRuntimeSelection(raw: string | null | undefined): {
       (normalized.source === undefined || typeof normalized.source === "string" && normalized.source.length > 0 && normalized.source.length <= 2_048) &&
       (normalized.model === undefined || typeof normalized.model === "string" && normalized.model.length > 0 && normalized.model.length <= 512) &&
       (normalized.longContext === undefined || typeof normalized.longContext === "boolean") &&
-      (normalized.effort === undefined || typeof normalized.effort === "string" && normalized.effort.length <= 128)
+      (normalized.effort === undefined || typeof normalized.effort === "string" && normalized.effort.length <= 128) &&
+      (normalized.role === undefined || normalized.role === "orchestrator" || normalized.role === "worker") &&
+      (normalized.inherit === undefined || typeof normalized.inherit === "boolean")
     ) {
       return { state: "valid", value: normalized as unknown as RuntimeSelection };
     }
