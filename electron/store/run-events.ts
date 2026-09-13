@@ -4,6 +4,7 @@ import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, typ
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
 import { externalToolNames } from "../../shared/tool-activity";
+import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
 import {
   QUESTION_CONTINUATION_REPLY_MAX_BYTES,
@@ -132,6 +133,61 @@ function stableUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/*
+ * 사이언스 챗의 작업 블록이 "실행함 명령"만 반복하던 이유 — 이 직렬화가 도구 이름만 보내고
+ * 인자를 통째로 뺐다(오너 지적 2026-09-13). 인자 원문과 결과는 계속 보내지 않는다.
+ * One/Work 와 같은 해석기로 "무엇에 썼는가" 한 줄만 만들어, 비밀 마스킹을 거쳐 160자로
+ * 잘라 보낸다 — 사이언스 저장소에 남는 것은 그 한 줄뿐이다.
+ */
+const SCIENCE_TOOL_SUMMARY_MAX = 160;
+
+const SCIENCE_TOOL_SUMMARY_KEYS = [
+  "query", "q", "search", "prompt", "question",
+  "command", "url", "path", "file_path", "filePath",
+  "title", "name", "id",
+] as const;
+
+function readableArgValue(args: unknown): string {
+  if (typeof args !== "string" || !args.trim()) return "";
+  let parsed: unknown;
+  try { parsed = JSON.parse(args); } catch { return ""; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+  const record = parsed as Record<string, unknown>;
+  for (const key of SCIENCE_TOOL_SUMMARY_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+export function scienceToolSummary(name: unknown, args: unknown): string | undefined {
+  if (typeof name !== "string" || !name.trim()) return undefined;
+  let line = "";
+  try {
+    const detail = normalizeToolCall({ name, args: typeof args === "string" ? args : undefined });
+    switch (detail.type) {
+      case "shell": line = detail.command; break;
+      case "read": case "edit": case "write": line = detail.filePath; break;
+      case "list": line = detail.path; break;
+      case "search": line = detail.path ? `${detail.query} · ${detail.path}` : detail.query; break;
+      case "fetch": line = detail.url; break;
+      case "sub_agent": line = detail.subAgentType || detail.description || ""; break;
+      case "browser": line = detail.target ? `${detail.action} · ${detail.target}` : detail.action; break;
+      // plain_text/unknown 은 도구 이름을 다시 적은 것뿐이라 객체로 쓸모가 없다.
+      // 사이언스 화면은 이미 자기 도구의 한국어 이름을 갖고 있으므로, 여기서는
+      // 인자에서 사람이 읽을 만한 값 하나만 골라 준다(없으면 이름만 남는다).
+      default: line = readableArgValue(args); break;
+    }
+  } catch {
+    // 해석 실패는 줄을 비우고 지나간다 — 도구 이름만 있는 예전 모습으로 돌아갈 뿐이다.
+    return undefined;
+  }
+  const text = String(line ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  const summary = truncate(text, SCIENCE_TOOL_SUMMARY_MAX);
+  return summary.trim() || undefined;
+}
+
 function scienceRuntimeEventJson(event: McpInvocationEvent): string {
   const common = {
     kind: event.kind,
@@ -150,6 +206,7 @@ function scienceRuntimeEventJson(event: McpInvocationEvent): string {
         id: event.tool?.id,
         name: event.tool?.name,
         isError: event.tool?.isError === true,
+        summary: scienceToolSummary(event.tool?.name, event.tool?.args),
         sourceUrls: Array.from({ length: Math.min(500, event.tool?.sourceUrls?.length ?? 0) }, () => "redacted"),
       },
     };
