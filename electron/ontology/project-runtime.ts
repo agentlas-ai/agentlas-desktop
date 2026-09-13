@@ -841,7 +841,14 @@ function materializeProjectOntologyIndex(projectPath: string): {
     "",
     "## Project file map",
   ];
-  for (const node of (sitemap?.nodes ?? []).slice(0, PROJECT_INDEX_MAX_SITEMAP_NODES)) {
+  // Core/operator graph nodes share the sitemap with the generated file tree.
+  // They deliberately have no relative_path; only file-tree nodes belong in
+  // this bounded file index. Filter before the limit so curated nodes cannot
+  // crowd real files out of the index or crash background ingest.
+  const fileNodes = (sitemap?.nodes ?? []).filter((node) =>
+    node && (node.kind === "file" || node.kind === "directory")
+      && typeof node.relative_path === "string");
+  for (const node of fileNodes.slice(0, PROJECT_INDEX_MAX_SITEMAP_NODES)) {
     const relativePath = safeMarkdownPath(node.relative_path);
     if (!relativePath) continue;
     lines.push(`- ${node.kind}: ${relativePath}${node.size_bytes === null ? "" : ` (${node.size_bytes} bytes)`}`);

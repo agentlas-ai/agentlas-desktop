@@ -1405,7 +1405,7 @@ function ProjectPage() {
             <section style={{ ...cardStyle, marginBottom: 16 }}>
               <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{locale === "ko" ? "소스" : "Source"}</div>
               <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>
-                {project.sourceType === "local" ? (locale === "ko" ? "로컬 폴더" : "Local folder") : project.sourceType === "github" ? "GitHub" : (locale === "ko" ? "샘플" : "Sample")}
+                {project.sourceType === "local" ? (locale === "ko" ? "로컬 폴더" : "Local folder") : project.sourceType === "github" ? "GitHub" : project.sourceType === "empty" ? (locale === "ko" ? "Agentlas 폴더" : "Agentlas folder") : (locale === "ko" ? "샘플" : "Sample")}
               </strong>
               {(project.sourceRef || project.folderPath) ? <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.sourceRef || project.folderPath || ""}>
                 {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}

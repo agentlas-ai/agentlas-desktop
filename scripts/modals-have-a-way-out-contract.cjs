@@ -38,9 +38,15 @@ function stripComments(src) {
     .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + " ".repeat(m.length - p1.length));
 }
 
+function hasModalMarkup(src) {
+  // A selector string such as '[aria-modal="true"]' observes other modals;
+  // it does not create a modal owned by this component.
+  return /<[A-Za-z][\w.:-]*\b[^>]*\baria-modal\s*=\s*(?:["']true["']|\{\s*(?:true|["']true["'])\s*\})/.test(src);
+}
+
 const files = ["renderer/app", "renderer/components"].flatMap((d) => walk(path.join(root, d)))
   .map((f) => ({ rel: path.relative(root, f), src: stripComments(fs.readFileSync(f, "utf8")) }))
-  .filter((f) => /aria-modal=\{?"?true/.test(f.src));
+  .filter((f) => hasModalMarkup(f.src));
 
 /*
  * 예외 — 이유가 있는 자리만. 이유 없이 늘리면 이 계약은 장식이 된다.
@@ -86,8 +92,14 @@ check("SELFTEST 주석 속 Escape 는 처리로 세지 않는다", () => {
 
 check("SELFTEST Escape 없는 모달은 잡힌다", () => {
   const src = stripComments(`<div role="dialog" aria-modal="true">x</div>`);
-  assert.ok(/aria-modal=\{?"?true/.test(src));
+  assert.ok(hasModalMarkup(src));
   assert.equal(/["']Escape["']/.test(src), false);
+});
+
+check("SELFTEST 모달 감지용 CSS 선택자는 모달 선언이 아니다", () => {
+  assert.equal(hasModalMarkup(`const selector = '[role="dialog"], [aria-modal="true"]';`), false);
+  assert.equal(hasModalMarkup(`<div aria-modal={true}>modal</div>`), true);
+  assert.equal(hasModalMarkup(`<div aria-modal={false}>not modal</div>`), false);
 });
 
 process.stdout.write(`modals-have-a-way-out: ${checks} checks passed (문장 대조 — 실제 확인은 scripts/qa-dialog-sweep.cjs)\n`);
