@@ -4,6 +4,7 @@
 
 - Science 연구 서비스(0.1.20)를 싣습니다. 서비스 코드는 이 앱 안에 묶여 나가므로 Science 확장만 갱신해서는 닿지 않던 수리들입니다: "연구 중지" 뒤 "연구 계속"이 영원히 거절되던 막다른 길, 자율 승인 정책이 결과 검토·후속 분석 계획·재시작 뒤 재개까지 덮음(사람이 누를 승인 없이 진행), 원고 청사진이 비교 논문 1편부터 만들어지고 서술적 종설도 비교 논문으로 인정, 후속 분석 계획으로 실행 단계 전환, 소스 구조 도구가 바이트 범위를 줘 인용 실패를 줄임, 옛 프로젝트 폴더 결속 자가 수리.
 - 자동 도구 모드에서 요청이 URL·도메인·"브라우저로"를 직접 말하면 판정 없이 Agentlas 브라우저를 붙입니다. 작은 로컬 모델(Qwen3-4B)이 판정기일 때 브라우저 대신 시간 도구를 골라 헛돌던 실측 결함입니다. 격리 앱 실측: 브라우저·컴퓨터 유즈·파일 과제 4종 완주, 오류 0.
+- Work 실행이 파일을 만들었다고 말할 때 그 파일이 실제로 있는지 확인하고, 없으면 복구를 명시적으로 다시 요청합니다(Claude Code·Codex 런타임 둘 다).
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
