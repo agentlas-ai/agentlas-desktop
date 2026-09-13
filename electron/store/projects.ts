@@ -1,5 +1,8 @@
 // Project CRUD — 프로젝트가 소스, 지시, 직접 선택한 에이전트 풀을 소유한다.
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
 import { projectPoolMemberReferences } from "../../shared/project-agent-pool";
@@ -11,11 +14,96 @@ interface ProjectRow {
   description: string | null;
   system_prompt: string | null;
   agent_pool_json: string;
-  source_type: ProjectSourceType;
+  source_type: unknown;
   source_ref: string | null;
   folder_path: string | null;
   created_at: string;
   updated_at: string;
+}
+
+const PROJECT_SOURCE_TYPES = new Set<ProjectSourceType>(["local", "github", "empty", "sample"]);
+
+export function isProjectSourceType(value: unknown): value is ProjectSourceType {
+  return typeof value === "string" && PROJECT_SOURCE_TYPES.has(value as ProjectSourceType);
+}
+
+function normalizedPersistedProjectSourceType(value: unknown): ProjectSourceType {
+  // Old databases predate source_type and were migrated as local. Keep the same
+  // safe fallback for a malformed row instead of projecting an unknown source.
+  return isProjectSourceType(value) ? value : "local";
+}
+
+function normalizedSourceRef(sourceType: ProjectSourceType, value: string | null | undefined): string | null {
+  if (sourceType === "local" || sourceType === "empty") return null;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function managedProjectSlug(name: string): string {
+  const normalized = name
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return Array.from(normalized || "project").slice(0, 48).join("");
+}
+
+function assertManagedProjectsRoot(root: string): string {
+  const resolved = path.resolve(root);
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("managed_empty_project_root_invalid");
+  }
+  return resolved;
+}
+
+/**
+ * Allocate a Main-owned folder for an explicit empty-project save.
+ *
+ * The optional root is dependency injection for isolated verification only;
+ * production callers always use ~/.agentlas/projects.
+ */
+export function createManagedEmptyProjectDirectory(
+  projectId: string,
+  projectName: string,
+  managedProjectsRoot = path.join(os.homedir(), ".agentlas", "projects"),
+): string {
+  const root = assertManagedProjectsRoot(managedProjectsRoot);
+  const base = `${managedProjectSlug(projectName)}-${projectId}`;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const leaf = attempt === 0 ? base : `${base}-${randomUUID().slice(0, 8)}`;
+    const candidate = path.join(root, leaf);
+    if (path.dirname(candidate) !== root) throw new Error("managed_empty_project_path_invalid");
+    try {
+      fs.mkdirSync(candidate, { mode: 0o700 });
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("managed_empty_project_path_invalid");
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("managed_empty_project_path_collision");
+}
+
+function isReusableManagedEmptyProjectDirectory(folderPath: string | null, root: string): boolean {
+  if (!folderPath) return false;
+  const resolvedRoot = path.resolve(root);
+  const resolvedFolder = path.resolve(folderPath);
+  if (path.dirname(resolvedFolder) !== resolvedRoot) return false;
+  try {
+    const stat = fs.lstatSync(resolvedFolder);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+interface ProjectMutationOptions {
+  /** Private verification seam; never accepted from renderer IPC. */
+  managedProjectsRoot?: string;
+  /** Only the explicit projects:update save boundary may request allocation. */
+  allocateManagedEmptyFolder?: boolean;
 }
 
 function toProject(row: ProjectRow): Project {
@@ -35,7 +123,7 @@ function toProject(row: ProjectRow): Project {
     description: row.description,
     systemPrompt: row.system_prompt,
     agentPool,
-    sourceType: row.source_type,
+    sourceType: normalizedPersistedProjectSourceType(row.source_type),
     sourceRef: row.source_ref,
     folderPath: row.folder_path ?? null,
     createdAt: row.created_at,
@@ -113,25 +201,41 @@ export function createProject(input: {
   sourceType: ProjectSourceType;
   sourceRef?: string | null;
   folderPath?: string | null;
-}): Project {
+}, options: ProjectMutationOptions = {}): Project {
   const id = randomUUID();
   const now = new Date().toISOString();
-  getDb()
-    .prepare(
-      `INSERT INTO projects (id, name, description, system_prompt, agent_pool_json, source_type, source_ref, folder_path, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      input.name.trim() || "New project",
-      input.systemPrompt?.trim() || null,
-      JSON.stringify(normalizeAgentPool(input.agentPool)),
-      input.sourceType,
-      input.sourceRef?.trim() || null,
-      input.folderPath ?? null,
-      now,
-      now,
-    );
+  const name = input.name.trim() || "New project";
+  const sourceType = normalizedPersistedProjectSourceType(input.sourceType);
+  if (sourceType === "empty" && input.folderPath) throw new Error("empty_project_folder_must_be_managed");
+  let createdFolderPath: string | null = null;
+  const folderPath = sourceType === "empty"
+    ? (createdFolderPath = createManagedEmptyProjectDirectory(id, name, options.managedProjectsRoot))
+    : sourceType === "sample" ? null : input.folderPath ?? null;
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO projects (id, name, description, system_prompt, agent_pool_json, source_type, source_ref, folder_path, created_at, updated_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        name,
+        input.systemPrompt?.trim() || null,
+        JSON.stringify(normalizeAgentPool(input.agentPool)),
+        sourceType,
+        normalizedSourceRef(sourceType, input.sourceRef),
+        folderPath,
+        now,
+        now,
+      );
+  } catch (error) {
+    // Roll back only the directory created by this failed insert. Never recurse:
+    // if another actor wrote into it, preserving those bytes wins.
+    if (createdFolderPath) {
+      try { fs.rmdirSync(createdFolderPath); } catch { /* non-empty or already removed */ }
+    }
+    throw error;
+  }
   const project = getProject(id) as Project;
   emitDesktopStoreChange({ entity: "project", id });
   return project;
@@ -140,26 +244,61 @@ export function createProject(input: {
 export function updateProject(
   id: string,
   patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef" | "folderPath">>,
+  options: ProjectMutationOptions = {},
 ): Project {
   const db = getDb();
   const now = new Date().toISOString();
   const existing = getProject(id);
   if (!existing) throw new Error(`Project not found: ${id}`);
 
-  db.prepare(
-    `UPDATE projects
-        SET name = ?, system_prompt = ?, agent_pool_json = ?, source_type = ?, source_ref = ?, folder_path = ?, updated_at = ?
-      WHERE id = ?`,
-  ).run(
-    patch.name ?? existing.name,
-    patch.systemPrompt === undefined ? existing.systemPrompt : patch.systemPrompt,
-    JSON.stringify(patch.agentPool === undefined ? existing.agentPool : normalizeAgentPool(patch.agentPool)),
-    patch.sourceType ?? existing.sourceType,
-    patch.sourceRef === undefined ? existing.sourceRef : patch.sourceRef,
-    patch.folderPath === undefined ? existing.folderPath : patch.folderPath,
-    now,
-    id,
-  );
+  const sourceType = patch.sourceType === undefined
+    ? existing.sourceType
+    : normalizedPersistedProjectSourceType(patch.sourceType);
+  const sourceChanged = patch.sourceType !== undefined && sourceType !== existing.sourceType;
+  const sourceRef = patch.sourceRef !== undefined
+    ? normalizedSourceRef(sourceType, patch.sourceRef)
+    : patch.sourceType === undefined
+      ? existing.sourceRef
+      : normalizedSourceRef(sourceType, sourceChanged ? null : existing.sourceRef);
+  let folderPath = patch.folderPath === undefined
+    ? (sourceChanged ? null : existing.folderPath)
+    : patch.folderPath;
+  let createdFolderPath: string | null = null;
+  if (sourceType === "sample" && (patch.sourceType !== undefined || patch.folderPath !== undefined)) {
+    folderPath = null;
+  } else if (sourceType === "empty") {
+    if (patch.folderPath) throw new Error("empty_project_folder_must_be_managed");
+    const managedRoot = options.managedProjectsRoot ?? path.join(os.homedir(), ".agentlas", "projects");
+    if (options.allocateManagedEmptyFolder) {
+      folderPath = !sourceChanged && existing.sourceType === "empty"
+        && isReusableManagedEmptyProjectDirectory(existing.folderPath, managedRoot)
+        ? existing.folderPath
+        : (createdFolderPath = createManagedEmptyProjectDirectory(id, patch.name ?? existing.name, managedRoot));
+    }
+  }
+
+  try {
+    db.prepare(
+      `UPDATE projects
+          SET name = ?, system_prompt = ?, agent_pool_json = ?, source_type = ?, source_ref = ?, folder_path = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(
+      patch.name ?? existing.name,
+      patch.systemPrompt === undefined ? existing.systemPrompt : patch.systemPrompt,
+      // undefined preserves the pool; [] is an intentional full removal.
+      JSON.stringify(patch.agentPool === undefined ? existing.agentPool : normalizeAgentPool(patch.agentPool)),
+      sourceType,
+      sourceRef,
+      folderPath,
+      now,
+      id,
+    );
+  } catch (error) {
+    if (createdFolderPath) {
+      try { fs.rmdirSync(createdFolderPath); } catch { /* non-empty or already removed */ }
+    }
+    throw error;
+  }
   const project = getProject(id) as Project;
   emitDesktopStoreChange({ entity: "project", id });
   return project;

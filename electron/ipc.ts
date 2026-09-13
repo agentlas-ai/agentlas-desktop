@@ -285,6 +285,12 @@ import { grantDroppedPath, grantPastedAttachment, grantPastedImage, grantPath, p
 import { unwatchFsPreviewFile, unwatchFsPreviewFilesForOwner, watchFsPreviewFile } from "./fs/file-watch";
 import { connectGithubProject } from "./project-sources/github";
 import {
+  createProjectFromExplicitSave,
+  updateProjectFromExplicitSave,
+  type ExplicitProjectCreateInput,
+  type ExplicitProjectUpdatePatch,
+} from "./project-sources/save";
+import {
   getAuthSession,
   getAuthenticatedActorIds,
   getSessionCookieHeader,
@@ -807,7 +813,6 @@ import type {
   OberonSheetRequest,
   Project,
   ProjectAgentPoolMember,
-  ProjectSourceType,
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
@@ -4127,26 +4132,11 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "projects:create",
-    (_e, input: {
-      name: string;
-      systemPrompt?: string | null;
-      agentPool?: ProjectAgentPoolMember[];
-      sourceType: ProjectSourceType;
-      sourceRef?: string | null;
-      folderGrant?: FsPathGrant | null;
-    }) => {
-      const folderPath = input.folderGrant ? pathFromGrant(input.folderGrant, "directory") : null;
-      const project = createProject({
-        name: input.name,
-        systemPrompt: input.systemPrompt,
-        agentPool: input.agentPool,
-        sourceType: input.sourceType,
-        sourceRef: input.sourceRef,
-        folderPath,
-      });
+    (_e, input: ExplicitProjectCreateInput) => {
+      const project = createProjectFromExplicitSave(input);
       // Seed .agentlas as soon as the folder is known so the first turn already
       // has a project map. Runs in the background: creation must not block on it.
-      if (folderPath) void seedProjectMapInBackground(folderPath, input.name);
+      if (project.folderPath) void seedProjectMapInBackground(project.folderPath, input.name);
       return project;
     },
   );
@@ -4155,17 +4145,8 @@ export function registerIpcHandlers(): void {
     (
       _e,
       id: string,
-      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & { folderGrant?: FsPathGrant | null },
-    ) => updateProject(id, {
-      name: patch.name,
-      systemPrompt: patch.systemPrompt,
-      agentPool: patch.agentPool,
-      sourceType: patch.sourceType,
-      sourceRef: patch.sourceRef,
-      ...(patch.folderGrant !== undefined
-        ? { folderPath: patch.folderGrant ? pathFromGrant(patch.folderGrant, "directory") : null }
-        : {}),
-    }),
+      patch: ExplicitProjectUpdatePatch,
+    ) => updateProjectFromExplicitSave(id, patch),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
   ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>

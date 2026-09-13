@@ -1442,7 +1442,7 @@ export interface Project {
   agentPool: ProjectAgentPoolMember[];
   /** 프로젝트가 기준으로 삼는 소스. */
   sourceType: ProjectSourceType;
-  /** GitHub URL 또는 sample identifier. Local은 folderPath가 기준이다. */
+  /** GitHub URL 또는 sample identifier. Local/empty는 folderPath가 기준이다. */
   sourceRef: string | null;
   /** 이 프로젝트의 로컬 작업 폴더(절대경로). */
   folderPath: string | null;
@@ -1450,7 +1450,7 @@ export interface Project {
   updatedAt: string;
 }
 
-export type ProjectSourceType = "local" | "github" | "sample";
+export type ProjectSourceType = "local" | "github" | "empty" | "sample";
 
 export type ProjectSourceConnectResult =
   | { status: "connected"; capability: "ready"; repositoryUrl: string; folderGrant: FsPathGrant }
@@ -7515,13 +7515,17 @@ export interface AgentlasIpc {
       agentPool?: ProjectAgentPoolMember[];
       sourceType: ProjectSourceType;
       sourceRef?: string | null;
+      /** Required for local/GitHub. Omit for empty; Main allocates its managed folder. */
       folderGrant?: FsPathGrant | null;
     }) => Promise<Project>;
     get: (id: string) => Promise<Project | null>;
     timeline: (id: string, limit?: number) => Promise<ProjectTimelineSnapshot>;
     update: (
       id: string,
-      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & { folderGrant?: FsPathGrant | null },
+      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & {
+        /** Required only when changing to local/GitHub; empty allocates a Main-owned folder. */
+        folderGrant?: FsPathGrant | null;
+      },
     ) => Promise<Project>;
     remove: (id: string) => Promise<void>;
     connectGithub: (repositoryUrl: string) => Promise<ProjectSourceConnectResult>;
