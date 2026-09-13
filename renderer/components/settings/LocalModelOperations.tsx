@@ -42,7 +42,7 @@ export function LocalModelOperations({ ko, hiddenIds, onViewModel }: { ko: boole
       const model = snapshot?.modelCatalog.find(item => item.packageId === row.packageId || item.packageId === installed?.modelPackageId);
       const progress = [...(snapshot?.modelProgress ?? []),...(snapshot?.engineProgress ?? [])].find(item => item.packageId === row.packageId);
       const active = row.state === "pending" || row.state === "cancelling";
-      const status = row.state === "completed" ? ko ? "완료" : "Completed" : row.state === "failed" ? ko ? "완료하지 못함" : "Failed"
+      const status = row.state === "completed" ? ko ? "완료" : "Completed" : row.state === "failed" ? `${ko ? "완료하지 못함" : "Failed"}${failureReason(row.reasonCode, ko)}`
         : row.state === "cancelled" ? ko ? "중지됨" : "Stopped" : row.state === "cancelling" ? ko ? "중지 요청됨" : "Stop requested"
         : row.phase === "install" ? ko ? "파일 확인 및 설치 중" : "Verifying and installing" : row.phase === "download" ? ko ? "다운로드 중" : "Downloading"
         : row.phase === "load" ? ko ? "모델 불러오는 중" : "Loading" : ko ? "기능 확인 중" : "Checking capabilities";
@@ -53,4 +53,21 @@ export function LocalModelOperations({ ko, hiddenIds, onViewModel }: { ko: boole
       </div>;
     })}
   </div>;
+}
+
+/*
+ * 실패 사유를 사람 말로. 코드는 main(local-model-hub-ipc.ts failureReasonCode)이 그대로 실어 보낸다.
+ * 모르는 코드는 코드 그대로 보여 준다 — 숨기는 것보다 낫다(프로덕션 1.2.0 실측: "완료하지 못함"만 보여 원인을 알 수 없었다).
+ */
+function failureReason(code: string | null | undefined, ko: boolean): string {
+  if (!code || code === "local_model_operation_failed") return "";
+  const known: Record<string, [string, string]> = {
+    engine_attestation_managed_runtime_unavailable: ["실행 엔진 검증에 쓰는 내장 Node 를 사용할 수 없습니다. 앱을 재시작하거나 다시 설치하면 복구됩니다(자세한 사유는 앱 로그)", "The bundled Node used to verify the engine is unavailable. Restart or reinstall the app (details in the app log)"],
+    engine_attestation_fetch_failed: ["엔진 서명 증명을 GitHub 에서 가져오지 못했습니다(네트워크)", "Could not fetch the engine's signed attestation from GitHub (network)"],
+    engine_attestation_rate_limited: ["GitHub 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도해 주세요", "GitHub rate limit reached. Try again later"],
+    engine_attestation_bundle_missing: ["이 판의 서명 증명이 없습니다", "No signed attestation exists for this build"],
+    engine_not_installed: ["실행 엔진이 아직 설치되지 않았습니다", "The execution engine is not installed yet"],
+  };
+  const text = known[code]?.[ko ? 0 : 1] ?? code;
+  return ` · ${text}`;
 }

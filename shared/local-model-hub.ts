@@ -267,7 +267,11 @@ export interface LocalModelOperationView {
   phase: "download" | "install" | "load" | "check";
   startedAt: string;
   finishedAt: string | null;
-  reasonCode: "local_model_operation_cancelled" | "local_model_operation_failed" | null;
+  /**
+   * 취소/일반 실패 코드 또는 던진 쪽이 쓴 기계 코드(snake_case, 예: engine_attestation_managed_runtime_unavailable).
+   * 화면은 아는 코드는 사람 말로, 모르는 코드는 그대로 보여 준다 — 사유를 지우지 않는다(2026-09-13).
+   */
+  reasonCode: "local_model_operation_cancelled" | "local_model_operation_failed" | (string & {}) | null;
 }
 
 /** Renderer-facing API. Main owns operation controllers and the import dialog. */

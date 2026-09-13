@@ -100,7 +100,10 @@ export function registerLocalModelHubIpc(deps: {
       return result;
     }, error => {
       entry.view.state = controller.signal.aborted ? "cancelled" : "failed";
-      entry.view.reasonCode = controller.signal.aborted ? "local_model_operation_cancelled" : "local_model_operation_failed";
+      // 실패 사유를 지우지 않는다(프로덕션 1.2.0 실측 2026-09-13): 엔진 설치가
+      // engine_attestation_managed_runtime_unavailable 로 던졌는데 화면은 "완료하지 못함"만 보여
+      // 사용자는 버튼이 아무것도 안 한다고 느꼈다. 던진 쪽이 기계 코드를 쓰면 그대로 실어 보낸다.
+      entry.view.reasonCode = controller.signal.aborted ? "local_model_operation_cancelled" : failureReasonCode(error);
       throw error;
     }).finally(() => {
       entry.pending = false;
@@ -216,4 +219,11 @@ export function registerLocalModelHubIpc(deps: {
       return shutdownPromise;
     },
   };
+}
+
+/** 던져진 오류의 메시지가 기계 코드 형태(snake_case)면 그것을, 아니면 일반 실패 코드를 돌려준다. */
+function failureReasonCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const code = message.trim().split(/[\s:]/, 1)[0] ?? "";
+  return /^[a-z][a-z0-9_]{2,63}$/.test(code) ? code : "local_model_operation_failed";
 }

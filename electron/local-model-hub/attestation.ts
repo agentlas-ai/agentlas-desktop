@@ -16,9 +16,16 @@ export interface EngineAttestationOptions {
 export async function verifyManagedEngineAttestation(identity: LocalEnginePackageIdentity, archivePath: string, cacheRoot: string, signal?: AbortSignal, options: EngineAttestationOptions = {}): Promise<EngineAttestationEvidence> {
   assertLocalEnginePackageIdentity(identity);
   signal?.throwIfAborted();
-  const runtime = await (options.resolveRuntime ?? resolveManagedNodeRuntimeAsync)({ signal, forceVerify: true });
+  // 강제 재검증은 런타임 트리 전체를 다시 해시한다 — 기본 15초 상한은 메모리 압박·느린 디스크에서
+  // 넘어가 engine_attestation_managed_runtime_unavailable 로 끝났다(프로덕션 1.2.0 실측 2026-09-13).
+  // 여기서는 사용자가 버튼을 누르고 기다리는 자리라 상한을 최대(60초)로 준다.
+  const runtime = await (options.resolveRuntime ?? resolveManagedNodeRuntimeAsync)({ signal, forceVerify: true, timeoutMs: 60_000 });
   signal?.throwIfAborted();
-  if (!runtime.ok) throw new Error("engine_attestation_managed_runtime_unavailable");
+  if (!runtime.ok) {
+    // 사유를 로그에 남긴다 — 프로덕션 1.2.0 실측에서 이 코드만 남아 "왜"를 알 길이 없었다.
+    console.warn(`[local-model-hub] engine attestation: managed Node unavailable — ${runtime.reason}`);
+    throw new Error(`engine_attestation_managed_runtime_unavailable: ${runtime.reason}`);
+  }
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
   const cacheParent = await mkdtemp(join(cacheRoot, "verify-"));
   const nonce = randomUUID();

@@ -608,7 +608,7 @@ export function EngineUsage() {
         )}
       </>
     ) : !connected ? (
-      <button onClick={() => (e.auth === "local" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
+      <button onClick={() => (e.auth === "local" ? navigate("/local-models") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
         {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
       </button>
     ) : null;
