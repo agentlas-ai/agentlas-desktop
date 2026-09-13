@@ -19,6 +19,16 @@ import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
+
+/** 같은 slug 의 여러 판(release)이 목록에 함께 오면 한 줄로 접는다 — 먼저 온 판이 대표. */
+function dedupeListingsBySlug(listings: MarketplaceListing[]): MarketplaceListing[] {
+  const seen = new Set<string>();
+  return listings.filter((listing) => {
+    if (seen.has(listing.slug)) return false;
+    seen.add(listing.slug);
+    return true;
+  });
+}
 type Source = "local" | "cloud" | "hub";
 type OrgTreeTranslate = ReturnType<typeof useT>["t"];
 
@@ -426,9 +436,15 @@ export function OrgTree() {
           const { firms: cf, agents: ca } = bySource(cat.key);
           // 클라우드 카테고리(싱글 모드)엔 로컬에 아직 안 받은 서버 클라우드 에이전트도 함께 보여준다.
           const installedSlugs = new Set(agents.map((a) => a.slug));
+          // 서버에만 있는 클라우드 에이전트도 종류대로 나뉜다. 예전엔 싱글 탭에만, 그것도
+          // 팀(HQ)까지 전부 "싱글"로 실렸고 같은 slug 의 판이 여러 줄로 겹쳤다(실측 2026-09-13:
+          // Startup Founder Studio 6줄). 한 slug 한 줄, 팀은 멀티 탭, 도구·그래프는 조직도 밖.
           const cloudOnly =
-            cat.key === "cloud" && mode === "single"
-              ? cloudListings.filter((m) => !installedSlugs.has(m.slug) && matches(ko ? m.name : m.nameEn || m.name))
+            cat.key === "cloud"
+              ? dedupeListingsBySlug(cloudListings)
+                .filter((m) => !installedSlugs.has(m.slug))
+                .filter((m) => classifyHubEntity(m) === (mode === "multi" ? "multi" : "single"))
+                .filter((m) => matches(ko ? m.name : m.nameEn || m.name))
               : [];
           const hubOnly =
             cat.key === "hub"
@@ -535,16 +551,18 @@ export function OrgTree() {
                 })}
 
               {open &&
-                cloudOnly.map((m) => (
+                cloudOnly.map((m) => {
+                  const entityClass = classifyHubEntity(m);
+                  return (
                   <div key={`cloud:${m.slug}`} className="dashboard-org-rowwrap">
                     <button
                       onClick={() => navigate("/cloud")}
-                      className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
+                      className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
                       title={t("org.cloud_only.title")}
                     >
-                      <Dot />
+                      {entityClass === "multi" ? <IconBuilding size={13} /> : <Dot />}
                       <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
-                      <span className="dashboard-org-count">{t("org.kind.single")}</span>
+                      <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
                     </button>
                     <button
                       type="button"
@@ -556,7 +574,8 @@ export function OrgTree() {
                       ×
                     </button>
                   </div>
-                ))}
+                  );
+                })}
 
               {open &&
                 hubOnly.map(({ slug, listing }) => {

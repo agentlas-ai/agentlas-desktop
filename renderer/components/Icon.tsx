@@ -86,6 +86,12 @@ export const IconBuilding = (p: Props) =>
     "M3 21h18M5 21V5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v16M15 21v-9h4a1 1 0 0 1 1 1v8M8 8h2M8 12h2M8 16h2",
     p,
   );
+/** 싱글 에이전트 — 사람 하나 */
+export const IconUser = (p: Props) =>
+  svg("M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", p);
+/** 플러그인(도구) — 퍼즐 조각 */
+export const IconPuzzle = (p: Props) =>
+  svg("M14 3a2 2 0 0 1 2 2v2h3a1 1 0 0 1 1 1v3h-2a2 2 0 1 0 0 4h2v3a1 1 0 0 1-1 1h-3v-2a2 2 0 1 0-4 0v2H9a1 1 0 0 1-1-1v-3H6a2 2 0 1 1 0-4h2V8a1 1 0 0 1 1-1h3V5a2 2 0 0 1 2-2z", p);
 export const IconUsers = (p: Props) =>
   svg(
     "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",

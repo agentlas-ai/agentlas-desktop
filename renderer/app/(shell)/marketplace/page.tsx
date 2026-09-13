@@ -20,6 +20,8 @@ import {
 } from "@/lib/hub-verification";
 import { installedServerMatchesPluginSlug, normalizePluginSlug } from "@shared/plugin-slug";
 import { PluginLogo } from "@/components/PluginLogo";
+import { EntityKindIcon } from "@/components/EntityKindIcon";
+import { IconAlertTriangle } from "@/components/Icon";
 import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
@@ -1389,6 +1391,7 @@ function AgentCard({
   ].filter((fact): fact is string => Boolean(fact));
   return (
     <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
+      <EntityKindIcon kind={entityKind} locale={locale} className="hub-card-kind-icon" />
       <div className="hub-card-availability" data-callable={callable ? "true" : "false"}>
         <span className="hub-card-availability-dot" aria-hidden="true" />
         <span>
@@ -1432,11 +1435,7 @@ function AgentCard({
               ? (ko ? "Agentlas · 내장 도구" : "AGENTLAS · BUILT-IN")
               : plugin
               ? (ko ? "허브 플러그인" : "HUB PLUGIN")
-              : graph
-                ? (ko ? "Hub · 자동화 그래프" : "Hub · automation graph")
-                : entityKind === "multi"
-                  ? (ko ? "Hub · 멀티 에이전트 팀" : "Hub · multi-agent team")
-                  : (ko ? "Hub · 싱글 에이전트" : "Hub · single agent")}
+              : "Agentlas Hub"}
           </div>
           {/* 데스크탑 내장 도구는 허브에 공개 소개 페이지가 없다 — 눌러도 404가
               되는 제목을 링크처럼 보이게 두지 않는다. */}
@@ -1479,8 +1478,7 @@ function AgentCard({
           플러그인일 땐 이 줄 자체가 빈 채로 남는다 — 통째로 건너뛴다. */}
       {!plugin && (
         <div className="portal-chip-row hub-card-meta">
-          <SecurityGradeTag listing={listing} locale={locale} />
-          <RdTag dashed bg={entityKind === "multi" ? C.purple : C.green}>{cardLabel}</RdTag>
+          <SecurityBlockedTag listing={listing} locale={locale} />
           {sameSlugInstalled ? (
             <RdTag
               dashed
@@ -1753,15 +1751,22 @@ function AgentCard({
   );
 }
 
-function SecurityGradeTag({ listing, locale }: { listing: MarketplaceListing; locale: Locale }) {
-  const risky = listing.trustGrade !== "A";
+/**
+ * 보안 검사 결과는 카드에서 글자로 말하지 않는다 — "보안 검사 B · 경고 확인" 같은 줄은
+ * 고르는 데 도움이 안 되고 자리만 먹었다(오너 지시 2026-09-13). 실제로 **차단된**(C)
+ * 패키지만 경고 아이콘 하나로 표시하고, 등급 전문은 툴팁과 소개 페이지가 말한다.
+ */
+function SecurityBlockedTag({ listing, locale }: { listing: MarketplaceListing; locale: Locale }) {
+  if (listing.trustGrade !== "C") return null;
+  const label = hubSecurityGradeLabel(listing, locale);
   return (
-    <RdTag
-      dashed
-      style={risky ? { color: "var(--amber-deep)", borderColor: "rgba(186,116,44,0.36)" } : undefined}
-      title={hubSecurityGradeExplanation(locale)}
+    <span
+      className="hub-card-blocked"
+      role="img"
+      aria-label={label}
+      title={`${label} — ${hubSecurityGradeExplanation(locale)}`}
     >
-      {hubSecurityGradeLabel(listing, locale)}
-    </RdTag>
+      <IconAlertTriangle size={13} />
+    </span>
   );
 }

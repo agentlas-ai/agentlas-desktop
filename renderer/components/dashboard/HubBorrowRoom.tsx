@@ -5,7 +5,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
+import { classifyHubEntity } from "@/lib/agent-entity-kind";
+import { EntityKindIcon } from "@/components/EntityKindIcon";
 import {
   announceHubBookmarkChange,
   hubBookmarkIdentityKey,
@@ -20,7 +21,7 @@ import {
   isCallableHubListing,
 } from "@/lib/hub-verification";
 import { useT } from "@/lib/i18n";
-import { IconSearch, IconCheck } from "@/components/Icon";
+import { IconSearch, IconCheck, IconAlertTriangle } from "@/components/Icon";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { HubAgentBookmark, MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
 
@@ -187,18 +188,19 @@ export function HubBorrowRoom() {
                 data-entity-kind={entityClass}
                 data-contextual={intent ? "true" : "false"}
               >
-                <div className="hub-borrow-card-top">
-                  <span
-                    className="hub-borrow-trust"
-                    data-grade={r.trustGrade}
-                    title={hubSecurityGradeExplanation(locale)}
-                  >
-                    {hubSecurityGradeLabel(r, locale)}
-                  </span>
-                  <span className="agent-entity-badge" data-entity-kind={entityClass}>
-                    {entityClassLabel(entityClass, locale)}
-                  </span>
-                </div>
+                <EntityKindIcon kind={entityClass} locale={locale} className="hub-borrow-kind-icon" />
+                {r.trustGrade === "C" ? (
+                  <div className="hub-borrow-card-top">
+                    <span
+                      className="hub-card-blocked"
+                      role="img"
+                      aria-label={hubSecurityGradeLabel(r, locale)}
+                      title={`${hubSecurityGradeLabel(r, locale)} — ${hubSecurityGradeExplanation(locale)}`}
+                    >
+                      <IconAlertTriangle size={13} />
+                    </span>
+                  </div>
+                ) : null}
                 <div className="hub-borrow-card-name" title={ko ? r.name : r.nameEn || r.name}>
                   {ko ? r.name : r.nameEn || r.name}
                 </div>

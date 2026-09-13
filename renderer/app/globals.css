@@ -8008,6 +8008,7 @@ button[data-toggle-state="on"] {
 }
 
 .rd .hub-entity-card {
+  position: relative;
   min-height: 100%;
   padding: 16px;
   display: flex;
@@ -9232,6 +9233,33 @@ button[data-toggle-state="on"] {
 .agent-ownership-badge[data-owned="false"] {
   color: var(--rd-warn);
   background: color-mix(in oklch, var(--rd-warn) 14%, transparent);
+}
+/* 카드 우측상단 종류 아이콘 — 싱글(사람)·멀티(사람들)·플러그인(퍼즐)·그래프(경로). 글자 배지 대체. */
+.entity-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  color: var(--rd-ink-3);
+  background: var(--rd-surface-2);
+  border: 1px solid var(--rd-hair);
+}
+.entity-kind-icon[data-entity-kind="single"] { color: var(--rd-ok); background: color-mix(in oklch, var(--rd-ok) 12%, transparent); }
+.entity-kind-icon[data-entity-kind="multi"] { color: var(--rd-accent); background: color-mix(in oklch, var(--rd-accent) 13%, transparent); }
+.entity-kind-icon[data-entity-kind="plugin"] { color: var(--rd-ink-2); }
+.hub-card-kind-icon,
+.hub-borrow-kind-icon {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+.rd .hub-entity-card .hub-card-availability { padding-right: 32px; }
+.hub-card-blocked {
+  display: inline-flex;
+  align-items: center;
+  color: var(--rd-warn);
 }
 .agent-entity-badge {
   display: inline-block;
@@ -10534,6 +10562,7 @@ button[data-toggle-state="on"] {
   padding: 8px 20px 20px;
 }
 .hub-borrow-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;
