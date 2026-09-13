@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import type { McpInvocationRequest } from "../../shared/types";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
-import { getChat, getChatWorkingFolder } from "../store/chats";
+import { appendChatMessage, getChat, getChatWorkingFolder } from "../store/chats";
+import { currentUiLocale } from "../ui-locale";
 import { getDb } from "../store/db";
 import { prepareCheckpointContinuation } from "./continuation";
 import { appendLongRunEvent, getLongRun, listLongRuns, transitionLongRun } from "../store/long-runs";
@@ -99,6 +100,18 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         appendLongRunEvent({ runId: current.id, kind: "run.checkpoint_startup", actorKind: "host",
           payload: { appInstanceId, checkpointId: checkpoint.checkpointId, invocationRunId: successorRunId, status: "claimed" } });
       })();
+      /*
+       * 재시작 자동 재개는 그 실행의 런타임을 정확히 복원한다(설계). 그 사이 사람이 대화의 모델을 바꿔 두었다면
+       * 조용히 옛 모델로 이어가면 안 된다 — 무엇으로 이어가고 지금 선택은 무엇이며 바꾸려면 어떻게 하는지 한 줄(2026-09-14).
+       */
+      const chosen = getChat(chat.id)?.runtimeSelection ?? null;
+      if (chosen && (chosen.kind !== selection.kind || (chosen.model ?? null) !== (selection.model ?? null))) {
+        const label = (value: { kind: string; model?: string | null }) => `${value.kind}${value.model ? ` · ${value.model}` : ""}`;
+        const text = currentUiLocale() === "ko"
+          ? `이 작업은 시작할 때 고른 ${label(selection)} 로 이어갑니다 · 지금 선택은 ${label(chosen)} 입니다 — 새 모델로 하려면 중지한 뒤 다시 보내 주세요.`
+          : `This task continues with ${label(selection)}, the runtime it started with · your current choice is ${label(chosen)} — to use the new model, stop and send again.`;
+        appendChatMessage(chat.id, "assistant", text, { hostNotice: { purpose: "goal-continuation", runId: successorRunId } });
+      }
       const started = dispatcher.start(resumedRequest, undefined, undefined, undefined, "goal-continuation");
       if (started.runId !== successorRunId) throw new Error("checkpoint_startup_dispatch_identity_mismatch");
       const current = getLongRun(candidate.id);
