@@ -518,7 +518,11 @@ export async function applyAutomationFix(
       };
     }
     const { updateAutomationGraph } = await import("./store/automations");
-    updateAutomationGraph(automationId, repair.graph, { note: "평상시 실패로 이어지던 검증 위치를 고쳤습니다." });
+    updateAutomationGraph(automationId, repair.graph, {
+      note: ko
+        ? "평상시 실패로 이어지던 검증 위치를 고쳤습니다."
+        : "Fixed the verification placement that was causing routine failures.",
+    });
     return {
       ok: true,
       message: ko

@@ -53,6 +53,7 @@ import {
   isStormbreakerLongRunPrompt,
 } from "./hephaestus/loop-engineering";
 import { currentUiLocale } from "./ui-locale";
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
@@ -489,7 +490,10 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
             appendChatMessage(
               chat.chat.id,
               "system",
-              `System Optimizer 진단 런 자체가 실패했습니다: ${reason.slice(0, 500)}`,
+              L(
+                `System Optimizer 진단 런 자체가 실패했습니다: ${reason.slice(0, 500)}`,
+                `The System Optimizer diagnostic run itself failed: ${reason.slice(0, 500)}`,
+              ),
             );
           } catch (writeErr) {
             console.error("[automation] optimizer failure notice could not be written:", writeErr);
@@ -743,17 +747,23 @@ async function runOne(
     const cuaPerm = a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
     if (cuaPerm && !cuaPerm.ok) {
       runStatus = "needs_input";
-      runError =
+      runError = L(
         `macOS가 이 앱 실행본에 ${cuaPerm.missing.join(" · ")} 권한을 주지 않아 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
         // ★"켜세요"라는 경로 문장만으로는 부족하다 — 캔버스의 권한 카드가 설정 화면을
         //   바로 여는 버튼을 제공한다. 이미 켰다면 다른 실행본(설치본↔개발 실행)에 켰을 수 있다.
-        `자동화 화면의 [설정 화면 바로 열기] 버튼으로 켜 주세요. 켜면 다음 예약에 자동 재시도합니다.`;
+        `자동화 화면의 [설정 화면 바로 열기] 버튼으로 켜 주세요. 켜면 다음 예약에 자동 재시도합니다.`,
+        `macOS did not grant this app build the ${cuaPerm.missing.join(" · ")} permission(s), so the computer-use automation is being skipped (to avoid a hang). ` +
+        `Turn it on with the [Open Settings] button on the automation screen. Once it's on, this will auto-retry on the next scheduled run.`,
+      );
       console.warn(`[automation] CUA preflight skip (${a.name}): missing ${cuaPerm.missing.join(", ")}`);
     } else if (a.targetType === "hub" && !a.targetVersion) {
       runStatus = "needs_input";
       runError =
         "[hub_version_pin_required] automation_hub_version_pin_required: " +
-        "정확한 Hub 패키지 버전을 선택해야 자동화를 실행할 수 있습니다. 자동화 편집 화면에서 Hub 대상을 다시 선택하세요.";
+        L(
+          "정확한 Hub 패키지 버전을 선택해야 자동화를 실행할 수 있습니다. 자동화 편집 화면에서 Hub 대상을 다시 선택하세요.",
+          "An exact Hub package version must be selected before this automation can run. Reselect the Hub target on the automation edit screen.",
+        );
     } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = opts?.runId ?? `run-${a.id}-${Date.now()}`;
@@ -1285,11 +1295,18 @@ async function runOne(
         appendChatMessage(
           chat.chat.id,
           "system",
-          [
-            "이전 실행이 외부에 무언가를 반영했는지 확인되지 않아 자동 재실행을 멈췄습니다.",
-            "같은 작업이 두 번 나가는 것을 막기 위한 조치이며, 자동화는 꺼지지 않았습니다.",
-            "자동화 상세에서 어떤 단계가 실제로 반영됐는지 확인해 주시면 그 지점부터 이어서 실행합니다.",
-          ].join(" "),
+          L(
+            [
+              "이전 실행이 외부에 무언가를 반영했는지 확인되지 않아 자동 재실행을 멈췄습니다.",
+              "같은 작업이 두 번 나가는 것을 막기 위한 조치이며, 자동화는 꺼지지 않았습니다.",
+              "자동화 상세에서 어떤 단계가 실제로 반영됐는지 확인해 주시면 그 지점부터 이어서 실행합니다.",
+            ].join(" "),
+            [
+              "The automatic rerun was stopped because it is unconfirmed whether the previous run affected anything external.",
+              "This is to prevent the same work from going out twice, and the automation has not been turned off.",
+              "Check the automation details for which step actually took effect, and it will continue from that point.",
+            ].join(" "),
+          ),
         );
       } catch (error) {
         console.error("[automation] graph reconciliation suspension failed:", error);

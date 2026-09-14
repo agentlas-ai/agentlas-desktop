@@ -23,6 +23,9 @@ import {
   failureSignature,
   type AutomationFailureContext,
 } from "./automation-strategy";
+import { currentUiLocale } from "./ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 
 export interface AutomationRecoveryInput {
@@ -160,13 +163,27 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
   }
 
   const lines = [
-    `🧬 방법 전환으로 복구 성공 — 이전 ${input.prior.streak}회 실패하던 작업이 이번 실행에서 성공했습니다.`,
-    strategyChange ? `🔀 전환된 전략: ${strategyChange}` : "🔀 전환된 전략이 선언되지 않아 이번 런 기록을 근거로 남깁니다.",
+    L(
+      `🧬 방법 전환으로 복구 성공 — 이전 ${input.prior.streak}회 실패하던 작업이 이번 실행에서 성공했습니다.`,
+      `🧬 Recovered by switching methods — a task that had failed ${input.prior.streak} time(s) before succeeded on this run.`,
+    ),
+    strategyChange
+      ? L(`🔀 전환된 전략: ${strategyChange}`, `🔀 Strategy switched to: ${strategyChange}`)
+      : L(
+          "🔀 전환된 전략이 선언되지 않아 이번 런 기록을 근거로 남깁니다.",
+          "🔀 No switched strategy was declared, so this is recorded based on this run's record.",
+        ),
     experiencePromoted
-      ? "🧠 이 경험을 자동으로 기억했습니다(성공 영수증 기반 자동 승격)."
+      ? L(
+          "🧠 이 경험을 자동으로 기억했습니다(성공 영수증 기반 자동 승격).",
+          "🧠 This experience was remembered automatically (auto-promoted from the success receipt).",
+        )
       : memoryId
-        ? "🧠 이 경험을 에이전트 메모리에 기록했습니다."
-        : "🧠 대상이 단일 에이전트가 아니어서 실행 기록으로만 남깁니다.",
+        ? L("🧠 이 경험을 에이전트 메모리에 기록했습니다.", "🧠 This experience was recorded in agent memory.")
+        : L(
+            "🧠 대상이 단일 에이전트가 아니어서 실행 기록으로만 남깁니다.",
+            "🧠 The target is not a single agent, so this is kept only as a run record.",
+          ),
   ];
   appendAutomationChatMessage(input.automation, lines.join("\n"));
 

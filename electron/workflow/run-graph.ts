@@ -72,6 +72,9 @@ import {
 } from "../../shared/graph-node-protocol";
 // 코드가 읽는 값의 판별은 이 정본 하나뿐이다(`vars.get("x")` 눈먼 지점의 수리).
 import { codeReferencedVars as codeReferencedVarsSync } from "../../shared/graph-code-vars";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -705,11 +708,11 @@ export async function rewriteFailedCodeStep(input: {
  */
 function codeFailureHeadline(raw: string | null | undefined): string {
   const text = String(raw ?? "").trim();
-  if (!text) return "코드 단계가 실패했습니다.";
+  if (!text) return L("코드 단계가 실패했습니다.", "The code step failed.");
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1] ?? text;
   if (lines.length <= 3 || !/^traceback/i.test(lines[0])) return text;
-  return `${last}\n\n(자세한 내용)\n${text.slice(-600)}`;
+  return L(`${last}\n\n(자세한 내용)\n${text.slice(-600)}`, `${last}\n\n(details)\n${text.slice(-600)}`);
 }
 
 /**
@@ -1104,8 +1107,14 @@ export function planGraphLoops(graph: WorkflowGraph): GraphLoopPlan {
         nodeId: tailNode.id,
         failure: {
           code: "LOOP_WITHOUT_EXIT",
-          reason: `"${label}"에서 "${headNode.label || headNode.id}"(으)로 되돌아가는 반복에 빠져나갈 갈림길이 없습니다.`,
-          nextAction: "되돌아가기 전에 갈림길 단계를 넣고, 참·거짓 중 한쪽만 되돌아가게 이으세요.",
+          reason: L(
+            `"${label}"에서 "${headNode.label || headNode.id}"(으)로 되돌아가는 반복에 빠져나갈 갈림길이 없습니다.`,
+            `The loop going back from "${label}" to "${headNode.label || headNode.id}" has no branch to exit through.`,
+          ),
+          nextAction: L(
+            "되돌아가기 전에 갈림길 단계를 넣고, 참·거짓 중 한쪽만 되돌아가게 이으세요.",
+            "Add a branch step before looping back, and connect only one side (true or false) to loop back.",
+          ),
         },
       };
     }
@@ -1118,8 +1127,14 @@ export function planGraphLoops(graph: WorkflowGraph): GraphLoopPlan {
         nodeId: tailNode.id,
         failure: {
           code: "LOOP_BOUND_UNDECLARED",
-          reason: `"${label}"에서 되돌아가는 반복에 몇 바퀴까지 돌지가 정해져 있지 않습니다. 자동화는 사람이 보지 않는 동안 돌기 때문에, 멈출 지점이 없는 반복은 실행하지 않습니다.`,
-          nextAction: `되돌아가는 연결을 눌러 반복 횟수를 정하세요(예: ${DEFAULT_MAX_ITERATIONS}회).`,
+          reason: L(
+            `"${label}"에서 되돌아가는 반복에 몇 바퀴까지 돌지가 정해져 있지 않습니다. 자동화는 사람이 보지 않는 동안 돌기 때문에, 멈출 지점이 없는 반복은 실행하지 않습니다.`,
+            `The loop going back from "${label}" has no set limit on how many times it can run. Automations run unattended, so a loop with no stopping point will not be executed.`,
+          ),
+          nextAction: L(
+            `되돌아가는 연결을 눌러 반복 횟수를 정하세요(예: ${DEFAULT_MAX_ITERATIONS}회).`,
+            `Click the loop-back connection to set an iteration limit (e.g. ${DEFAULT_MAX_ITERATIONS}).`,
+          ),
         },
       };
     }
@@ -1129,8 +1144,14 @@ export function planGraphLoops(graph: WorkflowGraph): GraphLoopPlan {
         nodeId: tailNode.id,
         failure: {
           code: "LOOP_BOUND_INVALID",
-          reason: `"${label}"의 반복 횟수 ${declared}은(는) 실행할 수 있는 범위(1~${HARD_MAX_ITERATIONS})를 벗어납니다.`,
-          nextAction: `반복 횟수를 1~${HARD_MAX_ITERATIONS} 사이로 고치세요.`,
+          reason: L(
+            `"${label}"의 반복 횟수 ${declared}은(는) 실행할 수 있는 범위(1~${HARD_MAX_ITERATIONS})를 벗어납니다.`,
+            `The iteration count ${declared} for "${label}" is outside the allowed range (1-${HARD_MAX_ITERATIONS}).`,
+          ),
+          nextAction: L(
+            `반복 횟수를 1~${HARD_MAX_ITERATIONS} 사이로 고치세요.`,
+            `Set the iteration count to a value between 1 and ${HARD_MAX_ITERATIONS}.`,
+          ),
         },
       };
     }
@@ -1262,15 +1283,24 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
 
   if (varName && !(varName in vars)) {
     return unresolved(
-      `조건 노드 "${label}"이 읽으려는 변수 "${varName}"가 이 실행에 존재하지 않습니다.`,
-      "이 변수를 만드는 상류 노드를 연결하거나, 조건에서 참조하는 변수 이름을 고치세요.",
+      L(
+        `조건 노드 "${label}"이 읽으려는 변수 "${varName}"가 이 실행에 존재하지 않습니다.`,
+        `The variable "${varName}" that condition node "${label}" reads does not exist in this run.`,
+      ),
+      L(
+        "이 변수를 만드는 상류 노드를 연결하거나, 조건에서 참조하는 변수 이름을 고치세요.",
+        "Connect an upstream node that creates this variable, or fix the variable name referenced in the condition.",
+      ),
     );
   }
   const left = varName ? vars[varName] : undefined;
   if (!varName && op !== "truthy" && op !== "falsy") {
     return unresolved(
-      `조건 노드 "${label}"에 비교할 변수가 지정되지 않았습니다(연산자 "${op}").`,
-      "조건 노드를 열어 비교할 변수를 선택하세요.",
+      L(
+        `조건 노드 "${label}"에 비교할 변수가 지정되지 않았습니다(연산자 "${op}").`,
+        `Condition node "${label}" has no variable specified to compare (operator "${op}").`,
+      ),
+      L("조건 노드를 열어 비교할 변수를 선택하세요.", "Open the condition node and select a variable to compare."),
     );
   }
 
@@ -1289,8 +1319,14 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
       const r = Number(right);
       if (!Number.isFinite(l) || !Number.isFinite(r)) {
         return unresolved(
-          `조건 노드 "${label}"이 숫자로 비교할 수 없는 값을 받았습니다(좌: ${JSON.stringify(left)}, 우: ${JSON.stringify(right)}).`,
-          "비교 값을 숫자로 만들거나 연산자를 문자열 비교로 바꾸세요.",
+          L(
+            `조건 노드 "${label}"이 숫자로 비교할 수 없는 값을 받았습니다(좌: ${JSON.stringify(left)}, 우: ${JSON.stringify(right)}).`,
+            `Condition node "${label}" received a value that cannot be compared as a number (left: ${JSON.stringify(left)}, right: ${JSON.stringify(right)}).`,
+          ),
+          L(
+            "비교 값을 숫자로 만들거나 연산자를 문자열 비교로 바꾸세요.",
+            "Make the compared values numbers, or change the operator to a string comparison.",
+          ),
         );
       }
       return { ok: true, value: op === "gt" ? l > r : l < r };
@@ -1298,16 +1334,25 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
     case "contains": {
       if (typeof left !== "string" || typeof right !== "string") {
         return unresolved(
-          `조건 노드 "${label}"의 포함 비교는 문자열끼리만 가능합니다(좌: ${typeof left}, 우: ${typeof right}).`,
-          "먼저 transform 노드로 문자열을 만들거나 연산자를 바꾸세요.",
+          L(
+            `조건 노드 "${label}"의 포함 비교는 문자열끼리만 가능합니다(좌: ${typeof left}, 우: ${typeof right}).`,
+            `Condition node "${label}"'s "contains" comparison only works between strings (left: ${typeof left}, right: ${typeof right}).`,
+          ),
+          L(
+            "먼저 transform 노드로 문자열을 만들거나 연산자를 바꾸세요.",
+            "Use a transform node to make a string first, or change the operator.",
+          ),
         );
       }
       return { ok: true, value: left.includes(right) };
     }
     default:
       return unresolved(
-        `조건 노드 "${label}"에 이 커널이 모르는 연산자 "${op}"가 지정돼 있습니다.`,
-        "조건 노드를 열어 지원되는 연산자를 다시 고르세요.",
+        L(
+          `조건 노드 "${label}"에 이 커널이 모르는 연산자 "${op}"가 지정돼 있습니다.`,
+          `Condition node "${label}" specifies an operator ("${op}") this kernel does not know.`,
+        ),
+        L("조건 노드를 열어 지원되는 연산자를 다시 고르세요.", "Open the condition node and pick a supported operator."),
       );
   }
 }
@@ -1363,15 +1408,18 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): Grap
   if (!from) {
     return {
       code: "TRANSFORM_NODE_UNCONFIGURED",
-      reason: `"${label}"에 어떤 값을 가공할지(from)가 없습니다.`,
-      nextAction: "앞 단계가 만든 값 이름을 이 단계의 '가져올 값'에 적어 주세요.",
+      reason: L(`"${label}"에 어떤 값을 가공할지(from)가 없습니다.`, `"${label}" has no value to transform (from) set.`),
+      nextAction: L(
+        "앞 단계가 만든 값 이름을 이 단계의 '가져올 값'에 적어 주세요.",
+        "Enter the name of a value from a previous step into this step's 'value to take' field.",
+      ),
     };
   }
   if (!to) {
     return {
       code: "TRANSFORM_NODE_UNCONFIGURED",
-      reason: `"${label}"에 결과를 어느 이름으로 둘지(to)가 없습니다.`,
-      nextAction: "이 단계가 만들 값의 이름을 적어 주세요.",
+      reason: L(`"${label}"에 결과를 어느 이름으로 둘지(to)가 없습니다.`, `"${label}" has no name set for where to put the result (to).`),
+      nextAction: L("이 단계가 만들 값의 이름을 적어 주세요.", "Enter the name of the value this step creates."),
     };
   }
   const source = vars[from];
@@ -1380,8 +1428,14 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): Grap
     // 모르는 방식을 그냥 복사로 처리하면, 사람이 고른 가공이 조용히 사라진 채 통과한다.
     return {
       code: "TRANSFORM_MODE_UNKNOWN",
-      reason: `"${label}"의 가공 방식 "${mode}"을(를) 이 제품이 모릅니다.`,
-      nextAction: `가공 방식을 ${TRANSFORM_MODES.join(" · ")} 중 하나로 바꿔 주세요.`,
+      reason: L(
+        `"${label}"의 가공 방식 "${mode}"을(를) 이 제품이 모릅니다.`,
+        `This product does not know the transform mode "${mode}" used by "${label}".`,
+      ),
+      nextAction: L(
+        `가공 방식을 ${TRANSFORM_MODES.join(" · ")} 중 하나로 바꿔 주세요.`,
+        `Change the transform mode to one of: ${TRANSFORM_MODES.join(" · ")}.`,
+      ),
     };
   }
   switch (mode) {
@@ -1509,15 +1563,24 @@ export async function runGraph(
     );
     if (inFlightNodeIds.length > 0 || ambiguousNodeIds.length > 0 || (committedEffect && !reviewedCommittedEffect)) {
       const affectedNodes = [...new Set([...inFlightNodeIds, ...ambiguousNodeIds])];
-      const nodeDetail = affectedNodes.length > 0
-        ? ` 미확정 단계: ${affectedNodes.join(", ")}.`
-        : " 이전 실행에서 외부 동작이 기록됐을 수 있습니다.";
+      const nodeDetail = L(
+        affectedNodes.length > 0
+          ? ` 미확정 단계: ${affectedNodes.join(", ")}.`
+          : " 이전 실행에서 외부 동작이 기록됐을 수 있습니다.",
+        affectedNodes.length > 0
+          ? ` Unresolved step(s): ${affectedNodes.join(", ")}.`
+          : " The previous run may have recorded an external action.",
+      );
       throw new GraphContractError({
         code: "automation_fresh_run_blocked",
-        reason:
+        reason: L(
           `처음부터 새로 실행하면 이전 외부 동작을 다시 수행할 수 있어 새 실행을 시작하지 않았습니다.${nodeDetail}`,
-        nextAction:
+          `Starting fresh could repeat a previous external action, so a new run was not started.${nodeDetail}`,
+        ),
+        nextAction: L(
           "실행 기록에서 외부 상태를 확인하고 이 실행을 명시적으로 종결한 뒤, 처음부터 새 실행을 다시 선택하세요.",
+          "Check the external state in the run history, explicitly close out this run, then choose to start fresh again.",
+        ),
       });
     }
   }
@@ -1536,9 +1599,14 @@ export async function runGraph(
     if (!consumeGraphResumeCoordinate(latestFailed.runId)) {
       throw new GraphContractError({
         code: "RESUME_CONFLICT",
-        reason:
+        reason: L(
           "다른 실행이 이미 같은 지점에서 이어서 돌고 있습니다. 같은 단계를 두 번 실행하지 않기 위해 이번 요청은 시작하지 않았습니다.",
-        nextAction: "진행 중인 실행이 끝난 뒤 결과를 확인하고, 필요하면 그때 다시 실행하세요.",
+          "Another run is already resuming from this same point. This request was not started, to avoid running the same step twice.",
+        ),
+        nextAction: L(
+          "진행 중인 실행이 끝난 뒤 결과를 확인하고, 필요하면 그때 다시 실행하세요.",
+          "Check the result once the in-progress run finishes, and run again then if needed.",
+        ),
       });
     }
     /*
@@ -1895,10 +1963,16 @@ export async function runGraph(
       const remaining = Math.max(0, runTokenCap - runTokensUsed);
       return {
         code: "BUDGET_EXHAUSTED",
-        reason:
+        reason: L(
           `이번 실행의 남은 토큰(${remaining.toLocaleString()})으로는 "${label}"을(를) 돌릴 수 없습니다. ` +
           `상한 ${runTokenCap.toLocaleString()} 중 ${runTokensUsed.toLocaleString()}을 썼고, 앞선 노드는 한 번에 최대 ${maxObservedNodeTokens.toLocaleString()} 토큰을 썼습니다.`,
-        nextAction: "상한을 올린 뒤 [이 노드부터 재실행]하거나, 앞 단계에서 넘기는 내용을 줄이세요.",
+          `The tokens remaining for this run (${remaining.toLocaleString()}) are not enough to run "${label}". ` +
+          `${runTokensUsed.toLocaleString()} of ${runTokenCap.toLocaleString()} have been used, and the largest node so far used up to ${maxObservedNodeTokens.toLocaleString()} tokens in one run.`,
+        ),
+        nextAction: L(
+          "상한을 올린 뒤 [이 노드부터 재실행]하거나, 앞 단계에서 넘기는 내용을 줄이세요.",
+          "Raise the cap and use [Rerun from this node], or reduce what earlier steps pass along.",
+        ),
       };
     }
     const cap = nodeMaxTokens(node);
@@ -1906,8 +1980,14 @@ export async function runGraph(
     if (cap !== null && used >= cap) {
       return {
         code: "BUDGET_EXHAUSTED",
-        reason: `노드 "${label}"이 자기 상한 ${cap.toLocaleString()} 토큰을 모두 썼습니다(현재 ${used.toLocaleString()}).`,
-        nextAction: "이 노드의 상한을 올리거나, 프롬프트를 줄여 다시 실행하세요.",
+        reason: L(
+          `노드 "${label}"이 자기 상한 ${cap.toLocaleString()} 토큰을 모두 썼습니다(현재 ${used.toLocaleString()}).`,
+          `Node "${label}" has used up its own cap of ${cap.toLocaleString()} tokens (currently ${used.toLocaleString()}).`,
+        ),
+        nextAction: L(
+          "이 노드의 상한을 올리거나, 프롬프트를 줄여 다시 실행하세요.",
+          "Raise this node's cap, or shorten the prompt and run again.",
+        ),
       };
     }
     return null;
@@ -2018,9 +2098,14 @@ export async function runGraph(
     if (!present) {
       detachCallerAbort();
       throw new Error(
-        `automation_target_missing: "${automation.name}"이(가) 쓰던 `
-        + `${automation.targetType === "firm" ? "회사" : "에이전트"} "${automation.targetId}"을(를) 찾을 수 없습니다. `
-        + "지워졌거나 다른 곳에 설치돼 있습니다. 자동화를 열어 대상을 다시 고르세요.",
+        "automation_target_missing: " + L(
+          `"${automation.name}"이(가) 쓰던 `
+          + `${automation.targetType === "firm" ? "회사" : "에이전트"} "${automation.targetId}"을(를) 찾을 수 없습니다. `
+          + "지워졌거나 다른 곳에 설치돼 있습니다. 자동화를 열어 대상을 다시 고르세요.",
+          `The ${automation.targetType === "firm" ? "company" : "agent"} "${automation.targetId}" that "${automation.name}" `
+          + "was using could not be found. "
+          + "It may have been deleted or installed elsewhere. Open the automation and choose the target again.",
+        ),
       );
     }
   }
@@ -2335,10 +2420,14 @@ export async function runGraph(
       if (rival) {
         return {
           code: "REDUCER_WRITE_CONFLICT",
-          reason:
+          reason: L(
             `노드 "${node.label || node.id}"와 "${rival}"이(가) 동시에 실행될 수 있는데 같은 결과 이름 "${produces}"에 덮어쓰기로 저장합니다. 어느 쪽이 남을지는 먼저 끝나는 쪽에 따라 매번 달라집니다.`,
-          nextAction:
+            `Node "${node.label || node.id}" and "${rival}" can run at the same time, and both overwrite the same result name "${produces}". Which one survives depends on which finishes first, and that can change every time.`,
+          ),
+          nextAction: L(
             "두 노드의 결과 이름을 다르게 하거나, 저장 규칙을 '이어붙이기'로 바꾸세요.",
+            "Give the two nodes different result names, or change the save rule to 'append'.",
+          ),
         };
       }
       vars[produces] = text;
@@ -2364,8 +2453,14 @@ export async function runGraph(
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return {
           code: "REDUCER_MERGE_CONFLICT",
-          reason: `노드 "${node.label || node.id}"의 저장 규칙이 '합치기'인데 결과가 객체가 아닙니다(받은 값: ${typeof parsed}).`,
-          nextAction: "저장 규칙을 '덮어쓰기'나 '이어붙이기'로 바꾸거나, 앞에 transform 노드로 JSON 객체를 만드세요.",
+          reason: L(
+            `노드 "${node.label || node.id}"의 저장 규칙이 '합치기'인데 결과가 객체가 아닙니다(받은 값: ${typeof parsed}).`,
+            `Node "${node.label || node.id}"'s save rule is 'merge', but the result is not an object (received: ${typeof parsed}).`,
+          ),
+          nextAction: L(
+            "저장 규칙을 '덮어쓰기'나 '이어붙이기'로 바꾸거나, 앞에 transform 노드로 JSON 객체를 만드세요.",
+            "Change the save rule to 'overwrite' or 'append', or add a transform node before this to build a JSON object.",
+          ),
         };
       }
       const base = prior && typeof prior === "object" && !Array.isArray(prior)
@@ -2498,9 +2593,14 @@ export async function runGraph(
         if (undeclared.length > 0) {
           failGraphNode(node, {
             code: "EDGE_CONDITION_UNRESOLVED",
-            reason:
+            reason: L(
               `조건 노드 "${label}"에서 나가는 연결 ${undeclared.length}개가 참/거짓 중 어느 쪽인지 선언하지 않았습니다.`,
-            nextAction: "캔버스에서 해당 연결을 지우고 조건 노드의 참·거짓 출구에서 다시 이으세요.",
+              `${undeclared.length} connection(s) leaving condition node "${label}" do not declare whether they are the true or false side.`,
+            ),
+            nextAction: L(
+              "캔버스에서 해당 연결을 지우고 조건 노드의 참·거짓 출구에서 다시 이으세요.",
+              "Delete that connection on the canvas and reconnect it from the condition node's true/false output.",
+            ),
           });
           return;
         }
@@ -2515,8 +2615,14 @@ export async function runGraph(
         if (outgoing.length > 0 && !outgoing.some((edge) => edge.handle === take)) {
           failGraphNode(node, {
             code: "NO_MATCHING_EDGE",
-            reason: `조건 노드 "${label}"이 ${take === "true" ? "참" : "거짓"}으로 판정됐지만 그쪽으로 이어진 연결이 없습니다.`,
-            nextAction: `조건 노드의 ${take === "true" ? "참" : "거짓"} 출구에 다음 작업을 연결하거나, 여기서 끝나는 게 맞다면 종료 노드를 이으세요.`,
+            reason: L(
+              `조건 노드 "${label}"이 ${take === "true" ? "참" : "거짓"}으로 판정됐지만 그쪽으로 이어진 연결이 없습니다.`,
+              `Condition node "${label}" resolved to ${take === "true" ? "true" : "false"}, but no connection leads that way.`,
+            ),
+            nextAction: L(
+              `조건 노드의 ${take === "true" ? "참" : "거짓"} 출구에 다음 작업을 연결하거나, 여기서 끝나는 게 맞다면 종료 노드를 이으세요.`,
+              `Connect a next step to the condition node's ${take === "true" ? "true" : "false"} output, or connect an end node if it is meant to stop here.`,
+            ),
           });
           return;
         }
@@ -2529,8 +2635,14 @@ export async function runGraph(
           if (done >= loop.maxIterations) {
             failGraphNode(node, {
               code: "LOOP_LIMIT_REACHED",
-              reason: `"${label}"이 ${loop.maxIterations}바퀴를 다 돌 때까지 빠져나가는 조건을 만족하지 못했습니다.`,
-              nextAction: "반복 횟수를 늘리거나, 빠져나가는 조건을 지금 결과에 맞게 고친 뒤 다시 실행하세요.",
+              reason: L(
+                `"${label}"이 ${loop.maxIterations}바퀴를 다 돌 때까지 빠져나가는 조건을 만족하지 못했습니다.`,
+                `"${label}" ran through all ${loop.maxIterations} iterations without satisfying the exit condition.`,
+              ),
+              nextAction: L(
+                "반복 횟수를 늘리거나, 빠져나가는 조건을 지금 결과에 맞게 고친 뒤 다시 실행하세요.",
+                "Increase the iteration limit, or fix the exit condition to match the current result, then run again.",
+              ),
             });
             return;
           }
@@ -2595,8 +2707,14 @@ export async function runGraph(
         if (!subject || (!criteria && !hasItems)) {
           failGraphNode(node, {
             code: "EVAL_INCOMPLETE",
-            reason: `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(채점표 또는 criteria) 볼지가 없습니다.`,
-            nextAction: "검증할 값과 통과 기준을 적어 주세요.",
+            reason: L(
+              `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(채점표 또는 criteria) 볼지가 없습니다.`,
+              `Verification step "${node.label || node.id}" has no value to check (subject) or criteria to check it against (checklist or criteria).`,
+            ),
+            nextAction: L(
+              "검증할 값과 통과 기준을 적어 주세요.",
+              "Enter the value to check and the pass criteria.",
+            ),
           });
           return;
         }
@@ -2627,11 +2745,20 @@ export async function runGraph(
           failGraphNode(node, {
             code: "NODE_INPUT_MISSING",
             reason: value == null
-              ? `검증할 "${subject}" 값을 앞 단계가 만들어 주지 않았습니다.`
-              : `검증할 "${subject}" 값을 앞 단계가 만들기는 했지만 비어 있습니다.`,
+              ? L(
+                  `검증할 "${subject}" 값을 앞 단계가 만들어 주지 않았습니다.`,
+                  `The value "${subject}" to verify was not produced by an earlier step.`,
+                )
+              : L(
+                  `검증할 "${subject}" 값을 앞 단계가 만들기는 했지만 비어 있습니다.`,
+                  `The value "${subject}" to verify was produced by an earlier step, but it is empty.`,
+                ),
             nextAction: value == null
-              ? "앞 단계가 이 값을 만들어 내는지 확인하세요."
-              : "비어 있는 것이 정상인 값이라면, 이 검증을 값이 있는 쪽 가지 안으로 옮기세요.",
+              ? L("앞 단계가 이 값을 만들어 내는지 확인하세요.", "Check that an earlier step produces this value.")
+              : L(
+                  "비어 있는 것이 정상인 값이라면, 이 검증을 값이 있는 쪽 가지 안으로 옮기세요.",
+                  "If it being empty is expected, move this verification inside the branch where the value exists.",
+                ),
           });
           return;
         }
@@ -2664,8 +2791,14 @@ export async function runGraph(
           if (evidenceVar && (evidenceValue == null || judgeableText(evidenceValue).trim() === "")) {
             failGraphNode(node, {
               code: "NODE_INPUT_MISSING",
-              reason: `판정 근거로 선언된 "${evidenceVar}" 값을 앞 단계가 만들어 주지 않았습니다.`,
-              nextAction: "근거를 만드는 재조회 단계가 이 검증보다 앞에 있는지 확인하세요.",
+              reason: L(
+                `판정 근거로 선언된 "${evidenceVar}" 값을 앞 단계가 만들어 주지 않았습니다.`,
+                `The value "${evidenceVar}" declared as evidence for the verdict was not produced by an earlier step.`,
+              ),
+              nextAction: L(
+                "근거를 만드는 재조회 단계가 이 검증보다 앞에 있는지 확인하세요.",
+                "Check that a step producing this evidence runs before this verification.",
+              ),
             });
             return;
           }
@@ -2690,8 +2823,14 @@ export async function runGraph(
           } catch (error) {
             failGraphNode(node, {
               code: "EVAL_UNAVAILABLE",
-              reason: `검증을 수행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-              nextAction: "잠시 뒤 다시 실행하거나, 이 단계를 지우고 다시 만들어 주세요.",
+              reason: L(
+                `검증을 수행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+                `Could not perform the verification: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+              nextAction: L(
+                "잠시 뒤 다시 실행하거나, 이 단계를 지우고 다시 만들어 주세요.",
+                "Run again shortly, or delete this step and recreate it.",
+              ),
             });
             return;
           }
@@ -2701,16 +2840,25 @@ export async function runGraph(
               code: "EVAL_UNAVAILABLE",
               // ★판정 엔진이 "왜"를 말했으면 그대로 싣는다(한도·로그인 등) — 덮으면
               //   사람은 잠시 뒤 다시 눌러도 똑같이 막히는 이유를 영영 모른다.
+              // NOTE: this exact ko-only ternary text is pinned by
+              // scripts/test-refusal-not-output-contract.cjs (source regex match on
+              // `list.reasonText ? \`검증을 수행하지 못했습니다 — `) — do not localize.
               reason: list.reasonText
                 ? `검증을 수행하지 못했습니다 — ${list.reasonText}`
-                : "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
+                : L(
+                    "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
+                    "The verification could not be performed (the judging engine did not answer the checklist).",
+                  ),
               // ★"기다리면 풀리는 사유"와 "런타임을 하나 붙여야 풀리는 사유"의 다음 행동은
               //   다르다. 거절(refused)에 "잠시 뒤 다시 실행"을 붙이면, 그 사용자는 영원히
               //   같은 자리에서 같은 버튼을 누른다(실측 2026-08-19: 설치된 5종 중 codex 만
               //   판정을 거절 — codex 단독 사용자는 검증이 있는 자동화를 끝낼 수 없다).
               nextAction: list.failureKind === "refused"
-                ? "이 컴퓨터의 런타임이 채점을 수행하지 못합니다. 판정할 수 있는 런타임(Claude Code·Antigravity·Grok·Ollama 중 하나)을 연결한 뒤 다시 실행해 주세요."
-                : "잠시 뒤 다시 실행해 주세요.",
+                ? L(
+                    "이 컴퓨터의 런타임이 채점을 수행하지 못합니다. 판정할 수 있는 런타임(Claude Code·Antigravity·Grok·Ollama 중 하나)을 연결한 뒤 다시 실행해 주세요.",
+                    "This computer's runtime cannot perform scoring. Connect a runtime that can judge (Claude Code, Antigravity, Grok, or Ollama), then run again.",
+                  )
+                : L("잠시 뒤 다시 실행해 주세요.", "Please run again shortly."),
             });
             return;
           }
@@ -2772,8 +2920,14 @@ export async function runGraph(
               if (evalIsBoundary(node)) {
                 failGraphNode(node, {
                   code: "EVAL_FAILED",
-                  reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다:\n${list.reasonText}`,
-                  nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+                  reason: L(
+                    `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다:\n${list.reasonText}`,
+                    `Verification "${node.label || node.id}" did not pass:\n${list.reasonText}`,
+                  ),
+                  nextAction: L(
+                    "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+                    "Fix the earlier step's instructions, or draw a retry path for when this verification fails.",
+                  ),
                 });
                 return;
               }
@@ -2794,8 +2948,14 @@ export async function runGraph(
               //   상한을 다 태우지 않고 멈춰 사람에게 넘긴다(기준 자체가 안 맞을 수 있다).
               failGraphNode(node, {
                 code: "EVAL_STUCK",
-                reason: `같은 항목으로 두 번 연속 통과하지 못했습니다:\n${list.reasonText}`,
-                nextAction: "기준이 산출물과 안 맞을 수 있습니다 — 채점표를 고치거나 앞 단계의 지시를 바꿔 주세요.",
+                reason: L(
+                  `같은 항목으로 두 번 연속 통과하지 못했습니다:\n${list.reasonText}`,
+                  `The same item failed to pass twice in a row:\n${list.reasonText}`,
+                ),
+                nextAction: L(
+                  "기준이 산출물과 안 맞을 수 있습니다 — 채점표를 고치거나 앞 단계의 지시를 바꿔 주세요.",
+                  "The criteria may not match the output — fix the checklist or change the earlier step's instructions.",
+                ),
               });
               return;
             }
@@ -2828,8 +2988,14 @@ export async function runGraph(
         } catch (error) {
           failGraphNode(node, {
             code: "EVAL_UNAVAILABLE",
-            reason: `검증을 수행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-            nextAction: "잠시 뒤 다시 실행하거나, 이 단계를 지우고 다시 만들어 주세요.",
+            reason: L(
+              `검증을 수행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+              `Could not perform the verification: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+            nextAction: L(
+              "잠시 뒤 다시 실행하거나, 이 단계를 지우고 다시 만들어 주세요.",
+              "Run again shortly, or delete this step and recreate it.",
+            ),
           });
           return;
         }
@@ -2838,10 +3004,16 @@ export async function runGraph(
           failGraphNode(node, {
             code: "EVAL_UNAVAILABLE",
             // ★판정 엔진이 "왜"를 말했으면 그대로 싣는다(한도·로그인 등).
+            // NOTE: this exact ko-only ternary text is pinned by
+            // scripts/test-refusal-not-output-contract.cjs (source regex match on
+            // `verdict.reason ? \`검증을 수행하지 못했습니다 — `) — do not localize.
             reason: verdict.reason
               ? `검증을 수행하지 못했습니다 — ${verdict.reason}`
-              : "검증을 수행하지 못했습니다(판정 엔진이 답하지 못했습니다).",
-            nextAction: "잠시 뒤 다시 실행해 주세요.",
+              : L(
+                  "검증을 수행하지 못했습니다(판정 엔진이 답하지 못했습니다).",
+                  "The verification could not be performed (the judging engine did not answer).",
+                ),
+            nextAction: L("잠시 뒤 다시 실행해 주세요.", "Please run again shortly."),
           });
           return;
         }
@@ -2864,8 +3036,14 @@ export async function runGraph(
           if (evalIsBoundary(node)) {
             failGraphNode(node, {
               code: "EVAL_FAILED",
-              reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다${verdict.reason ? `: ${verdict.reason}` : "."}`,
-              nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+              reason: L(
+                `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다${verdict.reason ? `: ${verdict.reason}` : "."}`,
+                `Verification "${node.label || node.id}" did not pass${verdict.reason ? `: ${verdict.reason}` : "."}`,
+              ),
+              nextAction: L(
+                "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+                "Fix the earlier step's instructions, or draw a retry path for when this verification fails.",
+              ),
             });
             return;
           }
@@ -2905,8 +3083,14 @@ export async function runGraph(
         if (!codeText) {
           failGraphNode(node, {
             code: "CODE_NODE_EMPTY",
-            reason: `"${node.label || node.id}" 코드 단계에 실행할 스크립트가 없습니다.`,
-            nextAction: "이 단계가 무엇을 계산·가공할지 말로 적어 주세요 — AI가 스크립트를 채웁니다.",
+            reason: L(
+              `"${node.label || node.id}" 코드 단계에 실행할 스크립트가 없습니다.`,
+              `"${node.label || node.id}" is a code step with no script to run.`,
+            ),
+            nextAction: L(
+              "이 단계가 무엇을 계산·가공할지 말로 적어 주세요 — AI가 스크립트를 채웁니다.",
+              "Describe in words what this step should compute or transform — AI will fill in the script.",
+            ),
           });
           return;
         }
@@ -2916,10 +3100,16 @@ export async function runGraph(
         if (dryRun && codeEffect === "mutation") {
           dryRunBlocks.push({
             nodeId: node.id, nodeLabel: node.label || node.id, effect: codeEffect,
-            reason: `실전이었다면 "${node.label || node.id}" 코드가 바깥을 바꿨을 지점입니다. 시뮬레이션이라 돌리지 않았습니다.`,
+            reason: L(
+              `실전이었다면 "${node.label || node.id}" 코드가 바깥을 바꿨을 지점입니다. 시뮬레이션이라 돌리지 않았습니다.`,
+              `If this were a real run, the code in "${node.label || node.id}" would have changed the outside world here. It was not run because this is a simulation.`,
+            ),
           });
           envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id,
-            `[시뮬레이션] "${node.label || node.id}" 코드는 실행하지 않았습니다.`);
+            L(
+              `[시뮬레이션] "${node.label || node.id}" 코드는 실행하지 않았습니다.`,
+              `[Simulation] The code in "${node.label || node.id}" was not run.`,
+            ));
           outputs[node.id] = toHumanText(envelopes[node.id]);
           completeNode(node.id);
           status.set(node.id, "done");
@@ -2986,10 +3176,16 @@ export async function runGraph(
             ? {
               // 의존성 결손은 코드 결함이 아니다 — "다시 짜라"가 아니라 "패키지를 선언하라".
               code: "CODE_DEPENDENCY_MISSING",
-              reason: run.reason ?? "코드가 쓰는 파이썬 패키지를 준비하지 못했습니다.",
+              reason: run.reason ?? L(
+                "코드가 쓰는 파이썬 패키지를 준비하지 못했습니다.",
+                "Could not prepare the Python package(s) this code uses.",
+              ),
               // ★사람에게 pip 이름을 묻지 않는다 — 코드를 지은 것은 AI다.
               //   (실측: PIL→Pillow, sklearn→scikit-learn. 사용자가 알 이유가 없다.)
-              nextAction: "[AI가 고치게 하기]를 누르면 이 단계에 올바른 패키지 이름을 채워 넣은 수정안을 만들어 드립니다.",
+              nextAction: L(
+                "[AI가 고치게 하기]를 누르면 이 단계에 올바른 패키지 이름을 채워 넣은 수정안을 만들어 드립니다.",
+                "Click [Have AI fix it] and a fix with the correct package name filled in will be made for this step.",
+              ),
             }
             : {
               code: "CODE_STEP_FAILED",
@@ -3005,8 +3201,12 @@ export async function runGraph(
                *   **그렇게 하는 코드가 이 경로에 없다**(실측 2026-08-20). 사람은 기다렸다가
                *   아무 일도 안 일어나는 것을 본다. 지금 실제로 할 수 있는 것만 적는다.
                */
-              nextAction: "이 단계가 무엇을 어디서 가져와야 하는지 한 줄 더 적어 주고 다시 실행하세요"
+              nextAction: L(
+                "이 단계가 무엇을 어디서 가져와야 하는지 한 줄 더 적어 주고 다시 실행하세요"
                 + " — 다른 자료원이 필요할 수도 있습니다.",
+                "Add a line describing what this step should get and from where, then run again"
+                + " — a different source may be needed.",
+              ),
             });
           return;
         }
@@ -3044,8 +3244,14 @@ export async function runGraph(
         if (codeProduces && run.result == null && !codeText2) {
           failGraphNode(node, {
             code: "CODE_PRODUCED_NOTHING",
-            reason: `"${node.label || node.id}" 코드가 ${codeProduces} 값을 넘기기로 돼 있는데 아무것도 돌려주지 않았습니다.`,
-            nextAction: "[AI가 고치게 하기]를 누르면 스크립트 마지막에서 결과를 내놓도록 고쳐 드립니다.",
+            reason: L(
+              `"${node.label || node.id}" 코드가 ${codeProduces} 값을 넘기기로 돼 있는데 아무것도 돌려주지 않았습니다.`,
+              `The code in "${node.label || node.id}" is supposed to pass along a value for ${codeProduces}, but it returned nothing.`,
+            ),
+            nextAction: L(
+              "[AI가 고치게 하기]를 누르면 스크립트 마지막에서 결과를 내놓도록 고쳐 드립니다.",
+              "Click [Have AI fix it] and the script will be fixed to produce a result at the end.",
+            ),
           });
           return;
         }
@@ -3075,8 +3281,11 @@ export async function runGraph(
         if (!catalog) {
           failGraphNode(node, {
             code: "TOOL_NODE_UNCONFIGURED",
-            reason: `도구 단계 "${node.label || node.id}"에 어떤 도구를 쓸지가 없습니다.`,
-            nextAction: "이 단계에서 쓸 도구를 골라 주세요.",
+            reason: L(
+              `도구 단계 "${node.label || node.id}"에 어떤 도구를 쓸지가 없습니다.`,
+              `Tool step "${node.label || node.id}" has no tool selected.`,
+            ),
+            nextAction: L("이 단계에서 쓸 도구를 골라 주세요.", "Choose a tool for this step to use."),
           });
           return;
         }
@@ -3088,8 +3297,14 @@ export async function runGraph(
         if (!attached) {
           failGraphNode(node, {
             code: "TOOL_NODE_UNATTACHED",
-            reason: `도구 "${catalog}"가 어느 에이전트 단계에도 이어져 있지 않아 아무 데도 쓰이지 않습니다.`,
-            nextAction: "이 도구를 쓸 에이전트 단계와 선으로 이어 주세요.",
+            reason: L(
+              `도구 "${catalog}"가 어느 에이전트 단계에도 이어져 있지 않아 아무 데도 쓰이지 않습니다.`,
+              `The tool "${catalog}" is not connected to any agent step, so it is not used anywhere.`,
+            ),
+            nextAction: L(
+              "이 도구를 쓸 에이전트 단계와 선으로 이어 주세요.",
+              "Connect this tool to the agent step that will use it.",
+            ),
           });
           return;
         }
@@ -3120,8 +3335,14 @@ export async function runGraph(
           beginNode(node);
           failGraphNode(node, {
             code: "OUTPUT_NODE_EMPTY",
-            reason: `내보낼 것이 적혀 있지 않은 출력 단계입니다 ("${node.label || node.id}").`,
-            nextAction: "이 단계에서 무엇을 결과로 남길지 한 줄 적어 주세요.",
+            reason: L(
+              `내보낼 것이 적혀 있지 않은 출력 단계입니다 ("${node.label || node.id}").`,
+              `This output step has nothing to send out ("${node.label || node.id}").`,
+            ),
+            nextAction: L(
+              "이 단계에서 무엇을 결과로 남길지 한 줄 적어 주세요.",
+              "Write a line describing what this step should leave as its result.",
+            ),
           });
           return;
         }
@@ -3147,8 +3368,14 @@ export async function runGraph(
           if (filled.missing.length > 0) {
             failGraphNode(node, {
               code: "NODE_INPUT_MISSING",
-              reason: `내보낼 내용의 "${filled.missing.join(", ")}" 값을 앞 단계가 만들어 주지 않았습니다.`,
-              nextAction: "앞 단계가 그 값을 만들어 내는지, 조건 분기로 건너뛰지는 않았는지 확인하세요.",
+              reason: L(
+                `내보낼 내용의 "${filled.missing.join(", ")}" 값을 앞 단계가 만들어 주지 않았습니다.`,
+                `The value "${filled.missing.join(", ")}" in what should go out was not produced by an earlier step.`,
+              ),
+              nextAction: L(
+                "앞 단계가 그 값을 만들어 내는지, 조건 분기로 건너뛰지는 않았는지 확인하세요.",
+                "Check that an earlier step produces this value, and that it was not skipped by a condition branch.",
+              ),
             });
             return;
           }
@@ -3179,11 +3406,17 @@ export async function runGraph(
             nodeId: node.id,
             nodeLabel: label,
             effect,
-            reason: `실전이었다면 "${label}"이 외부에 변경을 반영했을 지점입니다. 시뮬레이션이라 호출하지 않았습니다.`,
+            reason: L(
+              `실전이었다면 "${label}"이 외부에 변경을 반영했을 지점입니다. 시뮬레이션이라 호출하지 않았습니다.`,
+              `If this were a real run, "${label}" would have applied a change externally here. It was not called because this is a simulation.`,
+            ),
           });
           // 시뮬레이션 안내문도 같은 봉투에 담는다 — 노드마다 다른 모양을 내지 않는다.
           envelopes[node.id] = declaredEnvelope(
-            node.id, label, `[시뮬레이션] "${label}"은(는) 실행하지 않았습니다.`,
+            node.id, label, L(
+              `[시뮬레이션] "${label}"은(는) 실행하지 않았습니다.`,
+              `[Simulation] "${label}" was not run.`,
+            ),
           );
           outputs[node.id] = toHumanText(envelopes[node.id]);
           const producesKey = str(node.config, "produces");
@@ -3298,11 +3531,23 @@ export async function runGraph(
           failGraphNode(node, {
             code: "NODE_INPUT_MISSING",
             reason: fromTrigger
-              ? `이 그래프는 시작할 때 "${names}" 값을 받아야 하는데, 값 없이 실행됐습니다.`
-              : `"${names}" 값을 앞 단계가 만들어 주지 않아 이 단계를 실행하지 않았습니다.`,
+              ? L(
+                  `이 그래프는 시작할 때 "${names}" 값을 받아야 하는데, 값 없이 실행됐습니다.`,
+                  `This graph needs a value for "${names}" at start, but it ran without one.`,
+                )
+              : L(
+                  `"${names}" 값을 앞 단계가 만들어 주지 않아 이 단계를 실행하지 않았습니다.`,
+                  `This step did not run because an earlier step did not produce the value "${names}".`,
+                ),
             nextAction: fromTrigger
-              ? "‘지금 실행’을 눌러 값을 입력하거나, 터미널에서 agentlas graph run \"<이름>\" 으로 값을 넣어 실행하세요."
-              : "앞 단계가 이 값을 만들어 내는지 확인하고, 조건 분기로 건너뛰었다면 그 분기를 점검하세요.",
+              ? L(
+                  "‘지금 실행’을 눌러 값을 입력하거나, 터미널에서 agentlas graph run \"<이름>\" 으로 값을 넣어 실행하세요.",
+                  "Click 'Run now' to enter a value, or run it from the terminal with agentlas graph run \"<name>\" and pass a value.",
+                )
+              : L(
+                  "앞 단계가 이 값을 만들어 내는지 확인하고, 조건 분기로 건너뛰었다면 그 분기를 점검하세요.",
+                  "Check that an earlier step produces this value, and if it was skipped by a condition branch, check that branch.",
+                ),
           });
           return;
         }
@@ -3574,20 +3819,28 @@ export async function runGraph(
             toolProofRetryNodes.add(node.id);
             throw new GraphContractError({
               code: "NODE_CLAIMED_WITHOUT_TOOLS",
-              reason:
+              reason: L(
                 `"${node.label || node.id}"은(는) 바깥을 바꾸는 단계인데 도구를 한 번도 호출하지 않았습니다 — `
                 + "그 답은 실제로 일어난 일이 아닙니다.",
+                `"${node.label || node.id}" is a step that changes the outside world, but it never called a tool — `
+                + "that answer did not actually happen.",
+              ),
               /*
                * ★두 가지 진실이 있고 둘 다 말해야 한다. 실측 2026-08-20: 주간 요약
                *   자동화의 "요약 작성" 단계가 매번 여기서 죽었는데, 그 단계는 글을 쓸 뿐
                *   바깥을 바꾸지 않는다 — 선언이 틀렸던 것이다. 도구 이야기만 하면 사람은
                *   있지도 않은 도구를 찾아 헤매게 된다.
                */
-              nextAction:
+              nextAction: L(
                 "이 단계에 필요한 도구(브라우저·컴퓨터 유즈 등)가 붙어 있는지 확인하고, 지시에 "
                 + "'무엇을 어떤 도구로 하라'를 한 줄 적어 주세요. "
                 + "이 단계가 사실은 바깥을 바꾸지 않고 글만 쓰는 단계라면, 단계 종류를 "
                 + "'바깥을 바꾼다'가 아닌 일반 작성 단계로 바꾸세요 — 그러면 이 확인은 돌지 않습니다.",
+                "Check that this step has the tool(s) it needs (browser, computer use, etc.) attached, and add "
+                + "a line to the instructions saying 'do X with tool Y'. "
+                + "If this step actually just writes text and does not change the outside world, change the step "
+                + "type from 'changes the outside world' to a plain writing step — then this check will not run.",
+              ),
             });
           }
           if (checkpointPersistenceError) throw checkpointPersistenceError;
@@ -3601,8 +3854,14 @@ export async function runGraph(
             notes,
             tokens: result.tokens,
             emptyReason: notes.some((note) => note.at === "tool")
-              ? `"${node.label || node.id}"이(가) 도구를 쓰긴 했지만 마지막에 결과를 내지 않았습니다.`
-              : `"${node.label || node.id}"이(가) 아무 결과도 내지 않았습니다.`,
+              ? L(
+                  `"${node.label || node.id}"이(가) 도구를 쓰긴 했지만 마지막에 결과를 내지 않았습니다.`,
+                  `"${node.label || node.id}" used a tool but did not produce a result at the end.`,
+                )
+              : L(
+                  `"${node.label || node.id}"이(가) 아무 결과도 내지 않았습니다.`,
+                  `"${node.label || node.id}" did not produce any result.`,
+                ),
           });
           envelopes[node.id] = envelope;
           // ★결과 없음은 사유 없는 에러가 아니라 **타입 있는 실패**다.
@@ -3613,8 +3872,14 @@ export async function runGraph(
               code: "NODE_NO_RESULT",
               reason: envelope.result.reason,
               nextAction: notes.some((note) => note.at === "tool")
-                ? "이 단계에 '무엇을 결과로 남겨라'를 한 줄 적어 주세요 — 도구만 쓰고 끝나면 다음 단계가 받을 것이 없습니다."
-                : "이 단계의 지시를 조금 더 구체적으로 적어 주세요.",
+                ? L(
+                    "이 단계에 '무엇을 결과로 남겨라'를 한 줄 적어 주세요 — 도구만 쓰고 끝나면 다음 단계가 받을 것이 없습니다.",
+                    "Add a line to this step saying 'leave X as the result' — if it only uses a tool and stops, the next step has nothing to receive.",
+                  )
+                : L(
+                    "이 단계의 지시를 조금 더 구체적으로 적어 주세요.",
+                    "Make this step's instructions a bit more specific.",
+                  ),
             });
             return;
           }
@@ -3734,19 +3999,34 @@ export async function runGraph(
           const failure: GraphNodeFailure = contractFailure ?? (nodeTimedOut
             ? {
                 code: "NODE_TIMEOUT",
-                reason: `노드 "${node.label || node.id}"이 제한 시간 ${Math.round(nodeDeadlineMs / 1000)}초 안에 끝나지 않아 중단했습니다.`,
-                nextAction: "이 노드의 제한 시간을 늘리거나, 작업을 더 작은 노드로 나눈 뒤 [이 노드부터 재실행]하세요.",
+                reason: L(
+                  `노드 "${node.label || node.id}"이 제한 시간 ${Math.round(nodeDeadlineMs / 1000)}초 안에 끝나지 않아 중단했습니다.`,
+                  `Node "${node.label || node.id}" was stopped because it did not finish within the ${Math.round(nodeDeadlineMs / 1000)}s time limit.`,
+                ),
+                nextAction: L(
+                  "이 노드의 제한 시간을 늘리거나, 작업을 더 작은 노드로 나눈 뒤 [이 노드부터 재실행]하세요.",
+                  "Raise this node's time limit, or split the task into smaller nodes, then [Rerun from this node].",
+                ),
               }
             : ambiguous
             ? {
                 code: "MUTATION_UNVERIFIED",
-                reason: `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
-                nextAction: "실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.",
+                reason: L(
+                  `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
+                  `Node "${node.label || node.id}" stopped without confirming whether it applied anything externally. Original: ${rawMessage}`,
+                ),
+                nextAction: L(
+                  "실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.",
+                  "Check whether it actually took effect, then choose [Rerun from this node] or [Skip].",
+                ),
               }
             : {
                 code: "NODE_FAILED",
                 reason: rawMessage,
-                nextAction: "사유를 확인하고 [이 노드부터 재실행]하거나, 노드 설정을 고친 뒤 다시 실행하세요.",
+                nextAction: L(
+                  "사유를 확인하고 [이 노드부터 재실행]하거나, 노드 설정을 고친 뒤 다시 실행하세요.",
+                  "Check the reason and [Rerun from this node], or fix the node's settings and run again.",
+                ),
               });
           nodeFailures[node.id] = failure;
           // 저작자가 실패 경로를 그려 뒀으면 그리로 보낸다 — 실행은 계속된다(커넥터 C40).
@@ -3787,8 +4067,11 @@ export async function runGraph(
         if (!ref) {
           failGraphNode(node, {
             code: "SUBGRAPH_NOT_FOUND",
-            reason: `"${node.label || node.id}" 단계에 어느 그래프를 부를지가 없습니다.`,
-            nextAction: "이 단계에서 실행할 자동화를 골라 주세요.",
+            reason: L(
+              `"${node.label || node.id}" 단계에 어느 그래프를 부를지가 없습니다.`,
+              `Step "${node.label || node.id}" has no graph selected to call.`,
+            ),
+            nextAction: L("이 단계에서 실행할 자동화를 골라 주세요.", "Choose an automation for this step to run."),
           });
           return;
         }
@@ -3797,9 +4080,16 @@ export async function runGraph(
         if (ref === automation.id || chain.includes(ref)) {
           failGraphNode(node, {
             code: "SUBGRAPH_SELF_CALL",
-            reason: `"${node.label || node.id}"이(가) 이미 실행 중인 자동화를 다시 부릅니다.`
+            reason: L(
+              `"${node.label || node.id}"이(가) 이미 실행 중인 자동화를 다시 부릅니다.`
               + " 그대로 두면 끝없이 자기를 부르게 됩니다.",
-            nextAction: "부를 자동화를 다른 것으로 바꾸거나, 이 단계를 지워 주세요.",
+              `"${node.label || node.id}" calls an automation that is already running.`
+              + " Left as is, it would call itself forever.",
+            ),
+            nextAction: L(
+              "부를 자동화를 다른 것으로 바꾸거나, 이 단계를 지워 주세요.",
+              "Change which automation this calls, or delete this step.",
+            ),
           });
           return;
         }
@@ -3807,8 +4097,14 @@ export async function runGraph(
         if (depth > MAX_SUBGRAPH_DEPTH) {
           failGraphNode(node, {
             code: "SUBGRAPH_DEPTH_EXCEEDED",
-            reason: `자동화가 자동화를 부른 깊이가 ${MAX_SUBGRAPH_DEPTH}단을 넘었습니다.`,
-            nextAction: "부르는 단계를 줄이거나, 안쪽 자동화를 하나로 합쳐 주세요.",
+            reason: L(
+              `자동화가 자동화를 부른 깊이가 ${MAX_SUBGRAPH_DEPTH}단을 넘었습니다.`,
+              `Automations calling automations went ${MAX_SUBGRAPH_DEPTH} levels deep, past the limit.`,
+            ),
+            nextAction: L(
+              "부르는 단계를 줄이거나, 안쪽 자동화를 하나로 합쳐 주세요.",
+              "Reduce the number of calling steps, or merge the inner automations into one.",
+            ),
           });
           return;
         }
@@ -3817,8 +4113,14 @@ export async function runGraph(
         if (!inner?.graph || inner.graph.nodes.length === 0) {
           failGraphNode(node, {
             code: "SUBGRAPH_NOT_FOUND",
-            reason: `부르려는 자동화를 찾지 못했습니다(${ref}). 지워졌거나 아직 만들어지지 않았습니다.`,
-            nextAction: "자동화 목록에서 부를 것을 다시 골라 주세요.",
+            reason: L(
+              `부르려는 자동화를 찾지 못했습니다(${ref}). 지워졌거나 아직 만들어지지 않았습니다.`,
+              `Could not find the automation to call (${ref}). It may have been deleted or not created yet.`,
+            ),
+            nextAction: L(
+              "자동화 목록에서 부를 것을 다시 골라 주세요.",
+              "Choose the automation to call again from the list.",
+            ),
           });
           return;
         }
@@ -3848,9 +4150,16 @@ export async function runGraph(
             .map((f) => f.reason).slice(0, 2).join(" ");
           failGraphNode(node, {
             code: "SUBGRAPH_FAILED",
-            reason: `부른 자동화 "${inner.name}"이(가) 끝까지 가지 못했습니다.`
+            reason: L(
+              `부른 자동화 "${inner.name}"이(가) 끝까지 가지 못했습니다.`
               + (innerReasons ? ` 안에서: ${innerReasons}` : ""),
-            nextAction: `"${inner.name}"의 실행 기록을 열어 그 단계를 고친 뒤 다시 실행하세요.`,
+              `The called automation "${inner.name}" did not run to completion.`
+              + (innerReasons ? ` Inside: ${innerReasons}` : ""),
+            ),
+            nextAction: L(
+              `"${inner.name}"의 실행 기록을 열어 그 단계를 고친 뒤 다시 실행하세요.`,
+              `Open "${inner.name}"'s run history, fix that step, and run again.`,
+            ),
           });
           return;
         }
@@ -3932,8 +4241,14 @@ export async function runGraph(
         if (!chosen) {
           failGraphNode(node, {
             code: "SUBGRAPH_NO_RESULT",
-            reason: `부른 자동화 "${inner.name}"이(가) 끝까지 돌았지만 가져올 결과를 남기지 않았습니다.`,
-            nextAction: "안쪽 자동화의 마지막 단계에 '무엇을 결과로 남길지'를 정해 주세요.",
+            reason: L(
+              `부른 자동화 "${inner.name}"이(가) 끝까지 돌았지만 가져올 결과를 남기지 않았습니다.`,
+              `The called automation "${inner.name}" ran to completion but left no result to bring back.`,
+            ),
+            nextAction: L(
+              "안쪽 자동화의 마지막 단계에 '무엇을 결과로 남길지'를 정해 주세요.",
+              "Set 'what to leave as the result' on the last step of the inner automation.",
+            ),
           });
           return;
         }
@@ -3958,8 +4273,14 @@ export async function runGraph(
         beginNode(node);
         failGraphNode(node, {
           code: "NODE_TYPE_UNSUPPORTED",
-          reason: `이 버전의 Agentlas는 노드 종류 "${node.type}"을(를) 실행할 수 없습니다.`,
-          nextAction: "Agentlas를 최신 버전으로 업데이트하거나, 이 노드를 지원되는 종류로 바꾸세요.",
+          reason: L(
+            `이 버전의 Agentlas는 노드 종류 "${node.type}"을(를) 실행할 수 없습니다.`,
+            `This version of Agentlas cannot run the node type "${node.type}".`,
+          ),
+          nextAction: L(
+            "Agentlas를 최신 버전으로 업데이트하거나, 이 노드를 지원되는 종류로 바꾸세요.",
+            "Update Agentlas to the latest version, or change this node to a supported type.",
+          ),
         });
         return;
     }
@@ -4036,11 +4357,20 @@ export async function runGraph(
         failNode(n.id, false);
         nodeFailures[n.id] ??= {
           code: "NODE_NEVER_REACHED",
-          reason: `"${n.label || n.id}" 앞의 연결이 끝내 정해지지 않아 이 단계는 시작하지 못했습니다.`
+          reason: L(
+            `"${n.label || n.id}" 앞의 연결이 끝내 정해지지 않아 이 단계는 시작하지 못했습니다.`
             + (backEdgeIds.size > 0
               ? " 되돌아가는 연결이 있는 그래프입니다 — 반복이 빠져나가지 못했을 수 있습니다."
               : " 서로 맞물려 기다리는 연결(순환)이 있는지 확인하세요."),
-          nextAction: "캔버스에서 이 단계로 들어오는 연결을 확인하고, 되돌아가는 연결이 있다면 갈림길과 반복 횟수를 점검하세요.",
+            `The connection(s) leading into "${n.label || n.id}" never resolved, so this step never started.`
+            + (backEdgeIds.size > 0
+              ? " This graph has a loop-back connection — the loop may not have been able to exit."
+              : " Check whether there is a cycle of connections waiting on each other."),
+          ),
+          nextAction: L(
+            "캔버스에서 이 단계로 들어오는 연결을 확인하고, 되돌아가는 연결이 있다면 갈림길과 반복 횟수를 점검하세요.",
+            "Check the connections leading into this step on the canvas, and if there is a loop-back connection, check the branch and iteration limit.",
+          ),
         };
       }
       ok = false;

@@ -18,6 +18,9 @@ import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { evaluateCondition } from "../triggers/condition";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 import type {
   Automation,
   AutomationExecutionPermission,
@@ -697,7 +700,7 @@ export function restoreGraphVersion(automationId: string, versionId: string): Au
     .get(versionId, automationId) as { graph_json?: string } | undefined;
   if (!row?.graph_json) throw new Error("graph_version_not_found");
   const graph = JSON.parse(row.graph_json) as WorkflowGraph;
-  return updateAutomationGraph(automationId, graph, { note: "되돌리기" });
+  return updateAutomationGraph(automationId, graph, { note: L("되돌리기", "Restore") });
 }
 
 /** 저장된 그래프를 갱신(그래프 편집/생성 경로). null이면 그래프 제거(단일 프롬프트로 복귀). */
