@@ -48,7 +48,8 @@ function fixture(installedCount) {
   const resident = installations[0] ? { schemaVersion: 1, receiptId: "r1", processEpoch: "epoch-0000-0000-0000-000000000001", installationId: installations[0].installationId, enginePackageId: engine.packageId, engineExecutableSha256: "0".repeat(64), endpoint: "http://127.0.0.1:1", contextTokens: 8192, state: "resident", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), reasonCode: null,
     acceleration: { evidence: "engine-log", backend: "metal", gpu: true, devices: [{ id: "MTL0", name: "Apple M4 Max", accelerator: "metal", gpu: true, memoryBytes: null, freeMemoryBytes: null }], offloadedLayers: 29, totalLayers: 29 } } : null;
   const hardware = { schemaVersion: 1, profileId: "hardware:qa", observedAt: new Date().toISOString(), platform: "darwin", arch: "arm64", cpuModel: "Apple M4 Max", logicalCpuCount: 16, totalMemoryBytes: 48 * 2 ** 30, availableMemoryBytes: 14 * 2 ** 30, memoryKind: "unified", accelerator: "metal", acceleratorEvidence: "engine-observed", vramBytes: 48 * 2 ** 30, diskAvailableBytes: 400 * 2 ** 30, engineDevices: [] };
-  return { schemaVersion: 1, generatedAt: new Date().toISOString(), hardware, engineCatalog: catalog.localEngineCatalog(), modelCatalog: catalog.localModelCatalog(), engineProgress: [], modelProgress: [], downloadReceipts: [], engineInstallations: [], modelInstallations: installations, fitAssessments: [], loadReceipts: resident ? [resident] : [], capabilityReceipts: [], runReceipts: [], resident, unavailableReason: null };
+  const engineInstallations = installations.length ? [{ schemaVersion: 1, receiptId: "engine-receipt-1", enginePackageId: engine.packageId, enginePackageSha256: engine.sha256, provenanceVerified: true, executableSha256: "0".repeat(64), executableRelativePath: engine.fileName, installedAt: new Date().toISOString() }] : [];
+  return { schemaVersion: 1, generatedAt: new Date().toISOString(), hardware, engineCatalog: catalog.localEngineCatalog(), modelCatalog: catalog.localModelCatalog(), engineProgress: [], modelProgress: [], downloadReceipts: [], engineInstallations, modelInstallations: installations, fitAssessments: [], loadReceipts: resident ? [resident] : [], capabilityReceipts: [], runReceipts: [], resident, unavailableReason: null };
 }
 
 async function run(browser, baseUrl, locale, installedCount) {
@@ -56,8 +57,24 @@ async function run(browser, baseUrl, locale, installedCount) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: "light" });
   await context.addInitScript({ content: `(${setupMockAgentlasBridge.toString()})(${JSON.stringify(mockBridgeOptions({}))});
     window.localStorage.setItem("agentlas.locale",${JSON.stringify(locale)});window.localStorage.setItem("agentlas.onboarded","1");
-    const snapshot = ${JSON.stringify(snapshot)};
-    window.agentlas.localModelHub = Object.assign(window.agentlas.localModelHub || {}, { snapshot: async () => snapshot, operations: async () => [], loadModel: async () => snapshot.resident });
+    let snapshot = ${JSON.stringify(snapshot)};
+    const residentTemplate = snapshot.resident;
+    const storeHandlers = [];
+    window.agentlasEvents.onStoreChanged = (handler) => { storeHandlers.push(handler); return () => { const index = storeHandlers.indexOf(handler); if (index >= 0) storeHandlers.splice(index, 1); }; };
+    window.__qa.localModelToggleCalls = [];
+    window.agentlas.localModelHub = Object.assign(window.agentlas.localModelHub || {}, {
+      snapshot: async () => structuredClone(snapshot), operations: async () => [],
+      unload: async (payload) => { window.__qa.localModelToggleCalls.push({ name: "unload", payload }); if (window.__qa.blockNextLocalUnload) { window.__qa.blockNextLocalUnload = false; throw new Error("local_model_runs_active"); } snapshot = { ...snapshot, resident: null }; storeHandlers.forEach((handler) => handler({ entity: "runtime" })); },
+      loadModel: async (payload) => { window.__qa.localModelToggleCalls.push({ name: "loadModel", payload }); const installation = snapshot.modelInstallations.find((item) => item.installationId === payload.installationId); snapshot = { ...snapshot, resident: { ...residentTemplate, installationId: installation.installationId, processEpoch: "epoch-0000-0000-0000-000000000002" } }; storeHandlers.forEach((handler) => handler({ entity: "runtime" })); return snapshot.resident; },
+    });
+    const baseDetect = window.agentlas.runtime.detect;
+    const localSelection = snapshot.modelInstallations[0] ? { kind: "agentlas-local", backend: "agentlas-local", source: "agentlas-local:" + snapshot.engineCatalog[0].packageId + ":" + snapshot.modelInstallations[0].installationId, model: snapshot.modelInstallations[0].fileName, role: "worker", inherit: false } : null;
+    const orchestratorSelection = { kind: "codex", backend: "openai", source: "/usr/local/bin/codex", model: "gpt-5.1-codex", effort: "high", role: "orchestrator", inherit: false };
+    const rolePool = { members: { orchestrator: [{ role: "orchestrator", position: 1, selection: orchestratorSelection, updatedAt: new Date().toISOString() }], worker: localSelection ? [{ role: "worker", position: 1, selection: localSelection, updatedAt: new Date().toISOString() }] : [] }, picks: { orchestrator: { role: "orchestrator", selection: orchestratorSelection, position: 1, inherited: false, skipped: [] }, worker: localSelection ? { role: "worker", selection: localSelection, position: 1, inherited: false, skipped: [] } : { role: "worker", selection: { ...orchestratorSelection, role: "worker", inherit: true }, position: 1, inherited: true, skipped: [] } } };
+    window.agentlas.runtime = Object.assign(window.agentlas.runtime || {}, {
+      listRoleMembers: async () => structuredClone(rolePool),
+      detect: async () => { const base = (await baseDetect()).map((item) => ({ ...item, activeRoles: (item.activeRoles || []).filter((role) => role !== "worker") })); if (!snapshot.resident || !localSelection) return base; return [...base, { ...localSelection, version: snapshot.resident.enginePackageId, active: false, activeRoles: ["worker"], roleSelections: { worker: localSelection }, label: "Agentlas Local", availableModels: [localSelection.model], allocationModels: [localSelection.model], allocationModelProfiles: { [localSelection.model]: { contextWindow: snapshot.resident.contextTokens, capabilities: [], supportsTools: true, supportsMultimodal: false } }, effort: null, efforts: [] }]; },
+    });
     window.agentlas.runtime = Object.assign(window.agentlas.runtime || {}, { setActive: async () => ({ ok: true }) });` });
   const page = await context.newPage();
   const errors = [];
@@ -76,11 +93,31 @@ async function run(browser, baseUrl, locale, installedCount) {
   const names = await cards.locator(".dashboard-local-model-name").allInnerTexts();
   const legacy = await page.locator(".dashboard-engine-card-name", { hasText: "Agentlas Local" }).count();
   const groupCount = await group.first().locator(".dashboard-engine-group-count").innerText();
+  const localSwitch = page.getByRole("switch", { name: locale === "ko" ? "로컬 모델 사용" : "Use local model" });
+  await localSwitch.waitFor({ state: "visible" });
+  const switchInitial = { checked: await localSwitch.getAttribute("aria-checked"), disabled: await localSwitch.isDisabled() };
+  let switchAfterOff = null, switchAfterOn = null, blockedOff = null, toggleCalls = [], offWorkerBadge = null, onWorkerBadge = null;
+  if (installedCount > 0) {
+    await localSwitch.click();
+    await page.waitForFunction(() => document.querySelector('.dashboard-local-runtime-switch')?.getAttribute('aria-checked') === 'false');
+    switchAfterOff = { checked: await localSwitch.getAttribute("aria-checked"), status: await page.locator('.dashboard-local-runtime-toggle [role="status"]').innerText() };
+    offWorkerBadge = await page.locator('[data-role="worker"] .dashboard-runtime-pool-badge').last().innerText();
+    await localSwitch.click();
+    await page.waitForFunction(() => document.querySelector('.dashboard-local-runtime-switch')?.getAttribute('aria-checked') === 'true');
+    switchAfterOn = { checked: await localSwitch.getAttribute("aria-checked"), status: await page.locator('.dashboard-local-runtime-toggle [role="status"]').innerText() };
+    onWorkerBadge = await page.locator('[data-role="worker"] .dashboard-runtime-pool-badge').last().innerText();
+    await page.evaluate(() => { window.__qa.blockNextLocalUnload = true; });
+    await localSwitch.click();
+    await page.locator('.dashboard-runtime-message[data-tone="error"]').waitFor({ state: "visible" });
+    blockedOff = { checked: await localSwitch.getAttribute("aria-checked"), message: await page.locator('.dashboard-runtime-message[data-tone="error"]').innerText() };
+    toggleCalls = await page.evaluate(() => window.__qa.localModelToggleCalls);
+  }
   fs.mkdirSync(outDir, { recursive: true });
   await group.first().scrollIntoViewIfNeeded();
   await group.first().screenshot({ path: path.join(outDir, `${locale}-${installedCount}.png`) });
+  await page.locator(".dashboard-runtime-control").screenshot({ path: path.join(outDir, `${locale}-${installedCount}-runtime-toggle.png`) });
   await context.close();
-  return { locale, installedCount, count, boxes, chipTitle, useButtons, names, legacy, groupCount, errors };
+  return { locale, installedCount, count, boxes, chipTitle, useButtons, names, legacy, groupCount, switchInitial, switchAfterOff, switchAfterOn, blockedOff, offWorkerBadge, onWorkerBadge, toggleCalls, errors };
 }
 
 async function main() {
@@ -101,9 +138,20 @@ async function main() {
       assert.match(r.chipTitle || "", /Apple M4 Max/, "사용 중 카드에 GPU 근거가 마우스 안내로");
       assert.equal(r.useButtons, 1, "나머지 카드엔 '사용' 단추 하나");
       assert.equal(r.groupCount, "1/2");
+      assert.deepEqual(r.switchInitial, { checked: "true", disabled: false });
+      assert.equal(r.switchAfterOff.checked, "false");
+      assert.match(r.switchAfterOff.status, r.locale === "ko" ? /GPU와 메모리 해제됨/ : /GPU and memory released/);
+      assert.equal(r.offWorkerBadge, r.locale === "ko" ? "꺼짐 · 건너뜀" : "Off · skipped");
+      assert.equal(r.onWorkerBadge, r.locale === "ko" ? "기본 선택" : "Default");
+      assert.equal(r.switchAfterOn.checked, "true");
+      assert.equal(r.blockedOff.checked, "true", "작업 중이면 스위치는 켜진 상태를 유지한다");
+      assert.match(r.blockedOff.message, r.locale === "ko" ? /작업 중이라 끄지 않았습니다/ : /is working, so it stayed on/);
+      assert.deepEqual(r.toggleCalls.map((call) => call.name), ["unload", "loadModel", "unload"]);
+      assert.equal(r.toggleCalls[0].payload.cancelActiveRuns, false, "끄기는 실행 중 작업을 강제 취소하지 않는다");
     } else {
       assert.equal(r.count, 1); assert.match(r.names[0], r.locale === "ko" ? /로컬 모델 받기/ : /Get a local model/);
       assert.equal(r.groupCount, "0/0");
+      assert.deepEqual(r.switchInitial, { checked: "false", disabled: true });
     }
   }
   console.log(JSON.stringify({ ok: true, outDir, results: results.map(({ boxes, ...rest }) => rest) }, null, 2));

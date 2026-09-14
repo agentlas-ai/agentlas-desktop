@@ -67,6 +67,8 @@ export interface LocalModelHubManagerOptions {
   healthTimeoutMs?: number;
   /** Pinned CRT DLL directory for Windows app-local deployment (see engine-installer.ts). */
   windowsRuntimeDir?: string;
+  /** Resident llama-server changed; callers invalidate runtime projections. */
+  onResidentChanged?: () => void;
 }
 
 export interface LocalCapabilityTestSelection {
@@ -179,6 +181,7 @@ export class LocalModelHubManager {
   private readonly fetchImpl: typeof fetch;
   private readonly spawnImpl: typeof spawn;
   private readonly healthTimeoutMs: number;
+  private readonly onResidentChanged: () => void;
   private readonly progress = new Map<string, LocalPackageProgress>();
   private state: PersistedHubState = emptyState();
   private initialized = false;
@@ -203,6 +206,7 @@ export class LocalModelHubManager {
     this.modelIndex = new HuggingFaceModelIndex(join(rootPath, "hf-cache"), this.fetchImpl);
     this.spawnImpl = options.spawnImpl ?? spawn;
     this.healthTimeoutMs = options.healthTimeoutMs ?? 60_000;
+    this.onResidentChanged = options.onResidentChanged ?? (() => {});
     this.downloader = new LocalPackageDownloadManager(this.packageRoot);
     this.installer = options.engineInstaller ?? new LocalEngineInstaller(this.engineRoot, { windowsRuntimeDir: options.windowsRuntimeDir });
   }
@@ -563,7 +567,11 @@ export class LocalModelHubManager {
     signal?: AbortSignal,
   ): Promise<LocalModelLoadReceipt> {
     const generation = ++this.loadGeneration;
-    return await this.enqueueLifecycle(() => this.loadModelExclusive(installationId, contextTokens, generation, signal));
+    try {
+      return await this.enqueueLifecycle(() => this.loadModelExclusive(installationId, contextTokens, generation, signal));
+    } finally {
+      this.notifyResidentChanged();
+    }
   }
 
   private async enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
@@ -710,6 +718,7 @@ export class LocalModelHubManager {
           this.residentProcess = null;
           this.residentReceipt = null;
           this.residentAuthToken = null;
+          this.notifyResidentChanged();
           // Keep the successful load observation, and append the exact process's
           // later failure. Intentional unload clears ownership before killing it.
           this.state.loadReceipts = bounded([...this.state.loadReceipts, {
@@ -767,16 +776,24 @@ export class LocalModelHubManager {
 
   async unload(expectedProcessEpoch?: string, options: { cancelActiveRuns?: boolean } = {}): Promise<void> {
     this.loadGeneration += 1;
-    await this.enqueueLifecycle(async () => {
-      if (expectedProcessEpoch && this.residentReceipt?.processEpoch !== expectedProcessEpoch) {
-        throw new Error("stale_local_model_process_epoch");
-      }
-      if (this.activeInference.size > 0) {
-        if (!options.cancelActiveRuns) throw new Error("local_model_runs_active");
-        await this.cancelActiveRuns();
-      }
-      await this.terminateResidentProcess();
-    });
+    try {
+      await this.enqueueLifecycle(async () => {
+        if (expectedProcessEpoch && this.residentReceipt?.processEpoch !== expectedProcessEpoch) {
+          throw new Error("stale_local_model_process_epoch");
+        }
+        if (this.activeInference.size > 0) {
+          if (!options.cancelActiveRuns) throw new Error("local_model_runs_active");
+          await this.cancelActiveRuns();
+        }
+        await this.terminateResidentProcess();
+      });
+    } finally {
+      this.notifyResidentChanged();
+    }
+  }
+
+  private notifyResidentChanged(): void {
+    try { this.onResidentChanged(); } catch { /* Runtime projection listeners cannot own model lifecycle. */ }
   }
 
   async cancelActiveRuns(): Promise<number> {

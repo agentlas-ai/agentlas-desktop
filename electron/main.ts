@@ -51,7 +51,8 @@ import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-u
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
-import { onDesktopStoreChange } from "./store/change-bus";
+import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
+import { clearDetectCache } from "./runtime/detect";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
@@ -1538,6 +1539,10 @@ app.whenReady().then(async () => {
   const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"), {
     // Windows app-local VC++ runtime for llama-server.exe; harmless elsewhere (never read).
     windowsRuntimeDir: path.join(process.resourcesPath, "vc-redist", "x64"),
+    onResidentChanged: () => {
+      clearDetectCache();
+      emitDesktopStoreChange({ entity: "runtime" });
+    },
   });
   await localModelHubManager.initialize();
   configureLocalModelHubManager(localModelHubManager);
