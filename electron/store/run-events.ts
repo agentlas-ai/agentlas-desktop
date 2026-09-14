@@ -199,6 +199,13 @@ function scienceRuntimeEventJson(event: McpInvocationEvent): string {
     redacted = { ...common, lifecycle: { phase: event.lifecycle?.phase, permission: event.lifecycle?.permission } };
   } else if (event.kind === "partial") {
     redacted = { ...common, delta: event.delta, text: event.text, textLen: event.textLen };
+  } else if (event.kind === "tool-use" && !event.tool?.name) {
+    // 이름 없는 tool-use 는 도구가 아니라 런타임 상태 하트비트("CLI 프로세스 실행 중", "session alive …")다.
+    // 도구 상자를 비워 보내 Science 가 상태 줄로 받게 한다 — 예전엔 빈 이름이 "도구 unknown" 으로 그려졌다.
+    redacted = {
+      ...common,
+      status: typeof event.status === "string" ? truncate(event.status, 500) : undefined,
+    };
   } else if (event.kind === "tool-use") {
     redacted = {
       ...common,

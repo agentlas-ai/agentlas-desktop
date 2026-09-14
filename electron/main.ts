@@ -3418,12 +3418,14 @@ app.whenReady().then(async () => {
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     return scienceStore().getArtifactValidationRunArtifactBindingForProject(String(record.projectId ?? ""), String(record.receiptId ?? ""));
   });
-  ipcMain.handle("science:artifactValidations:validate", (event, envelope: unknown) => {
+  ipcMain.handle("science:artifactValidations:validate", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     if (!input || typeof input !== "object") throw new Error("science-publication-validation-input-invalid");
     const record = input as Record<string, unknown>;
-    return scienceArtifactPublicationValidator().validate({
+    // Vega 차트에 채택된 캡처가 없으면 화면 없이(Vega→SVG→PNG) 찍고 검증한다 — 결과·그림 화면의 "지금 검증".
+    // 편집된 판(v2…)은 데이터가 같으면 실행 계보를 이어받는다(Science 0.1.28).
+    return scienceArtifactPublicationValidator().validateWithCapture({
       requestId: record.requestId === undefined ? undefined : String(record.requestId),
       projectId: String(record.projectId ?? ""),
       artifactId: String(record.artifactId ?? ""),
