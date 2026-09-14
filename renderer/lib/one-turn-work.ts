@@ -1,5 +1,6 @@
 import type { OneActivityItem, OneActivityState } from "./one-activity";
 import { normalizeToolCall, mcpServerName, stripCwdPrefix, type ToolCallDetail } from "@shared/tool-call-detail";
+import { mergeConsecutiveThoughts } from "@shared/turn-activity-rows";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
 import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
@@ -577,6 +578,17 @@ export function buildOneWorkPresentation(
       ...(answerRow.answerChars != null ? { chars: answerRow.answerChars } : {}),
     });
   }
+  // 연속된 헤드라인 없는 생각은 한 칸으로 합쳐 시간을 누적한다(공용 규칙 shared/turn-activity-rows.ts —
+  // Science 작업 블록과 같은 함수). Codex 처럼 헤드라인이 있는 생각은 각자 남는다.
+  const merged = mergeConsecutiveThoughts(
+    cells,
+    (cell) => cell.kind === "thought" && !cell.headline && !cell.body && cell.status !== "running",
+    (into, from) => (into.kind === "thought" && from.kind === "thought"
+      ? { ...into, durationMs: (into.durationMs ?? 0) + (from.durationMs ?? 0), ...(from.updatedAt ? { updatedAt: from.updatedAt } : {}) }
+      : into),
+  );
+  cells.length = 0;
+  cells.push(...merged);
   return {
     cells,
     dividers,
