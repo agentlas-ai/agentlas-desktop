@@ -25,6 +25,12 @@ function bundledPluginsRoot(): string {
   // dist/electron/dist/plugins does not exist -- so no dev app ever materialized a bundled plugin
   // ("bundled packages unreadable", persona apps 2026-09-14) and the Research Director pin drifted.
   if (path.basename(appPath) === "electron" && path.basename(path.dirname(appPath)) === "dist") {
+    // dist/plugins is a build product nobody refreshes on a source bump, so every service pin bump
+    // bricked every dev/QA app on the machine until someone rebuilt (rounds 3·5·6, 2026-09-14). A dev
+    // launch reads the source tree, which is what the Science service constant was written against.
+    const repositoryRoot = path.dirname(path.dirname(appPath));
+    const sourcePlugins = path.join(repositoryRoot, "plugins");
+    if (fs.existsSync(path.join(sourcePlugins, RESEARCH_DIRECTOR_PLUGIN_SLUG, "plugin.json"))) return sourcePlugins;
     return path.join(path.dirname(appPath), "plugins");
   }
   return path.join(appPath, "dist", "plugins");
