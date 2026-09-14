@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pluginTreeSignature } from "./tree-signature";
 import type { InstalledMcpServer, McpToolCatalogEntry } from "../../shared/types";
 import { installedPluginsRoot, verifiedInstalledPluginRelease } from "./materialize";
 
@@ -64,7 +65,16 @@ function assertContainedRealFile(root: string, target: string, reason: string): 
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(reason);
 }
 
+const manifestIntegrityCache = new Map<string, string>();
 function verifyManifestIntegrity(root: string, manifest: JsonObject): void {
+  // 같은 트리·같은 무결성 표면 → 마지막 성공 검증을 재사용(내용 해시는 트리가 바뀐 뒤에만 다시 낸다).
+  const signature = pluginTreeSignature(root, (name) => name === "plugin.json" || name === ".install.json" || name === ".state");
+  const key = signature ? `${signature}\0${createHash("sha256").update(JSON.stringify(manifest.integrity ?? null)).digest("hex")}` : null;
+  if (key && manifestIntegrityCache.get(root) === key) return;
+  computeVerifyManifestIntegrity(root, manifest);
+  if (key) manifestIntegrityCache.set(root, key);
+}
+function computeVerifyManifestIntegrity(root: string, manifest: JsonObject): void {
   const integrity = object(manifest.integrity, "plugin_manifest_integrity_missing");
   if (integrity.algo !== "sha256" || !Array.isArray(integrity.files) || integrity.files.length === 0 || integrity.files.length > 4096) {
     throw new Error("plugin_manifest_integrity_invalid");

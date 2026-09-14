@@ -733,7 +733,7 @@ function AutomationFlowPage() {
         : ev.kind === "thinking"
           ? (ev.status ?? "")
           : ev.kind === "reasoning" && ev.reasoning?.phase === "start"
-            ? "생각하는 중"
+            ? (locale === "en" ? "thinking" : "생각하는 중")
             : "";
       if (progress) {
         setNodeProgress((prev) => ({ ...prev, [ev.nodeId as string]: progress.slice(0, 60) }));
@@ -2816,15 +2816,12 @@ function LoopBoundPanel({
   return (
     <div className="automation-node-panel" data-one-content-slot>
       <div className="automation-node-panel-head">
-        <strong>{isBackEdge ? "되돌아가는 연결" : "연결"}</strong>
+        <strong>{isBackEdge ? L("되돌아가는 연결", "Loop-back connection") : L("연결", "Connection")}</strong>
         <button type="button" className="ghost-btn" onClick={onClose}>{L("닫기", "Close")}</button>
       </div>
       {isBackEdge ? (
         <>
-          <p className="automation-node-panel-hint">
-            앞 단계로 되돌아갑니다. 몇 바퀴까지 돌지 정해야 실행할 수 있어요 —
-            자동화는 아무도 보고 있지 않을 때 돌기 때문입니다.
-          </p>
+          <p className="automation-node-panel-hint">{L("앞 단계로 되돌아갑니다. 몇 바퀴까지 돌지 정해야 실행할 수 있어요 — 자동화는 아무도 보고 있지 않을 때 돌기 때문입니다.", "This goes back to an earlier step. Set how many rounds it may loop before it can run — automations run while nobody is watching.")}</p>
           <label className="automation-field">
             <span>{L("최대 반복 횟수", "Maximum repeats")}</span>
             <input
@@ -2840,15 +2837,13 @@ function LoopBoundPanel({
           <div className="automation-chip-row">
             {[2, 3, 5].map((n) => (
               <button key={n} type="button" className={value === n ? "chip chip-on" : "chip"} onClick={() => onChange(n)}>
-                {n}번
+                {L(`${n}번`, `${n}×`)}
               </button>
             ))}
           </div>
         </>
       ) : (
-        <p className="automation-node-panel-hint">
-          앞에서 뒤로 가는 보통 연결입니다. 따로 정할 것이 없어요.
-        </p>
+        <p className="automation-node-panel-hint">{L("앞에서 뒤로 가는 보통 연결입니다. 따로 정할 것이 없어요.", "An ordinary forward connection. Nothing to configure.")}</p>
       )}
       {/* ★한 번 그린 선을 지울 방법이 없었다(오너 실측 2026-08-08) — 키보드(Delete)를
           모르는 사람도 지울 수 있게 버튼으로. */}

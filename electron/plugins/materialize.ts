@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pluginTreeSignature } from "./tree-signature";
 import Database from "better-sqlite3";
 import { app } from "electron";
 
@@ -326,7 +327,17 @@ export type VerifiedInstalledPluginRelease = {
  * from it. `.install.json` is only a receipt; matching its stored digest to the
  * current real, symlink-free tree is the admission check.
  */
+const releaseVerificationCache = new Map<string, { signature: string; release: VerifiedInstalledPluginRelease }>();
 export function verifiedInstalledPluginRelease(destination: string): VerifiedInstalledPluginRelease | null {
+  // 트리 메타데이터가 마지막 성공 검증과 같으면 내용도 같다 — 매 실행 전 파일 sha256 을 다시 내지 않는다(tree-signature.ts).
+  const signature = pluginTreeSignature(path.resolve(destination), isHostOwned);
+  const cached = signature ? releaseVerificationCache.get(path.resolve(destination)) : undefined;
+  if (cached && cached.signature === signature) return cached.release;
+  const release = computeVerifiedInstalledPluginRelease(destination);
+  if (release && signature) releaseVerificationCache.set(path.resolve(destination), { signature, release });
+  return release;
+}
+function computeVerifiedInstalledPluginRelease(destination: string): VerifiedInstalledPluginRelease | null {
   try {
     const root = path.resolve(installedPluginsRoot());
     const directory = path.resolve(destination);

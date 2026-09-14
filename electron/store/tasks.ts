@@ -248,7 +248,7 @@ function participantNeedsUpsert(
   );
 }
 
-function toTask(row: TaskRow): CanonicalTask {
+function toTask(row: TaskRow, participantsByTask?: Map<string, ParticipantRow[]>): CanonicalTask {
   return {
     id: row.id,
     version: canonicalVersion(row.updated_at),
@@ -260,7 +260,7 @@ function toTask(row: TaskRow): CanonicalTask {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     archivedAt: row.archived_at,
-    participants: participantRows(row.id).map(toParticipant),
+    participants: (participantsByTask ? participantsByTask.get(row.id) ?? [] : participantRows(row.id)).map(toParticipant),
   };
 }
 
@@ -457,7 +457,20 @@ export function listCanonicalTasks(input: {
        LIMIT ?`,
     );
   const rows = (projectId ? statement.all(projectId, limit) : statement.all(limit)) as TaskRow[];
-  return rows.map(toTask);
+  // 참여자는 한 번에 — 행마다 쿼리하면 목록 하나에 문장 201개(2026-09-14 실측).
+  const participantsByTask = new Map<string, ParticipantRow[]>();
+  if (rows.length && tableExists("task_agent_participants")) {
+    for (let i = 0; i < rows.length; i += 200) {
+      const chunk = rows.slice(i, i + 200).map((row) => row.id);
+      const all = getDb().prepare(
+        `SELECT task_id, agent_id, agent_slug, role, first_seen_at, last_seen_at
+         FROM task_agent_participants WHERE task_id IN (${chunk.map(() => "?").join(",")})
+         ORDER BY first_seen_at, agent_slug`,
+      ).all(...chunk) as ParticipantRow[];
+      for (const row of all) { const list = participantsByTask.get(row.task_id) ?? []; list.push(row); participantsByTask.set(row.task_id, list); }
+    }
+  }
+  return rows.map((row) => toTask(row, participantsByTask));
 }
 
 /**
@@ -515,7 +528,7 @@ export function listPairingVerificationTasks(hostId: string): CanonicalTask[] {
        LIMIT 64`,
     )
     .all(legacyId, devicePrefix.length, devicePrefix) as TaskRow[];
-  return rows.map(toTask);
+  return rows.map((row) => toTask(row));
 }
 
 export function getCanonicalTask(taskId: string): CanonicalTask | null {

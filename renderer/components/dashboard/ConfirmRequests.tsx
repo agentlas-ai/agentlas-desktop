@@ -62,7 +62,8 @@ export function ConfirmRequests() {
     window.addEventListener("agentlas:attention-refresh", refresh);
     return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
-  useVisibleInterval(() => void load(true), POLL_MS);
+  // 주기 폴링은 캐시 신선도(10s)에 맡긴다 — force 는 명시적 새로고침 이벤트에만(같은 페이지의 다른 폴러와 왕복이 겹쳤다).
+  useVisibleInterval(() => void load(false), POLL_MS);
 
   const openConfirmation = useCallback(async (item: PendingConfirmation) => {
     const api = ipc();

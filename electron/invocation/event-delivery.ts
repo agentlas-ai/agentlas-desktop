@@ -11,7 +11,6 @@ export class RunEventDeliveryJournal {
   private readonly runs = new Map<string, Journal>();
   constructor(private readonly limits = { events: 20_000, bytes: 8 * 1024 * 1024, runs: 32, ttlMs: 10 * 60_000 }, private readonly now = Date.now) {}
   publish(runId: string, chatId: string, event: McpInvocationEvent, ordinal: number): McpInvocationEvent {
-    this.prune();
     let journal = this.runs.get(runId);
     if (journal && journal.chatId !== chatId) throw new Error("run-event-delivery-owner-mismatch");
     if (!journal) {
@@ -23,8 +22,10 @@ export class RunEventDeliveryJournal {
     if (!Number.isSafeInteger(ordinal) || ordinal <= journal.ordinal) throw new Error("run-event-delivery-ordinal-invalid");
     journal.ordinal = ordinal;
     journal.touchedAt = this.now();
-    const bytes = Buffer.byteLength(JSON.stringify(delivered));
-    const snapshot = structuredClone(delivered);
+    // 토큰마다 지나는 길이다 — 직렬화 한 번으로 크기와 격리 스냅샷을 함께 얻는다(structuredClone 별도 호출 제거).
+    const json = JSON.stringify(delivered);
+    const bytes = Buffer.byteLength(json);
+    const snapshot = JSON.parse(json) as McpInvocationEvent;
     journal.entries.set(ordinal, { event: snapshot, bytes }); journal.bytes += bytes;
     while (journal.entries.size > this.limits.events || journal.bytes > this.limits.bytes) {
       const first = journal.entries.entries().next().value!;

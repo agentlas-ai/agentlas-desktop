@@ -94,7 +94,7 @@ export function QuestBoard() {
       // ignore
     }
     try {
-      const agents = await api.team.list();
+      const agents = await loadViewData("dashboard.team", () => api.team.list(), { maxAgeMs: 15_000 });
       next.q_first_agent_hire = agents.length > 1;
     } catch {
       // ignore

@@ -235,6 +235,7 @@
     "test:last-round-question-mcp-outage": "node scripts/local/qa-last-round-question-and-mcp-outage.cjs",
     "test:mcp-proxy-child-reconnects": "node scripts/local/qa-mcp-proxy-child-reconnects.cjs",
     "test:turn-context-dedupe": "node scripts/local/qa-turn-context-dedupe-and-inventory-cache.cjs",
+    "test:desktop-waste-fixes": "node scripts/local/qa-desktop-waste-fixes.cjs",
     "test:session-continuity": "node scripts/local/session-continuity-contract.cjs",
     "test:runtime-sign-in-honesty": "node scripts/local/runtime-sign-in-honesty-contract.cjs",
     "test:one-transcript-monotonic": "node scripts/local/one-transcript-monotonic-contract.cjs",

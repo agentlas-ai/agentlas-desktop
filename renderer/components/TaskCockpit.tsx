@@ -2209,9 +2209,13 @@ function ChatPage() {
   // 화면에 복원된 대화 기록의 논리적 분량만 표시한다. 실제 모델 물리창 점유율은
   // CLI/BYOK별 시스템 프롬프트·툴·출력 예약과 compaction 뒤에야 정해지므로 가짜
   // 100k 분모나 퍼센트를 만들지 않는다.
-  const currentTokens = useMemo(() => {
-    return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
-  }, [messages]);
+  // 스트리밍 델타마다 전 메시지를 다시 합산하지 않는다 — 마지막 메시지만 매번, 나머지는 개수가 바뀔 때만.
+  const settledTokens = useMemo(() => {
+    return messages.slice(0, -1).reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, messages[messages.length - 2]?.id]);
+  const lastMessage = messages[messages.length - 1];
+  const currentTokens = settledTokens + (lastMessage ? (lastMessage.tokens ?? Math.floor((lastMessage.text?.length || 0) / 4)) : 0);
   // 멀티 에이전트 실시간 텔레메트리 — 속성(agentId) 이벤트로 채워지는 네트워크 패널 상태.
   const [liveAgents, setLiveAgents] = useState<Record<string, LiveAgent>>({});
   const [netTimeline, setNetTimeline] = useState<NetTimelineItem[]>([]);

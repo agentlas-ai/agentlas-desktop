@@ -638,7 +638,7 @@ export function NodeConfigPanel({
                 style={{ ...inp, fontFamily: "var(--font-mono)" }}
               />
               <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
-                이 값을 적어야 실패한 발행을 다시 시도합니다. 비워 두면 한 번만 시도합니다 — 두 번 나가는 사고를 막기 위해서입니다.
+                {bi(locale, "이 값을 적어야 실패한 발행을 다시 시도합니다. 비워 두면 한 번만 시도합니다 — 두 번 나가는 사고를 막기 위해서입니다.", "A failed publish is retried only when this is set. Leave it empty to try once — that prevents sending twice.")}
               </div>
             </Field>
           ) : null}

@@ -72,7 +72,7 @@ export function FleetSummaryStrip() {
 
   // 폴링(10s)으로 도는 loadPending+loadKey만 useVisibleInterval로(탭 숨김 시 정지).
   useVisibleInterval(() => {
-    void loadPending(true);
+    void loadPending(false);
     void loadKey(true);
   }, POLL_MS);
 

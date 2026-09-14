@@ -54,17 +54,26 @@ function routesFile(): string {
 // its first repair normally.
 let routesRevision = 0;
 
+// 파일이 안 바뀌었으면 다시 파싱하지 않는다 — getRoute 가 에이전트 목록의 행마다 불려 같은 JSON 을 N번 읽었다(2026-09-14).
+let readCache: { file: string; mtimeMs: number; size: number; map: Record<string, AgentRoute> } | null = null;
 function readAll(): Record<string, AgentRoute> {
+  const file = routesFile();
   try {
-    const raw = fs.readFileSync(routesFile(), "utf8");
+    const stat = fs.statSync(file);
+    if (readCache && readCache.file === file && readCache.mtimeMs === stat.mtimeMs && readCache.size === stat.size) return readCache.map;
+    const raw = fs.readFileSync(file, "utf8");
     const obj = JSON.parse(raw) as Record<string, AgentRoute>;
-    return obj && typeof obj === "object" ? obj : {};
+    const map = obj && typeof obj === "object" ? obj : {};
+    readCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, map };
+    return map;
   } catch {
+    readCache = null;
     return {};
   }
 }
 
 function writeAll(map: Record<string, AgentRoute>): void {
+  readCache = null;
   const target = routesFile();
   const parent = path.dirname(target);
   fs.mkdirSync(parent, { recursive: true });

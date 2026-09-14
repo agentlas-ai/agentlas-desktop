@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { ipc } from "@/lib/ipc";
 import type { LocalModelHubSnapshot, LocalModelOperationView } from "@shared/local-model-hub";
 import styles from "./LocalModelHubPanel.module.css";
@@ -10,6 +10,7 @@ export function LocalModelOperations({ ko, hiddenIds, onViewModel }: { ko: boole
   const [operations, setOperations] = useState<LocalModelOperationView[]>([]);
   const [snapshot, setSnapshot] = useState<LocalModelHubSnapshot | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const operationsRef = useRef(false);
   useEffect(() => {
     let disposed = false;
     let running = false;
@@ -21,11 +22,19 @@ export function LocalModelOperations({ ko, hiddenIds, onViewModel }: { ko: boole
         if (!api) throw new Error("local_model_bridge_unavailable");
         const rows = await api.operations();
         const state = rows.length ? await api.snapshot() : null;
-        if (!disposed) { setOperations(rows); setSnapshot(state); setUnavailable(false); }
+        if (!disposed) { operationsRef.current = rows.length > 0; setOperations(rows); setSnapshot(state); setUnavailable(false); }
       } catch { if (!disposed) setUnavailable(true); }
       finally { running = false; }
     };
-    void poll(); const timer = window.setInterval(() => void poll(), 1000);
+    // 도는 작업이 없으면 5초, 있으면 1초 — 그리고 창이 숨어 있으면 쉰다(전엔 페이지 수명 내내 초당 폴링).
+    let idleTicks = 0;
+    void poll();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      idleTicks = (idleTicks + 1) % 5;
+      if (idleTicks !== 0 && !operationsRef.current) return;
+      void poll();
+    }, 1000);
     return () => { disposed = true; window.clearInterval(timer); };
   }, []);
   const cancel = async (operationId: string) => {

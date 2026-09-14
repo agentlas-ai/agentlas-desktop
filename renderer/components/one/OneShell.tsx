@@ -871,7 +871,16 @@ function readableOneJson(text: string): string | null {
  * During streaming, hide an unfinished fence from its opening marker onward;
  * once closed, reuse the canonical parser so malformed JSON is still removed.
  */
+// 메시지 객체가 같으면 답도 같다 — 토큰마다 대화 전체를 다시 파싱하지 않는다(2026-09-14 실측: 스트리밍 델타마다 전 메시지 재계산).
+const visibleOneMessageTextCache = new WeakMap<UiMessage, string>();
 function visibleOneMessageText(message: UiMessage): string {
+  const cached = visibleOneMessageTextCache.get(message);
+  if (cached !== undefined) return cached;
+  const value = computeVisibleOneMessageText(message);
+  visibleOneMessageTextCache.set(message, value);
+  return value;
+}
+function computeVisibleOneMessageText(message: UiMessage): string {
   if (normalizeChatHostNotice(message.role, message.hostNotice)) return message.text;
   if (isResultContinuationMessage(message)) {
     return "";
@@ -3371,7 +3380,8 @@ export function OneShell() {
     };
 
     void refresh();
-    const timer = window.setInterval(refresh, busy ? 1_200 : 3_000);
+    // 창이 숨어 있으면 미리보기 목록을 갱신할 이유가 없다(다른 폴러와 같은 절전 규칙).
+    const timer = window.setInterval(() => { if (document.visibilityState !== "hidden") void refresh(); }, busy ? 1_200 : 3_000);
     return () => {
       disposed = true;
       window.clearInterval(timer);

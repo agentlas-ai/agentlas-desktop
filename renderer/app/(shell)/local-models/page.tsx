@@ -26,7 +26,7 @@ export default function LocalModelsPage() {
       <button type="button" aria-pressed={view === "library"} onClick={() => setView("library")}>{ko ? "내 모델" : "My models"}</button>
     </nav>
     <LocalModelOperations ko={ko} hiddenIds={ownedOperations} onViewModel={onViewModel} />
-    <div hidden={view !== "browse"}><HuggingFaceModelBrowser ko={ko} onInstalled={onViewModel} onOperationStarted={onOperationStarted} /></div>
-    <div hidden={view !== "library"}><LocalModelHubPanel locale={locale} standalone selectedPackageId={selectedPackageId} onOperationStarted={onOperationStarted} onExplore={() => setView("browse")} /></div>
+    {view === "browse" && <HuggingFaceModelBrowser ko={ko} onInstalled={onViewModel} onOperationStarted={onOperationStarted} />}
+    {view === "library" && <LocalModelHubPanel locale={locale} standalone selectedPackageId={selectedPackageId} onOperationStarted={onOperationStarted} onExplore={() => setView("browse")} />}
   </div>;
 }

@@ -108,7 +108,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     entry.connections.delete(close); if (!entry.connections.size) expireUnused(handle, entry);
     req.destroy(); res.destroy();
   };
-  const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error); } }, 1000); revalidate.unref?.();
+  // cwd 재검증은 연결마다 초당 stat·realpath·access 3회였다 — 경로가 바뀌는 일은 드물다. 5초면 충분하다.
+  const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error); } }, 5000); revalidate.unref?.();
   entry.connections.add(close); if (entry.timer) clearTimeout(entry.timer);
   req.on("aborted", () => close("wire_aborted")); req.on("end", () => close("wire_ended")); req.on("error", (error) => close(error));
   res.on("close", () => close("wire_response_closed")); res.on("error", (error) => close(error));
