@@ -30,6 +30,7 @@ export interface CardnewsTemplateSpec {
   mood: string;
   tags: string[];
   bestFor: string;
+  bestForEn: string;
 }
 
 export const CARDNEWS_FORMATS: Record<CardnewsFormatId, CardnewsFormatSpec> = {
@@ -46,6 +47,7 @@ export const CARDNEWS_TEMPLATES: CardnewsTemplateSpec[] = [
     mood: "high-contrast editorial",
     tags: ["ai", "tech", "github", "news", "trend", "signal", "analysis", "모델", "기술"],
     bestFor: "AI 테크 뉴스, GitHub repo 소개, 모델 비교",
+    bestForEn: "AI tech news, GitHub repo spotlights, model comparisons",
   },
   {
     id: "ledger",
@@ -53,6 +55,7 @@ export const CARDNEWS_TEMPLATES: CardnewsTemplateSpec[] = [
     mood: "research notes",
     tags: ["research", "source", "evidence", "explain", "교육", "리서치", "근거"],
     bestFor: "근거 중심 설명, 리서치 요약, 저장용 체크리스트",
+    bestForEn: "Evidence-led explainers, research summaries, save-worthy checklists",
   },
   {
     id: "blueprint",
@@ -60,6 +63,7 @@ export const CARDNEWS_TEMPLATES: CardnewsTemplateSpec[] = [
     mood: "operator guide",
     tags: ["workflow", "how", "guide", "automation", "app", "자동화", "가이드"],
     bestFor: "사용법, 자동화 흐름, 단계별 튜토리얼",
+    bestForEn: "How-tos, automation flows, step-by-step tutorials",
   },
   {
     id: "contrast",
@@ -67,6 +71,7 @@ export const CARDNEWS_TEMPLATES: CardnewsTemplateSpec[] = [
     mood: "comparison grid",
     tags: ["compare", "vs", "alternative", "ranking", "비교", "선택"],
     bestFor: "모델/도구 비교, 대안 정리, 선택 기준",
+    bestForEn: "Model/tool comparisons, alternatives, selection criteria",
   },
 ];
 

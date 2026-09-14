@@ -96,6 +96,7 @@
     "test:agent-control-block-parity": "npm run build:electron && node scripts/agent-control-block-parity-contract.cjs",
     "test:one-turn-work": "node scripts/qa-one-turn-work-contract.cjs",
     "test:turn-activity-rows": "node scripts/qa-turn-activity-rows-contract.cjs",
+    "test:renderer-korean-leak": "node scripts/qa-renderer-korean-leak-contract.cjs",
     "test:statistics-robustness-companions": "node scripts/qa-statistics-robustness-companions-contract.cjs",
     "test:automation-attention": "npm run build:electron && node scripts/automation-attention-contract.cjs",
     "test:owner-cloud-shelf-paging": "npm run build:electron && node scripts/owner-cloud-shelf-paging-contract.cjs",

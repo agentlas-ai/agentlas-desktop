@@ -286,7 +286,12 @@ export function OneOrgChart({
     setReplaceId("");
     setHandover(false);
   }, [sheetRequest, state?.members]);
-  const ghostRoles = locale === "ko" ? ["개발", "마케팅", "리서치"] : ["Engineering", "Marketing", "Research"];
+  // 역할 버튼은 안정 id 로 거른다 — 전에는 화면 글자("Engineering")를 한국어 키 표에서 찾아, 영어 화면에서 추가 목록이 늘 비었다(2026-09-14).
+  const ghostRoles: Array<{ id: "engineering" | "marketing" | "research"; label: string }> = [
+    { id: "engineering", label: locale === "ko" ? "개발" : "Engineering" },
+    { id: "marketing", label: locale === "ko" ? "마케팅" : "Marketing" },
+    { id: "research", label: locale === "ko" ? "리서치" : "Research" },
+  ];
   const active = state?.members.filter((member) => !member.archivedAt) || [];
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
   const insufficientCredits = active.filter((member) => member.creditState === "insufficient");
@@ -295,9 +300,9 @@ export function OneOrgChart({
     .map((member) => installedAgents.find((agent) => agent.id === member.installedAgentId)?.slug.toLocaleLowerCase())
     .filter((slug): slug is string => Boolean(slug))), [active, installedAgents]);
   const roleTerms: Record<string, string[]> = {
-    "개발": ["개발", "dev", "engineer", "code", "software", "build"],
-    "마케팅": ["마케팅", "marketing", "growth", "sales", "content"],
-    "리서치": ["리서치", "research", "analysis", "analyst", "조사"],
+    engineering: ["개발", "dev", "engineer", "code", "software", "build"],
+    marketing: ["마케팅", "marketing", "growth", "sales", "content"],
+    research: ["리서치", "research", "analysis", "analyst", "조사"],
   };
   const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id) && !agent.parentTeamId);
   const addSearchValue = addSearch.trim().toLocaleLowerCase();
@@ -612,7 +617,7 @@ export function OneOrgChart({
         {active.length === 0 && <>
           <div className={styles.empty}>{locale === "ko" ? "아직 상주 스태프가 없습니다. 아래 역할을 골라 시작하세요." : "No standing staff yet. Pick a role to get started."}</div>
           <div className={styles.ghosts} aria-label={locale === "ko" ? "추천 역할" : "Suggested roles"}>
-          {ghostRoles.map((role) => <button key={role} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role); setAddTab("my"); setAddOpen(true); }} disabled={!state || state.slots.available <= 0}><span><IconPlus size={14} /></span><strong>{role}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
+          {ghostRoles.map((role) => <button key={role.id} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role.id); setAddTab("my"); setAddOpen(true); }} disabled={!state || state.slots.available <= 0}><span><IconPlus size={14} /></span><strong>{role.label}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
           </div>
         </>}
         {active.map((member) => (

@@ -256,7 +256,7 @@ export function OrgTree() {
   function sourceLabel(source: Source): string {
     if (source === "local") return ko ? "로컬 폴더" : "local folder";
     if (source === "cloud") return "Agent Cloud";
-    return "Agentlas Hub 북마크";
+    return ko ? "Agentlas Hub 북마크" : "Agentlas Hub bookmark";
   }
 
   async function removeAgentCore(api: NonNullable<ReturnType<typeof ipc>>, agent: InstalledAgent): Promise<void> {
