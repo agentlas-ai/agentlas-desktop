@@ -20,10 +20,31 @@ function bundledPluginsRoot(): string {
   if (path.basename(appPath).toLowerCase() === "app.asar") {
     return path.join(`${appPath}.unpacked`, "dist", "plugins");
   }
+  // A dev launch (`electron dist/electron/main.js`) reports dist/electron as the app path, and
+  // dist/electron/dist/plugins does not exist -- so no dev app ever materialized a bundled plugin
+  // ("bundled packages unreadable", persona apps 2026-09-14) and the Research Director pin drifted.
+  if (path.basename(appPath) === "electron" && path.basename(path.dirname(appPath)) === "dist") {
+    return path.join(path.dirname(appPath), "plugins");
+  }
   return path.join(appPath, "dist", "plugins");
 }
 
+const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
+
+/**
+ * Packaged apps share the machine root. Dev/QA apps keep their own root under userData: two
+ * desktop builds on one machine pin different Research Director versions, and whichever
+ * materialized last would break the other's Science binding (production 1.2.6 vs a dev app
+ * bundling 1.24.5, 2026-09-14). Science reads the same root through its env override.
+ */
 export function installedPluginsRoot(): string {
+  if (!app.isPackaged || process.env.AGENTLAS_QA_USER_DATA_DIR) {
+    const root = path.join(app.getPath("userData"), "plugins");
+    if (!process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
+      process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT = path.join(root, RESEARCH_DIRECTOR_PLUGIN_SLUG);
+    }
+    return root;
+  }
   return path.join(os.homedir(), ".agentlas", "plugins");
 }
 
