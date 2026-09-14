@@ -17,7 +17,9 @@ export const MEMORY_CORE = [
 
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;
 
-const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리|저장해|기록해|남겨/i;
+// "저장해·기록해·남겨" 는 평범한 파일 작업 요청("파일로 저장해줘")에도 걸려 2.7KB 전체 스키마를 매번 실었다(2026-09-14).
+// 기억을 뜻하는 낱말(기억·메모리·remember·memory)에만 건다.
+const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리/i;
 // A stated preference or identity fact is exactly what belongs in user_identity,
 // yet the always-on core prompt has no room to explain that scope. So when the
 // turn carries one of those signals, load the full schema block (which does
@@ -26,7 +28,8 @@ const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory even
 // me / from now on / always" phrasings and explicit self-description, not every
 // mention of a name.
 const PREFERENCE_SIGNAL_RE =
-  /\b(?:call me|from now on|always|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|항상|불러|말투|반말|존댓말|내 이름|나를|프로필|선호/i;
+  // "always·항상·나를·프로필" 은 일상 요청에 너무 흔해 뺐다 — 정체성·선호 신호는 남긴다("always use 존댓말" 은 존댓말로 걸린다).
+  /\b(?:call me|from now on|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|불러|말투|반말|존댓말|내 이름|선호/i;
 
 /** Full schema is loaded when the task is about memory, or states a durable preference/identity. */
 export function memoryEmitterPromptFor(request: string, locale?: "ko" | "en"): string {
