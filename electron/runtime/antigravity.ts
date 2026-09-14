@@ -394,6 +394,90 @@ export function freshAgyArtifactPaths(paths: readonly string[], invocationStarte
  * agy stream-json 한 줄을 읽는다 — 순수 함수(게이트가 픽스처 주입).
  * agent_response의 text_delta를 본문으로 누적하고, DONE의 usage를 집계한다.
  */
+/**
+ * 막힌 도구 한 건. `reason` 이 이 실행을 죽일지 말지를 가른다.
+ *
+ * - `approval`: 헤드리스에 승인할 사람이 없어 거부됐다. 권한을 올리면 풀린다.
+ * - `boundary`: agy 자신의 하드코딩된 보호 경계다. **권한으로는 절대 못 연다.**
+ */
+export interface AntigravityDenial {
+  tool: string;
+  detail: string;
+  reason: "approval" | "boundary";
+}
+
+/**
+ * ★거부 한 건의 **종류**를 가른다 — 이 구분이 없어서 Science 연구가 시작조차 못 했다.
+ *
+ * 실측 2026-09-14 (agy 1.2.2, 같은 플래그 `--dangerously-skip-permissions --sandbox`,
+ * 두 실행을 나란히 떠서 stream-json 을 그대로 읽었다):
+ *
+ * 1) 진짜 승인 거부 (플래그 없이 write 요청):
+ *      step tool_info.error = {type:"TOOL_ERROR",
+ *        message:'permission check failed for write_file "…": user denied permission for write_file(…)'}
+ *      result.denied_actions = [{"action":"write_file","display_name":"WriteToFile"}]   ← **채워진다**
+ *      result.response = ""
+ * 2) agy 자신의 보호 경계 (grep_search 가 agy 의 appDataDir 를 건드림):
+ *      step tool_info.error = {type:"TOOL_ERROR",
+ *        message:'permission check failed for read_file "/…/.gemini/antigravity-cli":
+ *                 Permission denied for read_file(…). Matches hardcoded system protection boundary rule.'}
+ *      result.denied_actions = null                                                     ← **비어 있다**
+ *      result.response = 627자(멀쩡한 답)
+ *
+ * 두 메시지 모두 "permission … denied" 를 담고 있어서 기존 문구 정규식이 2)를 1)로 읽었다.
+ * 그 결과 오너의 Science 실행은 "auto-denied for missing approval: grep_search" 로 죽었고,
+ * 안내는 **거짓 해결책**("권한을 올리세요")을 가리켰다 — 그 경계는 권한으로 안 열린다.
+ * agy 의 appDataDir 거부는 정상 동작이다(2026-08-15 로그에서도 같은 거부 뒤 실행이 그대로
+ * 이어졌다: ~/.gemini/antigravity-cli/log/cli-20260815_152041.log:153). 막을 일이 아니라
+ * **넘어갈 일**이다.
+ *
+ * 판정 순서: 구조 필드(denied_actions)가 정본이고, 여기 문구 판별은 그 필드가 없는
+ * 스텝 이벤트에만 쓰는 보조다. 보조가 정본과 같은 무게를 갖던 것이 이 결함이었다.
+ */
+export function antigravityDenialReason(message: string): AntigravityDenial["reason"] {
+  return /\bhardcoded system protection boundary\b/i.test(message) ? "boundary" : "approval";
+}
+
+/**
+ * 답이 비어 있는 agy 실행을 어떻게 판정할지 — 순수 함수라 계약이 실제로 부를 수 있다.
+ *
+ * 오너 방향(2026-09-14): "도구 하나가 막혔다고 실행 전체를 죽이지 마라. 넘어가고 계속하거나,
+ * 정 안 되면 사람이 읽을 수 있는 사유와 함께 멈춰라."
+ *
+ * - 답이 있으면 막힌 도구가 있어도 실패가 아니다(`undefined`). 넘어가고 계속한 실행이다.
+ * - 승인 거부(approval)로 답이 비었으면 그대로 `refused` — 사람이 권한을 올리면 풀린다.
+ * - 보호 경계(boundary)뿐이면 `empty` 로 돌린다. 권한으로 못 여는 경계라 `refused` 는
+ *   거짓 안내이고, Science 루프의 REFUSED_CODES 에 걸려 연구가 영구 차단된다
+ *   (agentlas-science/src/pass-failure-verdict.ts: refused=block, 그 외=bounded retry).
+ *   같은 턴을 다시 태우면 모델이 다른 경로를 고르는 일이 흔하므로 재시도 쪽이 옳다.
+ */
+export function antigravityEmptyRunOutcome(input: {
+  answered: boolean;
+  toolsAllowed: boolean;
+  denials: readonly AntigravityDenial[];
+  locale?: string;
+}): { kind: "refused" | "empty"; message: string } | undefined {
+  if (input.answered) return undefined;
+  const approval = input.denials.filter((d) => d.reason === "approval");
+  const boundary = input.denials.filter((d) => d.reason === "boundary");
+  if (approval.length > 0) {
+    const names = approval.map((d) => d.tool).join(", ");
+    return {
+      kind: "refused",
+      message: !input.toolsAllowed
+        ? `Antigravity cannot use tools under read permission: this CLI has no way to allow read-only tools headlessly, so every call (${names}) is auto-denied and the run returns nothing. Raise the permission to write, or pick another runtime for read-only work.`
+        : `Antigravity produced no answer because ${approval.length === 1 ? "a tool call was" : `${approval.length} tool calls were`} auto-denied for missing approval: ${names}. ${approval[0]?.detail ?? ""}`.trim(),
+    };
+  }
+  if (boundary.length > 0) {
+    const names = boundary.map((d) => d.tool).join(", ");
+    const ko = `Antigravity 가 답을 내지 못했습니다. ${names} 호출이 Antigravity 자체의 보호 경계에 막혔습니다 — 이 경계는 Antigravity 안에 고정되어 있어 권한을 올려도 열리지 않습니다. 승인이 없어서가 아니므로 같은 턴을 다시 시도합니다.`;
+    const en = `Antigravity produced no answer: ${names} hit Antigravity's own built-in protection boundary. That boundary is fixed inside Antigravity and raising the permission does not open it. This is not a missing approval, so the same turn is retried.`;
+    return { kind: "empty", message: input.locale === "ko" ? ko : en };
+  }
+  return undefined;
+}
+
 export function reduceAgyLine(
   line: string,
   state: {
@@ -402,7 +486,7 @@ export function reduceAgyLine(
     inputTokens: number;
     outputTokens: number;
     /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
-    deniedTools?: { tool: string; detail: string }[];
+    deniedTools?: AntigravityDenial[];
     /**
      * ★agy 가 이 실행에 붙인 대화 ID. 실측 2026-08-19(agy 1.1.14): 최상위와
      * `result`·`step_update` 어디에나 `conversation_id` 로 실려 온다. 이걸 저장해
@@ -419,7 +503,7 @@ export function reduceAgyLine(
 ): {
   delta?: string;
   activity?: string;
-  approvalDenied?: { tool: string; detail: string };
+  approvalDenied?: AntigravityDenial;
   /*
    * ★agy 가 무슨 도구를 썼는지 — 예전에는 여기서 그냥 버렸다.
    *
@@ -539,6 +623,8 @@ export function reduceAgyLine(
       already.push({
         tool,
         detail: `Antigravity auto-denied "${tool}" because headless mode has nobody to approve it.`,
+        // 이 칸에 실린 것만이 **진짜 승인 거부**다(실측 2026-09-14: 보호 경계 거부는 이 칸이 비어 온다).
+        reason: "approval",
       });
     }
     return { activity: "result" };
@@ -565,9 +651,16 @@ export function reduceAgyLine(
   if (step.step_type === "tool" && step.state === "ERROR") {
     const message = step.tool_info?.error?.message ?? "";
     if (/\bdenied permission\b|\bpermission denied\b|\brequires? approval\b/i.test(message)) {
-      const denial = {
+      /*
+       * ★여기는 **보조** 판별이다 — 정본은 위 result.denied_actions 다.
+       * 같은 정규식이 agy 자신의 보호 경계 오류까지 함께 건져 올렸고(두 메시지 모두
+       * "permission … denied"), 그것이 오너의 Science 실행을 죽였다. 종류를 붙여서
+       * 아래 판정이 둘을 다르게 다루게 한다(antigravityDenialReason 주석의 실측).
+       */
+      const denial: AntigravityDenial = {
         tool: step.tool_name || step.tool_info?.name || "tool",
         detail: message,
+        reason: antigravityDenialReason(message),
       };
       (state.deniedTools ??= []).push(denial);
       return { activity: `denied:${denial.tool}`, approvalDenied: denial };
@@ -1651,7 +1744,7 @@ async function runPreparedAntigravity(
       finalResponse?: string;
       inputTokens: number;
       outputTokens: number;
-      deniedTools?: { tool: string; detail: string }[];
+      deniedTools?: AntigravityDenial[];
       conversationId?: string;
       resultStatus?: string;
       resultError?: string;
@@ -1691,23 +1784,39 @@ async function runPreparedAntigravity(
       if (step.approvalDenied && !announcedDenials.has(step.approvalDenied.tool)) {
         announcedDenials.add(step.approvalDenied.tool);
         const tool = step.approvalDenied.tool;
-        // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
-        announceToolDenied({
-          runtime: "antigravity",
-          sessionKey: `antigravity:${runReq.chatId ?? runReq.cwd ?? "default"}`,
-          tool,
-          detail: step.approvalDenied.detail,
-          cwd: runReq.cwd,
-          deniedBy: "runtime-headless",
-        });
-        const ko = `승인이 필요한 도구 호출이 자동 거부됐습니다: ${tool}. 이 실행에는 승인할 사람이 붙어 있지 않아 런타임이 스스로 거부한 것이며, 사용자가 거절한 것이 아닙니다. 권한을 올리면 이어서 진행됩니다.`;
-        const en = `A tool call needing approval was auto-denied: ${tool}. This run has nobody to approve it, so the runtime denied it itself — you did not reject it. Raising the permission lets it continue.`;
-        events.onNotice?.({
-          level: "warning",
-          code: "approval-required",
-          message: runReq.locale === "ko" ? ko : en,
-          i18n: { ko, en },
-        });
+        if (step.approvalDenied.reason === "boundary") {
+          /*
+           * ★승인 시트를 **열지 않는다**. 아무리 승인해도 열리지 않는 경계이기 때문이다.
+           * 여기에 시트를 띄우면 사용자는 자기가 풀 수 있는 문제로 오해하고 누른다 —
+           * 그리고 아무 일도 일어나지 않는다. 사실만 한 줄로 남기고 실행은 계속 간다.
+           */
+          const ko = `${tool} 호출이 Antigravity 자체의 보호 경계에 막혔습니다. 이 경계는 Antigravity 안에 고정되어 있어 권한을 올려도 열리지 않습니다. 실행은 계속됩니다.`;
+          const en = `${tool} was blocked by Antigravity's own built-in protection boundary. That boundary is fixed inside Antigravity and raising the permission does not open it. The run continues.`;
+          events.onNotice?.({
+            level: "warning",
+            code: "runtime-protected-path",
+            message: runReq.locale === "ko" ? ko : en,
+            i18n: { ko, en },
+          });
+        } else {
+          // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
+          announceToolDenied({
+            runtime: "antigravity",
+            sessionKey: `antigravity:${runReq.chatId ?? runReq.cwd ?? "default"}`,
+            tool,
+            detail: step.approvalDenied.detail,
+            cwd: runReq.cwd,
+            deniedBy: "runtime-headless",
+          });
+          const ko = `승인이 필요한 도구 호출이 자동 거부됐습니다: ${tool}. 이 실행에는 승인할 사람이 붙어 있지 않아 런타임이 스스로 거부한 것이며, 사용자가 거절한 것이 아닙니다. 권한을 올리면 이어서 진행됩니다.`;
+          const en = `A tool call needing approval was auto-denied: ${tool}. This run has nobody to approve it, so the runtime denied it itself — you did not reject it. Raising the permission lets it continue.`;
+          events.onNotice?.({
+            level: "warning",
+            code: "approval-required",
+            message: runReq.locale === "ko" ? ko : en,
+            i18n: { ko, en },
+          });
+        }
       }
       const now = Date.now();
       if (step.delta && now - lastEmit > 80 && agyState.text) {
@@ -1833,14 +1942,25 @@ async function runPreparedAntigravity(
             exitCode: 0,
           }
           : undefined;
-        const failure = runtimeSaidWhy ?? (!trimmed && denied.length > 0
+        /*
+         * ★막힌 도구가 실행 전체를 죽일지는 **거부의 종류**가 정한다 — 판정은 순수 함수로 꺼냈다.
+         * 오너 신고 2026-09-14: Science + agy 에서 grep_search 한 건이 agy 자신의 보호 경계에
+         * 막혔을 뿐인데 "auto-denied for missing approval" 로 실행 전체가 refused 로 죽었다.
+         * 계약(scripts/test-runtime-failure-contract.cjs)이 이 함수를 직접 부른다.
+         */
+        const deniedOutcome = antigravityEmptyRunOutcome({
+          answered: Boolean(trimmed),
+          toolsAllowed: !structural,
+          denials: denied,
+          locale: runReq.locale,
+        });
+        const failure = runtimeSaidWhy ?? (deniedOutcome
           ? {
-            kind: "refused" as const,
-            message: structural
-              ? `Antigravity cannot use tools under read permission: this CLI has no way to allow read-only tools headlessly, so every call (${denied.map((d) => d.tool).join(", ")}) is auto-denied and the run returns nothing. Raise the permission to write, or pick another runtime for read-only work.`
-              : `Antigravity produced no answer because ${denied.length === 1 ? "a tool call was" : `${denied.length} tool calls were`} auto-denied for missing approval: ${denied.map((d) => d.tool).join(", ")}. ${denied[0]?.detail ?? ""}`.trim(),
-            runtime: "antigravity",
-            source: "marker" as const,
+            kind: deniedOutcome.kind,
+            message: deniedOutcome.message,
+            runtime: "antigravity" as const,
+            // 경계 판정은 문구에서 나온다 — 출처를 marker 로 속이지 않는다(runtime-refusal.ts 규약).
+            source: deniedOutcome.kind === "empty" ? ("heuristic" as const) : ("marker" as const),
           }
           : antigravityExitFailure(body, stderr)
           /*
