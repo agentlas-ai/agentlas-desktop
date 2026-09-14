@@ -151,6 +151,7 @@
     "test:stdio-epipe-guard": "tsc -p electron/tsconfig.json && node scripts/stdio-epipe-guard-contract.cjs",
     "test:science-skills-menu": "node scripts/skills-menu-stays-small-contract.cjs",
     "test:runtime-fallback-exhaustion": "tsc -p electron/tsconfig.json && node scripts/runtime-fallback-pool-exhaustion-contract.cjs",
+    "test:runtime-invocation-breaker": "tsc -p electron/tsconfig.json && node scripts/runtime-invocation-breaker-contract.cjs",
     "test:quota-threshold": "node scripts/runtime-quota-threshold-contract.cjs",
     "test:runtime-fallback-choice": "tsc -p electron/tsconfig.json && node scripts/runtime-fallback-does-not-change-choice-contract.cjs",
     "test:resolved-model": "tsc -p electron/tsconfig.json && node scripts/resolved-model-is-read-not-written-contract.cjs",

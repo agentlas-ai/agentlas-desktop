@@ -1,5 +1,6 @@
 import { quotaExhausted } from "../../shared/runtime-quota";
 import { isRuntimeCredentialUnavailable } from "./credential-access";
+import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
 import type {
   AgentRuntimeOverride,
@@ -210,7 +211,10 @@ export function effortForSelectedModel(
 
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
   const selected = pickRunnerWithoutHostGuidance(active);
-  return selected ? { ...selected, runner: withNativeBrowserGuidance(selected.runner) } : null;
+  // 모든 제품 경로가 여기를 지난다 — 어느 루프에 버그가 있어도 실패하는 런타임을 분당 수만 번 띄우지 못한다(invocation-breaker).
+  return selected
+    ? { ...selected, runner: invocationBreaker.wrap(withNativeBrowserGuidance(selected.runner), invocationBreakerKey(active), selected.label) }
+    : null;
 }
 
 function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner; label: string } | null {
