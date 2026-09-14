@@ -24,6 +24,7 @@ const describeAutomation = readFileSync(resolve(root, "renderer/components/autom
 const runtimeSelection = readFileSync(resolve(root, "electron/runtime/selection.ts"), "utf8");
 const electronIpc = readFileSync(resolve(root, "electron/ipc.ts"), "utf8");
 const taskforceRuntime = readFileSync(resolve(root, "electron/mcp/borrowed-task-force.ts"), "utf8");
+const firmOrchestrator = readFileSync(resolve(root, "electron/mcp/firm-orchestrator.ts"), "utf8");
 const toolApproval = readFileSync(resolve(root, "renderer/components/ToolApprovalInline.tsx"), "utf8");
 const adaptiveResult = readFileSync(resolve(root, "renderer/components/one/OneAdaptiveResult.tsx"), "utf8");
 const globalsCss = readFileSync(resolve(root, "renderer/app/globals.css"), "utf8");
@@ -121,6 +122,18 @@ assert.match(createAgent, /선택한 모델이 안 되면 Worker 런타임, 그�
 // 풀, CEO/컨트롤러는 orchestrator 풀에서만 대체를 찾고, 탐지 순서를 숨은 폴백으로 쓰지
 // 않는다. fallbackStage 두 단계(worker/connected) 계약은 그대로다.
 assert.match(runtimeSelection, /Never use detection order as the hidden fallback[\s\S]*?fallbackStage: role === "worker" \|\| unavailableReason === "model-unavailable"[\s\S]*?\? "worker"[\s\S]*?: "connected",[\s\S]*?fallbackStage: "connected",/);
+// A team borrowed into One is one worker seat even though its internal CEO is
+// tier-1 within that team. Runtime recovery must therefore walk the worker pool
+// and must not raise a root-controller warning against One's saved model.
+assert.match(taskforceRuntime, /controllerRuntimeRole: "worker"/);
+const nestedFirmStart = taskforceRuntime.indexOf("const teamResult = await runFirmInvocation({");
+const nestedFirmEnd = taskforceRuntime.indexOf("p.sink(tag({", nestedFirmStart);
+assert.ok(nestedFirmStart >= 0 && nestedFirmEnd > nestedFirmStart);
+assert.doesNotMatch(taskforceRuntime.slice(nestedFirmStart, nestedFirmEnd), /onControllerRuntimeFallback/);
+assert.match(firmOrchestrator, /tier === 1\s*\? p\.controllerRuntimeRole \?\? "orchestrator"\s*:\s*"worker"/);
+assert.match(taskforceRuntime, /failedManagerPlanRuntimes[\s\S]*?taskForceRecoveryRuntime\([\s\S]*?"worker",\s*failedManagerPlanRuntimes/);
+assert.match(taskforceRuntime, /failedManagerSynthesisRuntimes[\s\S]*?taskForceRecoveryRuntime\([\s\S]*?"worker",\s*failedManagerSynthesisRuntimes/);
+assert.match(taskforceRuntime, /failedNestedWorkerRuntimes[\s\S]*?taskForceRecoveryRuntime\([\s\S]*?"worker",\s*failedNestedWorkerRuntimes/);
 assert.match(modalStyles, /\.layer\s*\{[\s\S]*?place-items:\s*center/);
 assert.match(orgChart, /setToolsTab\("plugins"\)/);
 assert.match(orgChart, /setToolsTab\("mcp"\)/);

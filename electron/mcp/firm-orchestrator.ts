@@ -171,11 +171,17 @@ export interface FirmRunParams {
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
   onAgentAppMcpRuntimeUnavailable?: () => void;
-  /** Main persists a controller fallback and updates the visible One picker. */
+  /** Root invocation only: report a controller fallback to the visible One picker. */
   onControllerRuntimeFallback?: (
     runtime: RuntimeStatus,
     failure: RunnerFailure,
   ) => void;
+  /**
+   * Runtime pool used by this firm's tier-1 controller. A firm invoked directly
+   * from One owns the orchestrator seat; a firm borrowed as one Taskforce packet
+   * is itself a worker and must stay inside the worker fallback pool.
+   */
+  controllerRuntimeRole?: "orchestrator" | "worker";
   /** True when the visible One composer pin was actually used for this run. */
   runtimePinHonored?: boolean;
   runnerEnv?: NodeJS.ProcessEnv;
@@ -843,11 +849,13 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // ambient project, MCP, memory, or resident-session authority merely because
   // the selected runtime exposes built-in shell/file tools.
   const controlPlaneTurn = phase === "synthesize" || (phase === "plan" && hasReports);
-  const runtimeRole: "orchestrator" | "worker" = tier === 1 ? "orchestrator" : "worker";
+  const runtimeRole: "orchestrator" | "worker" = tier === 1
+    ? p.controllerRuntimeRole ?? "orchestrator"
+    : "worker";
   // One's visible model is the controller's first attempt for an in-One team
-  // run. It is a preference with a typed fallback, not a replacement for the
-  // orchestrator role pool after a provider failure.
-  const oneControllerPreferred = runtimeRole === "orchestrator"
+  // run. A directly invoked firm then falls back through the orchestrator pool;
+  // a firm borrowed into a Taskforce falls back through the worker pool.
+  const oneControllerPreferred = tier === 1
     && p.req.oneMode === true
     && p.runtimePinHonored === true
     && Boolean(p.req.runtimeSelection);

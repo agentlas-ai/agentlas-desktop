@@ -3989,7 +3989,10 @@ async function runBorrowedAgentTurn(
         agentAppMcpRuntimeEnv: p.agentAppMcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: p.onAgentAppMcpRuntimeUnavailable,
         runtimePinHonored: p.runtimePinHonored,
-        onControllerRuntimeFallback: p.onControllerRuntimeFallback,
+        // This whole nested firm occupies one Taskforce worker seat. Its CEO is
+        // tier-1 only inside the firm, so recovery must use the worker pool and
+        // must not mutate/report the root One controller's fallback chain.
+        controllerRuntimeRole: "worker",
         runnerEnv: p.runnerEnv,
         locale: p.locale,
         sink: nestedSink,
@@ -4061,6 +4064,7 @@ async function runBorrowedAgentTurn(
         : pickRunner(managerPlanActive) ?? p.picked;
       let managerPlanResolutionBase = managerPlanBaseResolution;
       let managerPlanFallbackUsed = false;
+      const failedManagerPlanRuntimes: RuntimeStatus[] = [];
       const teamEvent = (node: string, name: string, event: McpInvocationEvent): McpInvocationEvent => ({
         ...event,
         agentId: `${id}:hub-team:${node}`,
@@ -4146,16 +4150,22 @@ async function runBorrowedAgentTurn(
           } catch (error) {
             const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
             if (!typed) throw error;
-            const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
-            if (!recovery) throw error;
-            if (oneControllerRuntimePreferred(p)) {
-              p.onControllerRuntimeFallback?.(recovery, typed.failure);
+            if (!failedManagerPlanRuntimes.some((runtime) => sameRuntimeModel(runtime, typed.runtime))) {
+              failedManagerPlanRuntimes.push(typed.runtime);
             }
+            const recovery = taskForceRecoveryRuntime(
+              p,
+              typed.runtime,
+              typed.failure,
+              "worker",
+              failedManagerPlanRuntimes,
+            );
+            if (!recovery) throw error;
             p.sink(teamEvent("manager", spec.name, {
               kind: "tool-use",
               status: p.locale === "ko"
-                ? `${managerPlanActive.model ?? managerPlanActive.kind} 계획 호출이 거절되어 오케스트레이터 우선순위 다음 모델로 이어갑니다.`
-                : `${managerPlanActive.model ?? managerPlanActive.kind} planning was rejected; continuing on the next orchestrator-priority model.`,
+                ? `${managerPlanActive.model ?? managerPlanActive.kind} 계획 호출이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+                : `${managerPlanActive.model ?? managerPlanActive.kind} planning was rejected; continuing on the next worker-priority model.`,
             }));
             managerPlanActive = recovery;
             managerPlanPicked = sameRuntime(recovery, p.active)
@@ -4169,7 +4179,7 @@ async function runBorrowedAgentTurn(
               source: "safe-fallback",
               resolutionCodes: [
                 ...managerPlanBaseResolution.resolutionCodes,
-                "runtime-failed-fell-back-to-orchestrator-priority",
+                "runtime-failed-fell-back-to-worker-priority",
               ],
             };
             managerPlanFallbackUsed = true;
@@ -4226,6 +4236,7 @@ async function runBorrowedAgentTurn(
         let observedWorkerPicked = picked;
         let selectedWorkerRuntime = active;
         let selectedWorkerPicked = picked;
+        const failedNestedWorkerRuntimes: RuntimeStatus[] = [];
         let observedWorkerInvocationId = `${workerInvocationId}:worker:1`;
         let observedWorkerResolution = workloadResolution;
         let observedWorkerReasonCodes: string[] = [];
@@ -4309,7 +4320,16 @@ async function runBorrowedAgentTurn(
               } catch (error) {
                 const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
                 if (!typed || role !== "worker") throw error;
-                const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "worker");
+                if (!failedNestedWorkerRuntimes.some((runtime) => sameRuntimeModel(runtime, typed.runtime))) {
+                  failedNestedWorkerRuntimes.push(typed.runtime);
+                }
+                const recovery = taskForceRecoveryRuntime(
+                  p,
+                  typed.runtime,
+                  typed.failure,
+                  "worker",
+                  failedNestedWorkerRuntimes,
+                );
                 if (!recovery) throw error;
                 p.sink(teamEvent(worker.id, worker.id, {
                   kind: "tool-use",
@@ -4464,6 +4484,7 @@ async function runBorrowedAgentTurn(
         : pickRunner(managerSynthesisActive) ?? p.picked;
       let managerSynthesisResolutionBase = managerSynthesisBaseResolution;
       let managerSynthesisFallbackUsed = false;
+      const failedManagerSynthesisRuntimes: RuntimeStatus[] = [];
       let managerSynthesis: RunnerResult | null = null;
       while (!managerSynthesis) {
         try {
@@ -4523,16 +4544,22 @@ async function runBorrowedAgentTurn(
         } catch (error) {
           const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
           if (!typed) throw error;
-          const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
-          if (!recovery) throw error;
-          if (oneControllerRuntimePreferred(p)) {
-            p.onControllerRuntimeFallback?.(recovery, typed.failure);
+          if (!failedManagerSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, typed.runtime))) {
+            failedManagerSynthesisRuntimes.push(typed.runtime);
           }
+          const recovery = taskForceRecoveryRuntime(
+            p,
+            typed.runtime,
+            typed.failure,
+            "worker",
+            failedManagerSynthesisRuntimes,
+          );
+          if (!recovery) throw error;
           p.sink(teamEvent("manager", spec.name, {
             kind: "tool-use",
             status: p.locale === "ko"
-              ? `${managerSynthesisActive.model ?? managerSynthesisActive.kind} 종합 호출이 거절되어 오케스트레이터 우선순위 다음 모델로 이어갑니다.`
-              : `${managerSynthesisActive.model ?? managerSynthesisActive.kind} synthesis was rejected; continuing on the next orchestrator-priority model.`,
+              ? `${managerSynthesisActive.model ?? managerSynthesisActive.kind} 종합 호출이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+              : `${managerSynthesisActive.model ?? managerSynthesisActive.kind} synthesis was rejected; continuing on the next worker-priority model.`,
           }));
           managerSynthesisActive = recovery;
           managerSynthesisPicked = sameRuntime(recovery, p.active)
@@ -4546,7 +4573,7 @@ async function runBorrowedAgentTurn(
             source: "safe-fallback",
             resolutionCodes: [
               ...managerSynthesisBaseResolution.resolutionCodes,
-              "runtime-failed-fell-back-to-orchestrator-priority",
+              "runtime-failed-fell-back-to-worker-priority",
             ],
           };
           managerSynthesisFallbackUsed = true;
