@@ -26,6 +26,7 @@ import path from "node:path";
 import type { AuthSession } from "../shared/types";
 import { userDataPath } from "./runtime-paths";
 import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "./development-effect-policy";
+import { currentUiLocale } from "./ui-locale";
 
 type ElectronApi = typeof import("electron");
 
@@ -886,7 +887,7 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
     modal: false,
     closable: true,
     minimizable: true,
-    title: "Agentlas — 로그인 (Esc 또는 ⌘W로 닫기)",
+    title: currentUiLocale() === "ko" ? "Agentlas — 로그인 (Esc 또는 ⌘W로 닫기)" : "Agentlas — Sign in (Esc or ⌘W to close)",
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     webPreferences: {

@@ -42,6 +42,7 @@ import {
   type BrowserActionLogRow,
   type BrowserPermissionDecision,
 } from "../store/browser-vault";
+import { currentUiLocale } from "../ui-locale";
 
 export type {
   BrowserSiteRow,
@@ -231,7 +232,7 @@ export function browserOpenLogin(site: string): Promise<BrowserOpenLoginResult> 
 async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResult> {
   const norm = normalizeSite(site);
   const exe = resolveChromeExe();
-  if (!exe) return { ok: false, error: "Agentlas 전용 브라우저 런타임이 없습니다. Agentlas를 다시 설치해 주세요." };
+  if (!exe) return { ok: false, error: currentUiLocale() === "ko" ? "Agentlas 전용 브라우저 런타임이 없습니다. Agentlas를 다시 설치해 주세요." : "The Agentlas browser runtime is missing. Reinstall Agentlas." };
   let browserLease: BrowserCdpLease | null = null;
   let leaseRetained = false;
   const url = `https://${norm}`;
@@ -378,7 +379,7 @@ export async function browserMarkSession(site: string, status: "valid" | "expire
     if (!verified) {
       setBrowserSession(norm, "none");
       logBrowserAction({ site: norm, action: "session.verify", result: "not-signed-in" });
-      return { ok: false, error: "X 로그인을 실제 전용 브라우저에서 확인하지 못했습니다. 열린 창에서 로그인한 뒤 다시 저장해 주세요." };
+      return { ok: false, error: currentUiLocale() === "ko" ? "X 로그인을 실제 전용 브라우저에서 확인하지 못했습니다. 열린 창에서 로그인한 뒤 다시 저장해 주세요." : "Could not confirm the X sign-in in the dedicated browser. Sign in in the open window, then save again." };
     }
   }
   setBrowserSession(norm, status);

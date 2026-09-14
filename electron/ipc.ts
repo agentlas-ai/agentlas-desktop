@@ -2011,7 +2011,7 @@ export function registerIpcHandlers(): void {
         const project = getSiteProject(projectId);
         let agentAppContext = null;
         if (project.surface === "agent-app") {
-          if (!project.agentAppTarget) throw new Error("Agent App 대상이 없습니다. 다시 선택해 주세요.");
+          if (!project.agentAppTarget) throw new Error(currentUiLocale() === "ko" ? "Agent App 대상이 없습니다. 다시 선택해 주세요." : "This Agent App has no target. Choose one again.");
           const { siteAgentAppContextFromProject } = await import("./site/agent-app");
           agentAppContext = siteAgentAppContextFromProject(project);
         }

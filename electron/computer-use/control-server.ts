@@ -16,6 +16,7 @@ import {
   type NativeInputAction,
   type NativeInputResult,
 } from "./native-driver";
+import { currentUiLocale } from "../ui-locale";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -153,7 +154,9 @@ function recordAudit(action: string, result: NativeInputResult, textLength?: num
     // observable action, never the screen pixels, coordinates, or credentials.
     void Promise.resolve(recordComputerHistorySummary({
       title: result.ok ? `Computer · ${action}` : `Computer action failed · ${action}`,
-      body: result.ok ? `컴퓨터에서 ${action} 작업이 수행되었습니다.` : `컴퓨터에서 ${action} 작업이 실패했습니다.`,
+      body: currentUiLocale() === "ko"
+        ? (result.ok ? `컴퓨터에서 ${action} 작업이 수행되었습니다.` : `컴퓨터에서 ${action} 작업이 실패했습니다.`)
+        : (result.ok ? `The ${action} action ran on the computer.` : `The ${action} action failed on the computer.`),
       apps: [],
     })).catch(() => undefined);
   } catch {

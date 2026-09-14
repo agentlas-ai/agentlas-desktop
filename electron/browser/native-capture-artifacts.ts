@@ -5,6 +5,7 @@ import type { McpInvocationEvent } from "../../shared/types";
 import { userDataPath } from "../runtime-paths";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
+import { currentUiLocale } from "../ui-locale";
 
 /** Only the Main-owned relay calls this with pixels from its authorized guest. */
 export function createNativeCapturePublisher(input: {
@@ -72,7 +73,7 @@ export function createNativeCapturePublisher(input: {
       if (artifacts.length !== 1) throw new Error("native-browser-capture-unavailable");
       // No await between authority check, binding, and durable event ingestion.
       input.emit({ kind: "notice", notice: { level: "info", code: "native-browser-capture-bound",
-        message: "브라우저 캡처를 저장했습니다." }, oneArtifacts: artifacts.map((artifact) => ({
+        message: currentUiLocale() === "ko" ? "브라우저 캡처를 저장했습니다." : "Browser capture saved." }, oneArtifacts: artifacts.map((artifact) => ({
           ...artifact, taskId: task.id, taskVersion: task.version, chatId: input.chatId, runId: input.runId,
         })) });
       committed = true;

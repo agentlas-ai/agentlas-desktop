@@ -48,6 +48,12 @@ import {
   writeBrowserCdpOwner,
 } from "../mcp-tools/browser-cdp-launcher";
 import { resolveAgentlasBrowserRuntime } from "./runtime";
+import { currentUiLocale } from "../ui-locale";
+
+/** 가져오기 거절·오류 문구는 화면 언어로 — 영어 화면에 한국어가 새지 않게(오너 2026-09-14). */
+function importCopy(ko: string, en: string): string {
+  return currentUiLocale() === "ko" ? ko : en;
+}
 import { listBrowserSites, normalizeSite, setBrowserSession, upsertBrowserSite } from "../store/browser-vault";
 
 export interface BrowserFamilyRoot {
@@ -147,7 +153,7 @@ export function listDiscoverableProfiles(): DiscoveredBrowserProfile[] {
         accountEmail: info.user_name?.trim() || null,
         path: profileDir,
         readable: Boolean(store),
-        ...(store ? {} : { reason: "이 프로필에는 쿠키 저장소가 없습니다(한 번도 안 쓴 프로필)." }),
+        ...(store ? {} : { reason: importCopy("이 프로필에는 쿠키 저장소가 없습니다(한 번도 안 쓴 프로필).", "This profile has no cookie store (it has never been used).") }),
       });
     }
   }
@@ -285,11 +291,11 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
 
   const profile = profiles.find((p) => p.id === profileId);
   if (!profile) {
-    return { ok: false, profiles, domains: [], profileId, error: "그 브라우저 프로필을 찾지 못했습니다." };
+    return { ok: false, profiles, domains: [], profileId, error: importCopy("그 브라우저 프로필을 찾지 못했습니다.", "That browser profile was not found.") };
   }
   const store = cookieStorePath(profile.path);
   if (!store) {
-    return { ok: false, profiles, domains: [], profileId, error: "이 프로필에는 쿠키 저장소가 없습니다." };
+    return { ok: false, profiles, domains: [], profileId, error: importCopy("이 프로필에는 쿠키 저장소가 없습니다.", "This profile has no cookie store.") };
   }
 
   const workDir = makeBrowserProfileImportWorkDir();
@@ -301,7 +307,7 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
         profiles,
         domains: [],
         profileId,
-        error: "쿠키 저장소 사본이 무결성 검사를 통과하지 못했습니다. 브라우저를 닫고 다시 시도해 주세요.",
+        error: importCopy("쿠키 저장소 사본이 무결성 검사를 통과하지 못했습니다. 브라우저를 닫고 다시 시도해 주세요.", "The copied cookie store failed its integrity check. Close the browser and try again."),
       };
     }
     const db = new Database(snap, { readonly: true });
@@ -410,7 +416,7 @@ function inheritEncryptionKeyIfNeeded(
   const sourceUserData = path.dirname(sourceProfileDir);
   const srcLocalState = path.join(sourceUserData, "Local State");
   if (!fs.existsSync(srcLocalState)) {
-    return { ok: false, reason: "원본 브라우저의 Local State 를 찾지 못해 복호화 키를 물려받을 수 없습니다." };
+    return { ok: false, reason: importCopy("원본 브라우저의 Local State 를 찾지 못해 복호화 키를 물려받을 수 없습니다.", "The source browser's Local State was not found, so its decryption key cannot be inherited.") };
   }
   const dedicated = ensureBrowserCdpProfilePrivate();
   const dstLocalState = path.join(dedicated, "Local State");
@@ -422,9 +428,9 @@ function inheritEncryptionKeyIfNeeded(
     };
     srcKey = parsed.os_crypt?.encrypted_key;
   } catch {
-    return { ok: false, reason: "원본 Local State 를 읽지 못했습니다." };
+    return { ok: false, reason: importCopy("원본 Local State 를 읽지 못했습니다.", "Could not read the source Local State.") };
   }
-  if (!srcKey) return { ok: false, reason: "원본 브라우저에 복호화 키 항목이 없습니다." };
+  if (!srcKey) return { ok: false, reason: importCopy("원본 브라우저에 복호화 키 항목이 없습니다.", "The source browser has no decryption key entry.") };
 
   let dst: Record<string, unknown> = {};
   if (fs.existsSync(dstLocalState)) {
@@ -441,7 +447,7 @@ function inheritEncryptionKeyIfNeeded(
       return {
         ok: false,
         reason:
-          "전용 프로필이 이미 다른 복호화 키로 만든 쿠키를 갖고 있습니다. 기존 세션을 잃지 않으려면 가져오기를 건너뜁니다.",
+          importCopy("전용 프로필이 이미 다른 복호화 키로 만든 쿠키를 갖고 있습니다. 기존 세션을 잃지 않으려면 가져오기를 건너뜁니다.", "The dedicated profile already holds cookies made with a different decryption key. The import is skipped so existing sessions are not lost."),
       };
     }
   }
@@ -449,7 +455,7 @@ function inheritEncryptionKeyIfNeeded(
   try {
     fs.writeFileSync(dstLocalState, JSON.stringify(dst), { mode: 0o600 });
   } catch {
-    return { ok: false, reason: "전용 프로필의 Local State 에 쓰지 못했습니다." };
+    return { ok: false, reason: importCopy("전용 프로필의 Local State 에 쓰지 못했습니다.", "Could not write the dedicated profile's Local State.") };
   }
   return { ok: true };
 }
@@ -555,7 +561,7 @@ function decryptMacChromiumCookie(
 ): Buffer {
   const prefix = encryptedValue.subarray(0, 3).toString("ascii");
   if (prefix !== "v10" && prefix !== "v11") {
-    throw new Error("지원하지 않는 macOS 쿠키 암호문 형식입니다.");
+    throw new Error(importCopy("지원하지 않는 macOS 쿠키 암호문 형식입니다.", "Unsupported macOS cookie ciphertext format."));
   }
   const iv = Buffer.alloc(16, 0x20);
   const decipher = createDecipheriv("aes-128-cbc", key, iv);
@@ -565,7 +571,7 @@ function decryptMacChromiumCookie(
     if (plaintext.length < expectedHostHash.length
       || !timingSafeEqual(plaintext.subarray(0, expectedHostHash.length), expectedHostHash)) {
       plaintext.fill(0);
-      throw new Error("macOS 쿠키의 사이트 무결성 검증에 실패했습니다.");
+      throw new Error(importCopy("macOS 쿠키의 사이트 무결성 검증에 실패했습니다.", "The macOS cookie failed its site integrity check."));
     }
   }
   return plaintext;
@@ -581,15 +587,15 @@ function macCookieReencryptor(
 } | null {
   if (process.platform !== "darwin") return null;
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
-  if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
+  if (!sourceService) throw new Error(importCopy(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`, `${browser}'s macOS cookie encryption is not supported.`));
   const destinationService = agentlasMacSafeStorageService();
   if (!destinationService) {
-    throw new Error("Agentlas 전용 브라우저의 macOS 쿠키 암호화 대상을 확인하지 못했습니다.");
+    throw new Error(importCopy("Agentlas 전용 브라우저의 macOS 쿠키 암호화 대상을 확인하지 못했습니다.", "Could not determine the macOS cookie encryption target of the Agentlas browser."));
   }
   const destinationKey = readMacSafeStorageKey(destinationService);
   if (!destinationKey) {
     throw new Error(
-      "macOS 키체인에서 Agentlas 브라우저의 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.",
+      importCopy("macOS 키체인에서 Agentlas 브라우저의 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the Agentlas browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again."),
     );
   }
   const destinationCanRead = (row: Record<string, unknown>): boolean => {
@@ -629,7 +635,7 @@ function macCookieReencryptor(
   if (!sourceKey) {
     destinationKey.fill(0);
     throw new Error(
-      "macOS 키체인에서 브라우저 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.",
+      importCopy("macOS 키체인에서 브라우저 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again."),
     );
   }
   return {
@@ -688,7 +694,7 @@ async function stopMacCookieImportBrowser(child: ChildProcess): Promise<void> {
   if (await waitForProcessExit(pid, 3_000)) return;
   try { child.kill("SIGKILL"); } catch { /* already gone */ }
   if (!(await waitForProcessExit(pid, 3_000))) {
-    throw new Error(`Agentlas 로그인 가져오기 브라우저 정리에 실패했습니다 (${pid}).`);
+    throw new Error(importCopy(`Agentlas 로그인 가져오기 브라우저 정리에 실패했습니다 (${pid}).`, `Could not clean up the Agentlas sign-in import browser (${pid}).`));
   }
 }
 
@@ -709,10 +715,10 @@ async function importMacCookiesThroughDedicatedRuntime(
     return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
   }
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
-  if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
+  if (!sourceService) throw new Error(importCopy(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`, `${browser}'s macOS cookie encryption is not supported.`));
   const sourceKey = readMacSafeStorageKey(sourceService);
   if (!sourceKey) {
-    throw new Error("macOS 키체인에서 원본 브라우저의 로그인 키를 읽지 못했습니다.");
+    throw new Error(importCopy("macOS 키체인에서 원본 브라우저의 로그인 키를 읽지 못했습니다.", "Could not read the source browser's sign-in key from the macOS Keychain."));
   }
 
   const plaintexts: Buffer[] = [];
@@ -782,11 +788,11 @@ async function importMacCookiesThroughDedicatedRuntime(
   const runtime = resolveAgentlasBrowserRuntime();
   if (!runtime?.executable || !fs.existsSync(runtime.executable)) {
     for (const plaintext of plaintexts) plaintext.fill(0);
-    throw new Error("Agentlas 전용 브라우저 런타임이 없어 로그인을 가져올 수 없습니다.");
+    throw new Error(importCopy("Agentlas 전용 브라우저 런타임이 없어 로그인을 가져올 수 없습니다.", "The Agentlas browser runtime is missing, so sign-ins cannot be imported."));
   }
   if (await browserCdpPortReady()) {
     for (const plaintext of plaintexts) plaintext.fill(0);
-    throw new Error(`Agentlas 브라우저 포트 ${browserCdpPort()}가 이미 사용 중입니다.`);
+    throw new Error(importCopy(`Agentlas 브라우저 포트 ${browserCdpPort()}가 이미 사용 중입니다.`, `Agentlas browser port ${browserCdpPort()} is already in use.`));
   }
 
   let child: ChildProcess | null = null;
@@ -806,7 +812,7 @@ async function importMacCookiesThroughDedicatedRuntime(
       // Do not seed an about:blank target during credential maintenance.
       "chrome://version/",
     ], { detached: false, stdio: "ignore" });
-    if (!child.pid) throw new Error("Agentlas 로그인 가져오기 브라우저를 시작하지 못했습니다.");
+    if (!child.pid) throw new Error(importCopy("Agentlas 로그인 가져오기 브라우저를 시작하지 못했습니다.", "Could not start the Agentlas sign-in import browser."));
     let launchError: Error | null = null;
     child.once("error", (error) => { launchError = error; });
     const deadline = Date.now() + 20_000;
@@ -814,16 +820,16 @@ async function importMacCookiesThroughDedicatedRuntime(
       await new Promise<void>((resolve) => setTimeout(resolve, 200));
     }
     if (launchError) throw launchError;
-    if (!(await browserCdpPortReady())) throw new Error("Agentlas 로그인 가져오기 브라우저가 준비되지 않았습니다.");
+    if (!(await browserCdpPortReady())) throw new Error(importCopy("Agentlas 로그인 가져오기 브라우저가 준비되지 않았습니다.", "The Agentlas sign-in import browser did not become ready."));
     writeBrowserCdpOwner(child.pid);
     const ownership = await inspectBrowserCdpOwnership();
     if (ownership.state !== "owned" || ownership.pid !== child.pid) {
-      throw new Error(`Agentlas 로그인 가져오기 브라우저 소유권 확인 실패 (${ownership.state}:${ownership.reason}).`);
+      throw new Error(importCopy(`Agentlas 로그인 가져오기 브라우저 소유권 확인 실패 (${ownership.state}:${ownership.reason}).`, `Could not verify ownership of the Agentlas sign-in import browser (${ownership.state}:${ownership.reason}).`));
     }
 
     connection = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`);
     const context = connection.contexts()[0];
-    if (!context) throw new Error("Agentlas 로그인 가져오기 브라우저 컨텍스트가 없습니다.");
+    if (!context) throw new Error(importCopy("Agentlas 로그인 가져오기 브라우저 컨텍스트가 없습니다.", "The Agentlas sign-in import browser has no context."));
     for (const page of context.pages()) await page.close().catch(() => undefined);
     await context.addCookies(cookies);
     const observed = await context.cookies(jobs.map((job) => `https://${job.domain}/`));
@@ -908,15 +914,15 @@ export async function importBrowserCredentials(
   // 그 사이트 쿠키를 전부 옮기는 쪽이 옳다(오너 결정 2026-08-20).
   const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
   if (wanted.length === 0) {
-    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "가져올 도메인을 하나 이상 골라 주세요." };
+    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: importCopy("가져올 도메인을 하나 이상 골라 주세요.", "Choose at least one domain to import.") };
   }
   const profile = resolveDiscoveredBrowserProfile(profileId);
   if (!profile) {
-    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "그 브라우저 프로필을 찾지 못했습니다." };
+    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: importCopy("그 브라우저 프로필을 찾지 못했습니다.", "That browser profile was not found.") };
   }
   const sourceStore = cookieStorePath(profile.path);
   if (!sourceStore) {
-    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "이 프로필에는 쿠키 저장소가 없습니다." };
+    return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: importCopy("이 프로필에는 쿠키 저장소가 없습니다.", "This profile has no cookie store.") };
   }
 
   // Refreshes must not erase a connection that was already verified in
@@ -937,7 +943,7 @@ export async function importBrowserCredentials(
         cookiesAdded: 0,
         linkedSites: [],
         skipped,
-        error: "쿠키 저장소 사본이 무결성 검사를 통과하지 못했습니다. 브라우저를 닫고 다시 시도해 주세요.",
+        error: importCopy("쿠키 저장소 사본이 무결성 검사를 통과하지 못했습니다. 브라우저를 닫고 다시 시도해 주세요.", "The copied cookie store failed its integrity check. Close the browser and try again."),
       };
     }
 
@@ -966,7 +972,7 @@ export async function importBrowserCredentials(
         cookiesAdded: 0,
         linkedSites: [],
         skipped,
-        error: keyResult.reason ?? "복호화 키를 준비하지 못했습니다.",
+        error: keyResult.reason ?? importCopy("복호화 키를 준비하지 못했습니다.", "Could not prepare the decryption key."),
       };
     }
 
@@ -995,7 +1001,7 @@ export async function importBrowserCredentials(
         cookiesAdded: 0,
         linkedSites: [],
         skipped,
-        error: "쿠키 저장소 형식이 예상과 달라 안전하게 옮길 수 없습니다.",
+        error: importCopy("쿠키 저장소 형식이 예상과 달라 안전하게 옮길 수 없습니다.", "The cookie store format is unexpected, so it cannot be moved safely."),
       };
     }
 
@@ -1078,7 +1084,7 @@ export async function importBrowserCredentials(
     for (const domain of wanted) {
       const rows = selectRows.all(domain, `.${domain}`, `%.${domain}`) as Record<string, unknown>[];
       if (rows.length === 0) {
-        skipped.push({ domain, reason: "이 프로필에서 그 도메인의 쿠키를 찾지 못했습니다." });
+        skipped.push({ domain, reason: importCopy("이 프로필에서 그 도메인의 쿠키를 찾지 못했습니다.", "No cookies for that domain were found in this profile.") });
         continue;
       }
       // Modern Windows Chrome binds v20 cookie ciphertext to Chrome's own
@@ -1109,7 +1115,7 @@ export async function importBrowserCredentials(
         if (!acceptedDomains.has(job.domain)) {
           skipped.push({
             domain: job.domain,
-            reason: "전용 브라우저가 이 사이트의 로그인 쿠키를 받아들이지 않았습니다.",
+            reason: importCopy("전용 브라우저가 이 사이트의 로그인 쿠키를 받아들이지 않았습니다.", "The dedicated browser did not accept this site's sign-in cookies."),
           });
         }
       }
@@ -1139,7 +1145,7 @@ export async function importBrowserCredentials(
     for (const domain of [...acceptedJobDomains, ...providerVerificationFailed, ...interactiveDomains]) {
       const site = normalizeSite(`https://${domain}`);
       if (!site) {
-        skipped.push({ domain, reason: "사이트 주소로 바꿀 수 없는 도메인입니다." });
+        skipped.push({ domain, reason: importCopy("사이트 주소로 바꿀 수 없는 도메인입니다.", "This domain cannot be turned into a site address.") });
         continue;
       }
       // eslint-disable-next-line no-await-in-loop -- 사이트 수는 사용자가 고른 만큼이라 작다.
@@ -1183,8 +1189,8 @@ export async function importBrowserCredentials(
         linkedSites,
         skipped,
         error: linkedSites.length > 0
-          ? "사이트는 목록에 올렸지만 새로 옮길 로그인 정보가 없었습니다. 그 브라우저에서 다시 로그인한 뒤 가져오거나, 연동 창에서 한 번 로그인해 주세요."
-          : "옮길 로그인 정보를 찾지 못했습니다. 그 브라우저에서 해당 사이트에 로그인되어 있는지 확인해 주세요.",
+          ? importCopy("사이트는 목록에 올렸지만 새로 옮길 로그인 정보가 없었습니다. 그 브라우저에서 다시 로그인한 뒤 가져오거나, 연동 창에서 한 번 로그인해 주세요.", "The sites were listed, but there were no new sign-ins to move. Sign in again in that browser and import, or sign in once in the connection window.")
+          : importCopy("옮길 로그인 정보를 찾지 못했습니다. 그 브라우저에서 해당 사이트에 로그인되어 있는지 확인해 주세요.", "No sign-ins to move were found. Check that you are signed in to those sites in that browser."),
       };
     }
     // The source list contains only domains with secure HttpOnly login-cookie

@@ -2,6 +2,7 @@
 // "부분 실행 후 먹통"되는 걸 막는다. 권한이 없으면 실행 전에 빠르게 감지해
 // 대기 상태로 스킵하고(다음 예약에 자동 재시도) 사용자에게 정확한 조치를 안내한다.
 import { systemPreferences } from "electron";
+import { currentUiLocale } from "./ui-locale";
 
 export interface MacPermissionState {
   accessibility: boolean;
@@ -37,7 +38,8 @@ export function checkComputerUsePermissions(): MacPermissionState {
     screenRecording = true;
   }
   const missing: string[] = [];
-  if (!accessibility) missing.push("손쉬운 사용(Accessibility)");
-  if (!screenRecording) missing.push("화면 기록(Screen Recording)");
+  const ko = currentUiLocale() === "ko";
+  if (!accessibility) missing.push(ko ? "손쉬운 사용(Accessibility)" : "Accessibility");
+  if (!screenRecording) missing.push(ko ? "화면 기록(Screen Recording)" : "Screen Recording");
   return { accessibility, screenRecording, ok: accessibility, missing };
 }
