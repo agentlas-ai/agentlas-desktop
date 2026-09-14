@@ -342,6 +342,12 @@ export function ChatStream({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollingToBottomRef = useRef(false);
+  /*
+   * 방금 보낸 내 말풍선을 화면 위쪽에 고정한다. 바닥을 따라가던 예전 규칙은 답이 오는 동안 작업 블록이
+   * 자라는 순간 내 메시지를 위로 밀어내 "보내자마자 사라졌다" 로 보였다(오너 2026-09-14, One·Work·Science
+   * 공통). 고정은 그 답이 끝나거나 사람이 직접 스크롤하면 풀린다.
+   */
+  const pinnedUserMessageRef = useRef<string | null>(null);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [hasNewContent, setHasNewContent] = useState(false);
   const last = messages[messages.length - 1];
@@ -368,7 +374,18 @@ export function ChatStream({
       return;
     }
 
+    const responding = Boolean(last && last.role !== "user" && (last.busy || last.streaming));
+    if (contentChanged && last?.role === "user" && stickToBottomRef.current) pinnedUserMessageRef.current = last.id;
+    else if (!responding && last?.role !== "user") pinnedUserMessageRef.current = null;
+    const pinnedId = pinnedUserMessageRef.current;
+    const pinnedActive = Boolean(pinnedId && (last?.role === "user" || responding));
+
     if (!stickToBottomRef.current) {
+      if (pinnedActive) {
+        // 고정된 말풍선 아래로 답이 자라는 동안은 "새 내용" 표시를 띄우지 않는다 — 보고 있는 그 자리다.
+        setHasNewContent(false);
+        return;
+      }
       if (contentChanged) setHasNewContent(true);
       return;
     }
@@ -376,6 +393,13 @@ export function ChatStream({
     setAwayFromBottom(false);
     setHasNewContent(false);
     const handle = window.requestAnimationFrame(() => {
+      const pinned = pinnedActive && pinnedId ? document.getElementById(messageDomId(pinnedId)) : null;
+      if (pinned) {
+        el.scrollTop += pinned.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+        // 이 뒤로는 바닥을 따라가지 않는다: 답이 자라도 내 메시지가 그 자리에 남는다.
+        stickToBottomRef.current = false;
+        return;
+      }
       el.scrollTop = el.scrollHeight;
     });
     return () => window.cancelAnimationFrame(handle);
@@ -416,7 +440,8 @@ export function ChatStream({
     if (scrollingToBottomRef.current && !atBottom) return;
     scrollingToBottomRef.current = false;
     stickToBottomRef.current = atBottom;
-    setAwayFromBottom(!atBottom);
+    if (atBottom) pinnedUserMessageRef.current = null;
+    setAwayFromBottom(!atBottom && !pinnedUserMessageRef.current);
     if (atBottom) setHasNewContent(false);
   }
 
@@ -450,6 +475,7 @@ export function ChatStream({
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     stickToBottomRef.current = true;
     scrollingToBottomRef.current = !reduceMotion;
+    pinnedUserMessageRef.current = null;
     setHasNewContent(false);
     if (reduceMotion) {
       el.scrollTop = el.scrollHeight;
