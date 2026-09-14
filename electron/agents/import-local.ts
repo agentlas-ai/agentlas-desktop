@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { removeRoute, replaceRoute, listRoutes, type RuntimeLabel } from "./routes";
+import { findAdoptableOrphanAgentId } from "../store/agent-dedupe";
 import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
 import { bindResolvedOrgAgentIds, clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
@@ -783,22 +784,41 @@ async function importLocalFolderOnce(
         | undefined)
     : undefined;
 
+  // slug 밑동은 폴더 이름에서 유도된다 — 되찾기 판정에도, 새 slug 발급에도 같은 값을 쓴다.
+  const baseSlug =
+    "local-" +
+    path
+      .basename(dir)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "local-agent";
+
+  // ★ 신원이 사이드카 파일에만 살면, 그 파일을 잃는 순간 멱등성도 같이 사라진다.
+  //
+  // 위의 두 조회(sameFolder·sameDefinition)는 둘 다 `agent-routes.json` 만 본다.
+  // 라우트가 없어진 행은 어느 쪽에도 안 걸려 매번 새 행 + 새 slug 가 만들어졌다 —
+  // 실측 2026-09-14 오너 DB: `local-agentlas-startup-founder-studio-53` 까지,
+  // `Upload Gate Probe` 11행. 라우트를 잃은 고아 행은 실행 폴더가 없으므로,
+  // 내용(종류·이름·프롬프트 전문·slug 밑동)이 같으면 새로 만들지 말고 되찾는다.
+  // 되찾으면 아래 replaceRoute 가 그 행에 폴더를 다시 붙여 신원이 복구된다.
+  if (!row) {
+    const orphanId = findAdoptableOrphanAgentId({ kind, name: nameKo, slug: baseSlug, systemPrompt });
+    if (orphanId) {
+      row = getDb().prepare("SELECT id, slug, tone FROM installed_agents WHERE id = ?").get(orphanId) as
+        | { id: string; slug: string; tone: InstalledAgent["tone"] }
+        | undefined;
+    }
+  }
+
   let id: string;
   let slug: string;
   let tone: InstalledAgent["tone"];
-  if (existing && row) {
+  if (row) {
     id = row.id;
     slug = row.slug;
     tone = row.tone;
   } else {
-    const baseSlug =
-      "local-" +
-      path
-        .basename(dir)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 40) || "local-agent";
     slug = uniqueSlug(baseSlug);
     id = randomUUID();
     tone = TONES[Math.abs(hash(slug)) % TONES.length];
@@ -822,7 +842,7 @@ async function importLocalFolderOnce(
   replaceRoute(nextRoute, staleRouteIds);
   try {
     db.transaction(() => {
-      if (existing && row) {
+      if (row) {
         db.prepare(
           "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible', entity_kind = ? WHERE id = ?",
         ).run(nameKo, nameEn, taglineKo, taglineEn, systemPrompt, envReqsJson, kind, id);

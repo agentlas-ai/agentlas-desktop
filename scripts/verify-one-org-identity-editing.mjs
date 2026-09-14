@@ -67,9 +67,20 @@ assert.match(chart, /onEditIdentity\(member\); return;/, "the org chart row's ed
 // 누른 사람 입장에서는 아무 일도 일어나지 않는 죽은 버튼이 된다(2026-08-25 실측).
 assert.match(chart, /sheetRequest\.kind !== "replace"/, "an explicit replace request must reach the replace sheet, not bounce back into the edit dialog");
 
-// ── 죽은 경로 사본 합치기(같은 에이전트가 43개로 불어난 사고) ─────────────
+// ── 실행 경로를 잃은 사본 합치기(같은 에이전트가 43개 → 53개로 불어난 사고) ─────
+// 2026-09-14: 죽은 경로(dead-content)만 보던 것을 "라우트가 아예 없는 행"까지 넓혔다.
+// 두 경우 다 실행할 폴더가 없으므로 판정이 하나로 합쳐졌다(orphanContentIdentity).
+// 여기는 문자열 앵커일 뿐이고, 값으로 확인하는 실행 계약은
+// scripts/test-local-agent-dedupe-orphan.cjs 가 갖고 있다(옛 고장 재주입 포함).
 const dedupe = read("electron/store/agent-dedupe.ts");
-assert.match(dedupe, /dead-content:/, "copies whose source folder is gone must merge by content, not by a path that no longer exists");
+assert.match(dedupe, /orphanContentIdentity/, "rows that lost their executable folder must merge by content, not by a path that no longer exists");
+// 에이전트 신원 판정에 한해, 라우트 부재로 판정을 포기하면 안 된다. (firm 쪽 같은 줄은
+// 아직 그대로다 — 오너 DB 실측상 중복 회사는 0건이고, 조직도 합치기는 위험이 더 크다.)
+assert.doesNotMatch(
+  dedupe,
+  /entity_kind \?\? route\?\.kind \?\? "agent";\s*\n\s*if \(!route\) return null;/,
+  "a missing route sidecar must not abandon agent identity — that is how 53 duplicates of one agent survived every repair pass",
+);
 assert.match(dedupe, /MIN_CONTENT_IDENTITY_PROMPT/, "content identity must require a substantial prompt so boilerplate cannot merge unrelated packages");
 
 console.log("one-org identity editing PASS: one avatar rule for create/seat/edit, edit reuses the create dialog, team members are not seatable, dead-path copies merge");
