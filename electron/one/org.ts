@@ -466,7 +466,8 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
   const produced = completion.produced[0];
   if (produced) {
     const producedKo = STATUS_TEMPLATES.produced.ko.replace("{label}", produced.label).replace("{count}", String(produced.count));
-    const producedEn = STATUS_TEMPLATES.produced.en.replace("{label}", produced.label).replace("{count}", String(produced.count));
+    // 캐시에 남은 기본 라벨 "도구 활동" 은 영어 줄에서 영어로(2026-09-14: 영어 줄에 한국어가 섞였다).
+    const producedEn = STATUS_TEMPLATES.produced.en.replace("{label}", produced.label === "도구 활동" ? "Tool activity" : produced.label).replace("{count}", String(produced.count));
     return {
       kind: "quiet",
       ko: boundedLine(producedKo, `${STATUS_TEMPLATES.produced.ko.replace("{label}", "도구 활동").replace("{count}", String(produced.count))}`),

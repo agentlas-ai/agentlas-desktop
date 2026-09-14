@@ -214,6 +214,12 @@ function addMissingRecommendationToTable(
   return { columns: table.columns, rows: [row, ...cleanedTable.rows].slice(0, MAX_TABLE_ROWS) };
 }
 
+function comparisonShape(ko: boolean): { choice: string; product: string; detail: string; recommended: string; alternative: (index: number) => string } {
+  return ko
+    ? { choice: "선택", product: "제품", detail: "핵심 내용", recommended: "추천", alternative: (index) => `대안 ${index}` }
+    : { choice: "Choice", product: "Product", detail: "Key details", recommended: "Recommended", alternative: (index) => `Alternative ${index}` };
+}
+
 function recommendationComparison(
   markdown: string,
   options: { allowBulletShape?: boolean } = {},
@@ -292,12 +298,14 @@ function recommendationComparison(
     !/^(?:커버리지|가격|스펙|장점|단점|한계|사용면적|소음|크기|무게|성능|근거|적정[ \t]+용량[ \t]+기준|평판)(?:[ \t(:（]|$)/i.test(cleanText(candidate[1], 80)),
   );
   if (productCandidateBullets.length >= 2) {
+    // 이 모양(`- **X**: Y`)은 영어 답에도 나온다 — 영어 답에 "선택·추천·대안" 을 박지 않는다(2026-09-14).
+    const shape = comparisonShape(isPrimarilyKorean(markdown));
     return {
-      columns: ["선택", "제품", "핵심 내용"],
+      columns: [shape.choice, shape.product, shape.detail],
       rows: productCandidateBullets.map((candidate, index) => ({
-        선택: index === 0 ? "추천" : `대안 ${index}`,
-        제품: cleanText(candidate[1].replace(/^차선\s*:\s*/i, ""), 300),
-        "핵심 내용": cleanText(candidate[2], MAX_CELL_LENGTH),
+        [shape.choice]: index === 0 ? shape.recommended : shape.alternative(index),
+        [shape.product]: cleanText(candidate[1].replace(/^차선\s*:\s*/i, ""), 300),
+        [shape.detail]: cleanText(candidate[2], MAX_CELL_LENGTH),
       })),
     };
   }
@@ -320,12 +328,13 @@ function recommendationComparison(
     })
     .slice(0, MAX_TABLE_ROWS);
   if (productFactBullets.length >= 2) {
+    const shape = comparisonShape(isPrimarilyKorean(markdown));
     return {
-      columns: ["선택", "제품", "핵심 내용"],
+      columns: [shape.choice, shape.product, shape.detail],
       rows: productFactBullets.map((candidate, index) => ({
-        선택: index === 0 ? "추천" : `대안 ${index}`,
-        제품: candidate.product,
-        "핵심 내용": candidate.detail,
+        [shape.choice]: index === 0 ? shape.recommended : shape.alternative(index),
+        [shape.product]: candidate.product,
+        [shape.detail]: candidate.detail,
       })),
     };
   }

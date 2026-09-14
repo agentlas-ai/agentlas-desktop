@@ -218,7 +218,7 @@ export function getProjectTimelineSnapshot(
   };
 
   for (const episode of episodes) {
-    const fallback = "작업 기록";
+    const fallback = currentUiLocale() === "ko" ? "작업 기록" : "Work record";
     // 정책이 적은 문장("답이 나오기 전에 …")은 저장 당시 언어라 — 지금 화면 언어로 바꿔 보여준다.
     const summary = summarizeCompletedWork(stripStrayProtocolTokens(localizePolicyTurnSummary(episode.summary, currentUiLocale())), fallback);
     if (!episode.chatId) {
@@ -280,7 +280,7 @@ export function getProjectTimelineSnapshot(
     entries.push({
       id: `chat-fallback:${chat.id}`,
       occurredAt: anchor?.createdAt ?? chat.updatedAt,
-      summary: summarizeCompletedWork(anchor?.text ?? chat.title, chat.title.trim() || "작업 기록"),
+      summary: summarizeCompletedWork(anchor?.text ?? chat.title, chat.title.trim() || (currentUiLocale() === "ko" ? "작업 기록" : "Work record")),
       source: "chat_fallback",
       chatId: chat.id,
       messageId: anchor?.id ?? null,

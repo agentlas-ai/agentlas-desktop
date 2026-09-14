@@ -1,4 +1,5 @@
 import { webBaseUrl } from "../auth";
+import { currentUiLocale } from "../ui-locale";
 import type {
   ExperienceHubCatalogChip,
   ExperienceHubCatalogOffer,
@@ -37,15 +38,16 @@ function publicId(value: unknown): string {
 
 function taskLabel(value: unknown): string | null {
   const id = text(value, 120).toLowerCase();
+  const ko = currentUiLocale() === "ko";
   const labels: Record<string, string> = {
-    design: "디자인",
-    "browser-automation": "브라우저 자동화",
-    publishing: "게시·배포",
-    research: "리서치",
-    writing: "글쓰기",
-    coding: "개발",
-    marketing: "마케팅",
-    automation: "자동화",
+    design: ko ? "디자인" : "Design",
+    "browser-automation": ko ? "브라우저 자동화" : "Browser automation",
+    publishing: ko ? "게시·배포" : "Publishing",
+    research: ko ? "리서치" : "Research",
+    writing: ko ? "글쓰기" : "Writing",
+    coding: ko ? "개발" : "Coding",
+    marketing: ko ? "마케팅" : "Marketing",
+    automation: ko ? "자동화" : "Automation",
   };
   const suffix = id.split("/").pop() || "";
   return labels[suffix] ?? null;
@@ -133,7 +135,9 @@ export async function getExperienceHubCatalog(): Promise<ExperienceHubCatalogRes
       status: "unavailable",
       chips: [],
       checkedAt,
-      message: "지금은 Hub 경험칩 목록을 불러오지 못했습니다. 잠시 후 다시 확인해 주세요.",
+      message: currentUiLocale() === "ko"
+        ? "지금은 Hub 경험칩 목록을 불러오지 못했습니다. 잠시 후 다시 확인해 주세요."
+        : "The Hub Experience Chip list could not be loaded right now. Please check again shortly.",
     };
   }
 }

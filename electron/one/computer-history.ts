@@ -12,6 +12,7 @@ import type {
 } from "../../shared/computer-history";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getMeta, setMeta } from "../store/meta";
+import { currentUiLocale } from "../ui-locale";
 
 const ROOT = process.env.AGENTLAS_COMPUTER_HISTORY_ROOT?.trim()
   || path.join(os.homedir(), ".agentlas", "history");
@@ -234,7 +235,7 @@ function parseEntry(file: string, source: ComputerHistorySource): ComputerHistor
     id,
     occurredAt,
     title: title || "Computer History",
-    body: description || "기록된 설명이 없습니다.",
+    body: description || (currentUiLocale() === "ko" ? "기록된 설명이 없습니다." : "No description was recorded."),
     apps,
     source,
     recommendation: suggestion ? {
@@ -291,7 +292,9 @@ function buildRecommendation(entries: ComputerHistoryEntry[]): ComputerHistoryRe
     id: createHash("sha256").update(evidence.map((item) => item.label + item.occurredAt).join("|")).digest("hex").slice(0, 24),
     kind: "agent",
     title: candidate[0].title,
-    body: "반복된 컴퓨터 기록을 근거로 에이전트 초안을 제안합니다. 자동으로 만들거나 켜지지 않습니다.",
+    body: currentUiLocale() === "ko"
+      ? "반복된 컴퓨터 기록을 근거로 에이전트 초안을 제안합니다. 자동으로 만들거나 켜지지 않습니다."
+      : "Suggests an agent draft based on repeated Computer History. Nothing is created or turned on automatically.",
     evidence,
     status: "draft",
   };
