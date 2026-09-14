@@ -53,7 +53,15 @@ export function AskCard({
    * **적은 답이 그대로 나간다.** 라벨이 시킨 것과 정반대다.
    * 그래서 라벨도 상태를 따라간다: 글이 있으면 submitLabel, 없으면 skipLabel.
    */
-  footer?: { placeholder: string; skipLabel: string; submitLabel: string; onSkip: (freeText: string) => void; hideInput?: boolean };
+  footer?: {
+    placeholder: string;
+    skipLabel: string;
+    submitLabel: string;
+    onSkip: (freeText: string) => void;
+    hideInput?: boolean;
+    /** 사람이 이미 보기를 골라 둔 상태인가 — 라벨이 "건너뛰기"로 거짓말하지 않게. */
+    hasSelection?: boolean;
+  };
   /** An explicit, keyboard-reachable row for the free-text answer. */
   otherOption?: { title: string; note?: string };
   /** Optional controlled value for drafts that outlive this card instance. */
@@ -67,6 +75,16 @@ export function AskCard({
   const [internalFreeText, setInternalFreeText] = useState("");
   const footerInputRef = useRef<HTMLInputElement | null>(null);
   const currentFreeText = freeText ?? internalFreeText;
+  /*
+   * 아래 단추의 이름은 "이 카드에서 사람이 답한 것"을 전부 보고 정해진다. 고른 보기를 빼고
+   * 자유입력만 보던 때에는, 여러 개 고르는 질문에서 보기를 골라도 단추가 "건너뛰기"라
+   * 보낼 길이 화면에 없었다(오너 신고 2026-09-14, Work 에서 재현).
+   *
+   * 고른 보기가 있는지는 `options[].active` 로 셀 수 없다 — 같은 칸을 승인 카드가 "권장 기본값"
+   * 강조로도 쓰기 때문이다(OneShell 승인, AskUserSheet 첫 보기). 그래서 답했는지는 묻는 쪽이
+   * 직접 말한다. 안 말하면 예전 그대로 자유입력만 본다.
+   */
+  const footerState = { freeText: currentFreeText, hasSelection: footer?.hasSelection ?? false };
   const updateFreeText = (value: string) => {
     if (freeText === undefined) setInternalFreeText(value);
     onFreeTextChange?.(value);
@@ -155,7 +173,7 @@ export function AskCard({
               }}
             />}
           <button type="button" className={styles.skip} onClick={() => footer.onSkip(currentFreeText.trim())}>
-            {askCardFooterLabel(currentFreeText, footer)}
+            {askCardFooterLabel(footerState, footer)}
           </button>
         </div>
       )}

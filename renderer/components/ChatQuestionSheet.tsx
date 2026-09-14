@@ -2,7 +2,8 @@
 // 챗 질문 시트 — Claude 데스크탑 질문 카드 스타일:
 //  · 헤더: "1/2" 진행 칩 + 질문 한 줄, 우측에 접기(v)·닫기(×)
 //  · 옵션: 회색 행(제목+설명) + 우측 숫자 배지, 마지막은 "기타" + 아래 자유입력
-//  · 푸터: [건너뛰기] [다음 ↵] — 질문은 한 번에 하나, 마지막 질문에서 다음=전송
+//  · 푸터: 단추 하나 — 답한 것(고른 보기 또는 자유입력)이 없으면 "건너뛰기", 있으면
+//    "다음 질문"(뒤에 질문이 더 있을 때) 또는 "이 답 보내기"(마지막 질문). 질문은 한 번에 하나
 //  · 전송은 배치 1회: 질문 하나 답할 때마다 프롬프트로 쏘지 않는다(질문 꼬리물기 방지)
 //  · 선택/입력은 로컬 상태 — 스트리밍 중에도 즉시 클릭 가능, 최종 전송만 busy에 묶인다
 //  · 답장 스캐폴딩은 UI locale — 입력 언어 고착 방지
@@ -239,8 +240,6 @@ export function ChatQuestionSheet({
   };
   keyHandlerRef.current = handleKey;
 
-  const nextLabel = isLast ? (ko ? "제출" : "Submit") : ko ? "다음" : "Next";
-
   /*
    * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
    * 여러 질문이면 제목에 1/2 처럼 몇 번째인지 붙는다.
@@ -274,9 +273,13 @@ export function ChatQuestionSheet({
         footer={{
           placeholder: ko ? "여기에 답변을 입력하세요" : "Type your answer here",
           skipLabel: ko ? "건너뛰기" : "Skip",
+          // 고른 보기가 있으면 이 단추는 건너뛰지 않고 보낸다 — 라벨도 그렇게 말해야 한다.
+          hasSelection: currentAnswered,
           submitLabel: busy
             ? (ko ? "실행이 정리되면 전송" : "Sends when settled")
-            : (ko ? "이 답 보내기" : "Send answer"),
+            : isLast
+              ? (ko ? "이 답 보내기" : "Send answer")
+              : (ko ? "다음 질문" : "Next question"),
           onSkip: (freeText) => {
             if (freeText) {
               const nts = { ...notes, [q.id]: freeText };
