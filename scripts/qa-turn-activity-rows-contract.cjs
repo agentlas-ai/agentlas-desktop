@@ -74,9 +74,9 @@ check("nameless and \"unknown\" tool events never become rows; a real tool keeps
   const out = rows.buildTurnActivityRows([
     { sequence: 1, kind: "tool", code: "tool-observed", at: at(0), toolName: null },
     { sequence: 2, kind: "tool", code: "tool-observed", at: at(1), toolName: "unknown" },
-    { sequence: 3, kind: "tool", code: "tool-observed", at: at(2), toolName: "Read", toolSummary: "/Users/mason/Science/tpa-meta/comparables/  index.md" },
+    { sequence: 3, kind: "tool", code: "tool-observed", at: at(2), toolName: "Read", toolSummary: "/Users/researcher/Science/tpa-meta/comparables/  index.md" },
     { sequence: 4, kind: "tool", code: "tool-observed", at: at(3), toolName: "Bash", toolSummary: `UA="Mozilla/5.0 (Macintosh)" curl -sL ${"x".repeat(200)}` },
-  ], { cwd: "/Users/mason/Science/tpa-meta" });
+  ], { cwd: "/Users/researcher/Science/tpa-meta" });
   assert.deepEqual(out.map((row) => row.toolName), ["Read", "Bash"]);
   assert.equal(out[0].toolSummary, "comparables/ index.md", "the project folder prefix is gone and whitespace is collapsed");
   assert.equal(out[1].toolSummary.length, 96, "long shell lines are capped");
