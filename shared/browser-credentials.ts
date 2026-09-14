@@ -103,8 +103,17 @@ export interface BrowserCredentialImportResult {
   nativeSession?: NativeBrowserCookieImportResult;
   ok: boolean;
   suppressionReason?: "development_effect_policy_disabled";
-  /** 전용 프로필에 추가되거나 더 최신/읽을 수 있는 암호문으로 교체된 쿠키 행 수. */
+  /**
+   * 이번 가져오기에서 **새로 추가된** 쿠키 행 수.
+   * ★"전용 프로필이 갖고 있는 쿠키 수"가 아니다 — 가져오기는 누적이므로, 이미 있던 줄은
+   *   cookiesPreserved 로 따로 센다. 이 둘을 섞으면 아무것도 옮기지 않은 주기 갱신이
+   *   매번 "+N개 가져옴"이라고 말한다(실측 로그 2026-09-09 "+29 cookies" × 수십 회).
+   */
   cookiesAdded: number;
+  /** 더 최신·읽을 수 있는 암호문으로 **교체된** 쿠키 행 수. */
+  cookiesUpdated?: number;
+  /** 이미 같은 값으로 누적돼 있어 손대지 않은 쿠키 행 수. 실패가 아니다. */
+  cookiesPreserved?: number;
   /** Connect 목록에 등록된 사이트. */
   linkedSites: string[];
   /**

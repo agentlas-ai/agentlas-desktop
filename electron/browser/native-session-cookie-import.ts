@@ -17,6 +17,7 @@ import {
 } from "../mcp-tools/browser-cdp-launcher";
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
+import { decideNativeCookieWrite } from "./cookie-merge";
 import { listBrowserSites } from "../store/browser-vault";
 import { getMeta, setMeta } from "../store/meta";
 import { getDb } from "../store/db";
@@ -312,7 +313,12 @@ export async function writeNativeBrowserCookies(
   cookies: readonly CdpCookie[],
   destination: NativeCookieSession,
   nowSeconds = Date.now() / 1_000,
-  connect?: { isCurrent: () => boolean | Promise<boolean>; beginMigration?: () => void },
+  connect?: {
+    isCurrent: () => boolean | Promise<boolean>;
+    beginMigration?: () => void;
+    /** 사용자가 방금 "가져오기"를 눌렀는가. 그때는 가져온 값이 낡은 세션을 이긴다. */
+    explicitImport?: boolean;
+  },
 ): Promise<CookieWriteSummary> {
   const counts = emptyCounts();
   counts.observed = cookies.length;
@@ -330,7 +336,13 @@ export async function writeNativeBrowserCookies(
         if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
         const domain = host(String(cookie.domain));
-        if (existing.some((item) => host(item.domain ?? "") === domain && item.path === converted.details.path)) {
+        const hasExisting = existing.some((item) => host(item.domain ?? "") === domain && item.path === converted.details.path);
+        /*
+         * 자동 갱신은 살아 있는 세션을 덮지 않는다(그 창에서 직접 로그인했을 수 있다).
+         * 그러나 사용자가 방금 가져오기를 눌렀다면 가져온 값이 이겨야 한다 — 그러지 않으면
+         * "가져왔는데 여전히 로그아웃"이 되고, 사용자 눈에는 가져오기가 안 된 것이다.
+         */
+        if (decideNativeCookieWrite({ hasExisting, explicitImport: connect.explicitImport === true }) === "preserve") {
           counts.preserved = (counts.preserved ?? 0) + 1;
           continue;
         }
@@ -402,7 +414,7 @@ async function syncConnectBrowserCookiesOnce(
     };
     if (!(await sourceCurrent())) return result("source-ownership-unverified");
     const counts = await writeNativeBrowserCookies(cookies, destination, Date.now() / 1000,
-      { isCurrent: sourceCurrent, beginMigration: connect.beginMigration });
+      { isCurrent: sourceCurrent, beginMigration: connect.beginMigration, explicitImport: connect.explicitImport === true });
     if (connect && !(await connect.isCurrent())) return result("authorization-required", counts);
     if (counts.imported === 0 && counts.skipped.writeFailed > 0) return result("destination-write-failed", counts);
     if (counts.imported === 0 && !counts.preserved) return result("no-transferable-cookies", counts);
@@ -428,6 +440,8 @@ export function importDedicatedBrowserCookies(input: {
 type ConnectSessionScope = {
   identity: string; domains: string[]; markerKeys: Map<string, string>;
   isCurrent: () => Promise<boolean>; hasCurrentGrant: () => boolean; beginMigration?: () => void;
+  /** 사용자가 방금 Connect 에서 가져오기를 눌렀는가(주기 갱신과 구분). */
+  explicitImport?: boolean;
 };
 const CONNECT_MIGRATION_SCHEMA = "agentlas.native-connect-migration.v1";
 function writeMigrationMarkers(keys: string[], state: "pending" | "completed", partial = false): void {
@@ -521,6 +535,7 @@ export function syncConnectBrowserSession(input?: { domains: readonly string[]; 
       const markerKeys = [scope.markerKeys.get(domain)!];
       const receipt = await syncConnectBrowserCookiesOnce({ ...scope, domains: [domain],
         beginMigration: () => writeMigrationMarkers(markerKeys, "pending"),
+        explicitImport,
       });
       counts.observed += receipt.observed;
       counts.imported += receipt.imported;

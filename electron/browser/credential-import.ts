@@ -48,6 +48,12 @@ import {
   writeBrowserCdpOwner,
 } from "../mcp-tools/browser-cdp-launcher";
 import { resolveAgentlasBrowserRuntime } from "./runtime";
+import {
+  cookieFreshness,
+  cookieIdentityColumns,
+  decideCookieWrite,
+  resolveCookieStoreLayout,
+} from "./cookie-merge";
 import { currentUiLocale } from "../ui-locale";
 
 /** 가져오기 거절·오류 문구는 화면 언어로 — 영어 화면에 한국어가 새지 않게(오너 2026-09-14). */
@@ -392,15 +398,39 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
   }
 }
 
-/** 전용 프로필의 쿠키 저장소 경로 — 원본이 신형(Network/)이면 목적지도 신형으로 맞춘다. */
+/** 목적지 쿠키 파일의 행 수. 파일이 없으면 null, 열 수 없으면 0. */
+function countCookieRows(file: string): number | null {
+  if (!fs.existsSync(file)) return null;
+  try {
+    const probe = new Database(file, { readonly: true });
+    const row = probe.prepare("SELECT COUNT(*) AS n FROM cookies").get() as { n?: number } | undefined;
+    probe.close();
+    return Number(row?.n || 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 전용 프로필의 쿠키 저장소 경로.
+ *
+ * ★원본의 배치(Network/ 유무)를 그대로 따라가면 안 된다(오너 신고 2026-09-14). 신형 배치
+ *   브라우저와 구형 배치 브라우저에서 각각 가져오면 같은 전용 프로필 안의 서로 다른 파일에
+ *   나뉘어 쌓이고, 전용 브라우저는 한쪽만 읽어 "방금 가져온 쿠키가 없어진다". 이미 쿠키가
+ *   들어 있는 목적지 파일이 있으면 그 파일에 계속 누적한다.
+ */
 function destinationCookieStore(sourceStore: string): string {
   const dedicated = ensureBrowserCdpProfilePrivate();
-  const useNetworkDir = path.basename(path.dirname(sourceStore)) === "Network";
-  const dir = useNetworkDir
-    ? path.join(dedicated, "Default", "Network")
-    : path.join(dedicated, "Default");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return path.join(dir, "Cookies");
+  const legacyFile = path.join(dedicated, "Default", "Cookies");
+  const networkFile = path.join(dedicated, "Default", "Network", "Cookies");
+  const layout = resolveCookieStoreLayout({
+    legacyRows: countCookieRows(legacyFile),
+    networkRows: countCookieRows(networkFile),
+    sourceUsesNetworkDir: path.basename(path.dirname(sourceStore)) === "Network",
+  });
+  const target = layout === "network" ? networkFile : legacyFile;
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  return target;
 }
 
 /**
@@ -1019,7 +1049,7 @@ export async function importBrowserCredentials(
 
     const quoted = shared.map((c) => `"${c}"`).join(", ");
     const placeholders = shared.map(() => "?").join(", ");
-    // merge: 이미 있는 (host_key, name, path) 는 건드리지 않는다.
+    // merge: 없는 줄만 넣는다. 목적지에 이미 있는 줄은 아래 판정이 정한다.
     const insert = dest.prepare(`INSERT OR IGNORE INTO cookies (${quoted}) VALUES (${placeholders})`);
     /*
      * ★ 왜 "있으면 건드리지 않는다" 를 버렸나 (오너 신고 2026-08-24, 실측으로 확인):
@@ -1029,19 +1059,25 @@ export async function importBrowserCredentials(
      *   되지 않는, 정확히 신고된 상태다. 로그인 쿠키는 회전한다. 원본이 더 새것이면
      *   갱신해야 옮긴 것이 된다.
      */
+    /*
+     * ★교체는 **그 줄 하나만** 지워야 한다(오너 신고 2026-09-14 "가져올 때마다 초기화").
+     *   예전 키는 (host_key, name, path) 뿐이라, 파티션(top_frame_site_key)·스킴·포트만 다른
+     *   형제 줄까지 한꺼번에 지우고 한 줄만 다시 넣었다 — 한 사이트를 가져오는 것이 이미
+     *   있던 다른 쿠키를 지우는 길이었다. 저장소의 실제 UNIQUE 조합을 키로 쓴다.
+     */
+    const identityColumns = cookieIdentityColumns(shared);
+    const identityWhere = identityColumns.map((column) => `"${column}" IS ?`).join(" AND ");
+    const identityOf = (row: Record<string, unknown>): Array<unknown> =>
+      identityColumns.map((column) => (column === "path" ? String(row.path ?? "/") : row[column] ?? null));
     const existingStmt = dest.prepare(
-      "SELECT expires_utc AS expiresUtc, last_update_utc AS updatedUtc, encrypted_value AS encryptedValue, value AS plainValue FROM cookies WHERE host_key = ? AND name = ? AND path = ? LIMIT 1",
+      `SELECT expires_utc AS expires_utc, last_update_utc AS last_update_utc, encrypted_value AS encryptedValue, value AS plainValue FROM cookies WHERE ${identityWhere} LIMIT 1`,
     );
-    const deleteStmt = dest.prepare("DELETE FROM cookies WHERE host_key = ? AND name = ? AND path = ?");
-    const freshnessOf = (record: Record<string, unknown>): number => {
-      // Chrome 은 두 칸 다 마이크로초 정수다. 있는 것 중 큰 값을 신선도로 본다.
-      const expires = Number(record.expires_utc ?? record.expiresUtc ?? 0);
-      const updated = Number(record.last_update_utc ?? record.updatedUtc ?? 0);
-      return Math.max(Number.isFinite(expires) ? expires : 0, Number.isFinite(updated) ? updated : 0);
-    };
+    const deleteStmt = dest.prepare(`DELETE FROM cookies WHERE ${identityWhere}`);
+    const hasFreshnessColumns = destColumns.has("expires_utc") || destColumns.has("last_update_utc");
 
     let added = 0;
     let refreshed = 0;
+    let preserved = 0;
     const linkedSites: string[] = [];
     const selectRows = src.prepare(
       `SELECT ${quoted} FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?`,
@@ -1050,31 +1086,29 @@ export async function importBrowserCredentials(
     const runAll = dest.transaction((jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>) => {
       for (const job of jobs) {
         for (const row of job.rows) {
-          const hostKey = String(row.host_key ?? "");
-          const name = String(row.name ?? "");
-          const cookiePath = String(row.path ?? "/");
-          const already = existingStmt.get(hostKey, name, cookiePath) as
-            { expiresUtc?: number; updatedUtc?: number; encryptedValue?: Buffer; plainValue?: string } | undefined;
-          if (already) {
-            // 신선도를 비교할 칸이 아예 없는 저장소 형식이면 예전처럼 건드리지 않는다.
-            const destinationReadable = !reencryptor || reencryptor.destinationCanRead({
-              host_key: hostKey,
-              encrypted_value: already.encryptedValue,
-              value: already.plainValue,
-            });
-            if (destinationReadable) {
-              if (!destColumns.has("expires_utc") && !destColumns.has("last_update_utc")) continue;
-              if (freshnessOf(row) <= freshnessOf(already as Record<string, unknown>)) continue;
-            }
-            deleteStmt.run(hostKey, name, cookiePath);
-            const prepared = reencryptor?.transform(row) ?? row;
-            insert.run(shared.map((c) => prepared[c] ?? null));
-            refreshed += 1;
+          const identity = identityOf(row);
+          const already = existingStmt.get(...identity) as Record<string, unknown> | undefined;
+          const destinationReadable = !already || !reencryptor || reencryptor.destinationCanRead({
+            host_key: row.host_key,
+            encrypted_value: already.encryptedValue,
+            value: already.plainValue,
+          });
+          const action = decideCookieWrite({
+            hasExisting: Boolean(already),
+            destinationReadable,
+            hasFreshnessColumns,
+            incomingFreshness: cookieFreshness(row),
+            existingFreshness: cookieFreshness(already),
+          });
+          if (action === "keep") {
+            preserved += 1;
             continue;
           }
+          if (action === "replace") deleteStmt.run(...identity);
           const prepared = reencryptor?.transform(row) ?? row;
           insert.run(shared.map((c) => prepared[c] ?? null));
-          added += 1;
+          if (action === "replace") refreshed += 1;
+          else added += 1;
         }
       }
     });
@@ -1178,8 +1212,15 @@ export async function importBrowserCredentials(
      * refresh retry on every launch and showed an error after a successful
      * earlier import. Only fail when no importable or interactive site exists.
      */
-    const moved = runtimeImported?.accepted ?? (added + refreshed);
+    /*
+     * ★숫자는 "이번에 실제로 쓴 줄"이어야 한다. 예전에는 macOS 에서 `runtimeImported.accepted`
+     *   (= 전용 브라우저가 그 사이트에 **갖고 있는** 쿠키 수)를 그대로 보고해, 아무것도 옮기지
+     *   않은 15분 주기 갱신이 로그에 "+29 cookies"를 영원히 찍었다(실측 로그). 추가/갱신/유지를
+     *   나눠 정직하게 돌려준다 — 유지(preserved)는 "이미 누적돼 있다"는 뜻이지 실패가 아니다.
+     */
+    const moved = added + refreshed;
     if (moved === 0
+      && preserved === 0
       && importedSites.length === 0
       && requiresLoginSites.length === 0
       && preservedSites.length === 0) {
@@ -1201,7 +1242,9 @@ export async function importBrowserCredentials(
     for (const site of importedSites) setBrowserSession(site, "valid");
     return {
       ok: true,
-      cookiesAdded: moved,
+      cookiesAdded: added,
+      cookiesUpdated: refreshed,
+      cookiesPreserved: preserved,
       linkedSites,
       skipped,
       ...(requiresLoginSites.length > 0 ? { requiresLoginSites } : {}),

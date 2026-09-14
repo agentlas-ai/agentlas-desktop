@@ -173,6 +173,8 @@ export function CredentialImportDialog({
       let skipped = 0;
       let nativeNotice: string | null = null;
       let protectedSites: string[] = [];
+      // 가져오기는 누적이다 — 이번에 더한 것, 갱신한 것, 이미 있어서 그대로 둔 것을 나눠 말한다.
+      let cookieDetail = "";
       if (checked.size > 0) {
         const res = await api.browser.importCredentials(profileId, [...checked]);
         if (!res.ok) {
@@ -183,6 +185,12 @@ export function CredentialImportDialog({
         linked = res.linkedSites.length;
         skipped += res.skipped.length;
         protectedSites = res.requiresLoginSites ?? [];
+        const added = res.cookiesAdded ?? 0;
+        const updated = res.cookiesUpdated ?? 0;
+        const kept = res.cookiesPreserved ?? 0;
+        cookieDetail = ko
+          ? ` (쿠키 +${added} · 갱신 ${updated} · 유지 ${kept})`
+          : ` (cookies +${added}, updated ${updated}, kept ${kept})`;
       }
       if (passwordChecked.size > 0 || historyChecked.size > 0) {
         const data = await api.browserProfileImport.import({
@@ -211,8 +219,8 @@ export function CredentialImportDialog({
         return;
       }
       const msg = ko
-        ? `로그인 ${linked} · 비밀번호 ${passwordCount} · 기록 ${historyCount}${skipped > 0 ? ` · ${skipped}개 제외` : ""}`
-        : `Sign-ins ${linked} · passwords ${passwordCount} · history ${historyCount}${skipped > 0 ? ` · ${skipped} skipped` : ""}`;
+        ? `로그인 ${linked}${cookieDetail} · 비밀번호 ${passwordCount} · 기록 ${historyCount}${skipped > 0 ? ` · ${skipped}개 제외` : ""}`
+        : `Sign-ins ${linked}${cookieDetail} · passwords ${passwordCount} · history ${historyCount}${skipped > 0 ? ` · ${skipped} skipped` : ""}`;
       if (skipped > 0) {
         setError(ko ? "일부 항목은 브라우저 보호 또는 변경 때문에 제외됐습니다." : "Some items were skipped because they are protected or changed.");
         // 사유를 읽을 수 있게 창은 열어 두고, 목록만 새로 고친다.

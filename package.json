@@ -260,6 +260,7 @@
     "test:experience-promotion": "node scripts/experience-promotion-contract.cjs",
     "test:loadout-editor": "node scripts/loadout-editor-contract.cjs",
     "test:mac-cookie-reencryption": "node scripts/mac-cookie-reencryption-contract.cjs",
+    "test:cookie-import-merge": "node scripts/cookie-import-merge-contract.cjs",
     "test:markdown-rendering": "node scripts/markdown-rendering-contract.cjs",
     "test:memory-hard-hook": "node scripts/memory-hard-hook-contract.cjs",
     "test:one-composer-enter": "node scripts/one-composer-enter-contract.cjs",
