@@ -335,6 +335,28 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
   return encoded;
 }
 
+/**
+ * 답변 언어는 앱의 화면 언어가 정한다(runner.ts responseLanguageGuide 의 제품 규칙). 그런데 Claude Code 사용자 설정
+ * `"language": "korean"` 은 CLI 가 시스템 수준에 넣어서, 우리 시스템 프롬프트의 "Always reply in English" 를 맨 앞에
+ * 두든 맨 끝에 두든 이겼다(실측 2026-09-14, claude 2.1.270: 두 배치 모두 한국어, `--settings '{"language":"english"}'`
+ * 는 영어). 영어 화면·영어 프로젝트에서 연구 디렉터가 한국어로 답하던 원인 — 그 설정을 해 둔 사용자 누구에게나 난다.
+ * --settings 는 두 번 주면 뒤의 것만 남으므로(위 claudeExecutionSettings 주석) 기존 설정 객체에 language 만 합친다.
+ */
+export async function withProductReplyLanguage(settings: string | null, locale: RunnerRequest["locale"]): Promise<string> {
+  const language = locale === "ko" ? "korean" : "english";
+  let base: Record<string, unknown> = {};
+  if (settings) {
+    const trimmed = settings.trim();
+    const raw = trimmed.startsWith("{") ? trimmed : await fs.readFile(trimmed, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("claude_execution_settings_invalid");
+    base = parsed as Record<string, unknown>;
+  }
+  const encoded = JSON.stringify({ ...base, language });
+  if (Buffer.byteLength(encoded, "utf8") > 40_960) throw new Error("claude_execution_settings_too_large");
+  return encoded;
+}
+
 function isCanonicalAgentAppInlineMcpConfig(value: string | undefined): boolean {
   if (!value || !value.startsWith('{"mcpServers":') || /[\r\n\0]/.test(value) ||
       Buffer.byteLength(value, "utf8") > 4_096) return false;
@@ -974,7 +996,7 @@ const runClaudeTurn = async (
   // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
-  const executionSettings = await claudeExecutionSettings(runReq);
+  const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq), runReq.locale);
   const toolBrokerArgs = executionSettings ? ["--settings", executionSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
