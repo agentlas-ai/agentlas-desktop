@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-research-director",
   "name": "Agentlas Science Research Director",
-  "version": "1.24.5",
+  "version": "1.24.6",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -34,20 +34,30 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "85ac695df35dc42ef1f5b93f9f9ff5c52d65131f31e43f2cef92f4ce1f564f8a",
+    "promptSha256": "7b38ffb8e07ea7143ebf6125b8e00b0a497a4d9922fef4bfab277223d8b489b5",
     "failClosed": true
   },
   "provides": {
     "skills": {
       "router": "skills/index/SKILL.md",
-      "workflows": ["direct-study", "write-manuscript"]
+      "workflows": [
+        "direct-study",
+        "write-manuscript"
+      ]
     }
   },
   "requires": {
     "prereq": [
-      { "id": "agentlas-science", "provided-by": "app" }
+      {
+        "id": "agentlas-science",
+        "provided-by": "app"
+      }
     ],
-    "os": ["darwin", "win32", "linux"]
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   },
   "permissions": {
     "fileWrite": "project-only",
@@ -55,7 +65,64 @@
     "shell": "deny"
   },
   "state": {
-    "files": ["research-director-state.json"],
+    "files": [
+      "research-director-state.json"
+    ],
     "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "agent/agent.md",
+        "sha256": "0e36cb4e7ba895e5fb1c82f63947730a4d83916bcbe4dca4613648cfb1f17cd0",
+        "bytes": 63395
+      },
+      {
+        "path": "agent/routing-card.json",
+        "sha256": "993ee5ea7e0f7631973947c8c159dfedb588e193fad85338fb92b8e1910f9084",
+        "bytes": 6380
+      },
+      {
+        "path": "agent/soul.md",
+        "sha256": "f39df8ad0aeb1d29f8455cd7aa38ceb92cec9ba5830c76bb43652dece39b84f8",
+        "bytes": 4648
+      },
+      {
+        "path": "contracts/decision.schema.json",
+        "sha256": "f8f96267bc6bec9d66c14481b6db6cfadf43b066d9bf1e90da1fbb311946327f",
+        "bytes": 1536
+      },
+      {
+        "path": "contracts/evidence-ledger.schema.json",
+        "sha256": "d77d56bc11857186a029039a2d5710ac5ad47c1f452422cbddfee604d4382f4c",
+        "bytes": 1391
+      },
+      {
+        "path": "contracts/research-state.schema.json",
+        "sha256": "3f50ace5d57e2c819fe527f07f512368798d29987d191b334b5887d97014c5a1",
+        "bytes": 5566
+      },
+      {
+        "path": "README.md",
+        "sha256": "eade56ed5974800a51713b8243fc52299c022059e77eeeb6a411c785973cf07e",
+        "bytes": 4659
+      },
+      {
+        "path": "skills/direct-study/SKILL.md",
+        "sha256": "d89af86284ce377665020b4aa2a9b3440aa8f33ded0a50204ce805892282b549",
+        "bytes": 19401
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "fd4e3ff803e4f3198f0e9f086a8c74a0527136d23f93d715e8a6bd557f2cb5fc",
+        "bytes": 918
+      },
+      {
+        "path": "skills/write-manuscript/SKILL.md",
+        "sha256": "2de1875801501d7cc38f93c90c3ee40e4fb7a7e31e21a06e61c62bac363e52b8",
+        "bytes": 25167
+      }
+    ]
   }
 }

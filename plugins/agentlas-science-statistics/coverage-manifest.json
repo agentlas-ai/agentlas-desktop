@@ -2,8 +2,8 @@
   "schema": "agentlas.science.statistics-coverage/v1",
   "engine": {
     "id": "agentlas-science-statistics",
-    "version": "1.10.0",
-    "algorithmRevision": "gaussian-random-intercept-lmm-v9-js-2026-09-01"
+    "version": "1.11.0",
+    "algorithmRevision": "robustness-companions-v10-js-2026-09-14"
   },
   "support": {
     "scope": "bounded-method-subset",
@@ -538,7 +538,7 @@
     },
     {
       "method": "linear_regression",
-      "implementedBoundary": "Ordinary least squares with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, coefficient inference, omnibus fit statistics, and bounded residual and influence diagnostics.",
+      "implementedBoundary": "Ordinary least squares with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, coefficient inference, omnibus fit statistics, and bounded residual and influence diagnostics. Every fit also carries robustness companions: HC3 sandwich standard errors, case-resampling bootstrap percentile intervals (1000 resamples, data-derived seed), and outcome-permutation p-values (1000 permutations).",
       "oracleCoverage": {
         "level": "independent-formula-partial",
         "evidence": [
@@ -574,7 +574,7 @@
     },
     {
       "method": "logistic_regression",
-      "implementedBoundary": "Binary logistic IRLS with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, Wald inference, likelihood-ratio fit when nested, odds ratios, discrimination, calibration, and influence screens.",
+      "implementedBoundary": "Binary logistic IRLS with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, Wald inference, likelihood-ratio fit when nested, odds ratios, discrimination, calibration, and influence screens. Every fit also carries robustness companions: HC3 sandwich standard errors, case-resampling bootstrap percentile intervals (300 resamples, data-derived seed), and outcome-permutation Wald-z p-values (300 permutations).",
       "oracleCoverage": {
         "level": "independent-optimizer-partial",
         "evidence": [
@@ -6758,5 +6758,5 @@
       "independentlyCrossChecked": true
     }
   ],
-  "manifestSha256": "sha256:08146485116a2a4f149fab1b7f972ec98d3c82d023ba6f87066ce041b7d98c64"
+  "manifestSha256": "sha256:4f7aec0cb62f059299077a90d66fcec7086b288dabc5be8c950e0a0f394300e2"
 }

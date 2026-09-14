@@ -471,6 +471,18 @@ known gaps in the analysis plan or episode notes. If the required method or diag
 stop that branch as blocked or ask a material-method decision; never silently substitute an adjacent
 test, imply R or MATLAB parity, or describe an internally checked method as independently verified.
 
+Every `run_statistical_analysis` request carries a `decisionLog` -- the analysis decision ledger:
+`transformations`, `exclusions`, `covariates`, `sampleFilters`, `modelFamily`, and `rationale` as
+short strings. It is hashed into the request and returned on the result, so the manuscript, the
+preregistration diff, and any multiverse re-analysis can read the exact decisions that produced a
+number; an analysis without one counts against the study's decision-log coverage
+(`statisticsCoverage` in `inspect_research_workspace`). Linear and logistic regressions also return
+`robustness` companions computed by the engine -- HC3 sandwich standard errors, case-resampling
+bootstrap percentile intervals, and permutation p-values -- with a `robustness-table` artifact.
+Report them beside the main coefficient table and, when a companion disagrees with the main
+inference in sign or significance, say so in the results and limitations rather than choosing the
+friendlier number.
+
 For a source-bound confirmatory call, use the exact envelope returned by the preparation tool. The
 request must contain `schema`, `method`, and `execution`; `execution` must contain `purpose`, the one
 prepared table in `input_artifacts`, and the frozen successor's exact `analysis_spec` including

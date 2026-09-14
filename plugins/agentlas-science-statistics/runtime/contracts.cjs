@@ -82,6 +82,26 @@ function data(properties, required) {
   return { type: "object", additionalProperties: false, required, properties };
 }
 
+/*
+ * 분석 결정 원장 — 모든 분석 요청이 실을 수 있는 구조화된 결정 기록(변환·배제·모형족·공변량·표본 필터·근거).
+ * 요청 해시에 포함되어 결과 영수증과 함께 남는다(하네스 조사 2026-09-14 #1).
+ */
+const decisionText = (maxLength) => ({ type: "string", minLength: 1, maxLength });
+const decisionList = { type: "array", maxItems: 64, items: decisionText(500) };
+const DECISION_LOG_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    transformations: decisionList,
+    exclusions: decisionList,
+    covariates: decisionList,
+    sampleFilters: decisionList,
+    modelFamily: decisionText(2000),
+    rationale: decisionText(2000),
+  },
+});
+
 function variant(method, dataSchema, optionKeys, optionRequired = []) {
   return {
     type: "object",
@@ -92,6 +112,7 @@ function variant(method, dataSchema, optionKeys, optionRequired = []) {
       method: { const: method },
       data: dataSchema,
       options: options(optionKeys, optionRequired),
+      decisionLog: DECISION_LOG_SCHEMA,
     },
   };
 }
@@ -302,4 +323,4 @@ const REQUEST_INPUT_SCHEMA = Object.freeze({
   ],
 });
 
-module.exports = { REQUEST_INPUT_SCHEMA };
+module.exports = { REQUEST_INPUT_SCHEMA, DECISION_LOG_SCHEMA };

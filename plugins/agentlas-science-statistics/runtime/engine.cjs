@@ -5,8 +5,8 @@ const { buildResearchDecisionLinkage } = require("./decision-linkage.cjs");
 
 const ENGINE = Object.freeze({
   id: "agentlas-science-statistics",
-  version: "1.10.0",
-  algorithmRevision: "gaussian-random-intercept-lmm-v9-js-2026-09-01",
+  version: "1.11.0",
+  algorithmRevision: "robustness-companions-v10-js-2026-09-14",
 });
 
 const REQUEST_SCHEMA = "agentlas.science.statistics.request/v1";
@@ -447,9 +447,233 @@ function survivalPredictors(raw, n) {
   });
 }
 
+/*
+ * 분석 결정 원장 — 변수 변환·배제 규칙·모형족·공변량·표본 필터를 요청에 구조화해 싣는다. 다중우주·사전등록 이탈
+ * diff·재현 패키지의 공통 입력이다(하네스 조사 2026-09-14 #1). 요청 해시에 그대로 들어가므로 뒤에서 바꿀 수 없다.
+ */
+const DECISION_LOG_LIST_KEYS = ["transformations", "exclusions", "covariates", "sampleFilters"];
+function parseDecisionLog(raw) {
+  if (raw === undefined || raw === null) return null;
+  const log = assertObject(raw, "decisionLog");
+  assertKeys(log, [...DECISION_LOG_LIST_KEYS, "modelFamily", "rationale"], "decisionLog");
+  const out = {};
+  for (const key of DECISION_LOG_LIST_KEYS) {
+    if (log[key] === undefined) continue;
+    if (!Array.isArray(log[key]) || log[key].length > 64) fail("STAT_INVALID_INPUT", `decisionLog.${key} must be an array of at most 64 strings`);
+    out[key] = log[key].map((entry, index) => {
+      if (typeof entry !== "string" || !entry.trim() || entry.length > 500) fail("STAT_INVALID_INPUT", `decisionLog.${key}[${index}] must be a non-empty string of at most 500 characters`);
+      return entry.trim();
+    });
+  }
+  for (const key of ["modelFamily", "rationale"]) {
+    if (log[key] === undefined) continue;
+    if (typeof log[key] !== "string" || !log[key].trim() || log[key].length > 2000) fail("STAT_INVALID_INPUT", `decisionLog.${key} must be a non-empty string of at most 2000 characters`);
+    out[key] = log[key].trim();
+  }
+  if (!Object.keys(out).length) fail("STAT_INVALID_INPUT", "decisionLog must record at least one decision");
+  return out;
+}
+
+/*
+ * 주 분석 동반 3종 — HC3 샌드위치 표준오차, 케이스 재표집 부트스트랩 백분위 신뢰구간, 순열 p 값(하네스 조사
+ * 2026-09-14 #4). 연구자가 고른 공분산 추정기와 무관하게 회귀 1회당 자동으로 붙는다. 난수는 데이터 해시에서
+ * 만든 시드로 고정해 같은 요청이면 같은 숫자가 나온다. 시간 예산을 넘기면 완료된 재표집 수를 적고 멈춘다.
+ */
+const ROBUSTNESS_SCHEMA = "agentlas.science.statistics.robustness-companions/v1";
+const ROBUSTNESS_RESAMPLES = Object.freeze({ linear: 1000, logistic: 300 });
+function mulberry32(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function robustnessSeed(y, x) {
+  return Number.parseInt(rawSha256([y, x]).slice(0, 8), 16) >>> 0;
+}
+function shuffled(values, rng) {
+  const out = values.slice();
+  for (let index = out.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(rng() * (index + 1));
+    const held = out[index]; out[index] = out[swap]; out[swap] = held;
+  }
+  return out;
+}
+function percentileInterval(samples, confidenceLevel) {
+  const sortedSamples = samples.slice().sort((a, b) => a - b);
+  const alpha = (1 - confidenceLevel) / 2;
+  return { lower: quantileR7(sortedSamples, alpha), upper: quantileR7(sortedSamples, 1 - alpha) };
+}
+function robustnessTable(outcomeLabel, rows) {
+  return tableArtifact(
+    `Robustness companions: ${outcomeLabel}`,
+    "HC3 heteroscedasticity-consistent standard errors, case-resampling bootstrap percentile intervals, and permutation p-values that accompany the main coefficient table.",
+    [
+      { key: "term", label: "Term", type: "string" },
+      { key: "estimate", label: "Estimate", type: "number" },
+      { key: "hc3StandardError", label: "HC3 SE", type: "number" },
+      { key: "hc3PValue", label: "HC3 p", type: "number" },
+      { key: "bootstrapLower", label: "Bootstrap lower", type: "number" },
+      { key: "bootstrapUpper", label: "Bootstrap upper", type: "number" },
+      { key: "permutationPValue", label: "Permutation p", type: "number" },
+    ],
+    rows,
+    ["Bootstrap: case resampling with a data-derived seed; intervals are percentile intervals. Permutation: outcome labels shuffled, coefficient statistic recomputed; p = (count + 1) / (B + 1)."],
+    "robustness-table",
+  );
+}
+function companionSummary(robustness, names) {
+  const rows = names.map((term, j) => ({
+    term, estimate: robustness.hc3[j].estimate, hc3StandardError: robustness.hc3[j].standardError, hc3PValue: robustness.hc3[j].pValue,
+    bootstrapLower: robustness.bootstrap.intervals[j].lower, bootstrapUpper: robustness.bootstrap.intervals[j].upper, permutationPValue: robustness.permutation.pValues[j].pValue,
+  }));
+  const stopped = robustness.stoppedBy ? " (stopped by execution budget)" : "";
+  return {
+    robustness,
+    artifact: robustnessTable(names.join(", "), rows),
+    diagnostic: { name: "robustness companions", status: robustness.stoppedBy ? "partial" : "attached", detail: `HC3 SE, bootstrap ${robustness.bootstrap.completed}/${robustness.bootstrap.resamples}, permutation ${robustness.permutation.completed}/${robustness.permutation.permutations}${stopped}` },
+  };
+}
+function linearRobustnessCompanions(y, x, names, core, mse, leverage, options, budget) {
+  const n = y.length;
+  const p = x[0].length;
+  const dfResidual = n - p;
+  const hc3 = sandwichCovariance(x, core.inverse, core.residuals, leverage, "hc3", budget);
+  const critical = tCritical(options.confidenceLevel, dfResidual);
+  const hc3Rows = core.beta.map((estimate, j) => {
+    const standardError = Math.sqrt(Math.max(0, hc3[j][j]));
+    const statistic = standardError > 0 ? estimate / standardError : null;
+    return { term: names[j], estimate, standardError, statistic, pValue: statistic === null ? null : pFromT(statistic, dfResidual, "two-sided"), lower: estimate - critical * standardError, upper: estimate + critical * standardError };
+  });
+  const seed = robustnessSeed(y, x);
+  const rng = mulberry32(seed);
+  const projector = matMul(core.inverse, transpose(x), budget);
+  const fitBeta = (outcome) => projector.map((row) => { let value = 0; for (let i = 0; i < n; i += 1) value += row[i] * outcome[i]; return value; });
+  const classicalT = (beta, outcome) => {
+    let sse = 0;
+    for (let i = 0; i < n; i += 1) { let fitted = 0; for (let j = 0; j < p; j += 1) fitted += x[i][j] * beta[j]; sse += (outcome[i] - fitted) ** 2; }
+    const scale = sse / dfResidual;
+    return beta.map((value, j) => value / Math.sqrt(Math.max(1e-300, scale * core.inverse[j][j])));
+  };
+  const observedT = classicalT(core.beta, y);
+  const resamples = ROBUSTNESS_RESAMPLES.linear;
+  const bootstrapBetas = Array.from({ length: p }, () => []);
+  let bootstrapCompleted = 0;
+  let bootstrapSkipped = 0;
+  let stoppedBy = null;
+  for (let b = 0; b < resamples; b += 1) {
+    try { budget.check(n * p); } catch (error) { stoppedBy = "budget"; break; }
+    const indexes = Array.from({ length: n }, () => Math.floor(rng() * n));
+    try {
+      const fit = olsCore(indexes.map((index) => y[index]), indexes.map((index) => x[index]), budget);
+      if (fit.beta.every((value) => Number.isFinite(value))) { fit.beta.forEach((value, j) => bootstrapBetas[j].push(value)); bootstrapCompleted += 1; } else bootstrapSkipped += 1;
+    } catch (error) {
+      if (error instanceof StatisticsError && error.code === "STAT_TIMEOUT") { stoppedBy = "budget"; break; }
+      bootstrapSkipped += 1;
+    }
+  }
+  const counts = Array(p).fill(0);
+  let permutationsCompleted = 0;
+  for (let b = 0; b < resamples && stoppedBy === null; b += 1) {
+    try { budget.check(n * p); } catch (error) { stoppedBy = "budget"; break; }
+    const permuted = shuffled(y, rng);
+    const t = classicalT(fitBeta(permuted), permuted);
+    for (let j = 0; j < p; j += 1) if (Math.abs(t[j]) >= Math.abs(observedT[j])) counts[j] += 1;
+    permutationsCompleted += 1;
+  }
+  const intervals = names.map((term, j) => bootstrapBetas[j].length >= 20 ? { term, ...percentileInterval(bootstrapBetas[j], options.confidenceLevel) } : { term, lower: null, upper: null });
+  const pValues = names.map((term, j) => ({ term, pValue: permutationsCompleted > 0 ? (counts[j] + 1) / (permutationsCompleted + 1) : null }));
+  return companionSummary({
+    schema: ROBUSTNESS_SCHEMA,
+    seed,
+    hc3: hc3Rows,
+    bootstrap: { method: "case-resampling-percentile", resamples, completed: bootstrapCompleted, skipped: bootstrapSkipped, level: options.confidenceLevel, intervals },
+    permutation: { method: "outcome-permutation-t", permutations: resamples, completed: permutationsCompleted, skipped: 0, pValues },
+    ...(stoppedBy ? { stoppedBy } : {}),
+  }, names);
+}
+function logisticFitQuick(y, x, maxIterations, tolerance) {
+  const n = y.length;
+  const p = x[0].length;
+  let beta = Array(p).fill(0);
+  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    const xtwx = Array.from({ length: p }, () => Array(p).fill(0));
+    const xtwz = Array(p).fill(0);
+    for (let row = 0; row < n; row += 1) {
+      let eta = 0;
+      for (let j = 0; j < p; j += 1) eta += x[row][j] * beta[j];
+      const probability = sigmoid(eta);
+      const weight = Math.max(1e-9, probability * (1 - probability));
+      const z = eta + (y[row] - probability) / weight;
+      for (let j = 0; j < p; j += 1) {
+        xtwz[j] += x[row][j] * weight * z;
+        for (let k = 0; k < p; k += 1) xtwx[j][k] += x[row][j] * weight * x[row][k];
+      }
+    }
+    let inverse;
+    try { inverse = invert(xtwx); } catch { return null; }
+    const next = inverse.map((row) => row.reduce((acc, value, index) => acc + value * xtwz[index], 0));
+    if (next.some((value) => !Number.isFinite(value) || Math.abs(value) > 30)) return null;
+    const delta = Math.max(...next.map((value, index) => Math.abs(value - beta[index])));
+    beta = next;
+    if (delta < tolerance) return { beta, inverse };
+  }
+  return null;
+}
+function logisticRobustnessCompanions(y, x, names, beta, informationInverse, scoreResiduals, leverage, options, budget) {
+  const n = y.length;
+  const p = x[0].length;
+  const hc3 = sandwichCovariance(x, informationInverse, scoreResiduals, leverage, "hc3", budget);
+  const critical = normalInv(1 - (1 - options.confidenceLevel) / 2);
+  const hc3Rows = beta.map((estimate, j) => {
+    const standardError = Math.sqrt(Math.max(0, hc3[j][j]));
+    const statistic = standardError > 0 ? estimate / standardError : null;
+    return { term: names[j], estimate, standardError, statistic, pValue: statistic === null ? null : pFromNormal(statistic, "two-sided"), lower: estimate - critical * standardError, upper: estimate + critical * standardError };
+  });
+  const seed = robustnessSeed(y, x);
+  const rng = mulberry32(seed);
+  const waldZ = (fit) => fit.beta.map((value, j) => value / Math.sqrt(Math.max(1e-300, fit.inverse[j][j])));
+  const observedZ = waldZ({ beta, inverse: informationInverse });
+  const resamples = ROBUSTNESS_RESAMPLES.logistic;
+  const bootstrapBetas = Array.from({ length: p }, () => []);
+  let bootstrapCompleted = 0;
+  let bootstrapSkipped = 0;
+  let stoppedBy = null;
+  for (let b = 0; b < resamples; b += 1) {
+    try { budget.check(n * p * 8); } catch (error) { stoppedBy = "budget"; break; }
+    const indexes = Array.from({ length: n }, () => Math.floor(rng() * n));
+    const fit = logisticFitQuick(indexes.map((index) => y[index]), indexes.map((index) => x[index]), options.maxIterations, options.tolerance);
+    if (fit) { fit.beta.forEach((value, j) => bootstrapBetas[j].push(value)); bootstrapCompleted += 1; } else bootstrapSkipped += 1;
+  }
+  const counts = Array(p).fill(0);
+  let permutationsCompleted = 0;
+  let permutationsSkipped = 0;
+  for (let b = 0; b < resamples && stoppedBy === null; b += 1) {
+    try { budget.check(n * p * 8); } catch (error) { stoppedBy = "budget"; break; }
+    const fit = logisticFitQuick(shuffled(y, rng), x, options.maxIterations, options.tolerance);
+    if (!fit) { permutationsSkipped += 1; continue; }
+    const z = waldZ(fit);
+    for (let j = 0; j < p; j += 1) if (Math.abs(z[j]) >= Math.abs(observedZ[j])) counts[j] += 1;
+    permutationsCompleted += 1;
+  }
+  const intervals = names.map((term, j) => bootstrapBetas[j].length >= 20 ? { term, ...percentileInterval(bootstrapBetas[j], options.confidenceLevel) } : { term, lower: null, upper: null });
+  const pValues = names.map((term, j) => ({ term, pValue: permutationsCompleted > 0 ? (counts[j] + 1) / (permutationsCompleted + 1) : null }));
+  return companionSummary({
+    schema: ROBUSTNESS_SCHEMA,
+    seed,
+    hc3: hc3Rows,
+    bootstrap: { method: "case-resampling-percentile", resamples, completed: bootstrapCompleted, skipped: bootstrapSkipped, level: options.confidenceLevel, intervals },
+    permutation: { method: "outcome-permutation-wald-z", permutations: resamples, completed: permutationsCompleted, skipped: permutationsSkipped, pValues },
+    ...(stoppedBy ? { stoppedBy } : {}),
+  }, names);
+}
+
 function parseRequest(raw) {
   const request = assertObject(raw, "request");
-  assertKeys(request, ["schema", "method", "data", "options"], "request");
+  assertKeys(request, ["schema", "method", "data", "options", "decisionLog"], "request");
   if (request.schema !== REQUEST_SCHEMA) fail("STAT_INVALID_INPUT", `request.schema must be ${REQUEST_SCHEMA}`);
   if (!METHODS.includes(request.method)) fail("STAT_INVALID_INPUT", `unsupported method: ${String(request.method)}`);
   const data = assertObject(request.data, "data");
@@ -911,7 +1135,7 @@ function parseRequest(raw) {
     }
   }
 
-  return { schema: REQUEST_SCHEMA, method: request.method, data: parsedData, options };
+  return { schema: REQUEST_SCHEMA, method: request.method, data: parsedData, options, decisionLog: parseDecisionLog(request.decisionLog) };
 }
 
 function sum(values, budget) {
@@ -2616,18 +2840,21 @@ function analyzeLinearRegression(data, options, budget) {
   const influence = core.residuals.map((residual, index) => ({ row: index + 1, leverage: leverage[index], residual, cooksDistance: residual ** 2 / (p * mse) * leverage[index] / Math.max(1e-12, (1 - leverage[index]) ** 2) }));
   const influential = [...influence].sort((a, b) => b.cooksDistance - a.cooksDistance || a.row - b.row).slice(0, 10);
   const categoricalCoding = data.predictors.filter((predictor) => predictor.type === "categorical").map((predictor) => ({ predictor: predictor.name, levels: predictor.levels, reference: predictor.reference, coding: "treatment/reference" }));
+  const companions = linearRobustnessCompanions(data.y, x, names, core, mse, leverage, options, budget);
   return {
+    robustness: companions.robustness,
     sample: { n, predictors: data.predictors.length, coefficients: p },
     estimates: { coefficients, rSquared, adjustedRSquared, residualStandardError: Math.sqrt(mse), sse, sst, covariance: options.covariance, expandedTerms: names },
     tests: f === null ? [] : [{ name: "Overall regression F test", statistic: f, distribution: "F", df1: modelDf, df2: dfResidual, pValue: modelP }],
     confidenceIntervals: coefficients.map((coefficient) => ({ parameter: coefficient.term, level: options.confidenceLevel, lower: coefficient.lower, upper: coefficient.upper, method: options.covariance === "classical" ? "classical OLS Student t" : `${options.covariance.toUpperCase()} covariance with residual-df t reference` })),
     effectSizes: [{ name: "R squared", estimate: rSquared }, { name: "adjusted R squared", estimate: adjustedRSquared }],
     assumptions: [{ name: "linearity", status: "requires_residual_plot_review" }, { name: "independent errors", status: "diagnostic_attached" }, { name: "homoscedastic errors", status: options.covariance === "classical" ? "diagnostic_attached" : "robust_covariance_requested_but_design_review_still_required" }, { name: "normal residuals", status: "diagnostic_attached" }, { name: "full-rank treatment coding", status: "verified_by_matrix_inversion" }],
-    diagnostics: [jarqueBera(core.residuals, budget), breuschPaganDiagnostic(x, core.residuals, budget), { name: "Durbin-Watson", statistic: durbinWatson, interpretation: "approximately 2 is consistent with no first-order residual autocorrelation" }, { name: "residual range", ...minMax(core.residuals) }, { name: "covariance estimator", value: options.covariance, inferenceReference: "residual-df t", boundary: "HC estimators do not repair clustering, dependence, misspecification, or small-sample bias beyond the declared correction" }, { name: "categorical treatment coding", predictors: categoricalCoding }, { name: "influence screen", thresholdLeverage: 2 * p / n, thresholdCooksDistance: 4 / n, topRows: influential, status: "screen_only" }],
+    diagnostics: [companions.diagnostic, jarqueBera(core.residuals, budget), breuschPaganDiagnostic(x, core.residuals, budget), { name: "Durbin-Watson", statistic: durbinWatson, interpretation: "approximately 2 is consistent with no first-order residual autocorrelation" }, { name: "residual range", ...minMax(core.residuals) }, { name: "covariance estimator", value: options.covariance, inferenceReference: "residual-df t", boundary: "HC estimators do not repair clustering, dependence, misspecification, or small-sample bias beyond the declared correction" }, { name: "categorical treatment coding", predictors: categoricalCoding }, { name: "influence screen", thresholdLeverage: 2 * p / n, thresholdCooksDistance: 4 / n, topRows: influential, status: "screen_only" }],
     artifacts: [
       tableArtifact(`Linear regression: ${data.outcomeLabel}`, "Ordinary least-squares coefficient table.", [{ key: "term", label: "Term", type: "string" }, { key: "estimate", label: "Estimate", type: "number" }, { key: "standardError", label: "SE", type: "number" }, { key: "statistic", label: "t", type: "number" }, { key: "df", label: "df", type: "number" }, { key: "pValue", label: "p", type: "number" }, { key: "lower", label: "CI lower", type: "number" }, { key: "upper", label: "CI upper", type: "number" }], coefficients, [`R² = ${rSquared}; adjusted R² = ${adjustedRSquared}; covariance = ${options.covariance}.`, "Categorical terms use deterministic treatment coding with the declared reference level."]),
       vegaArtifact("coefficient-plot", "Linear regression coefficients", { data: { values: coefficients.filter((row) => row.term !== "Intercept") }, layer: [{ mark: { type: "rule", strokeWidth: 2 }, encoding: { y: { field: "term", type: "nominal", title: null }, x: { field: "lower", type: "quantitative", title: "Coefficient" }, x2: { field: "upper" } } }, { mark: { type: "point", filled: true, size: 80 }, encoding: { y: { field: "term", type: "nominal" }, x: { field: "estimate", type: "quantitative" }, tooltip: [{ field: "term" }, { field: "estimate", format: ".4g" }, { field: "pValue", format: ".4g" }] } }, { mark: { type: "rule", strokeDash: [4, 4], color: "#777" }, encoding: { x: { datum: 0 } } }] }),
       vegaArtifact("residual-distribution", "Residual distribution", { data: { values: residualHistogram }, mark: "bar", encoding: { x: { field: "binStart", type: "quantitative", bin: "binned", title: "Residual" }, x2: { field: "binEnd" }, y: { field: "count", type: "quantitative" } } }),
+      companions.artifact,
     ],
   };
 }
@@ -3509,18 +3736,21 @@ function analyzeLogisticRegression(data, options, budget) {
   });
   const influential = [...influence].sort((a, b) => b.cooksDistance - a.cooksDistance || a.row - b.row).slice(0, 10);
   const categoricalCoding = data.predictors.filter((predictor) => predictor.type === "categorical").map((predictor) => ({ predictor: predictor.name, levels: predictor.levels, reference: predictor.reference, coding: "treatment/reference" }));
+  const companions = logisticRobustnessCompanions(data.y, x, names, beta, informationInverse, scoreResiduals, leverage, options, budget);
   return {
+    robustness: companions.robustness,
     sample: { n, events: sum(data.y), nonEvents: n - sum(data.y), predictors: data.predictors.length, coefficients: p },
     estimates: { coefficients, logLikelihood, nullLogLikelihood, mcfaddenRSquared: 1 - logLikelihood / nullLogLikelihood, auc: modelAuc, brierScore, deviance, pearsonChiSquare, covariance: options.covariance, expandedTerms: names },
     tests: [...(likelihoodRatio === null || modelDf <= 0 ? [] : [{ name: "Logistic likelihood-ratio test", statistic: likelihoodRatio, distribution: "chi-square", df: modelDf, pValue: pFromChiSquare(likelihoodRatio, modelDf) }]), ...coefficients.map((coefficient) => ({ name: `Wald test: ${coefficient.term}`, statistic: coefficient.statistic, distribution: "normal", pValue: coefficient.pValue }))],
     confidenceIntervals: coefficients.map((coefficient) => ({ parameter: `${coefficient.term} log-odds`, level: options.confidenceLevel, lower: coefficient.lower, upper: coefficient.upper, method: options.covariance === "classical" ? "model-information Wald normal" : `${options.covariance.toUpperCase()} sandwich Wald normal` })),
     effectSizes: coefficients.map((coefficient) => ({ name: `${coefficient.term} odds ratio`, estimate: coefficient.oddsRatio, lower: coefficient.oddsRatioLower, upper: coefficient.oddsRatioUpper })),
     assumptions: [{ name: "binary outcome", status: "verified" }, { name: "independent observations", status: "requires_design_review" }, { name: "linearity of continuous predictors in logit", status: "requires_diagnostic_review" }, { name: "absence of complete separation", status: "screened_by_convergence_bounds_not_proven" }, { name: "full-rank treatment coding", status: "verified_by_matrix_inversion" }],
-    diagnostics: [{ name: "IRLS convergence", status: "converged", iterations, tolerance: options.tolerance }, { name: "covariance estimator", value: options.covariance, boundary: "HC sandwich covariance is available; clustered covariance and Firth or other penalized separation correction are not implemented" }, { name: "deviance", value: deviance, residualDf }, { name: "Pearson goodness-of-fit", statistic: pearsonChiSquare, df: residualDf, pValue: pFromChiSquare(pearsonChiSquare, residualDf), boundary: "asymptotic diagnostic, not valid as a universal calibration test for sparse or continuous-covariate data" }, { name: "grouped calibration screen", statistic: calibrationStatistic, df: calibrationDf, pValue: pFromChiSquare(calibrationStatistic, calibrationDf), groups: calibration.length, values: calibration, boundary: "deterministic equal-count grouping; not claimed as a definitive Hosmer-Lemeshow implementation under tied predictions" }, { name: "AUC", value: modelAuc }, { name: "Brier score", value: brierScore }, { name: "categorical treatment coding", predictors: categoricalCoding }, { name: "influence screen", thresholdLeverage: 2 * p / n, thresholdCooksDistance: 4 / n, topRows: influential, status: "screen_only" }],
+    diagnostics: [companions.diagnostic, { name: "IRLS convergence", status: "converged", iterations, tolerance: options.tolerance }, { name: "covariance estimator", value: options.covariance, boundary: "HC sandwich covariance is available; clustered covariance and Firth or other penalized separation correction are not implemented" }, { name: "deviance", value: deviance, residualDf }, { name: "Pearson goodness-of-fit", statistic: pearsonChiSquare, df: residualDf, pValue: pFromChiSquare(pearsonChiSquare, residualDf), boundary: "asymptotic diagnostic, not valid as a universal calibration test for sparse or continuous-covariate data" }, { name: "grouped calibration screen", statistic: calibrationStatistic, df: calibrationDf, pValue: pFromChiSquare(calibrationStatistic, calibrationDf), groups: calibration.length, values: calibration, boundary: "deterministic equal-count grouping; not claimed as a definitive Hosmer-Lemeshow implementation under tied predictions" }, { name: "AUC", value: modelAuc }, { name: "Brier score", value: brierScore }, { name: "categorical treatment coding", predictors: categoricalCoding }, { name: "influence screen", thresholdLeverage: 2 * p / n, thresholdCooksDistance: 4 / n, topRows: influential, status: "screen_only" }],
     artifacts: [
       tableArtifact(`Logistic regression: ${data.outcomeLabel}`, "Maximum-likelihood logistic regression coefficient and odds-ratio table.", [{ key: "term", label: "Term", type: "string" }, { key: "estimate", label: "Log-odds", type: "number" }, { key: "standardError", label: "SE", type: "number" }, { key: "statistic", label: "z", type: "number" }, { key: "pValue", label: "p", type: "number" }, { key: "lower", label: "Log-odds CI lower", type: "number" }, { key: "upper", label: "Log-odds CI upper", type: "number" }, { key: "oddsRatio", label: "Odds ratio", type: "number" }, { key: "oddsRatioLower", label: "OR CI lower", type: "number" }, { key: "oddsRatioUpper", label: "OR CI upper", type: "number" }], coefficients, [`AUC = ${modelAuc}; Brier score = ${brierScore}; covariance = ${options.covariance}.`, "Categorical terms use deterministic treatment coding; Firth correction is not implemented."]),
       vegaArtifact("odds-ratio-plot", "Odds ratios with confidence intervals", { data: { values: coefficients.filter((row) => row.term !== "Intercept") }, layer: [{ mark: { type: "rule", strokeWidth: 2 }, encoding: { y: { field: "term", type: "nominal", title: null }, x: { field: "oddsRatioLower", type: "quantitative", scale: { type: "log" }, title: "Odds ratio" }, x2: { field: "oddsRatioUpper" } } }, { mark: { type: "point", filled: true, size: 80 }, encoding: { y: { field: "term", type: "nominal" }, x: { field: "oddsRatio", type: "quantitative", scale: { type: "log" } }, tooltip: [{ field: "term" }, { field: "oddsRatio", format: ".4g" }, { field: "pValue", format: ".4g" }] } }, { mark: { type: "rule", strokeDash: [4, 4], color: "#777" }, encoding: { x: { datum: 1, scale: { type: "log" } } } }] }),
       vegaArtifact("calibration", "Calibration by predicted-risk group", { data: { values: calibration }, layer: [{ mark: { type: "line", point: true }, encoding: { x: { field: "predicted", type: "quantitative", title: "Mean predicted probability" }, y: { field: "observed", type: "quantitative", title: "Observed event rate" }, tooltip: [{ field: "group" }, { field: "n" }, { field: "predicted", format: ".3f" }, { field: "observed", format: ".3f" }] } }, { mark: { type: "line", strokeDash: [4, 4], color: "#777" }, data: { values: [{ predicted: 0, observed: 0 }, { predicted: 1, observed: 1 }] }, encoding: { x: { field: "predicted", type: "quantitative" }, y: { field: "observed", type: "quantitative" } } }] }),
+      companions.artifact,
     ],
   };
 }
@@ -4875,6 +5105,9 @@ function finalize(request, analysis) {
     artifactReceipts,
     inferenceReceipt,
     limits: LIMITS,
+    // 분석 결정 원장(요청이 실은 그대로)과 주 분석 동반 3종(HC3·부트스트랩·순열). 없으면 null 로 정직하게.
+    decisionLog: request.decisionLog ?? null,
+    robustness: analysis.robustness ?? null,
   };
   const resultHash = sha256(core);
   const receiptCore = { schema: RECEIPT_SCHEMA, engine: ENGINE, method: request.method, requestHash, resultHash, artifactReceipts, inferenceReceipt };

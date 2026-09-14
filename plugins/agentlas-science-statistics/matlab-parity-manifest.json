@@ -100,8 +100,8 @@
   "snapshot": {
     "engine": {
       "id": "agentlas-science-statistics",
-      "version": "1.10.0",
-      "algorithmRevision": "gaussian-random-intercept-lmm-v9-js-2026-09-01",
+      "version": "1.11.0",
+      "algorithmRevision": "robustness-companions-v10-js-2026-09-14",
       "methodCount": 179,
       "methodIds": [
         "descriptive",

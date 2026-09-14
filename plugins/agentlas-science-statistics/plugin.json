@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-statistics",
   "name": "Agentlas Science Statistics",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -389,8 +389,8 @@
       },
       {
         "path": "coverage-manifest.json",
-        "sha256": "2f47b94462aeba8b5ce9f729b67e057c45ea7358d191e3c655b3c6651082278d",
-        "bytes": 269021
+        "sha256": "bac2a68a5e06ef47d7c80d9b5eb1df92dfb1b1be8c8963ac6b5d695a5b19e981",
+        "bytes": 269447
       },
       {
         "path": "figure-catalog.json",
@@ -399,8 +399,8 @@
       },
       {
         "path": "matlab-parity-manifest.json",
-        "sha256": "7336451c2b0526a81c12264656f493817e91834565a6fe1761b793d3dbfdc6f1",
-        "bytes": 136298
+        "sha256": "fadd5131abd0ad67e0778ea1453da5e63dadddcdec8d9458567963c0f5683eeb",
+        "bytes": 136291
       },
       {
         "path": "README.md",
@@ -414,8 +414,8 @@
       },
       {
         "path": "runtime/contracts.cjs",
-        "sha256": "e80a10d746f7dad8671e7c9001d38c3c25e652438336214cd4d386a20afbefce",
-        "bytes": 15202
+        "sha256": "da991257dbdb338d98a44adcd9af337cadc2027501ef631c4055e88cc0da5456",
+        "bytes": 16034
       },
       {
         "path": "runtime/core-data-schemas.cjs",
@@ -434,8 +434,8 @@
       },
       {
         "path": "runtime/engine.cjs",
-        "sha256": "b5e393edef0766edd197b4acd0a817296ac9c4754487e4b2ab92665afaef9a08",
-        "bytes": 327778
+        "sha256": "5abddc80317ac4cfafc06396bc3601e471698e24ad59f36ff35674b04a3432be",
+        "bytes": 341313
       },
       {
         "path": "runtime/figure-catalog.cjs",
