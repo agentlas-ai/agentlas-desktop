@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-research-director",
   "name": "Agentlas Science Research Director",
-  "version": "1.24.6",
+  "version": "1.24.7",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -34,7 +34,7 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "7b38ffb8e07ea7143ebf6125b8e00b0a497a4d9922fef4bfab277223d8b489b5",
+    "promptSha256": "e55779962f80ce2c9ac544033298a745f41ec286eda5ce3f8b2a488a3de79fbb",
     "failClosed": true
   },
   "provides": {
@@ -75,8 +75,8 @@
     "files": [
       {
         "path": "agent/agent.md",
-        "sha256": "0e36cb4e7ba895e5fb1c82f63947730a4d83916bcbe4dca4613648cfb1f17cd0",
-        "bytes": 63395
+        "sha256": "1f6888f31c130eace75d5066762765c7d1fbf02e0e33f705f25b5cb15b2869e5",
+        "bytes": 64278
       },
       {
         "path": "agent/routing-card.json",
