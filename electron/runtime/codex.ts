@@ -19,8 +19,7 @@ import {
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
-  unseenHistoryGap,
-} from "./continuity";
+  unseenHistoryGap, dedupeStableTurnContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -1751,7 +1750,7 @@ async function runCodexResidentTurn(input: {
     const promptText = continuing
       ? composeResumeTurnPrompt(
         req.userPrompt,
-        [gapContext, req.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        [gapContext, dedupeStableTurnContext({ chatId: req.chatId, runtimeKind: "codex", sessionId: String(session.threadId ?? resumeThreadId ?? ""), turnContext: req.turnContext, stableBlocks: req.turnContextStable }).text].filter(Boolean).join("\n\n"),
         req.locale,
       )
       : buildResidentInitialTurnPrompt(req);

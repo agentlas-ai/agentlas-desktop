@@ -4346,6 +4346,8 @@ ${effectiveUserPrompt}`;
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
+  // 세션 내내 같은 블록 — resume 턴에서 러너가 최근 보낸 것을 생략한다(runner.turnContextStable).
+  const stableTurnContextParts: string[] = [];
   // A resumed Codex session does not receive `systemPrompt` again. Reassert the
   // visible One language as host context on *every* interactive turn, otherwise
   // a Korean task marker can pull a previously English-seeded session back into
@@ -4362,7 +4364,7 @@ ${effectiveUserPrompt}`;
     ? recordInvocationInstructionSnapshot({ runId: req.runId, chatId: chat.id, projectDir: workforceProjectDir })
     : compileProjectInstructionSnapshot({ projectDir: workforceProjectDir });
   if (projectInstructions.snapshot.sources.length > 0 || projectInstructions.delta.changedRefs.length > 0) {
-    turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot));
+    turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   /*
    * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의
@@ -4640,7 +4642,7 @@ ${effectiveUserPrompt}`;
       effectiveUserPrompt,
     ) ? remoteOperationalSnapshot : null;
     if (applicableRemoteOperational) {
-      turnContextParts.push(applicableRemoteOperational.directive);
+      turnContextParts.push(applicableRemoteOperational.directive); stableTurnContextParts.push(applicableRemoteOperational.directive);
       sink({
         kind: "tool-use",
         status: locale === "ko"
@@ -4659,7 +4661,7 @@ ${effectiveUserPrompt}`;
           reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
         });
         if (experienceContext.prompt) {
-          turnContextParts.push(experienceContext.prompt);
+          turnContextParts.push(experienceContext.prompt); stableTurnContextParts.push(experienceContext.prompt);
           if (req.runId) {
             recordContextSourceMarker({
               runId: req.runId,
@@ -4682,7 +4684,7 @@ ${effectiveUserPrompt}`;
     // Taste stays a separate, lower-authority aesthetic overlay. The exact
     // verified snapshot is frozen for this chat and can change only when a
     // new runtime session starts.
-    turnContextParts.push(applicableTasteSnapshot.directive);
+    turnContextParts.push(applicableTasteSnapshot.directive); stableTurnContextParts.push(applicableTasteSnapshot.directive);
     sink({
       kind: "tool-use",
       status: locale === "ko"
@@ -4693,7 +4695,7 @@ ${effectiveUserPrompt}`;
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
   if (!req.agentAppMode && !restrictedReadBoundary) {
-    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req)));
+    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
   if (!req.agentAppMode && chat.kind === "division" && (req.toolMode || req.hubMode)) {
@@ -4733,7 +4735,7 @@ ${effectiveUserPrompt}`;
     if (chat.kind === "division") {
       systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
     } else {
-      turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`);
+      turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
     }
   }
   if (!req.agentAppMode && executionContext?.source !== "automation" && (chat.kind !== "division" || req.automationId)) {
@@ -4755,7 +4757,7 @@ ${effectiveUserPrompt}`;
     // 모델이 스스로 판단해 ## Automation 블록을 낼지 결정한다. 단어장 판정은 없다.
     // Fresh/sessionless requests already merge this into the system prompt;
     // resumed sessions receive it with their turn. Do not inject it twice.
-    turnContextParts.push(AUTOMATION_PROTOCOL);
+    turnContextParts.push(AUTOMATION_PROTOCOL); stableTurnContextParts.push(AUTOMATION_PROTOCOL);
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
   // 동기라 캐시 peek만 가능했으므로, 여기(비동기)에서 판정을 확정해 같은 턴의 턴
@@ -4845,11 +4847,11 @@ ${effectiveUserPrompt}`;
           }
         }
         if (activeGoal?.status === "active") {
-          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale));
+          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
-          turnContextParts.push(goalCompletionProtocol(locale));
-          if (!executionContext) turnContextParts.push(goalWaitProtocol());
+          turnContextParts.push(goalCompletionProtocol(locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+          if (!executionContext) { turnContextParts.push(goalWaitProtocol()); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
         }
       }
     }
@@ -4995,6 +4997,7 @@ ${effectiveUserPrompt}`;
           ? systemPrompt
           : systemPrompt + "\n\n" + runtimeTurnContext,
         ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
+        ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
         userPrompt,
         backendLabel: runtimePicked.label,
         model: runtime.model ?? undefined,

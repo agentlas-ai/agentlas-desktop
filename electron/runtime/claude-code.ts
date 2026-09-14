@@ -46,8 +46,7 @@ import {
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
-  unseenHistoryGap,
-} from "./continuity";
+  unseenHistoryGap, dedupeStableTurnContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
@@ -822,9 +821,15 @@ const runClaudeTurn = async (
     : "";
   // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
   // 새 세션: 턴 컨텍스트를 시스템 프롬프트 뒤에 붙여 세션을 시드한다.
+  const dedupedTurnContext = resumeSessionId
+    ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND, sessionId: resumeSessionId, turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable })
+    : { text: runReq.turnContext ?? "", skipped: 0, savedBytes: 0 };
+  if (dedupedTurnContext.skipped && process.env.AGENTLAS_PROMPT_DEBUG) {
+    console.warn(`[prompt] stable turn-context blocks skipped=${dedupedTurnContext.skipped} savedBytes=${dedupedTurnContext.savedBytes} chat=${runReq.chatId ?? "-"}`);
+  }
   const continuationPrompt = composeResumeTurnPrompt(
     runReq.userPrompt,
-    [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+    [gapContext, dedupedTurnContext.text].filter(Boolean).join("\n\n"),
     runReq.locale,
   );
   const flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);

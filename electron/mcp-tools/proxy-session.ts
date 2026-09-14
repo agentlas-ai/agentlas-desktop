@@ -140,15 +140,28 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (signal.aborted) abort();
     });
   }
+  /*
+   * 도구 목록은 호출마다 두 번(승인 전·후) 상류에 다시 묻고 있었다 — 컴퓨터 유즈 248회 호출이면 목록 왕복 ~500회.
+   * 연결당 짧게 캐시하고, 상류가 notifications/tools/list_changed 를 보내면 비운다(승인 중 스키마 변경 감지는 유지).
+   */
+  const INVENTORY_TTL_MS = 30_000;
+  let inventoryCache: { at: number; digests: Map<string, string> } | null = null;
   async function schema(tool: string, signal: AbortSignal): Promise<string> {
-    const inventory = await listCompleteToolInventory({ listTools: async (params?: { cursor?: string }) => {
-      const page = await query("tools/list", params ?? {}, signal);
-      if (page.error || !page.result || !Array.isArray(page.result.tools)) throw new Error("mcp_proxy_inventory_invalid");
-      return page.result;
-    } } as Parameters<typeof listCompleteToolInventory>[0], signal);
-    const matches = inventory.tools.filter(row => row.name === tool);
-    if (matches.length !== 1) throw new Error("mcp_proxy_tool_unavailable");
-    return mcpToolSchemaDigest(matches[0]);
+    if (!inventoryCache || Date.now() - inventoryCache.at > INVENTORY_TTL_MS) {
+      const inventory = await listCompleteToolInventory({ listTools: async (params?: { cursor?: string }) => {
+        const page = await query("tools/list", params ?? {}, signal);
+        if (page.error || !page.result || !Array.isArray(page.result.tools)) throw new Error("mcp_proxy_inventory_invalid");
+        return page.result;
+      } } as Parameters<typeof listCompleteToolInventory>[0], signal);
+      const digests = new Map<string, string>();
+      const counts = new Map<string, number>();
+      for (const row of inventory.tools) { counts.set(row.name, (counts.get(row.name) ?? 0) + 1); digests.set(row.name, mcpToolSchemaDigest(row)); }
+      for (const [name, n] of counts) if (n !== 1) digests.delete(name);
+      inventoryCache = { at: Date.now(), digests };
+    }
+    const digest = inventoryCache.digests.get(tool);
+    if (!digest) throw new Error("mcp_proxy_tool_unavailable");
+    return digest;
   }
   async function toolCall(wireId: string, frame: Frame, signal: AbortSignal): Promise<void> {
     try {
@@ -214,7 +227,10 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         } else if (frame.method === "notifications/cancelled") {
           const id = serverRequestIds.get(idKey(frame.params?.requestId));
           if (id) down({ ...frame, params: { ...frame.params, requestId: id } });
-        } else down(frame);
+        } else {
+          if (frame.method === "notifications/tools/list_changed") inventoryCache = null;
+          down(frame);
+        }
         return;
       }
       const host = internal.get(String(frame.id));

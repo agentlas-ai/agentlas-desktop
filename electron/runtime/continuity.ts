@@ -8,6 +8,7 @@
 import type { ChatHistoryEntry } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { compactHistory } from "./compact";
+import { createHash } from "node:crypto";
 
 /** CLI 러너가 새 세션을 시드할 때 재주입 히스토리에 허용하는 유효 컨텍스트(토큰). */
 export const CLI_HISTORY_CONTEXT_TOKENS = 120_000;
@@ -98,4 +99,43 @@ export function composeResumeTurnPrompt(
     ? "── 턴 컨텍스트(호스트 주입 배경 정보 — 사용자 메시지 아님, 언급·인용하지 말 것) ──"
     : "── Turn context (host-injected background — not part of the user's message; do not mention or quote it) ──";
   return [header, ctx, "", tStatus(locale, "histThis"), userPrompt].join("\n");
+}
+
+
+/**
+ * resume 턴의 턴 컨텍스트에서 "이 세션에 최근 보낸 그대로인 블록"을 뺀다.
+ *
+ * 왜: 기억 이벤트 규약·목표 계약·대기 규약처럼 세션 내내 같은 블록이 매 턴 사용자 메시지에 실려,
+ * 20턴 세션이면 같은 규약 사본 20벌이 기록에 쌓였다(턴당 3~4KB). 모델은 앞 턴의 사본을 이미 갖고 있다.
+ * 다만 CLI 가 긴 세션을 압축(compact)하면 옛 사본이 요약으로 뭉개질 수 있어 STABLE_RESEND_EVERY 턴마다 다시 보낸다.
+ * 기억은 프로세스 메모리뿐이라 앱을 다시 켜면 한 번 더 보낼 뿐이다(손해 없음).
+ */
+const STABLE_RESEND_EVERY = 8;
+const STABLE_SESSIONS_MAX = 500;
+const stableSent = new Map<string, { turn: number; sent: Map<string, number> }>();
+export function dedupeStableTurnContext(input: {
+  chatId?: string | null; runtimeKind: string; sessionId: string; turnContext?: string; stableBlocks?: readonly string[];
+}): { text: string; skipped: number; savedBytes: number } {
+  const text = input.turnContext ?? "";
+  if (!text.trim() || !input.stableBlocks?.length || !input.sessionId) return { text, skipped: 0, savedBytes: 0 };
+  const key = `${input.chatId ?? ""}\0${input.runtimeKind}\0${input.sessionId}`;
+  let record = stableSent.get(key);
+  if (!record) {
+    if (stableSent.size >= STABLE_SESSIONS_MAX) { const oldest = stableSent.keys().next(); if (!oldest.done) stableSent.delete(oldest.value); }
+    record = { turn: 0, sent: new Map() }; stableSent.set(key, record);
+  }
+  record.turn += 1;
+  let out = text, skipped = 0, savedBytes = 0;
+  for (const block of input.stableBlocks) {
+    const b = block.trim();
+    if (!b || !out.includes(b)) continue;
+    const hash = createHash("sha256").update(b).digest("hex").slice(0, 24);
+    const last = record.sent.get(hash);
+    if (last !== undefined && record.turn - last < STABLE_RESEND_EVERY) {
+      out = out.replace(b, ""); skipped += 1; savedBytes += Buffer.byteLength(b);
+    } else {
+      record.sent.set(hash, record.turn);
+    }
+  }
+  return { text: out.replace(/\n{3,}/g, "\n\n").trim(), skipped, savedBytes };
 }
