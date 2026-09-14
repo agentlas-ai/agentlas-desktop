@@ -36,6 +36,10 @@ import {
 } from "../mcp-tools/proxy-channel";
 import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
+import { currentUiLocale } from "../ui-locale";
+
+// Picks the Korean or English human-readable string for the current UI locale.
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -1182,7 +1186,10 @@ async function reconcileAgyMcpServersUnderLease(
 
   if (collidedWithUserEntry.length) {
     entries = entries.filter(([key]) => !collidedWithUserEntry.includes(key));
-    onStatus(`antigravity: ${collidedWithUserEntry.join(", ")} — 사용자가 Antigravity에 직접 등록한 같은 이름의 MCP 항목이 있어 이번 실행에는 Agentlas 쪽 항목을 붙이지 않습니다`);
+    onStatus(`antigravity: ${collidedWithUserEntry.join(", ")} — ${L(
+      "사용자가 Antigravity에 직접 등록한 같은 이름의 MCP 항목이 있어 이번 실행에는 Agentlas 쪽 항목을 붙이지 않습니다",
+      "the user already registered a same-named MCP entry directly in Antigravity, so this run does not attach the Agentlas entry",
+    )}`);
   }
 
   const writeGlobal = async (value: typeof parsed): Promise<void> => {
@@ -1218,7 +1225,10 @@ async function reconcileAgyMcpServersUnderLease(
     quarantinedBrowser = parsed.mcpServers[BROWSER_KEY];
     delete parsed.mcpServers[BROWSER_KEY];
     globalDirty = true;
-    onStatus("antigravity: 다른 실행이 남긴 브라우저 도구 설정을 이번 실행 동안만 치워 둡니다");
+    onStatus(L(
+      "antigravity: 다른 실행이 남긴 브라우저 도구 설정을 이번 실행 동안만 치워 둡니다",
+      "antigravity: setting aside the browser tool config left by another run, for this run only",
+    ));
   }
 
   const added: string[] = [];

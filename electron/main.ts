@@ -4138,9 +4138,13 @@ app.whenReady().then(async () => {
         isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
         notify: (attention) => {
           if (!Notification.isSupported()) return;
-          const body = attention.state === "dispatched" ? "기다리던 결과가 도착해 작업을 이어갑니다."
-            : attention.state === "expired" ? "기다리던 결과가 제한 시간 안에 도착하지 않았습니다."
-            : "기다리던 작업을 이어가기 전에 확인이 필요합니다.";
+          const body = currentUiLocale() === "ko"
+            ? (attention.state === "dispatched" ? "기다리던 결과가 도착해 작업을 이어갑니다."
+              : attention.state === "expired" ? "기다리던 결과가 제한 시간 안에 도착하지 않았습니다."
+              : "기다리던 작업을 이어가기 전에 확인이 필요합니다.")
+            : (attention.state === "dispatched" ? "The result you were waiting for arrived, so the task is resuming."
+              : attention.state === "expired" ? "The result you were waiting for did not arrive within the time limit."
+              : "Confirmation is needed before the waiting task continues.");
           const notification = new Notification({ title: "Agentlas", body, silent: true });
           notification.on("click", () => { void openOneFromNotification(); });
           notification.show();

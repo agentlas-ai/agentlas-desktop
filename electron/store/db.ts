@@ -13,6 +13,10 @@ import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
 import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
+import { currentUiLocale } from "../ui-locale";
+
+// Picks the Korean or English human-readable string for the current UI locale.
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
@@ -5596,7 +5600,9 @@ export function initStore(options: StoreInitOptions = {}): void {
       // 백업 경로를 오류에 실어 보낸다. 이 단계는 되돌릴 수 없으므로 그 파일이 유일한 길이다.
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}`
-        + (seatBackup ? ` — 이 단계 직전 백업: ${seatBackup}` : " — 백업을 만들지 못했다"),
+        + (seatBackup
+          ? L(` — 이 단계 직전 백업: ${seatBackup}`, ` — backup right before this step: ${seatBackup}`)
+          : L(" — 백업을 만들지 못했다", " — could not create a backup")),
       );
     } finally {
       _db.pragma("foreign_keys = ON");
@@ -5800,7 +5806,9 @@ export function initStore(options: StoreInitOptions = {}): void {
     } catch (error) {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}`
-        + (seatSessionBackup ? ` — 이 단계 직전 백업: ${seatSessionBackup}` : " — 백업을 만들지 못했다"),
+        + (seatSessionBackup
+          ? L(` — 이 단계 직전 백업: ${seatSessionBackup}`, ` — backup right before this step: ${seatSessionBackup}`)
+          : L(" — 백업을 만들지 못했다", " — could not create a backup")),
       );
     }
   }
@@ -6554,9 +6562,17 @@ export function initStore(options: StoreInitOptions = {}): void {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `store_upgrade_failed: 스키마 ${userVersion} → ${SCHEMA_VERSION} 승급이 멈췄습니다 — ${reason}` +
-        (upgradeBackupPath ? ` (승급 직전 사본: ${upgradeBackupPath})` : "") +
-        " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 사본으로 되돌린 뒤 보고해 주세요.",
+      `store_upgrade_failed: ${L(
+        `스키마 ${userVersion} → ${SCHEMA_VERSION} 승급이 멈췄습니다 — ${reason}`,
+        `schema ${userVersion} → ${SCHEMA_VERSION} upgrade stopped — ${reason}`,
+      )}` +
+        (upgradeBackupPath
+          ? L(` (승급 직전 사본: ${upgradeBackupPath})`, ` (copy taken right before the upgrade: ${upgradeBackupPath})`)
+          : "") +
+        L(
+          " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 사본으로 되돌린 뒤 보고해 주세요.",
+          " · user_version was not advanced, so the next run will stop at the same point. Restore from the copy, then report this.",
+        ),
       { cause: error instanceof Error ? error : undefined },
     );
   }

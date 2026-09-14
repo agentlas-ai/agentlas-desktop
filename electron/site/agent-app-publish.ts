@@ -53,6 +53,11 @@ import {
   appendSiteAgentAppDeployment,
   siteAgentAppsRoot,
 } from "./store";
+import { currentUiLocale } from "../ui-locale";
+
+// Picks the Korean or English human-readable string for the current UI locale.
+// Machine-readable codes/reasons are untouched; only prose passes through this.
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 const COMMAND_OUTPUT_LIMIT = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 5 * 60_000;
@@ -123,10 +128,34 @@ const PROVIDER_URLS: Record<SitePublishProvider, Record<SiteProviderUrlKind, str
   },
 };
 
+const FREE_PLAN_NOTE_TEXT: Record<SitePublishProvider, () => string> = {
+  vercel: () =>
+    L(
+      "Vercel Hobby는 개인·비상업 용도 정책이 적용됩니다. 계정과 사용 목적 적합성은 사용자가 확인해야 합니다.",
+      "Vercel Hobby is for personal, non-commercial use. The user must confirm the account and usage fit that policy.",
+    ),
+  railway: () =>
+    L(
+      "Railway Free는 제한된 월 크레딧을 사용합니다. 초과 사용과 계정 요금제는 사용자가 확인해야 합니다.",
+      "Railway Free uses a limited monthly credit. The user must confirm overage usage and the account plan.",
+    ),
+  render: () =>
+    L(
+      "Render Free 웹 서비스는 유휴 시 중지될 수 있으며 데모 용도에 적합합니다. 프로덕션 SLA가 아닙니다.",
+      "Render Free web services can spin down when idle and are meant for demos, not a production SLA.",
+    ),
+};
+
 const FREE_PLAN_NOTES: Record<SitePublishProvider, string> = {
-  vercel: "Vercel Hobby는 개인·비상업 용도 정책이 적용됩니다. 계정과 사용 목적 적합성은 사용자가 확인해야 합니다.",
-  railway: "Railway Free는 제한된 월 크레딧을 사용합니다. 초과 사용과 계정 요금제는 사용자가 확인해야 합니다.",
-  render: "Render Free 웹 서비스는 유휴 시 중지될 수 있으며 데모 용도에 적합합니다. 프로덕션 SLA가 아닙니다.",
+  get vercel() {
+    return FREE_PLAN_NOTE_TEXT.vercel();
+  },
+  get railway() {
+    return FREE_PLAN_NOTE_TEXT.railway();
+  },
+  get render() {
+    return FREE_PLAN_NOTE_TEXT.render();
+  },
 };
 
 const CONSENT_BOUNDARY = {
@@ -390,7 +419,7 @@ function isProvider(value: unknown): value is SitePublishProvider {
 }
 
 function assertProvider(value: unknown): SitePublishProvider {
-  if (!isProvider(value)) throw new Error("지원하지 않는 Site 배포 provider입니다.");
+  if (!isProvider(value)) throw new Error(L("지원하지 않는 Site 배포 provider입니다.", "Unsupported Site deploy provider."));
   return value;
 }
 
@@ -407,7 +436,7 @@ function safeOptionalIdentifier(value: unknown, label: string): string | undefin
   if (value === undefined || value === null || value === "") return undefined;
   const text = String(value).trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(text)) {
-    throw new Error(`${label} 형식이 올바르지 않습니다.`);
+    throw new Error(L(`${label} 형식이 올바르지 않습니다.`, `${label} format is invalid.`));
   }
   return text;
 }
@@ -616,7 +645,7 @@ async function probeProviderConnection(
         connected: false,
         accountLabel: null,
         method: null,
-        reason: "Render API key가 저장되어 있지 않습니다.",
+        reason: L("Render API key가 저장되어 있지 않습니다.", "No Render API key is stored."),
       };
     }
     try {
@@ -625,13 +654,13 @@ async function probeProviderConnection(
         const label = cleanSingleLine(findNamedString(response.body, new Set(["name", "ownerName"])) ?? "", 120) || null;
         return { connected: true, accountLabel: label, method: "token", reason: null };
       }
-      return { connected: false, accountLabel: null, method: null, reason: `Render API 인증이 거부되었습니다 (HTTP ${response.status}).` };
+      return { connected: false, accountLabel: null, method: null, reason: L(`Render API 인증이 거부되었습니다 (HTTP ${response.status}).`, `Render API authentication was rejected (HTTP ${response.status}).`) };
     } catch {
-      return { connected: false, accountLabel: null, method: null, reason: "Render API 연결을 확인할 수 없습니다." };
+      return { connected: false, accountLabel: null, method: null, reason: L("Render API 연결을 확인할 수 없습니다.", "Could not verify the Render API connection.") };
     }
   }
   if (!executable) {
-    return { connected: false, accountLabel: null, method: null, reason: `${PROVIDER_CLI[provider]} CLI가 설치되어 있지 않습니다.` };
+    return { connected: false, accountLabel: null, method: null, reason: L(`${PROVIDER_CLI[provider]} CLI가 설치되어 있지 않습니다.`, `${PROVIDER_CLI[provider]} CLI is not installed.`) };
   }
   const args = provider === "vercel"
     ? ["whoami", "--no-color"]
@@ -648,7 +677,7 @@ async function probeProviderConnection(
     timeoutMs: 15_000,
   });
   if (result.code !== 0 || result.timedOut || result.spawnFailed) {
-    return { connected: false, accountLabel: null, method: null, reason: `${provider} 로그인이 필요합니다.` };
+    return { connected: false, accountLabel: null, method: null, reason: L(`${provider} 로그인이 필요합니다.`, `${provider} login is required.`) };
   }
   return {
     connected: true,
@@ -663,9 +692,9 @@ async function capturePreparedProviderSession(
 ): Promise<PreparedProviderSession> {
   const token = await storedProviderToken(provider);
   const executable = await resolveExecutable(PROVIDER_CLI[provider]);
-  if (!executable) throw new PublishFailure("provider-cli-missing", `${PROVIDER_CLI[provider]} CLI가 없습니다.`, {
+  if (!executable) throw new PublishFailure("provider-cli-missing", L(`${PROVIDER_CLI[provider]} CLI가 없습니다.`, `${PROVIDER_CLI[provider]} CLI is missing.`), {
     code: "provider-cli-missing",
-    message: `${PROVIDER_CLI[provider]} CLI를 설치한 뒤 다시 시도해 주세요.`,
+    message: L(`${PROVIDER_CLI[provider]} CLI를 설치한 뒤 다시 시도해 주세요.`, `Install the ${PROVIDER_CLI[provider]} CLI, then try again.`),
     url: PROVIDER_URLS[provider].docs,
   });
   const version = await runCommand({
@@ -678,17 +707,17 @@ async function capturePreparedProviderSession(
   const cliVersion = version.code === 0 ? parseVersion(`${version.stdout}\n${version.stderr}`) : null;
   const connection = await probeProviderConnection(provider, executable, token);
   if (!connection.connected || !connection.method) {
-    throw new PublishFailure("provider-login-required", connection.reason || `${provider} 로그인이 필요합니다.`, {
+    throw new PublishFailure("provider-login-required", connection.reason || L(`${provider} 로그인이 필요합니다.`, `${provider} login is required.`), {
       code: "provider-login-required",
-      message: connection.reason || `${provider} 로그인이 필요합니다.`,
+      message: connection.reason || L(`${provider} 로그인이 필요합니다.`, `${provider} login is required.`),
       url: PROVIDER_URLS[provider].token,
     });
   }
   const accountLabel = cleanSingleLine(connection.accountLabel ?? "", 120);
   if (!accountLabel) {
-    throw new PublishFailure("provider-account-unidentified", `${provider} 계정 identity를 확인할 수 없습니다.`, {
+    throw new PublishFailure("provider-account-unidentified", L(`${provider} 계정 identity를 확인할 수 없습니다.`, `Could not confirm the ${provider} account identity.`), {
       code: "provider-login-required",
-      message: `${provider} CLI에서 로그인 계정 identity를 확인한 뒤 다시 시도해 주세요.`,
+      message: L(`${provider} CLI에서 로그인 계정 identity를 확인한 뒤 다시 시도해 주세요.`, `Confirm the logged-in account identity in the ${provider} CLI, then try again.`),
       url: PROVIDER_URLS[provider].dashboard,
     });
   }
@@ -706,9 +735,9 @@ async function capturePreparedProviderSession(
 async function reverifyPreparedProviderSession(session: PreparedProviderSession): Promise<void> {
   const executable = await fs.realpath(session.executable).catch(() => null);
   if (executable !== session.executable) {
-    throw new PublishFailure("provider-session-changed", "Provider CLI identity가 승인 중 변경되었습니다.", {
+    throw new PublishFailure("provider-session-changed", L("Provider CLI identity가 승인 중 변경되었습니다.", "The provider CLI identity changed during approval."), {
       code: "provider-login-required",
-      message: "Provider CLI 또는 계정 상태가 변경되었습니다. 다시 확인해 주세요.",
+      message: L("Provider CLI 또는 계정 상태가 변경되었습니다. 다시 확인해 주세요.", "The provider CLI or account state changed. Please check again."),
       url: PROVIDER_URLS[session.provider].dashboard,
     });
   }
@@ -718,9 +747,9 @@ async function reverifyPreparedProviderSession(session: PreparedProviderSession)
     connection.method !== session.connectionMethod ||
     cleanSingleLine(connection.accountLabel ?? "", 120) !== session.accountLabel
   ) {
-    throw new PublishFailure("provider-session-changed", "Provider 계정 identity가 승인 중 변경되었습니다.", {
+    throw new PublishFailure("provider-session-changed", L("Provider 계정 identity가 승인 중 변경되었습니다.", "The provider account identity changed during approval."), {
       code: "provider-login-required",
-      message: "승인 화면에 표시된 provider 계정과 현재 계정이 다릅니다. 다시 시도해 주세요.",
+      message: L("승인 화면에 표시된 provider 계정과 현재 계정이 다릅니다. 다시 시도해 주세요.", "The provider account shown on the approval screen differs from the current account. Please try again."),
       url: PROVIDER_URLS[session.provider].dashboard,
     });
   }
@@ -728,16 +757,16 @@ async function reverifyPreparedProviderSession(session: PreparedProviderSession)
 
 async function capturePreparedRenderSession(ownerId: string): Promise<PreparedRenderSession> {
   const apiKey = await storedProviderToken("render");
-  if (!apiKey) throw new PublishFailure("provider-login-required", "Render API key가 Keychain에 없습니다.", {
+  if (!apiKey) throw new PublishFailure("provider-login-required", L("Render API key가 Keychain에 없습니다.", "No Render API key is in the Keychain."), {
     code: "provider-login-required",
-    message: "Render API key를 생성해 Keychain에 저장해 주세요.",
+    message: L("Render API key를 생성해 Keychain에 저장해 주세요.", "Create a Render API key and store it in the Keychain."),
     url: PROVIDER_URLS.render.token,
   });
   const connection = await probeProviderConnection("render", null, apiKey);
   if (!connection.connected || connection.method !== "token") {
-    throw new PublishFailure("provider-login-required", connection.reason || "Render API 인증이 필요합니다.", {
+    throw new PublishFailure("provider-login-required", connection.reason || L("Render API 인증이 필요합니다.", "Render API authentication is required."), {
       code: "provider-login-required",
-      message: connection.reason || "Render API key를 다시 확인해 주세요.",
+      message: connection.reason || L("Render API key를 다시 확인해 주세요.", "Please check the Render API key again."),
       url: PROVIDER_URLS.render.token,
     });
   }
@@ -756,9 +785,9 @@ async function capturePreparedRenderSession(ownerId: string): Promise<PreparedRe
 async function reverifyPreparedRenderSession(session: PreparedRenderSession): Promise<void> {
   const current = await storedProviderToken("render");
   if (!current || fullFingerprint(current) !== session.apiKeyFingerprint) {
-    throw new PublishFailure("provider-session-changed", "Render API key가 native 승인 중 변경되었습니다.", {
+    throw new PublishFailure("provider-session-changed", L("Render API key가 native 승인 중 변경되었습니다.", "The Render API key changed during native approval."), {
       code: "provider-login-required",
-      message: "승인 화면에 표시된 Render API key fingerprint와 현재 Keychain 값이 다릅니다. 다시 시도해 주세요.",
+      message: L("승인 화면에 표시된 Render API key fingerprint와 현재 Keychain 값이 다릅니다. 다시 시도해 주세요.", "The Render API key fingerprint shown on the approval screen differs from the current Keychain value. Please try again."),
       url: PROVIDER_URLS.render.token,
     });
   }
@@ -769,9 +798,9 @@ async function reverifyPreparedRenderSession(session: PreparedRenderSession): Pr
     connection.method !== "token" ||
     observedAccountLabel !== session.observedAccountLabel
   ) {
-    throw new PublishFailure("provider-session-changed", "승인된 Render API key를 다시 검증할 수 없습니다.", {
+    throw new PublishFailure("provider-session-changed", L("승인된 Render API key를 다시 검증할 수 없습니다.", "Could not re-verify the approved Render API key."), {
       code: "provider-login-required",
-      message: "Render API key와 승인 화면의 계정 identity를 확인한 뒤 다시 시도해 주세요.",
+      message: L("Render API key와 승인 화면의 계정 identity를 확인한 뒤 다시 시도해 주세요.", "Confirm the Render API key and the account identity on the approval screen, then try again."),
       url: PROVIDER_URLS.render.token,
     });
   }
@@ -826,7 +855,7 @@ export async function listSiteAgentAppPublishProviderStatuses(): Promise<SiteAge
 function validateProviderToken(value: string): string {
   const token = String(value ?? "").trim();
   if (token.length < 12 || token.length > 4_096 || /[\0-\x20\x7f]/.test(token)) {
-    throw new Error("Provider token 형식이 올바르지 않습니다.");
+    throw new Error(L("Provider token 형식이 올바르지 않습니다.", "Provider token format is invalid."));
   }
   return token;
 }
@@ -837,7 +866,7 @@ export async function saveSiteAgentAppPublishProviderToken(input: {
 }): Promise<SiteAgentAppPublishTokenResult> {
   const provider = assertProvider(input.provider);
   if (isSitePublishProviderCredentialLocked(provider)) {
-    throw new Error("이 provider credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
+    throw new Error(L("이 provider credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.", "This provider credential cannot be changed during a native publish approval or deployment."));
   }
   const token = validateProviderToken(input.token);
   await setSecret(PROVIDER_TOKEN_KEYS[provider], token);
@@ -850,7 +879,7 @@ export async function removeSiteAgentAppPublishProviderToken(
 ): Promise<SiteAgentAppPublishTokenResult> {
   const provider = assertProvider(providerInput);
   if (isSitePublishProviderCredentialLocked(provider)) {
-    throw new Error("이 provider credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
+    throw new Error(L("이 provider credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.", "This provider credential cannot be changed during a native publish approval or deployment."));
   }
   await deleteSecret(PROVIDER_TOKEN_KEYS[provider]);
   const status = await getSiteAgentAppPublishProviderStatus(provider);
@@ -863,7 +892,7 @@ export async function openSiteAgentAppPublishProviderUrl(input: {
 }): Promise<{ opened: boolean; provider: SitePublishProvider; kind: SiteProviderUrlKind }> {
   const provider = assertProvider(input.provider);
   if (input.kind !== "signup" && input.kind !== "token" && input.kind !== "login" && input.kind !== "dashboard" && input.kind !== "docs") {
-    throw new Error("지원하지 않는 provider URL 종류입니다.");
+    throw new Error(L("지원하지 않는 provider URL 종류입니다.", "Unsupported provider URL kind."));
   }
   await shell.openExternal(PROVIDER_URLS[provider][input.kind]);
   return { opened: true, provider, kind: input.kind };
@@ -881,7 +910,7 @@ export async function connectSiteAgentAppPublishProvider(
       status,
       userAction: {
         code: "native-approval-required",
-        message: "이 provider는 native 게시 승인 또는 배포 중이므로 로그인 상태를 변경할 수 없습니다.",
+        message: L("이 provider는 native 게시 승인 또는 배포 중이므로 로그인 상태를 변경할 수 없습니다.", "This provider's login state cannot be changed during a native publish approval or deployment."),
       },
       consentBoundary: CONSENT_BOUNDARY,
     };
@@ -896,8 +925,8 @@ export async function connectSiteAgentAppPublishProvider(
       userAction: {
         code: "provider-login-required",
         message: current.tokenStored
-          ? current.reason || "저장된 Render API key를 다시 확인해 주세요."
-          : "Render API key를 생성해 Keychain에 저장해 주세요.",
+          ? current.reason || L("저장된 Render API key를 다시 확인해 주세요.", "Please check the stored Render API key again.")
+          : L("Render API key를 생성해 Keychain에 저장해 주세요.", "Create a Render API key and store it in the Keychain."),
         url: PROVIDER_URLS.render.token,
       },
       consentBoundary: CONSENT_BOUNDARY,
@@ -911,7 +940,7 @@ export async function connectSiteAgentAppPublishProvider(
       status: current,
       userAction: {
         code: "provider-cli-missing",
-        message: `${PROVIDER_CLI[provider]} CLI를 설치하거나 provider token을 저장해 주세요.`,
+        message: L(`${PROVIDER_CLI[provider]} CLI를 설치하거나 provider token을 저장해 주세요.`, `Install the ${PROVIDER_CLI[provider]} CLI or store a provider token.`),
         url: PROVIDER_URLS[provider].docs,
       },
       consentBoundary: CONSENT_BOUNDARY,
@@ -937,8 +966,8 @@ export async function connectSiteAgentAppPublishProvider(
     userAction: {
       code: "provider-login-required",
       message: result.timedOut
-        ? "브라우저에서 provider 로그인을 완료한 뒤 다시 연결해 주세요."
-        : "Provider 로그인이 완료되지 않았습니다. 브라우저 로그인 또는 token 저장이 필요합니다.",
+        ? L("브라우저에서 provider 로그인을 완료한 뒤 다시 연결해 주세요.", "Finish the provider login in the browser, then reconnect.")
+        : L("Provider 로그인이 완료되지 않았습니다. 브라우저 로그인 또는 token 저장이 필요합니다.", "Provider login was not completed. Browser login or a stored token is required."),
       url: PROVIDER_URLS[provider].token,
     },
     consentBoundary: CONSENT_BOUNDARY,
@@ -983,15 +1012,15 @@ async function readBoundedCanonicalFile(
   limit: number,
 ): Promise<Buffer> {
   const resolved = path.resolve(filePath);
-  if (!isInside(root, resolved)) throw new Error("배포 artifact 파일 경로가 안전하지 않습니다.");
+  if (!isInside(root, resolved)) throw new Error(L("배포 artifact 파일 경로가 안전하지 않습니다.", "The deployment artifact file path is not safe."));
   const canonical = await fs.realpath(resolved);
   if (canonical !== resolved || !isInside(root, canonical)) {
-    throw new Error("배포 artifact에 symlink 또는 root 밖 경로가 포함되어 있습니다.");
+    throw new Error(L("배포 artifact에 symlink 또는 root 밖 경로가 포함되어 있습니다.", "The deployment artifact contains a symlink or a path outside the root."));
   }
   const handle = await fs.open(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > limit) throw new Error("배포 artifact 파일 크기 또는 형식이 올바르지 않습니다.");
+    if (!stat.isFile() || stat.size > limit) throw new Error(L("배포 artifact 파일 크기 또는 형식이 올바르지 않습니다.", "The deployment artifact file size or format is invalid."));
     return await handle.readFile();
   } finally {
     await handle.close();
@@ -1002,9 +1031,9 @@ async function readJsonObject(root: string, filePath: string, limit = JSON_FILE_
   const bytes = await readBoundedCanonicalFile(root, filePath, limit);
   let value: unknown;
   try { value = JSON.parse(bytes.toString("utf8")); } catch {
-    throw new Error(`${path.basename(filePath)} JSON이 손상되었습니다.`);
+    throw new Error(L(`${path.basename(filePath)} JSON이 손상되었습니다.`, `${path.basename(filePath)} JSON is corrupted.`));
   }
-  if (!jsonRecord(value)) throw new Error(`${path.basename(filePath)} 형식이 올바르지 않습니다.`);
+  if (!jsonRecord(value)) throw new Error(L(`${path.basename(filePath)} 형식이 올바르지 않습니다.`, `${path.basename(filePath)} format is invalid.`));
   return value;
 }
 
@@ -1019,7 +1048,7 @@ function assertSafeArtifactFileName(relativePath: string): void {
     base === ".pypirc" ||
     /\.(?:pem|key|p12|pfx|keystore|jks)$/.test(base)
   ) {
-    throw new Error(`배포 artifact에 허용되지 않는 secret 파일이 있습니다: ${relativePath}`);
+    throw new Error(L(`배포 artifact에 허용되지 않는 secret 파일이 있습니다: ${relativePath}`, `The deployment artifact has a disallowed secret file: ${relativePath}`));
   }
 }
 
@@ -1031,35 +1060,35 @@ async function validateArtifactTree(sourceRoot: string): Promise<ArtifactFile[]>
     for (const entry of entries) {
       if (entry.name === ".DS_Store") continue;
       if (entry.name.includes("\0") || entry.name === "." || entry.name === "..") {
-        throw new Error("배포 artifact 파일명이 올바르지 않습니다.");
+        throw new Error(L("배포 artifact 파일명이 올바르지 않습니다.", "The deployment artifact file name is invalid."));
       }
       const absolute = path.join(directory, entry.name);
       const relativePath = path.relative(sourceRoot, absolute);
       if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-        throw new Error("배포 artifact 경로가 root 밖을 가리킵니다.");
+        throw new Error(L("배포 artifact 경로가 root 밖을 가리킵니다.", "The deployment artifact path points outside the root."));
       }
-      if (entry.isSymbolicLink()) throw new Error(`배포 artifact에 symlink가 있습니다: ${relativePath}`);
+      if (entry.isSymbolicLink()) throw new Error(L(`배포 artifact에 symlink가 있습니다: ${relativePath}`, `The deployment artifact has a symlink: ${relativePath}`));
       if (entry.isDirectory()) {
         if (SKIPPED_SOURCE_DIRS.has(entry.name)) continue;
         await walk(absolute);
         continue;
       }
-      if (!entry.isFile()) throw new Error(`배포 artifact에 일반 파일이 아닌 항목이 있습니다: ${relativePath}`);
+      if (!entry.isFile()) throw new Error(L(`배포 artifact에 일반 파일이 아닌 항목이 있습니다: ${relativePath}`, `The deployment artifact has an entry that is not a regular file: ${relativePath}`));
       assertSafeArtifactFileName(relativePath);
       const canonical = await fs.realpath(absolute);
       if (canonical !== path.resolve(absolute) || !isInside(sourceRoot, canonical)) {
-        throw new Error(`배포 artifact 파일 경로가 변경되었거나 안전하지 않습니다: ${relativePath}`);
+        throw new Error(L(`배포 artifact 파일 경로가 변경되었거나 안전하지 않습니다: ${relativePath}`, `The deployment artifact file path changed or is unsafe: ${relativePath}`));
       }
       const stat = await fs.lstat(canonical);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > ARTIFACT_SINGLE_FILE_LIMIT) {
-        throw new Error(`배포 artifact 파일이 너무 크거나 안전하지 않습니다: ${relativePath}`);
+        throw new Error(L(`배포 artifact 파일이 너무 크거나 안전하지 않습니다: ${relativePath}`, `The deployment artifact file is too large or unsafe: ${relativePath}`));
       }
       total += stat.size;
       if (files.length >= ARTIFACT_FILE_LIMIT || total > ARTIFACT_TOTAL_LIMIT) {
-        throw new Error("배포 artifact가 허용된 파일 수 또는 전체 크기를 초과했습니다.");
+        throw new Error(L("배포 artifact가 허용된 파일 수 또는 전체 크기를 초과했습니다.", "The deployment artifact exceeds the allowed file count or total size."));
       }
       const bytes = await readBoundedCanonicalFile(sourceRoot, canonical, ARTIFACT_SINGLE_FILE_LIMIT);
-      if (bytes.byteLength !== stat.size) throw new Error(`배포 artifact 파일이 검증 중 변경되었습니다: ${relativePath}`);
+      if (bytes.byteLength !== stat.size) throw new Error(L(`배포 artifact 파일이 검증 중 변경되었습니다: ${relativePath}`, `The deployment artifact file changed during verification: ${relativePath}`));
       files.push({
         relativePath,
         bytes: stat.size,
@@ -1068,7 +1097,7 @@ async function validateArtifactTree(sourceRoot: string): Promise<ArtifactFile[]>
       if (stat.size <= 1024 * 1024 && TEXT_SOURCE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
         const text = bytes.toString("utf8");
         if (EMBEDDED_SECRET_PATTERN.test(text)) {
-          throw new Error(`배포 artifact 소스에 secret 값으로 보이는 문자열이 있습니다: ${relativePath}`);
+          throw new Error(L(`배포 artifact 소스에 secret 값으로 보이는 문자열이 있습니다: ${relativePath}`, `The deployment artifact source appears to contain a secret-like string: ${relativePath}`));
         }
       }
     }
@@ -1120,7 +1149,7 @@ function assertProjectBinding(project: SiteProjectMeta, binding: JsonRecord): vo
     runtime?.localEndpoint !== "/__agentlas/v1/run" ||
     runtime?.publicEndpoint !== "/api/run"
   ) {
-    throw new Error("Astryx public runtime binding이 Site 프로젝트와 일치하지 않습니다.");
+    throw new Error(L("Astryx public runtime binding이 Site 프로젝트와 일치하지 않습니다.", "The Astryx public runtime binding does not match the Site project."));
   }
   const forbiddenKeys = new Set([
     "systemprompt",
@@ -1141,7 +1170,7 @@ function assertProjectBinding(project: SiteProjectMeta, binding: JsonRecord): vo
     for (const [key, child] of Object.entries(value)) {
       const normalized = key.toLowerCase().replace(/[^a-z]/g, "");
       if (forbiddenKeys.has(normalized)) {
-        throw new Error(`Public binding에 허용되지 않는 필드가 있습니다: ${key}`);
+        throw new Error(L(`Public binding에 허용되지 않는 필드가 있습니다: ${key}`, `The public binding has a disallowed field: ${key}`));
       }
       inspect(child);
     }
@@ -1156,21 +1185,21 @@ async function validateDeployableContract(
 ): Promise<void> {
   const fileSet = new Set(artifact.files.map((file) => file.relativePath.replaceAll(path.sep, "/")));
   if (!scriptValue(artifact.packageJson, "build")) {
-    throw new PublishFailure("deployment-contract-missing", "Astryx package에 production build script가 없습니다.", {
+    throw new PublishFailure("deployment-contract-missing", L("Astryx package에 production build script가 없습니다.", "The Astryx package has no production build script."), {
       code: "deployment-contract-missing",
-      message: "Agent App을 다시 생성해 public runtime 계약을 포함해 주세요.",
+      message: L("Agent App을 다시 생성해 public runtime 계약을 포함해 주세요.", "Regenerate the Agent App to include the public runtime contract."),
     });
   }
   if (provider === "vercel" && !["api/run.mjs", "api/run.js", "api/run.cjs", "api/run.ts"].some((file) => fileSet.has(file))) {
-    throw new PublishFailure("deployment-contract-missing", "Vercel /api/run 함수가 없습니다.", {
+    throw new PublishFailure("deployment-contract-missing", L("Vercel /api/run 함수가 없습니다.", "The Vercel /api/run function is missing."), {
       code: "deployment-contract-missing",
-      message: "Agent App을 다시 생성해 Vercel public runtime을 포함해 주세요.",
+      message: L("Agent App을 다시 생성해 Vercel public runtime을 포함해 주세요.", "Regenerate the Agent App to include the Vercel public runtime."),
     });
   }
   if ((provider === "railway" || provider === "render") && (!fileSet.has("server.mjs") || !scriptValue(artifact.packageJson, "start"))) {
-    throw new PublishFailure("deployment-contract-missing", `${provider} 실행 서버 계약이 없습니다.`, {
+    throw new PublishFailure("deployment-contract-missing", L(`${provider} 실행 서버 계약이 없습니다.`, `The ${provider} execution server contract is missing.`), {
       code: "deployment-contract-missing",
-      message: "Agent App을 다시 생성해 server.mjs와 start script를 포함해 주세요.",
+      message: L("Agent App을 다시 생성해 server.mjs와 start script를 포함해 주세요.", "Regenerate the Agent App to include server.mjs and the start script."),
     });
   }
   const sourceFiles = artifact.files.filter((file) => /\.(?:cjs|js|mjs|ts)$/.test(file.relativePath));
@@ -1180,15 +1209,15 @@ async function validateDeployableContract(
     source += `\n${(await readBoundedCanonicalFile(artifact.sourceRoot, path.join(artifact.sourceRoot, file.relativePath), 1024 * 1024)).toString("utf8")}`;
   }
   if (!source.includes(LLM_ENV[llmProvider]) || source.includes(`VITE_${LLM_ENV[llmProvider]}`)) {
-    throw new PublishFailure("deployment-contract-missing", "선택한 BYOK provider의 server-only env 계약이 없습니다.", {
+    throw new PublishFailure("deployment-contract-missing", L("선택한 BYOK provider의 server-only env 계약이 없습니다.", "The server-only env contract for the selected BYOK provider is missing."), {
       code: "deployment-contract-missing",
-      message: "Agent App을 다시 생성해 선택한 LLM provider runtime을 포함해 주세요.",
+      message: L("Agent App을 다시 생성해 선택한 LLM provider runtime을 포함해 주세요.", "Regenerate the Agent App to include the selected LLM provider runtime."),
     });
   }
   if (!source.includes(APP_ACCESS_ENV) || source.includes(`VITE_${APP_ACCESS_ENV}`)) {
-    throw new PublishFailure("deployment-contract-missing", "공개 Agent App access-key 계약이 없습니다.", {
+    throw new PublishFailure("deployment-contract-missing", L("공개 Agent App access-key 계약이 없습니다.", "The public Agent App access-key contract is missing."), {
       code: "deployment-contract-missing",
-      message: "Agent App을 다시 생성해 server-only access-key 인증 계약을 포함해 주세요.",
+      message: L("Agent App을 다시 생성해 server-only access-key 인증 계약을 포함해 주세요.", "Regenerate the Agent App to include the server-only access-key auth contract."),
     });
   }
 }
@@ -1201,7 +1230,7 @@ async function validateSiteAgentAppArtifact(
   const project = getSiteProject(projectId);
   const artifact = project.agentAppArtifact;
   if (project.surface !== "agent-app" || !project.agentAppTarget || !artifact || artifact.status !== "ready") {
-    throw new Error("배포 가능한 ready 상태의 Agent App artifact가 없습니다.");
+    throw new Error(L("배포 가능한 ready 상태의 Agent App artifact가 없습니다.", "There is no Agent App artifact in a ready-to-deploy state."));
   }
   const record = getAgentApp(artifact.appRecordId);
   if (
@@ -1210,15 +1239,15 @@ async function validateSiteAgentAppArtifact(
     record.scaffold.appId !== artifact.appId ||
     path.resolve(record.rootPath) !== path.resolve(artifact.rootPath)
   ) {
-    throw new Error("Site 프로젝트와 AppFactory registry binding이 일치하지 않습니다.");
+    throw new Error(L("Site 프로젝트와 AppFactory registry binding이 일치하지 않습니다.", "The Site project does not match the AppFactory registry binding."));
   }
   const allowedRoot = await fs.realpath(siteAgentAppsRoot());
   const artifactRoot = await fs.realpath(artifact.rootPath);
-  if (!isInside(allowedRoot, artifactRoot)) throw new Error("Agent App artifact가 허용된 Site root 밖에 있습니다.");
+  if (!isInside(allowedRoot, artifactRoot)) throw new Error(L("Agent App artifact가 허용된 Site root 밖에 있습니다.", "The Agent App artifact is outside the allowed Site root."));
   const recordRoot = await fs.realpath(record.rootPath);
-  if (recordRoot !== artifactRoot) throw new Error("Agent App registry canonical root가 일치하지 않습니다.");
+  if (recordRoot !== artifactRoot) throw new Error(L("Agent App registry canonical root가 일치하지 않습니다.", "The Agent App registry canonical root does not match."));
   const sourceRoot = await fs.realpath(path.join(artifactRoot, "astryx-app"));
-  if (!isInside(artifactRoot, sourceRoot)) throw new Error("Astryx package root가 Agent App artifact 밖에 있습니다.");
+  if (!isInside(artifactRoot, sourceRoot)) throw new Error(L("Astryx package root가 Agent App artifact 밖에 있습니다.", "The Astryx package root is outside the Agent App artifact."));
 
   const packageJson = await readJsonObject(sourceRoot, path.join(sourceRoot, "package.json"));
   const binding = await readJsonObject(sourceRoot, path.join(sourceRoot, "public", "agentlas.binding.json"));
@@ -1227,7 +1256,7 @@ async function validateSiteAgentAppArtifact(
     dependencyVersion(packageJson, "dependencies", "@astryxdesign/theme-neutral") !== "0.1.4" ||
     dependencyVersion(packageJson, "dependencies", "react") !== "19.1.0"
   ) {
-    throw new Error("Astryx/React dependency pin이 Agentlas Site 계약과 일치하지 않습니다.");
+    throw new Error(L("Astryx/React dependency pin이 Agentlas Site 계약과 일치하지 않습니다.", "The Astryx/React dependency pin does not match the Agentlas Site contract."));
   }
   assertProjectBinding(project, binding);
   const files = await validateArtifactTree(sourceRoot);
@@ -1252,19 +1281,19 @@ async function copyValidatedArtifact(artifact: ValidatedArtifact): Promise<strin
     for (const file of artifact.files) {
       const source = path.join(artifact.sourceRoot, file.relativePath);
       const destination = path.join(temporaryRoot, file.relativePath);
-      if (!isInside(temporaryRoot, destination)) throw new Error("배포 package 복사 경로가 안전하지 않습니다.");
+      if (!isInside(temporaryRoot, destination)) throw new Error(L("배포 package 복사 경로가 안전하지 않습니다.", "The deployment package copy path is not safe."));
       const canonical = await fs.realpath(source);
       if (canonical !== path.resolve(source) || !isInside(artifact.sourceRoot, canonical)) {
-        throw new Error("배포 package 복사 중 source 경로가 변경되었습니다.");
+        throw new Error(L("배포 package 복사 중 source 경로가 변경되었습니다.", "The source path changed while copying the deployment package."));
       }
       const handle = await fs.open(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
       let bytes: Buffer;
       try {
         const stat = await handle.stat();
-        if (!stat.isFile() || stat.size !== file.bytes) throw new Error("배포 package 복사 중 source 파일이 변경되었습니다.");
+        if (!stat.isFile() || stat.size !== file.bytes) throw new Error(L("배포 package 복사 중 source 파일이 변경되었습니다.", "The source file changed while copying the deployment package."));
         bytes = await handle.readFile();
         if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
-          throw new Error("배포 package 복사 중 source 내용이 변경되었습니다.");
+          throw new Error(L("배포 package 복사 중 source 내용이 변경되었습니다.", "The source content changed while copying the deployment package."));
         }
       } finally {
         await handle.close();
@@ -1294,7 +1323,7 @@ async function prepareDeploymentArtifact(
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const existing = await fs.readFile(healthPath, "utf8");
         if (existing !== VERCEL_HEALTH_FUNCTION) {
-          throw new Error("Vercel /healthz publish shim이 main-owned 계약과 충돌합니다.");
+          throw new Error(L("Vercel /healthz publish shim이 main-owned 계약과 충돌합니다.", "The Vercel /healthz publish shim conflicts with the main-owned contract."));
         }
       }
     }
@@ -1317,31 +1346,31 @@ function requireConsent(input: SiteAgentAppPublishBackendRequest): SiteAgentAppP
   };
   if (!input.consent?.providerAccountReady) return {
     ...common,
-    reason: "Provider 계정 준비가 필요합니다.",
-    userAction: { code: "account-required", message: "Provider 계정 생성과 로그인은 사용자가 직접 완료해야 합니다.", url: PROVIDER_URLS[input.provider].signup },
+    reason: L("Provider 계정 준비가 필요합니다.", "Provider account setup is required."),
+    userAction: { code: "account-required", message: L("Provider 계정 생성과 로그인은 사용자가 직접 완료해야 합니다.", "The user must complete provider account creation and login directly."), url: PROVIDER_URLS[input.provider].signup },
   };
   if (!input.consent.providerTermsHandledByUser) return {
     ...common,
-    reason: "Provider 약관 확인이 필요합니다.",
-    userAction: { code: "terms-required", message: "Provider 약관과 필수 동의는 provider 화면에서 사용자가 직접 처리해야 합니다.", url: PROVIDER_URLS[input.provider].dashboard },
+    reason: L("Provider 약관 확인이 필요합니다.", "Provider terms confirmation is required."),
+    userAction: { code: "terms-required", message: L("Provider 약관과 필수 동의는 provider 화면에서 사용자가 직접 처리해야 합니다.", "The user must handle the provider terms and required consent directly on the provider's screen."), url: PROVIDER_URLS[input.provider].dashboard },
   };
   if (!input.consent.planConfirmedByUser) return {
     ...common,
-    reason: "Provider plan 확인이 필요합니다.",
+    reason: L("Provider plan 확인이 필요합니다.", "Provider plan confirmation is required."),
     userAction: { code: "plan-required", message: FREE_PLAN_NOTES[input.provider], url: PROVIDER_URLS[input.provider].dashboard },
   };
   if (!input.consent.deploymentApproved) return {
     ...common,
-    reason: "배포 승인이 필요합니다.",
-    userAction: { code: "deployment-approval-required", message: "이 Agent App의 공개 배포를 명시적으로 승인해 주세요." },
+    reason: L("배포 승인이 필요합니다.", "Deployment approval is required."),
+    userAction: { code: "deployment-approval-required", message: L("이 Agent App의 공개 배포를 명시적으로 승인해 주세요.", "Please explicitly approve the public deployment of this Agent App.") },
   };
   // A Render repository is user-controlled and is not cryptographically tied
   // to the validated local artifact. Never authorize or perform a Keychain
   // secret transfer to that trust boundary.
   if (input.provider !== "render" && !input.consent.llmKeyTransferApproved) return {
     ...common,
-    reason: "BYOK secret 전송 승인이 필요합니다.",
-    userAction: { code: "llm-key-transfer-approval-required", message: "선택한 BYOK 키를 provider secret storage로 복사하는 작업을 승인해 주세요." },
+    reason: L("BYOK secret 전송 승인이 필요합니다.", "BYOK secret transfer approval is required."),
+    userAction: { code: "llm-key-transfer-approval-required", message: L("선택한 BYOK 키를 provider secret storage로 복사하는 작업을 승인해 주세요.", "Please approve copying the selected BYOK key to the provider's secret storage.") },
   };
   return null;
 }
@@ -1354,10 +1383,10 @@ function assertCommandSucceeded(
   providerMutated = false,
 ): void {
   if (result.code === 0 && !result.timedOut && !result.spawnFailed) return;
-  const suffix = result.timedOut ? " (시간 초과)" : result.spawnFailed ? " (CLI 실행 실패)" : "";
+  const suffix = result.timedOut ? L(" (시간 초과)", " (timed out)") : result.spawnFailed ? L(" (CLI 실행 실패)", " (CLI execution failed)") : "";
   throw new PublishFailure(code, `${message}${suffix}`, {
     code: "provider-action-required",
-    message: `${message} Provider dashboard에서 상태를 확인한 뒤 다시 시도해 주세요.`,
+    message: L(`${message} Provider dashboard에서 상태를 확인한 뒤 다시 시도해 주세요.`, `${message} Check the status in the Provider dashboard, then try again.`),
     url: PROVIDER_URLS[provider].dashboard,
   }, providerMutated);
 }
@@ -1407,7 +1436,7 @@ const unsafeDeploymentAddresses = (() => {
 
 class UnsafeDeploymentAddressError extends Error {
   constructor() {
-    super("배포 검증 대상 DNS가 private, loopback, link-local 또는 예약 주소를 반환했습니다.");
+    super(L("배포 검증 대상 DNS가 private, loopback, link-local 또는 예약 주소를 반환했습니다.", "The DNS for the deployment verification target resolved to a private, loopback, link-local, or reserved address."));
     this.name = "UnsafeDeploymentAddressError";
   }
 }
@@ -1417,9 +1446,9 @@ export function normalizeProviderDeploymentUrl(
   provider: "vercel" | "railway",
   value: unknown,
 ): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error("배포 검증 URL이 없습니다.");
+  if (typeof value !== "string" || !value.trim()) throw new Error(L("배포 검증 URL이 없습니다.", "The deployment verification URL is missing."));
   let url: URL;
-  try { url = new URL(value.trim()); } catch { throw new Error("배포 검증 URL 형식이 올바르지 않습니다."); }
+  try { url = new URL(value.trim()); } catch { throw new Error(L("배포 검증 URL 형식이 올바르지 않습니다.", "The deployment verification URL format is invalid.")); }
   const hostname = url.hostname.toLowerCase();
   const suffix = provider === "vercel" ? ".vercel.app" : ".up.railway.app";
   if (
@@ -1433,7 +1462,7 @@ export function normalizeProviderDeploymentUrl(
     !hostname.endsWith(suffix) ||
     hostname === suffix.slice(1)
   ) {
-    throw new Error(`${provider}가 생성한 ${suffix} HTTPS URL만 자동 검증할 수 있습니다.`);
+    throw new Error(L(`${provider}가 생성한 ${suffix} HTTPS URL만 자동 검증할 수 있습니다.`, `Only an HTTPS URL ending in ${suffix} and generated by ${provider} can be auto-verified.`));
   }
   return `https://${hostname}/`;
 }
@@ -1566,7 +1595,7 @@ export async function verifySiteAgentAppDeployment(
   let healthStatus: number | null = null;
   let apiStatus: number | null = null;
   let apiErrorCode: string | null = null;
-  let reason = "배포 URL이 아직 준비되지 않았습니다.";
+  let reason = L("배포 URL이 아직 준비되지 않았습니다.", "The deployment URL is not ready yet.");
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -1608,9 +1637,9 @@ export async function verifySiteAgentAppDeployment(
       ) {
         return { ok: true, pageStatus, healthStatus, apiStatus, apiErrorCode, reason: null };
       }
-      reason = `공개 페이지 HTTP ${pageStatus || "응답 없음"}, /healthz HTTP ${healthStatus || "응답 없음"}, 인증된 /api/run contract HTTP ${apiStatus || "응답 없음"} (${apiErrorCode ?? "expected invalid-input 없음"}).`;
+      reason = L(`공개 페이지 HTTP ${pageStatus || "응답 없음"}, /healthz HTTP ${healthStatus || "응답 없음"}, 인증된 /api/run contract HTTP ${apiStatus || "응답 없음"} (${apiErrorCode ?? "expected invalid-input 없음"}).`, `Public page HTTP ${pageStatus || "no response"}, /healthz HTTP ${healthStatus || "no response"}, authenticated /api/run contract HTTP ${apiStatus || "no response"} (${apiErrorCode ?? "no expected invalid-input"}).`);
     } catch (error) {
-      reason = cleanSingleLine(error instanceof Error ? error.message : String(error), 500) || "배포 HTTPS 검증에 실패했습니다.";
+      reason = cleanSingleLine(error instanceof Error ? error.message : String(error), 500) || L("배포 HTTPS 검증에 실패했습니다.", "The deployment HTTPS verification failed.");
       if (error instanceof UnsafeDeploymentAddressError) {
         return { ok: false, pageStatus, healthStatus, apiStatus, apiErrorCode, reason };
       }
@@ -1696,9 +1725,9 @@ function railwayProjectId(value: unknown): string | null {
 async function loadLlmKey(provider: SiteLlmProvider): Promise<string> {
   const key = await readApiKey(provider as RuntimeBackend);
   if (!key) {
-    throw new PublishFailure("llm-key-missing", `${provider} BYOK 키가 Keychain에 없습니다.`, {
+    throw new PublishFailure("llm-key-missing", L(`${provider} BYOK 키가 Keychain에 없습니다.`, `The ${provider} BYOK key is not in the Keychain.`), {
       code: "llm-key-missing",
-      message: `Settings에서 ${provider} BYOK 키를 먼저 저장해 주세요.`,
+      message: L(`Settings에서 ${provider} BYOK 키를 먼저 저장해 주세요.`, `Save the ${provider} BYOK key in Settings first.`),
     });
   }
   return key;
@@ -1707,9 +1736,9 @@ async function loadLlmKey(provider: SiteLlmProvider): Promise<string> {
 function validateAppAccessKey(value: unknown): string {
   const key = typeof value === "string" ? value : "";
   if (key.length < 32 || key.length > 256 || !/^[\x21-\x7E]+$/.test(key)) {
-    throw new PublishFailure("app-access-key-required", "공개 Agent App access passcode가 필요합니다.", {
+    throw new PublishFailure("app-access-key-required", L("공개 Agent App access passcode가 필요합니다.", "A public Agent App access passcode is required."), {
       code: "app-access-key-required",
-      message: "32~256자의 공백 없는 printable ASCII access passcode를 입력해 주세요.",
+      message: L("32~256자의 공백 없는 printable ASCII access passcode를 입력해 주세요.", "Enter a 32-256 character printable ASCII access passcode with no spaces."),
     });
   }
   return key;
@@ -1725,9 +1754,9 @@ async function assertApprovedArtifactCopy(
 ): Promise<void> {
   const copiedFiles = await validateArtifactTree(packageRoot);
   if (artifactTreeDigest(copiedFiles) === approvedDigest) return;
-  throw new PublishFailure("approved-artifact-changed", "Native 승인에 표시된 배포 artifact가 변경되었습니다.", {
+  throw new PublishFailure("approved-artifact-changed", L("Native 승인에 표시된 배포 artifact가 변경되었습니다.", "The deployment artifact shown in the native approval changed."), {
     code: "deployment-contract-missing",
-    message: "승인된 artifact와 실제 배포 package가 다릅니다. Agent App을 다시 생성한 뒤 게시해 주세요.",
+    message: L("승인된 artifact와 실제 배포 package가 다릅니다. Agent App을 다시 생성한 뒤 게시해 주세요.", "The approved artifact differs from the actual deployment package. Regenerate the Agent App, then publish again."),
   });
 }
 
@@ -1741,7 +1770,7 @@ async function deployVercel(
   appAccessKey: string,
   attempt: DeploymentAttemptState,
 ): Promise<{ url: string; providerProjectId: string }> {
-  if (session.provider !== "vercel") throw new Error("Vercel provider session이 일치하지 않습니다.");
+  if (session.provider !== "vercel") throw new Error(L("Vercel provider session이 일치하지 않습니다.", "The Vercel provider session does not match."));
   const executable = session.executable;
   const env = session.env;
   const scopeArgs = accountScope ? ["--scope", accountScope] : [];
@@ -1753,7 +1782,7 @@ async function deployVercel(
     attempt,
     status: "provisioning",
     phase: "mutation-attempted",
-    reason: "Vercel project link/create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 원격 resource가 존재할 수 있습니다.",
+    reason: L("Vercel project link/create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 원격 resource가 존재할 수 있습니다.", "Started the Vercel project link/create mutation. If the response is lost, the receipt is unknown but the remote resource may exist."),
   });
   const link = await runCommand({
     executable,
@@ -1761,7 +1790,7 @@ async function deployVercel(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(link, "vercel-link-failed", "Vercel project 연결에 실패했습니다.", "vercel", true);
+  assertCommandSucceeded(link, "vercel-link-failed", L("Vercel project 연결에 실패했습니다.", "Failed to connect the Vercel project."), "vercel", true);
   const projectJson = await readJsonObject(packageRoot, path.join(packageRoot, ".vercel", "project.json"));
   const providerProjectId = typeof projectJson.projectId === "string" && projectJson.projectId.trim()
     ? projectJson.projectId.trim().slice(0, 200)
@@ -1771,7 +1800,7 @@ async function deployVercel(
     attempt,
     status: "provisioning",
     phase: "resource-created",
-    reason: "Vercel project가 연결되었습니다. 아직 공개 검증은 완료되지 않았습니다.",
+    reason: L("Vercel project가 연결되었습니다. 아직 공개 검증은 완료되지 않았습니다.", "The Vercel project is connected. Public verification is not complete yet."),
   });
 
   const selector = await runCommand({
@@ -1781,14 +1810,14 @@ async function deployVercel(
     env,
     stdin: `${input.llmProvider}\n`,
   });
-  assertCommandSucceeded(selector, "vercel-env-failed", "Vercel runtime provider 설정에 실패했습니다.", "vercel", true);
+  assertCommandSucceeded(selector, "vercel-env-failed", L("Vercel runtime provider 설정에 실패했습니다.", "Failed to configure the Vercel runtime provider."), "vercel", true);
 
   attempt.transferredSecrets = [...new Set([...attempt.transferredSecrets, APP_ACCESS_ENV])];
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transfer-attempted",
-    reason: `${APP_ACCESS_ENV} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`,
+    reason: L(`${APP_ACCESS_ENV} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`, `Started sending the ${APP_ACCESS_ENV} secret. If the response is lost, it may still remain with the provider.`),
   });
   const accessSecret = await runCommand({
     executable,
@@ -1797,12 +1826,12 @@ async function deployVercel(
     env,
     stdin: `${appAccessKey}\n`,
   });
-  assertCommandSucceeded(accessSecret, "vercel-access-secret-failed", "Vercel app access secret 저장에 실패했습니다.", "vercel", true);
+  assertCommandSucceeded(accessSecret, "vercel-access-secret-failed", L("Vercel app access secret 저장에 실패했습니다.", "Failed to store the Vercel app access secret."), "vercel", true);
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transferred",
-    reason: `${APP_ACCESS_ENV}가 Vercel server secret storage에 전송되었습니다.`,
+    reason: L(`${APP_ACCESS_ENV}가 Vercel server secret storage에 전송되었습니다.`, `${APP_ACCESS_ENV} was sent to Vercel server secret storage.`),
   });
 
   attempt.transferredSecrets = [...new Set([...attempt.transferredSecrets, LLM_ENV[input.llmProvider]])];
@@ -1810,7 +1839,7 @@ async function deployVercel(
     attempt,
     status: "provisioning",
     phase: "secret-transfer-attempted",
-    reason: `${LLM_ENV[input.llmProvider]} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`,
+    reason: L(`${LLM_ENV[input.llmProvider]} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`, `Started sending the ${LLM_ENV[input.llmProvider]} secret. If the response is lost, it may still remain with the provider.`),
   });
   const secret = await runCommand({
     executable,
@@ -1819,12 +1848,12 @@ async function deployVercel(
     env,
     stdin: `${llmKey}\n`,
   });
-  assertCommandSucceeded(secret, "vercel-secret-failed", "Vercel sensitive env 저장에 실패했습니다.", "vercel", true);
+  assertCommandSucceeded(secret, "vercel-secret-failed", L("Vercel sensitive env 저장에 실패했습니다.", "Failed to store the Vercel sensitive env."), "vercel", true);
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transferred",
-    reason: `${LLM_ENV[input.llmProvider]}가 Vercel server secret storage에 전송되었습니다.`,
+    reason: L(`${LLM_ENV[input.llmProvider]}가 Vercel server secret storage에 전송되었습니다.`, `${LLM_ENV[input.llmProvider]} was sent to Vercel server secret storage.`),
   });
 
   const deployment = await runCommand({
@@ -1833,11 +1862,11 @@ async function deployVercel(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(deployment, "vercel-deploy-failed", "Vercel production deploy에 실패했습니다.", "vercel", true);
+  assertCommandSucceeded(deployment, "vercel-deploy-failed", L("Vercel production deploy에 실패했습니다.", "The Vercel production deploy failed."), "vercel", true);
   const url = providerGeneratedUrlFromCommandOutput("vercel", `${deployment.stdout}\n${deployment.stderr}`);
-  if (!url) throw new PublishFailure("vercel-url-missing", "Vercel 배포 URL을 확인할 수 없습니다.", {
+  if (!url) throw new PublishFailure("vercel-url-missing", L("Vercel 배포 URL을 확인할 수 없습니다.", "Could not confirm the Vercel deployment URL."), {
     code: "provider-action-required",
-    message: "Vercel dashboard에서 배포 URL과 상태를 확인해 주세요.",
+    message: L("Vercel dashboard에서 배포 URL과 상태를 확인해 주세요.", "Check the deployment URL and status in the Vercel dashboard."),
     url: PROVIDER_URLS.vercel.dashboard,
   }, true);
   attempt.url = url;
@@ -1845,7 +1874,7 @@ async function deployVercel(
     attempt,
     status: "provisioning",
     phase: "resource-created",
-    reason: "Vercel production URL을 받았으며 공개 contract 검증을 기다리고 있습니다.",
+    reason: L("Vercel production URL을 받았으며 공개 contract 검증을 기다리고 있습니다.", "Received the Vercel production URL and is waiting for public contract verification."),
   });
   return { url, providerProjectId };
 }
@@ -1860,7 +1889,7 @@ async function deployRailway(
   appAccessKey: string,
   attempt: DeploymentAttemptState,
 ): Promise<{ url: string; providerProjectId: string }> {
-  if (session.provider !== "railway") throw new Error("Railway provider session이 일치하지 않습니다.");
+  if (session.provider !== "railway") throw new Error(L("Railway provider session이 일치하지 않습니다.", "The Railway provider session does not match."));
   const executable = session.executable;
   const env = session.env;
   attempt.mutated = true;
@@ -1868,7 +1897,7 @@ async function deployRailway(
     attempt,
     status: "provisioning",
     phase: "mutation-attempted",
-    reason: "Railway project create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 원격 resource가 존재할 수 있습니다.",
+    reason: L("Railway project create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 원격 resource가 존재할 수 있습니다.", "Started the Railway project create mutation. If the response is lost, the receipt is unknown but the remote resource may exist."),
   });
   const init = await runCommand({
     executable,
@@ -1876,7 +1905,7 @@ async function deployRailway(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(init, "railway-init-failed", "새 Railway project 생성에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(init, "railway-init-failed", L("새 Railway project 생성에 실패했습니다.", "Failed to create the new Railway project."), "railway", true);
   const initProjectId = railwayProjectId(parseJsonOutput(init.stdout));
   if (initProjectId) {
     attempt.providerProjectId = initProjectId;
@@ -1884,17 +1913,17 @@ async function deployRailway(
       attempt,
       status: "provisioning",
       phase: "resource-created",
-      reason: "Railway init 응답에서 project ID를 받았습니다. 아직 service와 공개 검증은 완료되지 않았습니다.",
+      reason: L("Railway init 응답에서 project ID를 받았습니다. 아직 service와 공개 검증은 완료되지 않았습니다.", "Received the project ID from the Railway init response. The service and public verification are not complete yet."),
     });
   }
 
   const status = await runCommand({ executable, args: ["status", "--json"], cwd: packageRoot, env });
-  assertCommandSucceeded(status, "railway-status-failed", "새 Railway project 상태를 확인할 수 없습니다.", "railway", true);
+  assertCommandSucceeded(status, "railway-status-failed", L("새 Railway project 상태를 확인할 수 없습니다.", "Could not confirm the new Railway project status."), "railway", true);
   const providerProjectId = railwayProjectId(parseJsonOutput(status.stdout))
     ?? initProjectId;
-  if (!providerProjectId) throw new PublishFailure("railway-project-id-missing", "새 Railway project ID를 확인할 수 없습니다.", {
+  if (!providerProjectId) throw new PublishFailure("railway-project-id-missing", L("새 Railway project ID를 확인할 수 없습니다.", "Could not confirm the new Railway project ID."), {
     code: "provider-action-required",
-    message: "Railway dashboard에서 새 project를 확인해 주세요.",
+    message: L("Railway dashboard에서 새 project를 확인해 주세요.", "Check the new project in the Railway dashboard."),
     url: PROVIDER_URLS.railway.dashboard,
   }, true);
   attempt.providerProjectId = providerProjectId;
@@ -1902,7 +1931,7 @@ async function deployRailway(
     attempt,
     status: "provisioning",
     phase: "resource-created",
-    reason: "Railway project가 생성되었습니다. 아직 service와 공개 검증은 완료되지 않았습니다.",
+    reason: L("Railway project가 생성되었습니다. 아직 service와 공개 검증은 완료되지 않았습니다.", "The Railway project was created. The service and public verification are not complete yet."),
   });
 
   const serviceName = `${artifact.projectName}-web`.slice(0, 80);
@@ -1911,7 +1940,7 @@ async function deployRailway(
     attempt,
     status: "provisioning",
     phase: "mutation-attempted",
-    reason: `Railway service ${serviceName} create mutation을 시작했습니다. 응답이 유실되면 service가 존재할 수 있습니다.`,
+    reason: L(`Railway service ${serviceName} create mutation을 시작했습니다. 응답이 유실되면 service가 존재할 수 있습니다.`, `Started the Railway service ${serviceName} create mutation. If the response is lost, the service may still exist.`),
   });
   const addService = await runCommand({
     executable,
@@ -1919,14 +1948,14 @@ async function deployRailway(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(addService, "railway-service-failed", "새 Railway service 생성에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(addService, "railway-service-failed", L("새 Railway service 생성에 실패했습니다.", "Failed to create the new Railway service."), "railway", true);
   const parsedService = parseJsonOutput(`${addService.stdout}\n${addService.stderr}`);
   attempt.providerServiceId = findNamedString(parsedService, new Set(["serviceId", "id"]));
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "service-created",
-    reason: "Railway service가 생성되었습니다. 아직 secret과 공개 검증은 완료되지 않았습니다.",
+    reason: L("Railway service가 생성되었습니다. 아직 secret과 공개 검증은 완료되지 않았습니다.", "The Railway service was created. Secrets and public verification are not complete yet."),
   });
 
   const link = await runCommand({
@@ -1935,7 +1964,7 @@ async function deployRailway(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(link, "railway-link-failed", "새 Railway project/service 명시 연결에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(link, "railway-link-failed", L("새 Railway project/service 명시 연결에 실패했습니다.", "Failed to explicitly link the new Railway project/service."), "railway", true);
 
   const selector = await runCommand({
     executable,
@@ -1944,14 +1973,14 @@ async function deployRailway(
     env,
     stdin: `${input.llmProvider}\n`,
   });
-  assertCommandSucceeded(selector, "railway-env-failed", "Railway runtime provider 설정에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(selector, "railway-env-failed", L("Railway runtime provider 설정에 실패했습니다.", "Failed to configure the Railway runtime provider."), "railway", true);
 
   attempt.transferredSecrets = [...new Set([...attempt.transferredSecrets, APP_ACCESS_ENV])];
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transfer-attempted",
-    reason: `${APP_ACCESS_ENV} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`,
+    reason: L(`${APP_ACCESS_ENV} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`, `Started sending the ${APP_ACCESS_ENV} secret. If the response is lost, it may still remain with the provider.`),
   });
   const accessSecret = await runCommand({
     executable,
@@ -1960,12 +1989,12 @@ async function deployRailway(
     env,
     stdin: `${appAccessKey}\n`,
   });
-  assertCommandSucceeded(accessSecret, "railway-access-secret-failed", "Railway app access secret 저장에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(accessSecret, "railway-access-secret-failed", L("Railway app access secret 저장에 실패했습니다.", "Failed to store the Railway app access secret."), "railway", true);
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transferred",
-    reason: `${APP_ACCESS_ENV}가 Railway server secret storage에 전송되었습니다.`,
+    reason: L(`${APP_ACCESS_ENV}가 Railway server secret storage에 전송되었습니다.`, `${APP_ACCESS_ENV} was sent to Railway server secret storage.`),
   });
 
   attempt.transferredSecrets = [...new Set([...attempt.transferredSecrets, LLM_ENV[input.llmProvider]])];
@@ -1973,7 +2002,7 @@ async function deployRailway(
     attempt,
     status: "provisioning",
     phase: "secret-transfer-attempted",
-    reason: `${LLM_ENV[input.llmProvider]} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`,
+    reason: L(`${LLM_ENV[input.llmProvider]} secret 전송을 시작했습니다. 응답이 유실되면 provider에 남아 있을 수 있습니다.`, `Started sending the ${LLM_ENV[input.llmProvider]} secret. If the response is lost, it may still remain with the provider.`),
   });
   const secret = await runCommand({
     executable,
@@ -1982,12 +2011,12 @@ async function deployRailway(
     env,
     stdin: `${llmKey}\n`,
   });
-  assertCommandSucceeded(secret, "railway-secret-failed", "Railway secret variable 저장에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(secret, "railway-secret-failed", L("Railway secret variable 저장에 실패했습니다.", "Failed to store the Railway secret variable."), "railway", true);
   await persistPublishReceipt({
     attempt,
     status: "provisioning",
     phase: "secret-transferred",
-    reason: `${LLM_ENV[input.llmProvider]}가 Railway server secret storage에 전송되었습니다.`,
+    reason: L(`${LLM_ENV[input.llmProvider]}가 Railway server secret storage에 전송되었습니다.`, `${LLM_ENV[input.llmProvider]} was sent to Railway server secret storage.`),
   });
 
   // Always pass the validated package path as the archive root and the newly
@@ -1999,7 +2028,7 @@ async function deployRailway(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(deployment, "railway-deploy-failed", "Railway local-folder deploy에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(deployment, "railway-deploy-failed", L("Railway local-folder deploy에 실패했습니다.", "The Railway local-folder deploy failed."), "railway", true);
 
   const domain = await runCommand({
     executable,
@@ -2007,11 +2036,11 @@ async function deployRailway(
     cwd: packageRoot,
     env,
   });
-  assertCommandSucceeded(domain, "railway-domain-failed", "Railway public domain 생성에 실패했습니다.", "railway", true);
+  assertCommandSucceeded(domain, "railway-domain-failed", L("Railway public domain 생성에 실패했습니다.", "Failed to create the Railway public domain."), "railway", true);
   const url = providerGeneratedUrlFromCommandOutput("railway", `${domain.stdout}\n${domain.stderr}`);
-  if (!url) throw new PublishFailure("railway-url-missing", "Railway public URL을 확인할 수 없습니다.", {
+  if (!url) throw new PublishFailure("railway-url-missing", L("Railway public URL을 확인할 수 없습니다.", "Could not confirm the Railway public URL."), {
     code: "provider-action-required",
-    message: "Railway dashboard에서 service domain을 확인해 주세요.",
+    message: L("Railway dashboard에서 service domain을 확인해 주세요.", "Check the service domain in the Railway dashboard."),
     url: PROVIDER_URLS.railway.dashboard,
   }, true);
   attempt.url = url;
@@ -2019,22 +2048,22 @@ async function deployRailway(
     attempt,
     status: "provisioning",
     phase: "resource-created",
-    reason: "Railway generated domain을 받았으며 공개 contract 검증을 기다리고 있습니다.",
+    reason: L("Railway generated domain을 받았으며 공개 contract 검증을 기다리고 있습니다.", "Received the Railway-generated domain and is waiting for public contract verification."),
   });
   return { url, providerProjectId };
 }
 
 function validateRenderRepository(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new PublishFailure("render-repository-required", "Render는 Git repository가 필요합니다.", {
+    throw new PublishFailure("render-repository-required", L("Render는 Git repository가 필요합니다.", "Render requires a Git repository."), {
       code: "render-repository-required",
-      message: "Render는 로컬 폴더를 직접 업로드하지 않습니다. 검증된 package를 Git repository에 올린 뒤 URL을 입력해 주세요.",
+      message: L("Render는 로컬 폴더를 직접 업로드하지 않습니다. 검증된 package를 Git repository에 올린 뒤 URL을 입력해 주세요.", "Render does not upload a local folder directly. Push the verified package to a Git repository, then enter the URL."),
       url: PROVIDER_URLS.render.dashboard,
     });
   }
   let url: URL;
   try { url = new URL(value.trim()); } catch {
-    throw new Error("Render repository URL 형식이 올바르지 않습니다.");
+    throw new Error(L("Render repository URL 형식이 올바르지 않습니다.", "The Render repository URL format is invalid."));
   }
   if (
     url.protocol !== "https:" ||
@@ -2046,7 +2075,7 @@ function validateRenderRepository(value: unknown): string {
     url.hostname === "127.0.0.1" ||
     url.hostname === "::1"
   ) {
-    throw new Error("Render repository는 credential이 없는 공개 HTTPS Git URL이어야 합니다.");
+    throw new Error(L("Render repository는 credential이 없는 공개 HTTPS Git URL이어야 합니다.", "The Render repository must be a public HTTPS Git URL with no credentials."));
   }
   return url.toString().replace(/\/$/, "").slice(0, 2_048);
 }
@@ -2055,7 +2084,7 @@ function validateRelativeRoot(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   const root = String(value).trim().replaceAll("\\", "/").replace(/^\.\//, "");
   if (!root || root.startsWith("/") || root.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Render rootDir 형식이 올바르지 않습니다.");
+    throw new Error(L("Render rootDir 형식이 올바르지 않습니다.", "The Render rootDir format is invalid."));
   }
   return root.slice(0, 300);
 }
@@ -2075,20 +2104,20 @@ function validateRenderIntent(
 ): ValidatedRenderIntent {
   const repositoryUrl = validateRenderRepository(input.renderRepositoryUrl);
   if (!input.renderRepositoryContainsValidatedPackage) {
-    throw new PublishFailure("render-source-confirmation-required", "Render repository source 확인이 필요합니다.", {
+    throw new PublishFailure("render-source-confirmation-required", L("Render repository source 확인이 필요합니다.", "Render repository source confirmation is required."), {
       code: "render-source-confirmation-required",
-      message: "입력한 repository/branch/rootDir에 현재 검증된 Astryx package와 동일한 server runtime이 있는지 사용자가 확인해야 합니다.",
+      message: L("입력한 repository/branch/rootDir에 현재 검증된 Astryx package와 동일한 server runtime이 있는지 사용자가 확인해야 합니다.", "The user must confirm that the entered repository/branch/rootDir has the same server runtime as the currently verified Astryx package."),
       url: PROVIDER_URLS.render.dashboard,
     });
   }
   const ownerId = safeOptionalIdentifier(input.renderOwnerId, "Render owner ID");
-  if (!ownerId) throw new PublishFailure("render-owner-required", "Render workspace owner ID가 필요합니다.", {
+  if (!ownerId) throw new PublishFailure("render-owner-required", L("Render workspace owner ID가 필요합니다.", "A Render workspace owner ID is required."), {
     code: "render-owner-required",
-    message: "Render workspace를 선택해 owner ID를 제공해 주세요.",
+    message: L("Render workspace를 선택해 owner ID를 제공해 주세요.", "Select a Render workspace to provide the owner ID."),
     url: PROVIDER_URLS.render.dashboard,
   });
   const branch = input.renderBranch ? cleanSingleLine(input.renderBranch, 200) : "main";
-  if (!branch || (input.renderBranch && /[\0\r\n]/.test(input.renderBranch))) throw new Error("Render branch 형식이 올바르지 않습니다.");
+  if (!branch || (input.renderBranch && /[\0\r\n]/.test(input.renderBranch))) throw new Error(L("Render branch 형식이 올바르지 않습니다.", "The Render branch format is invalid."));
   const rootDir = validateRelativeRoot(input.renderRootDir) ?? null;
   return {
     repositoryUrl,
@@ -2135,7 +2164,7 @@ async function deployRender(
     attempt,
     status: "provisioning",
     phase: "mutation-attempted",
-    reason: `Render service ${intent.serviceName} create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 service가 존재할 수 있습니다.`,
+    reason: L(`Render service ${intent.serviceName} create mutation을 시작했습니다. 응답이 유실되면 receipt는 알 수 없지만 service가 존재할 수 있습니다.`, `Started the Render service ${intent.serviceName} create mutation. If the response is lost, the receipt is unknown but the service may exist.`),
   });
   const response = await renderApiRequest(session.apiKey, "/services", {
     method: "POST",
@@ -2169,9 +2198,9 @@ async function deployRender(
   });
   if (!response.ok) {
     if (response.status >= 500) attempt.mutated = true;
-    throw new PublishFailure("render-create-failed", `Render service 생성이 거부되었습니다 (HTTP ${response.status}).`, {
+    throw new PublishFailure("render-create-failed", L(`Render service 생성이 거부되었습니다 (HTTP ${response.status}).`, `The Render service creation was rejected (HTTP ${response.status}).`), {
       code: "provider-action-required",
-      message: "Render workspace의 Git 연결, Free plan 사용 가능 여부, repository 접근 권한을 확인해 주세요.",
+      message: L("Render workspace의 Git 연결, Free plan 사용 가능 여부, repository 접근 권한을 확인해 주세요.", "Check the Render workspace's Git connection, Free plan availability, and repository access permission."),
       url: PROVIDER_URLS.render.dashboard,
     }, response.status !== 400 && response.status !== 401 && response.status !== 403);
   }
@@ -2186,12 +2215,12 @@ async function deployRender(
     attempt,
     status: "provisioning",
     phase: "service-created",
-    reason: "Render service 생성 요청이 성공했습니다. LLM/app secret은 전송되지 않았습니다.",
+    reason: L("Render service 생성 요청이 성공했습니다. LLM/app secret은 전송되지 않았습니다.", "The Render service creation request succeeded. The LLM/app secret was not sent."),
   });
   if (!providerProjectId || !url) {
-    throw new PublishFailure("render-receipt-missing", "Render service receipt에 ID 또는 URL이 없습니다.", {
+    throw new PublishFailure("render-receipt-missing", L("Render service receipt에 ID 또는 URL이 없습니다.", "The Render service receipt is missing an ID or URL."), {
       code: "provider-action-required",
-      message: "Render dashboard에서 생성된 service 상태와 URL을 확인해 주세요.",
+      message: L("Render dashboard에서 생성된 service 상태와 URL을 확인해 주세요.", "Check the created service's status and URL in the Render dashboard."),
       url: PROVIDER_URLS.render.dashboard,
     }, true);
   }
@@ -2296,7 +2325,7 @@ function existingRenderConfigurationResult(
 
   const requiredEnvironmentVariable = LLM_ENV[receipt.llmProvider];
   const message = receipt.reason ||
-    `Render service는 이미 생성되었지만 secret 설정이 남았습니다. Render dashboard에서 ${requiredEnvironmentVariable}와 ${APP_ACCESS_ENV}를 직접 추가해 주세요.`;
+    L(`Render service는 이미 생성되었지만 secret 설정이 남았습니다. Render dashboard에서 ${requiredEnvironmentVariable}와 ${APP_ACCESS_ENV}를 직접 추가해 주세요.`, `The Render service was already created but the secret setup remains. Add ${requiredEnvironmentVariable} and ${APP_ACCESS_ENV} directly in the Render dashboard.`);
   return {
     ok: false,
     provider: "render",
@@ -2321,7 +2350,7 @@ function deploymentVerificationActionResult(input: {
   providerProjectId: string;
   reason: string;
 }): SiteAgentAppPublishBackendResult {
-  const message = `Provider resource는 생성되었지만 공개 페이지, /healthz, 인증된 무추론 /api/run contract 검증이 완료되지 않았습니다. ${input.reason}`;
+  const message = L(`Provider resource는 생성되었지만 공개 페이지, /healthz, 인증된 무추론 /api/run contract 검증이 완료되지 않았습니다. ${input.reason}`, `The provider resource was created, but verification of the public page, /healthz, and the authenticated non-inference /api/run contract is not complete. ${input.reason}`);
   return {
     ok: false,
     provider: input.provider,
@@ -2333,7 +2362,7 @@ function deploymentVerificationActionResult(input: {
     reason: message,
     userAction: {
       code: "deployment-verification-required",
-      message: `${message} 유료 LLM 추론은 호출하지 않았습니다. Provider dashboard 상태를 확인한 뒤 다시 검증해 주세요.`,
+      message: L(`${message} 유료 LLM 추론은 호출하지 않았습니다. Provider dashboard 상태를 확인한 뒤 다시 검증해 주세요.`, `${message} No paid LLM inference was called. Check the Provider dashboard status, then verify again.`),
       url: PROVIDER_URLS[input.provider].dashboard,
     },
     consentBoundary: CONSENT_BOUNDARY,
@@ -2373,7 +2402,7 @@ async function runDeploymentVerification(
       (verification.healthStatus !== null && !Number.isInteger(verification.healthStatus)) ||
       (verification.apiStatus !== null && !Number.isInteger(verification.apiStatus)) ||
       (verification.apiErrorCode !== null && typeof verification.apiErrorCode !== "string")
-    ) throw new Error("배포 검증 결과 형식이 올바르지 않습니다.");
+    ) throw new Error(L("배포 검증 결과 형식이 올바르지 않습니다.", "The deployment verification result format is invalid."));
     return { url, verification };
   } catch (error) {
     return {
@@ -2384,7 +2413,7 @@ async function runDeploymentVerification(
         healthStatus: null,
         apiStatus: null,
         apiErrorCode: null,
-        reason: cleanSingleLine(error instanceof Error ? error.message : String(error), 500) || "배포 HTTPS 검증에 실패했습니다.",
+        reason: cleanSingleLine(error instanceof Error ? error.message : String(error), 500) || L("배포 HTTPS 검증에 실패했습니다.", "The deployment HTTPS verification failed."),
       },
     };
   }
@@ -2411,7 +2440,7 @@ async function recoverExistingDeploymentVerification(
   } catch {
     return needsActionResult(receipt.provider, true, "local-folder", {
       code: "app-access-key-required",
-      message: "기존 배포의 인증된 무추론 contract를 다시 확인하려면 배포 때 승인한 app access passcode를 입력해 주세요.",
+      message: L("기존 배포의 인증된 무추론 contract를 다시 확인하려면 배포 때 승인한 app access passcode를 입력해 주세요.", "To re-verify the existing deployment's authenticated non-inference contract, enter the app access passcode approved at deploy time."),
     });
   }
   const existingRecord = latestDeploymentRecord(project, (record) =>
@@ -2422,7 +2451,7 @@ async function recoverExistingDeploymentVerification(
   if (existingRecord?.appAccessKeyFingerprint && fullFingerprint(appAccessKey) !== existingRecord.appAccessKeyFingerprint) {
     return needsActionResult(receipt.provider, true, "local-folder", {
       code: "app-access-key-required",
-      message: "입력한 app access passcode fingerprint가 이 배포에서 승인한 값과 일치하지 않습니다.",
+      message: L("입력한 app access passcode fingerprint가 이 배포에서 승인한 값과 일치하지 않습니다.", "The entered app access passcode fingerprint does not match the value approved for this deployment."),
     });
   }
   const attempt = existingRecord
@@ -2451,12 +2480,12 @@ async function recoverExistingDeploymentVerification(
       provider: receipt.provider,
       url: null,
       providerProjectId: receipt.providerProjectId,
-      reason: receipt.reason || "Provider가 안전하게 검증할 수 있는 generated URL을 반환하지 않았습니다.",
+      reason: receipt.reason || L("Provider가 안전하게 검증할 수 있는 generated URL을 반환하지 않았습니다.", "The provider did not return a generated URL that can be safely verified."),
     });
   }
   const checked = await runDeploymentVerification(receipt.provider, receipt.url, appAccessKey, options);
   if (!checked.verification.ok || !checked.url) {
-    const reason = checked.verification.reason || "공개 endpoint가 아직 준비되지 않았습니다.";
+    const reason = checked.verification.reason || L("공개 endpoint가 아직 준비되지 않았습니다.", "The public endpoint is not ready yet.");
     await persistPublishReceipt({
       attempt: { ...attempt, url: checked.url ?? receipt.url },
       status: "verification-required",
@@ -2506,7 +2535,7 @@ function existingIncompleteMutationResult(
   const identity = [existing.providerProjectId, existing.providerServiceId, existing.providerServiceName, existing.url].filter(Boolean).join(" · ");
   return needsActionResult(request.provider, true, request.provider === "render" ? "user-confirmed-git-repository" : "local-folder", {
     code: "provider-action-required",
-    message: `이 artifact의 이전 배포가 provider를 변경했습니다 (${identity}). 중복 resource를 만들지 않도록 자동 재배포를 중단했습니다. Provider dashboard에서 기존 resource와 남은 secret을 확인해 주세요.`,
+    message: L(`이 artifact의 이전 배포가 provider를 변경했습니다 (${identity}). 중복 resource를 만들지 않도록 자동 재배포를 중단했습니다. Provider dashboard에서 기존 resource와 남은 secret을 확인해 주세요.`, `A previous deployment of this artifact changed provider (${identity}). Automatic redeploy was stopped to avoid creating a duplicate resource. Check the existing resource and remaining secret in the Provider dashboard.`),
     url: PROVIDER_URLS[request.provider].dashboard,
   });
 }
@@ -2516,7 +2545,7 @@ export async function publishSiteAgentApp(
   options: SiteAgentAppPublishExecutionOptions = {},
 ): Promise<SiteAgentAppPublishBackendResult> {
   const provider = assertProvider(request.provider);
-  if (!isLlmProvider(request.llmProvider)) throw new Error("지원하지 않는 BYOK LLM provider입니다.");
+  if (!isLlmProvider(request.llmProvider)) throw new Error(L("지원하지 않는 BYOK LLM provider입니다.", "Unsupported BYOK LLM provider."));
   const source: SiteAgentAppPublishBackendResult["providerSource"] =
     provider === "render" ? "user-confirmed-git-repository" : "local-folder";
   const existingVerification = await recoverExistingDeploymentVerification(request, options);
@@ -2550,7 +2579,7 @@ export async function publishSiteAgentApp(
       releaseCredentialLock = acquirePublishCredentialLock(provider, null);
       if (!releaseCredentialLock) return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "Render provider credential을 사용하는 다른 native 게시 승인이 진행 중입니다.",
+        message: L("Render provider credential을 사용하는 다른 native 게시 승인이 진행 중입니다.", "Another native publish approval using the Render provider credential is in progress."),
       });
       const deploymentId = randomUUID();
       const intent = validateRenderIntent(artifact, request, deploymentId);
@@ -2578,7 +2607,7 @@ export async function publishSiteAgentApp(
       };
       if (!options.confirmNativeApproval) return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "Electron main native Render service 생성 확인이 필요합니다.",
+        message: L("Electron main native Render service 생성 확인이 필요합니다.", "Electron main native Render service creation confirmation is required."),
       });
       const approved = await options.confirmNativeApproval({
         projectId: artifact.project.id,
@@ -2609,22 +2638,22 @@ export async function publishSiteAgentApp(
       });
       if (!approved) return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "사용자가 native Render service 생성을 취소했습니다. Provider 변경은 수행하지 않았습니다.",
+        message: L("사용자가 native Render service 생성을 취소했습니다. Provider 변경은 수행하지 않았습니다.", "The user canceled the native Render service creation. No provider change was made."),
       });
       await reverifyPreparedRenderSession(preparedRenderSession);
       await assertApprovedArtifactCopy(deploymentArtifactDigest, temporaryRoot);
       const revalidatedIntent = validateRenderIntent(artifact, request, deploymentId);
       if (renderIntentDigest(deploymentArtifactDigest, request.llmProvider, revalidatedIntent) !== intentDigest) {
-        throw new PublishFailure("render-intent-changed", "Render service intent가 native 승인 중 변경되었습니다.", {
+        throw new PublishFailure("render-intent-changed", L("Render service intent가 native 승인 중 변경되었습니다.", "The Render service intent changed during native approval."), {
           code: "native-approval-required",
-          message: "승인된 repository/account/service intent와 현재 요청이 다릅니다. 다시 확인해 주세요.",
+          message: L("승인된 repository/account/service intent와 현재 요청이 다릅니다. 다시 확인해 주세요.", "The approved repository/account/service intent differs from the current request. Please check again."),
         });
       }
       // Render deploys from a user-owned Git repo. It never receives or claims
       // to receive this local folder, selected Keychain LLM secret, or app key.
       const deployed = await deployRender(request, revalidatedIntent, preparedRenderSession, attempt);
       const requiredEnvironmentVariable = LLM_ENV[request.llmProvider];
-      const message = `Render service는 생성되었지만 secret은 전송하지 않았습니다. Render dashboard에서 ${requiredEnvironmentVariable}와 ${APP_ACCESS_ENV}를 직접 추가해 주세요.`;
+      const message = L(`Render service는 생성되었지만 secret은 전송하지 않았습니다. Render dashboard에서 ${requiredEnvironmentVariable}와 ${APP_ACCESS_ENV}를 직접 추가해 주세요.`, `The Render service was created, but the secret was not sent. Add ${requiredEnvironmentVariable} and ${APP_ACCESS_ENV} directly in the Render dashboard.`);
       await persistPublishReceipt({
         attempt: { ...attempt, url: deployed.url, providerProjectId: deployed.providerProjectId, providerServiceId: deployed.providerProjectId },
         status: "configuration-required",
@@ -2656,7 +2685,7 @@ export async function publishSiteAgentApp(
     if (!releaseCredentialLock) {
       return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "같은 provider 또는 LLM credential을 사용하는 다른 native 게시 승인이 진행 중입니다.",
+        message: L("같은 provider 또는 LLM credential을 사용하는 다른 native 게시 승인이 진행 중입니다.", "Another native publish approval using the same provider or LLM credential is in progress."),
       });
     }
 
@@ -2705,7 +2734,7 @@ export async function publishSiteAgentApp(
     if (!options.confirmNativeApproval) {
       return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "Electron main native 배포 확인이 필요합니다.",
+        message: L("Electron main native 배포 확인이 필요합니다.", "Electron main native deployment confirmation is required."),
       });
     }
     const approved = await options.confirmNativeApproval({
@@ -2729,7 +2758,7 @@ export async function publishSiteAgentApp(
     if (!approved) {
       return needsActionResult(provider, true, source, {
         code: "native-approval-required",
-        message: "사용자가 native 배포 확인을 취소했습니다. Secret 전송과 provider 변경은 수행하지 않았습니다.",
+        message: L("사용자가 native 배포 확인을 취소했습니다. Secret 전송과 provider 변경은 수행하지 않았습니다.", "The user canceled the native deployment confirmation. No secret was sent and no provider change was made."),
       });
     }
 
@@ -2752,9 +2781,9 @@ export async function publishSiteAgentApp(
       transferredSecrets: [APP_ACCESS_ENV, LLM_ENV[request.llmProvider]],
     });
     if (currentIntentDigest !== intentDigest) {
-      throw new PublishFailure("publish-intent-changed", "Native 승인 중 배포 intent가 변경되었습니다.", {
+      throw new PublishFailure("publish-intent-changed", L("Native 승인 중 배포 intent가 변경되었습니다.", "The deployment intent changed during native approval."), {
         code: "native-approval-required",
-        message: "승인된 artifact/account/secret fingerprint와 현재 배포 intent가 다릅니다. 다시 확인해 주세요.",
+        message: L("승인된 artifact/account/secret fingerprint와 현재 배포 intent가 다릅니다. 다시 확인해 주세요.", "The approved artifact/account/secret fingerprint differs from the current deployment intent. Please check again."),
       });
     }
     // The LLM value is first read only after native approval. Its main-owned
@@ -2762,9 +2791,9 @@ export async function publishSiteAgentApp(
     llmKey = await loadLlmKey(request.llmProvider);
     const actualKeyFingerprint = fullFingerprint(llmKey);
     if (keyDescriptor && actualKeyFingerprint !== keyDescriptor.fingerprint) {
-      throw new PublishFailure("llm-key-changed", "LLM Keychain key가 native 승인 중 변경되었습니다.", {
+      throw new PublishFailure("llm-key-changed", L("LLM Keychain key가 native 승인 중 변경되었습니다.", "The LLM Keychain key changed during native approval."), {
         code: "llm-key-missing",
-        message: "승인 화면에 표시된 LLM key identity와 현재 Keychain 값이 다릅니다. 다시 시도해 주세요.",
+        message: L("승인 화면에 표시된 LLM key identity와 현재 Keychain 값이 다릅니다. 다시 시도해 주세요.", "The LLM key identity shown on the approval screen differs from the current Keychain value. Please try again."),
       });
     }
     if (!keyDescriptor) await ensureApiKeyDescriptor(request.llmProvider as RuntimeBackend, llmKey);
@@ -2774,7 +2803,7 @@ export async function publishSiteAgentApp(
       : await deployRailway(artifact, temporaryRoot, request, preparedSession, accountScope, llmKey, appAccessKey, attempt);
     const checked = await runDeploymentVerification(provider, deployed.url, appAccessKey, options);
     if (!checked.verification.ok || !checked.url) {
-      const reason = checked.verification.reason || "공개 endpoint가 아직 준비되지 않았습니다.";
+      const reason = checked.verification.reason || L("공개 endpoint가 아직 준비되지 않았습니다.", "The public endpoint is not ready yet.");
       await persistPublishReceipt({
         attempt: { ...attempt, url: checked.url ?? deployed.url, providerProjectId: deployed.providerProjectId },
         status: "verification-required",
@@ -2821,7 +2850,7 @@ export async function publishSiteAgentApp(
         ...(attempt?.providerProjectId ? { providerProjectId: attempt.providerProjectId } : {}),
       };
     }
-    const reason = cleanSingleLine(error instanceof Error ? error.message : String(error), 1_000) || "배포에 실패했습니다.";
+    const reason = cleanSingleLine(error instanceof Error ? error.message : String(error), 1_000) || L("배포에 실패했습니다.", "The deployment failed.");
     if (attempt?.mutated && packageValidated) {
       await persistPublishReceipt({
         attempt,

@@ -587,12 +587,19 @@ function readHandoverSource(agentSlug: string, displayName: string): string {
   for (const file of candidates) {
     try {
       const body = fs.readFileSync(file, "utf8").trim();
-      if (body) return `인수인계 출처: ${displayName}\n\n${redactOneHandoverPaths(redactSecrets(body)).slice(0, 8_000)}`;
+      if (body) {
+        const content = redactOneHandoverPaths(redactSecrets(body)).slice(0, 8_000);
+        return currentUiLocale() === "ko"
+          ? `인수인계 출처: ${displayName}\n\n${content}`
+          : `Handover source: ${displayName}\n\n${content}`;
+      }
     } catch {
       // Local, absent memory is a valid no-op; replacement must still succeed.
     }
   }
-  return `인수인계 출처: ${displayName}\n\n전임 담당자의 로컬 인수인계 원본이 없습니다. 새 담당자는 이 조직에서 관찰한 사실만 이어받습니다.`;
+  return currentUiLocale() === "ko"
+    ? `인수인계 출처: ${displayName}\n\n전임 담당자의 로컬 인수인계 원본이 없습니다. 새 담당자는 이 조직에서 관찰한 사실만 이어받습니다.`
+    : `Handover source: ${displayName}\n\nThe previous occupant left no local handover note. The new occupant inherits only what has been observed in this org.`;
 }
 
 function handoverNote(value: string | null | undefined, row: Row): string | null {

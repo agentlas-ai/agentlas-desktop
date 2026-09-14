@@ -214,6 +214,9 @@ import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder
 import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
+
+// Picks the Korean or English human-readable string for the current UI locale.
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 import { agentRemovalPreview, assignSeatOccupant, getSeatForChat, listSeatOccupantHistory } from "./store/seats";
 import { koSubjectParticle, seatEventText } from "../shared/one-seat-events";
 import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
@@ -1717,7 +1720,7 @@ export function registerIpcHandlers(): void {
     const surface: SiteSurface =
       payload?.surface === "mobile" || payload?.surface === "agent-app" ? payload.surface : "web";
     if (surface === "agent-app") {
-      if (!payload?.agentAppTarget) throw new Error("Agent App에는 에이전트 또는 멀티에이전트 선택이 필요합니다.");
+      if (!payload?.agentAppTarget) throw new Error(L("Agent App에는 에이전트 또는 멀티에이전트 선택이 필요합니다.", "Agent App requires selecting an agent or a multi-agent team."));
       const { resolveSiteAgentAppContext } = await import("./site/agent-app");
       const context = resolveSiteAgentAppContext(payload.agentAppTarget);
       return siteProjectForRenderer(createSiteProject({
@@ -2210,7 +2213,7 @@ export function registerIpcHandlers(): void {
       // 폴더를 **먼저** 고르게 한다 — 몇 분짜리 변환을 돌린 뒤에 "어디 쓸까요"를 묻고
       // 취소당하면 그 실행이 통째로 버려진다.
       const picked = await dialog.showOpenDialog(win ?? undefined!, {
-        title: "내보낼 폴더 선택",
+        title: L("내보낼 폴더 선택", "Choose export folder"),
         properties: ["openDirectory", "createDirectory"],
       });
       if (picked.canceled || !picked.filePaths[0]) return { ok: false, canceled: true };
@@ -2277,7 +2280,7 @@ export function registerIpcHandlers(): void {
     async (_e, payload: { projectId?: string; workspaceGrant?: import("../shared/types").FsPathGrant; locale?: string }) => {
       let releaseSiteOperation: (() => void) | null = null;
       try {
-        if (!payload?.workspaceGrant) throw new Error("작업공간 폴더를 먼저 선택해 주세요.");
+        if (!payload?.workspaceGrant) throw new Error(L("작업공간 폴더를 먼저 선택해 주세요.", "Please select a workspace folder first."));
         const projectId = String(payload?.projectId ?? "");
         const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
         releaseSiteOperation = tryAcquireSiteProjectOperation(projectId, "handoff");
@@ -5101,7 +5104,7 @@ export function registerIpcHandlers(): void {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
     if (!automation.graph) {
-      return { ok: false as const, reason: "이 자동화에는 아직 그래프가 없습니다." };
+      return { ok: false as const, reason: L("이 자동화에는 아직 그래프가 없습니다.", "This automation has no graph yet.") };
     }
     const { publishGraphToHub } = await import("./cloud-agents/graph-publish");
     return publishGraphToHub({
@@ -5124,11 +5127,11 @@ export function registerIpcHandlers(): void {
     const name = (opts?.name || pkg.manifest.name || slug).trim();
     // 같은 이름이 이미 있으면 덮어쓰지 않는다 — 남의 작업을 지우는 설치는 없다.
     if (listAutomations().some((row) => row.name === name)) {
-      return { ok: false as const, reason: `"${name}" 이름의 자동화가 이미 있습니다.` };
+      return { ok: false as const, reason: L(`"${name}" 이름의 자동화가 이미 있습니다.`, `An automation named "${name}" already exists.`) };
     }
     const created = createAutomation({
       name,
-      scheduleHuman: pkg.manifest.trigger.schedule || "수동 실행",
+      scheduleHuman: pkg.manifest.trigger.schedule || L("수동 실행", "Manual run"),
       // 슬롯은 비운 채로 만든다. 받는 사람이 채우기 전에 도는 것이 가장 나쁘다.
       targetType: "agent",
       targetId: "",
@@ -5158,8 +5161,8 @@ export function registerIpcHandlers(): void {
       return {
         ok: false as const,
         code: "PATCH_NO_GRAPH",
-        reason: "이 자동화에는 아직 고칠 그래프가 없습니다.",
-        nextAction: "먼저 그래프를 만든 뒤 다시 요청해 주세요.",
+        reason: L("이 자동화에는 아직 고칠 그래프가 없습니다.", "This automation has no graph to fix yet."),
+        nextAction: L("먼저 그래프를 만든 뒤 다시 요청해 주세요.", "Create a graph first, then request this again."),
       };
     }
     const { evaluateGraphPatch } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
@@ -5180,10 +5183,10 @@ export function registerIpcHandlers(): void {
     if (!automation) throw new Error(`Automation not found: ${id}`);
     const sentence = String(request ?? "").trim();
     if (!sentence) {
-      return { ok: false as const, code: "ARCHITECT_NO_REQUEST", reason: "무엇을 바꿀지 알려주세요.", nextAction: "고치고 싶은 내용을 한 문장으로 적어 주세요." };
+      return { ok: false as const, code: "ARCHITECT_NO_REQUEST", reason: L("무엇을 바꿀지 알려주세요.", "Tell us what to change."), nextAction: L("고치고 싶은 내용을 한 문장으로 적어 주세요.", "Write what you want fixed in one sentence.") };
     }
     if (!automation.graph) {
-      return { ok: false as const, code: "PATCH_NO_GRAPH", reason: "이 자동화에는 아직 고칠 그래프가 없습니다.", nextAction: "먼저 그래프를 만든 뒤 다시 요청해 주세요." };
+      return { ok: false as const, code: "PATCH_NO_GRAPH", reason: L("이 자동화에는 아직 고칠 그래프가 없습니다.", "This automation has no graph to fix yet."), nextAction: L("먼저 그래프를 만든 뒤 다시 요청해 주세요.", "Create a graph first, then request this again.") };
     }
     const architect = require("./workflow/graph-architect") as typeof import("./workflow/graph-architect");
     const { evaluateGraphPatch, graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
@@ -5205,11 +5208,11 @@ export function registerIpcHandlers(): void {
         ok: false as const,
         code: "ARCHITECT_UNAVAILABLE",
         reason: detailed.failure
-          ? `그래프를 고치지 못했습니다 — ${detailed.failure.message}`
-          : "그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.",
+          ? L(`그래프를 고치지 못했습니다 — ${detailed.failure.message}`, `Could not fix the graph — ${detailed.failure.message}`)
+          : L("그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.", "Could not connect to a model to fix the graph. Nothing was changed."),
         nextAction: detailed.failure?.kind === "quota"
-          ? "안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요."
-          : "설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.",
+          ? L("안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요.", "Try again after the time noted in the message, or connect a different model.")
+          : L("설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.", "Check the model connection in Settings, then try again."),
       };
     }
     const parsed = architect.parseGraphPatchProposal(text);
@@ -5237,7 +5240,7 @@ export function registerIpcHandlers(): void {
     const { buildGraphFromBlueprint } = require("../shared/graph-blueprint") as typeof import("../shared/graph-blueprint");
     const current = state as import("./workflow/graph-interview").InterviewState;
     if (!current || typeof current !== "object" || typeof current.request !== "string") {
-      return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요." };
+      return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: L("만들 내용을 읽지 못했습니다.", "Could not read what to build."), nextAction: L("무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요.", "Say in one sentence what you want automated.") };
     }
     const {
       callConnectedModelDetailed,
@@ -5311,26 +5314,26 @@ export function registerIpcHandlers(): void {
           return {
             ok: false,
             code: "INTERVIEW_MODEL_UNAVAILABLE",
-            reason: `AI가 만들지 못했습니다 — ${detailedTurn.failure.message}`,
+            reason: L(`AI가 만들지 못했습니다 — ${detailedTurn.failure.message}`, `The AI could not build this — ${detailedTurn.failure.message}`),
             nextAction: detailedTurn.failure.kind === "quota"
-              ? "안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요."
-              : "다른 모델을 연결하거나, 잠시 뒤 다시 시도해 주세요.",
+              ? L("안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요.", "Try again after the time noted in the message, or connect a different model.")
+              : L("다른 모델을 연결하거나, 잠시 뒤 다시 시도해 주세요.", "Connect a different model, or try again shortly."),
           };
         }
       } catch (error) {
         return {
           ok: false,
           code: "INTERVIEW_MODEL_UNAVAILABLE",
-          reason: `AI를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-          nextAction: "잠시 뒤 다시 시도해 주세요.",
+          reason: L(`AI를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, `Could not call the AI: ${error instanceof Error ? error.message : String(error)}`),
+          nextAction: L("잠시 뒤 다시 시도해 주세요.", "Please try again shortly."),
         };
       }
       if (!text) {
         return {
           ok: false,
           code: "INTERVIEW_MODEL_UNAVAILABLE",
-          reason: "AI가 답하지 못했습니다.",
-          nextAction: "잠시 뒤 다시 시도해 주세요.",
+          reason: L("AI가 답하지 못했습니다.", "The AI did not respond."),
+          nextAction: L("잠시 뒤 다시 시도해 주세요.", "Please try again shortly."),
         };
       }
       const parsed = parseInterviewTurn(text, attempt);
@@ -5350,7 +5353,10 @@ export function registerIpcHandlers(): void {
           ...attempt,
           attempts: [...attempt.attempts, {
             round: attempt.round,
-            problems: ["지난 답이 JSON 하나로 읽히지 않았습니다. 설명 없이 JSON 객체 하나만 내보내세요."],
+            problems: [L(
+              "지난 답이 JSON 하나로 읽히지 않았습니다. 설명 없이 JSON 객체 하나만 내보내세요.",
+              "The previous answer did not parse as a single JSON object. Output only one JSON object, with no explanation.",
+            )],
           }],
         };
         continue;
@@ -5431,8 +5437,11 @@ export function registerIpcHandlers(): void {
     return {
       ok: false,
       code: "INTERVIEW_SELF_CORRECTION_EXHAUSTED",
-      reason: `${MAX_SELF_CORRECTIONS + 1}번 다시 만들어 봤지만 같은 자리에서 막혔습니다: ${[...new Set(tried)].slice(0, 3).join(" / ")}`,
-      nextAction: "만들고 싶은 것을 다른 말로 적어 주시거나, 캔버스에서 직접 만들어 보세요.",
+      reason: L(
+        `${MAX_SELF_CORRECTIONS + 1}번 다시 만들어 봤지만 같은 자리에서 막혔습니다: ${[...new Set(tried)].slice(0, 3).join(" / ")}`,
+        `Tried rebuilding ${MAX_SELF_CORRECTIONS + 1} times but kept getting stuck on the same thing: ${[...new Set(tried)].slice(0, 3).join(" / ")}`,
+      ),
+      nextAction: L("만들고 싶은 것을 다른 말로 적어 주시거나, 캔버스에서 직접 만들어 보세요.", "Describe what you want built in different words, or build it directly on the canvas."),
     };
   });
 
@@ -5513,7 +5522,7 @@ export function registerIpcHandlers(): void {
       };
     } | null;
     if (!input?.graph || !input.actionId || !input.blocked?.nodeId) {
-      return { ok: false as const, message: "이 조치를 실행할 수 없습니다." };
+      return { ok: false as const, message: L("이 조치를 실행할 수 없습니다.", "This action cannot be run.") };
     }
     const graph = input.graph as import("../shared/types").WorkflowGraph;
     const { applyGraphBuildRecovery, blockedStepFactsFrom } = await import("./workflow/build-recovery");
@@ -5565,7 +5574,7 @@ export function registerIpcHandlers(): void {
       name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string; goal?: string;
     } | null;
     if (!input?.name?.trim() || !input.graph) {
-      return { ok: false, code: "CREATE_INPUT_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "다시 시도해 주세요." };
+      return { ok: false, code: "CREATE_INPUT_INVALID", reason: L("만들 내용을 읽지 못했습니다.", "Could not read what to build."), nextAction: L("다시 시도해 주세요.", "Please try again.") };
     }
     const existing = listAutomations().find((a) => a.name === input.name!.trim());
     // ★같은 이름 + 같은 그래프면 새로 만들지 않고 있는 것을 돌려준다.
@@ -5618,7 +5627,7 @@ export function registerIpcHandlers(): void {
     if (!decision.ok) return decision;
     // 여기 도달했다는 것은 사용자가 diff를 보고 눌렀다는 뜻이다. 검증은 한 번 더 한다 —
     // 제안과 적용 사이에 그래프가 바뀌었으면 위 평가에서 이미 걸린다.
-    const automation = updateAutomationGraph(id, decision.next, { note: "말로 고치기" });
+    const automation = updateAutomationGraph(id, decision.next, { note: L("말로 고치기", "Fixed by chat") });
     return { ok: true as const, automationId: automation.id, automation };
   });
   ipcMain.handle("automations:runNow", async (
