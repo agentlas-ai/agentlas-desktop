@@ -3639,6 +3639,18 @@ app.whenReady().then(async () => {
       projectId: String(record.projectId ?? ""), officialHost: String(record.officialHost ?? ""), pageTitle: String(record.pageTitle ?? ""), text: String(record.text ?? ""),
     });
   });
+  ipcMain.handle("science:journals:useNeutralProfile", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-neutral-profile-input-invalid");
+    const record = input as Record<string, unknown>;
+    const service = scienceJournalPublicationService() as unknown as { ensureNeutralJournalProfile?: (value: { projectId: string; variant: string; articleType?: string }) => unknown };
+    if (typeof service.ensureNeutralJournalProfile !== "function") throw new Error("science-journal-neutral-profile-unavailable");
+    return service.ensureNeutralJournalProfile({
+      projectId: String(record.projectId ?? ""), variant: String(record.variant ?? ""),
+      articleType: typeof record.articleType === "string" ? record.articleType : undefined,
+    });
+  });
   ipcMain.handle("science:journals:inspectGuidelinesMirror", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:network");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;

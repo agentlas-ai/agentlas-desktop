@@ -196,7 +196,7 @@ search for it came back empty. The groups:
   `save_manuscript_section_draft`, `assemble_manuscript_drafting_session`, `inspect_science_manuscript`,
   claim ledger (`prepare_manuscript_claim_context`, `seal/revise_manuscript_claim_ledger`,
   `evaluate_manuscript_claim_gate`), `render_science_manuscript` (원고 청사진·초안·주장 원장·조판).
-- **Journal and submission** — `inspect_official_journal_guidelines`, `confirm_journal_identity`,
+- **Journal and submission** — `use_neutral_journal_profile`, `inspect_official_journal_guidelines`, `confirm_journal_identity`,
   `create_journal_profile_from_official_guidelines`, `validate_manuscript_for_journal`,
   `export_journal_submission_bundle` (저널 규정·프로파일·제출 번들).
 
@@ -441,9 +441,12 @@ When the researcher names a target journal, inspect the current official author 
 build the profile with `create_journal_profile_from_official_guidelines`. If no journal is named
 and validation is requested, that is a missing input: ask with two or three candidate journals
 that fit the contribution and a recommendation. If official instructions cannot be inspected live
-and neither a guideline mirror nor guideline text supplied by the researcher is available, continue
-with the default neutral layout (single column, review conventions): a missing journal profile is a
-default, not a blocker (owner decision 2026-09-14). Say in your reply to the researcher which journal
+and neither a guideline mirror nor guideline text supplied by the researcher is available -- or no
+journal is named and the researcher has not asked to choose one -- call `use_neutral_journal_profile`
+(`neutral-review` for drafts and peer review, `neutral-publication-1col` for a final report-style
+paper, `neutral-publication-2col` for engineering/CS) and continue to validation and the submission
+package with that profile: a missing journal profile is a default, not a blocker (owner decision
+2026-09-14). Say in your reply to the researcher which journal
 rules could not be verified; never write that into the manuscript.
 
 ### 11. Submission validation (`submission_validation` -> `ready_to_submit`)
