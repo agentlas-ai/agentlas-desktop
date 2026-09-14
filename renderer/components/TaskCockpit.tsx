@@ -3134,30 +3134,10 @@ function ChatPage() {
         // ★호스트 고지는 답변 본문에 섞지 않는다. 자기 행으로 붙는다.
         const notice = ev.notice;
         if (notice.code === "runtime-fallback" && ev.runtimeSelection) {
-          const selection = ev.runtimeSelection;
-          setChat((prev) => prev ? { ...prev, runtimeSelection: selection } : prev);
-          const api = ipc();
-          if (api) {
-            void api.runtime.detect().then((list) => {
-              const matched = list.find((runtime) => (
-                runtime.kind === selection.kind
-                && (!selection.backend || runtime.backend === selection.backend)
-                && (!selection.source || runtime.source === selection.source)
-              )) ?? list.find((runtime) => (
-                runtime.kind === selection.kind
-                && (!selection.backend || runtime.backend === selection.backend)
-              ));
-              if (matched) {
-                setActiveRuntime({
-                  ...matched,
-                  active: true,
-                  model: selection.model ?? matched.model,
-                  effort: selection.effort ?? matched.effort,
-                  longContextEnabled: selection.longContext ?? matched.longContextEnabled,
-                });
-              }
-            }).catch(() => undefined);
-          }
+          // A fallback is scoped to the running invocation. Work may attach to
+          // or replay a One-origin run, but that event must not replace the
+          // room's saved selection or the next send/steer will feed the
+          // temporary fallback back into execution as a new user choice.
         }
         transcriptRevisionRef.current += 1;
         setMessages((prev) => {

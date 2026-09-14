@@ -554,14 +554,25 @@ export async function runSwarmInvocation(
       });
     };
     let result: Awaited<ReturnType<typeof runWorkerOn>>;
+    const failedWorkerRuntimes: typeof candidateRuntimes = [];
     result = await runWorkerOn(executedRuntime, executedRunner);
     while (result.failure && !(signal ?? p.signal)?.aborted) {
+      if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
+        && runtime.model === executedRuntime.model)) {
+        failedWorkerRuntimes.push(executedRuntime);
+      }
       const fallback = rolePriorityRuntimes(candidateRuntimes, "worker", {
         failedRuntime: executedRuntime,
         failure: result.failure,
+        exclude: failedWorkerRuntimes,
       })[0];
       const fallbackRunner = fallback ? pickRunner(fallback) : null;
-      if (!fallback || !fallbackRunner) break;
+      if (
+        !fallback
+        || !fallbackRunner
+        || failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, fallback)
+          && runtime.model === fallback.model)
+      ) break;
       announceFallback(executedRuntime, fallback, result.failure.kind);
       executedRuntime = fallback;
       executedRunner = fallbackRunner;
@@ -722,6 +733,7 @@ export async function runSwarmInvocation(
     };
     let executedRuntime = active;
     let executedRunner = synthesisRunner;
+    const failedSynthesisRuntimes: typeof candidateRuntimes = [];
     let result = await runSynthesisOn(executedRuntime, executedRunner);
     while (
       result.failure
@@ -730,12 +742,22 @@ export async function runSwarmInvocation(
       && !p.benchmarkMode
       && !(signal ?? p.signal)?.aborted
     ) {
+      if (!failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
+        && runtime.model === executedRuntime.model)) {
+        failedSynthesisRuntimes.push(executedRuntime);
+      }
       const fallback = rolePriorityRuntimes(candidateRuntimes, "orchestrator", {
         failedRuntime: executedRuntime,
         failure: result.failure,
+        exclude: failedSynthesisRuntimes,
       })[0];
       const fallbackRunner = fallback ? pickRunner(fallback) : null;
-      if (!fallback || !fallbackRunner) break;
+      if (
+        !fallback
+        || !fallbackRunner
+        || failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, fallback)
+          && runtime.model === fallback.model)
+      ) break;
       if (oneControllerPreferred) p.onControllerRuntimeFallback?.(fallback, result.failure);
       synthEmit({
         kind: "tool-use",

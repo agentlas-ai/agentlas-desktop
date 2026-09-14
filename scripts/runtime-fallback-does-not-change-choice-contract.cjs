@@ -165,6 +165,25 @@ check("★렌더러도 저장하지 않는다 — 한쪽만 고치면 다른 쪽
   }
 });
 
+check("★Work attach/replay도 이번 실행의 폴백을 다음 선택으로 되먹이지 않는다", () => {
+  const src = fs.readFileSync(path.join(root, "renderer/components/TaskCockpit.tsx"), "utf8");
+  const body = sliceBetween(
+    src,
+    'if (notice.code === "runtime-fallback" && ev.runtimeSelection) {',
+    "transcriptRevisionRef.current += 1;",
+    "Work 폴백",
+  );
+  for (const [needle, why] of [
+    ["setChat(", "대화의 다음 요청 모델을 임시 폴백으로 바꿉니다"],
+    ["setActiveRuntime(", "작성창의 다음 요청 모델을 임시 폴백으로 바꿉니다"],
+    ["chats.setRuntimeSelection", "대화의 저장된 모델을 영구히 바꿉니다"],
+  ]) {
+    const hit = body.split("\n").filter((line) =>
+      !/^\s*(\/\/|\*|\/\*)/.test(line) && line.includes(needle));
+    assert.deepEqual(hit, [], `${needle}: ${why}\n${hit.join("\n")}`);
+  }
+});
+
 check("★고장 주입 — 위 두 검사가 실제로 빨간불이 된다", () => {
   // 이 스캔이 아무것도 못 잡는 모양이면 위 두 검사는 장식이다. 옛 고장을 넣어 확인한다.
   const brokenMain = [

@@ -1204,14 +1204,23 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   };
   let executedRuntime = active;
   let executedPicked = picked;
+  const failedNodeRuntimes: RuntimeStatus[] = [];
   let result = await runNodeOn(executedRuntime, executedPicked);
   while (result.failure && !p.req.agentAppMode && !(turn.signal ?? p.signal)?.aborted) {
+    if (!failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, executedRuntime))) {
+      failedNodeRuntimes.push(executedRuntime);
+    }
     const fallback = rolePriorityRuntimes(candidateRuntimes, runtimeRole, {
       failedRuntime: executedRuntime,
       failure: result.failure,
+      exclude: failedNodeRuntimes,
     })[0];
     const fallbackPicked = fallback ? pickRunner(fallback) : null;
-    if (!fallback || !fallbackPicked) break;
+    if (
+      !fallback
+      || !fallbackPicked
+      || failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, fallback))
+    ) break;
     if (tier === 1) {
       p.onControllerRuntimeFallback?.(fallback, result.failure);
     }

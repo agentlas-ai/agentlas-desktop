@@ -495,7 +495,10 @@ export function rolePriorityRuntimes(
      * "지금 막혀 있다"는 개념이 없었기 때문이다. 시한이 지나면 스스로 다시 후보가 된다.
      */
     if (runtimeCooldown(candidate)) return true;
-    if (excluded.some((item) => sameRuntimeIdentity(candidate, item))) return true;
+    // An attempted entry identifies one executable/model pair. Excluding the
+    // whole executable here silently removed the next configured model even
+    // though non-auth/non-quota failures are model-scoped below.
+    if (excluded.some((item) => sameRuntimeIdentity(candidate, item) && candidate.model === item.model)) return true;
     if (
       options.failedRuntime
       && options.failure
