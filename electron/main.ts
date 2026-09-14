@@ -2120,6 +2120,15 @@ app.whenReady().then(async () => {
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
     return scienceStore().getProject(projectId);
   });
+  ipcMain.handle("science:projects:updateOutputLanguage", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-project-input-invalid");
+    const record = input as Record<string, unknown>;
+    const store = scienceStore() as unknown as { updateProjectOutputLanguage?: (value: { requestId: string; projectId: string; outputLanguage: string | null }) => unknown };
+    if (typeof store.updateProjectOutputLanguage !== "function") throw new Error("science-project-output-language-unavailable");
+    return store.updateProjectOutputLanguage({ requestId: String(record.requestId ?? ""), projectId: String(record.projectId ?? ""), outputLanguage: record.outputLanguage === null ? null : String(record.outputLanguage ?? "") });
+  });
   ipcMain.handle("science:projects:updateRelatedDomains", (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;

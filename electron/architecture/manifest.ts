@@ -45,7 +45,7 @@ export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.24.9";
 // skills/direct-study/SKILL.md and skills/write-manuscript/SKILL.md (persona -> contract -> workflows).
 // The Science runtime refuses to dispatch when the installed package differs.
 // Regenerate from composeResearchDirectorSystemPrompt and the four prompt assets declared in plugin.json.
-export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "94182ae8329e5a73f7a0102c4a6a7ae0e4ecc52ee3e6073e7cc12b75767edefe";
+export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "2053ea2b60dd8c35787e5fe5fedc052a9481192bc6ae8535a12f360edb51a52b";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.

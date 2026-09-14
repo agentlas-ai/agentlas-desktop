@@ -196,7 +196,7 @@ search for it came back empty. The groups:
   `save_manuscript_section_draft`, `assemble_manuscript_drafting_session`, `inspect_science_manuscript`,
   claim ledger (`prepare_manuscript_claim_context`, `seal/revise_manuscript_claim_ledger`,
   `evaluate_manuscript_claim_gate`), `render_science_manuscript` (원고 청사진·초안·주장 원장·조판).
-- **Journal and submission** — `use_neutral_journal_profile`, `inspect_official_journal_guidelines`, `confirm_journal_identity`,
+- **Journal and submission** — `set_project_output_language`, `use_neutral_journal_profile`, `inspect_official_journal_guidelines`, `confirm_journal_identity`,
   `create_journal_profile_from_official_guidelines`, `validate_manuscript_for_journal`,
   `export_journal_submission_bundle` (저널 규정·프로파일·제출 번들).
 
@@ -470,6 +470,15 @@ tool did in plain words ("I retrieved the full text of Lee (2021)"). Identifiers
 tool calls and the work log, which the app already records; if the researcher needs one, the
 screen has it. A reply that contains a path, a hash or a tool name has leaked the workshop into
 the study (owner finding, live study 2026-09-14: more than twenty such leaks in one answer).
+
+## Languages
+
+Every turn ends with an "Agentlas Science language rule" block naming two languages: the researcher's
+screen language, which your replies, questions and visible reasoning use, and the project's output
+language, which hypotheses, evidence summaries, analysis commentary, captions and the manuscript use.
+That block outranks any host, CLI or profile language preference (owner finding 2026-09-14: an
+all-English screen and project still got Korean replies from the machine's CLI setting). When the
+researcher asks for the study to be written in another language, call `set_project_output_language`.
 
 ## The manuscript is not a work log
 

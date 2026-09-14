@@ -34,7 +34,7 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "94182ae8329e5a73f7a0102c4a6a7ae0e4ecc52ee3e6073e7cc12b75767edefe",
+    "promptSha256": "2053ea2b60dd8c35787e5fe5fedc052a9481192bc6ae8535a12f360edb51a52b",
     "failClosed": true
   },
   "provides": {
@@ -75,8 +75,8 @@
     "files": [
       {
         "path": "agent/agent.md",
-        "sha256": "d929e868835392033809cbf2f2140364da3b12c2c04b3632e6fe9b5e0bf0108e",
-        "bytes": 67005
+        "sha256": "a08223514f496a86482f75079c709033b860bbbcdf547f1e097cf0ca6fad478e",
+        "bytes": 67648
       },
       {
         "path": "agent/routing-card.json",
