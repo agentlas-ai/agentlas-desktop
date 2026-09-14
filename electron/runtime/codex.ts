@@ -2162,7 +2162,7 @@ export const runCodex: Runner = async (
       args,
       composeResumeTurnPrompt(
         runReq.userPrompt,
-        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        [gapContext, dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: "codex", sessionId: String(resumeSessionId ?? ""), turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable }).text].filter(Boolean).join("\n\n"),
         runReq.locale,
       ),
       runReq,
