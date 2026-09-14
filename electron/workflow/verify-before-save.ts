@@ -23,6 +23,9 @@
 
 import { codeReferencedVars } from "../../shared/graph-code-vars";
 import type { WorkflowGraph, WorkflowNode } from "../../shared/types";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export type PreSaveStepState = "ran" | "repaired" | "blocked" | "skipped";
 
@@ -85,7 +88,7 @@ function str(config: Record<string, unknown> | undefined, key: string): string {
  */
 export function humanCauseOf(rawFailure: string | null | undefined): string {
   const text = String(rawFailure ?? "").trim();
-  if (!text) return "이 단계가 실행되지 않았습니다.";
+  if (!text) return L("이 단계가 실행되지 않았습니다.", "This step did not run.");
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1] ?? text;
   if (lines.length <= 3 || !/^traceback/i.test(lines[0])) return text;
@@ -179,8 +182,8 @@ export async function verifyGraphBeforeSave(
         label: node.label || node.id,
         state: "skipped",
         skippedBecause:
-          `이 단계는 "${waitsFor.join(", ")}" 값을 기다리는데, 그 값을 만드는 단계는 `
-          + "바깥을 바꾸는 단계라 저장 전에는 돌리지 않습니다. 실제 실행에서 확인됩니다.",
+          L(`이 단계는 "${waitsFor.join(", ")}" 값을 기다리는데, 그 값을 만드는 단계는 바깥을 바꾸는 단계라 저장 전에는 돌리지 않습니다. 실제 실행에서 확인됩니다.`,
+            `This step waits for "${waitsFor.join(", ")}", which comes from a step that changes things outside, so it is not run before saving. It is checked in the real run.`),
       });
       continue;
     }
@@ -190,7 +193,7 @@ export async function verifyGraphBeforeSave(
         nodeId: node.id,
         label: node.label || node.id,
         state: "skipped",
-        skippedBecause: "이 단계에는 아직 스크립트가 없습니다.",
+        skippedBecause: L("이 단계에는 아직 스크립트가 없습니다.", "This step has no script yet."),
       });
       continue;
     }
@@ -265,8 +268,8 @@ export function renderPreSaveVerification(v: PreSaveVerification): string[] {
   const repaired = v.steps.filter((s) => s.state === "repaired");
   const blocked = v.steps.filter((s) => s.state === "blocked");
 
-  for (const step of repaired) out.push(`"${step.label}" 단계가 처음엔 안 돌아서 한 번 고쳤습니다.`);
-  for (const step of blocked) out.push(`"${step.label}" 단계는 아직 안 됩니다 — ${step.cause}`);
+  for (const step of repaired) out.push(L(`"${step.label}" 단계가 처음엔 안 돌아서 한 번 고쳤습니다.`, `"${step.label}" did not run at first, so it was fixed once.`));
+  for (const step of blocked) out.push(L(`"${step.label}" 단계는 아직 안 됩니다 — ${step.cause}`, `"${step.label}" does not work yet — ${step.cause}`));
   return out;
 }
 

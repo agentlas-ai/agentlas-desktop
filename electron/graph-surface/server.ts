@@ -15,6 +15,7 @@
  */
 import { GRAPH_WIRE } from "../../shared/graph-node-protocol";
 import { listGraphsForSurface, submitGraphRunRequest } from "./submit";
+import { currentUiLocale } from "../ui-locale";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -70,8 +71,9 @@ export function handleGraphSurfaceRequest(req: JsonRpcRequest): Record<string, u
           id: req.id ?? null,
           error: {
             code: -32600,
-            message: `SCHEMA_UNSUPPORTED_MAJOR: 이 Agentlas는 ${GRAPH_WIRE}로 말합니다 (요청: ${asked}). `
-              + "SDK와 Agentlas 중 오래된 쪽을 올려 주세요.",
+            message: currentUiLocale() === "ko"
+              ? `SCHEMA_UNSUPPORTED_MAJOR: 이 Agentlas는 ${GRAPH_WIRE}로 말합니다 (요청: ${asked}). SDK와 Agentlas 중 오래된 쪽을 올려 주세요.`
+              : `SCHEMA_UNSUPPORTED_MAJOR: this Agentlas speaks ${GRAPH_WIRE} (requested: ${asked}). Update whichever of the SDK or Agentlas is older.`,
           },
         };
       }

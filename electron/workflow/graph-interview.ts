@@ -17,6 +17,9 @@ import {
   type BlueprintTurn,
   type GraphBlueprint,
 } from "../../shared/graph-blueprint";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export const MAX_QUESTIONS_PER_TURN = 3;
 /** 인터뷰가 끝나지 않고 도는 것을 막는다. 이만큼 물었는데도 안 되면 사람에게 사정을 말한다. */
@@ -324,15 +327,15 @@ const unreadable = (rawText?: string | null): InterviewParse => {
       ok: false,
       // 재시도로 해결되지 않는다 — 형식 문제가 아니다.
       code: "INTERVIEW_MODEL_UNAVAILABLE",
-      reason: `AI가 만들지 못했습니다 — ${text}`,
-      nextAction: "다른 모델을 연결하거나, 안내에 적힌 시각 이후에 다시 시도해 주세요.",
+      reason: L(`AI가 만들지 못했습니다 — ${text}`, `The AI could not build this — ${text}`),
+      nextAction: L("다른 모델을 연결하거나, 안내에 적힌 시각 이후에 다시 시도해 주세요.", "Connect another model, or try again after the time given in the notice."),
     };
   }
   return {
     ok: false,
     code: "INTERVIEW_OUTPUT_UNREADABLE",
-    reason: "만들 내용을 읽지 못했습니다.",
-    nextAction: "자동으로 돌릴 일을 한 문장으로 다시 적어 주세요.",
+    reason: L("만들 내용을 읽지 못했습니다.", "Could not read what to build."),
+    nextAction: L("자동으로 돌릴 일을 한 문장으로 다시 적어 주세요.", "Describe what to automate again in one sentence."),
   };
 };
 
@@ -390,8 +393,8 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
       return {
         ok: false,
         code: "INTERVIEW_REPEATED_QUESTIONS",
-        reason: "이미 답하신 것만 다시 물으려 했습니다.",
-        nextAction: "다시 시도하거나, 만들 것을 조금 더 구체적으로 적어 주세요.",
+        reason: L("이미 답하신 것만 다시 물으려 했습니다.", "It only tried to ask questions you already answered."),
+        nextAction: L("다시 시도하거나, 만들 것을 조금 더 구체적으로 적어 주세요.", "Try again, or describe what to build a bit more specifically."),
       };
     }
     return { ok: true, turn: { kind: "ask", questions } };

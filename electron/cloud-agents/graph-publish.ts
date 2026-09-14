@@ -35,6 +35,9 @@ import {
 } from "../../shared/graph-package";
 import { getSessionCookieHeader } from "../auth";
 import { generateLocalizedListingWithSubmitterRuntime, hashPackage, localizedListingProblems } from "./package";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 const PACKAGE_HASH_VERSION = "path-sha256-executable-v2" as const;
 /** 패키지 안에서 그래프가 사는 자리. 받는 쪽이 이 한 이름만 알면 된다. */
@@ -84,9 +87,14 @@ function describeGraphCode(graph: WorkflowGraph): CloudAgentSecurityFinding[] {
         id: `graph-code:${node.id}`,
         severity: "info",
         category: "review",
-        message: `코드 단계 "${label}" — 불러오는 것: ${imports.length ? imports.join(", ") : "(없음)"}`
-          + ` · 설치되는 패키지: ${packages.length ? packages.join(", ") : "(선언 없음)"}`
-          + ` · ${code.split("\n").length}줄`,
+        message: L(
+          `코드 단계 "${label}" — 불러오는 것: ${imports.length ? imports.join(", ") : "(없음)"}`
+            + ` · 설치되는 패키지: ${packages.length ? packages.join(", ") : "(선언 없음)"}`
+            + ` · ${code.split("\n").length}줄`,
+          `Code step "${label}" — imports: ${imports.length ? imports.join(", ") : "(none)"}`
+            + ` · installed packages: ${packages.length ? packages.join(", ") : "(none declared)"}`
+            + ` · ${code.split("\n").length} lines`,
+        ),
       });
     }
     if (nodeDeclaresOutwardEffect({ type: node.type, config: cfg })) {
@@ -94,10 +102,10 @@ function describeGraphCode(graph: WorkflowGraph): CloudAgentSecurityFinding[] {
         id: `graph-outward:${node.id}`,
         severity: "info",
         category: "policy",
-        message: `바깥으로 나가는 단계 "${label}" — `
+        message: L(`바깥으로 나가는 단계 "${label}" — `, `Outward step "${label}" — `)
           + (cfg.approval === "auto"
-            ? "확인 없이 바로 실행되도록 설정돼 있습니다."
-            : "실행 전에 사람 확인을 받습니다."),
+            ? L("확인 없이 바로 실행되도록 설정돼 있습니다.", "set to run immediately without confirmation.")
+            : L("실행 전에 사람 확인을 받습니다.", "asks a person to confirm before running.")),
       });
     }
   }
@@ -121,11 +129,11 @@ export async function publishGraphToHub(input: {
     ...(input.version ? { version: input.version } : {}),
   });
   if (built.blocked) {
-    return { ok: false, blockers: built.blockers, reason: "패키지에 자격증명으로 보이는 값이 남아 있습니다." };
+    return { ok: false, blockers: built.blockers, reason: L("패키지에 자격증명으로 보이는 값이 남아 있습니다.", "The package still contains values that look like credentials.") };
   }
 
   const cookie = getSessionCookieHeader();
-  if (!cookie) return { ok: false, reason: "Hub에 올리려면 agentlas.cloud에 로그인해야 합니다." };
+  if (!cookie) return { ok: false, reason: L("Hub에 올리려면 agentlas.cloud에 로그인해야 합니다.", "Sign in to agentlas.cloud to publish to Hub.") };
 
   const body = JSON.stringify(built.package, null, 2) + "\n";
   const files = [{
@@ -166,8 +174,12 @@ export async function publishGraphToHub(input: {
     mode: "static-only",
     verdict: "pass",
     costOwner: "none",
-    summary: `그래프 패키지 — 노드 ${built.package.graph.nodes.length}개, 세척 ${built.findings.length}건, `
-      + `채워야 할 항목 ${graphBindingChecklist(built.package).length}개.`,
+    summary: L(
+      `그래프 패키지 — 노드 ${built.package.graph.nodes.length}개, 세척 ${built.findings.length}건, `
+        + `채워야 할 항목 ${graphBindingChecklist(built.package).length}개.`,
+      `Graph package — ${built.package.graph.nodes.length} nodes, ${built.findings.length} scrubbed values, `
+        + `${graphBindingChecklist(built.package).length} items to fill in.`,
+    ),
     findings: describeGraphCode(built.package.graph),
     reviewedAt: new Date().toISOString(),
   };
@@ -189,8 +201,10 @@ export async function publishGraphToHub(input: {
   if (listingProblems.length > 0) {
     return {
       ok: false,
-      reason: `공개 목록 문구를 만들지 못했습니다(${listingProblems.join(", ")}). `
-        + "영문 제목·설명을 직접 넣어 다시 시도해 주세요.",
+      reason: L(
+        `공개 목록 문구를 만들지 못했습니다(${listingProblems.join(", ")}). 영문 제목·설명을 직접 넣어 다시 시도해 주세요.`,
+        `Could not create the public listing text (${listingProblems.join(", ")}). Enter an English title and description and try again.`,
+      ),
     };
   }
 
@@ -248,12 +262,12 @@ export async function publishGraphToHub(input: {
         "x-agentlas-cloud-id": current.cloudId,
       });
     } else {
-      return { ok: false, reason: `Hub 등록 실패 (412): ${JSON.stringify(conflict).slice(0, 300)}` };
+      return { ok: false, reason: L(`Hub 등록 실패 (412): `, `Hub registration failed (412): `) + JSON.stringify(conflict).slice(0, 300) };
     }
   }
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    return { ok: false, reason: `Hub 등록 실패 (${response.status}): ${text.slice(0, 300)}` };
+    return { ok: false, reason: L(`Hub 등록 실패 (${response.status}): `, `Hub registration failed (${response.status}): `) + text.slice(0, 300) };
   }
   return {
     ok: true,
@@ -282,7 +296,7 @@ export async function fetchGraphFromHub(slug: string): Promise<GraphFetchResult>
     headers: { accept: "application/json", ...(cookie ? { cookie } : {}) },
   });
   if (!response.ok) {
-    return { ok: false, reason: `Hub에서 받지 못했습니다 (${response.status}).` };
+    return { ok: false, reason: L(`Hub에서 받지 못했습니다 (${response.status}).`, `Could not download from Hub (${response.status}).`) };
   }
   // MCP 매니페스트 라우트는 본문을 {result: …}로 감싼다. 감싼 채로 읽으면 언제나
   // "파일이 없다"가 되어, 받을 수 있는 패키지를 못 받는다고 말하게 된다.
@@ -295,13 +309,13 @@ export async function fetchGraphFromHub(slug: string): Promise<GraphFetchResult>
   const entry = json?.cloudPackage?.files?.find((f) => f.path === GRAPH_PACKAGE_FILE);
   if (!entry?.contentBase64) {
     // 목록에는 있는데 바이트가 없다 — "설치 가능"으로 보이면 안 된다.
-    return { ok: false, reason: `Hub 응답에 ${GRAPH_PACKAGE_FILE}이 없습니다.` };
+    return { ok: false, reason: L(`Hub 응답에 ${GRAPH_PACKAGE_FILE}이 없습니다.`, `The Hub response has no ${GRAPH_PACKAGE_FILE}.`) };
   }
   let pkg: unknown;
   try {
     pkg = JSON.parse(Buffer.from(entry.contentBase64, "base64").toString("utf8"));
   } catch {
-    return { ok: false, reason: "받은 패키지를 읽지 못했습니다." };
+    return { ok: false, reason: L("받은 패키지를 읽지 못했습니다.", "Could not read the downloaded package.") };
   }
   const problems = verifyGraphPackage(pkg);
   if (problems.length) return { ok: false, reason: problems.join(" ") };

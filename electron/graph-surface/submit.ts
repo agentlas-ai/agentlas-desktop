@@ -16,6 +16,9 @@ import { randomUUID } from "node:crypto";
 import { decideGraphRunRequest } from "../../shared/graph-run-request";
 import { listAutomations } from "../store/automations";
 import { enqueueTriggerEvent } from "../store/trigger-events";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export type GraphSurfaceSource = "sdk" | "mcp" | "telegram";
 
@@ -59,8 +62,8 @@ export function submitGraphRunRequest(request: {
     return {
       ok: false,
       code: "RUN_REQUEST_QUEUE_UNAVAILABLE",
-      reason: `실행 요청을 대기열에 적지 못했습니다: ${err instanceof Error ? err.message : String(err)}`,
-      nextAction: "Agentlas가 실행 중인지 확인한 뒤 다시 보내 주세요.",
+      reason: L("실행 요청을 대기열에 적지 못했습니다: ", "Could not queue the run request: ") + (err instanceof Error ? err.message : String(err)),
+      nextAction: L("Agentlas가 실행 중인지 확인한 뒤 다시 보내 주세요.", "Check that Agentlas is running, then send it again."),
     };
   }
   return {
@@ -84,6 +87,6 @@ export function listGraphsForSurface(): Array<{
     name: row.name,
     // ★꺼진 것도 보여준다. 목록에서 감추면 부른 쪽은 "없는 자동화"라는 잘못된 사유를 받는다.
     enabled: row.enabled,
-    description: row.scheduleHuman ? `${row.scheduleHuman}에 도는 자동화` : "자동화",
+    description: row.scheduleHuman ? L(`${row.scheduleHuman}에 도는 자동화`, `Automation that runs ${row.scheduleHuman}`) : L("자동화", "Automation"),
   }));
 }

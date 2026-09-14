@@ -32,6 +32,9 @@ import {
   trackRunChild,
 } from "../runtime/exec";
 import { userDataPath } from "../runtime-paths";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export type CodeLang = "python" | "js";
 export type CodeIsolationLevel = "os-sandboxed" | "process-isolated" | "unavailable";
@@ -221,7 +224,7 @@ async function ensurePythonPackages(
   const installedNow: string[] = [];
   for (const raw of packages) {
     const name = safePipName(raw);
-    if (!name) return { ok: false, installedNow, failed: { name: String(raw), reason: "패키지 이름 형식이 올바르지 않습니다." } };
+    if (!name) return { ok: false, installedNow, failed: { name: String(raw), reason: L("패키지 이름 형식이 올바르지 않습니다.", "The package name is not valid.") } };
     if (have.has(name.toLowerCase())) continue;
     const r = await new Promise<{ code: number | null; err: string }>((resolve) => {
       const child = spawn(python, [
@@ -236,7 +239,7 @@ async function ensurePythonPackages(
       child.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, err: String(e) }); });
     });
     if (r.code !== 0) {
-      return { ok: false, installedNow, failed: { name, reason: r.err.trim().slice(-500) || `pip 종료 코드 ${r.code}` } };
+      return { ok: false, installedNow, failed: { name, reason: r.err.trim().slice(-500) || L(`pip 종료 코드 ${r.code}`, `pip exit code ${r.code}`) } };
     }
     recordInstalled(dir, name);
     installedNow.push(name);
@@ -268,7 +271,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     if (!py) {
       return {
         ok: false, isolation: "unavailable",
-        reason: "이 컴퓨터에서 파이썬 실행기를 찾지 못했습니다. 앱을 다시 설치하거나 파이썬을 설치해 주세요.",
+        reason: L("이 컴퓨터에서 파이썬 실행기를 찾지 못했습니다. 앱을 다시 설치하거나 파이썬을 설치해 주세요.", "No Python runtime was found on this computer. Reinstall the app or install Python."),
       };
     }
     interpreter = py.python;
@@ -291,11 +294,11 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       const declared = (input.packages ?? []).map((s) => String(s).trim()).filter(Boolean);
       if (declared.length) {
         const ensured = await ensurePythonPackages(interpreter, declared, env);
-        if (ensured.installedNow.length) provisionNotes.push(`[deps] 설치: ${ensured.installedNow.join(", ")}`);
+        if (ensured.installedNow.length) provisionNotes.push(L(`[deps] 설치: ${ensured.installedNow.join(", ")}`, `[deps] installed: ${ensured.installedNow.join(", ")}`));
         if (!ensured.ok && ensured.failed) {
           return {
             ok: false, isolation: "process-isolated", failureCode: "CODE_DEPENDENCY_MISSING",
-            reason: `이 단계가 선언한 파이썬 패키지 "${ensured.failed.name}"를 설치하지 못했습니다: ${ensured.failed.reason}`,
+            reason: L(`이 단계가 선언한 파이썬 패키지 "${ensured.failed.name}"를 설치하지 못했습니다: ${ensured.failed.reason}`, `Could not install the Python package "${ensured.failed.name}" this step declares: ${ensured.failed.reason}`),
           };
         }
       }
@@ -347,7 +350,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         // ★조용한 폴백 금지 — 울타리 없이 돌리고 "격리했다"고 말하는 것이 최악이다.
         return {
           ok: false, isolation: "unavailable",
-          reason: "macOS 샌드박스 실행기(sandbox-exec)를 찾지 못해 코드를 돌리지 않았습니다.",
+          reason: L("macOS 샌드박스 실행기(sandbox-exec)를 찾지 못해 코드를 돌리지 않았습니다.", "The code did not run because the macOS sandbox runner (sandbox-exec) was not found."),
         };
       }
     }
@@ -380,7 +383,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     const beforeFiles = input.effect === "mutation" ? fileState(cwd) : null;
     let run = await runOnce();
     if (input.signal?.aborted) {
-      return { ok: false, isolation, reason: "실행이 중지되었습니다." };
+      return { ok: false, isolation, reason: L("실행이 중지되었습니다.", "The run was stopped.") };
     }
     // ── 미선언 import 구조(救助) — 없는 모듈이면 설치를 시도하고 딱 한 번 다시 돈다 ──
     //   선언이 정답이지만, 이미 저장된 그래프(선언 이전에 지어진 코드)를 원문 traceback으로
@@ -391,15 +394,15 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       if (missing && safePipName(missing)) {
         const rescue = await ensurePythonPackages(interpreter, [missing], env);
         if (rescue.ok) {
-          provisionNotes.push(`[deps] 없던 모듈 "${missing}" 설치 후 재시도`);
+          provisionNotes.push(L(`[deps] 없던 모듈 "${missing}" 설치 후 재시도`, `[deps] installed missing module "${missing}" and retried`));
           run = await runOnce();
           if (input.signal?.aborted) {
-            return { ok: false, isolation, reason: "실행이 중지되었습니다." };
+            return { ok: false, isolation, reason: L("실행이 중지되었습니다.", "The run was stopped.") };
           }
         } else if (rescue.failed) {
           return {
             ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
-            reason: `코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `
+            reason: L(`코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `, `The Python package "${missing}" used by the code is not on this computer, and installing it failed: `)
               + `${rescue.failed.reason}`,
           };
         }
@@ -407,12 +410,12 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     }
     if (run.code !== 0) {
       const stillMissing = input.lang === "python" ? MISSING_MODULE_RE.exec(run.stderr)?.[1] : null;
-      const reason = run.stderr.trim() || `코드 스텝이 오류로 끝났습니다 (종료 코드 ${run.code}).`;
+      const reason = run.stderr.trim() || L(`코드 스텝이 오류로 끝났습니다 (종료 코드 ${run.code}).`, `The code step ended with an error (exit code ${run.code}).`);
       if (stillMissing) {
         return {
           ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
-          reason: `코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — `
-            + `원문: ${reason.slice(0, 800)}`,
+          reason: L(`코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — 원문: `, `Could not prepare the Python module "${stillMissing}" used by the code. Its pip name may differ from the module name — original error: `)
+            + reason.slice(0, 800),
         };
       }
       return { ok: false, isolation, reason: reason.slice(0, 4000) };

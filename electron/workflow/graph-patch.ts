@@ -10,6 +10,9 @@ import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
 //  · 위험 표식을 모르면 안전한 쪽이 아니라 **승인 필요 쪽**으로 판정한다. 위험을 몰라서
 //    통과시키는 방향의 오류는 되돌릴 수 없다.
 import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "../../shared/types";
+import { currentUiLocale } from "../ui-locale";
+
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export type GraphPatchOpKind =
   | "addNode" | "editNode" | "removeNode"
@@ -87,8 +90,8 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
   if (!patch || !Array.isArray(patch.ops) || patch.ops.length === 0) {
     return fail(
       "PATCH_EMPTY",
-      "고칠 내용을 만들지 못했습니다.",
-      "무엇을 바꾸고 싶은지 조금 더 구체적으로 말씀해 주세요.",
+      L("고칠 내용을 만들지 못했습니다.", "Could not work out what to change."),
+      L("무엇을 바꾸고 싶은지 조금 더 구체적으로 말씀해 주세요.", "Say a bit more specifically what you want to change."),
     );
   }
   const nodes = graph.nodes.map((node) => ({ ...node }));
@@ -103,20 +106,20 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       // 모르는 연산을 건너뛰고 나머지를 적용하면, 사용자가 승인한 적 없는 그래프가 된다.
       return fail(
         "PATCH_OP_UNKNOWN",
-        `이 버전이 알 수 없는 변경 방식("${op?.op ?? "이름 없음"}")이 포함돼 있어 전체를 적용하지 않았습니다.`,
-        "Agentlas를 최신 버전으로 업데이트하거나, 요청을 더 단순하게 다시 말씀해 주세요.",
+        L(`이 버전이 알 수 없는 변경 방식("${op?.op ?? "이름 없음"}")이 포함돼 있어 전체를 적용하지 않았습니다.`, `Nothing was applied because the change includes an operation this version does not know ("${op?.op ?? "unnamed"}").`),
+        L("Agentlas를 최신 버전으로 업데이트하거나, 요청을 더 단순하게 다시 말씀해 주세요.", "Update Agentlas to the latest version, or ask again more simply."),
       );
     }
     if (op.op === "addNode") {
       if (!op.node?.id || nodes.some((n) => n.id === op.node!.id)) {
-        return fail("PATCH_NODE_CONFLICT", "이미 있는 단계와 같은 이름으로 추가하려 했습니다.", "다른 이름으로 다시 시도해 주세요.");
+        return fail("PATCH_NODE_CONFLICT", L("이미 있는 단계와 같은 이름으로 추가하려 했습니다.", "It tried to add a step with the same name as an existing one."), L("다른 이름으로 다시 시도해 주세요.", "Try again with a different name."));
       }
       nodes.push(op.node);
       added.push(op.node.label || op.node.id);
       for (const risk of risksOfNode(op.node)) risks.add(risk);
     } else if (op.op === "editNode") {
       const index = nodes.findIndex((n) => n.id === op.nodeId);
-      if (index < 0) return fail("PATCH_NODE_MISSING", `고치려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      if (index < 0) return fail("PATCH_NODE_MISSING", L(`고치려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step to edit, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       const merged = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
       // 이미 갖고 있던 위험은 이 패치가 새로 거는 것이 아니다 — **늘어난 것만** 센다.
       // (안 그러면 발송 단계의 문구 한 줄 고치는 데도 승인이 뜬다.)
@@ -126,7 +129,7 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       for (const risk of risksOfNode(merged)) if (!before.has(risk)) risks.add(risk);
     } else if (op.op === "removeNode") {
       const index = nodes.findIndex((n) => n.id === op.nodeId);
-      if (index < 0) return fail("PATCH_NODE_MISSING", `지우려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      if (index < 0) return fail("PATCH_NODE_MISSING", L(`지우려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step to remove, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       removed.push(nodes[index].label || nodes[index].id);
       nodes.splice(index, 1);
       for (let i = edges.length - 1; i >= 0; i -= 1) {
@@ -135,28 +138,28 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       risks.add("delete");
     } else if (op.op === "addEdge") {
       if (!op.edge?.id || edges.some((e) => e.id === op.edge!.id)) {
-        return fail("PATCH_EDGE_CONFLICT", "이미 있는 연결과 같은 이름으로 추가하려 했습니다.", "다시 시도해 주세요.");
+        return fail("PATCH_EDGE_CONFLICT", L("이미 있는 연결과 같은 이름으로 추가하려 했습니다.", "It tried to add a connection with the same name as an existing one."), L("다시 시도해 주세요.", "Please try again."));
       }
       if (!nodes.some((n) => n.id === op.edge!.source) || !nodes.some((n) => n.id === op.edge!.target)) {
-        return fail("PATCH_EDGE_DANGLING", "존재하지 않는 단계를 잇는 연결이 포함돼 있습니다.", "연결할 단계를 먼저 만들도록 다시 요청해 주세요.");
+        return fail("PATCH_EDGE_DANGLING", L("존재하지 않는 단계를 잇는 연결이 포함돼 있습니다.", "The change connects a step that does not exist."), L("연결할 단계를 먼저 만들도록 다시 요청해 주세요.", "Ask again so the steps are created before they are connected."));
       }
       edges.push(op.edge);
       changed.push(`${op.edge.source} → ${op.edge.target}`);
     } else if (op.op === "removeEdge") {
       const index = edges.findIndex((e) => e.id === op.edgeId);
-      if (index < 0) return fail("PATCH_EDGE_MISSING", "지우려는 연결을 찾지 못했습니다.", "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      if (index < 0) return fail("PATCH_EDGE_MISSING", L("지우려는 연결을 찾지 못했습니다.", "The connection to remove was not found."), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       edges.splice(index, 1);
-      changed.push("연결 제거");
+      changed.push(L("연결 제거", "Connection removed"));
     } else if (op.op === "setTrigger") {
       risks.add("cron");
       const index = nodes.findIndex((n) => n.type === "trigger");
-      if (index < 0) return fail("PATCH_NODE_MISSING", "시작 지점을 찾지 못했습니다.", "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      if (index < 0) return fail("PATCH_NODE_MISSING", L("시작 지점을 찾지 못했습니다.", "The starting point was not found."), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
-      changed.push("실행 시점");
+      changed.push(L("실행 시점", "Run schedule"));
     } else {
       // setPolicy
       const index = nodes.findIndex((n) => n.id === op.nodeId);
-      if (index < 0) return fail("PATCH_NODE_MISSING", `설정을 바꾸려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      if (index < 0) return fail("PATCH_NODE_MISSING", L(`설정을 바꾸려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step whose settings should change, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       const policyBefore = new Set(risksOfNode(nodes[index]));
       nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
       changed.push(nodes[index].label || nodes[index].id);
@@ -191,8 +194,8 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
     if (edge.sourceHandle === "true" || edge.sourceHandle === "false") continue;
     return fail(
       "PATCH_EDGE_HANDLE_MISSING",
-      `갈림길에서 나가는 연결(${edge.source} → ${edge.target})이 참일 때인지 거짓일 때인지 정하지 않았습니다.`,
-      "이 변경은 적용하지 않았습니다. 참/거짓 어느 쪽인지 함께 말씀해 주세요.",
+      L(`갈림길에서 나가는 연결(${edge.source} → ${edge.target})이 참일 때인지 거짓일 때인지 정하지 않았습니다.`, `The branch connection (${edge.source} → ${edge.target}) does not say whether it is the true or false path.`),
+      L("이 변경은 적용하지 않았습니다. 참/거짓 어느 쪽인지 함께 말씀해 주세요.", "This change was not applied. Say whether it is the true or the false path."),
     );
   }
 
@@ -234,8 +237,8 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       if (typeof bound === "number" && Number.isFinite(bound) && bound >= 1) continue;
       return fail(
         "PATCH_LOOP_BOUND_MISSING",
-        `되돌아가는 연결(${backEdge.source} → ${backEdge.target})에 반복 상한이 없습니다.`,
-        "이 변경은 적용하지 않았습니다. 몇 바퀴까지 반복할지(maxIterations)를 함께 말씀해 주세요.",
+        L(`되돌아가는 연결(${backEdge.source} → ${backEdge.target})에 반복 상한이 없습니다.`, `The looping connection (${backEdge.source} → ${backEdge.target}) has no repeat limit.`),
+        L("이 변경은 적용하지 않았습니다. 몇 바퀴까지 반복할지(maxIterations)를 함께 말씀해 주세요.", "This change was not applied. Say how many times it may repeat (maxIterations)."),
       );
     }
   }
@@ -248,8 +251,8 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
     if (!codeText) {
       return fail(
         "PATCH_CODE_EMPTY",
-        `코드 단계 "${node.label || node.id}"에 실행할 스크립트가 없습니다.`,
-        "이 변경은 적용하지 않았습니다. 그 단계가 무엇을 계산할지 말씀해 주시면 스크립트까지 채워 다시 제안합니다.",
+        L(`코드 단계 "${node.label || node.id}"에 실행할 스크립트가 없습니다.`, `The code step "${node.label || node.id}" has no script to run.`),
+        L("이 변경은 적용하지 않았습니다. 그 단계가 무엇을 계산할지 말씀해 주시면 스크립트까지 채워 다시 제안합니다.", "This change was not applied. Say what the step should compute and the script will be filled in with a new proposal."),
       );
     }
   }
