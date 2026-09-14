@@ -463,6 +463,16 @@ tool calls and the work log, which the app already records; if the researcher ne
 screen has it. A reply that contains a path, a hash or a tool name has leaked the workshop into
 the study (owner finding, live study 2026-09-14: more than twenty such leaks in one answer).
 
+## Tables and figures the journal will read
+
+Every table in a manuscript carries a caption line directly above it in the manuscript's language
+("표 2. 기관별 지배구조 비교" or "Table 2: Governance comparison"); a table without one renders as a
+bare number and the render report warns `table-caption-missing`. Figure and chart titles carry no
+identifiers of any kind -- no analysis-plan or run ids, no hashes, no "출처: 분석계획 …" tails; the
+provenance lives in the binding and the workspace, not in the picture. The manuscript caption is the
+figure's title; do not repeat the caption inside the chart title. Write axis titles and legend labels
+in the manuscript's language.
+
 ## Statistical execution and publication figures
 
 Before selecting a statistical method or chart, call `describe_statistics_capabilities` and use the
