@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentlas.ai/schemas/science/research-director-state-v1.json",
+  "$id": "https://agentlas.cloud/schemas/science/research-director-state-v1.json",
   "title": "Agentlas Science Research Director State",
   "type": "object",
   "additionalProperties": false,

@@ -848,7 +848,7 @@ async function fetchOqmdWithReceipt(fetchImpl, url, request, { clockMs, sleep, t
       const response = await fetchImpl(url, {
         headers: {
           accept: "application/vnd.api+json, application/json;q=0.9",
-          "user-agent": `Agentlas-Materials-Science/${PLUGIN_VERSION} (materials research; https://agentlas.ai)`,
+          "user-agent": `Agentlas-Materials-Science/${PLUGIN_VERSION} (materials research; https://agentlas.cloud)`,
         },
         redirect: "error",
         signal: controller.signal,

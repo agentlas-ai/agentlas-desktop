@@ -23,7 +23,7 @@ import { setContextWindowResolver } from "../../shared/models";
 
 export const MODELS_DEV_URL = "https://models.dev/api.json";
 export const REMOTE_TTL_MS = 24 * 60 * 60 * 1000;
-const USER_AGENT = "agentlas-desktop/1.0 (+https://agentlas.ai)";
+const USER_AGENT = "agentlas-desktop/1.0 (+https://agentlas.cloud)";
 
 interface RemoteCache {
   fetchedAt: string;

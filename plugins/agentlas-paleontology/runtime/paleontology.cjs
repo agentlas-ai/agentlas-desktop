@@ -2,7 +2,7 @@
 const crypto = require("node:crypto");
 const PLUGIN_VERSION = "0.2.0";
 const PBDB_ENDPOINT = "https://paleobiodb.org/data1.2";
-const USER_AGENT = "Agentlas-Science/1.0 (paleontology research; https://agentlas.ai)";
+const USER_AGENT = "Agentlas-Science/1.0 (paleontology research; https://agentlas.cloud)";
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
 function stableStringify(value) {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;

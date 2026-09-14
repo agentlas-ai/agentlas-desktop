@@ -6,7 +6,7 @@
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Academic Search",
@@ -30,14 +30,24 @@
   "provides": {
     "skills": {
       "router": "skills/index/SKILL.md",
-      "workflows": ["search", "full-text"]
+      "workflows": [
+        "search",
+        "full-text"
+      ]
     }
   },
   "requires": {
     "prereq": [
-      { "id": "agentlas-science", "provided-by": "app" }
+      {
+        "id": "agentlas-science",
+        "provided-by": "app"
+      }
     ],
-    "os": ["darwin", "win32", "linux"]
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   },
   "permissions": {
     "fileWrite": "none",
@@ -47,5 +57,30 @@
   "state": {
     "files": [],
     "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "700a85c572cb14fa21dfcd5717a888cb3362c1b8556ef7b44703cc1eef150557",
+        "bytes": 757
+      },
+      {
+        "path": "skills/full-text/SKILL.md",
+        "sha256": "09a6539e80aeb1af89d1efbb09d38417ba81071d3fa7a5758ae3ad9684d2fe39",
+        "bytes": 1409
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "b809d33b3ce7040f693ecda9735520e45408056227dd2cc3db3e8766a3cb45fe",
+        "bytes": 1094
+      },
+      {
+        "path": "skills/search/SKILL.md",
+        "sha256": "1f97b6eac9d2a55376450c8971f4eb87b65912c94e8b3c1fe6baaa1fa87ab1f3",
+        "bytes": 1565
+      }
+    ]
   }
 }

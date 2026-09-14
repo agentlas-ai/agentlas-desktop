@@ -6,7 +6,7 @@
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Paleontology",
@@ -109,8 +109,8 @@
       },
       {
         "path": "runtime/paleontology.cjs",
-        "sha256": "77051833ac932fb8e527506e258a64140981c7e72f406afd39809783eea18cb5",
-        "bytes": 53206
+        "sha256": "9d603ab1e615039e036e119d0423376e11c2edd1a7b844d3b4816b59bfd142da",
+        "bytes": 53209
       },
       {
         "path": "schemas/tools.json",

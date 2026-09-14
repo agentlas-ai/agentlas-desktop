@@ -6,7 +6,7 @@
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Earth Science",
@@ -123,8 +123,8 @@
       },
       {
         "path": "runtime/earth-science.cjs",
-        "sha256": "3ab4858fb9bdb88ec8af9d3a1e24f6293aef1b7fdcd2cb725ce04fa54e90c5c5",
-        "bytes": 99143
+        "sha256": "8b8a7c97a5aed5e6d8b4f9b53107961a1882f4cb21f276b3aa008e3790d328e2",
+        "bytes": 99146
       },
       {
         "path": "runtime/earth-seismicity.cjs",

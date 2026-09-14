@@ -6,7 +6,7 @@
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Physics",
@@ -133,8 +133,8 @@
       },
       {
         "path": "runtime/physics.cjs",
-        "sha256": "80751664acfe9ecbd919827e125ba21635215bdf57730221e639e1436edb2a16",
-        "bytes": 54532
+        "sha256": "6621f80d946716af4854790826a30bfb144a8c51038c0ca9509e3ee38cce9a9d",
+        "bytes": 54535
       },
       {
         "path": "runtime/signal-analysis.cjs",

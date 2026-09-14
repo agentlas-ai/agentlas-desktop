@@ -6,7 +6,7 @@
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Materials Science",
@@ -104,8 +104,8 @@
       },
       {
         "path": "runtime/materials-science.cjs",
-        "sha256": "b82a855309fdf2538ba337820205c541bd3874bc5b9436e8593e197eadfaa89f",
-        "bytes": 60279
+        "sha256": "b978ab64cff47ae5809331ecbaea2481f2855f87e60d2b46f3ef60be01065c9f",
+        "bytes": 60282
       },
       {
         "path": "runtime/mcp-server.cjs",

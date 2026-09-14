@@ -16,7 +16,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const SOURCE_URL = "https://models.dev/api.json";
-const USER_AGENT = "agentlas-desktop/1.0 (+https://agentlas.ai; model-catalog-snapshot)";
+const USER_AGENT = "agentlas-desktop/1.0 (+https://agentlas.cloud; model-catalog-snapshot)";
 // Providers this product can actually route to (BYOK backends + CLI vendors).
 const PROVIDERS = [
   "anthropic", "openai", "google", "xai", "deepseek",

@@ -22,7 +22,7 @@ const DEFAULT_NETWORK_POLICY = Object.freeze({
   maxResponseBytes: MAX_RESPONSE_BYTES,
   inspireIntervalMs: 350,
   hepdataIntervalMs: 1_000,
-  userAgent: "Agentlas-Physics/0.2.0 (INSPIRE and HEPData research; https://agentlas.ai)",
+  userAgent: "Agentlas-Physics/0.2.0 (INSPIRE and HEPData research; https://agentlas.cloud)",
 });
 
 class PhysicsError extends Error {

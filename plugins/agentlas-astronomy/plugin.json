@@ -6,7 +6,7 @@
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Astronomy",
@@ -115,8 +115,8 @@
       },
       {
         "path": "runtime/astronomy.cjs",
-        "sha256": "32544a4df873f46bc56f59cd1bf6acf22e2803162af8e386d2905354a07ab690",
-        "bytes": 89325
+        "sha256": "e8817c7670b6a9d31b5327c1b547b5a2793f4f1f8deb4ddf814615050f15cf55",
+        "bytes": 89328
       },
       {
         "path": "runtime/colour-magnitude.cjs",

@@ -32,7 +32,7 @@ const COOPS_DATUMS = new Set(["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL",
 const COOPS_UNITS = new Set(["metric", "english"]);
 const CONTENT_TYPES = new Set(["application/json", "application/geo+json", "application/vnd.geo+json"]);
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
-const USER_AGENT = `Agentlas-Earth-Science/${PLUGIN_VERSION} (official Earth observations; https://agentlas.ai)`;
+const USER_AGENT = `Agentlas-Earth-Science/${PLUGIN_VERSION} (official Earth observations; https://agentlas.cloud)`;
 
 class EarthScienceError extends Error {
   constructor(code, message = code, details = null, cause = undefined) {

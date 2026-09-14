@@ -6,7 +6,7 @@
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
-    "url": "https://agentlas.ai"
+    "url": "https://agentlas.cloud"
   },
   "surface": {
     "displayName": "Research Director",
@@ -90,18 +90,18 @@
       },
       {
         "path": "contracts/decision.schema.json",
-        "sha256": "f8f96267bc6bec9d66c14481b6db6cfadf43b066d9bf1e90da1fbb311946327f",
-        "bytes": 1536
+        "sha256": "8e68cb19ff9bc7d53568b04659dda438c29e4546ef568caec0feb48af2d93994",
+        "bytes": 1539
       },
       {
         "path": "contracts/evidence-ledger.schema.json",
-        "sha256": "d77d56bc11857186a029039a2d5710ac5ad47c1f452422cbddfee604d4382f4c",
-        "bytes": 1391
+        "sha256": "51d012a27e47c53999305cddda95499634bf1c5596eb85b14bbb01a1d9547bdf",
+        "bytes": 1394
       },
       {
         "path": "contracts/research-state.schema.json",
-        "sha256": "3f50ace5d57e2c819fe527f07f512368798d29987d191b334b5887d97014c5a1",
-        "bytes": 5566
+        "sha256": "7f542e98cb4ece3b94f73c38dcb3db0ff54b9587a24186f7b99662c078f19503",
+        "bytes": 5569
       },
       {
         "path": "README.md",

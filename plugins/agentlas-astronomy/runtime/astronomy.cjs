@@ -151,7 +151,7 @@ const DEFAULT_POLICY = deepFreeze({
   maxObjects: 500,
   minRadiusDeg: 0.001,
   maxRadiusDeg: 10,
-  userAgent: "Agentlas-Astronomy/1.2.2 (SIMBAD TAP object research; https://agentlas.ai)",
+  userAgent: "Agentlas-Astronomy/1.2.2 (SIMBAD TAP object research; https://agentlas.cloud)",
   contentTypes: CONTENT_TYPE_ALLOWLIST,
   retryableStatusCodes: RETRYABLE_STATUS_CODES,
 });
