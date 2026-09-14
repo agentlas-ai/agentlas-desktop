@@ -4,6 +4,7 @@ import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
+import { quotaExhausted } from "../../shared/runtime-quota";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
 import { reportDiscoveryLoudly , storedResolvedAliases } from "./model-discovery-store";
@@ -959,13 +960,15 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   return list;
 }
 
+/** 로컬 서버가 실제 보유 목록을 돌려주는 런타임 — 모델 부재를 증명할 수 있다. */
+const LOCAL_MODEL_INVENTORY_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"]);
 /**
  * 역할 풀 선택 게이트 — detect 본체와 UI 조회가 같은 규칙을 쓰게 한 곳에 둔다.
  * 두 벌로 두면 한쪽만 고쳐져 "설정 화면과 실제 실행이 다른 모델"이 된다.
+ *
+ * 그 경고가 맞았는데 두 번째 벌이 다른 파일에 있었다: 여기는 90%, 실행 선택
+ * (runtime/selection.ts)은 100% 였다. 이제 둘 다 shared/runtime-quota 를 쓴다.
  */
-const QUOTA_SKIP_PERCENT = 90;
-/** 로컬 서버가 실제 보유 목록을 돌려주는 런타임 — 모델 부재를 증명할 수 있다. */
-const LOCAL_MODEL_INVENTORY_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"]);
 function rolePoolGates(list: RuntimeStatus[]): {
   isRuntimeAvailable: (selection: RuntimeSelection) => boolean;
   isModelUnavailable: (selection: RuntimeSelection) => boolean;
@@ -1002,8 +1005,7 @@ function rolePoolGates(list: RuntimeStatus[]): {
       return !catalog.includes(model);
     },
     isQuotaExceeded: (selection) => {
-      const used = peekProviderUsedPercent(selection.kind);
-      return used !== null && used >= QUOTA_SKIP_PERCENT;
+      return quotaExhausted(peekProviderUsedPercent(selection.kind));
     },
   };
 }

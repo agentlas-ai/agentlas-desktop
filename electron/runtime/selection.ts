@@ -1,3 +1,4 @@
+import { quotaExhausted } from "../../shared/runtime-quota";
 import { isRuntimeCredentialUnavailable } from "./credential-access";
 import { runtimeCooldown } from "./runtime-cooldown";
 import type {
@@ -390,9 +391,6 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   return true;
 }
 
-// A near-limit warning still leaves usable quota. Only an exhausted snapshot
-// excludes a candidate; actual provider quota/auth failures retain their cooldown.
-const QUOTA_EXHAUSTED_PERCENT = 100;
 const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx", "agentlas-local"]);
 
 function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
@@ -417,8 +415,10 @@ function runtimeSelectionUnavailableReason(
   // access. A display catalog or cached quota cannot justify a silent swap.
   if (isRuntimeCredentialUnavailable(runtime)) return null;
   if (runtimeModelUnavailable(runtime, selection.model)) return "model-unavailable";
-  const used = peekProviderUsedPercent(selection.kind);
-  if (used !== null && used >= QUOTA_EXHAUSTED_PERCENT) return "quota-exceeded";
+  // A near-limit warning still leaves usable quota. Only an exhausted snapshot
+  // excludes a candidate; actual provider quota/auth failures retain their cooldown.
+  // 역할 풀 선택(detect.ts rolePoolGates)도 같은 판정을 쓴다 — shared/runtime-quota.
+  if (quotaExhausted(peekProviderUsedPercent(selection.kind))) return "quota-exceeded";
   return null;
 }
 
