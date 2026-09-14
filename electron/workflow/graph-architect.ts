@@ -8,6 +8,10 @@
 // 변경 제안에서 "대충 읽어 살린 부분"은 사용자가 승인한 적 없는 변경이 된다.
 import type { WorkflowGraph } from "../../shared/types";
 import type { GraphPatch, GraphPatchOp } from "./graph-patch";
+import { currentUiLocale } from "../ui-locale";
+
+// 승인 화면에 뜨는 거절 문구는 화면 언어로(오너 2026-09-14 One·Work 하드코딩 제거).
+const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 const MAX_OPS = 24;
 
@@ -126,8 +130,8 @@ export function parseGraphPatchProposal(text: string | null | undefined): GraphP
   if (!raw) {
     return reject(
       "ARCHITECT_OUTPUT_UNREADABLE",
-      "고칠 내용을 만들지 못했습니다.",
-      "무엇을 어떻게 바꾸고 싶은지 한 문장으로 다시 말씀해 주세요.",
+      L("고칠 내용을 만들지 못했습니다.", "Could not work out the change."),
+      L("무엇을 어떻게 바꾸고 싶은지 한 문장으로 다시 말씀해 주세요.", "Say again in one sentence what to change and how."),
     );
   }
   let parsed: unknown;
@@ -136,37 +140,37 @@ export function parseGraphPatchProposal(text: string | null | undefined): GraphP
   } catch {
     return reject(
       "ARCHITECT_OUTPUT_UNREADABLE",
-      "고칠 내용을 만들지 못했습니다.",
-      "무엇을 어떻게 바꾸고 싶은지 한 문장으로 다시 말씀해 주세요.",
+      L("고칠 내용을 만들지 못했습니다.", "Could not work out the change."),
+      L("무엇을 어떻게 바꾸고 싶은지 한 문장으로 다시 말씀해 주세요.", "Say again in one sentence what to change and how."),
     );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return reject("ARCHITECT_OUTPUT_UNREADABLE", "고칠 내용을 만들지 못했습니다.", "다시 한 문장으로 말씀해 주세요.");
+    return reject("ARCHITECT_OUTPUT_UNREADABLE", L("고칠 내용을 만들지 못했습니다.", "Could not work out the change."), L("다시 한 문장으로 말씀해 주세요.", "Say it again in one sentence."));
   }
   const ops = (parsed as { ops?: unknown }).ops;
   if (!Array.isArray(ops)) {
-    return reject("ARCHITECT_OUTPUT_UNREADABLE", "고칠 내용을 만들지 못했습니다.", "다시 한 문장으로 말씀해 주세요.");
+    return reject("ARCHITECT_OUTPUT_UNREADABLE", L("고칠 내용을 만들지 못했습니다.", "Could not work out the change."), L("다시 한 문장으로 말씀해 주세요.", "Say it again in one sentence."));
   }
   if (ops.length === 0) {
     // 모델이 "이 요청은 이 연산들로 표현할 수 없다"고 말한 경우. 억지로 근사하지 않은 것이므로
     // 실패가 아니라 정직한 빈 제안이며, 사용자에게는 다르게 물어보라고 안내한다.
     return reject(
       "ARCHITECT_NO_CHANGE",
-      "요청을 그래프 변경으로 옮기지 못했습니다.",
-      "어떤 단계를 추가·수정·삭제할지 구체적으로 말씀해 주시면 다시 시도합니다.",
+      L("요청을 그래프 변경으로 옮기지 못했습니다.", "The request could not be turned into a graph change."),
+      L("어떤 단계를 추가·수정·삭제할지 구체적으로 말씀해 주시면 다시 시도합니다.", "Say which step to add, change or remove and it will try again."),
     );
   }
   if (ops.length > MAX_OPS) {
     return reject(
       "ARCHITECT_OUTPUT_TOO_LARGE",
-      `한 번에 ${ops.length}개를 바꾸려 합니다. 사람이 확인하기 어려운 크기입니다.`,
-      "요청을 몇 단계로 나눠서 말씀해 주세요.",
+      L(`한 번에 ${ops.length}개를 바꾸려 합니다. 사람이 확인하기 어려운 크기입니다.`, `This would change ${ops.length} things at once — too many to review.`),
+      L("요청을 몇 단계로 나눠서 말씀해 주세요.", "Split the request into a few smaller steps."),
     );
   }
   const cleaned: GraphPatchOp[] = [];
   for (const candidate of ops) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-      return reject("ARCHITECT_OUTPUT_MALFORMED", "변경 항목 하나의 형태가 어긋났습니다.", "다시 시도해 주세요.");
+      return reject("ARCHITECT_OUTPUT_MALFORMED", L("변경 항목 하나의 형태가 어긋났습니다.", "One change item was malformed."), L("다시 시도해 주세요.", "Try again."));
     }
     const op = candidate as Record<string, unknown>;
     const kind = typeof op.op === "string" ? op.op : null;
@@ -180,8 +184,8 @@ export function parseGraphPatchProposal(text: string | null | undefined): GraphP
     if (!check(op)) {
       return reject(
         "ARCHITECT_OUTPUT_MALFORMED",
-        `변경 항목 "${kind}"에 필요한 값이 빠졌습니다.`,
-        "다시 시도하거나, 요청을 조금 더 구체적으로 말씀해 주세요.",
+        L(`변경 항목 "${kind}"에 필요한 값이 빠졌습니다.`, `Change item "${kind}" is missing a required value.`),
+        L("다시 시도하거나, 요청을 조금 더 구체적으로 말씀해 주세요.", "Try again, or make the request a little more specific."),
       );
     }
     cleaned.push(op as unknown as GraphPatchOp);

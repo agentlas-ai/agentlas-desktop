@@ -81,6 +81,9 @@ function scrub(source) {
   let text = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
   text = text.replace(/(^|[\s;{}(),])\/\/[^\n]*/g, (m, p) => p + m.slice(p.length).replace(/[^\n]/g, " "));
   if (!/[가-힣]/u.test(text)) return text;
+  // SQL inside template strings: `-- comment` lines and LIKE '%패턴%' match stored text, never render
+  text = text.replace(/^([ \t]*)--[^\n]*/gm, (m, lead) => lead + m.slice(lead.length).replace(/[^\n]/g, " "));
+  text = text.replace(/'%[^'\n]*%'/g, (m) => m.replace(/[^\n]/g, " "));
   // regex literals match user input (e.g. /실패|failed/), they are never shown on screen
   text = text.replace(/(^|[(,=:\[!&|?{};>\n]|\breturn|\bmatch\(|\btest\()(\s*)\/(?![*/\s])((?:\\.|\[(?:\\.|[^\]\n])*\]|[^/\n\\])+)\/([dgimsuy]*)/g,
     (m, lead, space, body, flags) => `${lead}${space}/${body.replace(/[^\n]/g, " ")}/${flags}`);
@@ -183,7 +186,9 @@ function scrub(source) {
       return /^[("'`]/.test(raw) && /["'`]/.test(raw) && !/=>|\bfunction\b/.test(raw) ? { from, to, raw } : null;
     });
     const korean = literalArgs.filter((arg) => arg && /[가-힣]/u.test(arg.raw));
-    const english = literalArgs.filter((arg) => arg && !/[가-힣]/u.test(arg.raw) && /[A-Za-z]{2}/.test(arg.raw));
+    // the English twin must read like prose ("Could not save"), not an identifier or error code ("PATCH_INVALID", "science-x")
+    const english = literalArgs.filter((arg) => arg && !/[가-힣]/u.test(arg.raw) && /[A-Za-z]{2,}/.test(arg.raw)
+      && !/^["'`][A-Z0-9_:.]+["'`]$/.test(arg.raw) && !/^["'`][a-z0-9]+(?:[-_.:/][a-z0-9]+)+["'`]$/.test(arg.raw) && !/^["'`][a-z][a-zA-Z0-9]*["'`]$/.test(arg.raw));
     if (korean.length && english.length) for (const arg of korean) ranges.push([arg.from, arg.to]);
   }
   return applyRanges(text, ranges);
