@@ -28,6 +28,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-paleontology": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-physics": ["README.md", "assets", "capabilities.json", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-science-research-director": ["README.md", "agent", "contracts", "plugin.json", "skills"],
+  "agentlas-science-skills": ["README.md", "assets", "plugin.json", "runtime", "schemas", "skills"],
   "agentlas-science-statistics": ["README.md", "bin", "coverage-manifest.json", "figure-catalog.json", "matlab-parity-manifest.json", "plugin.json", "runtime", "skills"],
   "agentlas-time": ["plugin.json"],
   "agentlas-workspace-preview": ["plugin.json"],
