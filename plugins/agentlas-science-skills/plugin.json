@@ -1,0 +1,68 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-science-skills",
+  "name": "Agentlas Scientific Skills",
+  "version": "0.1.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Scientific Skills",
+    "displayNameKo": "과학 절차 라이브러리",
+    "tagline": "145 validated research procedures, found on demand",
+    "taglineKo": "검증된 연구 절차 145개를 필요할 때만 꺼내 씁니다",
+    "description": "A searchable library of established scientific procedures — experimental design, statistical analysis, cheminformatics, quantum computing, astronomy, time series and more. The agent searches for the right procedure instead of inventing a method, and only the chosen one is read.",
+    "descriptionKo": "실험 설계·통계 분석·화학정보·양자컴퓨팅·천문·시계열 등 정립된 연구 절차를 검색해 씁니다. AI 가 방법을 지어내는 대신 맞는 절차를 찾아 따르고, 고른 하나만 읽습니다.",
+    "category": "knowledge",
+    "brandColor": "#2F7D5B",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 실험을 어떻게 설계해야 교란이 안 생기는지 절차를 찾아 줘",
+      "두 집단을 비교할 올바른 통계 절차를 찾아서 그대로 따라 해 줘",
+      "이 분석에 필요한 검정력과 표본 수 계산 절차를 찾아 줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-science-skills",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "tools": [
+      {
+        "id": "agentlas-science-skills",
+        "capability": "knowledge",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 20000,
+        "surface": {
+          "name": "과학 절차 라이브러리",
+          "nameEn": "Scientific Skills",
+          "description": "검증된 연구 절차 145개를 검색해 필요한 하나만 읽습니다",
+          "descriptionEn": "Search 145 validated research procedures and read only the one you need",
+          "category": "knowledge",
+          "brandColor": "#2F7D5B",
+          "mark": "SK",
+          "docsUrl": "https://github.com/K-Dense-AI/scientific-agent-skills"
+        }
+      }
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "thirdParty": {
+    "source": "https://github.com/K-Dense-AI/scientific-agent-skills",
+    "upstreamLicense": "MIT",
+    "note": "Individual skills carry their own license in SKILL.md frontmatter. Only permissive-licensed skills are bundled. Excluded: alphagenome (service is non-commercial despite an MIT frontmatter), docx/pdf/pptx/xlsx (Anthropic proprietary, redistribution forbidden).",
+    "bundledSkillCount": 145
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "tools": [
+    {
+      "name": "scientific_procedures_here",
+      "description": "The established research procedures filed for where you are right now. Give the lab you have open, the research stage you are at, or both. Call this before you invent a method of your own — a study that follows a named procedure can be reviewed; one that does not, cannot. Returns only this place's procedures (3 to 20), not the whole library.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "lab": {
+            "type": "string",
+            "enum": [
+              "astronomy-sky",
+              "biodiversity-map",
+              "chemistry",
+              "comparative-genomics",
+              "data-tables",
+              "data-visualization",
+              "earthquake-observations",
+              "economic-indicators",
+              "genomics-variants",
+              "literature",
+              "materials-structures",
+              "molecular-structure",
+              "paleontology-evidence",
+              "physics-data",
+              "statistics-analysis"
+            ],
+            "description": "The lab you have open."
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "acquisition",
+              "analysis-runs",
+              "hypotheses",
+              "interpretation",
+              "literature",
+              "manuscript",
+              "plan-protocols",
+              "results",
+              "scope",
+              "submission-archive"
+            ],
+            "description": "The research stage you are at."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "find_scientific_skill",
+      "description": "Find the scientific procedure to follow for what you are about to do. Describe the task in your own words (for example \"compare two groups with unequal variance\", \"design a randomized trial\", \"dock a ligand\", \"draw a forest plot\"). Returns a few candidate skill names with a one-line summary each, not the full library. Use this before inventing a method yourself.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "What you are trying to do, in your own words."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 15,
+            "description": "How many candidates to return. Default 5."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_scientific_skill",
+      "description": "Read the full procedure for exactly one skill named by find_scientific_skill. Returns the complete method, its Python dependencies, and the names of any reference notes and runnable scripts that ship with it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Exact skill name from find_scientific_skill."
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_scientific_skills",
+      "description": "Page through every installed skill name. Use only when browsing the whole library; prefer find_scientific_skill when you know what you need.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}
