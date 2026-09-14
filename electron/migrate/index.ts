@@ -27,6 +27,8 @@ import type {
   RuntimeBackend,
 } from "../../shared/types";
 
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
+
 const TONE_BY_SOURCE: Record<MigrationSourceKind, "blue" | "purple"> = {
   openclaw: "purple",
   hermes: "blue",
@@ -244,7 +246,7 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
     if (!job.promptTemplate) continue;
     createAutomation({
       name: job.name,
-      scheduleHuman: job.scheduleHuman || "가져온 예약",
+      scheduleHuman: job.scheduleHuman || uiText("가져온 예약", "Imported schedule"),
       targetType: "agent",
       targetId: agent.id,
       promptTemplate: job.promptTemplate,
@@ -261,7 +263,7 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
           `워킹 폴더로 연결하면 에이전트가 참조할 수 있습니다.`
         : "";
     const project = createProject({
-      name: `${src.label} 마이그레이션`,
+      name: uiText(`${src.label} 마이그레이션`, `${src.label} migration`),
       sourceType: "local",
       agentPool: [{
         entityKind: "agent",

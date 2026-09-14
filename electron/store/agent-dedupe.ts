@@ -4,6 +4,9 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { getDb } from "./db";
 import { getRoute, getRoutesRevision, removeRoute, type AgentRoute } from "../agents/routes";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 type AgentRow = {
   id: string;
@@ -346,8 +349,10 @@ function mergeReferences(db: Database.Database, duplicateId: string, canonicalId
       .get(duplicateId) as { n: number }).n;
     if (stranded > 0) {
       throw new Error(
-        `agent_merge_would_orphan: ${reference.table}.${reference.column} 에 ${stranded}행이 남아 ` +
-          `병합을 중단했습니다 (duplicate=${duplicateId}). 이대로 지우면 그 행들이 함께 사라집니다.`,
+        `agent_merge_would_orphan: ` + uiText(
+          `${reference.table}.${reference.column} 에 ${stranded}행이 남아 병합을 중단했습니다 (duplicate=${duplicateId}). 이대로 지우면 그 행들이 함께 사라집니다.`,
+          `merge stopped because ${stranded} row(s) remain in ${reference.table}.${reference.column} (duplicate=${duplicateId}); deleting now would lose them.`,
+        ),
       );
     }
   }

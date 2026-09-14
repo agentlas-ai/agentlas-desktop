@@ -9,6 +9,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SiteConversationEntry, SiteProjectMeta, SiteWorkspaceHandoff } from "../../shared/site-studio";
 import { getSiteProject, listSiteConversation, readSiteScreenHtml } from "./store";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 const SAFE_DIRECTORY = /^[a-zA-Z0-9._-]+$/;
 
@@ -25,13 +28,13 @@ function ensureChildDirectory(root: string, parts: string[]): string {
   let current = root;
   for (const part of parts) {
     if (!SAFE_DIRECTORY.test(part) || part === "." || part === "..") {
-      throw new Error("안전하지 않은 디자인 폴더 이름입니다.");
+      throw new Error(uiText("안전하지 않은 디자인 폴더 이름입니다.", "Unsafe design folder name."));
     }
     const candidate = path.join(current, part);
     try {
       const stat = fs.lstatSync(candidate);
       if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        throw new Error("디자인 폴더 경로에 심볼릭 링크 또는 파일이 있어 가져올 수 없습니다.");
+        throw new Error(uiText("디자인 폴더 경로에 심볼릭 링크 또는 파일이 있어 가져올 수 없습니다.", "The design folder path contains a symbolic link or a file, so it cannot be imported."));
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
@@ -39,7 +42,7 @@ function ensureChildDirectory(root: string, parts: string[]): string {
     }
     const real = fs.realpathSync.native(candidate);
     if (!isInside(real, root)) {
-      throw new Error("디자인 폴더가 선택한 작업공간 밖을 가리킵니다.");
+      throw new Error(uiText("디자인 폴더가 선택한 작업공간 밖을 가리킵니다.", "The design folder points outside the selected workspace."));
     }
     current = real;
   }
@@ -47,7 +50,7 @@ function ensureChildDirectory(root: string, parts: string[]): string {
 }
 
 function writeNewFile(directory: string, name: string, content: string): void {
-  if (!SAFE_DIRECTORY.test(name)) throw new Error("안전하지 않은 디자인 파일 이름입니다.");
+  if (!SAFE_DIRECTORY.test(name)) throw new Error(uiText("안전하지 않은 디자인 파일 이름입니다.", "Unsafe design file name."));
   const filePath = path.join(directory, name);
   // revision 폴더가 고유하더라도 wx로 고정해 기존 파일을 덮어쓰지 않는다.
   fs.writeFileSync(filePath, content, { encoding: "utf8", mode: 0o644, flag: "wx" });
@@ -139,7 +142,7 @@ export function handoffSiteProjectToWorkspace(input: {
   locale?: "ko" | "en";
 }): SiteWorkspaceHandoff {
   const meta = getSiteProject(input.projectId);
-  if (!meta.screens.length) throw new Error("가져올 화면이 없습니다.");
+  if (!meta.screens.length) throw new Error(uiText("가져올 화면이 없습니다.", "There are no screens to import."));
 
   const workspaceRoot = fs.realpathSync.native(input.workspacePath);
   const rootStat = fs.lstatSync(workspaceRoot);

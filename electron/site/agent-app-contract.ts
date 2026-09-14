@@ -12,6 +12,9 @@ import {
   noSiteAgentAppCapabilities,
   normalizeSiteAgentAppCapabilityProfile,
 } from "./agent-app-capabilities";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export const SITE_AGENT_APP_CONTRACT_FILE = ".agentlas/agent-app-contract.json" as const;
 export const SITE_AGENT_APP_ROUTING_CARD_FILE = ".agentlas/routing-card.json" as const;
@@ -133,14 +136,14 @@ export function readDeclaredSiteAgentAppContract(root: string | null | undefined
     real = fs.realpathSync(candidate);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new Error("Agent App 입출력 계약 파일을 읽을 수 없습니다.", { cause: error });
+    throw new Error(uiText("Agent App 입출력 계약 파일을 읽을 수 없습니다.", "The Agent App input/output contract file could not be read."), { cause: error });
   }
   const relative = path.relative(rootReal, real);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Agent App 입출력 계약 파일이 패키지 경계를 벗어났습니다.");
+    throw new Error(uiText("Agent App 입출력 계약 파일이 패키지 경계를 벗어났습니다.", "The Agent App input/output contract file is outside the package."));
   }
   if (stat.size <= 0 || stat.size > CONTRACT_MAX_BYTES) {
-    throw new Error(`Agent App 입출력 계약은 ${CONTRACT_MAX_BYTES / 1024}KB 이하의 JSON이어야 합니다.`);
+    throw new Error(uiText(`Agent App 입출력 계약은 ${CONTRACT_MAX_BYTES / 1024}KB 이하의 JSON이어야 합니다.`, `The Agent App input/output contract must be JSON of ${CONTRACT_MAX_BYTES / 1024}KB or less.`));
   }
 
   let parsed: unknown;
@@ -152,10 +155,10 @@ export function readDeclaredSiteAgentAppContract(root: string | null | undefined
       fs.closeSync(fd);
     }
   } catch (error) {
-    throw new Error("Agent App 입출력 계약 JSON이 올바르지 않습니다.", { cause: error });
+    throw new Error(uiText("Agent App 입출력 계약 JSON이 올바르지 않습니다.", "The Agent App input/output contract JSON is invalid."), { cause: error });
   }
   const contract = normalizeSiteAgentAppContract(parsed, "declared-package");
-  if (!contract) throw new Error("Agent App 입출력 계약 스키마가 올바르지 않습니다.");
+  if (!contract) throw new Error(uiText("Agent App 입출력 계약 스키마가 올바르지 않습니다.", "The Agent App input/output contract schema is invalid."));
   const templateValue = (parsed as { template?: unknown }).template;
   if (
     templateValue !== undefined &&
@@ -163,7 +166,7 @@ export function readDeclaredSiteAgentAppContract(root: string | null | undefined
     templateValue !== "ai-chat-landing" &&
     templateValue !== "form-two-column"
   ) {
-    throw new Error("Agent App 입출력 계약의 Astryx 템플릿 값이 올바르지 않습니다.");
+    throw new Error(uiText("Agent App 입출력 계약의 Astryx 템플릿 값이 올바르지 않습니다.", "The Astryx template in the Agent App contract is invalid."));
   }
   const template: SiteAstryxTemplate | null =
     templateValue === "ai-chat" || templateValue === "ai-chat-landing" || templateValue === "form-two-column"
@@ -269,14 +272,14 @@ function readRoutingCard(root: string): Record<string, unknown> | null {
     real = fs.realpathSync(candidate);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new Error("Agent App routing-card를 읽을 수 없습니다.", { cause: error });
+    throw new Error(uiText("Agent App routing-card를 읽을 수 없습니다.", "The Agent App routing card could not be read."), { cause: error });
   }
   const relative = path.relative(rootReal, real);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Agent App routing-card가 패키지 경계를 벗어났습니다.");
+    throw new Error(uiText("Agent App routing-card가 패키지 경계를 벗어났습니다.", "The Agent App routing card is outside the package."));
   }
   if (stat.size <= 0 || stat.size > CONTRACT_MAX_BYTES) {
-    throw new Error(`Agent App routing-card는 ${CONTRACT_MAX_BYTES / 1024}KB 이하의 JSON이어야 합니다.`);
+    throw new Error(uiText(`Agent App routing-card는 ${CONTRACT_MAX_BYTES / 1024}KB 이하의 JSON이어야 합니다.`, `The Agent App routing card must be JSON of ${CONTRACT_MAX_BYTES / 1024}KB or less.`));
   }
   try {
     const fd = fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -287,7 +290,7 @@ function readRoutingCard(root: string): Record<string, unknown> | null {
       fs.closeSync(fd);
     }
   } catch (error) {
-    throw new Error("Agent App routing-card JSON이 올바르지 않습니다.", { cause: error });
+    throw new Error(uiText("Agent App routing-card JSON이 올바르지 않습니다.", "The Agent App routing card JSON is invalid."), { cause: error });
   }
 }
 
@@ -374,6 +377,6 @@ export function readResolvedSiteAgentAppContract(root: string | null | undefined
     outputs: outputs.slice(0, 8),
     capabilities,
   }, "declared-routing-card");
-  if (!contract) throw new Error("Agent App routing-card 입출력 계약을 정규화할 수 없습니다.");
+  if (!contract) throw new Error(uiText("Agent App routing-card 입출력 계약을 정규화할 수 없습니다.", "The input/output contract in the Agent App routing card could not be normalized."));
   return { contract, template: null };
 }

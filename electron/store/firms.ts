@@ -8,6 +8,9 @@ import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
 import { materializeTeamMemberCells } from "./team-member-cells";
 import { dedupeLocalInstalledAgents } from "./agent-dedupe";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 interface FirmRow {
   id: string;
@@ -83,14 +86,14 @@ export async function installFirm(slug: string): Promise<InstalledFirm> {
     (node) => {
       const agentId = slugToAgentId[node.agentSlug];
       if (!agentId)
-        throw new Error(`Firm ${slug}의 orgChart에서 slug ${node.agentSlug}가 의존 목록에 없습니다`);
+        throw new Error(uiText(`Firm ${slug}의 orgChart에서 slug ${node.agentSlug}가 의존 목록에 없습니다`, `Firm ${slug}: org chart slug ${node.agentSlug} is not in its dependency list`));
       return { ...node, agentId };
     },
   );
 
   const ceoAgentId = slugToAgentId[seed.ceoSlug];
   if (!ceoAgentId)
-    throw new Error(`Firm ${slug}의 CEO slug ${seed.ceoSlug}가 의존 목록에 없습니다`);
+    throw new Error(uiText(`Firm ${slug}의 CEO slug ${seed.ceoSlug}가 의존 목록에 없습니다`, `Firm ${slug}: CEO slug ${seed.ceoSlug} is not in its dependency list`));
 
   const id = randomUUID();
   const installedAt = new Date().toISOString();
@@ -114,7 +117,7 @@ export async function installFirm(slug: string): Promise<InstalledFirm> {
     );
 
   if (!getAgentById(ceoAgentId)) {
-    throw new Error("CEO 에이전트 설치 후 조회 실패 (registry inconsistency)");
+    throw new Error(uiText("CEO 에이전트 설치 후 조회 실패 (registry inconsistency)", "Could not find the CEO agent after installing it (registry inconsistency)"));
   }
 
   const firm = getFirm(id) as InstalledFirm;

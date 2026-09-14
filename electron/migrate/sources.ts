@@ -10,6 +10,9 @@ import type {
   MigrationSourceKind,
   RuntimeBackend,
 } from "../../shared/types";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 /** 소스에서 추출한 예약 작업 1개 (Agentlas Automation 초안) */
 export interface ParsedCronJob {
@@ -76,8 +79,8 @@ const SPECS: SourceSpec[] = [
     envFiles: [".env"],
     cronFiles: ["cron/jobs.json"],
     memoryDirs: ["workspace/memory"],
-    defaultName: "OpenClaw에서 가져온 에이전트",
-    defaultTagline: "OpenClaw SOUL을 옮겨온 개인 어시스턴트",
+    get defaultName() { return uiText("OpenClaw에서 가져온 에이전트", "Agent imported from OpenClaw"); },
+    get defaultTagline() { return uiText("OpenClaw SOUL을 옮겨온 개인 어시스턴트", "Personal assistant carried over from OpenClaw SOUL"); },
   },
   {
     kind: "hermes",
@@ -89,8 +92,8 @@ const SPECS: SourceSpec[] = [
     envFiles: [".env"],
     cronFiles: ["cron/jobs.json", "automations/jobs.json"],
     memoryDirs: ["memories", "workspace/memory"],
-    defaultName: "Hermes에서 가져온 에이전트",
-    defaultTagline: "Hermes SOUL을 옮겨온 개인 어시스턴트",
+    get defaultName() { return uiText("Hermes에서 가져온 에이전트", "Agent imported from Hermes"); },
+    get defaultTagline() { return uiText("Hermes SOUL을 옮겨온 개인 어시스턴트", "Personal assistant carried over from Hermes SOUL"); },
   },
 ];
 

@@ -17,6 +17,9 @@ import {
   updateSiteAgentAppArtifact,
   updateSiteAgentAppVisual,
 } from "./store";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 function developmentPort(projectId: string): number {
   const hash = createHash("sha256").update(projectId).digest().readUInt32BE(0);
@@ -31,7 +34,7 @@ function developmentPort(projectId: string): number {
 export async function scaffoldSiteAgentApp(projectId: string, screenId: string): Promise<AppFactoryScaffoldResult> {
   let project = getSiteProject(projectId);
   if (project.surface !== "agent-app" || !project.agentAppTarget) {
-    throw new Error("Agent App 프로젝트만 Astryx 앱으로 만들 수 있습니다.");
+    throw new Error(uiText("Agent App 프로젝트만 Astryx 앱으로 만들 수 있습니다.", "Only Agent App projects can be built as Astryx apps."));
   }
 
   // Never rewrite dist/source underneath an already-open capability runtime.

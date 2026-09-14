@@ -29,6 +29,9 @@ import { normalizeSiteAgentAppContract } from "./agent-app-contract";
 import { normalizeSiteAgentAppMcpConsentReceipt } from "./agent-app-mcp-consent";
 import { defaultSiteAgentAppVisual, normalizeSiteAgentAppVisual } from "./agent-app-visual";
 import { userDataPath } from "../runtime-paths";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 function projectsRoot(): string {
   return userDataPath("site-projects");
@@ -508,7 +511,7 @@ export function createSiteProject(
       )
     : null;
   if (surface === "agent-app" && (!agentAppTarget || !astryxTemplate || !agentAppContract)) {
-    throw new Error("Agent App 프로젝트에는 대상, Astryx 템플릿, 입출력 계약 스냅샷이 모두 필요합니다.");
+    throw new Error(uiText("Agent App 프로젝트에는 대상, Astryx 템플릿, 입출력 계약 스냅샷이 모두 필요합니다.", "An Agent App project needs a target, an Astryx template, and an input/output contract snapshot."));
   }
   const meta: SiteProjectMeta = {
     id: randomUUID(),
@@ -536,9 +539,9 @@ export function updateSiteAgentAppArtifact(
   artifact: SiteAgentAppArtifact,
 ): SiteProjectMeta {
   const meta = getSiteProject(projectId);
-  if (meta.surface !== "agent-app") throw new Error("Agent App 프로젝트만 실행 artifact를 저장할 수 있습니다.");
+  if (meta.surface !== "agent-app") throw new Error(uiText("Agent App 프로젝트만 실행 artifact를 저장할 수 있습니다.", "Only Agent App projects can save run artifacts."));
   const normalized = normalizeSiteAgentAppArtifact(artifact);
-  if (!normalized) throw new Error("Agent App artifact 경로 또는 메타데이터가 올바르지 않습니다.");
+  if (!normalized) throw new Error(uiText("Agent App artifact 경로 또는 메타데이터가 올바르지 않습니다.", "The Agent App artifact path or metadata is invalid."));
   meta.agentAppArtifact = normalized.publish
     ? normalized
     : { ...normalized, publishBinding: null };
@@ -552,7 +555,7 @@ export function updateSiteAgentAppMcpConsent(
   receipt: SiteAgentAppMcpConsentReceipt | null,
 ): SiteProjectMeta {
   const meta = getSiteProject(projectId);
-  if (meta.surface !== "agent-app") throw new Error("Agent App 프로젝트만 MCP 동의를 저장할 수 있습니다.");
+  if (meta.surface !== "agent-app") throw new Error(uiText("Agent App 프로젝트만 MCP 동의를 저장할 수 있습니다.", "Only Agent App projects can save MCP consent."));
   if (receipt === null) {
     meta.agentAppMcpConsent = null;
     meta.updatedAt = new Date().toISOString();
@@ -561,7 +564,7 @@ export function updateSiteAgentAppMcpConsent(
   }
   const normalized = normalizeSiteAgentAppMcpConsentReceipt(receipt);
   if (!normalized || normalized.projectId !== meta.id) {
-    throw new Error("Agent App MCP 동의 영수증이 올바르지 않습니다.");
+    throw new Error(uiText("Agent App MCP 동의 영수증이 올바르지 않습니다.", "The Agent App MCP consent record is invalid."));
   }
   meta.agentAppMcpConsent = normalized;
   meta.updatedAt = new Date().toISOString();
@@ -576,12 +579,12 @@ export function appendSiteAgentAppDeployment(
 ): SiteProjectMeta {
   const meta = getSiteProject(projectId);
   if (meta.surface !== "agent-app" || !meta.agentAppArtifact) {
-    throw new Error("Agent App artifact가 있는 프로젝트만 배포 이력을 저장할 수 있습니다.");
+    throw new Error(uiText("Agent App artifact가 있는 프로젝트만 배포 이력을 저장할 수 있습니다.", "Only projects with an Agent App artifact can save deployment history."));
   }
   const normalized = normalizeDeploymentRecord(record);
-  if (!normalized) throw new Error("Agent App 배포 ledger 항목이 올바르지 않습니다.");
+  if (!normalized) throw new Error(uiText("Agent App 배포 ledger 항목이 올바르지 않습니다.", "The Agent App deployment record is invalid."));
   if ((meta.agentAppDeployments ?? []).some((entry) => entry.ledgerEntryId === normalized.ledgerEntryId)) {
-    throw new Error("Agent App 배포 ledger entry id가 중복되었습니다.");
+    throw new Error(uiText("Agent App 배포 ledger entry id가 중복되었습니다.", "The Agent App deployment record id is a duplicate."));
   }
   meta.agentAppDeployments = [...(meta.agentAppDeployments ?? []), normalized];
   meta.agentAppArtifact = {
@@ -603,7 +606,7 @@ export function appendSiteAgentAppDeployment(
 
 export function getSiteProject(projectId: string): SiteProjectMeta {
   const meta = readProjectMeta(safeId(projectId));
-  if (!meta) throw new Error("프로젝트를 찾을 수 없음");
+  if (!meta) throw new Error(uiText("프로젝트를 찾을 수 없음", "Project not found"));
   return meta;
 }
 
@@ -623,9 +626,9 @@ function readSiteConversation(projectId: string): SiteConversationEntry[] {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error("사이트 대화 기록이 손상되어 원본을 보존했습니다.", { cause: error });
+    throw new Error(uiText("사이트 대화 기록이 손상되어 원본을 보존했습니다.", "The site chat history is damaged; the original file was preserved."), { cause: error });
   }
-  if (!Array.isArray(parsed)) throw new Error("사이트 대화 기록 형식이 올바르지 않아 원본을 보존했습니다.");
+  if (!Array.isArray(parsed)) throw new Error(uiText("사이트 대화 기록 형식이 올바르지 않아 원본을 보존했습니다.", "The site chat history has an invalid format; the original file was preserved."));
   const valid = parsed.every(
     (entry): entry is SiteConversationEntry =>
       Boolean(entry) &&
@@ -636,7 +639,7 @@ function readSiteConversation(projectId: string): SiteConversationEntry[] {
       typeof (entry as SiteConversationEntry).text === "string" &&
       typeof (entry as SiteConversationEntry).createdAt === "string",
   );
-  if (!valid) throw new Error("사이트 대화 기록 항목이 손상되어 원본을 보존했습니다.");
+  if (!valid) throw new Error(uiText("사이트 대화 기록 항목이 손상되어 원본을 보존했습니다.", "A site chat history entry is damaged; the original file was preserved."));
   return parsed.slice(-200);
 }
 
@@ -742,7 +745,7 @@ export function saveSiteScreen(input: SaveScreenInput): SiteScreenMeta {
 export function updateSiteScreenHtml(projectId: string, screenId: string, html: string): SiteScreenMeta {
   const meta = getSiteProject(projectId);
   const screen = meta.screens.find((s) => s.id === screenId);
-  if (!screen) throw new Error("화면을 찾을 수 없음");
+  if (!screen) throw new Error(uiText("화면을 찾을 수 없음", "Screen not found"));
   fs.writeFileSync(screenFilePath(projectId, screenId), html, "utf8");
   const now = new Date().toISOString();
   screen.updatedAt = now;
@@ -756,9 +759,9 @@ export function updateSiteAgentAppVisual(
   visual: SiteAgentAppVisualSnapshot,
 ): SiteProjectMeta {
   const meta = getSiteProject(projectId);
-  if (meta.surface !== "agent-app") throw new Error("Agent App 프로젝트만 시각 스냅샷을 저장할 수 있습니다.");
+  if (meta.surface !== "agent-app") throw new Error(uiText("Agent App 프로젝트만 시각 스냅샷을 저장할 수 있습니다.", "Only Agent App projects can save visual snapshots."));
   const normalized = normalizeSiteAgentAppVisual(visual);
-  if (!normalized) throw new Error("Agent App 시각 스냅샷이 올바르지 않습니다.");
+  if (!normalized) throw new Error(uiText("Agent App 시각 스냅샷이 올바르지 않습니다.", "The Agent App visual snapshot is invalid."));
   meta.agentAppVisual = normalized;
   meta.updatedAt = new Date().toISOString();
   writeProjectMeta(meta);
@@ -768,7 +771,7 @@ export function updateSiteAgentAppVisual(
 export function renameSiteScreen(projectId: string, screenId: string, name: string): SiteScreenMeta {
   const meta = getSiteProject(projectId);
   const screen = meta.screens.find((s) => s.id === screenId);
-  if (!screen) throw new Error("화면을 찾을 수 없음");
+  if (!screen) throw new Error(uiText("화면을 찾을 수 없음", "Screen not found"));
   screen.name = name.trim() || screen.name;
   screen.updatedAt = new Date().toISOString();
   meta.updatedAt = screen.updatedAt;

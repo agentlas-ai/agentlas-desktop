@@ -27,6 +27,9 @@ import {
   extractSiteAgentAppVisual,
   siteAgentAppVisualMetaMarkup,
 } from "./agent-app-visual";
+import { currentUiLocale } from "../ui-locale";
+
+const uiText = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
 export type SiteAgentAppContext = {
   target: SiteAgentAppTarget;
@@ -327,7 +330,7 @@ function resolveTargetAndSummary(ref: SiteAgentAppTargetRef): {
     const agent = getAgentById(ref.id);
     if (!agent || !visibleAgent(agent)) throw new Error("The selected agent was not found.");
     const actualKind = (agent.kind ?? "agent") === "team" ? "team" : "agent";
-    if (actualKind !== ref.kind) throw new Error("선택한 에이전트 유형이 변경되었습니다. 다시 선택해 주세요.");
+    if (actualKind !== ref.kind) throw new Error(uiText("선택한 에이전트 유형이 변경되었습니다. 다시 선택해 주세요.", "The selected agent type changed. Please choose it again."));
     target = {
       kind: actualKind,
       id: agent.id,
@@ -339,7 +342,7 @@ function resolveTargetAndSummary(ref: SiteAgentAppTargetRef): {
     addInstalledDeclaration(agent);
   } else {
     const firm = getFirm(ref.id);
-    if (!firm) throw new Error("선택한 멀티에이전트 회사를 찾을 수 없습니다.");
+    if (!firm) throw new Error(uiText("선택한 멀티에이전트 회사를 찾을 수 없습니다.", "The selected multi-agent company could not be found."));
     target = {
       kind: "firm",
       id: firm.id,
@@ -411,7 +414,7 @@ export function siteAgentAppContextFromProject(
   project: Pick<SiteProjectMeta, "surface" | "agentAppTarget" | "astryxTemplate" | "agentAppContract" | "agentAppVisual">,
 ): SiteAgentAppContext {
   if (project.surface !== "agent-app" || !project.agentAppTarget || !project.astryxTemplate || !project.agentAppContract) {
-    throw new Error("이 Agent App에는 고정된 대상·Astryx 템플릿·입출력 계약이 없습니다. Agent App을 다시 만들어 주세요.");
+    throw new Error(uiText("이 Agent App에는 고정된 대상·Astryx 템플릿·입출력 계약이 없습니다. Agent App을 다시 만들어 주세요.", "This Agent App has no pinned target, Astryx template, or input/output contract. Please create the Agent App again."));
   }
   // Availability is rechecked, but current registry copy never replaces the persisted snapshot.
   resolveTargetAndSummary({ kind: project.agentAppTarget.kind, id: project.agentAppTarget.id });
