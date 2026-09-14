@@ -55,7 +55,7 @@ Every sound analysis follows the same arc. Skipping steps is how analyses end up
 
 1. **Frame the question before touching the data.** State the hypothesis, the outcome and predictor variables, and the design (independent vs. paired, number of groups). Commit to a planned test now — choosing the test after peeking at results is p-hacking, even when done innocently.
 2. **Inspect the data.** Per group: n, mean, SD, median, missing values. Plot the raw data (histograms or box plots) before any test. Unequal group sizes, missingness, floor/ceiling effects, and outliers all change what test is appropriate — surface them to the user rather than silently working around them.
-3. **Select the test** using the quick reference below, or `references/test_selection_guide.md` for designs beyond the basics (counts, time-to-event, reliability, factorial).
+3. **Select the test** using the quick reference below, or `references/statistical-test-selection.md` for designs beyond the basics (counts, time-to-event, reliability, factorial).
 4. **Check assumptions** with `scripts/assumption_checks.py`. If an assumption fails, switch to the remedial test (table below) and report both the plan and the change.
 5. **Run the test** and always compute the effect size alongside it — a p-value says an effect exists; the effect size says whether anyone should care.
 6. **Report** using the APA templates below, including descriptives, exact statistics, effect sizes with CIs, and the assumption checks performed.
@@ -68,7 +68,7 @@ If the user only needs one step (e.g., "how many participants do I need?"), jump
 
 ### Quick Reference: Choosing the Right Test
 
-Use `references/test_selection_guide.md` for comprehensive guidance (counts, survival, reliability, factorial designs). Quick reference:
+Use `references/statistical-test-selection.md` for comprehensive guidance (counts, survival, reliability, factorial designs). Quick reference:
 
 **Comparing Two Groups:**
 - Independent, continuous, normal → Independent t-test
@@ -416,7 +416,7 @@ See `references/bayesian_statistics.md` for prior specification, Bayes Factors, 
 
 ### References (`references/`)
 
-- **test_selection_guide.md**: Decision tree covering group comparisons, relationships, counts, time-to-event, agreement/reliability, and categorical analysis
+- **statistical-test-selection.md**: Decision tree covering group comparisons, relationships, counts, time-to-event, agreement/reliability, and categorical analysis
 - **assumptions_and_diagnostics.md**: Detailed guidance on checking and handling assumption violations
 - **effect_sizes_and_power.md**: Calculating, interpreting, and reporting effect sizes; power analysis
 - **bayesian_statistics.md**: Priors, Bayes Factors, credible intervals, hierarchical models, diagnostics
