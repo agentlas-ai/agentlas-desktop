@@ -277,6 +277,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   journals: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:journals:list", { extensionId, projectId }),
     inspectOfficialGuidelines: (input: unknown) => ipcRenderer.invoke("science:journals:inspectOfficialGuidelines", { extensionId, input }),
+    recordGuidelineText: (input: unknown) => ipcRenderer.invoke("science:journals:recordGuidelineText", { extensionId, input }),
+    inspectGuidelinesMirror: (input: unknown) => ipcRenderer.invoke("science:journals:inspectGuidelinesMirror", { extensionId, input }),
     confirmIdentity: (input: unknown) => ipcRenderer.invoke("science:journals:confirmIdentity", { extensionId, input }),
     confirmHumanAttestation: (input: unknown) => ipcRenderer.invoke("science:journals:confirmHumanAttestation", { extensionId, input }),
     createProfile: (input: unknown) => ipcRenderer.invoke("science:journals:createProfile", { extensionId, input }),

@@ -3627,6 +3627,23 @@ app.whenReady().then(async () => {
     const record = input as Record<string, unknown>;
     return scienceJournalPublicationService().inspectOfficialGuidelines({ projectId: String(record.projectId ?? ""), sourceUrl: String(record.sourceUrl ?? "") });
   });
+  // 공식 사이트가 죽었을 때의 화면 경로(2026-09-14): 규정 본문 붙여넣기 / 거울 페이지.
+  ipcMain.handle("science:journals:recordGuidelineText", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceJournalPublicationService().recordManualGuidelineText({
+      projectId: String(record.projectId ?? ""), officialHost: String(record.officialHost ?? ""), pageTitle: String(record.pageTitle ?? ""), text: String(record.text ?? ""),
+    });
+  });
+  ipcMain.handle("science:journals:inspectGuidelinesMirror", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:network");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceJournalPublicationService().inspectGuidelineMirror({ projectId: String(record.projectId ?? ""), sourceUrl: String(record.sourceUrl ?? ""), officialHost: String(record.officialHost ?? "") });
+  });
   ipcMain.handle("science:journals:createProfile", (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
