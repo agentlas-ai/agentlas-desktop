@@ -42,6 +42,13 @@ function recordPath(pid: number): string {
   return path.join(registryDir(), `${pid}.json`);
 }
 
+const intendedSpawnCommands = new WeakMap<ChildProcess, string>();
+
+/** Preserve the requested executable without persisting prompts or other argv. */
+export function rememberSpawnedRunChildCommand(child: ChildProcess, command: string): void {
+  if (command.trim()) intendedSpawnCommands.set(child, command);
+}
+
 /**
  * 스폰 직후 원장에 적는다. 자식이 정상 종료하면 스스로 지운다 — 남는 파일은
  * (a) 아직 도는 자식이거나 (b) 호스트가 급사해 close 훅이 못 돈 흔적이다.
@@ -55,7 +62,9 @@ export function recordSpawnedRunChild(child: ChildProcess): void {
     const record: SpawnRecord = {
       pid,
       hostPid: process.pid,
-      spawnfile: child.spawnfile ?? "",
+      // cross-spawn's Windows child.spawnfile is often cmd.exe for a .cmd shim;
+      // the requested command is the identity the sweeper must attest instead.
+      spawnfile: intendedSpawnCommands.get(child) ?? child.spawnfile ?? "",
       at: new Date().toISOString(),
     };
     fs.writeFileSync(recordPath(pid), JSON.stringify(record), "utf8");
@@ -96,6 +105,177 @@ function psCommandOf(pid: number): Promise<string | null> {
   });
 }
 
+export interface WindowsProcessIdentity {
+  processId: number;
+  executablePath: string;
+  commandLine: string;
+  creationTime: string;
+}
+
+function normalizeWindowsPath(value: string): string {
+  return value.trim().replace(/^"|"$/g, "").replace(/\//g, "\\").toLowerCase();
+}
+
+function windowsTokenPresent(commandLine: string, expected: string): boolean {
+  if (!expected) return false;
+  const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // A bare registered command (for example `claude.cmd`) can appear as the
+  // basename of an absolute path in cmd.exe's command line.
+  return new RegExp(`(^|[\\s"\\\\])${escaped}(?=$|[\\s"])`, "i").test(commandLine);
+}
+
+/**
+ * PID 재사용 방어용 순수 판정. 실행 파일/커맨드라인뿐 아니라 프로세스 생성 시각이
+ * 원장 기록 시각과 가까운지도 요구한다. 같은 이름의 프로세스가 나중에 같은 PID를
+ * 재사용해도 죽이지 않기 위해서다.
+ */
+export function windowsProcessIdentityMatches(
+  record: SpawnRecord,
+  identity: WindowsProcessIdentity,
+): boolean {
+  if (identity.processId !== record.pid) return false;
+  const recordedAt = Date.parse(record.at);
+  const createdAt = Date.parse(identity.creationTime);
+  if (!Number.isFinite(recordedAt) || !Number.isFinite(createdAt)) return false;
+  if (Math.abs(createdAt - recordedAt) > 10_000) return false;
+
+  const expected = normalizeWindowsPath(record.spawnfile || "");
+  if (!expected) return false;
+  const actualExecutable = normalizeWindowsPath(identity.executablePath || "");
+  const commandLine = normalizeWindowsPath(identity.commandLine || "");
+  if (path.win32.isAbsolute(expected)) {
+    return actualExecutable === expected || windowsTokenPresent(commandLine, expected);
+  }
+  const expectedBase = path.win32.basename(expected);
+  const actualBase = path.win32.basename(actualExecutable);
+  const hasKnownExtension = /\.(?:exe|cmd|bat|com)$/i.test(expectedBase);
+  const candidates = hasKnownExtension
+    ? [expectedBase]
+    : [expectedBase, `${expectedBase}.exe`, `${expectedBase}.cmd`, `${expectedBase}.bat`, `${expectedBase}.com`];
+  return candidates.some((candidate) => actualBase === candidate || windowsTokenPresent(commandLine, candidate));
+}
+
+// Keep `powershell.exe -Command` comfortably below Windows' command-line
+// ceiling even if a damaged/stale ledger contains thousands of records.
+// 128 maximum-width decimal PIDs produce a script under 4 KiB.
+export const WINDOWS_CIM_PID_CHUNK_SIZE = 128;
+
+function normalizedWindowsProcessIds(pids: readonly number[]): number[] {
+  return [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+
+function buildWindowsProcessIdentityScriptForChunk(pids: readonly number[]): string {
+  const filter = pids.map((pid) => `ProcessId = ${pid}`).join(" OR ");
+  return [
+    `$items = @(Get-CimInstance Win32_Process -Filter \"${filter}\" | ForEach-Object {`,
+    "  $created = $_.CreationDate.ToUniversalTime().ToString('o')",
+    "  [pscustomobject]@{ processId = [int]$_.ProcessId; executablePath = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; creationTime = $created }",
+    "})",
+    "ConvertTo-Json -InputObject @($items) -Compress",
+  ].join("\n");
+}
+
+/** Build bounded numeric-only WQL queries for all orphan candidates. */
+export function buildWindowsProcessIdentityScripts(pids: readonly number[]): string[] {
+  const uniquePids = normalizedWindowsProcessIds(pids);
+  const scripts: string[] = [];
+  for (let offset = 0; offset < uniquePids.length; offset += WINDOWS_CIM_PID_CHUNK_SIZE) {
+    scripts.push(buildWindowsProcessIdentityScriptForChunk(
+      uniquePids.slice(offset, offset + WINDOWS_CIM_PID_CHUNK_SIZE),
+    ));
+  }
+  return scripts;
+}
+
+/** ConvertTo-Json emits either an array or a single object depending on PowerShell version. */
+export function parseWindowsProcessIdentities(stdout: string): Map<number, WindowsProcessIdentity> {
+  return decodeWindowsProcessIdentities(stdout) ?? new Map();
+}
+
+function decodeWindowsProcessIdentities(stdout: string): Map<number, WindowsProcessIdentity> | null {
+  const identities = new Map<number, WindowsProcessIdentity>();
+  if (!stdout.trim()) return null;
+  try {
+    const parsed = JSON.parse(stdout.trim()) as unknown;
+    if (!Array.isArray(parsed) && (!parsed || typeof parsed !== "object")) return null;
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of items) {
+      if (!item || typeof item !== "object") return null;
+      const candidate = item as Partial<WindowsProcessIdentity>;
+      if (
+        !Number.isInteger(candidate.processId) || Number(candidate.processId) <= 0 ||
+        typeof candidate.executablePath !== "string" ||
+        typeof candidate.commandLine !== "string" ||
+        typeof candidate.creationTime !== "string"
+      ) return null;
+      identities.set(Number(candidate.processId), candidate as WindowsProcessIdentity);
+    }
+  } catch {
+    return null;
+  }
+  return identities;
+}
+
+export interface WindowsProcessIdentityLookupResult {
+  identities: Map<number, WindowsProcessIdentity>;
+  /** A failed/timed-out chunk is retryable; its ledger records must survive. */
+  failedPids: Set<number>;
+}
+
+export type WindowsProcessIdentityLookupState =
+  | { status: "found"; identity: WindowsProcessIdentity }
+  | { status: "missing" }
+  | { status: "failed" };
+
+export function classifyWindowsProcessIdentityLookup(
+  lookup: WindowsProcessIdentityLookupResult,
+  pid: number,
+): WindowsProcessIdentityLookupState {
+  if (lookup.failedPids.has(pid)) return { status: "failed" };
+  const identity = lookup.identities.get(pid);
+  return identity ? { status: "found", identity } : { status: "missing" };
+}
+
+function executeWindowsProcessIdentityQuery(script: string): Promise<Map<number, WindowsProcessIdentity> | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 5_000, windowsHide: true, encoding: "utf8" },
+      (error, stdout) => resolve(error ? null : decodeWindowsProcessIdentities(stdout)),
+    );
+  });
+}
+
+async function windowsProcessIdentitiesOf(pids: readonly number[]): Promise<WindowsProcessIdentityLookupResult> {
+  const uniquePids = normalizedWindowsProcessIds(pids);
+  const identities = new Map<number, WindowsProcessIdentity>();
+  const failedPids = new Set<number>();
+  for (let offset = 0; offset < uniquePids.length; offset += WINDOWS_CIM_PID_CHUNK_SIZE) {
+    const chunkPids = uniquePids.slice(offset, offset + WINDOWS_CIM_PID_CHUNK_SIZE);
+    const chunk = await executeWindowsProcessIdentityQuery(
+      buildWindowsProcessIdentityScriptForChunk(chunkPids),
+    );
+    if (!chunk) {
+      for (const pid of chunkPids) failedPids.add(pid);
+      continue;
+    }
+    for (const [pid, identity] of chunk) identities.set(pid, identity);
+  }
+  return { identities, failedPids };
+}
+
+function taskkillWindowsTree(pid: number, force: boolean): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      "taskkill.exe",
+      ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])],
+      { timeout: 5_000, windowsHide: true },
+      (error) => resolve(!error),
+    );
+  });
+}
+
 export interface OrphanSweepResult {
   scanned: number;
   /** 이번 패스에 SIGTERM/SIGKILL 을 보낸 고아 수. */
@@ -106,6 +286,8 @@ export interface OrphanSweepResult {
   keptLive: number;
   /** PID 재사용 의심으로 죽이지 않고 지운 수. */
   prunedMismatched: number;
+  /** CIM 자체 실패로 정체를 확인하지 못해 다음 패스로 보존한 수. */
+  identityLookupFailed: number;
 }
 
 /**
@@ -118,11 +300,19 @@ export interface OrphanSweepResult {
  *    때만 프로세스 그룹 SIGTERM. 다음 패스에도 남아 있으면 SIGKILL 로 승격.
  *  - 판정 불가(ps 실패 등)면 죽이지 않는다 — 오폭보다 고아가 낫다.
  *
- * Windows 는 이 패스를 건너뛴다(프로세스 그룹/ps 계약이 달라 별도 구현이 필요하다).
+ * Windows 는 CIM으로 실행 파일·커맨드라인·생성 시각을 다시 증명한 뒤 taskkill /T,
+ * 다음 패스에 /F로 승격한다. 정체를 증명할 수 없으면 POSIX와 마찬가지로 죽이지 않는다.
  */
 export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
-  const result: OrphanSweepResult = { scanned: 0, signaled: 0, prunedDead: 0, keptLive: 0, prunedMismatched: 0 };
-  if (process.platform === "win32") return result;
+  const result: OrphanSweepResult = {
+    scanned: 0,
+    signaled: 0,
+    prunedDead: 0,
+    keptLive: 0,
+    prunedMismatched: 0,
+    identityLookupFailed: 0,
+  };
+  const orphanCandidates: Array<{ file: string; record: SpawnRecord }> = [];
   let entries: string[];
   try {
     entries = fs.readdirSync(registryDir()).filter((name) => name.endsWith(".json"));
@@ -138,7 +328,10 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
       continue;
     }
-    if (!Number.isInteger(record.pid) || !Number.isInteger(record.hostPid)) {
+    if (
+      !Number.isInteger(record.pid) || record.pid <= 0 ||
+      !Number.isInteger(record.hostPid) || record.hostPid <= 0
+    ) {
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
       continue;
     }
@@ -152,24 +345,61 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
       result.keptLive += 1;
       continue;
     }
+    orphanCandidates.push({ file, record });
+  }
+
+  // Windows process identity lookup starts PowerShell/WMI. Do it once per sweep,
+  // rather than serially paying its startup and timeout cost for every orphan.
+  const windowsIdentities = process.platform === "win32"
+    ? await windowsProcessIdentitiesOf(orphanCandidates.map(({ record }) => record.pid))
+    : { identities: new Map<number, WindowsProcessIdentity>(), failedPids: new Set<number>() };
+
+  for (const { file, record } of orphanCandidates) {
     // 호스트는 죽었고 자식 PID 는 살아 있다 — 죽이기 전에 정체를 확인한다.
-    const command = await psCommandOf(record.pid);
+    const windowsLookup = process.platform === "win32"
+      ? classifyWindowsProcessIdentityLookup(windowsIdentities, record.pid)
+      : null;
+    if (windowsLookup?.status === "failed") {
+      // WMI/CIM 장애는 PID 부재가 아니다. 원장을 보존해 다음 sweep에서 재시도한다.
+      result.identityLookupFailed += 1;
+      continue;
+    }
+    if (windowsLookup?.status === "missing") {
+      // 성공한 CIM 조회에서 사라졌다 = processAlive 이후 종료한 정상 race.
+      result.prunedDead += 1;
+      try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
+      continue;
+    }
+    const command = process.platform === "win32" ? null : await psCommandOf(record.pid);
     const expected = path.basename(record.spawnfile || "");
-    if (!command || !expected || !command.includes(expected)) {
-      // ps 실패 또는 커맨드 불일치(PID 재사용) — 절대 죽이지 않고 레코드만 정리.
+    const identityMatches = process.platform === "win32"
+      ? Boolean(windowsLookup?.status === "found" && windowsProcessIdentityMatches(record, windowsLookup.identity))
+      : Boolean(command && expected && command.includes(expected));
+    if (!identityMatches) {
+      // 실행 정체 불일치(PID 재사용) — 절대 죽이지 않고 레코드만 정리.
       result.prunedMismatched += 1;
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
       continue;
     }
     const escalate = typeof record.termSignaledAt === "number";
-    const signal: NodeJS.Signals = escalate ? "SIGKILL" : "SIGTERM";
-    try {
-      // detachedSpawnOpts 로 뜬 자식은 자기 PID 가 곧 프로세스 그룹이다 — 손자까지 함께.
-      process.kill(-record.pid, signal);
-    } catch {
-      try { process.kill(record.pid, signal); } catch { /* 이미 죽었을 수 있다 */ }
+    let signaled = false;
+    if (process.platform === "win32") {
+      signaled = await taskkillWindowsTree(record.pid, escalate);
+    } else {
+      const signal: NodeJS.Signals = escalate ? "SIGKILL" : "SIGTERM";
+      try {
+        // detachedSpawnOpts 로 뜬 자식은 자기 PID 가 곧 프로세스 그룹이다 — 손자까지 함께.
+        process.kill(-record.pid, signal);
+        signaled = true;
+      } catch {
+        try {
+          process.kill(record.pid, signal);
+          signaled = true;
+        } catch { /* 이미 죽었을 수 있다 */ }
+      }
     }
-    result.signaled += 1;
+    if (!signaled && processAlive(record.pid)) continue;
+    result.signaled += signaled ? 1 : 0;
     if (escalate) {
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
     } else {

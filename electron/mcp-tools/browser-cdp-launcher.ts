@@ -440,8 +440,21 @@ export async function acquireBrowserCdpLease(kind: string): Promise<BrowserCdpLe
   return { file, kind: safeKind, pid: process.pid };
 }
 
+const browserCdpIdleShutdownFlights = new Map<number, ReturnType<typeof spawn>>();
+
 export function scheduleBrowserCdpIdleShutdown(): boolean {
   if (process.env.AGENTLAS_CDP_DISABLE_REAPER === "1") return false;
+  const owner = readBrowserCdpOwner();
+  if (
+    !owner ||
+    owner.port !== browserCdpPort() ||
+    canonicalProfilePath(owner.profile) !== canonicalProfilePath(browserCdpProfilePath()) ||
+    !browserCdpProcessIsLive(owner.pid)
+  ) return false;
+  // live-view and connect both release their own leases during Main shutdown.
+  // One active reaper for the same browser owner is sufficient; clear the
+  // single-flight when it exits so a later real idle transition can schedule again.
+  if (browserCdpIdleShutdownFlights.has(owner.pid)) return false;
   const launcher = browserCdpLauncherPath();
   if (!fs.existsSync(launcher)) return false;
   try {
@@ -451,6 +464,14 @@ export function scheduleBrowserCdpIdleShutdown(): boolean {
       windowsHide: true,
       env: { ...process.env, AGENTLAS_CDP_AUTO_STOP: "1", ELECTRON_RUN_AS_NODE: "1" },
     });
+    browserCdpIdleShutdownFlights.set(owner.pid, child);
+    const clearFlight = (): void => {
+      if (browserCdpIdleShutdownFlights.get(owner.pid) === child) {
+        browserCdpIdleShutdownFlights.delete(owner.pid);
+      }
+    };
+    child.once("error", clearFlight);
+    child.once("exit", clearFlight);
     child.unref();
     return true;
   } catch {

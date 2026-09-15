@@ -321,36 +321,34 @@ export function RuntimeControl() {
     });
   }, [load, loadLocalModelSnapshot, loadPool]);
 
-  function localInstallationForEnable(snapshot: LocalModelHubSnapshot): LocalModelInstallationReceipt | null {
-    const exactModels = ["orchestrator", "worker", "multimodal"]
-      .flatMap((role) => pool?.members[role as RuntimeRole] ?? [])
-      .map((member) => member.selection)
-      .filter((selection) => selection.kind === "agentlas-local" && selection.model)
-      .map((selection) => selection.model as string);
-    for (const model of exactModels) {
-      const installation = snapshot.modelInstallations.find((item) => item.fileName === model);
-      if (installation) return installation;
-    }
-    for (const receipt of [...snapshot.loadReceipts].reverse()) {
-      const installation = snapshot.modelInstallations.find((item) => item.installationId === receipt.installationId);
-      if (installation) return installation;
-    }
-    return snapshot.modelInstallations.length === 1 ? snapshot.modelInstallations[0] : null;
+  function localInstallationForSelection(
+    snapshot: LocalModelHubSnapshot,
+    selection: RuntimeSelection,
+  ): LocalModelInstallationReceipt | null {
+    if (selection.kind !== "agentlas-local") return null;
+    const sourceInstallationId = selection.source?.split(":").at(-1);
+    const exact = sourceInstallationId
+      ? snapshot.modelInstallations.find((item) => item.installationId === sourceInstallationId)
+      : null;
+    if (exact && (!selection.model || exact.fileName === selection.model)) return exact;
+    const matchingModel = snapshot.modelInstallations.filter((item) => item.fileName === selection.model);
+    return matchingModel.length === 1 ? matchingModel[0] : null;
   }
 
-  async function toggleLocalModel() {
+  async function toggleLocalModel(selection: RuntimeSelection) {
     const api = ipc();
     if (!api?.localModelHub || localModelBusy) return;
     setLocalModelBusy(true);
     try {
       const before = await api.localModelHub.snapshot();
-      if (before.resident) {
+      const installation = localInstallationForSelection(before, selection);
+      const selectedModelIsResident = Boolean(installation && before.resident?.installationId === installation.installationId);
+      if (selectedModelIsResident && before.resident) {
         await api.localModelHub.unload({ processEpoch: before.resident.processEpoch, cancelActiveRuns: false });
         say(ko ? "로컬 모델을 껐습니다. GPU와 메모리를 해제했습니다." : "Local model turned off. GPU and memory were released.");
       } else {
-        const installation = localInstallationForEnable(before);
         if (!installation) {
-          throw new Error(before.modelInstallations.length > 1 ? "local_model_selection_required" : "local_model_not_installed");
+          throw new Error("local_model_selection_unavailable");
         }
         const receipt = await api.localModelHub.loadModel({ installationId: installation.installationId, contextTokens: 0, operationId: crypto.randomUUID() });
         if (receipt.state !== "resident") throw new Error(receipt.reasonCode ?? "model_load_failed");
@@ -373,10 +371,8 @@ export function RuntimeControl() {
       say(
         code === "local_model_runs_active"
           ? (ko ? "로컬 모델이 작업 중이라 끄지 않았습니다. 실행이 끝난 뒤 다시 꺼 주세요." : "The local model is working, so it stayed on. Turn it off after the run finishes.")
-          : code === "local_model_selection_required"
-            ? (ko ? "설치된 모델이 여러 개입니다. 로컬 모델 화면에서 사용할 모델을 먼저 선택해 주세요." : "Several models are installed. Choose one on the Local Models screen first.")
-            : code === "local_model_not_installed"
-              ? (ko ? "설치된 로컬 모델이 없습니다. 로컬 모델 화면에서 먼저 받아 주세요." : "No local model is installed. Download one from Local Models first.")
+          : code === "local_model_selection_unavailable"
+            ? (ko ? "이 후보와 일치하는 설치 모델을 찾지 못했습니다. 로컬 모델 화면에서 다시 선택해 주세요." : "No installed model matches this candidate. Choose it again on the Local Models screen.")
               : (ko ? `로컬 모델을 전환하지 못했습니다 (${code}).` : `Could not switch the local model (${code}).`),
         "error",
       );
@@ -901,9 +897,10 @@ export function RuntimeControl() {
               const selection = member.selection;
               const runtime = runtimeForSelection(selection);
               const installedLocalModel = selection.kind === "agentlas-local" && localModelSnapshot?.modelInstallations.some((item) => item.fileName === selection.model);
-              const visibleBadge = installedLocalModel && !runtime
-                ? { label: ko ? "꺼짐 · 건너뜀" : "Off · skipped", tone: "idle" as const }
-                : badge;
+              const localInstallation = localModelSnapshot
+                ? localInstallationForSelection(localModelSnapshot, selection)
+                : null;
+              const localModelOn = Boolean(localInstallation && localModelSnapshot?.resident?.installationId === localInstallation.installationId);
               const modelOptions = modelOptionsForRole(role, selection);
               const modelValue = runtime
                 ? modelOptionKey(runtime, selection.model)
@@ -1042,16 +1039,33 @@ export function RuntimeControl() {
                       )}
                     </label>
                   </fieldset>
-                  <span
-                    className="dashboard-runtime-pool-badge"
-                    data-tone={duplicate ? "skip" : visibleBadge.tone}
-                  >
-                    {duplicate
-                      ? ko
-                        ? "중복 후보"
-                        : "Duplicate"
-                      : visibleBadge.label}
-                  </span>
+                  {selection.kind === "agentlas-local" ? (
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={localModelOn}
+                      aria-label={`${rowLabel} ${ko ? "로컬 모델" : "local model"}`}
+                      aria-busy={localModelBusy ? "true" : undefined}
+                      className="dashboard-runtime-row-switch"
+                      disabled={localModelBusy || !installedLocalModel || !localInstallation || Boolean(localModelSnapshot?.unavailableReason)}
+                      onClick={() => void toggleLocalModel(selection)}
+                      title={ko ? "이 로컬 모델의 GPU 상주 프로세스를 켜거나 끕니다." : "Turns this local model's GPU resident process on or off."}
+                    >
+                      <span className="dashboard-runtime-row-switch-track" aria-hidden="true"><span /></span>
+                      <span>{localModelOn ? "ON" : "OFF"}</span>
+                    </button>
+                  ) : (
+                    <span
+                      className="dashboard-runtime-pool-badge"
+                      data-tone={duplicate ? "skip" : badge.tone}
+                    >
+                      {duplicate
+                        ? ko
+                          ? "중복 후보"
+                          : "Duplicate"
+                        : badge.label}
+                    </span>
+                  )}
                   {role === "orchestrator" && members.length === 1 && (
                     /*
                      * ★못 지우는 이유는 화면에 있어야 한다 (QA 실측 2026-09-08).
@@ -1178,10 +1192,7 @@ export function RuntimeControl() {
   }
 
   const anyActive = runtimes.some((runtime) => runtime.kind !== "ollama");
-  const localResident = localModelSnapshot?.resident ?? null;
   const localInstalled = (localModelSnapshot?.modelInstallations.length ?? 0) > 0;
-  const localEngineInstalled = (localModelSnapshot?.engineInstallations.length ?? 0) > 0;
-  const localToggleDisabled = localModelBusy || !localInstalled || !localEngineInstalled || Boolean(localModelSnapshot?.unavailableReason);
   return (
     <div
       className="dashboard-module dashboard-runtime-control"
@@ -1223,33 +1234,6 @@ export function RuntimeControl() {
             {renderRole("orchestrator")}
             {renderRole("worker")}
             {renderRole("multimodal")}
-          </div>
-          <div className="dashboard-local-runtime-toggle" data-state={localResident ? "on" : "off"}>
-            <div>
-              <strong>{ko ? "로컬 모델 사용" : "Use local model"}</strong>
-              <span role="status" aria-live="polite">
-                {localModelBusy
-                  ? (ko ? "전환 중…" : "Switching…")
-                  : localResident
-                    ? (ko ? "켜짐 · GPU와 메모리 사용 중" : "On · using GPU and memory")
-                    : localInstalled && localEngineInstalled
-                      ? (ko ? "꺼짐 · GPU와 메모리 해제됨" : "Off · GPU and memory released")
-                      : (ko ? "로컬 모델과 실행 엔진을 먼저 준비하세요" : "Set up a local model and engine first")}
-              </span>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={Boolean(localResident)}
-              aria-label={ko ? "로컬 모델 사용" : "Use local model"}
-              aria-busy={localModelBusy ? "true" : undefined}
-              className="dashboard-local-runtime-switch"
-              disabled={localToggleDisabled}
-              onClick={() => void toggleLocalModel()}
-              title={ko ? "역할 선택은 유지하고 로컬 모델 프로세스만 켜거나 끕니다." : "Turns only the local model process on or off and keeps role selections."}
-            >
-              <span aria-hidden="true" />
-            </button>
           </div>
           {message && (
             <div

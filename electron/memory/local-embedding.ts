@@ -61,6 +61,10 @@ const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
   "README.md": { sha256: "9505454b6a3efbb25257124de875cb73e02bd663a822528525a3c29b1c4d91ac", size: 5575 },
 };
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
+// Keep the model across an ordinary working session so a later memory lookup
+// does not pay the verified ~200 ms synchronous reload pause. One hour of true
+// embedding inactivity still returns the large model buffers to the OS.
+const DEFAULT_MODEL_IDLE_EVICTION_MS = 60 * 60_000;
 const HASH_MIN_VECTOR_SCORE = 0.08;
 // A noise floor, not a precision gate — precision comes from the reciprocal-rank
 // fusion below. Calibrated against the multilingual asset, where a genuine match
@@ -106,6 +110,50 @@ type ModelDescriptor = {
 
 let cachedModelDescriptor: ModelDescriptor | null | undefined;
 let cachedModelDescriptorAt = 0;
+let modelIdleEvictionMs = DEFAULT_MODEL_IDLE_EVICTION_MS;
+let modelIdleEvictionTimer: NodeJS.Timeout | null = null;
+
+function clearModelIdleEvictionTimer(): void {
+  if (modelIdleEvictionTimer) clearTimeout(modelIdleEvictionTimer);
+  modelIdleEvictionTimer = null;
+}
+
+function scheduleModelIdleEviction(): void {
+  clearModelIdleEvictionTimer();
+  if (!cachedModelDescriptor || modelIdleEvictionMs <= 0) return;
+  modelIdleEvictionTimer = setTimeout(() => {
+    // Drop every strong reference to the ~128 MB embedding matrix, scales,
+    // tokenizer vocabulary and Unigram scores. V8/Node may return the eligible
+    // pages on its own schedule; the next embedding call verifies and lazily
+    // reloads the exact pinned asset, preserving vector identity and ranking.
+    cachedModelDescriptor = undefined;
+    cachedModelDescriptorAt = 0;
+    modelIdleEvictionTimer = null;
+  }, modelIdleEvictionMs);
+  modelIdleEvictionTimer.unref?.();
+}
+
+/** Observable lifecycle state for resource contracts and diagnostics. */
+export function localEmbeddingModelCacheState(): {
+  loaded: boolean;
+  retainedAssetBytes: number;
+  idleEvictionMs: number;
+} {
+  const descriptor = cachedModelDescriptor ?? null;
+  return {
+    loaded: Boolean(descriptor),
+    retainedAssetBytes: descriptor
+      ? descriptor.embeddings.byteLength + descriptor.scales.byteLength
+      : 0,
+    idleEvictionMs: modelIdleEvictionMs,
+  };
+}
+
+/** Test-only timing seam; production remains a one-hour idle lease. */
+export function setLocalEmbeddingIdleEvictionMsForTests(timeoutMs: number): void {
+  modelIdleEvictionMs = Math.max(1, Math.trunc(timeoutMs));
+  if (cachedModelDescriptor) scheduleModelIdleEviction();
+}
 
 const LATIN_TOKEN_PATTERN = /[a-z0-9][a-z0-9_-]{1,}/g;
 const CJK_RUN_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7a3]+/g;
@@ -361,6 +409,7 @@ export function verifyLocalModel2VecAsset(directory: string): {
 
 /** Runtime installers may place the asset after Desktop has already started. */
 export function invalidateLocalEmbeddingModelCache(): void {
+  clearModelIdleEvictionTimer();
   cachedModelDescriptor = undefined;
   cachedModelDescriptorAt = 0;
 }
@@ -368,12 +417,17 @@ export function invalidateLocalEmbeddingModelCache(): void {
 function verifiedModelDescriptor(): ModelDescriptor | null {
   if (cachedModelDescriptor !== undefined && (
     cachedModelDescriptor !== null || Date.now() - cachedModelDescriptorAt < MODEL_DISCOVERY_MISS_TTL_MS
-  )) return cachedModelDescriptor;
+  )) {
+    if (cachedModelDescriptor) scheduleModelIdleEviction();
+    return cachedModelDescriptor;
+  }
   for (const candidate of modelCandidates()) {
     const descriptor = verifyModelDirectory(candidate);
     if (descriptor) {
       cachedModelDescriptorAt = Date.now();
-      return (cachedModelDescriptor = descriptor);
+      cachedModelDescriptor = descriptor;
+      scheduleModelIdleEviction();
+      return descriptor;
     }
   }
   cachedModelDescriptorAt = Date.now();

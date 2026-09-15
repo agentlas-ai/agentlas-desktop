@@ -73,7 +73,24 @@ function useGlobe(canvasRef: React.RefObject<HTMLCanvasElement>) {
     const canvasTeal = readToken("--landing-teal", "#2de6c8"); // colour-literal-allowed: canvas fallback for the landing token
     const canvasCyan = readToken("--landing-cyan", "#22d3ee"); // colour-literal-allowed: canvas fallback for the landing token
     let raf = 0;
-    const frame = () => {
+    let lastPaintAt = 0;
+    let disposed = false;
+    const ambientFrameIntervalMs = 1000 / 30;
+    const frame = (paintAt = 0) => {
+      raf = 0;
+      if (disposed || document.visibilityState === "hidden") return;
+      // The globe is slow ambient motion, not an input surface. Repainting its
+      // 240 points at the display refresh rate kept both Renderer and GPU busy
+      // on an otherwise idle signed-out window. 30fps is visually smooth for
+      // this slow ambient motion while still bounding idle composition cost.
+      if (!reduce && paintAt > 0 && paintAt - lastPaintAt < ambientFrameIntervalMs) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      const elapsedSincePaint = lastPaintAt > 0 && paintAt > 0
+        ? Math.min(250, paintAt - lastPaintAt)
+        : 1000 / 60;
+      lastPaintAt = paintAt;
       ctx.clearRect(0, 0, S, S);
       const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.7);
       g.addColorStop(0, "rgba(45,230,200,0.20)");
@@ -156,12 +173,21 @@ function useGlobe(canvasRef: React.RefObject<HTMLCanvasElement>) {
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
       if (!reduce) {
-        a += 0.0042;
+        // Keep the original rotation speed even though paints are less frequent.
+        a += 0.0042 * (elapsedSincePaint / (1000 / 60));
         raf = requestAnimationFrame(frame);
       }
     };
+    const resumeWhenVisible = () => {
+      if (!reduce && !disposed && document.visibilityState !== "hidden" && !raf) {
+        raf = requestAnimationFrame(frame);
+      }
+    };
+    document.addEventListener("visibilitychange", resumeWhenVisible);
     frame();
     return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", resumeWhenVisible);
       if (raf) cancelAnimationFrame(raf);
     };
   }, [canvasRef]);

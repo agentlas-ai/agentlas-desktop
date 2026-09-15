@@ -381,20 +381,37 @@ export default function AutomationListPage() {
                     {locale === "en" ? "Needs your call" : "내가 정해야 함"}
                   </button>
                 ) : null}
-                <button
-                  onClick={() => void toggle(a.id, !a.enabled)}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    fontSize: 11,
-                    fontWeight: 600,
-                    border: "1px solid var(--paper-edge)",
-                    background: a.enabled ? "var(--fill-1)" : "var(--paper-2)",
-                    color: a.enabled ? "var(--accent)" : "var(--muted-deep)",
-                  }}
-                >
-                  {a.enabled ? t("auto.action.disable") : t("auto.action.enable")}
-                </button>
+                {!a.enabled && a.scheduleSpec?.kind === "once" && a.nextRunAt == null ? (
+                  <span
+                    data-testid={`automation-terminal-once-${a.id}`}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      border: "1px solid var(--paper-edge)",
+                      background: "var(--paper-2)",
+                      color: "var(--muted-deep)",
+                    }}
+                  >
+                    {locale === "en" ? "Ended" : "종료됨"}
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => void toggle(a.id, !a.enabled)}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      border: "1px solid var(--paper-edge)",
+                      background: a.enabled ? "var(--fill-1)" : "var(--paper-2)",
+                      color: a.enabled ? "var(--accent)" : "var(--muted-deep)",
+                    }}
+                  >
+                    {a.enabled ? t("auto.action.disable") : t("auto.action.enable")}
+                  </button>
+                )}
                 {/* 결정을 기다리는 동안에는 실행을 권하지 않는다 — 눌러 봐야 같은 자리에서
                     또 멈춘다. 그 자리는 위의 [승인 대기]가 대신한다. */}
                 {waiting[a.id] ? null : (

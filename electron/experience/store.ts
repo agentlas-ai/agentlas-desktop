@@ -1182,9 +1182,15 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
   const taskTermsUnavailable = tasks.length === 0;
 
   const pack = ensureAutoExperiencePack({ ...input, basePackageHash });
+  // Historical releases could split one automatic pack when its base changed.
+  // Reuse the same Memory only inside the same project and environment lane;
+  // cross-platform/project candidates intentionally remain distinct.
   const existingCandidate = getDb().prepare(
-    "SELECT * FROM experience_candidates WHERE pack_id = ? AND source_memory_id = ? LIMIT 1",
-  ).get(pack.id, input.memory.id) as CandidateRow | undefined;
+    `SELECT * FROM experience_candidates
+      WHERE agent_id = ? AND source_memory_id = ? AND auto_managed = 1
+        AND project_scope_key = ? AND environment_key = ?
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
+  ).get(input.agentId, input.memory.id, pack.project_scope_key, pack.environment_key) as CandidateRow | undefined;
   if (existingCandidate) {
     recordAutoIntakeReceipt({
       agentId: input.agentId,
@@ -1196,7 +1202,9 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
         // 분류가 비었어도 후보는 만든다 — 세어 볼 수 있게 사실만 남긴다.
         ...(taskTermsUnavailable ? ["task-taxonomy-empty"] : []),
       ],
-      packId: pack.id,
+      // A reused candidate remains owned by its original pack. Keep the
+      // receipt referentially consistent instead of pointing at a newer split.
+      packId: existingCandidate.pack_id,
       candidateId: existingCandidate.id,
       runId,
       redactionCount,
@@ -1292,8 +1300,8 @@ type CuratedMemoryReconciliationResult = {
 
 // Keep each intake, including its candidate/receipt transaction, synchronous.
 // Both callers share the same privacy, identity and duplicate checks.
-function reconcileCuratedMemoryRow(memory: MemoryProjectionRow, result: CuratedMemoryReconciliationResult): void {
-  if (!memory.agent_id) return;
+function reconcileCuratedMemoryRow(memory: MemoryProjectionRow, result: CuratedMemoryReconciliationResult): boolean {
+  if (!memory.agent_id) return true;
   result.scanned += 1;
   try {
     const agent = getAgentById(memory.agent_id);
@@ -1314,16 +1322,22 @@ function reconcileCuratedMemoryRow(memory: MemoryProjectionRow, result: CuratedM
       basePackageHash: agent ? effectiveExperienceBaseHash(agent) : null,
       taskHint: requestContext?.userIntent ?? requestContext?.triggerTerms?.join(" ") ?? null,
     };
+    const sourceMemoryHash = autoIntakeSourceMemoryHash(input);
     autoIntakeCuratedMemory(input);
     const receipt = getDb().prepare(
       "SELECT status FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
-    ).get(memory.agent_id, autoIntakeSourceMemoryHash(input)) as { status?: string } | undefined;
-    if (receipt?.status === "candidate-created") result.candidateCreated += 1;
-    else if (receipt?.status === "blocked") result.blocked += 1;
-    else if (receipt?.status === "skipped") result.skipped += 1;
-    else result.deferred += 1;
+    ).get(memory.agent_id, sourceMemoryHash) as { status?: string } | undefined;
+    if (receipt?.status === "candidate-created" || receipt?.status === "blocked" || receipt?.status === "skipped") {
+      if (receipt.status === "candidate-created") result.candidateCreated += 1;
+      else if (receipt.status === "blocked") result.blocked += 1;
+      else result.skipped += 1;
+      return true;
+    }
+    result.deferred += 1;
+    return false;
   } catch {
     result.deferred += 1;
+    return false;
   }
 }
 
@@ -1363,12 +1377,106 @@ export async function reconcileExistingCuratedMemoryCandidatesAtStartup(
   signal?.throwIfAborted();
   const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
   const only = typeof options.agentId === "string" && options.agentId.trim() ? options.agentId.trim() : null;
-  const ids = getDb().prepare(
-    `SELECT id FROM memory_entries
-      WHERE agent_id IS NOT NULL AND superseded_at IS NULL
-        AND (? IS NULL OR agent_id = ?)
-      ORDER BY created_at ASC, id ASC LIMIT ?`,
-  ).all(only, only, limit) as Array<{ id: string }>;
+  // The existing meta ledger avoids a schema migration (and therefore avoids a
+  // full pre-upgrade SQLite backup) while preserving a durable, policy-scoped
+  // startup boundary. Existing rowid cursors hand off without rereading old
+  // bodies to an immutable created_at + id order that survives VACUUM or a
+  // future table rebuild. A new policy still gets its own independent cursor.
+  const cursorKey = [
+    "experience-startup-memory-rowid",
+    AUTO_INTAKE_POLICY_VERSION,
+    process.platform,
+    process.arch,
+    only ?? "all",
+  ].join(":");
+  const stableCursorKey = cursorKey.replace("experience-startup-memory-rowid", "experience-startup-memory-order");
+  const pendingKey = `${cursorKey}:pending`;
+  const cursorRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(cursorKey) as { value?: string } | undefined;
+  const parsedCursor = Number.parseInt(cursorRow?.value ?? "0", 10);
+  const cursor = Number.isSafeInteger(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
+  const stableCursorRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(stableCursorKey) as { value?: string } | undefined;
+  let stableCursor: { createdAt: string; id: string } | null = null;
+  try {
+    const parsed = JSON.parse(stableCursorRow?.value ?? "null") as { createdAt?: unknown; id?: unknown } | null;
+    if (parsed && typeof parsed.createdAt === "string" && typeof parsed.id === "string") {
+      stableCursor = { createdAt: parsed.createdAt, id: parsed.id };
+    }
+  } catch {
+    /* A damaged stable cursor falls back to the existing rowid drain. */
+  }
+  if (!stableCursor) {
+    // Convert the physical cursor before doing more work. The oldest logical
+    // row beyond the legacy boundary proves a prefix that was already seen;
+    // rows interleaved after that prefix are harmlessly retried through the
+    // idempotent intake receipt. Only key columns are read for this one-time
+    // handoff, so no Memory bodies or schema migration are required.
+    const firstUnprocessed = getDb().prepare(
+      `SELECT created_at AS createdAt, id FROM memory_entries
+        WHERE rowid > ? AND agent_id IS NOT NULL AND superseded_at IS NULL
+          AND (? IS NULL OR agent_id = ?)
+        ORDER BY created_at ASC, id ASC LIMIT 1`,
+    ).get(cursor, only, only) as { createdAt: string; id: string } | undefined;
+    if (firstUnprocessed) {
+      const predecessor = getDb().prepare(
+        `SELECT created_at AS createdAt, id FROM memory_entries
+          WHERE (created_at < ? OR (created_at = ? AND id < ?))
+            AND agent_id IS NOT NULL AND superseded_at IS NULL
+            AND (? IS NULL OR agent_id = ?)
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+      ).get(
+        firstUnprocessed.createdAt,
+        firstUnprocessed.createdAt,
+        firstUnprocessed.id,
+        only,
+        only,
+      ) as { createdAt: string; id: string } | undefined;
+      stableCursor = predecessor ?? { createdAt: "", id: "" };
+    } else {
+      const anchor = getDb().prepare(
+        `SELECT created_at AS createdAt, id FROM memory_entries
+          WHERE agent_id IS NOT NULL AND superseded_at IS NULL
+            AND (? IS NULL OR agent_id = ?)
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+      ).get(only, only) as { createdAt: string; id: string } | undefined;
+      stableCursor = anchor ?? { createdAt: "", id: "" };
+    }
+  }
+  const MAX_PENDING_MEMORY_IDS = 10_000;
+  const pendingRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(pendingKey) as { value?: string } | undefined;
+  let parsedPending: unknown = [];
+  try { parsedPending = JSON.parse(pendingRow?.value ?? "[]"); } catch {}
+  const pendingIds = new Set(
+    (Array.isArray(parsedPending) ? parsedPending : [])
+      .filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 120)
+      .slice(0, MAX_PENDING_MEMORY_IDS),
+  );
+  // Retry a bounded slice without allowing permanently unavailable agents to
+  // consume the whole startup budget. Failed IDs rotate to the tail; new rows
+  // always retain most of the capacity.
+  const pendingBudget = Math.min(pendingIds.size, 128, Math.max(1, Math.floor(limit / 4)));
+  type StartupMemoryId = {
+    id: string;
+    source: "pending" | "stable";
+    createdAt?: string;
+  };
+  const pendingAttempts: StartupMemoryId[] = [...pendingIds].slice(0, pendingBudget)
+    .map((id) => ({ id, source: "pending" }));
+  const newBudget = Math.max(0, limit - pendingAttempts.length);
+  const newIds: StartupMemoryId[] = (getDb().prepare(
+    `SELECT memory.id, memory.created_at AS createdAt FROM memory_entries memory
+      WHERE (memory.created_at > ? OR (memory.created_at = ? AND memory.id > ?))
+        AND memory.agent_id IS NOT NULL AND memory.superseded_at IS NULL
+        AND (? IS NULL OR memory.agent_id = ?)
+      ORDER BY memory.created_at ASC, memory.id ASC LIMIT ?`,
+  ).all(
+    stableCursor.createdAt,
+    stableCursor.createdAt,
+    stableCursor.id,
+    only,
+    only,
+    newBudget,
+  ) as Array<{ id: string; createdAt: string }>).map((item) => ({ ...item, source: "stable" }));
+  const ids = [...pendingAttempts, ...newIds];
   const readCurrent = getDb().prepare(
     `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
             sensitivity, context_json, superseded_at
@@ -1376,6 +1484,23 @@ export async function reconcileExistingCuratedMemoryCandidatesAtStartup(
         AND superseded_at IS NULL AND (? IS NULL OR agent_id = ?)`,
   );
   const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
+  const persistCursor = getDb().prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+  let persistedStableCursor = stableCursorRow?.value ?? "null";
+  let persistedPending = JSON.stringify([...pendingIds]);
+  const flushState = (): void => {
+    const pendingJson = JSON.stringify([...pendingIds]);
+    const stableCursorJson = JSON.stringify(stableCursor);
+    if (stableCursorJson === persistedStableCursor && pendingJson === persistedPending) return;
+    getDb().transaction(() => {
+      if (stableCursorJson !== persistedStableCursor) persistCursor.run(stableCursorKey, stableCursorJson);
+      if (pendingJson !== persistedPending) persistCursor.run(pendingKey, pendingJson);
+    })();
+    persistedStableCursor = stableCursorJson;
+    persistedPending = pendingJson;
+  };
   let batchStarted = performance.now();
   let batchRows = 0;
   for (let index = 0; index < ids.length; index += 1) {
@@ -1383,15 +1508,30 @@ export async function reconcileExistingCuratedMemoryCandidatesAtStartup(
     // A user may delete/supersede a Memory or replace an agent while we yield.
     // Read fresh content and resolve the exact current base inside this turn.
     const memory = readCurrent.get(ids[index].id, only, only) as MemoryProjectionRow | undefined;
-    if (memory) reconcileCuratedMemoryRow(memory, result);
+    const settled = memory ? reconcileCuratedMemoryRow(memory, result) : true;
+    const item = ids[index];
+    if (item.source === "pending") {
+      pendingIds.delete(item.id);
+      if (!settled) pendingIds.add(item.id); // rotate a persistent failure
+    } else {
+      if (!settled) {
+        // Never forget a deferred row. If the bounded retry ledger is full,
+        // stop before moving the high-water mark past an ID we cannot retain.
+        if (pendingIds.size >= MAX_PENDING_MEMORY_IDS) break;
+        pendingIds.add(item.id);
+      }
+      stableCursor = { createdAt: item.createdAt ?? "", id: item.id };
+    }
     batchRows += 1;
     if (index + 1 < ids.length && (batchRows >= 32 || performance.now() - batchStarted >= 8)) {
+      flushState();
       await yieldToMain(undefined, { signal });
       signal?.throwIfAborted();
       batchRows = 0;
       batchStarted = performance.now();
     }
   }
+  flushState();
   signal?.throwIfAborted();
   return result;
 }

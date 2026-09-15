@@ -728,6 +728,7 @@ import {
 } from "./app-factory/live-preview";
 import {
   registerNativeBrowserTask,
+  closeWorkLiveViewsForTaskScope,
   listWorkBrowserTabs,
   createWorkBrowserTab,
   captureWorkLiveView,
@@ -4254,6 +4255,7 @@ export function registerIpcHandlers(): void {
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
     removeChat(id);
+    closeWorkLiveViewsForTaskScope(id);
   });
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
   ipcMain.handle("chats:recap", (_e, id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));

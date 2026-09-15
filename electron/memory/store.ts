@@ -60,6 +60,24 @@ interface Row {
   created_at: string;
 }
 
+const MEMORY_CREATED_AT_CLOCK_KEY = "memory-created-at-clock-v1";
+
+function nextMemoryCreatedAt(db: ReturnType<typeof getDb>): string {
+  const clock = db.prepare("SELECT value FROM meta WHERE key = ?").get(MEMORY_CREATED_AT_CLOCK_KEY) as {
+    value?: string;
+  } | undefined;
+  const latest = clock?.value ?? (db.prepare("SELECT MAX(created_at) AS createdAt FROM memory_entries").get() as {
+    createdAt?: string | null;
+  }).createdAt ?? "";
+  const parsed = Date.parse(latest);
+  const createdAt = new Date(Math.max(Date.now(), Number.isFinite(parsed) ? parsed + 1 : 0)).toISOString();
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(MEMORY_CREATED_AT_CLOCK_KEY, createdAt);
+  return createdAt;
+}
+
 function parseRequestContext(json?: string | null): RequestContext | null {
   if (!json) return null;
   try {
@@ -155,7 +173,7 @@ export interface NewMemoryEntry {
 
 export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
   const id = randomUUID();
-  const now = new Date().toISOString();
+  let now = "";
   const embedding = autoLocalEmbedding(e.content);
   const insert = getDb().transaction(() => {
     assertMemoryWriteAllowed({
@@ -169,6 +187,10 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       intakeRunId: e.intakeRunId,
       intakeEpoch: e.intakeEpoch,
     });
+    // Startup reconciliation uses this timestamp plus id as its durable logical
+    // cursor. Advance it inside the write transaction so other Desktop/headless
+    // writers cannot insert behind that cursor in the same millisecond.
+    now = nextMemoryCreatedAt(getDb());
     getDb().prepare(
       `INSERT INTO memory_entries
        (id, scope, kind, content, project_id, project_path, agent_id, chat_id,

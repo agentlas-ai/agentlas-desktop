@@ -65,6 +65,8 @@ export interface LocalModelHubManagerOptions {
   spawnImpl?: typeof spawn;
   engineInstaller?: LocalEngineInstaller;
   healthTimeoutMs?: number;
+  /** Maximum time to drain aborted inference before the resident engine is terminated. */
+  cancellationDrainTimeoutMs?: number;
   /** Pinned CRT DLL directory for Windows app-local deployment (see engine-installer.ts). */
   windowsRuntimeDir?: string;
   /** Resident llama-server changed; callers invalidate runtime projections. */
@@ -127,6 +129,27 @@ function aborted(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
 }
 
+function awaitAbortableExecutor<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolveValue, rejectValue) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      rejectValue(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolveValue(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        rejectValue(error);
+      },
+    );
+  });
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -181,6 +204,7 @@ export class LocalModelHubManager {
   private readonly fetchImpl: typeof fetch;
   private readonly spawnImpl: typeof spawn;
   private readonly healthTimeoutMs: number;
+  private readonly cancellationDrainTimeoutMs: number;
   private readonly onResidentChanged: () => void;
   private readonly progress = new Map<string, LocalPackageProgress>();
   private state: PersistedHubState = emptyState();
@@ -206,6 +230,7 @@ export class LocalModelHubManager {
     this.modelIndex = new HuggingFaceModelIndex(join(rootPath, "hf-cache"), this.fetchImpl);
     this.spawnImpl = options.spawnImpl ?? spawn;
     this.healthTimeoutMs = options.healthTimeoutMs ?? 60_000;
+    this.cancellationDrainTimeoutMs = options.cancellationDrainTimeoutMs ?? 2_000;
     this.onResidentChanged = options.onResidentChanged ?? (() => {});
     this.downloader = new LocalPackageDownloadManager(this.packageRoot);
     this.installer = options.engineInstaller ?? new LocalEngineInstaller(this.engineRoot, { windowsRuntimeDir: options.windowsRuntimeDir });
@@ -797,9 +822,28 @@ export class LocalModelHubManager {
   }
 
   async cancelActiveRuns(): Promise<number> {
-    const active = [...this.activeInference.values()];
-    for (const item of active) item.controller.abort();
-    await Promise.allSettled(active.map((item) => item.done));
+    const active = [...this.activeInference.entries()];
+    for (const [, item] of active) item.controller.abort();
+    if (active.length > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const drained = await Promise.race([
+          Promise.allSettled(active.map(([, item]) => item.done)).then(() => true),
+          new Promise<false>((resolveTimeout) => {
+            timer = setTimeout(() => resolveTimeout(false), this.cancellationDrainTimeoutMs);
+          }),
+        ]);
+        if (!drained) {
+          // The engine is terminated immediately after this boundary. Do not let
+          // an AbortSignal-ignoring request keep the manager permanently busy.
+          for (const [id, item] of active) {
+            if (this.activeInference.get(id) === item) this.activeInference.delete(id);
+          }
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
     return active.length;
   }
 
@@ -862,7 +906,12 @@ export class LocalModelHubManager {
     let reasonCode: string | null = null;
     let result: T;
     try {
-      result = await executor(active.signal);
+      // Executor implementations normally pass this signal to fetch, but the
+      // manager's public promise must still settle if a buggy/native executor
+      // ignores it. The abandoned operation is observed and becomes GC-eligible
+      // once its underlying owner releases it; it can no longer retain callers.
+      const operation = Promise.resolve().then(() => executor(active.signal));
+      result = await awaitAbortableExecutor(operation, active.signal);
       return result;
     } catch (error) {
       state = aborted(error, active.signal) ? "cancelled" : "failed";
@@ -884,10 +933,24 @@ export class LocalModelHubManager {
         reasonCode,
       };
       this.state.runReceipts = bounded([...this.state.runReceipts, receipt]);
-      try {
-        await this.save();
-      } finally {
+      if (state === "cancelled") {
+        // Cancellation is a control-plane boundary: release the public caller
+        // and lifecycle slot even if durable receipt I/O is stalled. The
+        // already-materialized receipt remains in memory and its write is
+        // observed best-effort; completed/failed runs keep their awaited
+        // durability contract below.
         active.finish();
+        void Promise.resolve()
+          .then(() => this.save())
+          .catch((error) => {
+            console.error("[local-model-hub] cancellation receipt write failed", error);
+          });
+      } else {
+        try {
+          await this.save();
+        } finally {
+          active.finish();
+        }
       }
     }
   }

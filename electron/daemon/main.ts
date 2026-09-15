@@ -496,10 +496,11 @@ export async function startDaemon(): Promise<void> {
     }
     void sweepOrphanedRunChildren()
       .then((sweep) => {
-        if (sweep.signaled > 0 || sweep.prunedMismatched > 0) {
+        if (sweep.signaled > 0 || sweep.prunedMismatched > 0 || sweep.identityLookupFailed > 0) {
           console.log(
             `[agentlasd] orphan sweep: signaled=${sweep.signaled} prunedDead=${sweep.prunedDead} ` +
-            `keptLive=${sweep.keptLive} prunedMismatched=${sweep.prunedMismatched}`,
+            `keptLive=${sweep.keptLive} prunedMismatched=${sweep.prunedMismatched} ` +
+            `identityLookupFailed=${sweep.identityLookupFailed}`,
           );
         }
       })

@@ -610,6 +610,16 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
       : timeDriven
         ? existing.nextRunAt
         : null;
+  // A past one-shot has no schedule slot to reactivate. Persisting enabled=1
+  // here made the list look active even though the scheduler could never pick
+  // it up. Keep the terminal row unchanged and send the user to edit the time
+  // (or use the separate manual "run now" action) instead.
+  if (enabled && existing.scheduleSpec?.kind === "once" && nextRunAt == null) {
+    throw new Error(L(
+      "지난 일회성 자동화는 다시 켤 수 없습니다. 실행 시간을 바꾸거나 지금 실행을 사용하세요.",
+      "A past one-time automation cannot be turned back on. Change its run time or use Run now.",
+    ));
+  }
   getDb()
     .prepare("UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nextRunAt, id);
@@ -1517,6 +1527,83 @@ export function countConsecutiveFailures(automationId: string, lookback = 10): n
   return streak;
 }
 
+/** Count durable attempts for the exact occurrence containing `runId`.
+ * Scheduled attempt receipts are written before preflight, so permission or
+ * runtime failures count even when no graph snapshot could be created. Older
+ * rows fall back to automation_runs for migration-free compatibility. */
+export function countGraphRunAttemptsForRun(runId: string): number {
+  const attemptEvent = getDb()
+    .prepare(
+      `SELECT automation_id, payload_json FROM run_events
+       WHERE run_id = ? AND kind = 'automation_schedule_attempt_started'
+       ORDER BY seq ASC LIMIT 1`,
+    )
+    .get(runId) as { automation_id: string | null; payload_json: string } | undefined;
+  if (attemptEvent?.automation_id) {
+    let occurrenceId: string | null = null;
+    try {
+      const payload = JSON.parse(attemptEvent.payload_json) as { occurrenceId?: unknown };
+      if (typeof payload.occurrenceId === "string" && payload.occurrenceId.length > 0) {
+        occurrenceId = payload.occurrenceId;
+      }
+    } catch {
+      /* damaged event falls through to the legacy graph count */
+    }
+    if (occurrenceId) {
+      const count = getDb()
+        .prepare(
+          `SELECT COUNT(DISTINCT run_id) AS n FROM run_events
+           WHERE automation_id = ? AND kind = 'automation_schedule_attempt_started'
+             AND json_valid(payload_json)
+             AND json_extract(payload_json, '$.occurrenceId') = ?`,
+        )
+        .get(attemptEvent.automation_id, occurrenceId) as { n: number };
+      return Math.max(1, count.n);
+    }
+  }
+  const row = getDb()
+    .prepare("SELECT automation_id, occurrence_id FROM automation_runs WHERE id = ?")
+    .get(runId) as { automation_id: string | null; occurrence_id: string | null } | undefined;
+  if (!row?.automation_id || !row.occurrence_id) return 1;
+  const count = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM automation_runs
+       WHERE automation_id = ? AND occurrence_id = ?`,
+    )
+    .get(row.automation_id, row.occurrence_id) as { n: number };
+  return Math.max(1, count.n);
+}
+
+/** Latest durable graph occurrence, including mechanically successful runs
+ * whose scheduler outcome still requires input or was rejected. */
+export function getLatestGraphRunOccurrenceId(automationId: string): string | null {
+  const attemptEvent = getDb()
+    .prepare(
+      `SELECT payload_json FROM run_events
+       WHERE automation_id = ? AND kind = 'automation_schedule_attempt_started'
+       ORDER BY ts DESC, rowid DESC LIMIT 1`,
+    )
+    .get(automationId) as { payload_json: string } | undefined;
+  if (attemptEvent) {
+    try {
+      const payload = JSON.parse(attemptEvent.payload_json) as { occurrenceId?: unknown };
+      if (typeof payload.occurrenceId === "string" && payload.occurrenceId.length > 0) {
+        return payload.occurrenceId;
+      }
+    } catch {
+      /* fall through to pre-receipt graph rows */
+    }
+  }
+  const row = getDb()
+    .prepare(
+      `SELECT occurrence_id FROM automation_runs
+       WHERE automation_id = ? AND status IN ('ok', 'error')
+       ORDER BY started_at DESC LIMIT 1`,
+    )
+    .get(automationId) as { occurrence_id: string | null } | undefined;
+  return row?.occurrence_id ?? null;
+}
+
 export function listRunHistory(automationId: string, limit = 50): AutomationRunRecord[] {
   const rows = getDb()
     .prepare("SELECT * FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC LIMIT ?")
@@ -1608,6 +1695,9 @@ export function markAutomationRun(
     executionConsumed?: boolean;
     /** One-shot failures remain retryable instead of silently disabling. */
     deferredRetryMs?: number;
+    /** False opens the occurrence circuit and advances only to the next real
+     * schedule slot. A one-shot remains enabled/manual-runnable with no due slot. */
+    deferRetry?: boolean;
     /** Durable scheduler run receipt used for exactly-once chain fan-out. */
     sourceRunId?: string | null;
     /** Final source output carried into chain trigger variables. */
@@ -1667,11 +1757,19 @@ export function markAutomationRun(
   const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
   const deferredRetryAt = new Date(at.getTime() + deferredRetryMs).toISOString();
   const nextRunAt = !executionConsumed && !pastEnd && advance
-    ? computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
-      ? deferredRetryAt
-      : computedNextRunAt
+    ? opts?.deferRetry === false
+      ? computedNextRunAt
+      : computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
+        ? deferredRetryAt
+        : computedNextRunAt
     : computedNextRunAt;
-  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed);
+  // A one-shot has no natural slot after its scheduled time. Once its bounded
+  // retry circuit is exhausted, disabled+no-next-run is the coherent terminal
+  // state; enabled+no-next-run looked active while it could never fire again.
+  // Reconciliation suspension deliberately remains enabled for user recovery.
+  const exhaustedOneShot = noFuture && !executionConsumed && opts?.deferRetry === false &&
+    opts?.suspendForReconciliation !== true;
+  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed) || exhaustedOneShot;
 
   const atIso = at.toISOString();
   const terminalStatus = opts?.status ?? "ok";

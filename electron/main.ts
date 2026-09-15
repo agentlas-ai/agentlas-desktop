@@ -26,6 +26,7 @@ import {
 } from "electron";
 import fs from "node:fs";
 import os from "node:os";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
 import path from "node:path";
@@ -1160,6 +1161,9 @@ app.on("activate", () => {
 let quitCleanupDone = false;
 let quitCleanupPromise: Promise<void> | null = null;
 let quitServicesStopPromise: Promise<void> | null = null;
+let quitCleanupDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+const QUIT_CLEANUP_DEADLINE_MS = 30_000;
+const QUIT_NATIVE_EXIT_GRACE_MS = 2_000;
 let legacyLearningTimer: NodeJS.Timeout | null = null;
 let legacyLearningController: AbortController | null = null;
 let legacyLearningJob: Promise<void> | null = null;
@@ -1258,9 +1262,13 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
     throw new Error(`App runtime did not settle: ${report.unsettledParticipantNames.join(", ")}`);
   }
   await stopQuitServices();
+  // Complete the same child/browser/store shutdown as an ordinary Quit before
+  // the controller captures continuity and calls the native installer. Keep
+  // only the updater controller alive until quitAndInstall performs its handoff.
+  await finishQuitCleanup({ preserveUpdater: true });
 }
 
-function finishQuitCleanup(): Promise<void> {
+function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise<void> {
   if (quitCleanupPromise) return quitCleanupPromise;
   if (developmentEffectsSuppressed()) {
     // This admitted process starts no workers or host-global maintenance.
@@ -1315,7 +1323,9 @@ function finishQuitCleanup(): Promise<void> {
     }
     try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
-    try { disposeAutoUpdater(); } catch {}
+    if (!options.preserveUpdater) {
+      try { disposeAutoUpdater(); } catch {}
+    }
     quitCleanupDone = true;
   })();
   return quitCleanupPromise;
@@ -1339,15 +1349,115 @@ electronAutoUpdater.on("before-quit-for-update", () => {
   // the durable journal instead of waiting behind a dying process.
   if (!allowMultiInstance && app.hasSingleInstanceLock()) app.releaseSingleInstanceLock();
 });
+function forceQuitAfterContinuity(reason: string): void {
+  quitCleanupDeadlineTimer = null;
+  console.error(`[shutdown] ${reason}; forcing process exit after continuity deadlines`);
+  // Long-run and Science each had their bounded opportunity to checkpoint.
+  // An OS credential prompt or native worker must not leave an invisible
+  // Main process and defunct helpers alive indefinitely after Quit.
+  shellReadyForWindows = false;
+  try { runHostShutdownHooks(); } catch {}
+  try { closeScienceStore(); } catch {}
+  try { closeStore(); } catch {}
+  quitCleanupDone = true;
+  app.exit(0);
+}
+
+function armQuitCleanupDeadline(): void {
+  if (quitCleanupDeadlineTimer) return;
+  console.info(`[shutdown] cleanup deadline armed (${QUIT_CLEANUP_DEADLINE_MS}ms)`);
+  quitCleanupDeadlineTimer = setTimeout(() => {
+    forceQuitAfterContinuity(`cleanup exceeded ${QUIT_CLEANUP_DEADLINE_MS}ms`);
+  }, QUIT_CLEANUP_DEADLINE_MS);
+}
+
+function disarmQuitCleanupDeadline(): void {
+  if (quitCleanupDeadlineTimer) clearTimeout(quitCleanupDeadlineTimer);
+  quitCleanupDeadlineTimer = null;
+}
+
+function armNativeExitDeadline(): void {
+  if (quitCleanupDeadlineTimer) clearTimeout(quitCleanupDeadlineTimer);
+  console.info(`[shutdown] native exit grace armed (${QUIT_NATIVE_EXIT_GRACE_MS}ms)`);
+  quitCleanupDeadlineTimer = setTimeout(() => {
+    forceQuitAfterContinuity(`native exit exceeded ${QUIT_NATIVE_EXIT_GRACE_MS}ms`);
+  }, QUIT_NATIVE_EXIT_GRACE_MS);
+}
+
+function armMacNativeExitWatchdog(): boolean {
+  if (process.platform !== "darwin") return false;
+  try {
+    const watchdog = spawn(
+      "/bin/sh",
+      [
+        "-c",
+        'sleep 2; [ "$PPID" -eq "$1" ] && kill -KILL "$1" 2>/dev/null',
+        "agentlas-quit-watchdog",
+        String(process.pid),
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    watchdog.unref();
+    console.info(`[shutdown] mac native exit watchdog armed (${QUIT_NATIVE_EXIT_GRACE_MS}ms)`);
+    return true;
+  } catch (error) {
+    console.error("[shutdown] failed to arm mac native exit watchdog", error);
+    return false;
+  }
+}
+
+// Start the hard boundary before Electron begins closing renderer and auxiliary
+// windows. On macOS, a native credential lookup can outlive every visible
+// window and prevent `will-quit` from being reached at all.
+app.on("before-quit", () => {
+  if (automaticQuitInstaller.quitDisposition() === "ordinary") {
+    armQuitCleanupDeadline();
+  } else {
+    // Updating owns this process lifetime until either the native handoff is
+    // authorized or the failed preparation explicitly resumes a normal quit.
+    // Never let an ordinary cleanup deadline cut through package replacement.
+    disarmQuitCleanupDeadline();
+  }
+});
+
 app.on("will-quit", (event) => {
+  const quitDisposition = automaticQuitInstaller.quitDisposition();
+  if (quitDisposition !== "ordinary") disarmQuitCleanupDeadline();
   // electron-updater's raw auto-install-on-quit path is intentionally disabled:
   // it cannot capture Agentlas continuity first. Defer this first quit, run the
   // controller's full verified transaction, then allow the native updater's
   // second quit through after state advances to `installing`.
   if (!developmentEffectsSuppressed() && automaticQuitInstaller.handle(event)) return;
-  if (quitCleanupDone) return;
+  if (quitDisposition === "native-update") {
+    // `before-quit-for-update` can only be reached after update preparation
+    // completed the full cleanup above. Do not interrupt the native handoff.
+    if (!quitCleanupDone) {
+      console.error("[shutdown] native update quit arrived before cleanup completed");
+    }
+    return;
+  }
+  armQuitCleanupDeadline();
+  if (quitCleanupDone) {
+    // JS cleanup and continuity checkpoints are complete. Give Electron a
+    // short listener-settlement grace, then cut off native workers (for example
+    // a blocked macOS Keychain lookup) that can otherwise retain Main forever.
+    // macOS can stop servicing JS timers while a Security.framework worker is
+    // still blocked. A detached watchdog permits normal exit first and only
+    // kills us while it can still prove this exact process is its parent.
+    if (armMacNativeExitWatchdog()) {
+      disarmQuitCleanupDeadline();
+      return;
+    }
+    // Other platforms keep the loop alive so the in-process boundary can run.
+    event.preventDefault();
+    armNativeExitDeadline();
+    return;
+  }
   event.preventDefault();
-  void finishQuitCleanup().finally(() => app.quit());
+  void finishQuitCleanup().finally(() => {
+    disarmQuitCleanupDeadline();
+    app.quit();
+  });
 });
 
 let startupStage = "before-ready";

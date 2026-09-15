@@ -2178,57 +2178,53 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   font-size: 12px;
 }
 
-.dashboard-local-runtime-toggle {
-  min-height: 58px;
-  padding: 11px 16px;
-  border-top: 1px solid var(--dash-line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  background: color-mix(in srgb, var(--dash-teal-9, var(--ok)) 3%, transparent);
-}
-
-.dashboard-local-runtime-toggle > div {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.dashboard-local-runtime-toggle strong { color: var(--dash-ink); font-size: 13px; }
-.dashboard-local-runtime-toggle span[role="status"] { color: var(--dash-muted); font-size: 11px; }
-
-.dashboard-local-runtime-switch {
-  width: 46px;
-  height: 28px;
-  flex: none;
-  padding: 3px;
+.dashboard-runtime-row-switch {
+  justify-self: start;
+  min-width: 68px;
+  min-height: 28px;
+  padding: 3px 8px 3px 3px;
   border: 1px solid var(--dash-line);
   border-radius: 999px;
-  background: var(--dash-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--dash-muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
   cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease;
 }
 
-.dashboard-local-runtime-switch > span {
-  display: block;
-  width: 20px;
+.dashboard-runtime-row-switch-track {
+  width: 34px;
   height: 20px;
+  padding: 2px;
+  border-radius: 999px;
+  display: block;
+  background: var(--dash-muted);
+  transition: background 140ms ease;
+}
+
+.dashboard-runtime-row-switch-track > span {
+  width: 16px;
+  height: 16px;
+  display: block;
   border-radius: 50%;
   background: var(--paper);
-  box-shadow: 0 1px 4px color-mix(in srgb, var(--dash-ink) 24%, transparent);
-  transform: translateX(0);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--dash-ink) 24%, transparent);
   transition: transform 140ms ease;
 }
 
-.dashboard-local-runtime-switch[aria-checked="true"] {
-  border-color: var(--dash-teal-9, var(--ok));
-  background: var(--dash-teal-9, var(--ok));
+.dashboard-runtime-row-switch[aria-checked="true"] {
+  border-color: color-mix(in srgb, var(--dash-teal-9, var(--ok)) 45%, var(--dash-line));
+  color: var(--dash-teal-9, var(--ok));
 }
 
-.dashboard-local-runtime-switch[aria-checked="true"] > span { transform: translateX(18px); }
-.dashboard-local-runtime-switch:focus-visible { outline: 3px solid color-mix(in srgb, var(--dash-teal-9, var(--ok)) 35%, transparent); outline-offset: 2px; }
-.dashboard-local-runtime-switch:disabled { opacity: .45; cursor: default; }
+.dashboard-runtime-row-switch[aria-checked="true"] .dashboard-runtime-row-switch-track { background: var(--dash-teal-9, var(--ok)); }
+.dashboard-runtime-row-switch[aria-checked="true"] .dashboard-runtime-row-switch-track > span { transform: translateX(14px); }
+.dashboard-runtime-row-switch:focus-visible { outline: 3px solid color-mix(in srgb, var(--dash-teal-9, var(--ok)) 35%, transparent); outline-offset: 2px; }
+.dashboard-runtime-row-switch:disabled { opacity: .45; cursor: default; }
 
 /*
  * 거절은 안내와 같은 색이어선 안 된다 — 같은 색이면 사용자가 "저장됐다"로 읽는다.

@@ -12,6 +12,9 @@ export interface AutomaticQuitInstallDependencies {
    * the user's original normal quit without attempting an update.
    */
   prepare?: () => Promise<void>;
+  /** Bounds only the reversible pre-install cleanup. Once the native updater is
+   * called, its platform handoff owns process lifetime and must not be cut off. */
+  prepareTimeoutMs?: number;
   install: () => Promise<UpdaterActionResult>;
   /** Arms a fresh app process when a retryable native handoff terminates this one. */
   relaunch?: () => void;
@@ -22,6 +25,13 @@ export interface AutomaticQuitInstallDependencies {
 }
 
 export interface AutomaticQuitInstaller {
+  /**
+   * Classifies the next quit before Electron starts tearing down windows.
+   * Update-owned quits must never inherit the ordinary cleanup watchdog: the
+   * native installer may legitimately keep the old process alive while it
+   * stages, replaces, and relaunches the application.
+   */
+  quitDisposition(): "ordinary" | "defer-update" | "native-update";
   /**
    * Returns true only when this quit must be deferred while the updater creates
    * its recovery copy and durable journal. The native updater's second quit is
@@ -50,6 +60,28 @@ export function createAutomaticQuitInstaller(
   let quitDeferred = false;
   let allowNextQuitWithoutUpdate = false;
   let nativeQuitAuthorized = false;
+  const requestedPrepareTimeoutMs = deps.prepareTimeoutMs ?? 45_000;
+  const prepareTimeoutMs = Number.isFinite(requestedPrepareTimeoutMs)
+    ? Math.max(1, Math.trunc(requestedPrepareTimeoutMs))
+    : 45_000;
+
+  const prepareWithinDeadline = async (): Promise<void> => {
+    if (!deps.prepare) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => deps.prepare?.()),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("automatic_update_prepare_timed_out")),
+            prepareTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   const continueNormalQuit = () => {
     if (!quitDeferred) return;
@@ -84,6 +116,13 @@ export function createAutomaticQuitInstaller(
   deps.subscribe?.(observeInstallState);
 
   return {
+    quitDisposition(): "ordinary" | "defer-update" | "native-update" {
+      if (deps.shouldInstallOnQuit && !deps.shouldInstallOnQuit()) return "ordinary";
+      if (nativeQuitAuthorized) return "native-update";
+      if (allowNextQuitWithoutUpdate) return "ordinary";
+      if (quitDeferred || deps.getState().status === "downloaded") return "defer-update";
+      return "ordinary";
+    },
     authorizeNativeQuit(): void {
       // Ignore unrelated native events. A legitimate handoff is emitted only
       // after the controller has published `installing` and called the updater.
@@ -117,7 +156,7 @@ export function createAutomaticQuitInstaller(
       quitDeferred = true;
 
       void Promise.resolve()
-        .then(() => deps.prepare?.())
+        .then(prepareWithinDeadline)
         .then(() => deps.install())
         .then((result) => {
           if (result.accepted) {

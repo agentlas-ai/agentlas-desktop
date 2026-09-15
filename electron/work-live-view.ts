@@ -346,6 +346,21 @@ export function closeWorkLiveViewsForOwner(ownerId: number): void {
   }
 }
 
+/**
+ * A deleted chat can no longer present or explicitly close its task-scoped
+ * browser tabs. Release only that terminal task's browser guests; app previews
+ * and tabs owned by other chats keep their continuity.
+ */
+export function closeWorkLiveViewsForTaskScope(taskScopeId: string): void {
+  if (!taskScopeId) return;
+  for (const [id, owner] of nativeTaskOwners) {
+    if (owner.taskScopeId === taskScopeId) nativeTaskOwners.delete(id);
+  }
+  for (const active of [...activeViews.values()]) {
+    if (active.mode === "browser" && active.taskScopeId === taskScopeId) closeActive(active);
+  }
+}
+
 export function setWorkLiveViewBounds(
   ownerId: number,
   input: { viewId: string; bounds: WorkLiveViewBounds; visible?: boolean; taskScopeId?: string; viewLeaseId?: string },

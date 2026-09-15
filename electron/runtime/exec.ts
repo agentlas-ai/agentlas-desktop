@@ -12,7 +12,11 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
 import { currentRunPriority, nicenessForPriority } from "./run-priority";
-import { AGENTLAS_SPAWN_MARKER_ENV, recordSpawnedRunChild } from "./spawn-registry";
+import {
+  AGENTLAS_SPAWN_MARKER_ENV,
+  recordSpawnedRunChild,
+  rememberSpawnedRunChildCommand,
+} from "./spawn-registry";
 import { resolveManagedNodeRuntime } from "./managed-node";
 
 /**
@@ -151,7 +155,7 @@ export function spawnCli(
       argsCount: args.length,
     }));
   }
-  return crossSpawn(command, args, {
+  const child = crossSpawn(command, args, {
     ...options,
     env: {
       ...env,
@@ -160,6 +164,11 @@ export function spawnCli(
       [AGENTLAS_SPAWN_MARKER_ENV]: `agentlas:${process.pid}`,
     },
   });
+  // On Windows cross-spawn executes a .cmd shim through cmd.exe, so
+  // child.spawnfile alone loses the provider executable identity. Remember the
+  // original command (never its arguments) for the crash-recovery ledger.
+  rememberSpawnedRunChildCommand(child, command);
+  return child;
 }
 
 /**
@@ -355,9 +364,38 @@ export function detachedSpawnOpts(): { detached?: boolean } {
 /**
  * LLM 실행 자식 트리 종료 — POSIX는 프로세스 그룹 SIGTERM → graceMs 후 SIGKILL 승격.
  * 단일 child.kill()은 CLI가 띄운 손자(MCP 서버·빌드 프로세스)를 고아로 남기던 문제를 막는다.
- * Windows/그룹킬 실패 시 단일 kill 폴백. detachedSpawnOpts()와 짝으로 사용.
+ * Windows는 taskkill /T 로 트리 전체에 정상 종료를 요청하고 grace 뒤 /F 로 승격한다.
+ * 그룹킬/taskkill 실행 실패 시에만 단일 child.kill()로 폴백한다. detachedSpawnOpts()와 짝으로 사용.
  */
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
+  if (process.platform === "win32" && child.pid) {
+    const pid = child.pid;
+    const runTaskkill = (force: boolean): void => {
+      const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
+      const killer = crossSpawn("taskkill.exe", args, {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      const fallback = (): void => {
+        try { child.kill(); } catch { /* already exited */ }
+      };
+      killer.once("error", fallback);
+      killer.once("close", (code) => { if (code !== 0) fallback(); });
+      killer.unref?.();
+    };
+
+    runTaskkill(false);
+    const force = setTimeout(() => {
+      // Never target a numeric PID after Node has observed the owned leader exit:
+      // Windows can reuse that PID for an unrelated process during the grace period.
+      // taskkill /T already enumerated the descendants in the first pass; /F is safe
+      // only while the original leader handle still proves ownership of this PID.
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      runTaskkill(true);
+    }, Math.max(0, graceMs));
+    force.unref?.();
+    return;
+  }
   if (process.platform !== "win32" && child.pid) {
     try {
       const processGroupId = child.pid;

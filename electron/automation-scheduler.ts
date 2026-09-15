@@ -22,6 +22,9 @@ import {
   updateGraphRunNode,
   finishGraphRun,
   countConsecutiveFailures,
+  countGraphRunAttemptsForRun,
+  computeNextRun,
+  getLatestGraphRunOccurrenceId,
   isAutomationRunParentMissingError,
   pinAutomationRuntimeIfUnset,
   getAutomationExecutionContractState,
@@ -90,6 +93,7 @@ import {
   collectAutomationFailureContext,
   type AutomationFailureContext,
 } from "./automation-strategy";
+
 import { recordAutomationRecovery } from "./automation-recovery";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "./automation-continuity";
 import type {
@@ -97,6 +101,45 @@ import type {
   TriggerDispatchResult,
   TriggerEventPayload,
 } from "./store/trigger-events";
+
+const MAX_SCHEDULE_OCCURRENCE_ATTEMPTS = 3;
+const SCHEDULE_RETRY_BASE_MS = 15 * 60_000;
+
+/**
+ * A retry before the next calendar slot resumes the exact failed occurrence.
+ * Once the real next slot arrives it gets a new identity and cannot inherit a
+ * prior slot's checkpoint. This is the boundary that prevents an hourly/daily
+ * automation from accumulating hundreds of retries under one occurrence.
+ */
+export function scheduledOccurrenceIdForDueRun(a: Automation): string {
+  const scheduledFor = a.nextRunAt;
+  if (!scheduledFor) return `schedule:${a.id}:${randomUUID()}`;
+  const previousOccurrenceId = getLatestGraphRunOccurrenceId(a.id);
+  const occurrencePrefix = `schedule:${a.id}:`;
+  if (previousOccurrenceId?.startsWith(occurrencePrefix)) {
+    const originalSlot = new Date(previousOccurrenceId.slice(occurrencePrefix.length));
+    const scheduledAt = Date.parse(scheduledFor);
+    if (!Number.isNaN(originalSlot.getTime()) && Number.isFinite(scheduledAt)) {
+      // Anchor the boundary to the original calendar slot, not lastRunAt: an
+      // explicit Run now updates lastRunAt but must not turn the next scheduled
+      // slot into a continuation of that manual run.
+      const naturalNext = computeNextRun(a.scheduleHuman, originalSlot, {
+        scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+        timezone: a.timezone,
+      });
+      // A one-shot has no natural successor. Any later due time while it is
+      // still enabled is necessarily the bounded backoff for this occurrence,
+      // not a new calendar occurrence.
+      if (!naturalNext && a.scheduleSpec?.kind === "once" && scheduledAt > originalSlot.getTime()) {
+        return previousOccurrenceId;
+      }
+      if (naturalNext && scheduledAt < Date.parse(naturalNext)) {
+        return previousOccurrenceId;
+      }
+    }
+  }
+  return `schedule:${a.id}:${scheduledFor}`;
+}
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -538,6 +581,9 @@ async function runOne(
     fresh?: boolean;
     triggerDelivery?: TriggerDeliveryHooks;
     triggerContext?: TriggerEventPayload;
+    /** Exact scheduled occurrence. Calendar slots must not implicitly resume
+     * another slot merely because it is the latest failed graph. */
+    occurrenceId?: string;
     /** The scheduled fire time. Recording the run and advancing the schedule
      *  must use the same clock, or a run fired for a past-due slot stamps
      *  last_run_at with wall-clock now while next_run_at advances from the slot,
@@ -609,6 +655,12 @@ async function runOne(
   let machineError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  const scheduledOccurrenceId =
+    (opts?.advanceSchedule ?? true) &&
+    opts?.occurrenceId?.startsWith(`schedule:${a.id}:`)
+      ? opts.occurrenceId
+      : null;
+  let scheduledAttemptRecorded = false;
   // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
   // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
   let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
@@ -623,6 +675,22 @@ async function runOne(
   let leaseRenewWarningEmitted = false;
   const controller = new AbortController();
   try {
+    if (scheduledOccurrenceId) {
+      // Count the attempt before runtime/permission/Hub preflight. Those gates
+      // can fail before runGraph creates automation_runs, but they are still a
+      // real firing of this scheduled occurrence and must open the same bounded
+      // retry circuit. A stable sourceEventId makes a repeated delivery of the
+      // same preallocated run id idempotent.
+      currentRunId = opts?.runId ?? `run-${a.id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      recordRunEvent({
+        runId: currentRunId,
+        kind: "automation_schedule_attempt_started",
+        automationId: a.id,
+        payload: { occurrenceId: scheduledOccurrenceId },
+        sourceEventId: "automation_schedule_attempt_started",
+      });
+      scheduledAttemptRecorded = true;
+    }
     /*
      * ★사람이 멈출 수 있게 이 실행의 중단 손잡이를 등록한다.
      *
@@ -766,7 +834,7 @@ async function runOne(
         );
     } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
-      const runId = opts?.runId ?? `run-${a.id}-${Date.now()}`;
+      const runId = currentRunId ?? opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       opts?.triggerDelivery?.onRunBound(runId);
       // 사람이 대기시켜 둔 입력을 이 실행에 묶는다. 소비는 한 번만 성공하므로
@@ -819,7 +887,7 @@ async function runOne(
             ...(opts?.dryRun ? { dryRun: true } : {}),
             ...(opts?.fresh ? { fresh: true } : {}),
           runId,
-          occurrenceId: opts?.triggerDelivery?.occurrenceId,
+          occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
           initialVars: graphInitialVars,
           sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
@@ -919,7 +987,7 @@ async function runOne(
       }
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
-      const runId = opts?.runId ?? `run-${a.id}-${Date.now()}`;
+      const runId = currentRunId ?? opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       let lastDurableHeartbeatAt = 0;
       const persistLegacyHeartbeat = (at = Date.now()): void => {
@@ -1252,6 +1320,22 @@ async function runOne(
     // (예약 슬롯을 잡아먹거나 이벤트 자동화를 시계 스케줄로 승격하는 버그 방지).
     // run_history 기록·run_count·종료 정책은 어느 경우든 동일하게 적용한다.
     if (!leaseOwnershipLost) {
+      // If the preflight attempt receipt itself could not be persisted, fail
+      // closed: never replay this same occurrence automatically. A recurring
+      // schedule may still reach its next natural slot; an exhausted one-shot
+      // becomes disabled by markAutomationRun.
+      let occurrenceAttempt = scheduledOccurrenceId && !scheduledAttemptRecorded
+        ? MAX_SCHEDULE_OCCURRENCE_ATTEMPTS
+        : 1;
+      if (currentRunId && (!scheduledOccurrenceId || scheduledAttemptRecorded)) {
+        try {
+          occurrenceAttempt = countGraphRunAttemptsForRun(currentRunId);
+        } catch {
+          // If attempt evidence is unavailable, keep one conservative retry;
+          // never pretend the circuit is open without a durable count.
+          occurrenceAttempt = 1;
+        }
+      }
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
           markAutomationRun(a.id, opts?.fireTime ?? new Date(), {
@@ -1262,6 +1346,8 @@ async function runOne(
             // (max_runs 보존). status가 ok로 남아도 이 정책은 그대로다 — 정책은 판정을 본다.
             executionConsumed: (runStatus === "ok" || runStatus === "skipped")
               && runOutcome !== "needs_input" && runOutcome !== "blocked",
+            deferredRetryMs: SCHEDULE_RETRY_BASE_MS * 2 ** Math.max(0, occurrenceAttempt - 1),
+            deferRetry: occurrenceAttempt < MAX_SCHEDULE_OCCURRENCE_ATTEMPTS,
             outcome: runOutcome,
             outcomeReason: runOutcomeReason,
             suspendForReconciliation: requiresGraphReconciliation(machineError ?? runError),
@@ -1500,7 +1586,11 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
   }
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
   await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
-    await runOne(a, { claim: true, fireTime: now });
+    await runOne(a, {
+      claim: true,
+      fireTime: now,
+      occurrenceId: scheduledOccurrenceIdForDueRun(a),
+    });
   });
 }
 
