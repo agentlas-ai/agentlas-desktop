@@ -1117,7 +1117,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const promptText = resumed
         ? `${composeResumeTurnPrompt(userPrompt, req.turnContext, locale)}${schemaFallback}`
         : [
-          wrapSystemPrompt(req.systemPrompt, locale, req.permission, userPrompt),
+          wrapSystemPrompt(
+            req.systemPrompt, locale, req.permission, userPrompt,
+            req.forceSurface, req.restrictedReadBoundary, req.untrustedNoTools,
+            req.untrustedAllowedMcpTools, req.workforceRuntimeToolGrant,
+            undefined, req.surfaceGate,
+          ),
           req.history.length > 0 ? renderConversationContext(req.history, locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
           req.turnContext,
           userPrompt,

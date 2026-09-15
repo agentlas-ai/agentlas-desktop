@@ -217,6 +217,14 @@ export function parseSwarmOutput(text: string): {
 }
 
 /** 스웜 실행 엔트리 — runMcpInvocation이 호출. 최종 텍스트를 반환하고 채팅에 저장한다. */
+export function swarmDirectUserRuntimePinHonored(
+  p: Pick<BorrowedTaskForceParams, "req" | "runtimePinHonored">,
+): boolean {
+  return p.req.promptOrigin !== "system"
+    && p.runtimePinHonored === true
+    && Boolean(p.req.runtimeSelection);
+}
+
 export async function runSwarmInvocation(
   p: BorrowedTaskForceParams & {
     runtimes?: BorrowedTaskForceParams["active"][];
@@ -225,6 +233,7 @@ export async function runSwarmInvocation(
   },
 ): Promise<{ finalText: string }> {
   const goal = p.req.userPrompt;
+  const directUserRuntimePinHonored = swarmDirectUserRuntimePinHonored(p);
   if (p.stormbreakerMode && !p.stormbreakerHarness) {
     throw new Error("Stormbreaker requires the canonical Goal + UltraCode harness from Agentlas Core.");
   }
@@ -556,7 +565,7 @@ export async function runSwarmInvocation(
     let result: Awaited<ReturnType<typeof runWorkerOn>>;
     const failedWorkerRuntimes: typeof candidateRuntimes = [];
     result = await runWorkerOn(executedRuntime, executedRunner);
-    while (result.failure && !(signal ?? p.signal)?.aborted) {
+    while (result.failure && !directUserRuntimePinHonored && !(signal ?? p.signal)?.aborted) {
       if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
         failedWorkerRuntimes.push(executedRuntime);
@@ -622,11 +631,8 @@ export async function runSwarmInvocation(
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
-    const oneControllerPreferred = p.req.oneMode === true
-      && p.runtimePinHonored === true
-      && Boolean(p.req.runtimeSelection);
     const controllerPriority = rolePriorityRuntimes(candidateRuntimes, "orchestrator");
-    const controllerDefault = oneControllerPreferred
+    const controllerDefault = directUserRuntimePinHonored
       ? p.active
       : p.runtimeOverride
         ? p.active
@@ -740,6 +746,7 @@ export async function runSwarmInvocation(
       && !p.workforceSelectionReceipt
       && !p.req.agentAppMode
       && !p.benchmarkMode
+      && !directUserRuntimePinHonored
       && !(signal ?? p.signal)?.aborted
     ) {
       if (!failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
@@ -758,7 +765,6 @@ export async function runSwarmInvocation(
         || failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, fallback)
           && runtime.model === fallback.model)
       ) break;
-      if (oneControllerPreferred) p.onControllerRuntimeFallback?.(fallback, result.failure);
       synthEmit({
         kind: "tool-use",
         status: p.locale === "ko"

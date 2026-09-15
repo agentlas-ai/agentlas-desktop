@@ -24,6 +24,7 @@ function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, l
     ollama: "Ollama",
     lmstudio: "LM Studio",
     mlx: "MLX",
+    "agentlas-local": "Agentlas Local · On-device",
     acp: "ACP",
     agentlas: "Agentlas",
   };

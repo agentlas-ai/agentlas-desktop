@@ -24,6 +24,7 @@ import { isRuntimeCredentialUnavailable, probeRuntimeCredentialAccess, type Runt
 import {
   AGENTLAS_SERVING_DEFAULT_MODEL,
   AGENTLAS_SERVING_MODELS,
+  AGENTLAS_SERVING_CONTEXT_WINDOW,
 } from "../../shared/agentlas-serving";
 import { getDb } from "../store/db";
 import {
@@ -782,6 +783,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
         model.id,
         {
           costTier: model.tier === "hard" ? "frontier" : model.tier === "normal" ? "balanced" : "economy",
+          contextWindow: AGENTLAS_SERVING_CONTEXT_WINDOW,
           supportsTools: false,
           supportsMultimodal: false,
         },

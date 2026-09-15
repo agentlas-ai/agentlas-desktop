@@ -32,7 +32,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
-  "agentlas-local": "Agentlas Local",
+  "agentlas-local": "Agentlas Local · On-device",
   acp: "ACP",
   agentlas: "Agentlas",
 };
@@ -44,7 +44,7 @@ const BACKEND_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
-  "agentlas-local": "Agentlas Local",
+  "agentlas-local": "Agentlas Local · On-device",
   upstage: "Upstage",
   custom: "Custom",
   glm: "GLM",

@@ -182,7 +182,7 @@ const TASK_FORCE_ASK_PROTOCOL = `When the team has reached a real user-approval 
 Use this only when the next phase is intentionally blocked on the person's decision. Keep the visible answer before it natural; never print or explain the wire format.`;
 
 export type WorkerHandoffRole = "worker" | "orchestrator";
-export type WorkerHandoffViolation = "tool_markup" | "empty_deliverable";
+export type WorkerHandoffViolation = "tool_markup" | "control_envelope" | "empty_deliverable";
 
 export interface WorkerHandoffOutcome<T> {
   result: T;
@@ -259,14 +259,19 @@ export function requireTaskForceRunnerSuccess<T extends { failure?: RunnerFailur
 export function workerHandoffContractViolation(text: unknown): WorkerHandoffViolation | null {
   const value = String(text ?? "");
   if (HANDOFF_TOOL_MARKUP_RE.test(value)) return "tool_markup";
+  if (value.includes(AGENT_SURFACE_OPEN)) return "control_envelope";
   if (value.replace(/[\s`#*_>\-|:.~]+/g, "").length < 12) return "empty_deliverable";
   return null;
 }
 
 function workerHandoffRepairDirective(violation: WorkerHandoffViolation): string {
-  return violation === "tool_markup"
-    ? "HANDOFF REPAIR MODE: your previous reply contained raw tool-call markup. Rewrite the complete deliverable as plain text or markdown only, with zero tool-call syntax."
-    : "HANDOFF REPAIR MODE: your previous reply contained no usable deliverable. Author the complete concrete handoff artifact now, directly in this reply.";
+  if (violation === "tool_markup") {
+    return "HANDOFF REPAIR MODE: your previous reply contained raw tool-call markup. Rewrite the complete deliverable as plain text or markdown only, with zero tool-call syntax.";
+  }
+  if (violation === "control_envelope") {
+    return "HANDOFF REPAIR MODE: your previous reply copied an Agentlas Surface control envelope. Workers never render the final user Surface. Return the actual packet deliverable as plain text or markdown, without any Agentlas control block.";
+  }
+  return "HANDOFF REPAIR MODE: your previous reply contained no usable deliverable. Author the complete concrete handoff artifact now, directly in this reply.";
 }
 
 /**
@@ -707,8 +712,7 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[]
 }
 
 function oneControllerRuntimePreferred(p: BorrowedTaskForceParams): boolean {
-  return p.req.oneMode === true
-    && p.runtimePinHonored === true
+  return p.runtimePinHonored === true
     && Boolean(p.req.runtimeSelection);
 }
 
@@ -734,7 +738,8 @@ function taskForceRecoveryRuntime(
   if (
     p.workforceSelectionReceipt ||
     p.benchmarkMode ||
-    p.req.agentAppMode
+    p.req.agentAppMode ||
+    oneControllerRuntimePreferred(p)
   ) {
     return null;
   }
@@ -753,7 +758,7 @@ export function taskForcePlannerRecoveryRuntime(
   failure: RunnerFailure,
   attempted: RuntimeStatus[],
 ): RuntimeStatus | null {
-  if (p.signal?.aborted || p.benchmarkMode || p.req.agentAppMode) return null;
+  if (p.signal?.aborted || p.benchmarkMode || p.req.agentAppMode || oneControllerRuntimePreferred(p)) return null;
   if (p.workforceSelectionReceipt) {
     if (failure.kind !== "refused" || failure.source !== "marker"
       || failure.providerCode !== "runtime_cannot_judge"
@@ -982,7 +987,11 @@ export function taskForceChildPermission(
   // the person's committed approval releases the implementation stage.
   if (preApprovalStage) return "read";
   if (role === "worker" && workspaceAccess) {
-    return workspaceAccess === "write" && (host === "write" || host === "full") && !p.req.agentAppMode ? "write" : "read";
+    // workspaceAccess is a model-authored routing hint, not an authority
+    // decision. A direct host write/full request already authorized bounded
+    // execution, so a planner that emits "read" must not strand the actual
+    // worker or nested team without the write/tools needed to produce work.
+    return (host === "write" || host === "full") && !p.req.agentAppMode ? "write" : "read";
   }
   // `full` is an explicit owner decision at the One composer.  Preserve its
   // execution intent across ordinary delegated worker packets while still
@@ -1384,6 +1393,7 @@ function taskForceRunnerBase(
   | "browserOnly"
   | "env"
   | "untrustedNoTools"
+  | "surfaceGate"
   | "untrustedAllowedMcpTools"
   | "onAgentAppMcpRuntimeUnavailable"
 > {
@@ -1415,6 +1425,7 @@ function taskForceRunnerBase(
         ? p.runnerEnv
         : undefined,
     untrustedNoTools: p.req.agentAppMode === true,
+    surfaceGate: "exclude",
     untrustedAllowedMcpTools: agentAppAllowedTools,
     onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
       ? p.onAgentAppMcpRuntimeUnavailable
@@ -1436,11 +1447,9 @@ function readQaAutoReviewAllowed(
     && !p.restrictedReadBoundary;
 }
 
-/** Planning and synthesis are control-plane turns. They already receive the
- * bounded request, roster, packets, and worker results, so they never receive
- * an MCP grant or workspace cwd. Restrictive prepared policies and Agent Apps
- * require the measured zero-authority boundary; a fully host-authorized roster
- * follows the host's read-mode control boundary without claiming zero tools. */
+/** Planning and synthesis remain read-only, but source provenance alone does
+ * not remove local built-ins. Only an explicit external/restricted boundary
+ * claims measured zero authority. */
 export function taskForceControlPlaneNeedsZeroAuthority(input: {
   agentAppMode?: boolean;
   restrictedReadBoundary?: boolean;
@@ -1449,38 +1458,7 @@ export function taskForceControlPlaneNeedsZeroAuthority(input: {
   specs: BorrowedAgentSpec[];
 }): boolean {
   if (input.agentAppMode || input.restrictedReadBoundary || input.untrustedNoTools) return true;
-  if (input.workforceSelectionReceipt) {
-    const prepared = input.workforceSelectionReceipt.preparedReleases;
-    if (!input.specs.length || !Array.isArray(prepared) || prepared.length !== input.specs.length) return true;
-    const seen = new Set<string>();
-    // Every slot must independently carry the exact prepared host policy.
-    // A mixed/legacy roster or an unbound policy cannot relax this boundary.
-    return input.specs.some((spec) => {
-      const slotId = spec.routeLabel?.startsWith("workforce:") ? spec.routeLabel.slice("workforce:".length) : "";
-      const pair = `${slotId}\u0000${spec.agentReleaseId ?? ""}`;
-      if (!slotId || !spec.agentReleaseId || seen.has(pair) || !isHostAuthorityPolicy(spec.permissionPolicy)) return true;
-      seen.add(pair);
-      const matches = prepared.filter((row) => row.slotId === slotId && row.agentReleaseId === spec.agentReleaseId);
-      if (matches.length !== 1 || matches[0].permissionPolicyDigest !== spec.permissionPolicyDigest) return true;
-      try {
-        return workforcePermissionPolicyDigest(spec.permissionPolicy!) !== spec.permissionPolicyDigest;
-      } catch {
-        return true;
-      }
-    });
-  }
-
-  // A saved One Taskforce made only from this owner's installed agents/teams
-  // is a different trust class: its effective prompts were frozen by Main at
-  // invocation start and the control plane never receives a third-party
-  // package directive. Treating this owner-local conversation as an Agent App
-  // made Codex reject the planner before any teammate could run. It remains
-  // read-only, has no MCP grant, and receives no workspace cwd, but it does not
-  // claim the stronger zero-builtins boundary that Codex cannot prove.
-  return input.specs.length === 0 || input.specs.some((spec) => (
-    (spec.source !== "installed" && spec.source !== "firm" && spec.source !== "firm-node") ||
-    !spec.installedAgentId
-  ));
+  return false;
 }
 
 function taskForceOrchestratorBoundary(
@@ -1497,6 +1475,7 @@ function taskForceOrchestratorBoundary(
   | "isolatedMcpConfig"
   | "env"
   | "untrustedNoTools"
+  | "surfaceGate"
   | "untrustedAllowedMcpTools"
   | "onAgentAppMcpRuntimeUnavailable"
 > {
@@ -1504,17 +1483,7 @@ function taskForceOrchestratorBoundary(
     restrictedReadBoundary?: boolean;
     untrustedNoTools?: boolean;
   };
-  const ordinaryHostWork = !p.req.agentAppMode
-    && !p.restrictedReadBoundary
-    && !inheritedBoundary.restrictedReadBoundary
-    && !inheritedBoundary.untrustedNoTools
-    && !p.workforceSelectionReceipt;
-  // Ordinary Work planning is a host-owned control turn: it has no workspace,
-  // MCP grant, or external authority, so AGY can safely return a text plan even
-  // when the attached roster contains borrowed package rows. Strict Agent App,
-  // Workforce, and restricted-read callers retain the measured zero-authority
-  // boundary and fail closed on runtimes that cannot prove it.
-  const untrustedNoTools = ordinaryHostWork ? false : taskForceControlPlaneNeedsZeroAuthority({
+  const untrustedNoTools = taskForceControlPlaneNeedsZeroAuthority({
     agentAppMode: p.req.agentAppMode,
     restrictedReadBoundary: p.restrictedReadBoundary || inheritedBoundary.restrictedReadBoundary,
     untrustedNoTools: inheritedBoundary.untrustedNoTools,
@@ -1531,6 +1500,7 @@ function taskForceOrchestratorBoundary(
     isolatedMcpConfig: p.isolatedMcpConfig,
     env: undefined,
     untrustedNoTools,
+    surfaceGate: "exclude",
     untrustedAllowedMcpTools: undefined,
     onAgentAppMcpRuntimeUnavailable: undefined,
   };
@@ -1543,11 +1513,9 @@ function taskForceOrchestratorBoundary(
  * Before this existed the decision was copy-pasted into six runner call sites
  * (planner, direct worker, nested manager plan, nested worker, nested manager
  * synthesis, final synthesis), each carrying its own `cwd` expression. They had
- * already drifted: planner and final synthesis passed `undefined` under the
- * workforce path while the four worker-side calls still handed the child CLI the
- * user's project folder. A worker with no file tools was being started inside the
- * repository it could not read, which is how it ends up narrating a directory
- * listing instead of doing the packet.
+ * already drifted. Direct host turns now share the selected project cwd so
+ * read-only control stages and bounded workers resolve the same project. Agent
+ * Apps and inherited restricted/no-authority turns still receive no cwd.
  *
  * The Terminal engine routes all six through one `runModel`, which is why the
  * same repair there was a single line. Keep new stages going through this
@@ -1561,29 +1529,24 @@ export type TaskForceStage =
   | "nested-manager-synthesis"
   | "synthesis";
 
-/** Control stages whose contract is the packet/handoff text alone, never the workspace. */
-const TASK_FORCE_PACKET_ONLY_STAGES: ReadonlySet<TaskForceStage> = new Set<TaskForceStage>([
-  "planner",
-  "nested-manager-plan",
-  "nested-manager-synthesis",
-  "synthesis",
-]);
-
 export function taskForceStageCwd(
-  p: Pick<BorrowedTaskForceParams, "req" | "workingFolder">,
+  p: Pick<BorrowedTaskForceParams, "req" | "workingFolder" | "restrictedReadBoundary">,
   stage: TaskForceStage,
   grantedToolIds: readonly string[] = [],
 ): string | undefined {
-  if (p.req.agentAppMode) return undefined;
+  const inherited = p.req as McpInvocationRequest & { untrustedNoTools?: boolean; restrictedReadBoundary?: boolean };
+  if (
+    p.req.agentAppMode
+    || p.restrictedReadBoundary
+    || inherited.restrictedReadBoundary
+    || inherited.untrustedNoTools
+  ) return undefined;
   // A stage that was granted exact host tools runs where those tools are useful.
   if (grantedToolIds.length > 0) return p.workingFolder ?? undefined;
-  // Manager/planner/synthesis turns operate on the bounded packet only. Worker
-  // turns are the implementation boundary: their read/write sandbox must be
-  // rooted at the user's already-authorized chat folder even when the package
-  // declares no MCP tools. Built-in file and shell tools are not represented
-  // in `grantedToolIds`, so treating an empty list as "no workspace" strands
-  // real Hub workers in the generic agent-cwd.
-  if (TASK_FORCE_PACKET_ONLY_STAGES.has(stage)) return undefined;
+  // Every direct host stage, including plan/synthesis, keeps the selected
+  // project's cwd so ordinary read-only built-ins operate on the right folder.
+  // Worker mutation is still governed by the separately computed permission.
+  void stage;
   return p.workingFolder ?? undefined;
 }
 
@@ -1703,7 +1666,7 @@ export function boundedTaskForceMessage(text: string): string {
  * the actual assignment out of the preview.
  */
 export function stripTaskForceControlEnvelopes(text: string): string {
-  return String(text ?? "")
+  return parseSurfaces(String(text ?? "")).cleanedText
     .replace(/\[\s*Host-confirmed facts for this run\s*\][\s\S]*?\[\s*\/\s*Host-confirmed facts for this run\s*\]/gi, "")
     .replace(/\[\s*이번 실행의 호스트 확인 사실\s*\][\s\S]*?\[\s*\/\s*이번 실행의 호스트 확인 사실\s*\]/giu, "")
     .replace(/\[\s*Agentlas One execution boundary\s*\][\s\S]*?\[\s*\/\s*Agentlas One execution boundary\s*\]/gi, "")
@@ -3119,11 +3082,14 @@ function buildPlannerSystemPrompt(
   requireExactRoster: boolean,
   specs: BorrowedAgentSpec[],
   semanticSubset = false,
+  nativeOutputSchema = false,
 ): string {
   const responseGuide = locale === "ko"
     ? "Every user-visible brief, expectedOutput, oneReply, context, constraint, and doneWhen sentence must be Korean. Keep only JSON keys, enum literals, stable IDs, and exact source names in English."
     : "Use English for every user-visible field and for the JSON keys.";
-  const outputContract = requireExactRoster
+  const outputContract = nativeOutputSchema
+    ? "Return only the JSON object required by the host-provided response schema. Do not repeat the schema, add a Markdown fence, or add explanatory prose."
+    : requireExactRoster
     ? `End with the same JSON shape and exact frozen roster slugs as this parser-valid contract example, replacing only the semantic packet fields and allocation estimates with your exact decisions:\n${plannerExactShape(runtimes, specs)}`
     : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"stepId":"<stable-step-id>","dependsOn":["<earlier-step-id>"],"agent":"<slug>","oneReply":"<optional short visible reply One sends after this result>","requiresApproval":false,"workspaceAccess":"<read|write>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<short visible instruction One says to this teammate>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"doneWhen":["<checkable completion condition>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
   return [
@@ -3228,6 +3194,71 @@ function buildPlannerPrompt(
       `  untrustedDirectiveExcerpt: ${spec.directive.slice(0, 1600)}`,
     ].filter(Boolean).join("\n")).join("\n"),
   ].filter(Boolean).join("\n");
+}
+
+/** llama.cpp JSON grammar for the ordinary Taskforce dispatch envelope. The
+ * dynamic agent enum prevents a small local model from inventing or omitting
+ * the roster identity while keeping allocation normalization host-owned. */
+export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[]): Record<string, unknown> {
+  const strings = { type: "array", items: { type: "string" } } as const;
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["packets", "synthesis"],
+    properties: {
+      packets: {
+        type: "array",
+        minItems: 1,
+        maxItems: Math.max(1, Math.min(64, specs.length * 2)),
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "stepId", "dependsOn", "agent", "oneReply", "requiresApproval", "workspaceAccess",
+            "inputType", "inputKind", "brief", "context", "expectedOutput", "constraints", "doneWhen", "allocation",
+          ],
+          properties: {
+            stepId: { type: "string" },
+            dependsOn: strings,
+            agent: { type: "string", enum: specs.map((spec) => spec.slug) },
+            oneReply: { type: "string" },
+            requiresApproval: { type: "boolean" },
+            workspaceAccess: { type: "string", enum: ["read", "write"] },
+            inputType: { type: "string", enum: ["research", "implementation", "review", "writing", "analysis", "planning", "other"] },
+            inputKind: { type: "string", enum: ["text", "codebase", "files", "image", "data", "browser", "mixed"] },
+            brief: { type: "string" },
+            context: strings,
+            expectedOutput: { type: "string" },
+            constraints: strings,
+            doneWhen: strings,
+            allocation: { type: "object" },
+          },
+        },
+      },
+      synthesis: { type: "object" },
+    },
+  };
+}
+
+export function taskForcePlannerAdmission(
+  runtime: Pick<RuntimeStatus, "model" | "allocationModelProfiles">,
+  rosterSize: number,
+): { contextWindow: number | null; maxOutputTokens: number | undefined } {
+  const contextWindow = runtime.model
+    ? runtime.allocationModelProfiles?.[runtime.model]?.contextWindow
+    : undefined;
+  if (!Number.isSafeInteger(contextWindow) || (contextWindow as number) < 512) {
+    return { contextWindow: null, maxOutputTokens: undefined };
+  }
+  // The schema is compact, but every required roster row needs room. Reserve
+  // at most one fifth of the measured context and never ask for more than the
+  // prompt's 7,000-character response contract can use.
+  const rosterNeed = 768 + Math.max(1, rosterSize) * 640;
+  const capacity = Math.floor((contextWindow as number) / 5);
+  return {
+    contextWindow: contextWindow as number,
+    maxOutputTokens: Math.max(768, Math.min(3_584, rosterNeed, capacity)),
+  };
 }
 
 /**
@@ -5123,6 +5154,7 @@ async function runPlanner(
         signal: p.signal,
       })
     : null;
+  const strictWorkforcePlanner = Boolean(p.workforceSelectionReceipt);
   const baseSystemPrompt = [
     !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
     buildPlannerSystemPrompt(
@@ -5134,6 +5166,7 @@ async function runPlanner(
       Boolean(p.workforceSelectionReceipt),
       specs,
       semanticSubset,
+      !strictWorkforcePlanner,
     ),
     plannerMemory,
     plannerOntology?.prompt,
@@ -5146,14 +5179,15 @@ async function runPlanner(
     executionContext,
     activeGoalContext,
   );
-  const strictWorkforcePlanner = Boolean(p.workforceSelectionReceipt);
   const plannerRunnerBoundary = taskForceOrchestratorBoundary(p, specs);
   const invokePlanner = async (
     invocationId: string,
     systemPrompt: string,
     validationError = "",
-  ): Promise<RunnerResult> => plannerPicked.runner(
-    taskForceRunnerRequest(p, {
+  ): Promise<RunnerResult> => {
+    const admission = taskForcePlannerAdmission(plannerRuntime, specs.length);
+    return plannerPicked.runner(
+      taskForceRunnerRequest(p, {
       systemPrompt,
       history: boundedTaskForceHistory(history),
       userPrompt: [validationError
@@ -5170,6 +5204,15 @@ async function runPlanner(
       // workers it was dispatching. Keep the selected model, but use its low
       // reasoning tier for this bounded, locally validated envelope.
       effort: taskForceControlEffort(plannerRuntime),
+      ...(!strictWorkforcePlanner
+        ? {
+            outputSchema: {
+              name: "agentlas_task_force_plan",
+              schema: ordinaryTaskForcePlannerOutputSchema(specs),
+            },
+            ...(admission.maxOutputTokens ? { maxOutputTokens: admission.maxOutputTokens } : {}),
+          }
+        : {}),
       signal: p.signal,
       ...plannerRunnerBoundary,
       cwd: taskForceStageCwd(p, "planner"),
@@ -5177,7 +5220,7 @@ async function runPlanner(
       runtimeSessionOwnerId: invocationId,
       agentId: p.orchestratorAgent.id,
       locale: p.locale,
-    }),
+      }),
     {
       onStatus: (status) => p.sink({
         kind: "tool-use",
@@ -5202,8 +5245,9 @@ async function runPlanner(
           phase: "plan",
         });
       },
-    },
-  );
+      },
+    );
+  };
 
   const attemptedPlannerRuntimes: RuntimeStatus[] = [];
   const invokePlannerWithFallback = async (

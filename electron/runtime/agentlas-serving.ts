@@ -16,6 +16,7 @@
  */
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import {
+  AGENTLAS_SERVING_CONTEXT_WINDOW,
   AGENTLAS_SERVING_DEFAULT_MODEL,
   agentlasServingModel,
   isAgentlasServingModel,
@@ -39,8 +40,6 @@ const MAX_TOKENS: Record<string, number> = {
  * 그래서 요즘 모델이 공통으로 가진 보수적인 값을 쓴다 — 넘겨서 거절당하는 것보다
  * 조금 일찍 접는 쪽이 낫다.
  */
-const SERVING_CONTEXT_WINDOW = 128_000;
-
 function servingModelId(req: RunnerRequest): string {
   return isAgentlasServingModel(req.model) ? String(req.model).trim() : AGENTLAS_SERVING_DEFAULT_MODEL;
 }
@@ -57,7 +56,7 @@ type ServingTurn = { role: "user" | "assistant"; text: string };
 
 function turnsFor(req: RunnerRequest, events: RunnerEvents): { turns: ServingTurn[]; system: string } {
   const { recent, digest, droppedCount } = compactHistory(req.history, {
-    contextWindow: SERVING_CONTEXT_WINDOW,
+    contextWindow: AGENTLAS_SERVING_CONTEXT_WINDOW,
     locale: req.locale,
   });
   if (digest) {
@@ -90,6 +89,10 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents): { turns: ServingTur
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
+      undefined,
+      undefined,
+      undefined,
+      req.surfaceGate,
     ),
   };
 }
@@ -146,7 +149,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       model,
       system,
       messages: turns,
-      maxTokens: MAX_TOKENS[model] ?? 2_600,
+      maxTokens: Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   });

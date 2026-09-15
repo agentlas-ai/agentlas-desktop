@@ -34,6 +34,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   kimi: "Kimi",
   acp: "ACP",
   ollama: "Ollama",
+  "agentlas-local": "Agentlas Local · On-device",
   agentlas: "Agentlas",
 };
 

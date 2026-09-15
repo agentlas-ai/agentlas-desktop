@@ -30,7 +30,7 @@ export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> 
       source: `agentlas-local:${resident.enginePackageId}:${resident.installationId}`,
       version: resident.enginePackageId,
       active: false,
-      label: "Agentlas Local",
+      label: "Agentlas Local · On-device",
       model: installation.fileName,
       availableModels: [installation.fileName],
       allocationModels: [installation.fileName],

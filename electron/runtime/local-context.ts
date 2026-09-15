@@ -1,10 +1,18 @@
 import type { RunnerFailure } from "./runner";
 
-export type LocalContextCode = "local_context_limit_exceeded" | "local_context_measurement_unavailable";
+export type LocalContextCode = "local_context_limit_exceeded" | "local_context_measurement_unavailable" | "local_output_limit_exceeded";
+
+export function boundedLocalOutputTokens(available: number, requested?: number): number {
+  if (!Number.isSafeInteger(available) || available < 1) return 0;
+  if (!Number.isSafeInteger(requested) || requested === undefined || requested < 1) return available;
+  return Math.min(available, requested);
+}
 export function localContextFailure(code: LocalContextCode, runtime: string, locale: string): RunnerFailure {
   return { kind: "refused", runtime, source: "marker", providerCode: code,
     message: code === "local_context_limit_exceeded"
       ? locale === "ko" ? "현재 모델의 대화 용량을 넘었습니다. 새 대화를 시작하거나 모델 용량을 늘려 주세요." : "This request exceeds the model context. Start a new conversation or increase its context capacity."
+      : code === "local_output_limit_exceeded"
+        ? locale === "ko" ? "로컬 모델이 계획 응답 한도 안에 결과를 끝내지 못했습니다." : "The local model did not finish its planning response within the admitted output budget."
       : locale === "ko" ? "현재 모델의 대화 용량을 확인하지 못했습니다. 모델 상태를 확인해 주세요." : "The model context could not be verified. Check the model status." };
 }
 

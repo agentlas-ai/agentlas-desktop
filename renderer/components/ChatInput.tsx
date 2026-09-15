@@ -64,6 +64,7 @@ const LOCAL_RUNTIME_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
+  "agentlas-local": "Agentlas Local · On-device",
 };
 
 /** 모델 칩에 보일 라벨 — 현재 모델 라벨(opts에서) 또는 런타임 기본명. */

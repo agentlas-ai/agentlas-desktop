@@ -13,6 +13,11 @@
 
 export type AgentlasServingTier = "light" | "normal" | "hard";
 
+/** Desktop-visible conservative window used for prompt compaction and routing.
+ * The server may use a different backing model, but every serving tier accepts
+ * this public request budget. */
+export const AGENTLAS_SERVING_CONTEXT_WINDOW = 128_000;
+
 export interface AgentlasServingModel {
   /** 서버에 그대로 보내는 값. 웹 모델 카탈로그의 별칭과 같은 문자열이어야 한다. */
   id: string;

@@ -10,6 +10,7 @@ import { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG, SURFACE_OPEN_FENCE, SURFAC
 import { selectModules, tokenize } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
+import { isJudgmentRefusal } from "./judgment-refusal";
 
 export interface RunnerRequest {
   /** Main-authored Plan ceiling; mutation cannot be approved within this run. */
@@ -31,6 +32,10 @@ export interface RunnerRequest {
   longContext?: boolean;
   /** 작업량(reasoning effort) — Claude Code `--effort`로 전달. 그 외 러너는 무시. */
   effort?: string;
+  /** Host-owned generation ceiling for compact control envelopes. */
+  maxOutputTokens?: number;
+  /** Nested/control calls return data to their parent and never own a user Surface. */
+  surfaceGate?: "auto" | "exclude";
   /**
    * 최종 답의 형태를 **계약으로** 못박는다. 지원 런타임은 CLI 플래그로 강제하고
    * (claude·grok·agy `--json-schema`, codex `--output-schema <FILE>`), OpenAI 호환
@@ -658,6 +663,15 @@ export interface RunnerResult {
  */
 export function runnerFailureFromError(error: unknown, runtime: string): RunnerFailure {
   const message = (error instanceof Error ? error.message : String(error)).trim() || "runtime execution failed";
+  if (isJudgmentRefusal(error)) {
+    return {
+      kind: "refused",
+      message: message.slice(0, 2_000),
+      runtime: error.runtimeKind || runtime,
+      source: "marker",
+      providerCode: error.code,
+    };
+  }
   const kind: RunnerFailureKind = /\b429\b|rate.?limit|quota|usage limit|weekly limit|credits?|resets?/i.test(message)
     ? "quota"
     : /unauthori[sz]ed|authentication|not logged in|please run \/login|\blogin\b|\bsign in\b|token.*(?:expired|invalid)|\bforbidden\b/i.test(message)

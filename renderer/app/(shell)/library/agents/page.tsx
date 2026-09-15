@@ -3262,7 +3262,7 @@ const RUNTIME_KIND_DISPLAY: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
-  "agentlas-local": "Agentlas Local",
+  "agentlas-local": "Agentlas Local · On-device",
   acp: "ACP",
   agentlas: "Agentlas",
 };

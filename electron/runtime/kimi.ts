@@ -206,6 +206,9 @@ function buildPrompt(req: RunnerRequest): string {
     req.restrictedReadBoundary,
     req.untrustedNoTools,
     req.untrustedAllowedMcpTools,
+    undefined,
+    undefined,
+    req.surfaceGate,
   );
   const turnContext = req.turnContext?.trim();
   const parts = [`[SYSTEM]\n${system}${turnContext ? `\n\n${turnContext}` : ""}`, ""];

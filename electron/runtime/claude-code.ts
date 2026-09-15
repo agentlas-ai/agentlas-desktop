@@ -822,6 +822,8 @@ const runClaudeTurn = async (
       ? (hasExactUntrustedMcpGrant ? runReq.untrustedAllowedMcpTools : undefined)
       : runReq.untrustedAllowedMcpTools,
     runReq.workforceRuntimeToolGrant,
+    undefined,
+    runReq.surfaceGate,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
   const savedSession = !runReq.untrustedNoTools && runReq.chatId

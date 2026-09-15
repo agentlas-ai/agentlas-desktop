@@ -100,6 +100,10 @@ export const runOllama: Runner = async (
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
+      undefined,
+      undefined,
+      undefined,
+      req.surfaceGate,
     ),
   }];
   for (const m of recent) {

@@ -334,6 +334,10 @@ function buildSystemText(req: RunnerRequest): string {
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,
+    undefined,
+    undefined,
+    undefined,
+    req.surfaceGate,
   );
   const turnContext = req.turnContext?.trim();
   return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;

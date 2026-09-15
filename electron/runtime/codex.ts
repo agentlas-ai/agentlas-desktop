@@ -213,6 +213,10 @@ function buildPrompt(req: RunnerRequest): string {
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,
+    undefined,
+    undefined,
+    undefined,
+    req.surfaceGate,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -241,6 +245,10 @@ function buildDeveloperInstructions(req: RunnerRequest): string {
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,
+    undefined,
+    undefined,
+    undefined,
+    req.surfaceGate,
   );
 }
 

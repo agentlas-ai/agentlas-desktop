@@ -271,6 +271,19 @@ export function firmDivisionRequiresDirectExecution(
   return matchedSpecialistCount === 0 && !runtimeToolsDisabled;
 }
 
+/** Host-owned team turns keep read-only built-ins. Only an explicit external
+ * or inherited restricted boundary claims measured zero-tool isolation. */
+export function firmTurnNeedsZeroAuthority(
+  p: Pick<FirmRunParams, "req" | "restrictedReadBoundary">,
+  turn: Pick<NodeTurn, "runtimeToolsDisabled">,
+): boolean {
+  const inherited = p.req as McpInvocationRequest & { untrustedNoTools?: boolean };
+  return p.req.agentAppMode === true
+    || p.restrictedReadBoundary === true
+    || inherited.untrustedNoTools === true
+    || turn.runtimeToolsDisabled === true;
+}
+
 function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["phase"]): string {
   return `firm:run:${p.req.runId ?? "direct"}:chat:${p.chat.id}:node:${nodeId}:phase:${phase}`;
 }
@@ -852,11 +865,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   const runtimeRole: "orchestrator" | "worker" = tier === 1
     ? p.controllerRuntimeRole ?? "orchestrator"
     : "worker";
-  // One's visible model is the controller's first attempt for an in-One team
-  // run. A directly invoked firm then falls back through the orchestrator pool;
-  // a firm borrowed into a Taskforce falls back through the worker pool.
-  const oneControllerPreferred = tier === 1
-    && p.req.oneMode === true
+  // A user-selected controller is exact for this run on every host surface.
+  // It must not silently turn into another model during plan/synthesis.
+  const pinnedControllerPreferred = tier === 1
     && p.runtimePinHonored === true
     && Boolean(p.req.runtimeSelection);
   const nodePermission = firmNodePermission(p, turn);
@@ -952,7 +963,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     }
     if (memorySignal?.aborted) throw new Error("Firm turn cancelled");
   }
-  const runtimeChoice = p.req.agentAppMode || oneControllerPreferred
+  const runtimeChoice = p.req.agentAppMode || pinnedControllerPreferred
     ? null
     : selectRuntimeForTargets(
         p.runtimes,
@@ -972,19 +983,19 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         // manager's own plan/synthesis inside that delegated branch.
         runtimeRole,
       );
-  const baseActive = oneControllerPreferred
+  const baseActive = pinnedControllerPreferred
     ? p.active
     : runtimeChoice?.picked
       ? runtimeChoice.active
       : p.active;
-  const basePicked = oneControllerPreferred
+  const basePicked = pinnedControllerPreferred
     ? p.picked
     : runtimeChoice?.picked ?? p.picked;
   const candidateRuntimes = firmCandidateRuntimes(
     p,
     baseActive,
     runtimeRole,
-    oneControllerPreferred || Boolean(runtimeChoice?.override),
+    pinnedControllerPreferred || Boolean(runtimeChoice?.override),
   );
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(
@@ -997,7 +1008,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         "",
         "## Planning boundary",
         "This turn only chooses and briefs direct reports for the host orchestrator.",
-        "Do not inspect files, call tools, spawn sub-agents, implement, edit, test, or solve the task yourself.",
+        "You may use read-only built-in tools to inspect the assigned project when needed to make a sound delegation.",
+        "Do not implement, edit, test, or solve the delegated task yourself.",
         "Return the Delegate block immediately, then stop. The host executes the chosen workers after parsing it.",
       ].join("\n");
     }
@@ -1006,8 +1018,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     systemPrompt += [
       "",
       "## Synthesis boundary",
-      "This turn may use only the bounded worker results supplied in this prompt.",
-      "Do not inspect files, call tools, read ambient skills or memory, spawn sub-agents, implement, edit, test, or browse.",
+      "Use the bounded worker results supplied in this prompt as the source of the synthesis.",
+      "Read-only built-in tools remain available for host-owned verification when needed; do not implement, edit, or expand the task.",
       "Synthesize the supplied results, or return only a Delegate block for a genuinely missing listed report, then stop.",
     ].join("\n");
   }
@@ -1081,6 +1093,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
+  const strictZeroAuthority = firmTurnNeedsZeroAuthority(p, turn);
   const runNodeOn = async (
     runtime: RuntimeStatus,
     runtimePicked: { runner: Runner; label: string },
@@ -1130,7 +1143,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               ? "auto_review"
               : "user",
           restrictedReadBoundary: p.restrictedReadBoundary,
-          cwd: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn ? undefined : workingFolder ?? undefined,
+          cwd: strictZeroAuthority ? undefined : workingFolder ?? undefined,
           chatId: p.req.agentAppMode
             ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
             : controlPlaneTurn
@@ -1158,19 +1171,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           env: p.req.agentAppMode
             ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
             : p.runnerEnv,
-          // Planning-with-a-roster and synthesis are control-plane turns. The
-          // prompt already says not to inspect or execute, but prompt text is
-          // not an authority boundary: a real nested firm run showed a Codex
-          // planner issuing hundreds of file/shell/MCP calls, then stalling in
-          // read-only build and hidden approval failures instead of returning
-          // its Delegate block. Require the runtime's measured zero-tool mode
-          // here. Runtimes that cannot prove it fail closed and the role pool
-          // may select a capable fallback; implementation delegates retain the
-          // bounded project/tool grant below this control plane.
-          untrustedNoTools:
-            p.req.agentAppMode === true ||
-            turn.runtimeToolsDisabled === true ||
-            controlPlaneTurn,
+          // Host-owned plan/synthesis stays read-only while retaining normal
+          // local built-ins. Agent Apps and explicit inherited restrictions
+          // keep the stronger measured zero-authority boundary.
+          untrustedNoTools: strictZeroAuthority,
+          surfaceGate: "exclude",
           untrustedAllowedMcpTools: agentAppAllowedTools,
           onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
             ? p.onAgentAppMcpRuntimeUnavailable
@@ -1206,7 +1211,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let executedPicked = picked;
   const failedNodeRuntimes: RuntimeStatus[] = [];
   let result = await runNodeOn(executedRuntime, executedPicked);
-  while (result.failure && !p.req.agentAppMode && !(turn.signal ?? p.signal)?.aborted) {
+  while (
+    result.failure
+    && !p.req.agentAppMode
+    && !pinnedControllerPreferred
+    && !(turn.signal ?? p.signal)?.aborted
+  ) {
     if (!failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, executedRuntime))) {
       failedNodeRuntimes.push(executedRuntime);
     }
@@ -1240,7 +1250,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // Keep later CEO/manager turns in the same firm run on the runtime that
   // actually survived the fallback. Worker turns still resolve independently
   // from the Worker role pool.
-  if (oneControllerPreferred && tier === 1 && !sameRuntime(executedRuntime, p.active)) {
+  if (pinnedControllerPreferred && tier === 1 && !sameRuntime(executedRuntime, p.active)) {
     p.active = executedRuntime;
     p.picked = executedPicked;
   }

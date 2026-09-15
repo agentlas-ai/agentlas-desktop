@@ -990,6 +990,7 @@ function TaskSidePanelContent({
   const presentedResultKeyRef = useRef<string | null>(null);
   const presentedArtifactIdRef = useRef<string | null>(null);
   const presentedMcpResultIdRef = useRef<string | null>(null);
+  const presentedToolIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
   const agents = useMemo(() => {
@@ -1025,28 +1026,10 @@ function TaskSidePanelContent({
       ? current
       : { ...current, [browserScopeKey]: currentBrowserUrl });
   }, [browserScopeKey, currentBrowserUrl]);
-  /*
-   * ★에이전트가 화면을 몰고 있으면 그 화면을 보여 준다 (실측 2026-09-08).
-   *
-   *   컴퓨터 조작(cua-driver 등)은 **어느 화면에도 자리가 없었다.** Work 는 패널을
-   *   열지만 그릴 것이 없었고(릴리스 1.1.5 가 그리는 부품의 호출부를 지웠다),
-   *   One 은 판정 자체가 없었다. 남은 곳은 스스로 열리지 않는 떠 있는 카드뿐이라
-   *   사람 눈에는 "아무 일도 안 일어남"으로 보였다. 오너: "컴퓨터 유즈를 못하네".
-   *
-   *   호스트가 알려 주기를 기다리지 않고 **활동 기록에서 직접 끌어낸다** — 그래야
-   *   One 과 Work 가 같은 순간에 같은 것을 본다. 브라우저는 이미 전용 보기가 있으므로
-   *   여기서는 컴퓨터 조작만 맡는다(같은 것을 두 번 그리지 않는다).
-   */
-  const computerToolActive = useMemo(() => {
-    const rows = activity?.items ?? [];
-    for (let i = rows.length - 1; i >= 0; i -= 1) {
-      const row = rows[i];
-      if (row.kind !== "tool") continue;
-      if (agentScreenModeForTool(row.tool?.name) !== "computer") continue;
-      return true;
-    }
-    return false;
-  }, [activity?.items]);
+  const latestTool = useMemo(
+    () => [...(activity?.items ?? [])].reverse().find((item) => item.kind === "tool" && item.tool) ?? null,
+    [activity?.items],
+  );
   const [screenMode, setScreenMode] = useState<"browser" | "computer">("computer");
 
   const boundImages = scopedBoundImages(items, screenChatId);
@@ -1092,15 +1075,27 @@ function TaskSidePanelContent({
         ? `result:${resultKey}`
         : `kind:${activeOutputKind}`;
   useEffect(() => {
-    if (!computerToolActive) return;
-    setOpenTabs((tabs) => (tabs.includes("screen") ? tabs : [...tabs, "screen"]));
-    /*
-     * ★탭만 연다. 자동 선택은 넣었다가 **되돌렸다**(2026-09-08): 여기서
-     * setRailView 를 부르면 레일 자체가 화면에서 사라졌다(실측 — aside 가 통째로 없어짐).
-     * 레일의 표시 조건과 어떻게 얽혀 있는지 아직 모르므로, 모르는 채로 밀어 넣지 않는다.
-     * 지금은 "화면" 탭이 생기는 것까지가 확인된 동작이다.
-     */
-  }, [computerToolActive]);
+    if (!latestTool || activity?.terminalStatus || presentedToolIdRef.current === latestTool.id) return;
+    presentedToolIdRef.current = latestTool.id;
+    onRequestOpen?.();
+
+    const screen = agentScreenModeForTool(latestTool.tool?.name);
+    if (screen === "computer") {
+      setScreenMode("computer");
+      setOpenTabs((tabs) => (tabs.includes("screen") ? tabs : [...tabs, "screen"]));
+      setRailView("screen");
+      return;
+    }
+
+    // Agentlas Browser owns a live, task-scoped WebContents and its status
+    // event below selects Browser as soon as the actual view exists. Until
+    // then keep the tool receipt visible instead of fabricating an empty tab.
+    const nextView: OutputRailView = isCommandTool(latestTool.tool?.name) ? "terminal" : "activity";
+    setOpenTabs((tabs) => (tabs.includes(nextView) ? tabs : [...tabs, nextView]));
+    setRailView((current) => (
+      current === "browser" || current === "screen" || current === "worker" ? current : nextView
+    ));
+  }, [activity?.terminalStatus, latestTool, onRequestOpen]);
 
   useEffect(() => {
     const handleOpen = (event: Event) => {

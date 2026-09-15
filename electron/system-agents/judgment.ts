@@ -464,9 +464,10 @@ async function callJudgmentModelDetailed(opts: {
   /**
    * ★**짓는 일**은 판정이 아니다 — 이 통로를 열면 조회 도구와 이미 동의된 MCP 가 함께 간다.
    *
-   * 배경(2026-08-20 실측): 그래프 빌더가 이 함수를 그대로 쓰고 있었다. 이 함수의 기본은
-   * `untrustedNoTools: true` — "순수 분류" 를 위해 **도구를 0개로 못 박은** 설정이다.
-   * 판정에는 맞지만, 그래프를 짓는 일에 쓰면 빌더는 눈 감고 손 묶인 채 10단계를 받아쓴다.
+   * 배경(2026-08-20 실측): 그래프 빌더가 이 함수를 그대로 쓰고 있었다. 판정 호출은
+   * cwd와 명시적 MCP 설정을 주지 않지만, "순수 분류"라는 이유로 별도 격리 모드를
+   * 요구하지 않는다. 격리 증명이 없는 모델에서 목표 판정 자체가 사라졌기 때문이다.
+   * 그래프를 짓는 일은 authoring으로 구분해 조회 도구와 문맥을 받을 수 있다.
    * 그래서 자기가 쓴 스크립트가 도는지도 모르고 403 짜리를 그대로 저장했다.
    *
    * 이 깃발은 **조회만** 연다(permission 은 계속 "read" — 만드는 중에 메일이 나가거나
@@ -600,11 +601,11 @@ async function callJudgmentModelDetailed(opts: {
             longContext: opts.runtimeSelection ? runtime.longContextEnabled : false,
             effort: opts.runtimeSelection ? runtime.effort ?? undefined : "low",
             permission: "read",
-            // Pure classification: zero tools, no local rules or memory, no
-            // session persistence, and the runner fails closed if it cannot
-            // prove that. A runtime that refuses is skipped, never downgraded —
-            // the judge must not lower its own boundary to get an answer.
-            untrustedNoTools: !opts.authoring,
+            // This receives no cwd or explicit MCP grant. Requiring verified
+            // zero-builtins isolation here disabled Goal intake and capability
+            // selection on Antigravity before the user's task could start.
+            untrustedNoTools: false,
+            surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
@@ -677,7 +678,8 @@ async function callJudgmentModelDetailed(opts: {
               longContext: false,
               effort: "low",
               permission: "read",
-              untrustedNoTools: !opts.authoring,
+              untrustedNoTools: false,
+              surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,

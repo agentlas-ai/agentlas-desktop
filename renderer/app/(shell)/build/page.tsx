@@ -110,6 +110,8 @@ function engineLabel(r: RuntimeStatus, ko: boolean): string {
       return "Agentlas";
     case "ollama":
       return ko ? "Ollama · 로컬" : "Ollama · local";
+    case "agentlas-local":
+      return "Agentlas Local · On-device";
     default:
       return r.kind;
   }

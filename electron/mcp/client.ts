@@ -2454,12 +2454,20 @@ ${effectiveUserPrompt}`;
   // chat and One Work/graph runs. A normal Library assignment remains the
   // default for other surfaces; One only leaves its pin after a typed runtime
   // failure, at which point the ordered orchestrator pool takes over.
+  // A model chosen on the interactive composer is the user's execution
+  // decision for this turn.  Library role assignments may fill an Auto choice,
+  // but must not replace this explicit pin.
+  const directUserRuntimePinRequested = req.promptOrigin !== "system" && Boolean(req.runtimeSelection);
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     pinIsAuthoritative:
-      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || continuationRuntimePinned,
+      directUserRuntimePinRequested || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || continuationRuntimePinned,
     agentAppMode: req.agentAppMode === true,
   });
+  const directUserRuntimePinHonored = directUserRuntimePinRequested && runtimeResolution.pinHonored;
+  const directUserTeamControlAuthority = directUserRuntimePinHonored
+    && !restrictedOrchestrationBoundary
+    && req.agentAppMode !== true;
   let runtimeChoice = runtimeResolution.choice;
   if ((scienceRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
     const selected = runtimeChoice.active;
@@ -2681,11 +2689,14 @@ ${effectiveUserPrompt}`;
      */
     const fromLabel = `${previous.kind}${previous.model ? ` · ${previous.model}` : ""}`;
     const toLabel = `${nextSelection.kind}${nextSelection.model ? ` · ${nextSelection.model}` : ""}`;
+    const contextLimited = failure?.providerCode === "local_context_limit_exceeded";
     const reason = failure?.kind === "quota"
       ? locale === "ko" ? "사용 한도에 걸려" : "hit its usage limit"
-      : locale === "ko" ? "실행할 수 없어" : "became unavailable";
+      : contextLimited
+        ? locale === "ko" ? "팀 계획 입력이 모델 문맥 한도를 넘어" : "exceeded its context limit while planning the team"
+        : locale === "ko" ? "실행할 수 없어" : "became unavailable";
     const koMessage = `One 모델 ${fromLabel}이 ${reason} 이번 실행만 ${toLabel}로 이어갑니다. 저장된 선택은 ${previous.kind}${previous.model ? ` · ${previous.model}` : ""} 그대로이고, 사용할 수 있게 되면 자동으로 돌아갑니다.`;
-    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
+    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : contextLimited ? "exceeded its context limit while planning the team" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
     const message = locale === "ko"
       ? koMessage
       : enMessage;
@@ -3565,11 +3576,15 @@ ${effectiveUserPrompt}`;
             longContext: active.longContextEnabled ?? false,
             effort: active.effort ?? undefined,
             signal,
-            permission: "read",
+            permission: directUserTeamControlAuthority ? normalizedPermission : "read",
             restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
             env: orchestrationRunnerEnv,
-            untrustedNoTools: true,
-            cwd: undefined,
+            // This is a bounded staffing decision, but an internal control
+            // label must not revoke authority the user already granted to an
+            // exact runtime. Unpinned/background/restricted callers retain the
+            // existing zero-tool path.
+            untrustedNoTools: !directUserTeamControlAuthority,
+            cwd: directUserTeamControlAuthority ? workingFolder ?? undefined : undefined,
             chatId: `workforce-goal-turn:${req.runId}`,
             locale,
           },
@@ -3772,11 +3787,11 @@ ${effectiveUserPrompt}`;
               longContext: active.longContextEnabled ?? false,
               effort: active.effort ?? undefined,
               signal,
-              permission: "read",
+              permission: directUserTeamControlAuthority ? normalizedPermission : "read",
               restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
               env: orchestrationRunnerEnv,
-              untrustedNoTools: true,
-              cwd: undefined,
+              untrustedNoTools: !directUserTeamControlAuthority,
+              cwd: directUserTeamControlAuthority ? workingFolder ?? undefined : undefined,
               chatId: turn.invocationId,
               locale,
             },
@@ -4878,7 +4893,11 @@ ${effectiveUserPrompt}`;
         ? effortForSelectedModel(active, active.model, "minimal") ?? undefined
         : active.effort ?? undefined,
       signal,
-      permission: req.permissions,
+      // Antigravity cannot approve an MCP call in headless read mode. Preserve
+      // the user's selected runtime and open its ordinary write+sandbox tool
+      // mode for this trusted, Main-authorized review invocation. Other
+      // runtimes keep the review's original read permission.
+      permission: scienceReview && active.kind === "antigravity" ? "write" : req.permissions,
       ...(planReadOnly ? { planMode: true as const } : {}),
       ...(req.simulation === true ? { simulation: true as const } : {}),
       ...(browserOnly ? { browserOnly: true as const } : {}),

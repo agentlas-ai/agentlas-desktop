@@ -100,6 +100,10 @@ function prepareContext(
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
+      undefined,
+      undefined,
+      undefined,
+      req.surfaceGate,
     ),
   };
 }

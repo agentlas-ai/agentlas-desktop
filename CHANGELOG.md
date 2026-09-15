@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.13 — 2026-09-15
+
+- Team·Firm·Workforce·Science가 사용자가 고른 모델과 실행 권한을 그대로 사용합니다. Qwen이나 다른 모델로 몰래 바꾸지 않으며, 로컬 소형 모델부터 프로덕션 모델까지 각 모델이 받을 수 있는 문맥과 출력 크기에 맞춰 요청을 만듭니다. 선택한 모델이 실제로 실행되지 않으면 성공처럼 이어 가지 않고 이유를 표시합니다.
+- Antigravity 실행을 "내장 도구를 완전히 격리할 수 없다"는 이유로 시작 전에 막던 잘못된 관문을 없앴습니다. 사용자가 직접 시작하고 쓰기 권한을 준 Team·Work·Science 실행은 그 권한으로 파일과 도구를 사용하며, 장기 웹 작업은 처음 선택한 URL과 브라우저 연결을 다음 턴에도 유지합니다.
+- 작업 중 실제 도구가 열리면 One과 Work의 공용 패널도 함께 열립니다. 브라우저는 브라우저 탭, 화면 조작은 화면, 명령 실행은 터미널, 그 밖의 MCP·검색·읽기는 활동 결과로 표시되어 에이전트가 무엇을 조작하는지 볼 수 있습니다.
+- 하위 에이전트의 원시 `<<agentlas-surface>>` 프로토콜 텍스트는 대화에 그대로 출력되지 않습니다. 구조를 해석할 수 없는 출력은 완성 결과로 채택하지 않습니다.
+- 앱이 관리하는 내장 로컬 실행은 `Agentlas Local · On-device`로 표시하고, 구형 Ollama 연결은 별도 공급자로 구분합니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.12 — 2026-09-15
 
 - 오래 켜 두어도 조용한 앱이 실제로 조용해집니다. 보이지 않는 작업 화면과 랜딩 애니메이션은 멈추고, 닫은 작업 창의 캡처 자원은 바로 반환하며, 앱이 끝날 때 로컬 모델·브라우저·CLI·데몬을 함께 정리합니다. macOS 실측에서 전경 CPU는 수정 전 약 23.5%에서 10.2~19.3%로 낮아졌고, 숨김 뒤에는 0~0.2%로 수렴했습니다. 표시와 숨김을 세 번 반복해도 메모리가 계속 늘지 않았습니다.

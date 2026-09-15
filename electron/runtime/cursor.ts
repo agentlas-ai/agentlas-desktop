@@ -145,6 +145,9 @@ function promptFor(req: RunnerRequest): string {
       req.restrictedReadBoundary,
       req.untrustedNoTools,
       req.untrustedAllowedMcpTools,
+      undefined,
+      undefined,
+      req.surfaceGate,
     )}`,
     "",
   ];

@@ -525,12 +525,15 @@ export async function autoSelectMcpTools(input: {
    *   도구 호출만 4번 반복하고 실패했다. 선택 대상은 설치·활성·설정 유효한 정본 브라우저(agentlas-browser)뿐이고,
    *   없으면 아무것도 바꾸지 않는다(막다른 길 금지). 키워드 점수화가 아니라 호스트 바인딩의 명시 증거 하나다.
    */
+  // A later "continue" turn must retain the browser named by the active Goal's
+  // original objective. Looking only at the latest short follow-up made a
+  // durable web campaign silently lose its authenticated browser.
+  const browserBindingText = [input.userPrompt, activeGoalScope?.objective ?? ""].filter(Boolean).join("\n");
   const explicitBrowserEvidence = automaticHostDecision && effectiveToolMode === "auto"
-    && (/https?:\/\/[^\s)]+/i.test(input.userPrompt)
+    && (/https?:\/\/[^\s)]+/i.test(browserBindingText)
       // 스킴 없는 도메인("example.com 화면 찍어줘")도 웹 대상의 명시 증거다 — 판정기 없이도 브라우저.
-      || /(^|[\s"'(])[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|ai|dev|app|co|kr|jp|edu|gov)(\/[^\s)]*)?(?=$|[\s)"',.!?])/i.test(input.userPrompt)
-      || /(브라우저(로|에서|를 열)|in the browser|with the browser|open (the )?browser)/i.test(input.userPrompt))
-    && initialInstalledServers.some((server) => server.catalogId === "agentlas-browser" && server.enabled && server.configurationValid !== false);
+      || /(^|[\s"'(])[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|ai|dev|app|co|kr|jp|edu|gov)(\/[^\s)]*)?(?=$|[\s)"',.!?])/i.test(browserBindingText)
+      || /(브라우저(로|에서|를 열)|in the browser|with the browser|open (the )?browser)/i.test(browserBindingText));
   if (explicitBrowserEvidence) effectiveToolMode = "browser";
 
   // ── ① 프로젝트 우선 (project-first narrowing) ────────────────────────────

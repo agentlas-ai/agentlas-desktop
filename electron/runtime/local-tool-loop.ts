@@ -1,4 +1,4 @@
-import { localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
+import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof } from "../long-run/file-proof";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
@@ -990,7 +990,11 @@ export async function runLocalOpenAiChat(
           }
         }
         if (!measured.fits) return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
-        requestBody.max_tokens = measured.maxOutputTokens;
+        const admittedOutputTokens = boundedLocalOutputTokens(measured.maxOutputTokens, req.maxOutputTokens);
+        if (req.maxOutputTokens && admittedOutputTokens < req.maxOutputTokens) {
+          return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        }
+        requestBody.max_tokens = admittedOutputTokens;
       } catch {
         if (req.signal?.aborted) throw abortReasonError(req);
         return {text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)};
@@ -1037,7 +1041,7 @@ export async function runLocalOpenAiChat(
           throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
         }
         const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
-        if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
         finalText = result.text;
         reachedAnswer = true;
         break;
@@ -1046,7 +1050,7 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
-    if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+    if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
     // A provider is allowed to hallucinate a tool_calls block even though it
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
