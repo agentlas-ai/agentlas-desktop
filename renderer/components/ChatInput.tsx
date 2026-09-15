@@ -101,6 +101,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconEdit,
   IconTrash,
   IconFileUp,
   IconFolder,
@@ -320,6 +321,7 @@ function ChatInputComponent({
   goalBlockedReason,
   onResumeGoal,
   onPauseGoal,
+  onEditGoal,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -376,6 +378,8 @@ function ChatInputComponent({
   goalBlockedReason?: string | null;
   onResumeGoal?: () => void;
   onPauseGoal?: () => void;
+  /** Replace the stopped Goal contract with a user-authored revision. */
+  onEditGoal?: (objective: string) => Promise<boolean>;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -1500,6 +1504,7 @@ function ChatInputComponent({
           blockedReason={goalBlockedReason}
           onResume={onResumeGoal}
           onPause={onPauseGoal}
+          onEdit={onEditGoal}
           onEndGoal={() => toggleGoalMode(false)}
         />
       )}
@@ -2099,6 +2104,7 @@ function ComposerGoalBar({
   blockedReason,
   onResume,
   onPause,
+  onEdit,
   onEndGoal,
 }: {
   label?: string;
@@ -2109,9 +2115,13 @@ function ComposerGoalBar({
   blockedReason?: string | null;
   onResume?: () => void;
   onPause?: () => void;
+  onEdit?: (objective: string) => Promise<boolean>;
   onEndGoal: () => void;
 }) {
   const { locale } = useT();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
   /*
    * ★멈춘 목표에 "이제 시작합니다" 라고 말하고 있었다 (오너 실데이터 실측 2026-09-08).
    *
@@ -2180,8 +2190,10 @@ function ComposerGoalBar({
       ? "다음 요청으로 목표와 성공 기준을 확정합니다"
       : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
+  const editable = Boolean(onEdit && label && ["paused", "blocked", "queued", "waiting_user", "draft"].includes(runStatus ?? ""));
   return (
-    <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite" data-chat-goal-bar="true">
+    <div className="chat-composer-goal-stack" data-chat-goal-bar="true">
+    <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite">
       <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
       <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
       <span className="chat-composer-progress-label" title={(paused || blocked) ? [title, blockedReason ?? pauseReason].filter(Boolean).join("\n") : title}>{title}</span>
@@ -2208,6 +2220,13 @@ function ComposerGoalBar({
           {locale === "ko" ? "재개" : "Resume"}
         </button>
       )}
+      {onEdit && label && (
+        <button type="button" onClick={() => { setDraft(label); setEditing(true); }}
+          aria-label={locale === "ko" ? "목표 편집" : "Edit goal"}
+          title={!editable ? (locale === "ko" ? "실행을 먼저 일시정지하면 편집할 수 있습니다" : "Pause the run before editing") : undefined}>
+          <IconEdit size={12} />
+        </button>
+      )}
       <button
         type="button"
         onClick={onEndGoal}
@@ -2216,6 +2235,19 @@ function ComposerGoalBar({
       >
         <IconTrash size={12} />
       </button>
+    </div>
+    {editing && <form className="chat-composer-goal-editor" onSubmit={(event) => {
+      event.preventDefault();
+      if (!editable || saving || !draft.trim() || !onEdit) return;
+      setSaving(true);
+      void onEdit(draft.trim()).then((saved) => { if (saved) setEditing(false); }).finally(() => setSaving(false));
+    }}>
+      <textarea value={draft} onChange={(event) => setDraft(event.target.value)} autoFocus maxLength={12000}
+        aria-label={locale === "ko" ? "목표 내용" : "Goal objective"} />
+      {!editable && <p>{locale === "ko" ? "목표를 일시정지한 뒤 저장할 수 있습니다." : "Pause the goal before saving."}</p>}
+      <div><button type="button" onClick={() => setEditing(false)}>{locale === "ko" ? "취소" : "Cancel"}</button>
+        <button type="submit" disabled={!editable || saving || !draft.trim()}>{saving ? (locale === "ko" ? "저장 중" : "Saving") : (locale === "ko" ? "저장" : "Save")}</button></div>
+    </form>}
     </div>
   );
 }

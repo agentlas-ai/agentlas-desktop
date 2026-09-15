@@ -797,9 +797,38 @@ export type Runner = (
   events: RunnerEvents,
 ) => Promise<RunnerResult>;
 
+/**
+ * MCP-less orchestration turns must not inherit transport-only environment.
+ *
+ * A parent run can own the native Agentlas Browser while its planner or
+ * synthesizer intentionally runs without tools. Passing the browser scope (or
+ * secret aliases) without the matching per-run config creates an impossible
+ * request: adapters correctly refuse it before the model starts. Keep ordinary
+ * provider/runtime environment intact and remove only values whose authority is
+ * carried by the omitted MCP config.
+ */
+export function withoutMcpTransportEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  if (!env) return env;
+  const next = { ...env };
+  delete next.AGENTLAS_NATIVE_BROWSER_SCOPE;
+  for (const key of Object.keys(next)) {
+    if (/^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key)
+      || /^AGENTLAS_MCP_PROXY_/.test(key)
+      || key === "AGENTLAS_MCP_RUN_BINDING"
+      || /^AGENTLAS_AGY_MCP_(?:CONFIG|ENTRY_INTEGRITY|GENERATION|SERVER_KEY)$/.test(key)) delete next[key];
+  }
+  return next;
+}
+
 /** Display guidance only: this marker never grants tools, credentials or authority. */
 export function withNativeBrowserGuidance(runner: Runner): Runner {
   return (req, events) => {
+    // Every measured no-tools boundary intentionally omits MCP config. Remove
+    // transport-only parent state at the shared runner edge as a final guard,
+    // so Firm, Taskforce, Swarm, and future control turns obey the same pair.
+    if (req.untrustedNoTools && req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task" && !req.mcpConfigPath) {
+      return runner({ ...req, env: withoutMcpTransportEnv(req.env) }, events);
+    }
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE !== "task" || !req.mcpConfigPath) return runner(req, events);
     const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared native browser tabs and login session. Use those tools for browser interaction, accessibility snapshots and screenshots shown in the task sidebar. A provider's separate built-in browser is a different session and is not evidence from this shared task browser. For a worker handoff, report the verified page URL and how to reach the running app; provider-native browser/tab IDs belong to their original session and must not be reused by another worker. The next worker should inspect its own available tabs or open the URL in its authorized browser session. Keep the app server available through verification and report an unreachable URL as unfinished work. Existing approval and cancellation rules still apply. [/Host browser target]";
     return runner({ ...req, turnContext: [req.turnContext, guidance].filter(Boolean).join("\n\n") }, events);

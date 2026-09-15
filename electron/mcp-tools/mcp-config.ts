@@ -260,6 +260,7 @@ function resolveVaultRemoteUrl(s: InstalledMcpServer, rawUrl: string): string | 
 }
 
 const MCP_CHILD_ENV_WRAPPER = `"use strict";
+const path = require("node:path");
 const crossSpawn = require(process.argv[2]);
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -311,8 +312,16 @@ for (const key of PROXY_KEYS) {
   } catch {}
 }
 // A built-in MCP may use the signed Electron binary as its bundled Node
-// runtime. Do not forward this switch to unrelated external executables.
-if (command === process.execPath) env.ELECTRON_RUN_AS_NODE = "1";
+// runtime. A dedicated plugin row can briefly retain the previous installed
+// Agentlas executable across an update, so its exact launcher contract also
+// needs Node mode. Do not forward this switch to unrelated external tools.
+const dedicatedPluginLaunch = args.length >= 8
+  && path.basename(args[0] || "") === "plugin-tool-launcher.js"
+  && args[1] === "--plugin-root"
+  && args[3] === "--release-digest"
+  && args[5] === "--entry"
+  && args.includes("--", 7);
+if (command === process.execPath || dedicatedPluginLaunch) env.ELECTRON_RUN_AS_NODE = "1";
 for (const [targetKey, alias] of Object.entries(mapping)) {
   if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !MCP_ALIAS_RE.test(alias)) {
     process.stderr.write("Agentlas MCP secret wrapper rejected an invalid environment mapping.\\n");
@@ -712,6 +721,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         s.catalogId === "agentlas-browser"
           ? {
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
+              // Full access is an explicit user choice for this run. Carry it
+              // into the browser launcher so routine code-based inspection and
+              // interaction do not stop on a second, hidden approval system.
+              AGENTLAS_BROWSER_AUTONOMY: opts?.toolGate?.permission === "full" ? "trust" : "gated",
               ...(browserRuntime?.env ?? {}),
               ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
               ...(canonicalComputerUseSelected ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() } : {}),

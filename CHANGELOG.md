@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.14 — 2026-09-16
+
+- One·Work의 자동 Goal이 원래 대화를 지우지 않습니다. 실행이 시작 전에 실패해도 사용자가 보낸 문장은 대화에 남고, 중단한 Goal은 화면에서 직접 편집한 뒤 같은 장기 작업으로 재개할 수 있습니다.
+- 직접 선택한 로컬 팀도 One의 실행 주체로 정상 호출됩니다. Goal을 편집해 revision이 바뀐 뒤 재개할 때는 새 revision 전용 컨트롤러 계보를 만들어 이전 작업과 충돌하지 않습니다.
+- Firm·Swarm·기억 정리 등 모든 공용 오케스트레이션의 계획·통합 단계는 실행용 MCP 전송 환경만 분리하고, 사용자가 직접 시작한 팀 턴을 `도구 0개` 격리 실행으로 바꾸지 않습니다. AGY가 증명할 수 없는 격리 요구 때문에 시작 전에 중단되지 않으며, 실제 작업 워커는 사용자가 준 전체 액세스와 Browser 도구를 그대로 받습니다.
+- 실행 도구가 이미 고정된 뒤 Browser 런처 메타데이터가 갱신되어도 현재 Goal을 폐기하지 않습니다. 전체 액세스로 시작한 Browser 작업은 페이지 조사·클릭·코드 기반 조작을 다시 승인받지 않고 계속하며, 실제 브라우저 탭과 조작 과정은 One·Work 결과 패널에 표시됩니다.
+- 이전 앱 버전이 등록한 플러그인 실행 경로도 시작할 때 현재 앱 경로로 복구합니다. 천문학·통계 같은 플러그인 확인이 별도 Agentlas 창을 열어 진행 중인 Goal을 `호스트 종료`로 중단시키던 공통 문제를 막고, 경로 교체 사이에도 플러그인 런처는 항상 Node 도구로 실행됩니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.13 — 2026-09-15
 
 - Team·Firm·Workforce·Science가 사용자가 고른 모델과 실행 권한을 그대로 사용합니다. Qwen이나 다른 모델로 몰래 바꾸지 않으며, 로컬 소형 모델부터 프로덕션 모델까지 각 모델이 받을 수 있는 문맥과 출력 크기에 맞춰 요청을 만듭니다. 선택한 모델이 실제로 실행되지 않으면 성공처럼 이어 가지 않고 이유를 표시합니다.

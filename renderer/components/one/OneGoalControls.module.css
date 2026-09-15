@@ -9,4 +9,9 @@
 .root button:disabled { opacity: 0.5; cursor: default; }
 .error { margin: 0 0 5px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .error > span { display: block; color: var(--muted-deep); }
+.editor { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--paper-edge); border-radius: 9px; background: var(--paper); }
+.editor textarea { width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; border: 1px solid var(--paper-edge); border-radius: 7px; padding: 8px; color: var(--ink); background: var(--paper); font: inherit; line-height: 1.45; }
+.editor textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.editor p { margin: 0; color: var(--muted-deep); font-size: 11px; }
+.editor > div { display: flex; justify-content: flex-end; gap: 6px; }
 @media (max-width: 480px) { .criteria { display: none; } .bar { gap: 4px; } }

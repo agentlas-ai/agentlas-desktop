@@ -7361,6 +7361,13 @@ button[data-toggle-state="on"] {
 .chat-composer-goal {
   background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
 }
+.chat-composer-goal-stack { width: min(100%, 740px); margin: 0 auto; }
+.chat-composer-goal-stack > .chat-composer-goal { width: 100%; }
+.chat-composer-goal-editor { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--paper-edge); border-radius: 9px; background: var(--paper); }
+.chat-composer-goal-editor textarea { width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; border: 1px solid var(--paper-edge); border-radius: 7px; padding: 8px; color: var(--ink); background: var(--paper); font: inherit; line-height: 1.45; }
+.chat-composer-goal-editor textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.chat-composer-goal-editor p { margin: 0; color: var(--muted-deep); font-size: 11px; }
+.chat-composer-goal-editor > div { display: flex; justify-content: flex-end; gap: 6px; }
 
 .chat-composer-goal-criteria {
   flex: 0 0 auto;

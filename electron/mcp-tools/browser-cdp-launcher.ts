@@ -2624,11 +2624,13 @@ function browserApprovalFailure(denied) {
   return { code, content: [{ type: 'text', text: message }], isError: true };
 }
 function requestApproval(site, actionType, summary, signal) {
+  const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
+  // Full access is Main-authored per run. It covers ordinary page actions and
+  // page-scoped code, including when the approval UI is present. Payment keeps
+  // its separate checkpoint because it can create a financial obligation.
+  const trustedRun = autonomy === 'trust' && actionType !== 'payment';
+  if (trustedRun) return Promise.resolve('approved');
   return new Promise((resolve) => {
-    const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
-    // trust는 일반 반복 작업만 무인 복구한다. 결제와 임의 코드는 환경값만으로
-    // 승인할 수 없는 secure checkpoint이며 승인 UI/서버가 없으면 fail-closed다.
-    const trustFallback = autonomy === 'trust' && actionType !== 'payment' && actionType !== 'unsafe-code';
     let req = null;
     let settled = false;
     const finish = (decision) => {
@@ -2644,7 +2646,7 @@ function requestApproval(site, actionType, summary, signal) {
     if (signal && signal.aborted) return finish('cancelled');
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     const info = readApprovalInfo();
-    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish(trustFallback ? 'approved' : 'unavailable'); }
+    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish('unavailable'); }
     const payload = JSON.stringify({ site, actionType, summary });
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
       let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });

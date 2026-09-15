@@ -261,7 +261,13 @@ export function loadDedicatedPluginToolCatalog(options: {
 }
 
 export function isDedicatedPluginToolLaunch(server: Pick<InstalledMcpServer, "command" | "args">): boolean {
-  return server.command === process.execPath
+  // The row can outlive the Desktop build that installed it. In development,
+  // or immediately after an update, its command may therefore still point at
+  // the previous Agentlas executable. Recognise the signed plugin launcher by
+  // its full argument contract; defaults.ts then rewrites the row to this
+  // process.execPath before it can be selected. Requiring command equality here
+  // made that repair impossible and launched a second full Desktop window.
+  return Boolean(server.command)
     && server.args.length >= 8
     && path.basename(server.args[0]) === LAUNCHER_BASENAME
     && server.args[1] === "--plugin-root"

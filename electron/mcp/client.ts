@@ -1969,7 +1969,12 @@ async function runMcpInvocationInContext(
     const exactSlugs = exactIds && expectedIds.every((agentId) => {
       const liveAgent = getAgentById(agentId);
       const frozen = oneParticipantEffectivePrompts?.get(agentId);
-      return Boolean(liveAgent && frozen && liveAgent.slug === frozen.agentSlug && liveAgent.kind !== "team");
+      // The conversation controller can be an installed team package selected
+      // directly from One's organisation. Dynamically selected team targets do
+      // not enter expectedIds (they retain their Firm target binding), so only
+      // the controller is allowed to carry kind=team here.
+      return Boolean(liveAgent && frozen && liveAgent.slug === frozen.agentSlug
+        && (liveAgent.kind !== "team" || agentId === expectedIds[0]));
     });
     if (!oneParticipantEffectivePrompts || !exactIds || !exactSlugs) {
       sink({

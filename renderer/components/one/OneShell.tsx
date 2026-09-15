@@ -2214,9 +2214,26 @@ export function OneShell() {
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
           ?? await getOneTaskProjection(api, wanted, active, pending, profile, appLocale);
-        setSelected(detail);
-        setConversation(null);
-        setReceipt(detail?.latestReceipt ?? null);
+        if (detail) {
+          setSelected(detail);
+          setConversation(null);
+          setReceipt(detail.latestReceipt ?? null);
+        } else {
+          // A projection is a moving view of the Task. Never turn a transient
+          // version mismatch into an empty home that clears the chat history.
+          const canonical = await api.tasks.get(wanted).catch(() => null);
+          const origin = canonical?.originChatId
+            ? await api.chats.get(canonical.originChatId).catch(() => null)
+            : null;
+          if (origin?.originSurface === "one") {
+            selectedTaskIdRef.current = null;
+            selectedConversationIdRef.current = origin.id;
+            setSelected(null);
+            setConversation(origin);
+            setReceipt(null);
+            router.replace(`/one?chat=${encodeURIComponent(origin.id)}`);
+          }
+        }
       } else if (selectedConversationIdRef.current) {
         const chatId = selectedConversationIdRef.current;
         const [chat, promotedTask] = await Promise.all([
@@ -2224,14 +2241,22 @@ export function OneShell() {
           api.tasks.findForChat(chatId).catch(() => null),
         ]);
         if (promotedTask) {
-          selectedTaskIdRef.current = promotedTask.id;
-          selectedConversationIdRef.current = null;
           const detail = items.find((item) => item.taskId === promotedTask.id)
             ?? await getOneTaskProjection(api, promotedTask.id, active, pending, profile, appLocale);
-          setSelected(detail);
-          setConversation(null);
-          setReceipt(detail?.latestReceipt ?? null);
-          router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
+          if (detail?.chatId === chatId) {
+            selectedTaskIdRef.current = promotedTask.id;
+            selectedConversationIdRef.current = null;
+            setSelected(detail);
+            setConversation(null);
+            setReceipt(detail.latestReceipt ?? null);
+            router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
+          } else {
+            // Keep the stable chat owner visible until the Task projection is
+            // coherent. The next store refresh retries the promotion.
+            setSelected(null);
+            setConversation(chat);
+            setReceipt(null);
+          }
         } else if (chat && chat.originSurface !== "one") {
           // One never ejects the person into Work. Reject stale/non-One deep
           // links in place and return to One's own conversation home instead.
@@ -2876,6 +2901,12 @@ export function OneShell() {
       // initial history request resolves. Do not replace the optimistic user
       // turn and live response with the earlier empty snapshot.
       const screenAlreadyOnThisThread = shownThreadChatIdRef.current === chatId;
+      if (activeThreadChatIdRef.current !== chatId) return;
+      // setState updaters may run immediately. Establish the durable history
+      // owner before setMessages checks it; doing this on the following line
+      // made a reopened Task reject its own non-empty history once, then stay
+      // on the false "no conversation" state until another refresh occurred.
+      shownThreadChatIdRef.current = chatId;
       const liveRunOwnsThread = screenAlreadyOnThisThread && Boolean(
         attachment || (runIdRef.current && runChatIdBeforeSwitch === chatId),
       );
@@ -2902,7 +2933,6 @@ export function OneShell() {
           return mergeDurableChatCatchup(current, hydratedNext);
         });
       }
-      shownThreadChatIdRef.current = chatId;
       // Every settled run of this conversation becomes its own turn block. The
       // live run (attachment) is drawn from live state and excluded at render.
       if (threadRunsChatIdRef.current === chatId) {

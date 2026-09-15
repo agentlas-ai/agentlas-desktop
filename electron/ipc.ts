@@ -1,5 +1,6 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
-import { getLongRunByGoalId, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "./store/long-runs";
+import { getLongRunByGoalId, acknowledgeUncertainLongRunAttempts, bindCurrentGoalRevisionToLongRun, liveLongRunAttemptCount } from "./store/long-runs";
+import { getChatGoalRevision, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -421,6 +422,7 @@ import {
   listRecentChats,
   listRecentOneChats,
   appendChatMessage,
+  autoTitleFromFirstMessage,
   removeChat,
   renameChat,
   setChatContinuousMode,
@@ -4357,6 +4359,48 @@ export function registerIpcHandlers(): void {
     }
     return context;
   });
+  ipcMain.handle("chats:reviseGoal", async (_e, id: string, input: {
+    expectedGoalId?: unknown; expectedVersion?: unknown; expectedGoalRevision?: unknown;
+    objective?: unknown; locale?: unknown;
+  }) => {
+    const chat = getChat(id);
+    if (!chat?.goalId || input?.expectedGoalId !== chat.goalId) throw new Error("goal_control_binding_changed");
+    if (!Number.isSafeInteger(input.expectedVersion) || Number(input.expectedVersion) <= 0
+      || !Number.isSafeInteger(input.expectedGoalRevision) || Number(input.expectedGoalRevision) <= 0) {
+      throw new TypeError("A current Goal revision and long-run version are required");
+    }
+    if (invocationService.activeChatIds().includes(id)) throw new Error("goal_edit_requires_pause");
+    const current = getChatGoalRevision(chat.goalId);
+    const run = getLongRunByGoalId(chat.goalId);
+    if (!current || current.revision !== input.expectedGoalRevision || !run
+      || run.version !== input.expectedVersion || !["paused", "blocked", "queued", "waiting_user", "draft"].includes(run.status)) {
+      throw new Error("goal_edit_state_changed");
+    }
+    const objective = typeof input.objective === "string" ? input.objective.replace(/\s+/g, " ").trim() : "";
+    if (!objective || objective.length > 12_000) throw new TypeError("goal_objective_invalid");
+    const locale = input.locale === "ko" || input.locale === "en"
+      ? input.locale : currentUiLocale() === "ko" ? "ko" : "en";
+    const criteria = deriveGoalAcceptanceCriteria(objective, locale);
+    getDb().transaction(() => {
+      const source = appendChatMessage(id, "user", objective);
+      reviseStoredAutomaticGoal({
+        goalId: chat.goalId!,
+        expectedRevision: current.revision,
+        source: { chatId: id, messageId: source.id, role: "user", text: source.text },
+        objective,
+        reason: "user_edited_goal",
+        retainedCriteria: [],
+        explicitlyRemovedCriterionIds: current.acceptanceCriteria.map((criterion) => criterion.id),
+        addedCriteria: criteria.map((text, index) => ({
+          id: `goal-edit-${current.revision + 1}-${index}-${createHash("sha256").update(text).digest("hex").slice(0, 12)}`,
+          text,
+        })),
+        createdAt: source.createdAt,
+      });
+      bindCurrentGoalRevisionToLongRun(run.id, run.version);
+    })();
+    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+  });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {
     const chat = getChat(id);
     if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
@@ -6509,7 +6553,29 @@ export function registerIpcHandlers(): void {
         prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
       ])).catch(() => undefined);
     }
-    return invocationService.start(request);
+    try {
+      return invocationService.start(request);
+    } catch (cause) {
+      // The renderer has already accepted and displayed this turn. Several
+      // Main-owned start gates (participant snapshot, capability claim, durable
+      // run receipt) execute before runMcpInvocation reaches its normal
+      // transcript write. Preserve the person's message even when one of those
+      // gates refuses the run; otherwise a reload makes the request disappear.
+      if (!request.agentAppMode && request.chatId && request.promptOrigin !== "system") {
+        const row = appendChatMessage(request.chatId, "user", request.userPrompt,
+          request.images?.length ? { images: request.images } : undefined);
+        autoTitleFromFirstMessage(request.chatId, request.userPrompt);
+        if (request.runId) {
+          tryRecordRunEvent({
+            runId: request.runId,
+            chatId: request.chatId,
+            kind: "invoke_prompt_bound",
+            payload: { promptMessageId: row.id, startRejected: true },
+          });
+        }
+      }
+      throw cause;
+    }
   });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
   ipcMain.handle("invoke:cancel", (_event, runId: string) => ({

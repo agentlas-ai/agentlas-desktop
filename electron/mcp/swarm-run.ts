@@ -24,7 +24,7 @@ import {
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
 import { pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
-import { runnerFailureFromError } from "../runtime/runner";
+import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
   isMobileReadRuntimeAllowed,
@@ -721,7 +721,9 @@ export async function runSwarmInvocation(
             permission: p.req.permissions,
             restrictedReadBoundary: p.restrictedReadBoundary,
             cwd: p.workingFolder ?? undefined,
-            env: p.runnerEnv,
+            // Synthesis intentionally has no MCP config. Do not inherit the
+            // worker browser marker without the grant that gives it meaning.
+            env: withoutMcpTransportEnv(p.runnerEnv),
             locale: p.locale,
           },
           {

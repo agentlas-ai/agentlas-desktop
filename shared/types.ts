@@ -1786,6 +1786,8 @@ export interface OneSeatView {
  */
 export interface ChatGoalContext {
   goalId: string;
+  /** Latest append-only user-authored revision, when this Goal uses the revision ledger. */
+  goalRevision?: number;
   objective: string;
   acceptanceCriteria: string[];
   status: "active" | "blocked" | "completed" | "cancelled";
@@ -7596,6 +7598,14 @@ export interface AgentlasIpc {
     getGoalContext: (id: string) => Promise<ChatGoalContext | null>;
     /** 첫 Goal 요청으로만 goal 계약을 정의한다. 활성 goal은 후속 채팅/steering으로 덮어쓰지 않는다. */
     defineGoal: (id: string, objective: string, locale?: "ko" | "en") => Promise<ChatGoalContext | null>;
+    /** Append a user-visible Goal revision after execution has stopped. */
+    reviseGoal: (id: string, input: {
+      expectedGoalId: string;
+      expectedVersion: number;
+      expectedGoalRevision: number;
+      objective: string;
+      locale?: "ko" | "en";
+    }) => Promise<ChatGoalContext | null>;
     /** Stop execution and automatic continuation while retaining this exact goal. */
     pauseGoal: (id: string, goalId: string) => Promise<ChatGoalContext | null>;
     /** Detach this exact goal; retain chat, files and audit history. */

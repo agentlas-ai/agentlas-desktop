@@ -1,5 +1,6 @@
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
+import { withoutMcpTransportEnv } from "../runtime/runner";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
 //   본부(division)는 지속 세션(숨김 sub-chat, 히스토리·메모리 유지), 전문가는 1회성 worker.
@@ -275,13 +276,12 @@ export function firmDivisionRequiresDirectExecution(
  * or inherited restricted boundary claims measured zero-tool isolation. */
 export function firmTurnNeedsZeroAuthority(
   p: Pick<FirmRunParams, "req" | "restrictedReadBoundary">,
-  turn: Pick<NodeTurn, "runtimeToolsDisabled">,
+  _turn: Pick<NodeTurn, "runtimeToolsDisabled">,
 ): boolean {
   const inherited = p.req as McpInvocationRequest & { untrustedNoTools?: boolean };
   return p.req.agentAppMode === true
     || p.restrictedReadBoundary === true
-    || inherited.untrustedNoTools === true
-    || turn.runtimeToolsDisabled === true;
+    || inherited.untrustedNoTools === true;
 }
 
 function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["phase"]): string {
@@ -1155,22 +1155,27 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           orchestrationAgentId: node.id,
           isolatedMcpConfig: p.isolatedMcpConfig,
           browserOnly: turn.runtimeToolsDisabled || controlPlaneTurn ? undefined : p.browserOnly,
-          mcpConfigPath: turn.runtimeToolsDisabled || controlPlaneTurn
-            ? undefined
-            : p.req.agentAppMode
-              ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
+          // Agent Apps carry a Main-minted exact allowlist. A plan/synthesis
+          // label must not accidentally drop that bounded config. Ordinary
+          // host control turns still omit their broad execution MCP surface.
+          mcpConfigPath: p.req.agentAppMode
+            ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
+            : turn.runtimeToolsDisabled || controlPlaneTurn
+              ? undefined
               : p.mcpConfigPath,
-          mcpAllowedTools: turn.runtimeToolsDisabled || controlPlaneTurn
-            ? undefined
-            : p.req.agentAppMode
-              ? agentAppAllowedTools
+          mcpAllowedTools: p.req.agentAppMode
+            ? agentAppAllowedTools
+            : turn.runtimeToolsDisabled || controlPlaneTurn
+              ? undefined
               : p.mcpAllowedTools,
           mcpCodexConfigArgs: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn
             ? undefined
             : p.mcpCodexConfigArgs,
           env: p.req.agentAppMode
             ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
-            : p.runnerEnv,
+            : turn.runtimeToolsDisabled || controlPlaneTurn
+              ? withoutMcpTransportEnv(p.runnerEnv)
+              : p.runnerEnv,
           // Host-owned plan/synthesis stays read-only while retaining normal
           // local built-ins. Agent Apps and explicit inherited restrictions
           // keep the stronger measured zero-authority boundary.

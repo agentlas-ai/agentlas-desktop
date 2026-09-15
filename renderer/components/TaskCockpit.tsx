@@ -5868,6 +5868,25 @@ function ChatPage() {
         setSessionNotice(ko ? `목표를 이어가지 못했습니다. ${explained}` : `The goal was not resumed. ${explained}`);
       });
   }, [chat, goalContext?.version, locale]);
+  const handleEditGoal = useCallback(async (objective: string): Promise<boolean> => {
+    if (!chat || !goalContext?.version || !goalContext.goalRevision) return false;
+    try {
+      const context = await ipc()?.chats.reviseGoal(chat.id, {
+        expectedGoalId: goalContext.goalId,
+        expectedVersion: goalContext.version,
+        expectedGoalRevision: goalContext.goalRevision,
+        objective,
+        locale: locale === "ko" ? "ko" : "en",
+      });
+      if (!context) return false;
+      setGoalContext(context);
+      return true;
+    } catch (cause) {
+      void ipc()?.chats.getGoalContext(chat.id).then(setGoalContext);
+      setSessionNotice(failureMessage(cause));
+      return false;
+    }
+  }, [chat, goalContext, locale]);
   const handleToggleContinuous = useCallback(() => {
     if (!chat) return;
     const next = !chat.continuousMode;
@@ -6639,6 +6658,7 @@ function ChatPage() {
           goalBlockedReason={goalContext?.blockedReason}
           onResumeGoal={handleResumeGoal}
           onPauseGoal={handlePauseGoal}
+          onEditGoal={handleEditGoal}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

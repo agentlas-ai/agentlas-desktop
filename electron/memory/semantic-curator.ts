@@ -4,7 +4,7 @@
 import { looksSecret } from "../../shared/secret-patterns";
 import { MEMORY_SCOPES, type MemoryScope } from "../architecture/manifest";
 import { randomUUID } from "node:crypto";
-import type { Runner } from "../runtime/runner";
+import { withoutMcpTransportEnv, type Runner } from "../runtime/runner";
 import type { RawMemoryEvent } from "./events";
 import { parseMemoryEvents } from "./events";
 import { callConnectedModel } from "../system-agents/judgment";
@@ -173,8 +173,12 @@ export async function runSemanticMemoryReview(input: {
       effort: input.effort,
       signal: input.signal,
       permission: "read",
-      env: input.env,
-      untrustedNoTools: true,
+      env: withoutMcpTransportEnv(input.env),
+      // This is a host-owned post-turn review, not untrusted webpage input.
+      // Some exact runtimes (including Antigravity) cannot prove a zero-tool
+      // sandbox even after MCP transport is removed. Keep the review read-only
+      // and MCP-less without rejecting the selected runtime before it starts.
+      untrustedNoTools: false,
       chatId: `memory-curator:${randomUUID()}`,
       locale: input.locale,
     }, {

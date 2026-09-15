@@ -2,14 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AgentlasIpc, ChatGoalContext } from "../../../shared/types";
-import { IconTarget, IconTrash } from "@/components/Icon";
+import { IconEdit, IconTarget, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { failureMessage } from "@/lib/invocation-failure";
 import styles from "./OneGoalControls.module.css";
 
-type GoalAction = "pause" | "delete" | "resume";
+type GoalAction = "pause" | "delete" | "resume" | "edit";
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; pending: GoalAction | null; error: string | null };
-type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "pauseGoal" | "deleteGoal" | "resumeGoal">;
+type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "pauseGoal" | "deleteGoal" | "resumeGoal" | "reviseGoal">;
 
 /** A mounted view owns observations, never Goal authority. Old reads/actions
  * may finish in Main, but cannot paint a replacement chat or reset its draft. */
@@ -57,7 +57,6 @@ export function createOneGoalControlSession(input: {
   const act = async (action: GoalAction) => {
     if (!current() || !view.goalId || view.pending === action || view.pending === "delete") return;
     const goalId = view.goalId;
-    const version = view.context?.version;
     const generation = ++actionGeneration;
     ++readGeneration;
     const fresh = () => current() && generation === actionGeneration;
@@ -66,6 +65,7 @@ export function createOneGoalControlSession(input: {
       const chat = await input.api.get(input.chatId);
       if (!fresh()) return;
       if (chat?.id !== input.chatId || chat.goalId !== goalId) throw new Error("goal_control_binding_changed");
+      if (action === "edit") throw new Error("goal_edit_objective_required");
       if (action === "delete") {
         const updated = await input.api.deleteGoal(input.chatId, goalId);
         if (!fresh()) return;
@@ -75,8 +75,27 @@ export function createOneGoalControlSession(input: {
       } else if (action === "pause") {
         await input.api.pauseGoal(input.chatId, goalId);
       } else {
-        if (!version) throw new Error("long_run_resume_version_conflict");
-        await input.api.resumeGoal(input.chatId, version, goalId);
+        // Goal events can advance the long-run CAS version after the button
+        // rendered (for example, app-close recovery or attempt settlement).
+        // Re-read immediately before resume and retry one exact version race;
+        // the goal identity is checked on every pass, so this never resumes a
+        // replacement Goal or widens the user's command.
+        let resumed = false;
+        for (let attempt = 0; attempt < 2 && !resumed; attempt += 1) {
+          const latest = await input.api.getGoalContext(input.chatId);
+          if (!fresh()) return;
+          if (!latest || latest.goalId !== goalId || !latest.version) {
+            throw new Error("goal_control_binding_changed");
+          }
+          try {
+            await input.api.resumeGoal(input.chatId, latest.version, goalId);
+            resumed = true;
+          } catch (cause) {
+            if (attempt === 0 && /(?:^|:\s*)long_run_resume_version_conflict$/.test(failureMessage(cause))) continue;
+            throw cause;
+          }
+        }
+        if (!resumed) throw new Error("long_run_resume_version_conflict");
       }
     } catch (cause) {
       if (fresh()) publish({ error: failureMessage(cause).slice(0, 240) });
@@ -87,7 +106,27 @@ export function createOneGoalControlSession(input: {
       }
     }
   };
-  return { refresh, act, observedRunId: () => view.context?.runId,
+  const revise = async (objective: string) => {
+    if (!current() || !view.goalId || view.pending || !view.context?.version || !view.context.goalRevision) return;
+    const generation = ++actionGeneration;
+    ++readGeneration;
+    const fresh = () => current() && generation === actionGeneration;
+    publish({ pending: "edit", error: null });
+    try {
+      const context = await input.api.reviseGoal(input.chatId, {
+        expectedGoalId: view.goalId,
+        expectedVersion: view.context.version,
+        expectedGoalRevision: view.context.goalRevision,
+        objective,
+      });
+      if (fresh()) publish({ context });
+    } catch (cause) {
+      if (fresh()) publish({ error: failureMessage(cause).slice(0, 240) });
+    } finally {
+      if (fresh()) { publish({ pending: null }); await refresh(); }
+    }
+  };
+  return { refresh, act, revise, observedRunId: () => view.context?.runId,
     dispose: () => { live = false; ++readGeneration; ++actionGeneration; } };
 }
 
@@ -95,6 +134,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted }: {
   chatId: string; locale: "ko" | "en"; isCurrent: () => boolean; onDeleted: () => void;
 }) {
   const [view, setView] = useState<GoalView>({ goalId: null, context: null, pending: null, error: null });
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
   const callbacks = useRef({ isCurrent, onDeleted });
   callbacks.current = { isCurrent, onDeleted };
   const session = useRef<ReturnType<typeof createOneGoalControlSession> | null>(null);
@@ -138,6 +179,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted }: {
   const status = view.context?.runStatus;
   const resumable = status === "paused" || status === "blocked";
   const pausable = Boolean(status && !["paused", "pausing", "blocked", "completed", "failed", "cancelled", "cancelling"].includes(status));
+  const editable = Boolean(view.context?.goalRevision && view.context?.version && (status === "paused" || status === "blocked" || status === "queued" || status === "waiting_user" || status === "draft"));
   const label = view.pending === "delete" ? (ko ? "목표를 삭제하는 중" : "Deleting goal")
     : status === "pausing" || view.pending === "pause" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
     : status === "paused" ? (ko ? "일시정지됨" : "Paused")
@@ -156,10 +198,24 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted }: {
       {resumable && <button type="button" disabled={view.pending === "resume" || !view.context?.version}
         aria-label={ko ? "목표 수동 재개" : "Resume goal manually"}
         onClick={() => { void session.current?.act("resume"); }}>{view.pending === "resume" ? (ko ? "확인 중" : "Checking") : ko ? "재개" : "Resume"}</button>}
+      <button type="button" aria-label={ko ? "목표 편집" : "Edit goal"}
+        title={!editable ? (ko ? "실행을 먼저 일시정지하면 편집할 수 있습니다" : "Pause the run before editing") : undefined}
+        onClick={() => { setDraft(view.context?.objective ?? ""); setEditing(true); }}><IconEdit size={13} /></button>
       <button type="button" aria-label={ko ? "목표 삭제" : "Delete goal"}
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>
     </div>}
+    {editing && <form className={styles.editor} onSubmit={(event) => {
+      event.preventDefault();
+      if (!editable || !draft.trim()) return;
+      void session.current?.revise(draft.trim()).then(() => setEditing(false));
+    }}>
+      <textarea value={draft} onChange={(event) => setDraft(event.target.value)} autoFocus
+        aria-label={ko ? "목표 내용" : "Goal objective"} maxLength={12000} />
+      {!editable && <p>{ko ? "목표를 일시정지한 뒤 저장할 수 있습니다." : "Pause the goal before saving."}</p>}
+      <div><button type="button" onClick={() => setEditing(false)}>{ko ? "취소" : "Cancel"}</button>
+        <button type="submit" disabled={!editable || !draft.trim() || view.pending === "edit"}>{view.pending === "edit" ? (ko ? "저장 중" : "Saving") : (ko ? "저장" : "Save")}</button></div>
+    </form>}
     {view.error && <p className={styles.error} role="alert">{uncertainResume
       ? (ko ? "이전 실행의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The previous action's outcome needs confirmation first. Your goal and work history are preserved.")
       : (ko ? "목표 상태를 확인하거나 변경하지 못했습니다. 상태를 새로고침한 뒤 다시 시도해 주세요." : "The goal could not be checked or changed. Refresh its status, then try again.")}

@@ -320,21 +320,25 @@ export async function listOneTaskProjections(
         .map((item) => normalizeProjection(item, oneId))
         .filter((item): item is OneTaskProjection => Boolean(item));
       if (projections.length > 0) {
+        const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
         const canonicalTasks = await api.tasks.list({ limit: 40, includeArchived: true }).catch(() => []);
         const canonicalById = new Map(canonicalTasks.map((task) => [task.id, task]));
         const hydrated = await Promise.all(projections.map(async (projection) => {
           const task = canonicalById.get(projection.taskId);
-          if (
-            !task
-            || task.version !== projection.canonicalVersion
-            || statusForCanonicalTask(task) !== projection.status.value
-          ) return null;
+          if (!task) return null;
           const [chat, latestReceipt] = task.originChatId
             ? await Promise.all([
                 api.chats.get(task.originChatId).catch(() => null),
                 api.invoke.latestReceipt(task.originChatId).catch(() => null),
               ])
             : [null, null] as const;
+          if (chat?.originSurface !== "one") return null;
+          if (task.version !== projection.canonicalVersion
+            || statusForCanonicalTask(task) !== projection.status.value) {
+            return reconcileDormantProjection(canonicalProjection(
+              task, chat, confirmations, latestReceipt, oneId, locale,
+            ), activeChatIds);
+          }
           return reconcileDormantProjection({
             ...projection,
             canonicalStatus: task.status,
@@ -398,17 +402,25 @@ export async function getOneTaskProjection(
       );
       if (normalized) {
         const task = await api.tasks.get(taskId).catch(() => null);
-        if (
-          !task
-          || task.version !== normalized.canonicalVersion
-          || statusForCanonicalTask(task) !== normalized.status.value
-        ) return null;
+        if (!task) return null;
         const [chat, latestReceipt] = task.originChatId
           ? await Promise.all([
               api.chats.get(task.originChatId).catch(() => null),
               api.invoke.latestReceipt(task.originChatId).catch(() => null),
             ])
           : [null, null] as const;
+        if (chat?.originSurface !== "one") return null;
+        if (task.version !== normalized.canonicalVersion
+          || statusForCanonicalTask(task) !== normalized.status.value) {
+          return reconcileDormantProjection(canonicalProjection(
+            task,
+            chat,
+            new Map(pendingConfirmations.map((item) => [item.chatId, item])),
+            latestReceipt,
+            oneId,
+            locale,
+          ), activeChatIds);
+        }
         return reconcileDormantProjection({
           ...normalized,
           canonicalStatus: task.status,

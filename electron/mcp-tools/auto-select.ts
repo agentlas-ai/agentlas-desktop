@@ -959,17 +959,25 @@ export async function autoSelectMcpTools(input: {
       if (retainedIds.has(result[index].id) && !needs.needed.includes(result[index].id)) result.splice(index, 1);
     }
   }
+  // A connection probe may legitimately refresh launcher metadata in the MCP
+  // registry. Rebase the receipt once, after all probes and retained-tool
+  // pruning, instead of treating that host-owned refresh as a Goal revision.
+  // Any later change is still caught below, and materialized configs retain
+  // their own exact binding lease for the lifetime of the runtime call.
+  if (activeGoalScope && goalBindingStillCurrent()) {
+    expectedInstalledFingerprint = registryFingerprint(deps.listInstalledServers());
+  }
   const finalReceiptScope = receiptScope && goalScopeStillCurrent() ? { ...receiptScope,
     scopeHash: createHash("sha256").update(goalScopeKeyFor(expectedInstalledFingerprint)).digest("hex"),
   } : null;
-  const dispatchIds = new Set(result.filter((tool) => tool.state === "ready").map((tool) => tool.id));
-  const dispatchFingerprint = (): string => registryFingerprint(deps.listInstalledServers()
-    .filter((server) => dispatchIds.has(server.id) || (server.catalogId && dispatchIds.has(server.catalogId))));
-  const selectedServerFingerprint = dispatchFingerprint();
   const context: AutoSelectedMcpContext = {
     ...(finalReceiptScope ? { goalSelectionScope: finalReceiptScope } : {}),
+    // Once Main has selected and materialized this turn's immutable config,
+    // unrelated registry metadata changes must not revoke the running Goal.
+    // The config lease/assertCurrent path still verifies the exact prepared
+    // bindings; this callback owns only Goal revision continuity.
     ...(activeGoalScope ? { goalSelectionIsCurrent: () => Boolean(finalReceiptScope)
-      && goalBindingStillCurrent() && dispatchFingerprint() === selectedServerFingerprint } : {}),
+      && goalBindingStillCurrent() } : {}),
     effectiveToolMode,
     tools: result,
     localInventory,

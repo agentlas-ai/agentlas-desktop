@@ -434,7 +434,13 @@ function exactOneInvocationParticipants(
   const participants: InstalledAgent[] = [];
   for (const participantId of participantIds) {
     const participant = installedById.get(participantId);
-    if (!participant || participant.kind === "team" || participant.sourceMissingSince) return null;
+    // A direct One organisation seat may itself be an installed team
+    // controller. It is the selected execution owner and has exact local
+    // prompt/package bytes, so pin it just like a single agent. Team targets
+    // inside a dynamically assembled roster remain outside this list and are
+    // represented by their Firm target binding instead.
+    const directOwnerTeam = participantId === ownerAgentId && participant?.kind === "team";
+    if (!participant || (participant.kind === "team" && !directOwnerTeam) || participant.sourceMissingSince) return null;
     participants.push(participant);
   }
   return participants;
@@ -1807,7 +1813,14 @@ export class InvocationService {
     let goalControllerAttemptSettled = false;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
-      const workerId = `controller_${goalLongRun.id}`;
+      // A Goal revision owns a new durable task. Reusing one controller worker
+      // across revisions makes the immutable task binding conflict on resume.
+      // Keep retries of the same revision on one worker, while giving each
+      // revised task its own controller lineage.
+      const workerId = `controller_${createHash("sha256")
+        .update(`${goalLongRun.id}:${goalLongRunTask.id}`)
+        .digest("hex")
+        .slice(0, 32)}`;
       try {
         const longRunRuntimeSelection = captureLongRunRuntimeSelection(selection, { requireExact: true });
         bindLongRunWorker({

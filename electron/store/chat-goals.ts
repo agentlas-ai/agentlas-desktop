@@ -235,11 +235,16 @@ export function reviseStoredAutomaticGoal(input: Omit<Parameters<typeof reviseAu
     if (replay) return replay;
     const contract = readRow(input.goalId);
     if (!contract || contract.chat_id !== input.source.chatId) throw new Error("goal_chat_mismatch");
-    if (contract.status !== "active") throw new Error("goal_contract_not_active");
+    if (!["active", "blocked"].includes(contract.status)) throw new Error("goal_contract_not_active");
     const current = getChatGoalRevision(input.goalId);
     if (!current) throw new Error("goal_revision_missing");
     const next = reviseAutomaticGoal({ ...input, current });
     insertRevision(next);
+    getDb().prepare(`UPDATE chat_goal_contracts
+      SET objective = ?, acceptance_criteria_json = ?, status = 'active', updated_at = ?, completed_at = NULL
+      WHERE goal_id = ? AND chat_id = ?`).run(next.objective,
+      JSON.stringify(next.acceptanceCriteria.map((criterion) => criterion.text)), next.createdAt,
+      next.goalId, next.chatId);
     return next;
   })();
 }

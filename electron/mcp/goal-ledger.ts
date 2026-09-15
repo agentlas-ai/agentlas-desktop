@@ -14,6 +14,7 @@ import {
   transitionLongRun,
   tryCompleteVerifiedLongRun,
 } from "../store/long-runs";
+import { getChatGoalRevision } from "../store/chat-goals";
 import { goalScopeCriterion } from "../../shared/goal-scope";
 
 export interface GoalLedgerDecision {
@@ -28,6 +29,7 @@ export interface GoalLedgerDecision {
 
 export interface GoalLedgerSnapshot {
   goalId: string;
+  goalRevision?: number;
   objective: string;
   acceptanceCriteria: string[];
   status: "active" | "blocked" | "completed" | "cancelled";
@@ -88,8 +90,10 @@ export async function getGoalLedgerGoal(
   try {
     const run = getLongRunByGoalId(goalId);
     if (!run) return null;
+    const revision = getChatGoalRevision(goalId);
     return {
       goalId: run.goalId,
+      ...(revision ? { goalRevision: revision.revision } : {}),
       objective: run.objective,
       acceptanceCriteria: run.acceptanceCriteria,
       status: snapshotStatus(run.status),
