@@ -670,7 +670,7 @@
   position: relative;
   height: 64px;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 12px;
   padding: 0 20px;
@@ -834,21 +834,14 @@
   font-weight: 650;
 }
 
-.taskToolbar > .taskToolbarAutomationToggle {
-  grid-column: 5;
-}
-
 .taskToolbar > .taskToolbarOutputToggle {
-  grid-column: 6;
+  grid-column: 5;
 }
 
 .taskToolbar > .taskforceMembersButton:hover,
 .taskToolbar > .taskforceMembersButton:focus-visible { border-color: var(--muted); background: var(--paper-3); }
 
-.taskToolbar > .taskToolbarAutomationToggle[data-active="true"],
-.taskToolbar > .taskToolbarOutputToggle[data-active="true"] { color: var(--ink); background: var(--paper-3); }
-
-.taskToolbarMenu { position: relative; grid-column: 7; }
+.taskToolbarMenu { position: relative; grid-column: 6; }
 
 .taskToolbarMenuPopover {
   position: absolute;

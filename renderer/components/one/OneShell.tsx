@@ -4,7 +4,6 @@ import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
-import { AutomationSchedulePanel } from "./AutomationSchedulePanel";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
@@ -44,7 +43,6 @@ import {
   IconBolt,
   IconChevronDown,
   IconCheck,
-  IconClock,
   IconClose,
   IconFileUp,
   IconFolder,
@@ -1435,7 +1433,6 @@ export function OneShell() {
     setContextRailWidthState(clampContextRailWidth(contextRailPreferredWidthRef.current));
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
-  const [automationPanelOpen, setAutomationPanelOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
   // 에이전트 세션 시트는 OneBottomSheet 를 쓰지 않는 자체 다이얼로그라 Escape
   // 계약(설정·검색 시트와 동일)이 빠져 있었다(D-8). 닫기는 포커스 위치와
@@ -6766,17 +6763,6 @@ export function OneShell() {
                 ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
                 <button
                   type="button"
-                  className={styles.taskToolbarAutomationToggle}
-                  data-one-automation-toggle="true"
-                  data-active={automationPanelOpen ? "true" : "false"}
-                  aria-label={automationPanelOpen
-                    ? (appLocale === "ko" ? "자동화 패널 닫기" : "Close automation panel")
-                    : (appLocale === "ko" ? "자동화 패널 열기" : "Open automation panel")}
-                  aria-expanded={automationPanelOpen}
-                  onClick={() => setAutomationPanelOpen((value) => !value)}
-                ><IconClock size={16} /></button>
-                <button
-                  type="button"
                   className={styles.taskToolbarOutputToggle}
                   data-one-output-toggle="true"
                   data-active={contextRailOpen ? "true" : "false"}
@@ -7959,13 +7945,6 @@ export function OneShell() {
               </div>
             </section>
           )}
-
-          <AutomationSchedulePanel
-            open={automationPanelOpen}
-            chatId={activeThreadChatId || null}
-            locale={appLocale}
-            onClose={() => setAutomationPanelOpen(false)}
-          />
 
           {searchOpen && (
             <section ref={searchSheetRef} className={styles.searchSheet} role="dialog" aria-modal="true" aria-label={tFor(appLocale, "one.shell.search.dialog_aria")} onKeyDown={trapSearchFocus}>

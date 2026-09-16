@@ -68,8 +68,6 @@ export const IconTrash = (p: Props) =>
   svg("M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", p);
 export const IconRefresh = (p: Props) =>
   svg("M21 12a9 9 0 0 1-15.4 6.4L3 21M3 12a9 9 0 0 1 15.4-6.4L21 3M21 3v6h-6M3 21v-6h6", p);
-export const IconClock = (p: Props) =>
-  svg("M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 7v5l4 2", p);
 export const IconCamera = (p: Props) =>
   svg("M4 7h3l1.5-2h7L17 7h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1zM12 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", p);
 export const IconPower = (p: Props) =>
