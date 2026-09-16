@@ -9,6 +9,7 @@ import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, InstalledAgent, InstalledFirm, RuntimeSelection } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
+import { OneAutomationTable } from "@/components/automation/OneAutomationTable";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, locale: string): string {
@@ -48,6 +49,12 @@ export default function AutomationListPage() {
      이 목록이 첫 화면인데, 승인 대기로 멈춘 그래프가 정상인 것과 똑같이 보여서
      사용자는 [지금 실행]을 눌렀고 — 그것은 같은 자리에서 또 멈춘다. */
   const [waiting, setWaiting] = useState<Record<string, string>>({});
+  /* 캔버스에서 만든 그래프와 One 이 대화에서 만든 job 은 사는 곳도 고치는 길도 다르다.
+     가르는 기준은 monitor.originChatId — 이 값이 있어야 "어느 대화" 열을 채울 수 있으므로
+     탭 구분자와 표의 열이 같은 사실 위에 선다. */
+  const [tab, setTab] = useState<"graph" | "one">("graph");
+  const oneItems = items.filter((a) => a.monitor?.originChatId);
+  const graphItems = items.filter((a) => !a.monitor?.originChatId);
 
   async function refresh() {
     const api = ipc();
@@ -268,6 +275,29 @@ export default function AutomationListPage() {
             {installing ? (locale === "en" ? "Fetching…" : "받는 중…") : (locale === "en" ? "Install" : "받기")}
           </button>
         </div>
+        <nav
+          aria-label={locale === "en" ? "Automation views" : "자동화 보기"}
+          style={{ display: "flex", gap: 6 }}
+        >
+          {([["graph", locale === "en" ? "Graphs" : "그래프", graphItems.length],
+             ["one", locale === "en" ? "One automations" : "One 자동화", oneItems.length]] as const).map(
+            ([id, label, count]) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={tab === id}
+                onClick={() => setTab(id)}
+                style={{
+                  padding: "7px 14px", fontSize: 12, fontWeight: 650, borderRadius: "var(--radius-md)",
+                  border: "1px solid " + (tab === id ? "var(--muted)" : "var(--paper-edge)"),
+                  background: tab === id ? "var(--paper-3)" : "var(--paper)",
+                  color: tab === id ? "var(--ink)" : "var(--ink-soft)",
+                  cursor: "pointer",
+                }}
+              >{label}{count > 0 ? ` ${count}` : ""}</button>
+            ),
+          )}
+        </nav>
         {message ? (
           <div
             style={{
@@ -298,7 +328,14 @@ export default function AutomationListPage() {
             <span>{locale === "en" ? "Loading automations…" : "자동화를 불러오는 중입니다…"}</span>
             <LoadingEstimate locale={locale} operationKey="desktop-automation-list" expectedSeconds={[1, 20]} />
           </div>
-        ) : items.length === 0 ? (
+        ) : tab === "one" ? (
+          <OneAutomationTable
+            items={oneItems}
+            locale={locale}
+            onToggle={(id, enabled) => void toggle(id, enabled)}
+            onRemove={(id) => void remove(id)}
+          />
+        ) : graphItems.length === 0 ? (
           <div
             style={{
               padding: 32,
@@ -312,7 +349,7 @@ export default function AutomationListPage() {
           </div>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-            {items.map((a) => (
+            {graphItems.map((a) => (
               <li
                 key={a.id}
                 style={{
