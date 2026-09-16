@@ -95,7 +95,15 @@ function canonicalPolicy(policy) {
 }
 
 function materializeProductExtensionSigningPolicy(projectDir, env = process.env) {
-  const raw = String(env[POLICY_ENV] || "").trim();
+  let raw = String(env[POLICY_ENV] || "").trim();
+  if (!raw && env.AGENTLAS_LOCAL_CANDIDATE === "1") {
+    const localPolicyPath = path.join(projectDir, "build-resources", "product-extension-signing-policy.json");
+    if (fs.existsSync(localPolicyPath)) {
+      // Local unsigned candidates may use the checked-in public policy. Official
+      // release/CI paths still require the release-owned environment value below.
+      raw = fs.readFileSync(localPolicyPath, "utf8");
+    }
+  }
   if (!raw) {
     throw new Error(
       `[product-extension-policy] ${POLICY_ENV} is required for packaging; `
