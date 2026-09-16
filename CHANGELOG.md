@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.15 — 2026-09-17
+
+- One·Work의 전체 액세스가 브라우저·MCP·결제 동작까지 한 번에 해제되며, 실행 중 `Allow once` 승인 칩이 다시 나타나지 않습니다. 기존 Goal도 사용자가 권한을 바꾸면 새 권한으로 재인가됩니다.
+- 스티어링 뒤 늦게 도착한 도구 응답은 실패가 아니라 중단으로 기록되어 이전 추론·작업 내역이 빨간 오류처럼 보이지 않습니다.
+- 긴 브라우저·파일 탭 제목은 영역 안에서 안전하게 줄어들고 스크롤되어 탭 바가 깨지지 않습니다. 브라우저 타깃의 `ref=e349` 표기도 실행 전에 올바른 참조로 정규화합니다.
+- 로컬 macOS unsigned 후보 패키징은 Luna 같은 호출 모델이나 셸 환경변수에 의존하지 않고 저장소의 공개 정책을 사용합니다. 공식 릴리즈·CI는 여전히 릴리즈 소유 공개키가 없으면 닫힙니다.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.14 — 2026-09-16
 
 - One·Work의 자동 Goal이 원래 대화를 지우지 않습니다. 실행이 시작 전에 실패해도 사용자가 보낸 문장은 대화에 남고, 중단한 Goal은 화면에서 직접 편집한 뒤 같은 장기 작업으로 재개할 수 있습니다.
