@@ -33,6 +33,7 @@ export function automationLifecycleContext(chatId: string, sessionAutomationId?:
     "For a user-requested pause/cancel, emit ## Automation followed by a json fence containing {action:'pause',automationId:<exact id>} using valid JSON double quotes. Pause disables future runs and requests Stop of an active run. Do not delete history.",
     "For a user-requested resume, emit {action:'resume',automationId:<exact id>,expectedDefinitionDigest:<exact digest>}. Resume needs write permission and a current definition. Do not resume an unknown/ambiguous target or claim application before the host receipt.",
     "Lifecycle blocks contain no prompt, schedule, graph, target, monitor or permission changes. Ask which target when the request is ambiguous. Do not recreate a paused job. Pausing remains available with read permission; resuming does not.",
+    "To change WHAT a listed job does (its prompt, schedule, steps or target), do not use a lifecycle block: re-emit the ## Automation registration block carrying that exact automationId and the revised definition. These ids are the identity to use there.",
     JSON.stringify(rows.slice(0,100).map(a=>({automationId:a.id,name:a.name,enabled:a.enabled,schedule:a.scheduleHuman,
       timezone:a.timezone,expectedDefinitionDigest:automationDefinitionDigest(a)}))),
     ...(rows.length>100?["More saved jobs exist; unlisted targets must not be guessed."]:[]),

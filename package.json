@@ -326,6 +326,7 @@
     "test:table-payload-dialects": "node scripts/table-payload-dialects-contract.mjs",
     "test:agent-toolbox": "node scripts/test-agent-toolbox-contract.cjs",
     "test:automation-result": "node scripts/test-automation-result-contract.cjs",
+    "test:automation-revision": "npm run build:electron && node scripts/test-automation-revision-contract.cjs",
     "test:cloud-agent-save-publish": "node scripts/test-cloud-agent-save-publish-contract.cjs",
     "test:codex-resume-token": "node scripts/test-codex-resume-token-contract.cjs",
     "test:graph-architect": "node scripts/test-graph-architect-contract.cjs",

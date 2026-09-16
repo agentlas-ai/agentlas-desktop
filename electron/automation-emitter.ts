@@ -147,7 +147,8 @@ export const AUTOMATION_PROTOCOL = [
   "",
   AUTOMATION_HEADING,
   "```json",
-  '[ { "name": "<short name>",',
+  '[ { "automationId": "<omit when creating; the exact id of an existing job when revising it>",',
+  '    "name": "<short name>",',
   '    "prompt": "<exactly what to do on each run>",',
   '    "agent": "<installed agent name/slug/id that should RUN this — set it whenever a specific agent (not you) owns the job; omit to run on yourself>",',
   '    "hubAgent": "<optional Agentlas Hub agent slug to RUN this without local install>",',
@@ -175,6 +176,15 @@ export const AUTOMATION_PROTOCOL = [
   "no named tool cannot be enforced or verified and will be judged unsupported.",
   "Registering is idempotent within its origin chat; use the exact automationId from the receipt when refining a job.",
   "Keep its name when refining the same job; do not register a duplicate under a new name.",
+  // ★말로만 받아들이면 자동화는 옛 프롬프트로 계속 돈다. 실측 2026-09-16: 오너가
+  //   팔로우/게시/리플 하한을 새로 지시했는데 두 자동화 프롬프트 어느 쪽에도 반영되지
+  //   않았다 — 수정 경로는 호스트에 있었지만(client.ts, action:"updated"), 이 대화가
+  //   가진 id 목록은 pause/resume 전용이라 적혀 있어 모델이 그리로 갈 문장이 없었다.
+  "WHEN THE USER CHANGES THE RULES OF A JOB THAT ALREADY EXISTS, re-emit this registration block for",
+  "that job with the revised prompt and its exact automationId — acknowledging the change in prose",
+  "alone leaves the saved job running its old prompt. Take the id from the saved automation lifecycle",
+  "list in this conversation's context when you no longer have the original receipt. Those ids are",
+  "valid identity here; only the separate lifecycle block is limited to pause/resume.",
   "STRONGLY prefer steps[] whenever the job has phases (gather → draft → check → publish → report):",
   "steps become an editable visual workflow the user can inspect; a single monolithic prompt is a",
   "last resort for genuinely one-step jobs.",
