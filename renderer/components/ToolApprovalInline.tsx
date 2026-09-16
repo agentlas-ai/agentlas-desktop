@@ -300,12 +300,15 @@ export function ToolApprovalCard({
 
 export function ToolApprovalInline({
   chatId,
+  permission,
   compact = false,
   chip = false,
   composerWidth,
   composerInset = 0,
 }: {
   chatId: string | null | undefined;
+  /** Full access settles stale live cards without painting an Allow once chip. */
+  permission?: "auto" | "read" | "write" | "full";
   compact?: boolean;
   /** Enables the Graph approval chip without changing One's existing card. */
   chip?: boolean;
@@ -326,8 +329,13 @@ export function ToolApprovalInline({
 }) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
+  const mine = chatId ? queue.filter((item) => item.chatId === chatId) : [];
+  useEffect(() => {
+    if (permission !== "full" || mine.length === 0) return;
+    for (const request of mine) void decideToolApproval(request.id, "allow_session");
+  }, [mine, permission]);
   if (!chatId) return null;
-  const mine = queue.filter((item) => item.chatId === chatId);
+  if (permission === "full") return null;
   if (mine.length === 0) return null;
   return (
     <div

@@ -722,6 +722,7 @@ const api: AgentlasIpc = {
     defineGoal: (id: string, objective: string, locale?: "ko" | "en") =>
       ipcRenderer.invoke("chats:defineGoal", id, objective, locale),
     reviseGoal: (id, input) => ipcRenderer.invoke("chats:reviseGoal", id, input),
+    reauthorizeGoal: (id, input) => ipcRenderer.invoke("chats:reauthorizeGoal", id, input),
     pauseGoal: (id: string, goalId: string) => ipcRenderer.invoke("chats:pauseGoal", id, goalId),
     deleteGoal: (id: string, goalId: string) => ipcRenderer.invoke("chats:deleteGoal", id, goalId),
     resumeGoal: (id: string, expectedVersion: number, expectedGoalId: string) =>

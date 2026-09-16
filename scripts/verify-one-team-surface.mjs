@@ -203,7 +203,7 @@ assert.match(oneShell, /const composerAttachmentBlocked = busy \|\| teamPrefligh
 // Planning and tool permission gates stay in the shared room immediately
 // above the composer. They are compact controls, not navigation or a bottom
 // sheet, and a task-force synthesis knows the durable ask-fence contract.
-assert.match(oneShell, /<DecisionInline[\s\S]*?<ToolApprovalInline chatId=\{activeThreadChatId\}/);
+assert.match(oneShell, /<DecisionInline[\s\S]*?<ToolApprovalInline[^>]*permission=\{onePermission\}[^>]*chatId=\{activeThreadChatId\}/);
 assert.doesNotMatch(oneShell, /function DecisionBottomSheet/);
 assert.match(oneShell, /data-testid="one-decision-inline"/);
 assert.match(toolApproval, /Allow image generation\?/);

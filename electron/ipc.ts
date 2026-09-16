@@ -1,6 +1,6 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { getLongRunByGoalId, acknowledgeUncertainLongRunAttempts, bindCurrentGoalRevisionToLongRun, liveLongRunAttemptCount } from "./store/long-runs";
-import { getChatGoalRevision, reviseStoredAutomaticGoal } from "./store/chat-goals";
+import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
@@ -3957,8 +3957,9 @@ export function registerIpcHandlers(): void {
   setRuntimeToolPermissionArbiter(async (ask) => {
     /*
      * 저장된 능력 규칙이 최우선이다(deny > allow, chat > agent > global).
-     * "항상 허용"으로 영구 부여된 행동은 권한 등급과 무관하게 통과하고,
-     * 영구 거부된 행동은 full 권한으로도 뚫리지 않는다.
+     * "항상 허용"으로 영구 부여된 행동은 권한 등급과 무관하게 통과한다.
+     * 사용자가 이 실행에서 Full access를 선택하면 이전에 저장된 거부보다
+     * 현재의 명시적 선택을 우선해 모든 일반 도구 관문을 해제한다.
      */
     const capability = capabilityClassFor(ask.kind, ask.tool);
     let consentBinding: ToolApprovalConsentBinding;
@@ -3976,9 +3977,9 @@ export function registerIpcHandlers(): void {
       chatId: ask.chatId,
       consentBinding,
     });
-    if (ruled === "deny") return "deny";
     if (ruled === "allow") return "allow_session";
     if (ask.permission === "full") return "allow_session";
+    if (ruled === "deny") return "deny";
     if (!ask.mutating) return "allow_once";
     if (ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));
@@ -4399,6 +4400,41 @@ export function registerIpcHandlers(): void {
       });
       bindCurrentGoalRevisionToLongRun(run.id, run.version);
     })();
+    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+  });
+  ipcMain.handle("chats:reauthorizeGoal", async (_e, id: string, input: {
+    expectedGoalId?: unknown; expectedGoalRevision?: unknown; permission?: unknown;
+  }) => {
+    const chat = getChat(id);
+    if (!chat?.goalId || input?.expectedGoalId !== chat.goalId) throw new Error("goal_control_binding_changed");
+    if (!Number.isSafeInteger(input.expectedGoalRevision) || Number(input.expectedGoalRevision) <= 0) {
+      throw new TypeError("A current Goal revision is required");
+    }
+    if (input.permission !== "read" && input.permission !== "write" && input.permission !== "full") {
+      throw new TypeError("goal_permission_invalid");
+    }
+    const changed = reauthorizeStoredAutomaticGoal({
+      goalId: chat.goalId,
+      chatId: id,
+      expectedRevision: Number(input.expectedGoalRevision),
+      permission: input.permission,
+    });
+    const run = getLongRunByGoalId(chat.goalId);
+    if (run) {
+      tryRecordRunEvent({
+        runId: run.id,
+        chatId: id,
+        kind: "goal_authority_reauthorized",
+        payload: {
+          goalId: chat.goalId,
+          goalRevision: changed.revision.revision,
+          previousAuthorityRefs: changed.previousAuthorityRefs,
+          authorityRef: changed.authorityRef,
+          permission: input.permission,
+          changedAt: changed.changedAt,
+        },
+      });
+    }
     return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {

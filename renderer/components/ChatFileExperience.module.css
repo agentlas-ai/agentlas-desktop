@@ -72,9 +72,11 @@
 }
 
 .tabs.inline {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   min-height: 28px;
-  overflow: visible;
+  overflow-x: auto;
   border: 0;
   background: transparent;
   gap: 3px;
@@ -82,6 +84,8 @@
 
 .inline .tab {
   height: 28px;
+  min-width: 0;
+  max-width: 230px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -92,7 +96,7 @@
   box-shadow: none;
 }
 
-.inline .tabSelect { padding: 0 4px 0 8px; }
+.inline .tabSelect { flex: 1 1 auto; max-width: 100%; padding: 0 4px 0 8px; }
 .inline .tabClose { width: 20px; min-height: 20px; opacity: 0; }
 .inline .tab:hover .tabClose,
 .inline .tab[data-active="true"] .tabClose { opacity: .62; }
@@ -100,6 +104,7 @@
 .tab {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
   flex: 0 0 auto;
   max-width: 230px;
   border-right: 1px solid var(--paper-edge);
@@ -123,13 +128,17 @@
 .tabSelect {
   display: inline-flex;
   align-items: center;
+  flex: 1 1 auto;
   gap: 6px;
   min-width: 0;
+  max-width: 100%;
   padding: 8px 8px 7px 10px;
   font-size: 11px;
 }
 
 .tabSelect span {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

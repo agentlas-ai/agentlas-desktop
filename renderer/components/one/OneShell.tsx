@@ -1371,10 +1371,41 @@ export function OneShell() {
   // One is the owner's personal agent. Full access is the explicit product
   // default; the chip remains the per-turn authority control for narrowing it.
   const [onePermission, setOnePermissionState] = useState<OnePermissionMode>(readStoredOnePermission);
+  const permissionChangeEpochRef = useRef(0);
   const setOnePermission = useCallback((permission: OnePermissionMode) => {
+    const previous = onePermission;
     window.localStorage.setItem(ONE_PERMISSION_STORAGE_KEY, permission);
     setOnePermissionState(permission);
-  }, []);
+    if (permission === previous) return;
+    const targetChat = activeThreadChat;
+    const api = ipc();
+    if (!api || !targetChat?.id) return;
+    const epoch = ++permissionChangeEpochRef.current;
+    const effectivePermission = permission === "auto" ? "write" : permission;
+    void (async () => {
+      // The chat row is loaded independently from the composer. Read it again
+      // so a just-promoted Goal cannot keep the old write grant merely because
+      // this render still has the pre-promotion row.
+      const currentChat = await api.chats.get(targetChat.id);
+      if (!currentChat?.goalId) return;
+      const context = await api.chats.getGoalContext(currentChat.id);
+      if (!context || context.goalId !== currentChat.goalId || !context.goalRevision) {
+        throw new Error("goal_authority_context_missing");
+      }
+      await api.chats.reauthorizeGoal(targetChat.id, {
+        expectedGoalId: currentChat.goalId,
+        expectedGoalRevision: context.goalRevision,
+        permission: effectivePermission,
+      });
+    })().catch((cause: unknown) => {
+      if (permissionChangeEpochRef.current !== epoch) return;
+      // Do not leave the composer saying Full access when Main rejected the
+      // compare-and-swap or the durable authority write.
+      window.localStorage.setItem(ONE_PERMISSION_STORAGE_KEY, previous);
+      setOnePermissionState(previous);
+      console.warn("[one] goal permission reauthorization failed", cause);
+    });
+  }, [activeThreadChat, onePermission]);
   const [workspaceGrant, setWorkspaceGrant] = useState<FsPathGrant | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
@@ -7368,7 +7399,7 @@ export function OneShell() {
               />
             )}
             <ComposerDecisionSlot className={styles.composerDecisions} surface="one" />
-            <ToolApprovalInline chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
+            <ToolApprovalInline permission={onePermission} chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
               ? selected?.taskId === selectedTaskId
               : selectedConversationId === activeThreadChatId) && <OneGoalControls
@@ -8139,7 +8170,7 @@ export function OneShell() {
           approval listener is not mounted here. Keep the native approval
           checkpoint in this route explicitly; otherwise browser actions can
           wait behind an invisible sheet. */}
-      <BrowserActionApprovalSheet />
+      <BrowserActionApprovalSheet permission={onePermission} />
 
       <OneSettingsSheet
         open={settingsSheet}

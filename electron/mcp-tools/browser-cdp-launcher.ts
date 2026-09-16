@@ -2625,10 +2625,11 @@ function browserApprovalFailure(denied) {
 }
 function requestApproval(site, actionType, summary, signal) {
   const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
-  // Full access is Main-authored per run. It covers ordinary page actions and
-  // page-scoped code, including when the approval UI is present. Payment keeps
-  // its separate checkpoint because it can create a financial obligation.
-  const trustedRun = autonomy === 'trust' && actionType !== 'payment';
+  // Full access is Main-authored per run. It is the user's explicit instruction
+  // to release every browser checkpoint for this run, including payment. A
+  // gated run remains fail-closed and reaches the approval sheet.
+  const trustedRun = autonomy === 'trust';
+  if (signal && signal.aborted) return Promise.resolve('cancelled');
   if (trustedRun) return Promise.resolve('approved');
   return new Promise((resolve) => {
     let req = null;
@@ -2651,7 +2652,7 @@ function requestApproval(site, actionType, summary, signal) {
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
       let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
     });
-    req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : (trustFallback ? 'approved' : 'unavailable')));
+    req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : 'unavailable'));
     req.on('timeout', () => { finish('expired'); req.destroy(); });
     req.write(payload); req.end();
   });
@@ -2806,11 +2807,26 @@ async function main() {
   // Normalize only that safe, read-only omission so a graph does not turn a
   // harmless tab inspection into a misleading permission failure.
   const normalizeToolArguments = (name, args) => {
-    if (name !== 'browser_tabs' || !args || typeof args !== 'object' || Array.isArray(args)) return args || {};
-    if (!Object.prototype.hasOwnProperty.call(args, 'action') || args.action == null || args.action === '') {
-      return { ...args, action: 'list' };
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return args || {};
+    let next = args;
+    // Snapshot labels are printed as [ref=e349]. Playwright's target schema
+    // wants the exact ref value (e349), not the presentation prefix copied
+    // from that label. Normalize only target-shaped fields so a real selector
+    // or human-readable element description is never rewritten.
+    const targetKeys = ['target', 'startTarget', 'endTarget'];
+    for (const key of targetKeys) {
+      const value = args[key];
+      if (typeof value !== 'string') continue;
+      const normalized = value.trim().replace(/^ref=([A-Za-z][A-Za-z0-9_-]*)$/, '$1');
+      if (normalized === value) continue;
+      if (next === args) next = { ...args };
+      next[key] = normalized;
     }
-    return args;
+    if (name === 'browser_tabs' && (!Object.prototype.hasOwnProperty.call(next, 'action') || next.action == null || next.action === '')) {
+      if (next === args) next = { ...args };
+      next.action = 'list';
+    }
+    return next;
   };
 
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.

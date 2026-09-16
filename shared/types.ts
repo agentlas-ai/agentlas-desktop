@@ -7606,6 +7606,12 @@ export interface AgentlasIpc {
       objective: string;
       locale?: "ko" | "en";
     }) => Promise<ChatGoalContext | null>;
+    /** Explicit user permission changes reauthorize an existing Goal for future continuations. */
+    reauthorizeGoal: (id: string, input: {
+      expectedGoalId: string;
+      expectedGoalRevision: number;
+      permission: "read" | "write" | "full";
+    }) => Promise<ChatGoalContext | null>;
     /** Stop execution and automatic continuation while retaining this exact goal. */
     pauseGoal: (id: string, goalId: string) => Promise<ChatGoalContext | null>;
     /** Detach this exact goal; retain chat, files and audit history. */

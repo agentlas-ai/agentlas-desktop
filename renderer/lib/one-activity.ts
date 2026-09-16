@@ -636,6 +636,22 @@ export function reduceOneActivity(
     // start of every greeting or promote the conversation to a Task.
     && !event.tool.name.trim().startsWith("Agentlas Plugins ·")
   ) {
+    const toolFailureCode = event.tool.isError
+      ? classifyToolFailure({
+          explicitCode: event.tool.failureCode,
+          result: event.tool.result,
+          status: event.status,
+        })
+      : undefined;
+    // A provider often reports the interrupted tool after Main has already
+    // published cancel_requested. That callback is transport fallout, not a
+    // new user-visible failure. Keep genuine errors red when they arrive
+    // before steering, but make late abort callbacks follow the cancellation
+    // lifecycle in both live reduction and durable replay.
+    const cancelledTool = event.tool.isError && (
+      toolFailureCode === "cancelled"
+      || items.some((item) => item.kind === "run" && item.status === "cancelling")
+    );
     items = closeRunning(items, observedAt, "completed", true);
     activeReasoningId = undefined;
     const toolActor = event.agentId || event.runtimeAgentId;
@@ -652,17 +668,15 @@ export function reduceOneActivity(
     const id = existing?.id || (toolActor
       ? `tool:${JSON.stringify([toolActor, event.tool.id || sequence])}`
       : `tool:${event.tool.id || sequence}`);
-    const status: OneActivityStatus = event.tool.isError
-      ? "failed"
-      : event.tool.result !== undefined
-        ? "completed"
-        : "running";
+    const status: OneActivityStatus = cancelledTool
+      ? "cancelled"
+      : event.tool.isError
+        ? "failed"
+        : event.tool.result !== undefined
+          ? "completed"
+          : "running";
     const failureCode = event.tool.isError
-      ? classifyToolFailure({
-          explicitCode: event.tool.failureCode,
-          result: event.tool.result,
-          status: event.status,
-        })
+      ? cancelledTool ? "cancelled" : toolFailureCode
       : undefined;
     items = upsertItem(items, {
       id,

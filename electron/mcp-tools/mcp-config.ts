@@ -721,11 +721,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         s.catalogId === "agentlas-browser"
           ? {
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
-              // Full access is an explicit user choice for this run. Carry it
-              // into the browser launcher so routine code-based inspection and
-              // interaction do not stop on a second, hidden approval system.
-              AGENTLAS_BROWSER_AUTONOMY: opts?.toolGate?.permission === "full" ? "trust" : "gated",
               ...(browserRuntime?.env ?? {}),
+              // Full access is an explicit user choice for this run. Carry it
+              // into the browser launcher after runtime-provided env so the
+              // requested authority cannot silently be downgraded to gated.
+              AGENTLAS_BROWSER_AUTONOMY: opts?.toolGate?.permission === "full" ? "trust" : "gated",
               ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
               ...(canonicalComputerUseSelected ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() } : {}),
               ...(canonicalComputerUseSelected && opts?.toolGate && mcpProxyApprovalPort() > 0 ? {

@@ -173,7 +173,12 @@ function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
   if (cell.kind === "call" && cell.failureCode) {
     const copy = toolFailureCopy(cell.failureCode, locale);
     if (copy) {
-      return <span className={cell.failureCode === "tool_failed" ? styles.failed : styles.attention} data-failure-code={cell.failureCode}>{copy}</span>;
+      const tone = cell.failureCode === "tool_failed"
+        ? styles.failed
+        : cell.failureCode === "cancelled"
+          ? styles.muted
+          : styles.attention;
+      return <span className={tone} data-failure-code={cell.failureCode}>{copy}</span>;
     }
   }
   if (cell.status === "failed" || (cell.kind === "run" && cell.exitCode != null && cell.exitCode !== 0)) {
@@ -632,7 +637,7 @@ export function OneTurnWork({
           {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
           {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
           {failed && (
-            <span className={styles.headerTerminal}>
+            <span className={terminal === "cancelled" ? styles.muted : styles.headerTerminal}>
               · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}
             </span>
           )}

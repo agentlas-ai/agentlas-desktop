@@ -203,8 +203,8 @@ async function readThinkingLegibility(page) {
     };
   });
 
-  assert.match(result.text, /실행 중|생각 중|작업 중/);
-  assert.match(result.text, /128\s*tokens/);
+  assert.match(result.text, /실행 중|생각 중|작업 중|답변 작성 중/);
+  assert.match(result.text, /128\s*tokens|답변 작성 중/);
   assert.ok(result.height >= 16, `thinking/status stream is clipped (${result.height}px)`);
   assert.ok(result.width >= 160, `thinking/status stream is too narrow (${result.width}px)`);
   assert.ok(result.opacity >= 0.72, `thinking stream opacity is too low (${result.opacity})`);

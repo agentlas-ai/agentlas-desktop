@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import type { ChatGoalContext } from "../../shared/types";
 import {
   createAutomaticGoalRevision,
@@ -171,6 +173,50 @@ export function getChatGoalRevision(goalId: string, revision?: number): GoalRevi
     ? getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1").get(goalId)
     : getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? AND revision = ?").get(goalId, revision);
   return row ? JSON.parse((row as { payload_json: string }).payload_json) as GoalRevision : null;
+}
+
+export interface GoalAuthorityReauthorization {
+  revision: GoalRevision;
+  previousAuthorityRefs: string[];
+  authorityRef: string;
+  changedAt: string;
+}
+
+/** Explicit renderer permission changes replace the active Goal grant. The
+ * objective/criteria revision stays the same; authority is host-owned state,
+ * and the new opaque ref is recorded on that revision for every future resume.
+ */
+export function reauthorizeStoredAutomaticGoal(input: {
+  goalId: string;
+  chatId: string;
+  expectedRevision: number;
+  permission: "read" | "write" | "full";
+}): GoalAuthorityReauthorization {
+  const goalId = input.goalId.trim();
+  const chatId = input.chatId.trim();
+  if (!goalId || !chatId) throw new Error("goal_authority_identity_required");
+  const result = getDb().transaction(() => {
+    const contract = readRow(goalId);
+    if (!contract || contract.chat_id !== chatId || !["active", "blocked"].includes(contract.status)) {
+      throw new Error("goal_authority_reauthorization_not_allowed");
+    }
+    const current = getChatGoalRevision(goalId);
+    if (!current || current.chatId !== chatId) throw new Error("goal_revision_missing");
+    if (current.revision !== input.expectedRevision) throw new Error("goal_revision_conflict");
+    const changedAt = new Date().toISOString();
+    const authorityRef = `invocation:permission-change-${randomUUID()}:permission:${input.permission}`;
+    const next: GoalRevision = {
+      ...current,
+      authorityRefs: [authorityRef],
+      authorityChangedAt: changedAt,
+      authorityChangeReason: "user_permission_changed",
+    };
+    getDb().prepare("UPDATE chat_goal_revisions SET payload_json = ? WHERE goal_id = ? AND revision = ?")
+      .run(JSON.stringify(next), goalId, current.revision);
+    return { revision: next, previousAuthorityRefs: [...current.authorityRefs], authorityRef, changedAt };
+  })();
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
+  return result;
 }
 
 function assertStoredUserSource(source: GoalSourceMessage): void {

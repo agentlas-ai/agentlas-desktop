@@ -33,6 +33,9 @@ export interface GoalRevision {
   acceptanceCriteria: GoalCriterion[];
   /** References to existing host grants; this model cannot issue new grants. */
   authorityRefs: string[];
+  /** Host-authored reauthorization metadata; changing permission is not a model amendment. */
+  authorityChangedAt?: string;
+  authorityChangeReason?: "user_permission_changed";
   createdAt: string;
 }
 
