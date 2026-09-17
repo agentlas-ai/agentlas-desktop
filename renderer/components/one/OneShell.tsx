@@ -5064,9 +5064,12 @@ export function OneShell() {
       selected?.canonicalVersion ?? null,
       tFor(appLocale, "one.shell.system_prompt.retry_unfinished"),
       selected ? "task" : "conversation",
-      { displayUserMessage: false, promptOrigin: "system" },
+      // This callback is the user's Retry button, not automatic recovery.
+      // Honor the visible permission selection for that explicit action;
+      // unattended continuations still inherit their durable authority.
+      { displayUserMessage: false, promptOrigin: "system", permissionMode: onePermission },
     );
-  }, [appLocale, busy, conversation?.id, selected, startRun]);
+  }, [appLocale, busy, conversation?.id, onePermission, selected, startRun]);
 
   /**
    * Automatic recovery. A run that stops short is One's problem to route around,
