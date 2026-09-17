@@ -7,6 +7,8 @@
 - A busy conversation reconnects to its existing run instead of displaying a second failed run. Automatic continuation prompts and delayed failure notices no longer leak into another conversation's composer.
 - Recovery notices remain visible when they overlap a native browser panel; dismissing the notice restores the panel. Update messages distinguish changed app files from an unrecognized signing identity.
 
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.15 — 2026-09-17
 
 - One·Work의 전체 액세스가 브라우저·MCP·결제 동작까지 한 번에 해제되며, 실행 중 `Allow once` 승인 칩이 다시 나타나지 않습니다. 기존 Goal도 사용자가 권한을 바꾸면 새 권한으로 재인가됩니다.

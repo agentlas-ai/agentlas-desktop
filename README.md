@@ -64,6 +64,7 @@
 
 ## Release log
 
+- **2026-09-17 · v1.2.16 — 업데이트 경로와 One 오류 복구를 바로잡습니다** — CLI 자체 업데이트는 서명된 앱 안에 파일을 설치하지 않고 선택한 설치 경로를 유지합니다. One 오류 복구는 원래 대화에 머물며, 진행 중인 실행에 재연결하고 다른 대화의 입력창을 바꾸지 않습니다. 오류 알림이 네이티브 브라우저 패널에 가려지지 않습니다. This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
 This README keeps the newest source release note. The Releases page remains the
