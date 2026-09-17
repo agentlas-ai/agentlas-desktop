@@ -13,7 +13,7 @@ import { HostContinuationNotice } from "../HostContinuationNotice";
 import { OneGoalControls } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { failureMessage, isChatBusyFailure } from "@/lib/invocation-failure";
+import { failureMessage, goalAdmissionControlFailure, isChatBusyFailure } from "@/lib/invocation-failure";
 import {
   type CSSProperties,
   Fragment,
@@ -1311,6 +1311,11 @@ export function OneShell() {
     previousFingerprint: null,
     judgedRunIds: new Set(),
   });
+  // An admission refusal is not a failed model run. Projection refresh may
+  // resurrect an older receipt: never recover it on behalf of the refused turn.
+  // An accepted user turn or a verified newer run (including manual Goal resume)
+  // releases the fence. It never blocks an explicit user action.
+  const admissionRecoveryFenceRef = useRef(new Map<string, { runId: string; accepted: boolean; notice: string; rejectedAt: number }>());
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [composer, setComposerState] = useState(initialComposerDraftRef.current.composer);
   function setComposer(next: string | ((current: string) => string)) {
@@ -3979,6 +3984,8 @@ export function OneShell() {
       /** Marks a prompt One authored on the user's behalf. Main records it as a
        *  system turn so the conversation never quotes our wording as theirs. */
       promptOrigin?: "system";
+      /** Only unattended recovery, never a user Retry or a decision answer. */
+      automaticRecovery?: true;
       /** A continuation inherits the last run's durable effective authority.
        * This prevents an Auto conversation from widening to write merely
        * because answering its question materializes a Task. */
@@ -3992,6 +3999,7 @@ export function OneShell() {
     const runLocale = normalizedLocale;
     const effectiveRuntimeSelection = options?.runtimeSelection ?? oneRuntimeSelection;
     if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
+    if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return;
     if (runIdRef.current && runChatIdRef.current === chatId) {
       if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
       setActionNotice(runLocale === "ko" ? "이 대화는 실행 중입니다. 현재 작업에 지시를 보내거나 중지할 수 있습니다." : "This conversation is running. You can steer or stop the current run.");
@@ -4126,6 +4134,13 @@ export function OneShell() {
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
       });
+      const admissionFence = admissionRecoveryFenceRef.current.get(chatId);
+      if (!options?.automaticRecovery && admissionFence) {
+        admissionRecoveryFenceRef.current.set(chatId, { ...admissionFence, runId, accepted: true });
+        if (activeThreadChatIdRef.current === chatId) {
+          setActionNotice((current) => current === admissionFence.notice ? null : current);
+        }
+      }
       if (options?.teamRef) {
         setTeamPreflight(await api.oneTeamPreflight.getForChat(chatId).catch(() => null));
         setPendingTeamPrompt(null);
@@ -4154,12 +4169,16 @@ export function OneShell() {
       }
       await refreshAll();
     } catch (cause) {
+      const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");
+      if (controlFailure) {
+        admissionRecoveryFenceRef.current.set(chatId, { runId, accepted: false, notice: controlFailure.message, rejectedAt: Date.now() });
+      }
       if (activeThreadChatIdRef.current && activeThreadChatIdRef.current !== chatId) {
         if (!options?.promptOrigin) {
           const key = `chat:${chatId}`;
           if (!readOneComposerDraft(key).composer.trim()) writeOneComposerDraft(key, { composer: text });
         }
-        if (!isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
+        if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
         return;
       }
       if (isChatBusyFailure(cause)) {
@@ -4202,18 +4221,21 @@ export function OneShell() {
       activeRunStartedAtRef.current = null;
       if (activityRunIdRef.current === runId) activityRunIdRef.current = null;
       setBusy(false);
+      if (controlFailure) {
+        setMessages((current) => current.filter((item) => item.id !== "one-live-response"));
+        setAutoRecovery(null);
+      }
       setActivity((current) => {
         const failed = reduceOneActivity(current, {
           kind: "error",
           observedAt: new Date().toISOString(),
-          error: { code: "invoke_start_failed", message: "Run did not start." },
+          error: { code: controlFailure?.code ?? "invoke_start_failed", message: controlFailure?.message ?? "Run did not start." },
         });
         cacheOneActivity(chatId, failed);
         return failed;
       });
-      // Main owns the failed receipt and recovery evidence. Keep the unfinished
-      // run out of the transcript; refreshAll lets the automatic recovery loop
-      // judge and resume it.
+      // A control refusal did not admit this turn. Keep its reason visible and
+      // do not let refreshAll's older receipt authorize an automatic resend.
       setError(null);
       if (options?.attachments) {
         await api.oneAttachments.discard({ ref: options.attachments.ref }).catch(() => ({ discarded: false }));
@@ -4232,17 +4254,18 @@ export function OneShell() {
        *   그 사이 사용자가 새로 쓰기 시작했으면 건드리지 않는다.
        */
       window.setTimeout(() => {
+        if (controlFailure && (runIdRef.current || admissionRecoveryFenceRef.current.get(chatId)?.runId !== runId)) return;
         if (!options?.promptOrigin && activeThreadChatIdRef.current === chatId) {
           setComposer((current) => (current.trim() ? current : text));
         }
       }, 320);
-      setActionNotice(options?.promptOrigin
+      setActionNotice(controlFailure?.message ?? (options?.promptOrigin
         ? (normalizedLocale === "ko" ? "이 대화의 자동 이어가기를 시작하지 못했습니다." : "Automatic continuation could not start in this conversation.")
         : normalizedLocale === "ko"
         ? "작업을 시작하지 못했습니다. 쓰신 글은 작성창에 되돌려 놓았습니다 — 다시 보내 주세요."
-        : "The run did not start. Your text is back in the composer — send it again.");
+        : "The run did not start. Your text is back in the composer — send it again."));
       await refreshAll();
-      if (!isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
+      if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
     } finally {
       if (attachedOneMemoryUseOnce) {
         // One Main consumes on accepted start. A rejected start is also a
@@ -5012,19 +5035,20 @@ export function OneShell() {
        *   자리가 없다). 그래서 이미 화면에 그려지는 actionNotice 로 낸다.
        */
       const raw = failureMessage(cause);
+      const controlFailure = goalAdmissionControlFailure(cause, appLocale === "ko");
       if (unsupportedInputMessage) {
         setActionNotice(unsupportedInputMessage);
         return;
       }
       setActionNotice(
-        isChatBusyFailure(cause)
+        controlFailure?.message ?? (isChatBusyFailure(cause)
           // 엔진이 이미 "무엇을 하면 되는지"까지 담아 보낸 문장이다. 덮어쓰지 않는다.
           ? raw
           : appLocale === "ko"
             ? `보내지 못했습니다${raw ? `: ${raw}` : " (이유가 오지 않았습니다)"}. 글과 첨부는 작성창에 그대로 있습니다 — 다시 보내 주세요.`
-            : `The message was not sent${raw ? `: ${raw}` : " (no reason came back)"}. Your text and attachments are still in the composer; send it again.`,
+            : `The message was not sent${raw ? `: ${raw}` : " (no reason came back)"}. Your text and attachments are still in the composer; send it again.`),
       );
-      requestOneOperationalRecovery("one-submit", cause);
+      if (!controlFailure) requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
   }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
@@ -5079,9 +5103,19 @@ export function OneShell() {
    * or a run completes, so a new request always starts from a full budget.
    */
   useEffect(() => {
-    if (busy || !receipt) return;
+    if (!receipt) return;
     const chatId = selected?.chatId ?? conversation?.id;
     if (!chatId || receipt.chatId !== chatId) return;
+    const admissionFence = admissionRecoveryFenceRef.current.get(chatId);
+    if (admissionFence) {
+      const acceptedTurn = admissionFence.accepted && admissionFence.runId === receipt.runId;
+      const newerRun = receipt.runId !== admissionFence.runId
+        && Date.parse(receipt.startedAt) > admissionFence.rejectedAt;
+      if (!acceptedTurn && !newerRun) return;
+      admissionRecoveryFenceRef.current.delete(chatId);
+      setActionNotice((current) => current === admissionFence.notice ? null : current);
+    }
+    if (busy) return;
     if (receipt.status === "completed") {
       const state = autoRecoveryRef.current;
       if (receipt.runId !== state.recoveryRunId || !state.originalRunId) {
@@ -5109,7 +5143,7 @@ export function OneShell() {
         goal: state.goal,
         attemptsSpent: state.attemptsSpent,
       }).then((verification) => {
-        if (cancelled || !verification) return;
+        if (cancelled || !verification || admissionRecoveryFenceRef.current.has(chatId)) return;
         verificationSettled = true;
         const safeDiagnosis = toCustomerSafeText(verification.diagnosis, appLocale);
         if (verification.verified) {
@@ -5140,7 +5174,7 @@ export function OneShell() {
             reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
           }),
           selected ? "task" : "conversation",
-          { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system" },
+          { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true },
         );
       }).catch(() => {
         if (!cancelled) {
@@ -5185,7 +5219,7 @@ export function OneShell() {
         previousFingerprint: state.previousFingerprint,
       })
       .then((judgement) => {
-        if (cancelled || !judgement) return;
+        if (cancelled || !judgement || admissionRecoveryFenceRef.current.has(chatId)) return;
         judgementSettled = true;
         state.previousFingerprint = judgement.fingerprint;
         const safeDiagnosis = toCustomerSafeText(judgement.diagnosis, appLocale);
@@ -5209,7 +5243,7 @@ export function OneShell() {
             reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
           }),
           selected ? "task" : "conversation",
-          { runId: recoveryRunId, displayUserMessage: false, promptOrigin: "system" },
+          { runId: recoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true },
         );
       })
       .catch(() => {

@@ -1888,6 +1888,10 @@ async function runMcpInvocationInContext(
       chat.goalId = getChatGoalId(chat.id);
     } catch {
       tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "durable_user_message_hook_failed", payload: { messageId: persistedUserMessageId } });
+      // The hook may be committing Goal resume authority. An unexpected
+      // failure is not the explicit degraded-intake outcome: never dispatch a
+      // provider or synthesize completion from an empty successful result.
+      throw new Error("durable_user_message_hook_failed");
     }
   }
   if (signal?.aborted) return earlyResult();

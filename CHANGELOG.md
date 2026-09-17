@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.19 — 2026-09-18
+
+- Sending a new local message to a paused Goal resumes that same Goal and delivers the new instruction. The message is saved before the resume is recorded; the original objective and criteria remain attached to the conversation.
+- Goal resume preserves One's recorded read, write, or full-access permission instead of silently reverting to Auto. System retries do not acquire new permission or restart a user-paused Goal.
+- One distinguishes a refused start from a failed model run. A settling stop or changed Goal binding preserves the draft and shows the reason without repeatedly retrying an older run.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Recovery of an already-modified older macOS installation is a separate delivery requirement; this release does not itself prove that recovery has reached those installations.
+
 ## 1.2.18 — 2026-09-17
 
 - Explicitly ongoing Goals retain their mandate after a verified work cycle. Durable timer waits resume in the same conversation and survive app restarts; user pauses and stops remain authoritative. Local execution requires the app and computer to be running.

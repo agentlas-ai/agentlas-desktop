@@ -75,20 +75,51 @@ export function detailForUser(error: unknown): string {
   return !detail || looksLikeMachineText(detail) ? "" : detail;
 }
 
-/**
- * 시작 실패 코드 → 사람 문장. 실측(페르소나 루프 라운드 1, 2026-09-13): 멈춘 목표 대화에 "이어서"를 치면
- * goal_explicit_resume_required 가 그대로 떨어져 "이유가 오지 않았습니다"만 4번 반복됐다. 다음 행동을 말해 준다.
- */
-export function knownStartFailureHuman(error: unknown, ko: boolean): string | null {
-  const code = failureMessage(error).split(/[\s:]/, 1)[0] ?? "";
+/** Admission/control refusals need a new user decision, not a recovery model
+ * turn. Match only exact machine codes after Electron's transport wrapping. */
+export function goalAdmissionControlFailure(error: unknown, ko: boolean): { code: string; message: string } | null {
+  const code = failureMessage(error);
+  let message: string;
   switch (code) {
+    case "goal_stop_in_progress":
+      message = ko ? "목표를 멈추는 중이라 아직 새 요청을 시작할 수 없습니다. 입력은 보존되어 있습니다. 멈춤이 끝난 뒤 보내 주세요."
+        : "The goal is still stopping, so a new request cannot start yet. Your input is preserved; send it after stopping finishes.";
+      break;
     case "goal_explicit_resume_required":
-      return ko ? "이 작업은 멈춰 있어요. 위 목표 칩의 '재개'를 누르면 여기서부터 이어집니다." : "This task is paused. Press 'Resume' on the goal chip above to continue from here.";
+      message = ko ? "목표가 멈춰 있어 이번 요청을 시작하지 못했습니다. 목표와 입력은 보존되어 있습니다."
+        : "The goal is stopped, so this request did not start. Your goal and input are preserved.";
+      break;
     case "auto_goal_resume_attempt_unsettled":
-      return ko ? "이전 실행이 아직 정리되지 않았어요. 잠시 뒤 다시 시도해 주세요." : "The previous run is still settling. Try again in a moment.";
+    case "goal_verification_pending":
+      message = ko ? "이전 실행의 결과가 아직 확인되지 않아 시작하지 않았습니다. 목표와 입력은 보존되어 있습니다."
+        : "The previous attempt's outcome is still unresolved, so this request did not start. Your goal and input are preserved.";
+      break;
     case "auto_goal_resume_chat_busy":
-      return ko ? "이 대화가 아직 앞 요청을 돌리는 중이에요." : "This chat is still running an earlier request.";
+      message = ko ? "이 목표의 이전 실행이 아직 진행 중입니다. 입력은 보존되어 있습니다."
+        : "An earlier run of this goal is still active. Your input is preserved.";
+      break;
+    case "auto_goal_resume_not_ready":
+    case "auto_goal_resume_contract_not_blocked":
+    case "auto_goal_resume_version_required":
+    case "long_run_resume_version_conflict":
+    case "goal_control_binding_changed":
+    case "goal_control_scope_mismatch":
+    case "auto_goal_control_not_allowed":
+      message = ko ? "목표 상태가 달라졌거나 아직 이어갈 수 없어 시작하지 않았습니다. 현재 목표 상태를 확인해 주세요. 입력은 보존되어 있습니다."
+        : "The goal state changed or is not ready to continue, so this request did not start. Check its current state; your input is preserved.";
+      break;
+    case "auto_goal_budget_exhausted":
+      message = ko ? "목표의 실행 한도에 도달해 시작하지 않았습니다. 목표 한도를 확인해 주세요. 입력은 보존되어 있습니다."
+        : "The goal's execution budget is exhausted, so this request did not start. Check its budget; your input is preserved.";
+      break;
     default:
       return null;
   }
+  return { code, message };
+}
+
+/** Shared customer wording; a new user turn may resume a paused goal in Main.
+ * Do not require a separate Resume button or turn a refusal into a retry. */
+export function knownStartFailureHuman(error: unknown, ko: boolean): string | null {
+  return goalAdmissionControlFailure(error, ko)?.message ?? null;
 }

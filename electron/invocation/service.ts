@@ -1010,15 +1010,22 @@ export class InvocationService {
         }
       }
     }
-    if (boundGoal && ["paused", "pausing", "cancelling"].includes(boundGoal.status)) {
-      throw new Error("goal_explicit_resume_required");
-    }
     /* Validate now; reopen only after this turn is durably stored. */
     const localUserTurn = req.promptOrigin !== "system"
       && !workspaceBinding
       && !executionContext
       && req.agentAppMode !== true;
-    let blockedGoalReactivation: { runId: string; version: number } | null = null;
+    // Sending a new local message is an explicit resume plus steering command.
+    // Host retries and remote jobs cannot turn a paused Goal back on. A stop
+    // still draining is not a paused Goal and must finish before a new start.
+    if (boundGoal && ["pausing", "cancelling"].includes(boundGoal.status)) {
+      throw new Error("goal_stop_in_progress");
+    }
+    const resumesPausedGoal = boundGoal?.status === "paused" && localUserTurn;
+    if (boundGoal?.status === "paused" && !resumesPausedGoal) {
+      throw new Error("goal_explicit_resume_required");
+    }
+    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" } | null = null;
     // The request's taskIntent is only a claim for One: semantic intake may
     // promote a conversation to a task below. Defer blocked-goal eligibility
     // until runReq carries that effective intent; otherwise a valid One task
@@ -1322,7 +1329,7 @@ export class InvocationService {
     const judgedTaskIntent = requestedOneMode
       && invocationRequest.taskIntent === "conversation"
       && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task";
-    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = claimedOneAttachments
+    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = resumesPausedGoal || claimedOneAttachments
       ? "task"
       : judgedTaskIntent
         ? "task"
@@ -1350,20 +1357,20 @@ export class InvocationService {
       } : {}),
       ...(attachmentCapabilitySummary ? { attachmentCapabilitySummary } : {}),
     };
-    if (boundGoal?.status === "blocked" && localUserTurn && runReq.taskIntent !== "conversation") {
+    if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused")
+      && localUserTurn && runReq.taskIntent !== "conversation") {
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
         throw new Error("goal_control_scope_mismatch");
       }
-      // 사람이 멈춘 목표에 말을 걸었다: 끊긴 시도의 불확실성은 인지된 것으로 적고, 살아 있는 시도만 막는다.
-      const acknowledged = acknowledgeUncertainLongRunAttempts(boundGoal.id);
+      // Admission is read-only. The durable-message hook records the user's
+      // resume authority atomically with the state transition, not before it.
       if (liveLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
       const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
         || Boolean(longRunMonetaryRefusal(boundGoal))
         || (boundGoal.budget.wallclockDeadline != null
           && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
       if (budgetExhausted) throw new Error(longRunMonetaryRefusal(boundGoal) ?? "auto_goal_budget_exhausted");
-      // 인지 이벤트가 판번호를 올렸다 — 옛 판번호로 CAS 하면 재활성화가 조용히 건너뛰어진다(라운드 2 실측).
-      blockedGoalReactivation = { runId: boundGoal.id, version: acknowledged.version };
+      stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status };
     }
     const record: RunRecord = {
       controller,
@@ -1778,7 +1785,7 @@ export class InvocationService {
       }
     }
     let goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
-    if (!executionContext && goalLongRun?.rootChatId === chat.id) {
+    if (!stoppedGoalReactivation && !executionContext && goalLongRun?.rootChatId === chat.id) {
       supersedeGoalWaitForInvocation(goalLongRun.goalId, runId);
       goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
     }
@@ -2523,31 +2530,39 @@ export class InvocationService {
           recordMcpInvocationEvent(runId, runReq, noticeEvent);
           this.publishRunEvent(record, { runId, chatId: chat.id, event: noticeEvent });
         };
-        if (blockedGoalReactivation) {
+        if (stoppedGoalReactivation) {
           if (runReq.taskIntent === "conversation") {
-            blockedGoalReactivation = null;
+            stoppedGoalReactivation = null;
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
             projectionGoalId = null;
           }
         }
-        if (blockedGoalReactivation) {
+        if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
-          /*
-           * 왜 안 이어졌는지는 사람에게 말해야 한다 — 페르소나 루프 라운드 2(2026-09-14): 재시작 뒤 막힌 목표에
-           * 세 번 말을 걸었는데 셋 다 "목표 상태가 바뀌어…"만 보였다. 실제 원인은 여기 있던 옛 '미정산' 조회가
-           * 사람이 이미 인지한 불확실 시도까지 세어 조용히 null 을 돌려준 것(위에서 인지 이벤트까지 남긴 뒤에).
-           */
-          const stall: { reason: "not-blocked" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" } = { reason: "not-blocked" };
+          // Preserve a machine-coded refusal when another action changes the
+          // exact Goal while this turn is preparing. No provider dispatch may
+          // follow a failed resume transaction.
+          const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" } = { reason: "state-changed" };
           try {
             resumed = getDb().transaction(() => {
-              const current = getLongRun(blockedGoalReactivation!.runId);
-              if (!current || current.status !== "blocked" || current.version !== blockedGoalReactivation!.version) return null;
+              const current = getLongRun(stoppedGoalReactivation!.runId);
+              const source = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?")
+                .get(sourceMessageId) as { chat_id: string; role: string; text: string } | undefined;
+              if (controller.signal.aborted || !current
+                || current.status !== stoppedGoalReactivation!.status || current.version !== stoppedGoalReactivation!.version
+                || getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id
+                || source?.chat_id !== chat.id || source.role !== "user" || source.text !== runReq.userPrompt) return null;
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
               stall.reason = "revision";
-              if (!revision || revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision) return null;
-              // 불확실한 부작용은 위에서 사람이 인지했다(원장 run.user_control). 실제로 돌고 있는 시도만 막는다.
+              // Explicit legacy Goals have a contract and tasks but no
+              // automatic-intake revision. Missing automatic Goal metadata or
+              // a partial revision binding must still fail closed.
+              if (revision
+                ? revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision
+                : revisionBinding !== null || current.goalId.startsWith("goal:auto-message:")) return null;
+              // Never replay an old attempt; the new message owns a new turn.
               stall.reason = "attempt-live";
               if (liveLongRunAttemptCount(current.id)) return null;
               stall.reason = "budget";
@@ -2555,6 +2570,11 @@ export class InvocationService {
                 || Boolean(longRunMonetaryRefusal(current))
                 || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
               if (budgetExhausted) return null;
+              const acknowledged = acknowledgeUncertainLongRunAttempts(current.id);
+              appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
+                payload: { action: "resume_with_message", sourceMessageId, invocationRunId: runId,
+                  previousStatus: current.status, acknowledgedAttemptIds: acknowledged.attemptIds } });
+              const resumeVersion = getLongRun(current.id)!.version;
               stall.reason = "contract";
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
@@ -2562,22 +2582,27 @@ export class InvocationService {
                 .run(new Date().toISOString(), current.goalId, chat.id);
               if (contractChanged.changes !== 1) throw new Error("auto_goal_resume_contract_not_blocked");
               stall.reason = "not-ready";
-              const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), current.version);
+              const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), resumeVersion);
               if (!longRunContinueDecision(queued.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");
-              return transitionLongRun({
+              const running = transitionLongRun({
                 runId: queued.id,
                 to: "running",
                 actorKind: "host",
-                reason: "blocked-goal-user-dispatch",
+                reason: "stopped-goal-user-message-dispatch",
                 appInstanceId: desktopAppInstanceId(),
                 expectedVersion: queued.version,
               });
+              // A paused timer wait belongs to the old turn. Supersede it only
+              // after durable resume; doing it at admission advances the CAS
+              // version and makes the new message reject its own transition.
+              supersedeGoalWaitForInvocation(current.goalId, runId);
+              return getLongRun(running.id);
             })();
           } catch {
             resumed = null;
           }
           if (!resumed) {
-            blockedGoalReactivation = null;
+            stoppedGoalReactivation = null;
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
             projectionGoalId = null;
@@ -2602,7 +2627,7 @@ export class InvocationService {
             };
           }
           boundGoal = resumed;
-          blockedGoalReactivation = null;
+          stoppedGoalReactivation = null;
           refreshGoalProjection();
         }
         // Only ordinary local, user-authored root-chat work enters automatic
@@ -2866,9 +2891,11 @@ export class InvocationService {
       })
       .catch((error: unknown) => {
         settleGoalControllerAttempt(false);
-        if (record.automaticGoalId && !controller.signal.aborted) {
+        const failedGoalId = record.automaticGoalId ??
+          (error instanceof Error && error.message === "durable_user_message_hook_failed" ? projectionGoalId : null);
+        if (failedGoalId && !controller.signal.aborted) {
           try {
-            const current = getLongRunByGoalId(record.automaticGoalId);
+            const current = getLongRunByGoalId(failedGoalId);
             if (current && ["queued", "running", "waiting_worker", "waiting_tool"].includes(current.status)) {
               transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "invocation_failed" });
             }
