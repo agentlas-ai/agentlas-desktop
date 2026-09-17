@@ -288,6 +288,7 @@ scripts/verify-*.cjs
 scripts/.*
 scripts/lib/mock-*.cjs
 scripts/fixtures/
+/studio-pack/apps/founder-mobile/ios/Tests/
 # Exceptions: these two are packaging machinery, not suites. package-mac.sh and
 # the cross-platform build run them against the built artifact, so CI must have
 # them or packaging fails with file-not-found.

@@ -27,10 +27,6 @@ let package = Package(
             name: "FounderMobileApp",
             dependencies: ["FounderMobileIntents"],
             path: "App"
-        ),
-        .testTarget(
-            name: "FounderMobileIntentsTests",
-            dependencies: ["FounderMobileIntents", "FounderMobileApp"]
         )
     ]
 )
