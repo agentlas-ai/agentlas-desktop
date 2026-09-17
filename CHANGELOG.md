@@ -5,6 +5,7 @@
 - CLI self-updates keep npm writes outside the signed application and preserve the selected installation. Known unsigned CLI additions can be quarantined before the original app signature is verified again.
 - The explicit One retry action honors the visible permission selection; automatic continuations retain their recorded authority.
 - Concurrent automation and recovery runs use separate tool connection configurations. Expired connections stop reconnecting, and completed runs release only their own connection resources.
+- Temporary first-connection failures can retry without duplicating initialization or replaying completed tool actions. Replaced working folders revoke their old connection instead of causing a reconnect loop.
 - Linux browser recovery recognizes the supported Chromium and Edge executable paths while retaining exact process and profile ownership checks.
 - One operational recovery stays in the originating conversation, including Taskforce task routes. It no longer guesses a recent conversation or starts another run while that conversation is busy.
 - A busy conversation reconnects to its existing run instead of displaying a second failed run. Automatic continuation prompts and delayed failure notices no longer leak into another conversation's composer.

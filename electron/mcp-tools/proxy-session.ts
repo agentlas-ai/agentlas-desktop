@@ -59,6 +59,18 @@ export function revokeMcpProxyLaunch(handle: string): void {
   if (entry.timer) clearTimeout(entry.timer);
   for (const close of [...entry.connections]) close();
 }
+class McpProxyCwdChangedError extends Error {
+  readonly code = "mcp_proxy_cwd_changed";
+  constructor() { super("mcp_proxy_cwd_changed"); }
+}
+function validateLaunchCwd(cwd: { path: string; dev: number; ino: number }): void {
+  try {
+    const stat = fs.statSync(cwd.path);
+    if (!stat.isDirectory() || fs.realpathSync(cwd.path) !== cwd.path
+      || stat.dev !== cwd.dev || stat.ino !== cwd.ino) throw new McpProxyCwdChangedError();
+    fs.accessSync(cwd.path, fs.constants.R_OK | fs.constants.X_OK);
+  } catch { throw new McpProxyCwdChangedError(); }
+}
 export function stopMcpProxySessions(): void {
   const entries = [...launches.values()]; launches.clear();
   for (const entry of entries) {
@@ -88,7 +100,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   }
   // A revoked seal cannot recover on the same handle. Reject before opening
   // a wire so proxy-child receives terminal 403, not a retryable socket reset.
-  try { preparedMcpTargetTransport(candidate, candidate.server); }
+  try { preparedMcpTargetTransport(candidate, candidate.server); validateLaunchCwd(registration.cwd); }
   catch {
     revokeMcpProxyLaunch(handle);
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
@@ -106,14 +118,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const validate = () => {
     if (closed || lifetime.signal.aborted) throw new Error("mcp_proxy_closed");
     preparedMcpTargetTransport(binding, binding.server);
-    const stat = fs.statSync(entry.cwd.path);
-    if (!stat.isDirectory() || fs.realpathSync(entry.cwd.path) !== entry.cwd.path
-      || stat.dev !== entry.cwd.dev || stat.ino !== entry.cwd.ino) throw new Error("mcp_proxy_cwd_changed");
-    fs.accessSync(entry.cwd.path, fs.constants.R_OK | fs.constants.X_OK);
+    validateLaunchCwd(entry.cwd);
   };
   const close = (cause?: unknown) => {
     if (closed) return; closed = true; clearInterval(revalidate);
-    const invalidScope = cause instanceof PreparedMcpScopeChangedError;
+    const invalidScope = cause instanceof PreparedMcpScopeChangedError || cause instanceof McpProxyCwdChangedError;
     if (invalidScope) revokeMcpProxyLaunch(handle);
     const reason = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : initialized ? "wire_closed" : "closed_before_initialize";
     console.warn(`[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`);

@@ -22,7 +22,7 @@ try {
   process.exit(2);
 }
 const idKey = (id) => JSON.stringify(id);
-let closed = false, stdinEnded = false, request = null, response = null, connected = false;
+let closed = false, stdinEnded = false, request = null, response = null, connected = false, connectedOnce = false;
 let downBuffer = "", upBuffer = "", outbox = [], outboxBytes = 0, attempt = 0, firstDropAt = 0, reconnectTimer = null;
 const handshake = { initialize: null, initialized: null };
 const pending = new Map();      // 상류 응답을 기다리는 CLI 요청 id → true
@@ -62,6 +62,7 @@ function dropped(reason) {
   const wasConnected = connected; connected = false; request = null; response = null; downBuffer = "";
   if (stdinEnded) { close(0); return; }
   if (wasConnected) { attempt = 0; firstDropAt = Date.now(); failPending(reason); }
+  if (!firstDropAt) firstDropAt = Date.now();
   if (Date.now() - firstDropAt > RECONNECT_GIVE_UP_MS) { close(3, "mcp_proxy_bridge_unavailable"); return; }
   const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 6)); attempt += 1;
   log(`reconnecting in ${delay}ms (${reason})`);
@@ -77,8 +78,8 @@ function connect() {
     if (req !== request) { res.destroy(); return; }
     if (res.statusCode === 403) { close(3, "mcp_proxy_bridge_refused"); return; }
     if (res.statusCode !== 200) { res.destroy(); dropped(`bridge_status_${res.statusCode}`); return; }
-    response = res; connected = true;
-    const replay = firstDropAt > 0;
+    const replay = connectedOnce;
+    response = res; connected = true; connectedOnce = true;
     if (replay && handshake.initialize) {
       try { swallow.add(idKey(JSON.parse(handshake.initialize).id)); } catch {}
       req.write(handshake.initialize);
