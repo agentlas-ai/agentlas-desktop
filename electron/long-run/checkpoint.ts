@@ -60,6 +60,7 @@ export function recordTaskCheckpoint(input: {
     const checkpoint: LongRunTaskCheckpoint = {
       schemaVersion: "agentlas.task-checkpoint.v2", checkpointId, goalId: run.goalId,
       goalRevision: getLongRunGoalRevisionBinding(run.id)?.revision ?? null,
+      lifecycle: revision?.lifecycle ?? "finite",
       invocationRunId: input.invocationRunId ?? null, disposition: input.disposition,
       objective: run.objective,
       acceptanceCriteria: [...run.acceptanceCriteria],

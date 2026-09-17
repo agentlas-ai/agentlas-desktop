@@ -57,6 +57,7 @@ export interface LongRunTaskCheckpoint {
   checkpointId: string;
   goalId: string;
   goalRevision: number | null;
+  lifecycle?: "finite" | "ongoing";
   invocationRunId: string | null;
   disposition: GoalVerificationDisposition;
   capsule: ContinuityCapsule;
@@ -103,6 +104,19 @@ export function compileLongRunCheckpoint(
     : checkpoint.capsule.artifactRefs;
   const executionClass = runtimeExecutionClass(kind);
   const maxChars = executionClass === "local_inference" ? 12_000 : 20_000;
+  const ongoing = checkpoint.lifecycle === "ongoing";
+  const fullPlan = checkpoint.capsule.plan ?? null;
+  const closedStates = new Set(["completed", "cancelled", "failed"]);
+  const closedSteps = fullPlan?.steps.filter(step => closedStates.has(step.state)) ?? [];
+  const recentClosed = new Set(closedSteps.slice(-8).map(step => step.taskId));
+  const plan = !ongoing || !fullPlan ? fullPlan : { ...fullPlan,
+    steps: fullPlan.steps.filter(step => !closedStates.has(step.state) || recentClosed.has(step.taskId)) };
+  const allReceipts = checkpoint.capsule.externalActionReceipts ?? [];
+  const closedAttemptStates = new Set([...closedStates, "interrupted"]);
+  const mustCarry = (receipt: typeof allReceipts[number]) => receipt.invocationRunId === checkpoint.invocationRunId
+    || !closedAttemptStates.has(receipt.state) || receipt.sideEffectState === "uncertain";
+  const recentReceipts = new Set(allReceipts.filter(receipt => !mustCarry(receipt)).slice(-8).map(receipt => receipt.attemptId));
+  const receipts = ongoing ? allReceipts.filter(receipt => mustCarry(receipt) || recentReceipts.has(receipt.attemptId)) : allReceipts;
   const packet = {
     schemaVersion: "agentlas.checkpoint-context.v1",
     executionClass,
@@ -119,7 +133,7 @@ export function compileLongRunCheckpoint(
     })),
     originalConstraintsRef: checkpoint.capsule.originalConstraintsRef ?? null,
     originalConstraints: checkpoint.capsule.originalConstraints ?? null,
-    plan: checkpoint.capsule.plan ?? null,
+    plan,
     openQuestions: checkpoint.capsule.openQuestions,
     artifactVersions,
     ...(currentArtifacts ? {
@@ -130,10 +144,16 @@ export function compileLongRunCheckpoint(
     } : {}),
     historyRangeRef: checkpoint.capsule.historyRangeRef ?? null,
     instructionRevision: checkpoint.capsule.instructionSnapshot?.revision ?? null,
-    externalActionReceipts: checkpoint.capsule.externalActionReceipts ?? null,
+    externalActionReceipts: checkpoint.capsule.externalActionReceipts ? receipts : null,
+    ...(ongoing ? { lifecycle: "ongoing", historicalRecords: {
+      checkpointRef: checkpoint.checkpointId,
+      omittedClosedPlanSteps: (fullPlan?.steps.length ?? 0) - (plan?.steps.length ?? 0),
+      omittedSettledActionReceipts: allReceipts.length - receipts.length,
+      instruction: "The full immutable checkpoint and Goal ledger retain this history. Omitted completed work is NOT new work. Read the relevant historical receipts and current external state before taking any potentially repeated action. Unsettled receipts, open plan steps and all user constraints are retained here.",
+    } } : {}),
     workspacePath: checkpoint.workspacePath,
     eventCursor: checkpoint.capsule.lastCommittedEventSeq,
-    completedTaskIds: checkpoint.completedTaskIds.slice(0, 16),
+    completedTaskIds: ongoing ? checkpoint.completedTaskIds.slice(-16) : checkpoint.completedTaskIds.slice(0, 16),
     currentOperation: checkpoint.currentOperation,
     nextActions: checkpoint.nextActions.map((item) => ({ ...item, reason: item.reason.slice(0, 160) })),
     evidenceRefs: checkpoint.capsule.evidenceRefs.slice(0, 8),

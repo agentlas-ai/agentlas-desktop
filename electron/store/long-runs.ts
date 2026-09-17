@@ -1626,6 +1626,10 @@ export function settleVerifiedLongRun(runId: string): "completed" | "cycle_compl
         .get(runId) as { n: number };
       appendEventInDb({ runId, kind: "run.ongoing_cycle_verified", actorKind: "host", at: new Date().toISOString(),
         payload: { receiptCursor: cursor.n, goalRevision: getLongRunGoalRevisionBinding(runId)?.revision } });
+      // Independent evidence, not different wording, proves progress. A new
+      // episode must not inherit the preceding verified episode's stall streak.
+      // Consumed cycles/cost and the guard for unverified repetition stay intact.
+      getDb().prepare("UPDATE long_runs SET last_progress_key = NULL, stall_streak = 0 WHERE id = ?").run(runId);
       transitionLongRun({ runId, to: "running", actorKind: "host", reason: "ongoing-cycle-verified" });
       return "cycle_completed";
     }

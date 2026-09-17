@@ -1,9 +1,11 @@
 # Changelog
 
-## 1.2.17 — 2026-09-17
+## 1.2.18 — 2026-09-17
 
 - Explicitly ongoing Goals retain their mandate after a verified work cycle. Durable timer waits resume in the same conversation and survive app restarts; user pauses and stops remain authoritative. Local execution requires the app and computer to be running.
 - Each new ongoing cycle needs fresh verification evidence. Prior completed actions are retained for inspection, not replayed as a new cycle's success. Routine timed wakes are quiet.
+- Verified ongoing episodes reset their own no-progress streak, so repeated successful work does not stop on the fourth cycle. Unverified repetition still stops, and consumed budget remains recorded.
+- Ongoing continuation context carries recent settled history with references to the full checkpoint, while preserving open work, uncertain effects and user constraints. Completed episode history no longer grows every model request without bound.
 - Structured Antigravity server-unavailable codes are distinguished from quota exhaustion and permanent refusal.
 
 - CLI self-updates keep npm writes outside the signed application and preserve the selected installation. Known unsigned CLI additions can be quarantined before the original app signature is verified again.
