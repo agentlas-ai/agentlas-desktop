@@ -2,11 +2,12 @@
  * permission, execution, completion or notification authority is encoded here. */
 export type GoalWaitSubject =
   | { kind: "invocation"; invocationRunId: string; chatId: string }
-  | { kind: "artifact"; artifactId: string };
+  | { kind: "artifact"; artifactId: string }
+  | { kind: "timer"; notBefore: string };
 export interface GoalWaitIntent {
   schemaVersion: "agentlas.goal-wait-intent.v1";
   subject: GoalWaitSubject;
-  condition: "terminal" | "changed";
+  condition: "terminal" | "changed" | "due";
   nextAction: string;
   deadline: string | null;
 }
@@ -38,6 +39,9 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
     } else if (subject.kind === "artifact" && identifier(subject.artifactId) && item.condition === "changed"
       && Object.keys(subject).every(key => ["kind", "artifactId"].includes(key))) {
       bound = { kind: "artifact", artifactId: subject.artifactId };
+    } else if (subject.kind === "timer" && typeof subject.notBefore === "string" && Number.isFinite(Date.parse(subject.notBefore))
+      && item.condition === "due" && Object.keys(subject).every(key => ["kind", "notBefore"].includes(key))) {
+      bound = { kind: "timer", notBefore: new Date(subject.notBefore).toISOString() };
     } else return invalid("goal_wait_subject_unsupported");
     return { text: cleaned, request: { status: "requested", intent: { schemaVersion: "agentlas.goal-wait-intent.v1",
       subject: bound, condition: item.condition, nextAction: item.nextAction.trim(), deadline: item.deadline as string | null } } };
@@ -50,5 +54,5 @@ Emit at most one block:
 \`\`\`agentlas-goal-wait
 {"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"What to inspect after it settles","deadline":null}
 \`\`\`
-For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
+For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". For an explicitly ongoing Goal, use subject {"kind":"timer","notBefore":"future ISO timestamp"} and condition "due" to wait until the next useful work cycle. Respect the user's cadence, and inspect current external state before acting; never repeat an already completed post or purchase. Timer waits cannot be earlier than one minute from now. A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
 }

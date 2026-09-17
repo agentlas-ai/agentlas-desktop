@@ -18,7 +18,7 @@ import {
   requestLongRunVerification,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
-  tryCompleteVerifiedLongRun,
+  settleVerifiedLongRun,
   transitionLongRun,
 } from "../store/long-runs";
 import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
@@ -33,6 +33,7 @@ import {
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
+import { registerOngoingGoalCycle } from "./wait-subscriptions";
 
 const controllers = new Map<string, AbortController>();
 let accepting = true;
@@ -912,7 +913,8 @@ interface VerificationRecoveryEpoch {
 
 /** A person may explicitly retry a blocked campaign, and a new Goal revision
  * is a new verification contract. Both boundaries are durable host facts. An
- * automatic transition or model-authored text can never mint a fresh budget. */
+ * independently verified ongoing episode also starts a new recovery epoch.
+ * Model-authored text alone can never mint a fresh budget. */
 function verificationRecoveryEpoch(runId: string): VerificationRecoveryEpoch {
   try {
     const row = getDb().prepare(
@@ -921,6 +923,7 @@ function verificationRecoveryEpoch(runId: string): VerificationRecoveryEpoch {
          FROM long_run_events
          WHERE run_id = ? AND (
            (kind = 'run.goal_revision_bound' AND actor_kind = 'host')
+           OR (kind = 'run.ongoing_cycle_verified' AND actor_kind = 'host')
            OR (kind = 'run.status_changed' AND actor_kind = 'user'
              AND json_extract(payload_json, '$.reason') = 'user-resume')
          )
@@ -954,6 +957,7 @@ export async function verifyGoalCompletionClaim(input: {
   invocationRunId?: string | null;
   projectDir?: string | null;
   signal?: AbortSignal;
+  hasTransientAttachments?: boolean;
 }): Promise<GoalVerificationResult | null> {
   if (input.signal?.aborted) return null;
   if (!accepting) throw new Error("desktop_long_run_verifier_admission_closed");
@@ -1207,7 +1211,9 @@ export async function verifyGoalCompletionClaim(input: {
         summary: verdict.reason,
       });
     }
-    const completed = tryCompleteVerifiedLongRun(run.id);
+    return getDb().transaction(() => {
+    const settlement = settleVerifiedLongRun(run.id);
+    const completed = settlement === "completed";
     // `verifying` is transitional: typed repair and missing-evidence cases get
     // bounded continuation; prerequisites, unknown failures, and repeated stalls
     // become actionable blocked states.
@@ -1223,7 +1229,8 @@ export async function verifyGoalCompletionClaim(input: {
     let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts,
       retriesSoFar: recoveryEpoch.inconclusiveRetries, retryLimit,
       recoveryStreak });
-    if (!completed) {
+    if (settlement === "cycle_completed") disposition = "cycle_completed";
+    if (!completed && disposition !== "cycle_completed") {
       const current = getLongRunByGoalId(input.goalId);
       if (current && current.status === "verifying") {
         // Transitions append long-run events, so the existing store-change path
@@ -1262,8 +1269,16 @@ export async function verifyGoalCompletionClaim(input: {
       recoveryFingerprint, recoveryStreak,
       evidenceRefs: durableEvidence.refs, projectDir: input.projectDir,
     });
+    let cycleCheckpointId: string | null = null;
+    if (disposition === "cycle_completed") {
+      if (!input.invocationRunId) throw new Error("goal_wait_attempt_missing");
+      const wait = registerOngoingGoalCycle({ goalId: input.goalId, invocationRunId: input.invocationRunId,
+        hasTransientAttachments: input.hasTransientAttachments });
+      cycleCheckpointId = wait.checkpointId;
+    }
     return { runId: run.id, verifierWorkerId: workerId, verdicts: checkpointVerdicts, completed, disposition,
-      checkpointId: checkpoint?.checkpointId ?? null };
+      checkpointId: cycleCheckpointId ?? checkpoint?.checkpointId ?? null };
+    })();
   } catch (error) {
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,

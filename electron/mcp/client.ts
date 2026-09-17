@@ -15,7 +15,7 @@ import type { ChatHostNotice } from "../../shared/types";
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
-import { passFailureVerdict } from "../long-run/pass-failure-verdict";
+import { passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -4869,7 +4869,7 @@ ${effectiveUserPrompt}`;
           turnContextParts.push(persistentGoalTurnContext(activeGoal, locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
-          turnContextParts.push(goalCompletionProtocol(locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+          turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           if (!executionContext) { turnContextParts.push(goalWaitProtocol()); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
         }
       }
@@ -5780,7 +5780,7 @@ ${effectiveUserPrompt}`;
               : `Pass ${pass} failed; retrying the same pass in ${Math.round(verdict.retryAfterMs / 1000)}s.`,
             activity: { code: "goal_pass_retry" },
           });
-          await new Promise((resolve) => setTimeout(resolve, verdict.retryAfterMs));
+          await waitForPassRetry(verdict.retryAfterMs, signal);
           if (signal?.aborted) break;
           pass -= 1;
           continue;
@@ -5988,7 +5988,8 @@ ${effectiveUserPrompt}`;
     // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
     // 백그라운드 자동화로 안전하게 이어받는다. persistent goal 채팅은 goal 미달이기만 해도
     // (마커 없이) 여기로 들어와 앱 재시작·크래시 뒤에도 목표가 계속 돈다.
-    if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite) {
+    if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite
+      && (!activeGoalId || getChatGoalRevision(activeGoalId)?.lifecycle !== "ongoing")) {
       const marker = `Source chat: ${chat.id}`;
       // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
       // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.

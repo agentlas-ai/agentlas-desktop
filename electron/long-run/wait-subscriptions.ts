@@ -5,7 +5,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRun, getLongRunByGoalId, listLongRuns, transitionLongRun } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, listLongRuns, listLongRunTasks, transitionLongRun } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
@@ -34,7 +34,8 @@ let host: GoalWaitHost | null = null;
 export function setGoalWaitHost(value: GoalWaitHost | null): void { host = value; }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const identity = (intent: GoalWaitIntent) => intent.subject.kind === "invocation"
-  ? `invocation:${intent.subject.invocationRunId}` : `artifact:${intent.subject.artifactId}`;
+  ? `invocation:${intent.subject.invocationRunId}` : intent.subject.kind === "artifact"
+    ? `artifact:${intent.subject.artifactId}` : `timer:${intent.subject.notBefore}`;
 export function latestGoalWaitSubscription(goalId: string): GoalWaitSubscription | null {
   const run = getLongRunByGoalId(goalId);
   if (!run || run.surface === "science") return null;
@@ -56,10 +57,14 @@ function persist(value: GoalWaitSubscription): void {
   appendLongRunEvent({ runId: value.runId, kind: "run.wait_subscription", actorKind: "host",
     sourceEventId: `wait:${value.waitId}:${value.revision}`, payload: { subscription: value } });
 }
-export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId" | "sourceInvocationId" | "intent">): GoalWaitObservation {
+export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId" | "sourceInvocationId" | "intent">, now = Date.now()): GoalWaitObservation {
   const chat = getChat(wait.chatId);
   if (!chat) throw new Error("goal_wait_chat_missing");
   const subject = wait.intent.subject;
+  if (subject.kind === "timer") {
+    const due = now >= Date.parse(subject.notBefore);
+    return { digest: hash({ notBefore: subject.notBefore, due }), cursor: subject.notBefore, terminal: due, reason: due ? "ongoing_cycle_due" : null };
+  }
   if (subject.kind === "artifact") {
     const surface = getAgentSurface(subject.artifactId);
     if (!surface || surface.chatId !== chat.id || surface.artifactRevision == null || surface.stateRevision == null) throw new Error("goal_wait_artifact_binding_invalid");
@@ -99,6 +104,11 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) throw new Error("goal_wait_original_authority_missing");
     if (input.hasTransientAttachments) throw new Error("goal_wait_attachment_refresh_required");
     if (input.intent.deadline && Date.parse(input.intent.deadline) <= now) throw new Error("goal_wait_deadline_elapsed");
+    if (input.intent.subject.kind === "timer") {
+      if (revision.lifecycle !== "ongoing") throw new Error("goal_wait_ongoing_authority_required");
+      const due = Date.parse(input.intent.subject.notBefore);
+      if (due < now + 60_000 || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
+    }
     const prior = latestGoalWaitSubscription(run.goalId);
     if (prior?.state === "pending" || prior?.state === "claimed") throw new Error("goal_wait_already_registered");
     const boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId });
@@ -106,7 +116,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     const attempt = getDb().prepare("SELECT worker_id, attempt FROM long_run_worker_attempts WHERE invocation_run_id=? AND run_id=?")
       .get(input.invocationRunId, run.id) as { worker_id: string; attempt: number } | undefined;
     if (!attempt) throw new Error("goal_wait_attempt_missing");
-    const observation = observeGoalWaitSubject({ chatId: run.rootChatId, sourceInvocationId: input.invocationRunId, intent: input.intent });
+    const observation = observeGoalWaitSubject({ chatId: run.rootChatId, sourceInvocationId: input.invocationRunId, intent: input.intent }, now);
     const checkpoint = recordTaskCheckpoint({ goalId: run.goalId, workerId: attempt.worker_id, attempt: attempt.attempt,
       invocationRunId: input.invocationRunId, disposition: "retry_required", verdicts: [{ criterionIndex: 0, verdict: "inconclusive",
         reason: "Waiting for the registered subject; no completion verification has been claimed.", nextAction: input.intent.nextAction }], evidenceRefs: [], projectDir: getChatWorkingFolder(run.rootChatId) });
@@ -114,12 +124,23 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     const subscription: GoalWaitSubscription = { schemaVersion: "agentlas.goal-wait-subscription.v1", waitId: randomUUID(), runId: run.id,
       goalId: run.goalId, goalRevision: revision.revision, chatId: run.rootChatId, revision: 1, sourceInvocationId: input.invocationRunId,
       checkpointId: checkpoint.checkpointId, intent: input.intent, subjectRef: identity(input.intent), cursor: observation.cursor,
-      lastObservedDigest: observation.digest, nextCheckAt: new Date(now + 30_000).toISOString(), intervalMs: 30_000,
+      lastObservedDigest: observation.digest, nextCheckAt: input.intent.subject.kind === "timer" ? input.intent.subject.notBefore : new Date(now + 30_000).toISOString(), intervalMs: 30_000,
       deadline: input.intent.deadline, state: "pending", wakeReason: null, successorInvocationId: null, executionAvailability: "app-running" };
     persist(subscription);
     transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: `goal_wait:${subscription.waitId}` });
     return subscription;
   })();
+}
+
+/** The mandate remains open after verified work. A quiet, durable observation
+ * cycle is the fallback; it is not permission to repeat an external action. */
+export function registerOngoingGoalCycle(input: { goalId: string; invocationRunId: string; hasTransientAttachments?: boolean; now?: number }): GoalWaitSubscription {
+  const now = input.now ?? Date.now();
+  return registerGoalWaitSubscription({ ...input, now, intent: {
+    schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore: new Date(now + 30 * 60_000).toISOString() },
+    condition: "due", deadline: null,
+    nextAction: "Begin the next bounded episode of this ongoing mandate. Inspect current state and prior action receipts first. Respect the original user's cadence and scope; if no action is due, register another timer wait. Never repeat a completed post, purchase or other side effect. Reconcile any uncertain effect before taking another action. Keep the mandate open until the user stops it.",
+  } });
 }
 
 function candidateCheckpoint(wait: GoalWaitSubscription): LongRunTaskCheckpoint {
@@ -162,7 +183,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     const due = !wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now || (wait.deadline !== null && Date.parse(wait.deadline) <= now);
     if (!due && candidate.status !== "paused") continue;
     let observation: GoalWaitObservation | null = null, failure: string | null = null;
-    try { if (due) observation = await (options.observe ?? observeGoalWaitSubject)(wait); }
+    try { if (due) observation = await (options.observe ? options.observe(wait) : observeGoalWaitSubject(wait, clock())); }
     catch (error) { failure = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_source_unavailable"; }
     let dispatch: GoalWaitDispatch | null = null, notice: GoalWaitSubscription | null = null;
     try { getDb().transaction(() => {
@@ -187,13 +208,18 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         persist(next); transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason! }); notice = next; return;
       }
       if (!observation || !checkpoint) return;
-      const ready = wait.intent.condition === "terminal" ? observation.terminal : observation.digest !== wait.lastObservedDigest;
+      const ready = wait.intent.condition === "changed" ? observation.digest !== wait.lastObservedDigest : observation.terminal;
       next.cursor = observation.cursor; next.lastObservedDigest = observation.digest;
       if (!ready) {
         next.intervalMs = Math.min(wait.intervalMs * 2, 300_000);
         next.nextCheckAt = new Date(clock() + next.intervalMs).toISOString(); persist(next); return;
       }
       transitionLongRun({ runId: current.id, to: "running", actorKind: "host", reason: "goal_wait_satisfied" });
+      if (wait.intent.subject.kind === "timer" && !listLongRunTasks(current.id, true).length) {
+        if (getChatGoalRevision(wait.goalId)?.lifecycle !== "ongoing") throw new Error("goal_wait_ongoing_authority_required");
+        addLongRunTask({ runId: current.id, id: `task:ongoing:${wait.waitId}`, title: "Next ongoing work cycle", objective: current.objective,
+          acceptanceCriteria: current.acceptanceCriteria, criterionIndices: current.acceptanceCriteria.map((_, index) => index) });
+      }
       const fresh = recordTaskCheckpoint({ goalId: wait.goalId, workerId: checkpoint.capsule.workerId, attempt: checkpoint.capsule.attempt,
         invocationRunId: wait.sourceInvocationId, disposition: "retry_required", verdicts: checkpoint.nextActions,
         evidenceRefs: [...checkpoint.capsule.evidenceRefs, `wait:${wait.waitId}:observation:${observation.digest}`], projectDir: checkpoint.workspacePath });
@@ -233,6 +259,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         if (state === "blocked" && current.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
       })();
     }
-    if (notice && !["paused", "pausing", "cancelling", "cancelled"].includes(getLongRun(candidate.id)?.status ?? "")) attention(notice, target);
+    // Routine timed cycles are quiet; failures still ask for attention once.
+    if (notice && !(wait.intent.subject.kind === "timer" && (notice as GoalWaitSubscription).state === "dispatched")
+      && !["paused", "pausing", "cancelling", "cancelled"].includes(getLongRun(candidate.id)?.status ?? "")) attention(notice, target);
   }
 }

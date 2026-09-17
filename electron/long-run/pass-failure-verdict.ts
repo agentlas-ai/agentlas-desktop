@@ -39,6 +39,16 @@ export function transientRetryDelayMs(attempt: number): number {
 
 export const MAX_TRANSIENT_RETRIES = 3;
 
+/** Stop/steering must interrupt even the longest retry backoff immediately. */
+export function waitForPassRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
 export function passFailureVerdict(
   failure: Pick<RunnerFailure, "kind" | "retryAfterHint">,
   transientAttemptsSoFar: number,
@@ -63,6 +73,7 @@ export function passFailureVerdict(
        */
       return { action: "pause", reason: "unsupported", retryAfterMs: 0, ...hint };
     case "timeout":
+    case "unavailable":
     case "empty":
     case "exit":
       // Capacity, network, a truncated stream: the same request often succeeds shortly after.

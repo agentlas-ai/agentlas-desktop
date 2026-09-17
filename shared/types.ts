@@ -1786,6 +1786,7 @@ export interface OneSeatView {
  */
 export interface ChatGoalContext {
   goalId: string;
+  lifecycle?: "finite" | "ongoing";
   /** Latest append-only user-authored revision, when this Goal uses the revision ledger. */
   goalRevision?: number;
   objective: string;
@@ -1805,7 +1806,7 @@ export interface ChatGoalContext {
   wait?: {
     waitId: string;
     state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
-    subjectKind: "invocation" | "artifact";
+    subjectKind: "invocation" | "artifact" | "timer";
     nextCheckAt: string | null;
     deadline: string | null;
     executionAvailability: "app-running";

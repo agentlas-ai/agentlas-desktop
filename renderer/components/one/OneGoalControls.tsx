@@ -180,16 +180,22 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted }: {
   const resumable = status === "paused" || status === "blocked";
   const pausable = Boolean(status && !["paused", "pausing", "blocked", "completed", "failed", "cancelled", "cancelling"].includes(status));
   const editable = Boolean(view.context?.goalRevision && view.context?.version && (status === "paused" || status === "blocked" || status === "queued" || status === "waiting_user" || status === "draft"));
+  const ongoing = view.context?.lifecycle === "ongoing";
+  const timedWait = status === "waiting_tool" && view.context?.wait?.state === "pending" && view.context.wait.subjectKind === "timer";
+  const nextCheckAt = view.context?.wait?.nextCheckAt;
+  const nextCheck = nextCheckAt && Number.isFinite(Date.parse(nextCheckAt))
+    ? new Date(nextCheckAt).toLocaleString(ko ? "ko-KR" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
   const label = view.pending === "delete" ? (ko ? "목표를 삭제하는 중" : "Deleting goal")
     : status === "pausing" || view.pending === "pause" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
     : status === "paused" ? (ko ? "일시정지됨" : "Paused")
     : status === "blocked" ? (ko ? "진행이 멈췄습니다 · 재개 전 상태 확인이 필요합니다" : "Blocked · check the outcome before resuming")
     : status === "verifying" ? (ko ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
+    : timedWait ? (ko ? `다음 확인 ${nextCheck ?? "대기 중"} · 앱 실행 중 자동 재개` : `Next check ${nextCheck ?? "pending"} · resumes while app is running`)
     : view.context?.objective || (ko ? "다음 요청으로 목표를 확정합니다" : "Your next request will define the goal");
   return <section className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true">
     {view.goalId && <div className={styles.bar}>
       <IconTarget size={13} />
-      <strong>{ko ? "목표" : "Goal"}</strong>
+      <strong>{ongoing ? (ko ? "지속 목표" : "Ongoing goal") : (ko ? "목표" : "Goal")}</strong>
       <span className={styles.label} title={label} role="status">{label}</span>
       {Boolean(view.context?.acceptanceCriteria.length) && <span className={styles.criteria}
         title={view.context!.acceptanceCriteria.join("\n")}>{ko ? `기준 ${view.context!.acceptanceCriteria.length}개` : `${view.context!.acceptanceCriteria.length} criteria`}</span>}

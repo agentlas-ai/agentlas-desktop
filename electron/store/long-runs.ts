@@ -706,6 +706,9 @@ export function transitionLongRun(input: {
   if (current.surface === "science" && input.authority !== "science-projection") {
     throw new Error("science_projection_read_only");
   }
+  if (input.to === "completed" && current.surface !== "science" && getChatGoalRevision(current.goalId)?.lifecycle === "ongoing") {
+    throw new Error("ongoing_goal_requires_user_stop");
+  }
   assertLongRunTransition(current.status, input.to);
   if (current.status === input.to) return current;
   const now = new Date().toISOString();
@@ -1294,11 +1297,14 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
 
 function latestCriterionVerdicts(runId: string): Map<number, { taskId: string | null; verdict: string; evidenceRefs: string[]; artifactRefs: string[] }> {
   const binding = getLongRunGoalRevisionBinding(runId);
+  const episode = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.ongoing_cycle_verified' ORDER BY seq DESC LIMIT 1")
+    .get(runId) as { payload_json: string } | undefined;
+  const episodeCursor = episode ? JSON.parse(episode.payload_json).receiptCursor : 0;
   const rows = getDb().prepare(
     `SELECT task_id, criterion_index, verdict, evidence_refs_json, artifact_refs_json
      FROM long_run_verification_receipts
      WHERE run_id = ? AND rowid > ? ORDER BY created_at DESC, rowid DESC`,
-  ).all(runId, binding?.receiptCursor ?? 0) as Array<{
+  ).all(runId, Math.max(binding?.receiptCursor ?? 0, Number.isSafeInteger(episodeCursor) ? episodeCursor : 0)) as Array<{
     task_id: string | null;
     criterion_index: number;
     verdict: string;
@@ -1577,11 +1583,19 @@ export function applyScienceLongRunProjectionStatus(input: {
 }
 
 export function tryCompleteVerifiedLongRun(runId: string): boolean {
+  const run = getLongRun(runId);
+  if (run && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing") return false;
+  return settleVerifiedLongRun(runId) === "completed";
+}
+
+/** An ongoing mandate verifies episodes, never its own termination. Only the
+ * host verifier uses this path; ordinary completion requests remain false. */
+export function settleVerifiedLongRun(runId: string): "completed" | "cycle_completed" | null {
   return getDb().transaction(() => {
     const run = getLongRun(runId);
-    if (!run || run.status !== "verifying") return false;
-    if (run.surface === "science") return false;
-    if (!goalRevisionIsCurrent(run)) return false;
+    if (!run || run.status !== "verifying") return null;
+    if (run.surface === "science") return null;
+    if (!goalRevisionIsCurrent(run)) return null;
     const latest = latestCriterionVerdicts(runId);
     const unresolved = run.acceptanceCriteria.flatMap((_, index) => {
       const receipt = latest.get(index);
@@ -1599,16 +1613,24 @@ export function tryCompleteVerifiedLongRun(runId: string): boolean {
       appendEventInDb({ runId, kind: "verification.references_unresolved", actorKind: "host", at: now,
         payload: { criterionIndices: unresolved, goalRevision: getLongRunGoalRevisionBinding(runId)?.revision ?? null } });
       transitionLongRun({ runId, to: "blocked", actorKind: "host", reason: "verification_reference_unresolved" });
-      return false;
+      return null;
     }
-    if (listLongRunTasks(runId, true).length > 0) return false;
+    if (listLongRunTasks(runId, true).length > 0) return null;
     const allPassed = run.acceptanceCriteria.every((_, index) => {
       const receipt = latest.get(index);
       return receipt?.verdict === "passed";
     });
-    if (!allPassed) return false;
+    if (!allPassed) return null;
+    if (getChatGoalRevision(run.goalId)?.lifecycle === "ongoing") {
+      const cursor = getDb().prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM long_run_verification_receipts WHERE run_id = ?")
+        .get(runId) as { n: number };
+      appendEventInDb({ runId, kind: "run.ongoing_cycle_verified", actorKind: "host", at: new Date().toISOString(),
+        payload: { receiptCursor: cursor.n, goalRevision: getLongRunGoalRevisionBinding(runId)?.revision } });
+      transitionLongRun({ runId, to: "running", actorKind: "host", reason: "ongoing-cycle-verified" });
+      return "cycle_completed";
+    }
     transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
-    return true;
+    return "completed";
   })();
 }
 

@@ -603,7 +603,7 @@ export interface RunnerEvents {
  * ("You've hit your weekly limit")이 text에 실려 정상 답 행세를 했다 — 판정 폴백이
  * 안 걸리고, 노드 산출물·챗 답변이 됐다. throw 아니면 텍스트, 두 상태뿐이었던 것이 뿌리다.
  */
-export type RunnerFailureKind = "quota" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unsupported";
+export type RunnerFailureKind = "quota" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unavailable" | "unsupported";
 
 export interface RunnerFailure {
   kind: RunnerFailureKind;

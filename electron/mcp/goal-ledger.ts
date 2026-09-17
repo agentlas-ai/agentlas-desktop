@@ -29,6 +29,7 @@ export interface GoalLedgerDecision {
 
 export interface GoalLedgerSnapshot {
   goalId: string;
+  lifecycle?: "finite" | "ongoing";
   goalRevision?: number;
   objective: string;
   acceptanceCriteria: string[];
@@ -93,7 +94,7 @@ export async function getGoalLedgerGoal(
     const revision = getChatGoalRevision(goalId);
     return {
       goalId: run.goalId,
-      ...(revision ? { goalRevision: revision.revision } : {}),
+      ...(revision ? { goalRevision: revision.revision, lifecycle: revision.lifecycle } : {}),
       objective: run.objective,
       acceptanceCriteria: run.acceptanceCriteria,
       status: snapshotStatus(run.status),

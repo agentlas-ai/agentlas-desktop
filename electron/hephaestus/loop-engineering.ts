@@ -84,7 +84,15 @@ export function stripStormbreakerContinueMarker(text: string): { text: string; s
  * 연속 프롬프트에만 적으면 모델은 2패스째에야 마커를 알게 된다. 첫 패스에
  * 끝나는 작업이 바로 그 이유로 못 끝나면 안 되므로 착수 시점에 같이 준다.
  */
-export function goalCompletionProtocol(locale: "ko" | "en"): string {
+export function goalCompletionProtocol(locale: "ko" | "en", lifecycle: "finite" | "ongoing" = "finite"): string {
+  if (lifecycle === "ongoing") return [
+    "## Ongoing Goal (host-owned)",
+    "This is a continuing responsibility explicitly requested by the user, not a task with a final completion. Keep it open until the user stops it.",
+    "Work in bounded episodes. Inspect current state and durable receipts before acting, respect the user's cadence, and never repeat an already completed or uncertain external effect.",
+    `When the current episode satisfies its criteria with evidence, emit ${GOAL_COMPLETE_MARKER}. For this ongoing Goal the host verifies only the episode, then persists a quiet 30-minute observation wait; it does not complete the mandate.`,
+    "If work is not due yet, request a typed timer wait for the next useful time. Do not spin on unchanged state or claim that local work runs while the app or computer is off.",
+    "Auth, approval, uncertain side effects and explicit Stop still take precedence. Preserve the exact conversation, runtime/model and permission binding.",
+  ].join("\n");
   return locale === "ko"
     ? [
         "## Goal 종료 규약 (호스트 소유)",

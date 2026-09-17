@@ -2794,6 +2794,7 @@ export class InvocationService {
               evidence: completionClaim.evidence,
               invocationRunId: runId,
               projectDir: getChatWorkingFolder(chat.id),
+              hasTransientAttachments: record.hasTransientAttachments,
             }))
             .then((verification) => {
               /*
@@ -2810,12 +2811,20 @@ export class InvocationService {
                * The goal being verified is named by the claim. That is the identity to act on.
                */
               settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId,
-                verified: !controller.signal.aborted && verification?.disposition === "completed" });
+                verified: !controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "") });
               if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
               const verifiedGoalId = completionClaim.goalId!;
               if (verification?.disposition === "completed") {
                 completeChatGoalContract(verifiedGoalId, "completed");
                 if (getChat(chat.id)?.goalId === verifiedGoalId) setChatGoalBinding(chat.id, null);
+              } else if (verification?.disposition === "cycle_completed") {
+                const wait = latestGoalWaitSubscription(verifiedGoalId);
+                const message = pickLocale(runReq) === "ko"
+                  ? "이번 회차를 확인했습니다. 지속 목표는 유지되며, 앱 실행 중 30분 뒤 현재 상태를 확인해 이어갑니다. 중지하면 더 이상 재개하지 않습니다."
+                  : "This cycle is verified. The ongoing Goal stays open and will check current state again in 30 minutes while the app is running. Stop prevents further continuation.";
+                appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "goal-continuation", runId } });
+                tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: wait?.waitId,
+                  goalId: verifiedGoalId, nextCheckAt: wait?.nextCheckAt, lifecycle: "ongoing", executionAvailability: "app-running" } });
               } else if (verification?.disposition === "retry_required") {
                 // The verifier owns its verdict transition. Inconclusive returns
                 // to running to gather evidence, never straight back to blocked.

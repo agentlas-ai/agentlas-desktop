@@ -798,6 +798,13 @@ export function normalizeAntigravityRetryAfter(value: unknown): string | undefin
 /** Classify only exact machine codes. A provider error field without one remains refused. */
 export function antigravityFailureKind(_error: string, providerCode?: string): RunnerFailureKind {
   switch (normalizeAntigravityFailureCode(providerCode)) {
+    case "500":
+    case "502":
+    case "503":
+    case "504":
+    case "UNAVAILABLE":
+    case "INTERNAL":
+      return "unavailable";
     case "429":
     case "RESOURCE_EXHAUSTED":
     case "QUOTA_EXCEEDED":

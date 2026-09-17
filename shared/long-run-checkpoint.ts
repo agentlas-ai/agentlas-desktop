@@ -10,7 +10,7 @@ export function runtimeExecutionClass(kind: RuntimeKind): RuntimeExecutionClass 
   return "native_cli";
 }
 
-export type GoalVerificationDisposition = "completed" | "retry_required" | "blocked" | "interrupted";
+export type GoalVerificationDisposition = "completed" | "cycle_completed" | "retry_required" | "blocked" | "interrupted";
 export type GoalVerificationRecoveryClass = "none" | "repairable" | "prerequisite" | "unknown";
 export type GoalVerificationPrerequisiteCode =
   | "authentication_required"
