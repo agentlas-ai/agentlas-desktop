@@ -2,7 +2,7 @@
 //   - available:   새 버전 발견 (자동 다운로드 시작) 알림
 //   - downloading: 진행률 표시
 //   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
-//   - manual-required: 안전한 재시도 또는 로컬 데이터를 보존하는 공식 설치본 경로 노출
+//   - manual-required: 앱 내 복구 재시도와 사용자 선택형 대체 경로 노출
 //   - checking / not-available / routine error: 노출하지 않음 — 백그라운드로 조용히.
 //
 // 사용자가 "나중에"로 일단 닫으면 같은 다운로드 버전에 대해 다시 안 뜸 (세션 한정).
