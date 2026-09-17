@@ -25,6 +25,7 @@ import {
 } from "./updater/continuity";
 import {
   inspectMacInstalledAppTrust,
+  repairMacInstalledAppNpmGlobals,
   repairMacInstalledAppGeneratedPythonCaches,
 } from "./updater/mac-app-trust";
 import { userDataDir, userDataPath } from "./runtime-paths";
@@ -480,10 +481,15 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
       bundlePath,
       policyPath: path.join(process.resourcesPath, "macos-release-signing-policy.json"),
     }),
-    repairInstalledAppTrust: (bundlePath, diagnostic) => repairMacInstalledAppGeneratedPythonCaches({
-      bundlePath,
-      diagnostic,
-    }),
+    repairInstalledAppTrust: async (bundlePath, diagnostic) => {
+      const pythonRepaired = await repairMacInstalledAppGeneratedPythonCaches({ bundlePath, diagnostic });
+      const npmRepaired = await repairMacInstalledAppNpmGlobals({
+        bundlePath,
+        diagnostic,
+        recoveryRoot: path.join(userDataPath, "updater", "recovery"),
+      });
+      return pythonRepaired || npmRepaired;
+    },
     quiesceWriters: async () => {
       // Set both gates immediately, then wait for their current writes to
       // settle before continuity copies/hash counts are captured.

@@ -93,12 +93,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
     await ipc()?.updater.openManualDownload();
   }
 
+  const retrySourceSeal = state.code === "install-source-untrusted" && state.diagnostic?.category === "source-seal" && state.canRetry;
+
   async function openReleaseNotes() {
     await ipc()?.updater.openReleaseNotes(state.version);
   }
 
   const attentionCopy = state.code === "install-source-untrusted"
-      ? t("update.repair_required")
+      ? t(state.diagnostic?.category === "source-seal" ? "update.source_files_changed" : "update.repair_required")
     : state.code === "install-not-applied"
       ? t("update.install_not_applied")
     : state.code === "install-start-failed"
@@ -216,14 +218,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
             (canUseOfficialInstaller || state.canRetry) && (
               <button
                 onClick={() => void (
-                  canUseOfficialInstaller ? openOfficialInstaller() : retrySafetyAction()
+                  canUseOfficialInstaller && !retrySourceSeal ? openOfficialInstaller() : retrySafetyAction()
                 )}
                 className="sidenav-update-action"
-                title={canUseOfficialInstaller ? t("update.open_download") : t("update.retry")}
+                title={canUseOfficialInstaller && !retrySourceSeal ? t("update.open_download") : t("update.retry")}
               >
                 {collapsed
                   ? (state.canRetry ? "↻" : "↗")
-                  : canUseOfficialInstaller
+                  : canUseOfficialInstaller && !retrySourceSeal
                     ? t("update.open_download")
                     : t("update.retry")}
               </button>

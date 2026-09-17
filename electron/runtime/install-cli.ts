@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnCli } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
+import { cliSelfUpdateEnv } from "./cli-update-prefix";
 
 export type InstallableCli = "claude-code" | "codex" | "kimi" | "grok";
 export type ManageableCli = InstallableCli | "antigravity";
@@ -680,7 +681,13 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
   if (isAgentlasManagedNpmBinary(existing)) {
     return installCli(kind, { force: true });
   }
-  if (plan.selfUpdateArgs) return runBinary(existing, plan.selfUpdateArgs, 2 * 60 * 1000);
+  if (plan.selfUpdateArgs) {
+    try {
+      return runBinary(existing, plan.selfUpdateArgs, 2 * 60 * 1000, cliSelfUpdateEnv(existing, plan.pkg, augmentedEnv()));
+    } catch (error) {
+      return Promise.resolve({ ok: false, message: error instanceof Error ? error.message : "CLI update location could not be verified" });
+    }
+  }
   // No self-update command (kimi). Agentlas-owned installs were handled above;
   // external installs remain user-owned.
   return Promise.resolve({ ok: true, message: `self-managed install: ${existing} — update skipped` });

@@ -11,6 +11,8 @@ export type OneOperationalRecoveryDetail = {
    * 열고 있던 대화를 여기서 붙잡는다 — 그 방이 곧 실패한 방이다.
    */
   chatId?: string;
+  /** Task-route failures retain their durable origin instead of guessing a chat. */
+  taskId?: string;
   userMessage?: string;
 };
 
@@ -53,10 +55,14 @@ export function requestOneOperationalRecovery(
     .replace(/\s+/g, " ")
     .trim();
   let chatId = options?.chatId;
+  let taskId: string | undefined;
   try {
     if (!chatId) {
-      const current = new URL(window.location.href).searchParams.get("chat");
+      const params = new URL(window.location.href).searchParams;
+      const current = params.get("chat");
       if (current && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(current)) chatId = current;
+      const task = params.get("task");
+      if (!chatId && task && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(task)) taskId = task;
     }
   } catch {
     // 주소를 못 읽는 것은 실패 사유가 아니다 — 대상 없이 진행한다.
@@ -68,6 +74,7 @@ export function requestOneOperationalRecovery(
         scope: scope.slice(0, 120),
         evidence: evidence.slice(0, 4_000),
         ...(chatId && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(chatId) ? { chatId } : {}),
+        ...(taskId ? { taskId } : {}),
         ...(options?.userMessage?.trim() ? { userMessage: options.userMessage.trim().slice(0, 500) } : {}),
       },
     },

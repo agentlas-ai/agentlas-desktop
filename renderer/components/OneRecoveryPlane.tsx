@@ -115,23 +115,20 @@ export function OneRecoveryPlane() {
             return;
           }
 
-          // PRD §4.6 — 복구는 실패가 일어난 방에서 이어진다. 그 방을 모를 때만 최근 One 대화로 간다.
-          let one = queued.detail.chatId
-            ? await api.chats.get(queued.detail.chatId).catch(() => null)
-            : null;
-          if (one && (one.originSurface !== "one" || one.kind === "division")) one = null;
-          // One 것만 골라 받는다. 예전에는 전체 최근 100개를 받아 그중에서 찾았는데,
-          // Work 를 많이 쓰면 그 100칸이 Work 대화로 차서 **멀쩡한 One 대화가 있는데도**
-          // 못 찾고 아래에서 새 대화를 만들었다 — 복구할 때마다 One 대화가 하나씩 늘어난다.
-          const recent = one ? [] : await api.chats.listRecentOne(100);
-          one = one ?? recent.find((chat) => chat.kind !== "division") ?? null;
-          if (!one) {
-            one = await api.chats.create({
-              title: "One",
-              taskMode: "conversation",
-              originSurface: "one",
-            });
+          // Recovery belongs to the exact failing conversation. Recency is not
+          // ownership: a Taskforce error must never launch a worker's solo chat.
+          const chatId = queued.detail.chatId ?? (queued.detail.taskId
+            ? (await api.tasks.get(queued.detail.taskId))?.originChatId
+            : undefined);
+          const one = chatId ? await api.chats.get(chatId) : null;
+          if (!one || one.originSurface !== "one" || one.kind === "division") {
+            queued.attempts = RECOVERY_MAX_ATTEMPTS;
+            return;
           }
+          queued.detail = { ...queued.detail, chatId: one.id };
+          // A live user turn is not a failed recovery attempt. Leave its run,
+          // permissions and selected model untouched; wait for settlement.
+          if ((await api.invoke.activeChats()).includes(one.id)) return;
           try {
             await api.invoke.run({
               runId: queued.runId,
@@ -213,6 +210,7 @@ export function OneRecoveryPlane() {
         scope,
         evidence,
         ...(chatId ? { chatId } : {}),
+        ...(typeof detail.taskId === "string" ? { taskId: detail.taskId.slice(0, 128) } : {}),
         ...(userMessage ? { userMessage } : {}),
       };
       // This text is authored by the product call site and contains no private
@@ -225,7 +223,7 @@ export function OneRecoveryPlane() {
           message: userMessage,
         });
       }
-      const fingerprint = `${normalized.scope}\u0000${normalized.evidence}`;
+      const fingerprint = `${normalized.chatId ?? normalized.taskId ?? "unbound"}\u0000${normalized.scope}\u0000${normalized.evidence}`;
       const now = Date.now();
       const last = recentRef.current.get(fingerprint) ?? 0;
       if (now - last < 60_000 || queuedFingerprintsRef.current.has(fingerprint)) return;
@@ -264,6 +262,7 @@ export function OneRecoveryPlane() {
   return (
     <div
       role="status"
+      data-native-overlay="true"
       className={styles.recoveryNotice}
       data-one-recovery-chat-id={notice.chatId}
     >

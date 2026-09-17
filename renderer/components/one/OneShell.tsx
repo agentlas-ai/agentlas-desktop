@@ -2860,6 +2860,7 @@ export function OneShell() {
     setBusy(false);
     setKeyRequestSheet(null);
     if (!sameActivityThread && activeThreadChatId) {
+      setActionNotice(null);
       activityEventRunIdRef.current = null;
       setActivity(oneActivitySessionCache.get(activeThreadChatId) ?? initialOneActivityState());
       setRunStartedAt(null);
@@ -3991,6 +3992,11 @@ export function OneShell() {
     const runLocale = normalizedLocale;
     const effectiveRuntimeSelection = options?.runtimeSelection ?? oneRuntimeSelection;
     if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
+    if (runIdRef.current && runChatIdRef.current === chatId) {
+      if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
+      setActionNotice(runLocale === "ko" ? "이 대화는 실행 중입니다. 현재 작업에 지시를 보내거나 중지할 수 있습니다." : "This conversation is running. You can steer or stop the current run.");
+      return;
+    }
     // A Taskforce is the conversation's durable roster, not a one-turn
     // composer decoration. Decision answers, clarification turns, and recovery
     // continuations do not carry the composer's explicit target snapshot, so
@@ -4148,6 +4154,35 @@ export function OneShell() {
       }
       await refreshAll();
     } catch (cause) {
+      if (activeThreadChatIdRef.current && activeThreadChatIdRef.current !== chatId) {
+        if (!options?.promptOrigin) {
+          const key = `chat:${chatId}`;
+          if (!readOneComposerDraft(key).composer.trim()) writeOneComposerDraft(key, { composer: text });
+        }
+        if (!isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
+        return;
+      }
+      if (isChatBusyFailure(cause)) {
+        const attachment = await api.invoke.attach(chatId).catch(() => null);
+        if (attachment && runChatIdRef.current === chatId) {
+          runIdRef.current = attachment.runId;
+          activityRunIdRef.current = attachment.runId;
+          activityEventRunIdRef.current = null;
+          setActivityStateRunId(null);
+          setDispatchRunPrompt(null);
+          setLiveRunPrompt(null);
+          dispatchRunPromptRef.current = null;
+          setMessages((current) => current.filter((item) => item.id !== "one-live-response"));
+          setBusy(true);
+          setActivity(initialOneActivityState());
+          setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
+          if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
+          setActionNotice(runLocale === "ko" ? "이미 실행 중인 작업에 다시 연결했습니다." : "Reconnected to the run already in progress.");
+          subscribeRun(attachment.runId);
+          if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+          return;
+        }
+      }
       if (options?.teamRef) {
         const failed = await api.oneTeamPreflight.failStart(options.teamRef).catch(() => null);
         if (failed) setTeamPreflight(failed);
@@ -4189,7 +4224,7 @@ export function OneShell() {
        *   사용자는 자기 글이 어디로 갔는지 알 방법이 없었다.
        *   Work 는 같은 상황에서 글을 작성창에 되돌리고 이유를 말한다. 맞춘다.
        */
-      setComposer((current) => (current.trim() ? current : text));
+      if (!options?.promptOrigin) setComposer((current) => (current.trim() ? current : text));
       /*
        * ★한 번만 되돌리면 지워진다: 실패 직후 화면이 방금 만든 대화(또는 홈)로
        *   옮겨가고, 그 순간 초안 복원 효과가 **빈 초안**을 덮어쓴다(실측 2026-09-08:
@@ -4197,13 +4232,17 @@ export function OneShell() {
        *   그 사이 사용자가 새로 쓰기 시작했으면 건드리지 않는다.
        */
       window.setTimeout(() => {
-        setComposer((current) => (current.trim() ? current : text));
+        if (!options?.promptOrigin && activeThreadChatIdRef.current === chatId) {
+          setComposer((current) => (current.trim() ? current : text));
+        }
       }, 320);
-      setActionNotice(normalizedLocale === "ko"
+      setActionNotice(options?.promptOrigin
+        ? (normalizedLocale === "ko" ? "이 대화의 자동 이어가기를 시작하지 못했습니다." : "Automatic continuation could not start in this conversation.")
+        : normalizedLocale === "ko"
         ? "작업을 시작하지 못했습니다. 쓰신 글은 작성창에 되돌려 놓았습니다 — 다시 보내 주세요."
         : "The run did not start. Your text is back in the composer — send it again.");
       await refreshAll();
-      requestOneOperationalRecovery("one-run-start", cause);
+      if (!isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
     } finally {
       if (attachedOneMemoryUseOnce) {
         // One Main consumes on accepted start. A rejected start is also a

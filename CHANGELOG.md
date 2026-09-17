@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.16 — 2026-09-17
+
+- CLI self-updates keep npm writes outside the signed application and preserve the selected installation. Known unsigned CLI additions can be quarantined before the original app signature is verified again.
+- One operational recovery stays in the originating conversation, including Taskforce task routes. It no longer guesses a recent conversation or starts another run while that conversation is busy.
+- A busy conversation reconnects to its existing run instead of displaying a second failed run. Automatic continuation prompts and delayed failure notices no longer leak into another conversation's composer.
+- Recovery notices remain visible when they overlap a native browser panel; dismissing the notice restores the panel. Update messages distinguish changed app files from an unrecognized signing identity.
+
 ## 1.2.15 — 2026-09-17
 
 - One·Work의 전체 액세스가 브라우저·MCP·결제 동작까지 한 번에 해제되며, 실행 중 `Allow once` 승인 칩이 다시 나타나지 않습니다. 기존 Goal도 사용자가 권한을 바꾸면 새 권한으로 재인가됩니다.

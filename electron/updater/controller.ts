@@ -1264,7 +1264,7 @@ export class DesktopUpdaterController {
         if (repaired) {
           const verified = await this.deps.inspectInstalledAppTrust(access.bundlePath);
           if (verified.ok) {
-            this.logger.log("[updater] repaired generated Python cache files and restored the official app seal");
+            this.logger.log("[updater] repaired generated runtime files and restored the official app seal");
             return true;
           }
           trust = verified;
@@ -1279,6 +1279,7 @@ export class DesktopUpdaterController {
     this.blockedDiagnostic = trust.diagnostic;
     this.blockedNativeInstallFailures = 0;
     this.blockedRetryAfter = undefined;
+    this.logger.warn(`[updater] installed app verification blocked: ${trust.diagnostic.category}`);
     this.publish(this.manualState(version, "install-source-untrusted", trust.diagnostic));
     return false;
   }

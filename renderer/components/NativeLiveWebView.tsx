@@ -86,7 +86,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
         height: rect.height,
       };
     };
-    const overlaySelector = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"], dialog[open]';
+    const overlaySelector = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"], dialog[open], [data-native-overlay="true"]';
     const geometricallyVisible = () => {
       const rect = stage.getBoundingClientRect();
       const covered = Array.from(document.querySelectorAll<HTMLElement>(overlaySelector)).some((overlay) => {
@@ -154,7 +154,7 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       }
     });
     overlays.observe(document.body, { childList: true, subtree: true, attributes: true,
-      attributeFilter: ["open", "role", "aria-modal", "hidden", "style", "class"] });
+      attributeFilter: ["open", "role", "aria-modal", "data-native-overlay", "hidden", "style", "class"] });
     document.addEventListener("visibilitychange", syncBounds);
     const offStatus = api.onStatus((next) => {
       if (next.viewId !== viewId || next.taskScopeId !== taskScopeId || disposed) return;

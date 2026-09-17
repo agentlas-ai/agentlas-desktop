@@ -59,12 +59,13 @@ export function assertInvocationChatAvailable(
        *   그때의 진짜 회수 경로는 앱을 다시 켜는 것이다. 이 잠금은 메모리 안의 명단이라
        *   다시 켜면 남지 않는다(활성 명단은 InvocationLifecycleRegistry 의 Map 이고
        *   디스크에 없다). 짐작이 아니라 자료구조에서 나오는 사실이라 안내해도 된다.
-       */
+      */
       const error = new Error(
-        record.cancelRequestedAt
+        // Electron IPC preserves the message but can discard custom Error fields.
+        `${INVOCATION_CHAT_BUSY_CODE}: ` + (record.cancelRequestedAt
           ? "This chat was asked to stop, but the earlier request has not finished yet. "
             + "Wait a moment; if it never clears, reopening the app releases this chat."
-          : "This chat is still running an earlier request. Stop it first, then send this one again.",
+          : "This chat is still running an earlier request. Stop it first, then send this one again."),
       ) as Error & { code?: string; cancelAlreadyRequested?: boolean };
       error.code = INVOCATION_CHAT_BUSY_CODE;
       error.cancelAlreadyRequested = Boolean(record.cancelRequestedAt);

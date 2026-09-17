@@ -2338,7 +2338,7 @@ function UpdatePanel() {
 
   const statusText = (() => {
     if (installDeferred) return t("settings.update.active_runs");
-    if (state.code === "install-source-untrusted") return t("settings.update.repair_required");
+    if (state.code === "install-source-untrusted") return t(state.diagnostic?.category === "source-seal" ? "settings.update.source_files_changed" : "settings.update.repair_required");
     if (state.code === "install-not-applied") return t("settings.update.install_not_applied");
     if (state.code === "install-start-failed") return t("settings.update.install_start_failed");
     if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
@@ -2423,8 +2423,9 @@ function UpdatePanel() {
             {t("settings.update.install")}
           </button>
         ) : updaterCanUseOfficialInstaller(state) ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <button
-            onClick={() => void openOfficialInstaller()}
+            onClick={() => void (state.diagnostic?.category === "source-seal" && state.canRetry ? retrySafetyAction() : openOfficialInstaller())}
             style={{
               padding: "8px 14px",
               borderRadius: "var(--radius-md)",
@@ -2440,8 +2441,10 @@ function UpdatePanel() {
               boxShadow: "var(--neu-raised)",
             }}
           >
-            {t("settings.update.open_download")}
+            {state.diagnostic?.category === "source-seal" && state.canRetry ? t("update.retry") : t("settings.update.open_download")}
           </button>
+          {state.diagnostic?.category === "source-seal" && state.canRetry && <button type="button" onClick={() => void openOfficialInstaller()}>{t("settings.update.open_download")}</button>}
+          </div>
         ) : (state.status === "manual-required" || state.status === "incompatible") && state.canRetry ? (
           <button
             onClick={() => void retrySafetyAction()}

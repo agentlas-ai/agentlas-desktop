@@ -161,6 +161,99 @@ function sealedResourcePaths(bundleRoot: string, contentsRoot: string): Set<stri
   }
 }
 
+/** Preserve npm globals accidentally installed into the signed Node runtime.
+ * Only known, wholly unsealed package roots and their internal bin links may
+ * move. The caller must reverify the complete app signature after this repair.
+ */
+export async function repairMacInstalledAppNpmGlobals(input: {
+  bundlePath: string;
+  diagnostic: UpdaterDiagnostic;
+  recoveryRoot: string;
+}): Promise<boolean> {
+  if (input.diagnostic.category !== "source-seal") return false;
+  const bundleRoot = path.resolve(input.bundlePath);
+  const contentsRoot = path.join(bundleRoot, "Contents");
+  const runtimeRoot = path.join(contentsRoot, "Resources", "node-runtime");
+  const recoveryRoot = path.resolve(input.recoveryRoot);
+  if (recoveryRoot === bundleRoot || recoveryRoot.startsWith(`${bundleRoot}${path.sep}`)) return false;
+  const sealed = sealedResourcePaths(bundleRoot, contentsRoot);
+  if (!sealed) return false;
+  const packages = [
+    ["@anthropic-ai/claude-code", "claude"],
+    ["@xai-official/grok", "grok"],
+  ] as const;
+  const candidates: Array<{ source: string; relative: string; dev: number; ino: number }> = [];
+  const parents = new Map<string, { dev: number; ino: number }>();
+  const rememberParents = (leaf: string): void => {
+    for (let parent = path.dirname(leaf); ; parent = path.dirname(parent)) {
+      const stat = fs.lstatSync(parent);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("npm repair parent is linked");
+      parents.set(parent, { dev: stat.dev, ino: stat.ino });
+      if (parent === bundleRoot) break;
+      if (parent === path.dirname(parent)) throw new Error("npm repair escaped bundle");
+    }
+  };
+  const whollyUnsealed = (source: string): boolean => {
+    const relative = path.relative(contentsRoot, source).split(path.sep).join("/");
+    return ![...sealed].some((entry) => entry === relative || entry.startsWith(`${relative}/`) || relative.startsWith(`${entry}/`));
+  };
+  try {
+    for (const [packageName, binName] of packages) {
+      const source = path.join(runtimeRoot, "lib", "node_modules", packageName);
+      if (!fs.existsSync(source)) continue;
+      rememberParents(source);
+      const stat = fs.lstatSync(source);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !whollyUnsealed(source)) return false;
+      const manifestPath = path.join(source, "package.json");
+      const manifestStat = fs.lstatSync(manifestPath);
+      if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1) return false;
+      if (JSON.parse(fs.readFileSync(manifestPath, "utf8")).name !== packageName) return false;
+      candidates.push({ source, relative: path.relative(runtimeRoot, source), dev: stat.dev, ino: stat.ino });
+      const bin = path.join(runtimeRoot, "bin", binName);
+      let binStat: fs.Stats;
+      try { binStat = fs.lstatSync(bin); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      rememberParents(bin);
+      if (!binStat.isSymbolicLink() || !whollyUnsealed(bin)) return false;
+      const target = path.resolve(path.dirname(bin), fs.readlinkSync(bin));
+      if (!target.startsWith(`${source}${path.sep}`)) return false;
+      candidates.push({ source: bin, relative: path.relative(runtimeRoot, bin), dev: binStat.dev, ino: binStat.ino });
+    }
+    if (!candidates.length) return false;
+    fs.mkdirSync(recoveryRoot, { recursive: true, mode: 0o700 });
+    // Recovery must stay outside the app even when a parent is a symlink.
+    const realRecovery = fs.realpathSync(recoveryRoot);
+    const realBundle = fs.realpathSync(bundleRoot);
+    if (realRecovery === realBundle || realRecovery.startsWith(`${realBundle}${path.sep}`)) return false;
+    const destination = fs.mkdtempSync(path.join(realRecovery, "npm-seal-"));
+    let moved = 0;
+    try {
+      for (const candidate of candidates) {
+        for (const [parent, expected] of parents) {
+          const actual = fs.lstatSync(parent);
+          if (!actual.isDirectory() || actual.isSymbolicLink() || actual.dev !== expected.dev || actual.ino !== expected.ino) {
+            throw new Error("npm repair parent changed");
+          }
+        }
+        const actual = fs.lstatSync(candidate.source);
+        if (actual.dev !== candidate.dev || actual.ino !== candidate.ino) throw new Error("npm repair candidate changed");
+        const target = path.join(destination, candidate.relative);
+        fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+        fs.renameSync(candidate.source, target);
+        moved += 1;
+      }
+    } finally {
+      // No executable is run from quarantine and no package is deleted.
+      if (moved) console.info(`[updater] preserved ${moved} unsealed npm entries outside the app bundle`);
+    }
+    return moved > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Removes only generated Python bytecode from the two signed runtime roots.
  * This is intentionally narrower than a generic bundle repair: the official

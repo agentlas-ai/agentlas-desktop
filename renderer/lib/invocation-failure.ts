@@ -8,20 +8,14 @@
  *   `error.code` 로 판정하는 자리가 **한 곳도 없다**(선례 0건). 코드로 판정하는 코드를
  *   쓰면 컴파일도 되고 타입도 맞지만 **한 번도 참이 되지 않는다.**
  *
- *   그래서 code 가 있으면 code 를, 없으면 엔진이 쓰는 **문장**을 본다.
- *   문장 대조는 조용히 어긋나므로, 게이트(test:chat-busy-error-has-a-way-out)가
- *   엔진이 실제로 만드는 두 문장을 꺼내 이 함수에 먹여 양쪽 끝을 붙들어 맨다.
+ *   Main therefore includes a stable machine marker in the IPC message.
+ *   Classify that marker, never localized prose, when custom fields are lost.
  *
  *   메시지는 IPC 를 건너며 "Error invoking remote method '...': Error: <원문>" 으로
  *   감싸이므로 반드시 **부분 일치**로 본다.
  */
 
-/** 엔진(electron/runtime/run-id.ts)이 이 실패에 쓰는 문장의 고정 조각. */
-const CHAT_BUSY_FRAGMENTS = [
-  "still running an earlier request",
-  "was asked to stop, but the earlier request has not finished",
-];
-
+/** Stable marker emitted by electron/runtime/run-id.ts. */
 export const CHAT_BUSY_CODE = "chat_invocation_active";
 
 export function failureMessage(error: unknown): string {
@@ -36,7 +30,7 @@ export function failureMessage(error: unknown): string {
 export function isChatBusyFailure(error: unknown): boolean {
   if ((error as { code?: string } | null)?.code === CHAT_BUSY_CODE) return true;
   const message = failureMessage(error);
-  return CHAT_BUSY_FRAGMENTS.some((fragment) => message.includes(fragment));
+  return message.startsWith(`${CHAT_BUSY_CODE}:`);
 }
 
 /**
