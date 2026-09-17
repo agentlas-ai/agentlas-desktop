@@ -1,6 +1,16 @@
 /** Goal model only. Adapters own intent classification, authority and scheduling. */
 export const AUTO_GOAL_SCHEMA = "agentlas.auto-goal.v1" as const;
 
+/** Goal lifetime, not an episode budget or permission to perform effects. */
+export type GoalLifecycle = "finite" | "ongoing";
+
+/** Legacy revisions/host decisions retain finite semantics; corrupt values fail closed. */
+export function resolveGoalLifecycle(value: unknown): GoalLifecycle {
+  if (value === undefined) return "finite";
+  if (value === "finite" || value === "ongoing") return value;
+  throw new Error("goal_lifecycle_invalid");
+}
+
 export interface GoalSourceMessage {
   chatId: string;
   messageId: string;
@@ -13,6 +23,8 @@ export interface GoalIntakeDecision {
   messageId: string;
   intent: "execute" | "question" | "explore" | "conditional" | "unknown";
   commitment: "now" | "later" | "uncertain";
+  /** New judged execution decisions supply this; absent legacy decisions are finite. */
+  lifecycle?: GoalLifecycle;
 }
 
 export interface GoalCriterion {
@@ -30,6 +42,8 @@ export interface GoalRevision {
   sourceMessage: GoalSourceMessage;
   objective: string;
   reason: string;
+  /** Missing only on legacy data. Ongoing criteria verify an episode, never end the goal. */
+  lifecycle?: GoalLifecycle;
   acceptanceCriteria: GoalCriterion[];
   /** References to existing host grants; this model cannot issue new grants. */
   authorityRefs: string[];
@@ -69,6 +83,7 @@ function validateTime(at: string): void {
 /** Conservative admission: uncertainty never arms a background campaign. */
 export function admitsAutomaticGoal(source: GoalSourceMessage, decision: GoalIntakeDecision): boolean {
   validateSource(source);
+  resolveGoalLifecycle(decision.lifecycle);
   return decision.messageId === source.messageId && decision.intent === "execute" && decision.commitment === "now";
 }
 
@@ -94,6 +109,7 @@ export function createAutomaticGoalRevision(input: {
     sourceMessage: { ...input.source },
     objective: input.source.text,
     reason: "initial_execution_request",
+    lifecycle: resolveGoalLifecycle(input.decision.lifecycle),
     acceptanceCriteria: criteriaCopy(input.acceptanceCriteria),
     authorityRefs: [...new Set(input.authorityRefs)],
     createdAt: input.createdAt,
@@ -143,6 +159,8 @@ export function reviseAutomaticGoal(input: {
     sourceMessage: { ...source },
     objective: input.objective,
     reason: input.reason,
+    // An ordinary amendment cannot silently change an ongoing mandate's lifetime.
+    lifecycle: resolveGoalLifecycle(current.lifecycle),
     acceptanceCriteria: criteriaCopy([...input.retainedCriteria, ...input.addedCriteria]),
     authorityRefs: [...current.authorityRefs],
     createdAt: input.createdAt,
@@ -158,7 +176,8 @@ export interface GoalCriterionEvidence {
   verifiedAt: string;
 }
 
-/** Structural completion gate. Evidence content/freshness on the target surface
+/** Structural evidence gate (episode evidence for ongoing goals, not goal termination).
+ * Evidence content/freshness on the target surface
  * must additionally be verified by the adapter, including Science lifecycle gates.
  */
 export function hasCurrentGoalEvidence(goal: GoalRevision, evidence: readonly GoalCriterionEvidence[]): boolean {

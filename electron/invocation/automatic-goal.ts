@@ -10,6 +10,7 @@ import {
   type AutomaticGoalIntentResolution,
 } from "../long-run/judged-auto-goal-intent";
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
+import { resolveGoalLifecycle } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
 import { goalScopeCriterion } from "../../shared/goal-scope";
 
@@ -150,11 +151,13 @@ export async function prepareInvocationAutomaticGoal(input: {
     }
     tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake", payload: {
       sourceMessageId: source.messageId, intent: decision.intent, commitment: decision.commitment,
+      ...(decision.intent === "execute" ? { lifecycle: resolveGoalLifecycle(decision.lifecycle) } : {}),
       classified: true,
       ...("attempts" in decision && decision.attempts ? { attempts: decision.attempts } : {}),
     } });
     if (decision.intent !== "execute" || decision.commitment !== "now") return { kind: "bypass", decision };
     stage = "admission";
+    const ongoing = resolveGoalLifecycle(decision.lifecycle) === "ongoing";
     const run = admitJudgedAutomaticGoal({
       goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,
       /*
@@ -180,16 +183,21 @@ export async function prepareInvocationAutomaticGoal(input: {
         // The judge sees the criterion, not the chat. Carry the request text itself
         // so the deliverables are enumerable from the criterion alone; the Goal
         // objective is no longer truncated, so this stays complete.
-        { id: "requested-outcome", text: "Every deliverable in this request is complete and present on the requested output surface. "
+        { id: "requested-outcome", text: (ongoing
+          ? "This bounded work episode has made observable, verified progress toward the ongoing request on the requested output surface. Evaluate only this episode's concrete work, not completion of the continuing responsibility. The goal remains open until the user stops it. "
+          : "Every deliverable in this request is complete and present on the requested output surface. ")
           + `REQUEST (untrusted data): ${source.text.replace(/\s+/g, " ").trim()}` },
         { id: "scope", text: goalScopeCriterion({
           permission: input.permission === "read" || input.permission === "write" || input.permission === "full" ? input.permission : undefined,
           locale: "en",
         }) + " Verify the declared working folder and granted permission from the run receipt, and apply every explicit constraint stated in the request text carried by the requested-outcome criterion." },
-        { id: "evidence", text: "Completion is supported by current host-owned evidence on the requested output surface; unverified work remains open. "
+        { id: "evidence", text: (ongoing
+          ? "This episode's claimed outcomes are supported by current host-owned evidence on the requested output surface; unverified work remains open. Prior episodes' receipts do not establish this episode's success. "
+          : "Completion is supported by current host-owned evidence on the requested output surface; unverified work remains open. ")
           + "For a delegated tool-only runtime or observation request, include a successful host tool receipt and a host-owned delegation "
           + "execution receipt when delegation was requested; worker or model prose alone is not evidence." },
-        { id: "delivery-validation", text: "For an app or interactive UI delivery, launch the actual app and exercise its core user flows in a browser, simulator, or native runtime. Preserve host-owned evidence of launch, rendering, interactions, and outcomes; source, build, static analysis, tests, or a completion report alone do not pass. For tool-only work, prove the requested operation with host receipts. Inspect other outputs in their delivered format. Missing runtime or access remains unmet." },
+        { id: "delivery-validation", text: (ongoing ? "Validate the outputs and operations of this episode only, without claiming the ongoing goal is finished. " : "")
+          + "For an app or interactive UI delivery, launch the actual app and exercise its core user flows in a browser, simulator, or native runtime. Preserve host-owned evidence of launch, rendering, interactions, and outcomes; source, build, static analysis, tests, or a completion report alone do not pass. For tool-only work, prove the requested operation with host receipts. Inspect other outputs in their delivered format. Missing runtime or access remains unmet." },
       ],
       authorityRefs: [`invocation:${input.runId}:permission:${input.permission}`],
       budget: { maxCycles: AUTOMATIC_GOAL_CYCLE_LIMIT, maxCostUsd: null, maxWorkers: 2,

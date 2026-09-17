@@ -3,6 +3,7 @@ import { longRunMonetaryRefusal } from "./budget";
  * This module does not dispatch a provider, schedule work or grant permissions.
  */
 import type { GoalIntakeDecision, GoalCriterion, GoalSourceMessage } from "../../shared/auto-goal";
+import { admitsAutomaticGoal } from "../../shared/auto-goal";
 import { LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
 import { getDb } from "../store/db";
 import { createStoredAutomaticGoal, completeChatGoalContract } from "../store/chat-goals";
@@ -49,7 +50,7 @@ export function admitJudgedAutomaticGoal(input: {
   budget: LongRunBudget;
 }): LongRunRecord | null {
   const source = userSource(input.chatId, input.sourceMessageId);
-  if (input.decision.intent !== "execute" || input.decision.commitment !== "now" || input.decision.messageId !== source.messageId) return null;
+  if (!admitsAutomaticGoal(source, input.decision)) return null;
   finiteBudget(input.budget);
   return getDb().transaction(() => {
     const chat = getDb().prepare("SELECT goal_id, origin_surface, project_id FROM chats WHERE id = ?").get(input.chatId) as

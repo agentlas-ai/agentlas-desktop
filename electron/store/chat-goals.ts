@@ -4,6 +4,7 @@ import { emitDesktopStoreChange } from "./change-bus";
 import type { ChatGoalContext } from "../../shared/types";
 import {
   createAutomaticGoalRevision,
+  resolveGoalLifecycle,
   reviseAutomaticGoal,
   type GoalRevision,
   type GoalSourceMessage,
@@ -150,6 +151,11 @@ export function completeChatGoalContract(
 ): ChatGoalContext | null {
   const normalized = goalId.trim();
   if (!normalized) return null;
+  // Episode success cannot terminalize the user's ongoing mandate. User cancel
+  // and blocked/pause handling remain available independently of this guard.
+  if (status === "completed" && getChatGoalRevision(normalized)?.lifecycle === "ongoing") {
+    throw new Error("goal_ongoing_cannot_complete");
+  }
   const now = new Date().toISOString();
   getDb().prepare(
     `UPDATE chat_goal_contracts
@@ -172,7 +178,12 @@ export function getChatGoalRevision(goalId: string, revision?: number): GoalRevi
   const row = revision === undefined
     ? getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1").get(goalId)
     : getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? AND revision = ?").get(goalId, revision);
-  return row ? JSON.parse((row as { payload_json: string }).payload_json) as GoalRevision : null;
+  return row ? parseGoalRevision((row as { payload_json: string }).payload_json) : null;
+}
+
+function parseGoalRevision(payload: string): GoalRevision {
+  const revision = JSON.parse(payload) as GoalRevision;
+  return { ...revision, lifecycle: resolveGoalLifecycle(revision.lifecycle) };
 }
 
 export interface GoalAuthorityReauthorization {
@@ -231,7 +242,7 @@ function previouslyAppliedRevision(goalId: string, source: GoalSourceMessage): G
   const row = getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? AND source_message_id = ?")
     .get(goalId, source.messageId) as { payload_json: string } | undefined;
   if (!row) return null;
-  const revision = JSON.parse(row.payload_json) as GoalRevision;
+  const revision = parseGoalRevision(row.payload_json);
   if (revision.chatId !== source.chatId || revision.sourceMessage.text !== source.text) throw new Error("goal_source_message_mismatch");
   return revision;
 }
