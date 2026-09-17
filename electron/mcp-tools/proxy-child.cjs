@@ -40,12 +40,16 @@ function toStdout(line) { if (!process.stdout.write(line)) response?.pause(); }
 function trackUp(line) {
   let frame; try { frame = JSON.parse(line); } catch { return; }
   if (!frame || typeof frame !== "object") return;
-  if (frame.method === "initialize" && frame.id !== undefined) handshake.initialize = line;
-  else if (frame.method === "notifications/initialized") handshake.initialized = line;
   if (frame.id !== undefined && typeof frame.method === "string") pending.set(idKey(frame.id), true);
 }
+function trackSentHandshake(line) {
+  let frame; try { frame = JSON.parse(line); } catch { return; }
+  if (!frame || typeof frame !== "object") return;
+  if (frame.method === "initialize" && frame.id !== undefined) handshake.initialize = line;
+  else if (frame.method === "notifications/initialized") handshake.initialized = line;
+}
 function sendUp(line) {
-  if (connected && request) { if (!request.write(line)) process.stdin.pause(); return; }
+  if (connected && request) { trackSentHandshake(line); if (!request.write(line)) process.stdin.pause(); return; }
   outboxBytes += Buffer.byteLength(line);
   if (outboxBytes > MAX_FRAME_BYTES) { close(3, "mcp_proxy_frame_limit"); return; }
   outbox.push(line);
@@ -85,7 +89,9 @@ function connect() {
       req.write(handshake.initialize);
       if (handshake.initialized) req.write(handshake.initialized);
     }
-    for (const line of outbox) req.write(line);
+    // Queued initialization has never reached a prior wire. Record it only as
+    // it is sent, so reconnect cannot both replay it and drain it from outbox.
+    for (const line of outbox) { trackSentHandshake(line); req.write(line); }
     outbox = []; outboxBytes = 0; process.stdin.resume();
     res.setEncoding("utf8");
     res.on("data", chunk => {
