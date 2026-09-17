@@ -1635,7 +1635,7 @@ async function runMcpInvocationInContext(
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
-  let workspacePreviewCapabilityCleanup: (() => void) | undefined;
+  let mcpConfigCleanup: (() => void) | undefined;
   try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
@@ -3173,7 +3173,10 @@ ${effectiveUserPrompt}`;
           permission: normalizedPermission, signal: signal ?? new AbortController().signal });
       }
       const cfg = await buildMcpConfigFile({
-        ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant, configKey: `native-browser-${req.runId}` } : {}),
+        // Graph nodes can share a runId. Every preparation, including doctor
+        // and unattended runs, needs its own sealed file and launch lifetime.
+        configKey: `invocation-${randomUUID()}`,
+        ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
         // 그래프가 선으로 이어 선언한 도구는 자동 선택 결과와 **함께** 켠다.
@@ -3212,13 +3215,13 @@ ${effectiveUserPrompt}`;
           ...(executionContext ? { unattended: true } : {}),
         },
       });
+      mcpConfigCleanup = cfg?.cleanup;
       assertMcpGoalSelectionCurrent();
       if (nativeBrowserGrant && !cfg?.nativeBrowserBound) {
         throw new Error("native-browser-config-unbound");
       }
       if (cfg) {
         mcpConfigPath = cfg.configPath;
-        workspacePreviewCapabilityCleanup = cfg.workspacePreviewCapabilityCleanup;
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
         mcpRuntimeEnv = cfg.runtimeEnv;
@@ -3265,14 +3268,11 @@ ${effectiveUserPrompt}`;
           materialize: async (input, ids, generation) => {
             let grant: NativeBrowserRelayGrant | undefined;
             let childConfig: Awaited<ReturnType<typeof buildMcpConfigFile>>;
-            let childPreviewCapabilityCleanup: (() => void) | undefined;
             let released = false;
             const release = () => {
               if (released) return;
               released = true;
-              grant?.release();
-              childPreviewCapabilityCleanup?.();
-              if (childConfig) fs.rmSync(childConfig.configPath, { force: true });
+              try { grant?.release(); } finally { childConfig?.cleanup?.(); }
             };
             try {
               if (ids.includes("agentlas-browser")) {
@@ -3287,7 +3287,6 @@ ${effectiveUserPrompt}`;
                 toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
-              childPreviewCapabilityCleanup = childConfig?.workspacePreviewCapabilityCleanup;
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
                 const unavailableIds = ids.filter((id) => !boundIds.has(id)
@@ -6873,7 +6872,6 @@ ${effectiveUserPrompt}`;
     return earlyResult();
   }
   } finally {
-    nativeBrowserGrant?.release();
-    workspacePreviewCapabilityCleanup?.();
+    try { nativeBrowserGrant?.release(); } finally { mcpConfigCleanup?.(); }
   }
 }

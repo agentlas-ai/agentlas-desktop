@@ -6,7 +6,7 @@ import { setMaxListeners } from "node:events";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { createPreparedMcpTargetTransport, listCompleteToolInventory } from "./client";
-import { preparedMcpConsentResource, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
+import { preparedMcpConsentResource, preparedMcpTargetTransport, PreparedMcpScopeChangedError, type PreparedMcpBinding } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
 import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
@@ -51,6 +51,14 @@ export function activateMcpProxyLaunch(handle: string, binding: PreparedMcpBindi
   if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
   entry.binding = binding;
 }
+/** Revoke only this Main-minted launch, including its attached wires. */
+export function revokeMcpProxyLaunch(handle: string): void {
+  const entry = launches.get(handle);
+  if (!entry) return;
+  launches.delete(handle);
+  if (entry.timer) clearTimeout(entry.timer);
+  for (const close of [...entry.connections]) close();
+}
 export function stopMcpProxySessions(): void {
   const entries = [...launches.values()]; launches.clear();
   for (const entry of entries) {
@@ -78,6 +86,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     console.warn(`[mcp-proxy] bridge refused handle=${handle.slice(0, 8)} reason=${!registration ? "launch_unknown_or_expired" : !candidate ? "launch_not_activated" : "handle_invalid"}`);
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
   }
+  // A revoked seal cannot recover on the same handle. Reject before opening
+  // a wire so proxy-child receives terminal 403, not a retryable socket reset.
+  try { preparedMcpTargetTransport(candidate, candidate.server); }
+  catch {
+    revokeMcpProxyLaunch(handle);
+    res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
+  }
   const entry = registration, binding: PreparedMcpBinding = candidate, gate = entry.gate, lifetime = new AbortController();
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
@@ -98,6 +113,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   };
   const close = (cause?: unknown) => {
     if (closed) return; closed = true; clearInterval(revalidate);
+    const invalidScope = cause instanceof PreparedMcpScopeChangedError;
+    if (invalidScope) revokeMcpProxyLaunch(handle);
     const reason = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : initialized ? "wire_closed" : "closed_before_initialize";
     console.warn(`[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`);
     lifetime.abort(new Error("mcp_proxy_closed"));
@@ -106,7 +123,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     native.clear(); external.clear(); serverRequests.clear(); serverRequestIds.clear();
     void transport?.close().catch(() => {});
     entry.connections.delete(close); if (!entry.connections.size) expireUnused(handle, entry);
-    req.destroy(); res.destroy();
+    if (invalidScope && !res.headersSent && !res.destroyed) {
+      // The seal may change while the upstream is starting, after admission
+      // but before 200. This race is terminal too, not a transient reset.
+      res.writeHead(403).end("mcp_proxy_launch_unapproved"); req.resume();
+    } else { req.destroy(); res.destroy(); }
   };
   // cwd 재검증은 연결마다 초당 stat·realpath·access 3회였다 — 경로가 바뀌는 일은 드물다. 5초면 충분하다.
   const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error); } }, 5000); revalidate.unref?.();

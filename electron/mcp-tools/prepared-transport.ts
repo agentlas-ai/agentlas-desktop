@@ -11,6 +11,10 @@ export type PreparedMcpTransport =
 type Seal = { path: string; digest: string; current: () => boolean; invalid?: boolean; bindings: PreparedMcpBinding[] };
 const seals = new Map<string, Seal>();
 const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; targetTransport: PreparedMcpTransport; consentResource: string }>();
+export class PreparedMcpScopeChangedError extends Error {
+  readonly code = "mcp_prepared_scope_changed";
+  constructor() { super("mcp_prepared_scope_changed"); }
+}
 function fileDigest(path: string): string {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -34,7 +38,7 @@ export function registerPreparedMcpConfig(input: {
     /** Main's actual target before its per-run approval proxy is added. */
     consentTransport?: unknown }>;
   runtimeEnv: Record<string, string>; isCurrent: () => boolean;
-}): void {
+}): () => boolean {
   const resolve = (value: string) => value.replace(/\$\{(AGENTLAS_MCP_SECRET_[A-Za-z0-9_]+)\}/g, (_match, key: string) => {
     if (!Object.prototype.hasOwnProperty.call(input.runtimeEnv, key)) throw new Error("mcp_prepared_secret_unavailable");
     return input.runtimeEnv[key];
@@ -76,15 +80,23 @@ export function registerPreparedMcpConfig(input: {
     const binding = Object.freeze({ configKey: row.configKey, server });
     bindings.set(binding, { seal, transport, targetTransport, consentResource }); seal.bindings.push(binding);
   }
-  if (!seal.current()) throw new Error("mcp_prepared_scope_changed");
+  if (!seal.current()) throw new PreparedMcpScopeChangedError();
   seals.set(input.path, seal);
   // Eviction fails closed for an old handle; it never falls back to registry.
   while (seals.size > 256) seals.delete(seals.keys().next().value!);
+  // Capture the actual seal, not just its pathname. A late cleanup must never
+  // revoke a replacement preparation or remove a file changed by another owner.
+  return () => {
+    seal.invalid = true;
+    if (seals.get(input.path) !== seal) return false;
+    seals.delete(input.path);
+    try { return fileDigest(input.path) === seal.digest; } catch { return false; }
+  };
 }
 function validate(seal: Seal): void {
   try {
-    if (seal.invalid || seals.get(seal.path) !== seal || !seal.current() || fileDigest(seal.path) !== seal.digest) throw new Error("mcp_prepared_scope_changed");
-  } catch { seal.invalid = true; throw new Error("mcp_prepared_scope_changed"); }
+    if (seal.invalid || seals.get(seal.path) !== seal || !seal.current() || fileDigest(seal.path) !== seal.digest) throw new PreparedMcpScopeChangedError();
+  } catch { seal.invalid = true; throw new PreparedMcpScopeChangedError(); }
 }
 export function preparedMcpBindings(path: string): PreparedMcpBinding[] {
   const seal = seals.get(path);

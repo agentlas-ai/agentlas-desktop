@@ -198,6 +198,25 @@ function installedBrowserCdpRuntimeExecutable(): string | null {
   }
 }
 
+function legacyBrowserCdpExecutableCandidates(
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    ...legacySystemBrowserExecutableCandidates(platform, home, env),
+    // Linux /usr/bin launchers may exec a different binary, so /proc/<pid>/exe
+    // is not necessarily the launch path (nor its realpath). Identification
+    // must include these exact legacy binaries without allowing arbitrary paths.
+    ...(platform === "linux" ? [
+      "/usr/lib/chromium/chromium",
+      "/usr/lib/chromium-browser/chromium-browser",
+      "/opt/microsoft/msedge/msedge",
+      "/usr/lib/microsoft-edge/msedge",
+    ] : []),
+  ];
+}
+
 export function browserCdpExecutableCandidates(
   platform = process.platform,
   home = os.homedir(),
@@ -210,7 +229,7 @@ export function browserCdpExecutableCandidates(
     ...(installed && installed !== dedicated ? [installed] : []),
     // Legacy paths are identification-only so an old Agentlas process can be
     // migrated safely. resolveChromeExe() never chooses one for a new launch.
-    ...legacySystemBrowserExecutableCandidates(platform, home, env),
+    ...legacyBrowserCdpExecutableCandidates(platform, home, env),
   ];
 }
 
@@ -2484,7 +2503,7 @@ const UNIFIED_CUA_ADAPTER_MODULE = ${JSON.stringify(externalRuntimeModule("../co
 const UNIFIED_CUA_NATIVE_GATE_MODULE = ${JSON.stringify(externalRuntimeModule("../computer-use/unified/native-gate.js"))};
 const UNIFIED_CUA_BOOTSTRAP_SOURCE = ${JSON.stringify(UNIFIED_CUA_BOOTSTRAP_SOURCE)};
 const BROWSER_RUNTIME_EXE = ${JSON.stringify(CURRENT_BROWSER_RUNTIME?.executable ?? "")};
-const LEGACY_BROWSER_EXES = ${JSON.stringify(legacySystemBrowserExecutableCandidates())};
+const LEGACY_BROWSER_EXES = ${JSON.stringify(legacyBrowserCdpExecutableCandidates())};
 const log = (...a) => console.error('[agentlas-browser]', ...a);
 
 function portReady(port) {
