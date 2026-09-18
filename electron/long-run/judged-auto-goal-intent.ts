@@ -8,6 +8,7 @@ import {
 
 type IntakeLabel = Exclude<GoalIntakeDecision["intent"], "execute"> | "execute_finite" | "execute_ongoing";
 const INTAKE_LABELS: readonly IntakeLabel[] = ["execute_finite", "execute_ongoing", "question", "explore", "conditional", "unknown"];
+export const AUTOMATIC_GOAL_INTENT_TIMEOUT_MS = 60_000;
 
 export interface AutomaticGoalIntentResolution extends GoalIntakeDecision {
   classification: "classified" | "unavailable";
@@ -54,7 +55,8 @@ export async function resolveAutomaticGoalIntent(
       signal: options.signal,
       scanSecrets: true,
       maxInputChars: null,
-      timeoutMs: Math.min(30_000, Math.max(1, options.timeoutMs ?? 30_000)),
+      timeoutMs: Math.min(AUTOMATIC_GOAL_INTENT_TIMEOUT_MS,
+        Math.max(1, options.timeoutMs ?? AUTOMATIC_GOAL_INTENT_TIMEOUT_MS)),
     });
     if (options.signal?.aborted || result.source !== "llm" || !result.verdict || !INTAKE_LABELS.includes(result.verdict)) {
       return abstain({ failureKind: result.failureKind, attempts: result.attempts });

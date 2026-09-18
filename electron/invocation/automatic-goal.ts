@@ -6,6 +6,7 @@ import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
 import {
+  AUTOMATIC_GOAL_INTENT_TIMEOUT_MS,
   resolveAutomaticGoalIntent,
   type AutomaticGoalIntentResolution,
 } from "../long-run/judged-auto-goal-intent";
@@ -123,7 +124,7 @@ export async function prepareInvocationAutomaticGoal(input: {
       signal: input.signal,
       // Local classification can exceed a short network-style deadline. Keep a
       // finite bound while allowing the configured local runtime to answer.
-      timeoutMs: 60_000,
+      timeoutMs: AUTOMATIC_GOAL_INTENT_TIMEOUT_MS,
     });
     if (input.signal.aborted) return { kind: "bypass", decision };
     if ("classification" in decision && decision.classification === "unavailable") {
