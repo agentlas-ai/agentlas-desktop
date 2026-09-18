@@ -1683,13 +1683,23 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
     const run = getLongRunByGoalId(goalId);
     if (!run || run.surface === "science") throw new Error("long_run_usage_scope_invalid");
     const invocation = (usage.scopeAnchorId
-      ? db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started')")
+      ? db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started','verifier_execution_started')")
         .get(usage.invocationRunId, usage.scopeAnchorId)
       : db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
         .get(usage.invocationRunId)) as { chat_id: string | null; kind: string; payload_json: string } | undefined;
     if (usage.scopeAnchorId && (!invocation || invocation.chat_id !== run.rootChatId
       || (invocation.kind === "invoke_preflight_started" && JSON.parse(invocation.payload_json).goalId !== goalId))) {
       throw new Error("long_run_usage_anchor_mismatch");
+    }
+    if (invocation?.kind === "verifier_execution_started") {
+      const identity = JSON.parse(invocation.payload_json);
+      const verifier = usage.attemptId && db.prepare(`SELECT a.id FROM long_run_worker_attempts a
+        JOIN long_run_workers w ON w.id=a.worker_id WHERE a.id=? AND a.run_id=?
+        AND a.invocation_run_id=? AND w.run_id=a.run_id AND w.role='verifier'`)
+        .get(usage.attemptId,run.id,usage.invocationRunId);
+      if (!verifier || identity.goalId !== goalId || identity.attemptId !== usage.attemptId) {
+        throw new Error("long_run_usage_verifier_mismatch");
+      }
     }
     // Several specialist attempts may share the controller invocation ID.
     // An explicit child identity must resolve exactly; an unqualified direct

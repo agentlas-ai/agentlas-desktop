@@ -24,6 +24,27 @@ export function withInvocationAccounting<T>(input: {
   return accountingContext.run({ invocationRunId: input.runId, chatId: input.chatId, anchorId: anchor.id, readOwner: input.readOwner }, call);
 }
 
+/** Verification owns inference usage without reopening the task's sealed run.
+ * This anchor is bookkeeping, not an admitted invocation or execution grant. */
+export function withVerificationAccounting<T>(input: {
+  executionId: string; anchorId: string; attemptId: string; goalId: string; chatId: string;
+}, call: () => T): T {
+  const anchor = getDb().prepare(`SELECT e.payload_json FROM run_events e
+    JOIN long_run_worker_attempts a ON a.invocation_run_id=e.run_id
+    JOIN long_run_workers w ON w.id=a.worker_id
+    JOIN long_runs r ON r.id=a.run_id
+    WHERE e.id=? AND e.run_id=? AND e.chat_id=? AND e.kind='verifier_execution_started'
+      AND a.id=? AND a.state='running' AND w.role='verifier' AND w.run_id=r.id
+      AND r.goal_id=? AND r.root_chat_id=e.chat_id`)
+    .get(input.anchorId,input.executionId,input.chatId,input.attemptId,input.goalId) as {payload_json:string}|undefined;
+  const identity = anchor ? JSON.parse(anchor.payload_json) : null;
+  if (identity?.attemptId !== input.attemptId || identity?.goalId !== input.goalId) {
+    throw new Error("accounting_verifier_anchor_missing");
+  }
+  return accountingContext.run({invocationRunId:input.executionId,chatId:input.chatId,anchorId:input.anchorId,
+    readOwner:()=>({goalId:input.goalId,attemptId:input.attemptId})},call);
+}
+
 /** Pre-start inference has its own marker; it is never an admitted invocation. */
 export function withInvocationPreflightAccounting<T>(input: { runId: string; chatId: string }, call: () => T): T {
   if (!input.runId?.trim() || !input.chatId?.trim()) throw new Error("accounting_preflight_identity_required");

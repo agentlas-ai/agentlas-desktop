@@ -9,6 +9,8 @@ import { boundEffectBoundary } from "./effect-metadata";
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
 // adapters have incomplete result coverage and cannot attest quiescence here.
 const RESULT_COVERAGE = new Set(["claude-code", "codex", "byok", "ollama", "lmstudio", "mlx", "agentlas-local"]);
+/** Shared Main contract, not a provider-supplied no-tools attestation. */
+export function hasCallbackResultCoverage(kind: string): boolean { return RESULT_COVERAGE.has(kind); }
 /** Host capability/Goal notices lack provider operation identity, arguments and
  * typed outcome. A real provider operation sharing the display name still counts. */
 export function isEffectStatusOnlyTool(tool: {name:string;id?:unknown;args?:unknown;isError?:unknown}): boolean {

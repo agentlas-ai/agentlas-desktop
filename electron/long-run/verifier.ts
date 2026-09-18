@@ -1,7 +1,8 @@
 import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
-import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, criterionProofAccountingOwner } from "./criterion-proof";
-import { withInvocationAccounting } from "./accounting-context";
+import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection } from "./criterion-proof";
+import { withVerificationAccounting } from "./accounting-context";
+import { createVerificationSession } from "./verification-effects";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { judgeRequiredBatch, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
@@ -987,10 +988,12 @@ export async function verifyGoalCompletionClaim(input: {
     permissionProfile: "read-only-verification",
     state: "idle",
   });
+  const verificationExecutionId = randomUUID();
   const attempt = startLongRunWorkerAttempt({
     runId: run.id,
     workerId,
     taskId: task.id,
+    invocationRunId: verificationExecutionId,
     runtimeSelection,
   });
   const controller = new AbortController();
@@ -1045,12 +1048,20 @@ export async function verifyGoalCompletionClaim(input: {
   // Judgment uses the configured runtime pool. Keep the packet within the
   // smallest supported context while ordering host evidence before model prose.
   const judgeInputCeiling = 28_000;
+  let verificationSession: ReturnType<typeof createVerificationSession> | null = null;
   try {
+    if (verificationBoundary && input.invocationRunId && run.rootChatId) {
+      verificationSession = createVerificationSession({executionId:verificationExecutionId,
+        attemptId:attempt.attemptId,goalId:input.goalId,goalRevision:verificationBoundary.goalRevision,
+        invocationRunId:input.invocationRunId,chatId:run.rootChatId,boundaryDigest:verificationBoundary.digest,
+        signal:controller.signal});
+    }
     const recoveryOverride = hostRecoveryOverride(run.id, input.invocationRunId);
     let proofContracts: Awaited<ReturnType<typeof ensureCriterionProofContracts>> = [];
-    if (durableEvidence.ready && input.invocationRunId) {
+    if (durableEvidence.ready && input.invocationRunId && verificationSession) {
       try {
-        proofContracts = await ensureCriterionProofContracts({goalId:input.goalId,invocationRunId:input.invocationRunId,attemptId:attempt.attemptId,signal:controller.signal});
+        proofContracts = await ensureCriterionProofContracts({goalId:input.goalId,invocationRunId:input.invocationRunId,
+          attemptId:attempt.attemptId,signal:controller.signal,verificationSession});
       } catch (error) {
         if (controller.signal.aborted) throw error;
         if (getLongRunByGoalId(input.goalId)?.status !== "verifying") {
@@ -1072,8 +1083,10 @@ export async function verifyGoalCompletionClaim(input: {
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.
-    const judgments = durableEvidence.ready && hasAdmissibleProof && input.invocationRunId && run.rootChatId
-      ? await withInvocationAccounting({runId:input.invocationRunId,chatId:run.rootChatId,readOwner:()=>criterionProofAccountingOwner(input.goalId,input.invocationRunId!)},()=>judgeRequiredBatch<CriterionJudgeLabel>({
+    const judgments = durableEvidence.ready && hasAdmissibleProof && input.invocationRunId && run.rootChatId && verificationSession
+      ? await verificationSession.runStage("judgment",()=>withVerificationAccounting({
+        executionId:verificationSession!.executionId,anchorId:verificationSession!.anchorId,
+        chatId:run.rootChatId!,goalId:input.goalId,attemptId:attempt.attemptId},()=>judgeRequiredBatch<CriterionJudgeLabel>({
         kind: `long-run-criteria:${run.id}:${goalRevision}`,
         runtimeSelection: criterionProofRuntimeSelection(input.goalId,input.invocationRunId!),
         evidenceRefsByItem,
@@ -1108,7 +1121,7 @@ export async function verifyGoalCompletionClaim(input: {
         // The batch shares one bounded packet across every criterion.
         maxInputChars: judgeInputCeiling,
         timeoutMs: 60_000,
-      })) : null;
+      }))) : null;
     const verdicts: JudgedCriterion[] = judgments
       ? judgments.map((judged, criterionIndex) => {
       let result = criterionFromJudge(
@@ -1155,6 +1168,7 @@ export async function verifyGoalCompletionClaim(input: {
     }
     // A provider may resolve despite abort. Never persist its late verdicts.
     if (controller.signal.aborted) throw controller.signal.reason;
+    verificationSession?.assertSettledEmpty();
     if (verificationBoundary && input.invocationRunId) {
       let current: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
       try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Refuse stale result. */ }
@@ -1290,6 +1304,10 @@ export async function verifyGoalCompletionClaim(input: {
     if (controller.signal.aborted) return null;
     throw error;
   } finally {
+    // A bounded judge timeout is not transport drainage. Keep the retained
+    // invocation owner alive until its actual verifier runners have settled.
+    verificationSession?.close();
+    if (verificationSession) await verificationSession.drain();
     input.signal?.removeEventListener("abort", interrupt);
     controllers.delete(attempt.attemptId);
   }

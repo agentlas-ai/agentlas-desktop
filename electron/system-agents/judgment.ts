@@ -1,5 +1,6 @@
 import { beginAccountedInference } from "../long-run/accounting-context";
 import { withAdapterEffectPreparation } from "../invocation/adapter-effect-context";
+import { hasActiveVerificationSession, markVerificationEffectFailure, runVerificationEffectDispatch } from "../long-run/verification-effects";
 // Resident judgment service — the invisible system agent that replaces wordlist
 // *decisions* with connected-model judgment. Wordlists stop being the decider and
 // become REFERENCE ONLY: a keyword match is not proof, and a miss is not clearance.
@@ -224,6 +225,7 @@ export function awaitConnectedModelRunnerWithAbortGrace<T>(
 const cache = new Map<string, Verdict<string>>();
 
 function cacheGet<V extends string>(key: string): Verdict<V> | undefined {
+  if (hasActiveVerificationSession()) return undefined;
   const hit = cache.get(key);
   if (!hit) return undefined;
   // Refresh recency.
@@ -562,6 +564,8 @@ async function callJudgmentModelDetailed(opts: {
     }
   };
   const recordAttempt = (startedAt: number, outcome: JudgmentRuntimeAttempt["outcome"], failure?: RunnerFailure) => {
+    if (outcome !== "success") markVerificationEffectFailure(outcome === "timeout" ? "timeout"
+      : outcome === "cancelled" ? "cancelled" : outcome === "invalid_output" ? "invalid_output" : "runner_failed");
     if (!runtimeReceipt) return;
     const attempt: JudgmentRuntimeAttempt = {
       runtimeReceipt, outcome, elapsedMs: Math.max(0, Date.now() - startedAt),
@@ -604,7 +608,7 @@ async function callJudgmentModelDetailed(opts: {
         ? remainingMs
         : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
       const accounting = beginAccountedInference(runtime);
-      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runWithJudgmentPurpose(() => picked.runner(
+      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => picked.runner(
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -622,15 +626,15 @@ async function callJudgmentModelDetailed(opts: {
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
-            signal: attemptSignal,
+            signal: runnerSignal,
             locale: opts.locale ?? "en",
           },
           {
             onPartial: (chunk: string) => { try { opts.onPartial?.(chunk); } catch { /* 화면 사정은 판정을 막지 않는다 */ } },
             onStatus: () => {},
-            onTool: () => {},
+            onTool,
           },
-        )), attemptSignal));
+        ))), attemptSignal));
       accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
@@ -688,7 +692,7 @@ async function callJudgmentModelDetailed(opts: {
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
         const accounting = beginAccountedInference(selection);
-        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runWithJudgmentPurpose(() => recovery.runner(
+        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -703,11 +707,11 @@ async function callJudgmentModelDetailed(opts: {
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
-              signal: attemptSignal,
+              signal: runnerSignal,
               locale: opts.locale ?? "en",
             },
-            { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
-          )), attemptSignal));
+            { onPartial: () => {}, onStatus: () => {}, onTool },
+          ))), attemptSignal));
         accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;
@@ -1193,13 +1197,13 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const runtimeScope = runtimeSelectionCacheScope();
   const signature = `${intentSignature(input)}${runtimeScope}`;
   const cacheKey = `${subsetCacheKey(spec.kind, spec.labels, input)}${runtimeScope}`;
-  const cached = subsetCache.get(cacheKey);
+  const cached = hasActiveVerificationSession() ? undefined : subsetCache.get(cacheKey);
   if (cached) {
     subsetCache.delete(cacheKey);
     subsetCache.set(cacheKey, cached);
     return cached as SubsetVerdict<V>;
   }
-  const durableSubset = durableSubsetGet<V>(spec.kind, spec.labels, signature);
+  const durableSubset = hasActiveVerificationSession() ? undefined : durableSubsetGet<V>(spec.kind, spec.labels, signature);
   if (durableSubset) {
     subsetCache.set(cacheKey, durableSubset as SubsetVerdict<string>);
     return durableSubset;
@@ -1466,7 +1470,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     evidence ?? "",
     subject,
   ].join("\u0000");
-  const cached = checklistCacheGet(cacheKey);
+  const cached = hasActiveVerificationSession() ? undefined : checklistCacheGet(cacheKey);
   if (cached) return cached;
 
   const systemPrompt = [
