@@ -43,8 +43,9 @@ Oberon은 Agentlas Desktop에 내장된 AI 필름 스튜디오의 **에이전트
 
 ## 퍼블리시 (소유자)
 
-이 폴더(`agents/oberon-film-studio/`)가 클라우드 에이전트 패키징 루트다. 포함:
-`AGENT.md`(계약), `.agentlas/routing-card.json`(라우팅 카드 2.0), `README.md`, `memory.md`.
+이 폴더(`agents/oberon-film-studio/`)가 클라우드 에이전트 패키징 루트다. 공개 패키지에는
+`AGENT.md`(계약), `.agentlas/routing-card.json`(라우팅 카드 2.0), `README.md`만 포함한다.
+로컬 운영 기록은 패키지에서 제외한다.
 
 ```
 # dry-run 정적 리뷰 (시크릿 불필요)

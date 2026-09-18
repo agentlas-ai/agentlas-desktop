@@ -321,3 +321,6 @@ plugins/design/references/apple-hig/.cache/
 
 # 이 기계에서만 도는 검증·도구. 폴더째 무시한다 — 파일마다 규칙을 늘리지 않는다.
 scripts/local/
+
+# Local operator notes are not public runtime package inputs.
+/agents/oberon-film-studio/memory.md
