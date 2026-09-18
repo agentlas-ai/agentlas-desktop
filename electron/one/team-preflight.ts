@@ -1546,6 +1546,26 @@ export async function autoResolveOneTeamPreflight(
   }, deps, "one");
 }
 
+function staleRecoveryWasSuperseded(
+  proposal: OneTeamPreflightProposal,
+  chatId: string,
+  db = getDb(),
+): boolean {
+  if (proposal.status !== "recovery_required" || proposal.binding.chatId !== chatId) return false;
+  const evidence = db.prepare(
+    `SELECT chat_id, kind, ts
+       FROM run_events
+      WHERE chat_id = ?
+        AND kind = 'invoke_started'
+        AND ts > ?
+      ORDER BY ts ASC, rowid ASC
+      LIMIT 1`,
+  ).get(chatId, proposal.updatedAt) as { chat_id: string; kind: string; ts: string } | undefined;
+  return evidence?.chat_id === chatId
+    && evidence.kind === "invoke_started"
+    && evidence.ts > proposal.updatedAt;
+}
+
 export function getOneTeamPreflightForChat(
   chatId: string,
   deps: OneTeamPreflightDependencies = {},
@@ -1555,7 +1575,8 @@ export function getOneTeamPreflightForChat(
   const records = readStore().state.proposals
     .filter((item) => item.proposal.binding.chatId === chatId)
     .sort((left, right) => Date.parse(right.proposal.updatedAt) - Date.parse(left.proposal.updatedAt));
-  return records[0] ? expireIfNeeded(records[0], deps).proposal : null;
+  const proposal = records[0] ? expireIfNeeded(records[0], deps).proposal : null;
+  return proposal && staleRecoveryWasSuperseded(proposal, chatId) ? null : proposal;
 }
 
 export function acknowledgeOneTeamPreflight(
