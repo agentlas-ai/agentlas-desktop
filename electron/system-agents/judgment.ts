@@ -1,4 +1,5 @@
 import { beginAccountedInference } from "../long-run/accounting-context";
+import { withAdapterEffectPreparation } from "../invocation/adapter-effect-context";
 // Resident judgment service — the invisible system agent that replaces wordlist
 // *decisions* with connected-model judgment. Wordlists stop being the decider and
 // become REFERENCE ONLY: a keyword match is not proof, and a miss is not clearance.
@@ -475,6 +476,8 @@ async function callJudgmentModelDetailed(opts: {
    * 얻으면 자기가 판정할 대상을 스스로 만들어 낼 수 있다.
    */
   authoring?: boolean;
+  /** Optional metadata preparation must not dispatch a tool-capable model. */
+  requireNoTools?: true;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   const inherited = invocationJudgmentContext();
   opts = {
@@ -483,6 +486,8 @@ async function callJudgmentModelDetailed(opts: {
     signal: opts.signal && inherited?.signal && opts.signal !== inherited.signal
       ? AbortSignal.any([opts.signal, inherited.signal]) : opts.signal ?? inherited?.signal,
   };
+  const runWithJudgmentPurpose = <T>(action: () => T): T => opts.authoring
+    ? action() : withAdapterEffectPreparation(action);
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
   let runtimeReceipt: JudgmentRuntimeReceipt | undefined;
@@ -573,6 +578,14 @@ async function callJudgmentModelDetailed(opts: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
       if (opts.signal?.aborted) break;
+      // Antigravity explicitly refuses untrustedNoTools before spawn. Skip this
+      // optional preparation rather than starting an unisolated CLI or silently
+      // changing the caller's runtime. This does NOT suppress an effect scope.
+      if (opts.requireNoTools && runtime.kind === "antigravity") return { text: null, failure: {
+        kind: "unsupported", runtime: runtime.kind, source: "marker",
+        providerCode: "judgment_preparation_isolation_unavailable",
+        message: "judgment_preparation_isolation_unavailable",
+      }, attempts };
       const picked = pickRunner(runtime);
       if (!picked) continue;
       runtimeReceipt = { route, fingerprint, execution: "invoked", selection: {
@@ -591,7 +604,7 @@ async function callJudgmentModelDetailed(opts: {
         ? remainingMs
         : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
       const accounting = beginAccountedInference(runtime);
-      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(picked.runner(
+      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runWithJudgmentPurpose(() => picked.runner(
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -601,10 +614,10 @@ async function callJudgmentModelDetailed(opts: {
             longContext: opts.runtimeSelection ? runtime.longContextEnabled : false,
             effort: opts.runtimeSelection ? runtime.effort ?? undefined : "low",
             permission: "read",
-            // This receives no cwd or explicit MCP grant. Requiring verified
-            // zero-builtins isolation here disabled Goal intake and capability
-            // selection on Antigravity before the user's task could start.
-            untrustedNoTools: false,
+            // Optional metadata selection requires the runner's enforced
+            // no-tools contract. Other judgments/authoring keep their existing
+            // contract; neither path is detached from the host effect ledger.
+            untrustedNoTools: opts.requireNoTools === true,
             surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
@@ -617,7 +630,7 @@ async function callJudgmentModelDetailed(opts: {
             onStatus: () => {},
             onTool: () => {},
           },
-        ), attemptSignal));
+        )), attemptSignal));
       accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
@@ -629,6 +642,7 @@ async function callJudgmentModelDetailed(opts: {
         };
         recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
         if (bounded.cancelled) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        if (opts.requireNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         continue;
       }
       const result = bounded.value!;
@@ -640,6 +654,7 @@ async function callJudgmentModelDetailed(opts: {
            */
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
+          if (opts.requireNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         const text = result.text ?? "";
@@ -661,6 +676,11 @@ async function callJudgmentModelDetailed(opts: {
     if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
+      if (opts.requireNoTools && selection?.kind === "antigravity") return { text: null, failure: {
+        kind: "unsupported", runtime: selection.kind, source: "marker",
+        providerCode: "judgment_preparation_isolation_unavailable",
+        message: "judgment_preparation_isolation_unavailable",
+      }, attempts };
       if (selection && recovery && !opts.signal?.aborted) {
         runtimeReceipt = { route: "legacy", fingerprint: "legacy", execution: "invoked", selection: {
           kind: selection.kind, backend: selection.backend, source: selection.source, model: selection.model,
@@ -668,7 +688,7 @@ async function callJudgmentModelDetailed(opts: {
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
         const accounting = beginAccountedInference(selection);
-        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
+        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runWithJudgmentPurpose(() => recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -678,7 +698,7 @@ async function callJudgmentModelDetailed(opts: {
               longContext: false,
               effort: "low",
               permission: "read",
-              untrustedNoTools: false,
+              untrustedNoTools: opts.requireNoTools === true,
               surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
@@ -687,7 +707,7 @@ async function callJudgmentModelDetailed(opts: {
               locale: opts.locale ?? "en",
             },
             { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
-          ), attemptSignal));
+          )), attemptSignal));
         accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;
@@ -1112,6 +1132,8 @@ export interface SubsetSpec<V extends string> {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** Preparation can return undecided; it must never acquire tools to select tools. */
+  requireNoTools?: true;
 }
 
 export interface SubsetVerdict<V extends string> {
@@ -1213,9 +1235,12 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    requireNoTools: spec.requireNoTools,
+    ...(spec.requireNoTools ? { accept: (text: string) => parseSubset<V>(text, spec.labels) !== null } : {}),
   });
   const text = detailed.text;
-  if (text === null) return { ...undecided, failureKind: detailed.failure?.kind, attempts: detailed.attempts };
+  if (text === null) return { ...undecided, reason: detailed.failure?.providerCode ?? undecided.reason,
+    failureKind: detailed.failure?.kind, attempts: detailed.attempts };
 
   const parsed = parseSubset<V>(text, spec.labels);
   if (!parsed) return { ...undecided, decisionFailure: "invalid_output", failureKind: "exit", attempts: detailed.attempts };

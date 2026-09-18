@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.20 — 2026-09-18
+
+- Antigravity Goal waits reconcile actual Main-owned clock and native-browser tool completion with the runtime stream. Successful bounded operations can continue without being mistaken for uncertain effects; interrupted, unresolved and background operations retain their safety boundary.
+- Antigravity's temporary context messages are verified against the exact conversation's typed metadata instead of treating them as unknown tool execution. Sparse tool updates retain their original operation identity.
+- Native browser execution distinguishes completed actions from callbacks still suspended by a dialog. Invalid evaluate arguments are rejected before dispatch, and corrected retries preserve the original error history without stranding a safely settled turn.
+- Optional plugin selection no longer starts a tool-capable preparation model when no-tools isolation is unavailable. Durable effect receipts reject mismatched conversations, outcomes and missing result status.
+- A run waiting for another live Antigravity process now waits for its tool-configuration lease instead of failing the Goal immediately. Cancellation remains responsive and unknown ownership is never reclaimed.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority. Local ongoing work requires the app and computer to remain available.
+
 ## 1.2.19 — 2026-09-18
 
 - Sending a new local message to a paused Goal resumes that same Goal and delivers the new instruction. The message is saved before the resume is recorded; the original objective and criteria remain attached to the conversation.

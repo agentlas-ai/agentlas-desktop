@@ -1,5 +1,7 @@
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
+import { attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
+import { observeMainMcpEffects, mcpEffectArgumentsDigest, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
@@ -1116,13 +1118,21 @@ export async function reconcileAgyMcpServers(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
+  signal?: AbortSignal,
 ): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   let lease: Awaited<ReturnType<typeof acquireAgyMcpLease>>;
-  try { lease = await acquireAgyMcpLease(agyMcpConfigPath()); }
-  catch { return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
-    providerCode: "agy_mcp_scope_conflict", message: "Antigravity MCP configuration is leased by another run or its owner could not be verified." } }; }
+  try { lease = await acquireAgyMcpLease(agyMcpConfigPath(), { signal,
+    onWait: () => onStatus("[agy-mcp-scope] phase=waiting reason=lease-contention"),
+  }); }
+  catch (error) {
+    if (signal?.aborted) throw error;
+    return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
+      providerCode: error instanceof Error && error.message === "agy_mcp_lease_owner_unverified" ? error.message : "agy_mcp_scope_conflict",
+      message: "Antigravity MCP configuration ownership could not be verified." } };
+  }
   try {
+    signal?.throwIfAborted();
     const global = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
       throw error;
@@ -1154,6 +1164,7 @@ export async function reconcileAgyMcpServers(
     const stagedConfig = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
     const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
     const assertReady = async () => {
+      signal?.throwIfAborted();
       await lease.assertOwned();
       const current = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
       for (const key of guardedKeys) {
@@ -1168,6 +1179,7 @@ export async function reconcileAgyMcpServers(
     return { assertReady, cleanup: async () => { try { await bound.cleanup(); } finally { await lease.release(); } } };
   } catch (error) {
     await lease.release().catch(() => {});
+    if (signal?.aborted) throw error;
     const code = error instanceof Error && /^agy_mcp_[a-z_]+$/.test(error.message) ? error.message : "agy_mcp_config_unavailable";
     return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
       providerCode: code, message: "Antigravity MCP configuration could not be bound to this authorized run." } };
@@ -1682,28 +1694,47 @@ async function runPreparedAntigravity(
    * 도구가 닫힌 읽기 실행에는 붙이지 않는다: agy 헤드리스는 권한 플래그 없이 모든 도구
    * 호출을 자동 거부하므로, 서버를 붙여 봐야 "가진 척"만 된다(거짓 표시 금지).
    */
-  const mcpReconcile = agyToolsAllowed
-    ? await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env)
-    : { cleanup: async () => {} };
-  if (mcpReconcile.failure) return { text: "", failure: mcpReconcile.failure };
+  let mcpReconcile: Awaited<ReturnType<typeof reconcileAgyMcpServers>> = { cleanup: async () => {} };
   try {
+    req.signal?.throwIfAborted();
+    if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal);
+    req.signal?.throwIfAborted();
+    if (mcpReconcile.failure) return { text: "", failure: mcpReconcile.failure };
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
       if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
       for (const row of preparedMcpBindings(req.mcpConfigPath)) preparedMcpTransport(row, row.server);
     }
     if ("assertReady" in mcpReconcile) {
       try { await mcpReconcile.assertReady?.(); }
-      catch { return { text: "", failure: { kind: "refused", source: "marker", runtime: "antigravity",
+      catch (error) {
+        if (req.signal?.aborted) throw error;
+        return { text: "", failure: { kind: "refused", source: "marker", runtime: "antigravity",
         providerCode: "agy_mcp_configuration_drift", message: "Antigravity MCP scope changed before model execution." } }; }
     }
+    req.signal?.throwIfAborted();
     return await runAgyProcess();
   } finally {
-    await mcpReconcile.cleanup();
+    try { await mcpReconcile.cleanup(); } finally { cleanupAgyPrompt(); }
   }
 
   function runAgyProcess(): Promise<RunnerResult> {
+  const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
-  const effectCoverage = new AntigravityEffectCoverage(effectRun?.scopeId ?? randomUUID());
+  const hostEffects = new Map<string, MainMcpEffectReceipt>(), claimedEffects = new Set<string>();
+  let hostReceiptOverflow = false;
+  const detachEffects = observeMainMcpEffects(effectBindings, receipt => {
+    if (hostEffects.size >= 4096 && !hostEffects.has(receipt.id)) { hostReceiptOverflow = true; return; }
+    hostEffects.set(receipt.id, receipt);
+  });
+  const effectCoverage = new AntigravityEffectCoverage(effectRun?.scopeId ?? randomUUID(), (server, tool, args, failed) => {
+    const digest = mcpEffectArgumentsDigest(args);
+    // Reconcile the complete closed multiset, not arrival-order/FIFO: concurrent
+    // identical requests may finish in reverse order. Any unmatched/pending
+    // host request still makes the whole scope incomplete below.
+    const receipt = [...hostEffects.values()].find(row => !claimedEffects.has(row.id) && row.server === server && row.tool === tool && row.argumentsDigest === digest && row.failed === failed);
+    if (receipt) claimedEffects.add(receipt.id);
+    return receipt;
+  }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps);
   let effectExitCode: number | null = null, effectStdoutEnded = false;
   return new Promise<RunnerResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
@@ -1776,8 +1807,9 @@ async function runPreparedAntigravity(
     const consumeAgyLine = (line: string): void => {
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
-      effectCoverage.observe(trimmedLine);
-      const step = reduceAgyLine(trimmedLine, agyState);
+      const normalizedLine = effectCoverage.normalizeLine(trimmedLine);
+      effectCoverage.observe(normalizedLine);
+      const step = reduceAgyLine(normalizedLine, agyState);
       // 도구 호출을 화면으로 올린다 — 같은 도구가 진행(ACTIVE)/완료(DONE)로 두 번 오면 같은
       // id 로 갱신된다(ACTIVE 1회 + DONE 1회만 올린다; 반복 ACTIVE는 무시).
       if (step.tool) {
@@ -2056,7 +2088,7 @@ async function runPreparedAntigravity(
   }, error => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));
     throw error;
-  });
+  }).finally(detachEffects);
   }
 };
 

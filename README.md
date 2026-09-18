@@ -64,6 +64,8 @@
 
 ## Release log
 
+- **2026-09-18 · v1.2.20 — 장기 작업의 정상 도구 완료를 정확히 이어받습니다** — Antigravity 시간 조회와 네이티브 브라우저의 실제 완료 기록을 대기·재개에 연결합니다. 임시 컨텍스트 메시지는 원본 유형을 확인하며, 대화상자에 걸린 작업과 완료된 작업을 구분합니다. Source readiness does not prove a public installer or update feed; the Releases page stays the authority. This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+
 - **2026-09-18 · v1.2.19 — 정지된 목표도 새 채팅으로 이어갑니다** — 목표가 일시정지돼 있어도 새 메시지를 보내면 같은 목표와 기준을 유지하며 지시를 반영합니다. One 목표 재개는 저장된 Full access 등 권한을 그대로 전달합니다. 시작 거절은 과거 실패 실행의 자동 재시도를 유발하지 않고 입력과 구체적인 안내를 보존합니다. 이미 앱 파일이 변경된 구버전의 자동복구는 별도의 전달·검증 대상입니다. This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).

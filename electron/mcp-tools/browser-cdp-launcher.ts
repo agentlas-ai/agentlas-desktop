@@ -2358,7 +2358,7 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 16;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 17;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
 const UNIFIED_CUA_BOOTSTRAP_SOURCE = String.raw`
@@ -2415,6 +2415,98 @@ export function hasUsableLauncherRuntimeBindings(source: string): boolean {
   );
 }
 
+// The pinned upstream can return from a modal race before its action callback.
+// Observe the actual callbacks without changing that interactive behavior.
+export const BROWSER_LEAF_RECEIPT_SOURCE = String.raw`
+function installBrowserLeafHooks(tools) {
+  const backend = tools?.BrowserBackend?.prototype;
+  const tab = tools?.Tab?.prototype;
+  if (typeof backend?.callTool !== 'function' || typeof tab?.waitForCompletion !== 'function'
+    || typeof tab?._raceAgainstModalStates !== 'function') return false;
+  const callTool = backend.callTool;
+  const waitForCompletion = tab.waitForCompletion;
+  const raceAgainstModalStates = tab._raceAgainstModalStates;
+  const scopes = new AsyncLocalStorage();
+  const actions = new Set(['browser_evaluate', 'browser_navigate', 'browser_navigate_back', 'browser_snapshot',
+    'browser_click', 'browser_hover', 'browser_type', 'browser_fill_form', 'browser_select_option',
+    'browser_press_key', 'browser_drag', 'browser_tabs', 'browser_take_screenshot', 'browser_console_messages',
+    'browser_network_requests', 'browser_wait_for', 'browser_handle_dialog', 'browser_file_upload', 'browser_resize']);
+  const track = async (scope, callback, evaluationCallback) => {
+    scope.pending++;
+    if (evaluationCallback) scope.callbacks++;
+    try {
+      const value = await callback();
+      if (evaluationCallback) scope.completedCallbacks++;
+      return value;
+    } catch (error) {
+      scope.failed = true;
+      throw error;
+    } finally {
+      scope.pending--;
+    }
+  };
+  tab.waitForCompletion = function(callback) {
+    const scope = scopes.getStore();
+    return waitForCompletion.call(this, scope ? () => track(scope, callback, true) : callback);
+  };
+  tab._raceAgainstModalStates = async function(action) {
+    const scope = scopes.getStore();
+    const modalStates = await raceAgainstModalStates.call(this, scope ? () => track(scope, action, false) : action);
+    if (scope && (!Array.isArray(modalStates) || modalStates.length)) scope.interrupted = true;
+    return modalStates;
+  };
+  backend.callTool = function(name, args, signal) {
+    const scope = { pending: 0, callbacks: 0, completedCallbacks: 0, failed: false, interrupted: false };
+    return scopes.run(scope, async () => {
+      const result = await callTool.call(this, name, args, signal);
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+      const metadata = result._meta && typeof result._meta === 'object' && !Array.isArray(result._meta) ? { ...result._meta } : {};
+      // Reserved proof is always authored here, never copied from tool output.
+      delete metadata.agentlasBrowserLeaf;
+      if (actions.has(name)) {
+        let unpaused = false;
+        try { unpaused = this._context.debugger().pausedDetails() == null; } catch { /* Missing hook is not proof. */ }
+        const completed = Array.isArray(result.content) && (result.isError === undefined || result.isError === false)
+          && result.task === undefined && result.isClose !== true && !signal?.aborted && unpaused
+          && !scope.failed && !scope.interrupted && scope.pending === 0
+          && (name !== 'browser_evaluate' || (scope.callbacks > 0 && scope.callbacks === scope.completedCallbacks));
+        metadata.agentlasBrowserLeaf = {
+          schemaVersion: 'agentlas.browser-leaf.v1', tool: name, state: completed ? 'completed' : 'uncertain',
+        };
+      }
+      return { ...result, _meta: metadata };
+    });
+  };
+  return true;
+}
+function runNativeBrowserMcp() {
+  // This mode is used only after the outer native launcher acquires its lease.
+  const endpointIndex = process.argv.indexOf('--cdp-endpoint');
+  const endpoint = endpointIndex >= 0 ? process.argv[endpointIndex + 1] : '';
+  let native;
+  try { native = new URL(NATIVE_ENDPOINT); } catch { throw new Error('browser-leaf-native-binding-invalid'); }
+  if (native.protocol !== 'http:' || native.hostname !== '127.0.0.1' || !native.port || native.username || native.password
+    || !/^[a-f0-9]{64}$/.test(NATIVE_TOKEN) || !endpoint?.startsWith(NATIVE_ENDPOINT + '/session/')
+    || process.env.PLAYWRIGHT_MCP_CDP_HEADERS !== 'Authorization: Bearer ' + NATIVE_TOKEN) {
+    throw new Error('browser-leaf-native-binding-invalid');
+  }
+  const bundledRequire = createRequire(PLAYWRIGHT_MCP_CLI);
+  let installed = false;
+  try {
+    const bundle = bundledRequire.resolve('playwright-core/lib/coreBundle');
+    // Pin the complete upstream implementation, including handlers/serialization,
+    // not just method names. A dependency change requires a fresh contract audit.
+    const digest = createHash('sha256').update(fs.readFileSync(bundle)).digest('hex');
+    if (digest === 'be2e09efef3017b4eaa76f0cb5289f66c4ea57833f94319b17c1c2f184987ad7') {
+      installed = installBrowserLeafHooks(bundledRequire('playwright-core/lib/coreBundle').tools);
+    }
+  } catch { /* Retain tools, but emit no completion evidence on incompatibility. */ }
+  if (!installed) log('browser-leaf-hooks-unavailable');
+  process.argv = [process.execPath, PLAYWRIGHT_MCP_CLI, ...process.argv.slice(3)];
+  bundledRequire(PLAYWRIGHT_MCP_CLI);
+}
+`;
+
 function createLauncherSource(
   CURRENT_BROWSER_RUNTIME: ReturnType<typeof resolveAgentlasBrowserRuntime>,
 ): string {
@@ -2434,8 +2526,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const NATIVE_ENDPOINT = process.env.AGENTLAS_NATIVE_BROWSER_ENDPOINT || '';
@@ -2700,6 +2794,8 @@ function saveSkill(name, steps, description) {
 }
 function loadSkill(name) { const p = skillPath(name); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); }
 
+${BROWSER_LEAF_RECEIPT_SOURCE}
+
 async function main() {
   let leaseFile = null;
   let closing = false;
@@ -2754,7 +2850,7 @@ async function main() {
   }
   const OUTPUT_DIR = path.join(os.homedir(), '.agentlas', 'captures', 'browser');
   const child = spawn(process.execPath, [
-    PLAYWRIGHT_MCP_CLI,
+    ...(nativeLeaseEndpoint ? [fileURLToPath(import.meta.url), '--agentlas-browser-mcp'] : [PLAYWRIGHT_MCP_CLI]),
     '--cdp-endpoint', nativeLeaseEndpoint || 'http://127.0.0.1:' + PORT,
     '--output-dir', OUTPUT_DIR,
     '--output-max-size', '268435456',
@@ -2848,6 +2944,21 @@ async function main() {
     return next;
   };
 
+  // Match the bundled browser_evaluate schema without inventing code/expression
+  // aliases. Main may use this marker only on a response from its canonical
+  // native-browser binding, never as proof supplied by another server or model.
+  const browserEvaluateArgumentFailure = (name, args) => {
+    if (name !== 'browser_evaluate' || typeof args?.function === 'string') return null;
+    return {
+      content: [{ type: 'text', text: 'browser_evaluate requires a string argument named "function". The tool call was not dispatched.' }],
+      isError: true,
+      _meta: {
+        agentlasToolDispatch: 'not-dispatched',
+        agentlasFailureCode: 'browser_evaluate_function_required',
+      },
+    };
+  };
+
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
   const gate = async (name, args, signal) => {
     const observedUrl = await readCdpPageUrl();
@@ -2868,6 +2979,8 @@ async function main() {
 
   // 내부에서 child 에 tools/call 을 보내고 응답을 받는다(replay 용).
   const callChild = (name, args, signal) => new Promise((resolve) => {
+    const argumentFailure = browserEvaluateArgumentFailure(name, args);
+    if (argumentFailure) { resolve({ result: argumentFailure }); return; }
     const id = 'agx-' + (++internalSeq);
     const cancel = () => {
       if (!waiters.delete(id)) return;
@@ -3069,6 +3182,8 @@ async function main() {
       const name = msg.params.name || '';
       const originalArgs = msg.params.arguments || {};
       const args = normalizeToolArguments(name, originalArgs);
+      const argumentFailure = browserEvaluateArgumentFailure(name, args);
+      if (argumentFailure) { writeClient({ jsonrpc: '2.0', id: msg.id, result: argumentFailure }); return; }
       const forwardedLine = args === originalArgs
         ? line
         : JSON.stringify({ ...msg, params: { ...msg.params, arguments: args } });
@@ -3181,7 +3296,9 @@ async function main() {
   process.once('SIGINT', () => stopForSignal(130));
   process.once('SIGTERM', () => stopForSignal(143));
 }
-if (process.argv[2] === '--agentlas-cdp-reap') {
+if (process.argv[2] === '--agentlas-browser-mcp') {
+  runNativeBrowserMcp();
+} else if (process.argv[2] === '--agentlas-cdp-reap') {
   reapIdleBrowser().then(
     () => process.exit(0),
     (e) => { console.error('[agentlas-browser] idle reaper failed', e && e.stack || e); process.exit(1); },

@@ -22,18 +22,23 @@ function array<T>(value: unknown, parse: (item: unknown) => T, max = 4096): T[] 
   return value.map(parse);
 }
 function report(value: unknown): AdapterEffectReport {
-  const v = object(value, ["schemaVersion", "protocol", "complete", "terminal", "operationIds", "frameKinds", "reasons"]);
+  const v = object(value, ["schemaVersion", "protocol", "complete", "terminal", "operationIds", "frameKinds", "reasons", "settledFailureIds"]);
   if (v.schemaVersion !== "agentlas.adapter-effect-coverage.v1") return fail();
   const result: AdapterEffectReport = { schemaVersion: v.schemaVersion, protocol: id(v.protocol), complete: bool(v.complete), terminal: nullableId(v.terminal),
-    operationIds: array(v.operationIds, id), frameKinds: array(v.frameKinds, id, 128), reasons: array(v.reasons, id, 128) };
+    operationIds: array(v.operationIds, id), frameKinds: array(v.frameKinds, id, 128), reasons: array(v.reasons, id, 128),
+    ...(v.settledFailureIds === undefined ? {} : { settledFailureIds: array(v.settledFailureIds, id) }) };
   if (new Set(result.operationIds).size !== result.operationIds.length || (result.complete && result.reasons.length)) return fail();
+  if (result.settledFailureIds && (new Set(result.settledFailureIds).size !== result.settledFailureIds.length || result.settledFailureIds.some(value => !result.operationIds.includes(value)))) return fail();
   return result;
 }
 function admission(value: unknown, runId: string, completed: boolean): AdapterEffectAdmission & { report?: AdapterEffectReport | null } {
-  const v = object(value, ["scopeId", "adapterKind", "chatId", "agentId", "rootBound", ...(completed ? ["report"] : [])]);
+  const v = object(value, ["scopeId", "adapterKind", "chatId", "agentId", "rootBound", "purpose", ...(completed ? ["report"] : [])]);
   const scopeId = id(v.scopeId);
   if (!scopeId.startsWith(`${runId}:`)) return fail();
+  if (v.purpose !== undefined && v.purpose !== "preparation") return fail();
+  if (v.purpose === "preparation" && v.rootBound !== false) return fail();
   return { scopeId, adapterKind: id(v.adapterKind), chatId: nullableId(v.chatId), agentId: nullableId(v.agentId), rootBound: bool(v.rootBound),
+    ...(v.purpose === "preparation" ? { purpose: "preparation" as const } : {}),
     ...(completed ? { report: v.report === null ? null : report(v.report) } : {}) };
 }
 export function parseEffectMetadata(kind: string, value: unknown, runId: string): Record<string, unknown> | null {

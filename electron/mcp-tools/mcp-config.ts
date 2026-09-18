@@ -815,7 +815,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const direct = { command: process.execPath, args, env: inlineEnv };
         consentTransport = direct;
         const isComputerUse = isAuthenticComputerUseMcpLaunch(command, args);
-        const proxied = isComputerUse || opts?.toolGate?.planMode
+        // Antigravity needs Main's actual request/result receipt, not only its
+        // model-facing stream summary. Keep the authenticated inline target;
+        // the proxy observes it without introducing a mutable target wrapper.
+        const needsTimeReceipt = opts?.toolGate?.runtime === "antigravity" && isAuthenticSystemTimeMcpLaunch(command, args);
+        const proxied = isComputerUse || opts?.toolGate?.planMode || needsTimeReceipt
           ? mcpProxySpec(key, opts, s.catalogId, proxyHandles, isComputerUse ? "cua-driver" : undefined) : null;
         if (isComputerUse && opts?.toolGate && !proxied) {
           throw new Error("computer-use-tool-gate-unavailable");

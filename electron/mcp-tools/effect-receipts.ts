@@ -1,0 +1,58 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { PreparedMcpBinding } from "./prepared-transport";
+
+export interface MainMcpEffectReceipt {
+  id: string; server: string; tool: string; argumentsDigest: string;
+  state: "pending" | "settled" | "uncertain"; failed: boolean;
+}
+type Listener = (receipt: MainMcpEffectReceipt) => void;
+const listeners = new WeakMap<PreparedMcpBinding, Set<Listener>>();
+/** Main's opaque prepared binding, never a model/renderer-supplied server name. */
+export function observeMainMcpEffects(bindings: readonly PreparedMcpBinding[], listener: Listener): () => void {
+  for (const binding of bindings) {
+    const set = listeners.get(binding) ?? new Set<Listener>();
+    set.add(listener); listeners.set(binding, set);
+  }
+  return () => { for (const binding of bindings) listeners.get(binding)?.delete(listener); };
+}
+export function mcpEffectArgumentsDigest(value: unknown): string {
+  const canonical = (item: unknown): unknown => Array.isArray(item) ? item.map(canonical)
+    : item && typeof item === "object" ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : item;
+  return createHash("sha256").update(JSON.stringify(canonical(value)) ?? "undefined").digest("hex");
+}
+// Exact native operations supported by the bundled leaf-completion observer.
+// A normal MCP response alone is insufficient: upstream may race a modal dialog.
+const BROWSER_ACTIONS = new Set(["browser_evaluate", "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_click", "browser_hover",
+  "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key", "browser_drag", "browser_tabs",
+  "browser_take_screenshot", "browser_console_messages", "browser_network_requests", "browser_wait_for", "browser_handle_dialog", "browser_file_upload", "browser_resize"]);
+/** Called at the actual Main proxy request, before policy/upstream dispatch. */
+export function beginMainMcpEffect(binding: PreparedMcpBinding, tool: string, args: Record<string, unknown>, contract: "time" | "native-browser" | null) {
+  const targets = [...(listeners.get(binding) ?? [])];
+  const receipt: MainMcpEffectReceipt = { id: randomUUID(), server: binding.configKey, tool,
+    argumentsDigest: mcpEffectArgumentsDigest(args), state: "pending", failed: false };
+  const publish = () => { for (const listener of targets) listener({ ...receipt }); };
+  publish(); let dispatched = false, finished = false;
+  return {
+    dispatched: () => { dispatched = true; },
+    finish: (frame?: Record<string, any>) => {
+      if (finished) return; finished = true;
+      const result = frame?.result;
+      const valid = result && typeof result === "object" && !Array.isArray(result) && Array.isArray(result.content)
+        && (result.isError === undefined || typeof result.isError === "boolean") && result.task === undefined;
+      receipt.failed = !valid || result.isError === true || frame?.error != null;
+      const time = contract === "time" && ["get_current_time", "convert_time"].includes(tool);
+      const leaf = result?._meta?.agentlasBrowserLeaf;
+      const browserCompleted = contract === "native-browser" && BROWSER_ACTIONS.has(tool)
+        && leaf && typeof leaf === "object" && !Array.isArray(leaf) && Object.keys(leaf).length === 3
+        && leaf.schemaVersion === "agentlas.browser-leaf.v1" && leaf.tool === tool && leaf.state === "completed";
+      const predispatch = contract === "native-browser" && tool === "browser_evaluate"
+        && valid && result.isError === true && result._meta?.agentlasToolDispatch === "not-dispatched"
+        && result._meta?.agentlasFailureCode === "browser_evaluate_function_required" && typeof args.function !== "string";
+      // A definite local rejection is settled; a dropped wire after send never is.
+      // Even a snapshot may have an outstanding callback after a modal race;
+      // every native browser operation needs the exact leaf-completion receipt.
+      receipt.state = !dispatched || predispatch || (valid && !frame?.error && (time || (browserCompleted && !receipt.failed))) ? "settled" : "uncertain";
+      publish();
+    },
+  };
+}

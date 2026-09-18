@@ -1,4 +1,5 @@
-import { isEffectStatusOnlyTool } from "./effect-boundary";
+import { isEffectStatusOnlyTool, isSettledPreparationScope } from "./effect-boundary";
+import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
@@ -42,6 +43,9 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     try {
       if (boundary) { const { runtimeEvidence: _evidence, ...metadata } = boundary; exactBoundary = parseEffectMetadata("runtime_effect_boundary", metadata, input.invocationRunId); }
     } catch { pending.add("runtime-effect-metadata-invalid"); }
+    const scopeProofs = exactBoundary?.adapterScopes as Array<{ rootBound: boolean; chatId: string | null; report: { complete: boolean; settledFailureIds?: string[] } | null }> | undefined;
+    const settledFailures = new Set((scopeProofs ?? []).filter(scope => scope.rootBound && scope.chatId === input.expectedChatId && scope.report?.complete)
+      .flatMap(scope => scope.report?.settledFailureIds ?? []));
     if (!terminal) pending.add(`invocation:${input.invocationRunId}:terminal-pending`);
     if (terminal && terminal.kind !== "invoke_completed") pending.add(`event:${terminal.id}:effects-unconfirmed`);
     for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain" || attempt.side_effect_state === "uncertain") pending.add(`attempt:${attempt.id}`);
@@ -51,7 +55,7 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       || !Array.isArray(boundary.pendingEffectRefs) || boundary.pendingEffectRefs.length !== 0) pending.add("runtime-effect-boundary-unconfirmed");
     if (Array.isArray(boundary?.pendingEffectRefs)) for (const ref of boundary.pendingEffectRefs) if (typeof ref === "string") pending.add(ref);
     let toolEventCount = 0;
-    const tools = new Map<string, { row: EventRow; started: boolean; result: boolean; failed: boolean }>();
+    const tools = new Map<string, { row: EventRow; started: boolean; result: boolean; outcome: "pending" | "succeeded" | "failed" | "unknown" }>();
     const artifactRefs = new Set<string>(); const sourceRefs = new Set<string>();
     for (const row of rows) {
       const data = payload(row);
@@ -64,18 +68,26 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       if (terminal && row.seq > terminal.seq) pending.add(`event:${row.id}:after-terminal`);
       const toolId = typeof data.toolId === "string" && data.toolId ? data.toolId : `event:${row.id}`;
       const previous = tools.get(toolId);
-      tools.set(toolId, { row, started: typeof data.toolResultPreview !== "string" || previous?.started === true, result: typeof data.toolResultPreview === "string" || previous?.result === true,
-        failed: data.toolIsError === true || (data.toolIsError === undefined && previous?.failed === true) });
+      const hasResult = typeof data.toolResultPreview === "string";
+      // recordMcpInvocationEvent preserves toolIsError as a boolean but redacts
+      // and truncates previews. Only a result's typed flag attests its outcome;
+      // ACTIVE events may also carry isError=false without having a result.
+      const outcome = hasResult ? (data.toolIsError === true ? "failed"
+        : data.toolIsError === false && !data.toolFailureCode ? "succeeded" : "unknown") : "pending";
+      if (hasResult && previous?.result && previous.outcome !== outcome) pending.add(`tool:${toolId}:outcome-conflict`);
+      tools.set(toolId, { row, started: !hasResult || previous?.started === true, result: hasResult || previous?.result === true,
+        outcome: previous?.outcome === "failed" || previous?.outcome === "unknown" ? previous.outcome : hasResult ? outcome : previous?.outcome ?? "pending" });
     }
     // The observer never upgrades previews into receipts. The service's complete
     // operation snapshot, produced after runner settlement, is mandatory.
     if (boundary?.observedToolEventCount !== toolEventCount) pending.add("runtime-effect-event-count-mismatch");
-    for (const [id, tool] of tools) if (!tool.started || !tool.result || tool.failed) pending.add(`tool:${id}:outcome-pending`);
+    for (const [id, tool] of tools) if (!tool.started || !tool.result || tool.outcome !== (settledFailures.has(id) ? "failed" : "succeeded")) pending.add(`tool:${id}:outcome-pending`);
     // Require the durable closed snapshot, not merely its old truncated summary flags.
     const operations = exactBoundary?.operations as Array<{ toolId: string | null; startObserved: boolean; resultObserved: boolean; outcome: string }> | undefined;
     if (!operations || operations.length !== tools.size || new Set(operations.map(operation => operation.toolId)).size !== tools.size || operations.some(operation => !operation.toolId || !tools.has(operation.toolId)
-      || !operation.startObserved || !operation.resultObserved || operation.outcome !== "succeeded")) pending.add("runtime-effect-operation-snapshot-incomplete");
-    const scopes = exactBoundary?.adapterScopes as Array<{ scopeId: string; adapterKind: string; chatId: string | null; rootBound: boolean; report: { complete: boolean; operationIds: string[] } | null }> | undefined;
+      || !operation.startObserved || !operation.resultObserved || operation.outcome !== tools.get(operation.toolId)?.outcome
+      || operation.outcome !== (settledFailures.has(operation.toolId) ? "failed" : "succeeded"))) pending.add("runtime-effect-operation-snapshot-incomplete");
+    const scopes = exactBoundary?.adapterScopes as RuntimeEffectBoundaryReceipt["adapterScopes"];
     const completedScopes = new Map<string, Record<string, unknown>>();
     const startedScopes = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
@@ -96,16 +108,20 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       scopeIds.add(scope.scopeId);
       const startScope = startedScopes.get(scope.scopeId), completedScope = completedScopes.get(scope.scopeId);
       const { report, ...admission } = scope;
-      if (!scope.rootBound || scope.chatId !== input.expectedChatId || report?.complete !== true
+      if ((!scope.rootBound && !isSettledPreparationScope(scope, input.expectedChatId)) || scope.chatId !== input.expectedChatId || report?.complete !== true
         || JSON.stringify(startScope) !== JSON.stringify(admission) || JSON.stringify(completedScope) !== JSON.stringify(scope)
         || report.operationIds.some(id => !tools.has(id))) pending.add(`adapter:${scope.scopeId}:durable-receipt-mismatch`);
+      if (!scope.rootBound && isSettledPreparationScope(scope, input.expectedChatId)
+        && !(scopes ?? []).some(root => root.adapterKind === scope.adapterKind && root.rootBound
+          && root.chatId === input.expectedChatId && root.report?.complete === true)) pending.add(`adapter:${scope.scopeId}:root-execution-unconfirmed`);
       for (const id of report?.operationIds ?? []) {
         if (reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-reused");
         reportedOperationIds.add(id);
       }
     }
     for (const kind of (exactBoundary?.adapterKinds ?? []) as string[]) if (["antigravity", "acp"].includes(kind)
-      && !(scopes ?? []).some(scope => scope.adapterKind === kind)) pending.add("runtime-effect-adapter-receipt-missing");
+      && !(scopes ?? []).some(scope => scope.adapterKind === kind && scope.rootBound
+        && scope.chatId === input.expectedChatId && scope.report?.complete === true)) pending.add("runtime-effect-adapter-receipt-missing");
     if (((exactBoundary?.adapterKinds ?? []) as string[]).some(kind => ["antigravity", "acp"].includes(kind))) {
       for (const id of tools.keys()) if (!reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-missing");
     }

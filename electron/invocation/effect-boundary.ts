@@ -15,6 +15,13 @@ export function isEffectStatusOnlyTool(tool: {name:string;id?:unknown;args?:unkn
   return (isHostPreflightTool(tool.name) || tool.name === "Goal")
     && tool.id === undefined && tool.args === undefined && tool.isError === undefined;
 }
+/** Main-stamped preparation may close only with a complete, empty effect report.
+ * It never supplies operation proof or substitutes for a root adapter run. */
+export function isSettledPreparationScope(scope: { purpose?: unknown; chatId: string | null; report: AdapterEffectReport | null }, chatId: string): boolean {
+  return scope.purpose === "preparation" && scope.chatId === chatId && scope.report?.complete === true
+    && scope.report.operationIds.length === 0 && (scope.report.settledFailureIds?.length ?? 0) === 0
+    && scope.report.reasons.length === 0;
+}
 interface Operation {
   key: string; toolId: string | null; startObserved: boolean; resultObserved: boolean;
   outcome: "pending" | "succeeded" | "failed" | "unknown";
@@ -81,22 +88,28 @@ export class InvocationEffectBoundaryTracker {
         .get(this.runId,this.chatId) as {id:string;seq:number;kind:string}|undefined;
       if (!terminal) return null;
       const pending=new Set(this.uncertainties);
+      const settledFailures = new Set([...this.adapterScopes.values()].filter(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete)
+        .flatMap(scope => scope.report?.settledFailureIds ?? []));
       const dynamicCovered = (kind: string): boolean => {
         const scopes = [...this.adapterScopes.values()].filter(scope => scope.adapterKind === kind);
-        return scopes.length > 0 && scopes.every(scope => scope.rootBound && scope.report?.complete === true);
+        return scopes.some(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete === true)
+          && scopes.every(scope => scope.chatId === this.chatId && scope.report?.complete === true
+            && (scope.rootBound || isSettledPreparationScope(scope, this.chatId)));
       };
       const coverage=this.adapters.size>0 && [...this.adapters].every(kind=>RESULT_COVERAGE.has(kind) || dynamicCovered(kind)) ? "complete" : "unknown";
       if (coverage === "unknown") pending.add("adapter-result-coverage-unconfirmed");
       const reportedIds = new Set<string>();
       for (const scope of this.adapterScopes.values()) {
-        if (!scope.rootBound) pending.add(`adapter:${scope.scopeId}:nested-or-unbound`);
+        if (!scope.rootBound && !isSettledPreparationScope(scope, this.chatId)) pending.add(`adapter:${scope.scopeId}:nested-or-unbound`);
+        if (!scope.rootBound && isSettledPreparationScope(scope, this.chatId) && !dynamicCovered(scope.adapterKind)) pending.add(`adapter:${scope.scopeId}:root-execution-unconfirmed`);
+        if (scope.chatId !== this.chatId) pending.add(`adapter:${scope.scopeId}:chat-binding-mismatch`);
         if (!scope.report?.complete) pending.add(`adapter:${scope.scopeId}:incomplete`);
         for (const reason of scope.report?.reasons ?? []) pending.add(`adapter:${scope.scopeId}:${reason}`);
         for (const id of scope.report?.operationIds ?? []) {
           if (reportedIds.has(id)) pending.add(`adapter-operation:${id}:reused-across-dispatches`);
           reportedIds.add(id);
           const observed = this.operations.get(`root:root:${id}`);
-          if (!observed?.startObserved || !observed.resultObserved || observed.outcome !== "succeeded") pending.add(`adapter-operation:${id}:ledger-mismatch`);
+          if (!observed?.startObserved || !observed.resultObserved || observed.outcome !== (settledFailures.has(id) ? "failed" : "succeeded")) pending.add(`adapter-operation:${id}:ledger-mismatch`);
         }
       }
       if ([...this.adapters].some(kind => !RESULT_COVERAGE.has(kind))) {
@@ -105,7 +118,7 @@ export class InvocationEffectBoundaryTracker {
       if (terminal.kind !== "invoke_completed") pending.add(`terminal:${terminal.id}:not-successful`);
       const ledgerComplete=this.ledgerComplete && this.observedTools===this.durableTools;
       if (!ledgerComplete) pending.add("runtime-effect-ledger-incomplete");
-      for(const operation of this.operations.values()) if(operation.outcome!=="succeeded") pending.add(`operation:${operation.key}:${operation.outcome}`);
+      for(const operation of this.operations.values()) if(operation.outcome !== (operation.toolId && settledFailures.has(operation.toolId) ? "failed" : "succeeded")) pending.add(`operation:${operation.key}:${operation.outcome}`);
       const receipt=boundEffectBoundary({schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
         adapterKinds:[...this.adapters].sort(),coverage,effects:pending.size?"uncertain":"settled",ledgerComplete,observedToolEventCount:this.observedTools,
         operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()]},this.runId);

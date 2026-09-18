@@ -10,6 +10,8 @@ import { preparedMcpConsentResource, preparedMcpTargetTransport, PreparedMcpScop
 import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
 import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
+import { beginMainMcpEffect } from "./effect-receipts";
+import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 
 type Gate = {
   serverKey: string; runtime: string; sessionKey: string; permission?: "read" | "write" | "full";
@@ -109,7 +111,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
-  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean }>();
+  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect> }>();
   const external = new Map<string, string>();
   const serverRequests = new Map<string, string | number>();
   const serverRequestIds = new Map<string, string>();
@@ -128,7 +130,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     console.warn(`[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`);
     lifetime.abort(new Error("mcp_proxy_closed"));
     for (const pending of internal.values()) { pending.cleanup(); pending.reject(new Error("mcp_proxy_closed")); } internal.clear();
-    for (const pending of native.values()) { pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
+    for (const pending of native.values()) { pending.effect?.finish(); pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
     native.clear(); external.clear(); serverRequests.clear(); serverRequestIds.clear();
     void transport?.close().catch(() => {});
     entry.connections.delete(close); if (!entry.connections.size) expireUnused(handle, entry);
@@ -152,6 +154,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const up = async (frame: Frame) => { validate(); if (!transport) throw new Error("mcp_proxy_not_ready"); await transport.send(frame as JSONRPCMessage); };
   const finish = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending) return;
+    pending.effect?.finish(frame);
     pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
     down({ ...frame, id: pending.id });
   };
@@ -212,7 +215,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (decision === "deny") { deny(wireId, "policy_denied"); return; }
       if (await schema(tool, signal) !== digest) { deny(wireId, "schema_changed"); return; }
       signal.throwIfAborted(); validate();
-      const pending = native.get(wireId); if (!pending) return; pending.sent = true;
+      const pending = native.get(wireId); if (!pending) return; pending.sent = true; pending.effect?.dispatched();
       await up({ ...frame, id: wireId });
     } catch { deny(wireId, signal.aborted ? "cancelled" : "scope_or_schema_unavailable"); }
   }
@@ -237,7 +240,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     const controller = frame.method === "tools/call" ? new AbortController() : undefined;
     const abort = () => controller?.abort(lifetime.signal.reason);
     if (controller) lifetime.signal.addEventListener("abort", abort, { once: true });
-    native.set(wireId, { id: frame.id, method: frame.method, controller, sent: !controller,
+    const tool = frame.params?.name, args = frame.params?.arguments ?? {};
+    const effect = controller && typeof tool === "string" && args && typeof args === "object" && !Array.isArray(args)
+      ? beginMainMcpEffect(binding, tool, args, isCanonicalSystemTimeMcpServer(binding.server) ? "time"
+        : gate.planReadAuthority === "agentlas-browser" ? "native-browser" : null) : undefined;
+    native.set(wireId, { id: frame.id, method: frame.method, controller, sent: !controller, effect,
       ...(controller ? { detach: () => lifetime.signal.removeEventListener("abort", abort) } : {}) });
     external.set(idKey(frame.id), wireId);
     if (controller) { void toolCall(wireId, frame, controller.signal); return; }

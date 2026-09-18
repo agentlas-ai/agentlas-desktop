@@ -169,6 +169,10 @@ export async function resolveMcpNeeds(input: {
 
   const verdict = await (input.judgeSubsetFn ?? judgeSubset)({
     kind: MCP_NEED_JUDGMENT_KIND,
+    // Optional selection is metadata preparation, not authority to run tools.
+    // Unsupported isolation returns undecided; configured pins and exact active
+    // Goal selections remain governed by auto-select's existing host checks.
+    requireNoTools: true,
     question: MCP_NEED_JUDGMENT_QUESTION,
     labels: candidates.map((candidate) => candidate.id),
     input: [
@@ -185,7 +189,7 @@ export async function resolveMcpNeeds(input: {
   });
 
   if (verdict.source !== "llm") {
-    return { needed: [], decided: false, reason: "no connected model answered", omitted,
+    return { needed: [], decided: false, reason: verdict.reason, omitted,
       ...(verdict.failureKind ? { failureKind: verdict.failureKind } : {}),
       ...(verdict.decisionFailure ? { decisionFailure: verdict.decisionFailure } : {}),
       ...(verdict.attempts ? { attempts: verdict.attempts } : {}) };
