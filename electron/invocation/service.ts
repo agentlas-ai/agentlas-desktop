@@ -338,6 +338,7 @@ type InvocationSettledListener = (envelope: InvocationSettledEnvelope) => void |
 const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 const MAX_STEER_QUEUE_DEPTH = 8;
+const VERIFICATION_TRANSIENT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 480_000] as const;
 const ONE_TASK_KIND_MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const ONE_TASK_KIND_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const ONE_TASK_KIND_PARTICIPANT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -703,6 +704,36 @@ function isRetryableDecisionStoreError(error: unknown): boolean {
     ? String((error as { code?: unknown }).code ?? "")
     : "";
   return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || code === "SQLITE_PROTOCOL";
+}
+
+/** A completion judge is advisory and side-effect free. A provider timeout,
+ * malformed response, or drained runner failure must retry the judge only;
+ * it must never replay the already completed controller turn or block the
+ * person's Goal. User stop/steering still aborts the retained lifetime. */
+function isTransientGoalVerificationError(error: unknown): boolean {
+  const reasonCode = error && typeof error === "object" && "reasonCode" in error
+    ? String((error as { reasonCode?: unknown }).reasonCode ?? "")
+    : error instanceof Error ? error.message : "";
+  return [
+    "verification_effects_aborted",
+    "verification_effects_timeout",
+    "verification_effects_runner_failed",
+    "verification_effects_invalid_output",
+  ].includes(reasonCode);
+}
+
+function waitForGoalVerificationRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    timer.unref?.();
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 export function attachOneSurfaceProjection(
@@ -2880,15 +2911,45 @@ export class InvocationService {
           this.pendingGoalVerifications.set(runId, record);
           this.publishActiveChats();
           lifetime.retain(import("../long-run/verifier")
-            .then(({ verifyGoalCompletionClaim }) => verifyGoalCompletionClaim({
-              goalId: completionClaim.goalId!,
-              signal: controller.signal,
-              outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
-              evidence: completionClaim.evidence,
-              invocationRunId: runId,
-              projectDir: getChatWorkingFolder(chat.id),
-              hasTransientAttachments: record.hasTransientAttachments,
-            }))
+            .then(async ({ verifyGoalCompletionClaim }) => {
+              let transientAttempts = 0;
+              while (!controller.signal.aborted) {
+                try {
+                  return await verifyGoalCompletionClaim({
+                    goalId: completionClaim.goalId!,
+                    signal: controller.signal,
+                    outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
+                    evidence: completionClaim.evidence,
+                    invocationRunId: runId,
+                    projectDir: getChatWorkingFolder(chat.id),
+                    hasTransientAttachments: record.hasTransientAttachments,
+                  });
+                } catch (error) {
+                  if (!isTransientGoalVerificationError(error) || controller.signal.aborted) throw error;
+                  const delayMs = VERIFICATION_TRANSIENT_RETRY_DELAYS_MS[
+                    Math.min(transientAttempts, VERIFICATION_TRANSIENT_RETRY_DELAYS_MS.length - 1)
+                  ]!;
+                  transientAttempts += 1;
+                  const current = getLongRunByGoalId(completionClaim.goalId!);
+                  if (!current || current.status !== "verifying") throw error;
+                  appendLongRunEvent({
+                    runId: current.id,
+                    kind: "verification.transient_retry_scheduled",
+                    actorKind: "host",
+                    payload: {
+                      invocationRunId: runId,
+                      attempt: transientAttempts,
+                      delayMs,
+                      reasonCode: error && typeof error === "object" && "reasonCode" in error
+                        ? String((error as { reasonCode?: unknown }).reasonCode ?? "verification_transient")
+                        : "verification_transient",
+                    },
+                  });
+                  await waitForGoalVerificationRetry(delayMs, controller.signal);
+                }
+              }
+              return null;
+            })
             .then((verification) => {
               /*
                * Close the goal that was verified, not the one that happened to be auto-admitted.
