@@ -62,6 +62,12 @@ export class MainInvocationLifetime {
     }
   }
 
+  /** Read-only proof for this currently executing Main root, never a grant. */
+  ownsActiveRoot(): boolean {
+    return !!this.root && this.started && !this.finished && !this.root.lifetime.signal.aborted
+      && roots.getStore() === this.root && (ancestry.getStore()?.length ?? 0) === 0;
+  }
+
   retain(promise: Promise<unknown>): void {
     if (!this.acceptingChildren) throw new Error("main_invocation_children_closed");
     this.children.add(promise);

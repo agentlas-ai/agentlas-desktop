@@ -27,6 +27,7 @@ import {
 } from "../runtime/invocation-lifecycle";
 import {
   appendLongRunEvent,
+  bindCurrentGoalRevisionToLongRun,
   bindLongRunWorker,
   getLongRun,
   getLongRunByGoalId,
@@ -37,8 +38,9 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "../store/long-runs";
-import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
+import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
@@ -2554,6 +2556,41 @@ export class InvocationService {
             projectionGoalId = null;
           }
         }
+        let legacyLifecycle: LegacyGoalLifecyclePreparation | null = null;
+        const legacyRuntime = runReq.runtimeSelection ? { ...runReq.runtimeSelection } : undefined;
+        const legacyGoalId = projectionGoalId ?? boundGoal?.goalId;
+        if (localUserTurn && !runReq.planMode && !runReq.agentAppMode && !runWorkspaceBinding && !executionContext
+          && chat.kind === "user" && ["one", "work"].includes(chat.originSurface ?? "")
+          && legacyGoalId && getLegacyGoalLifecycleSnapshot(legacyGoalId)) {
+          let reasonCode = "legacy-lifecycle-stopped-native-resume-required";
+          if (stoppedGoalReactivation && lifetime.ownsActiveRoot()) {
+            legacyLifecycle = await prepareLegacyGoalLifecycle({
+              goalId: legacyGoalId, longRunId: stoppedGoalReactivation.runId,
+              expectedVersion: stoppedGoalReactivation.version, expectedStatus: stoppedGoalReactivation.status,
+              source: { chatId: chat.id, messageId: sourceMessageId, role: "user", text: runReq.userPrompt },
+              runtimeSelection: legacyRuntime, signal: controller.signal,
+            });
+            reasonCode = legacyLifecycle?.reasonCode ?? "legacy-lifecycle-no-longer-legacy";
+          }
+          recordRunEvent({ runId, chatId: chat.id, kind: "legacy_goal_lifecycle_classified", payload: {
+            goalId: legacyGoalId, sourceMessageId, reasonCode,
+            verdict: legacyLifecycle?.verdict ?? "unavailable",
+            ...(legacyLifecycle ? { expectedRevision: legacyLifecycle.snapshot.revision.revision,
+              snapshotDigest: legacyLifecycle.snapshotDigest, runtimeReceipt: legacyLifecycle.runtimeReceipt } : {}),
+          } });
+          if (!legacyLifecycle || legacyLifecycle.verdict !== "ongoing") {
+            const noticeEvent: McpInvocationEvent = { kind: "notice", notice: { level: "warning",
+              code: "legacy-goal-lifecycle-unchanged",
+              message: pickLocale(runReq) === "ko"
+                ? "기존 목표의 반복 수행 설정은 변경하지 않았습니다. 이번 메시지는 기존 목표 설정으로 처리합니다."
+                : "The existing Goal's lifetime was not changed. This message retains the existing Goal settings.",
+              details: JSON.stringify({ reasonCode, lifecycleChanged: false }),
+            } };
+            record.events.push(noticeEvent);
+            recordMcpInvocationEvent(runId, runReq, noticeEvent);
+            this.publishRunEvent(record, { runId, chatId: chat.id, event: noticeEvent });
+          }
+        }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
           // Preserve a machine-coded refusal when another action changes the
@@ -2578,6 +2615,9 @@ export class InvocationService {
               if (revision
                 ? revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision
                 : revisionBinding !== null || current.goalId.startsWith("goal:auto-message:")) return null;
+              if (legacyLifecycle && (getLegacyGoalLifecycleSnapshot(current.goalId)?.payloadJson !== legacyLifecycle.snapshot.payloadJson
+                || JSON.stringify(runReq.runtimeSelection) !== JSON.stringify(legacyRuntime))) return null;
+              if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return null;
               // Never replay an old attempt; the new message owns a new turn.
               stall.reason = "attempt-live";
               if (liveLongRunAttemptCount(current.id)) return null;
@@ -2590,13 +2630,25 @@ export class InvocationService {
               appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
                 payload: { action: "resume_with_message", sourceMessageId, invocationRunId: runId,
                   previousStatus: current.status, acknowledgedAttemptIds: acknowledged.attemptIds } });
-              const resumeVersion = getLongRun(current.id)!.version;
               stall.reason = "contract";
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
                 WHERE goal_id = ? AND chat_id = ? AND status IN ('active', 'blocked')`)
                 .run(new Date().toISOString(), current.goalId, chat.id);
               if (contractChanged.changes !== 1) throw new Error("auto_goal_resume_contract_not_blocked");
+              if (legacyLifecycle?.verdict === "ongoing") {
+                const migrated = migrateLegacyGoalLifecycle({ goalId: current.goalId,
+                  expectedPayloadJson: legacyLifecycle.snapshot.payloadJson, source: legacyLifecycle.source });
+                // Only our own writes advance this CAS. Generic revision binding
+                // stays strict; it never clears an uncertain attempt for us.
+                bindCurrentGoalRevisionToLongRun(current.id, getLongRun(current.id)!.version);
+                appendLongRunEvent({ runId: current.id, kind: "run.legacy_lifecycle_migrated", actorKind: "host",
+                  payload: { schemaVersion: "agentlas.legacy-goal-lifecycle.v1", sourceMessageId, invocationRunId: runId,
+                    previousRevision: revision!.revision, revision: migrated.revision, lifecycle: migrated.lifecycle,
+                    previousPayloadDigest: legacyLifecycle.snapshotDigest, runtimeSelection: legacyRuntime,
+                    runtimeReceipt: legacyLifecycle.runtimeReceipt, verdict: "ongoing" } });
+              }
+              const resumeVersion = getLongRun(current.id)!.version;
               stall.reason = "not-ready";
               const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), resumeVersion);
               if (!longRunContinueDecision(queued.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");

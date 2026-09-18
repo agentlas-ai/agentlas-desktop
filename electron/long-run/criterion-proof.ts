@@ -1,5 +1,6 @@
 import type { CurrentDownloadProof } from "./download-proof";
 import type { CurrentFileProof } from "./file-proof";
+import type { CurrentExecutionProof } from "./execution-proof";
 import { createHash } from "node:crypto";
 import type { RuntimeSelection } from "../../shared/types";
 import type { LongRunRuntimeSelection } from "../../shared/long-run";
@@ -140,7 +141,8 @@ export async function ensureCriterionProofContracts(input:{goalId:string;invocat
 /** This first boundary admits the host's canonical delivered answer and concrete
  * successful observations. External-effect kinds await their typed producers;
  * neither a generic tool preview nor a render-ready receipt manufactures proof. */
-export function admissibleCriterionProofRefs(contract:CriterionProofContract,refs:readonly string[],files:readonly CurrentFileProof[]=[],downloads:readonly CurrentDownloadProof[]=[],scope?:{goalId:string;invocationRunId:string;goalRevision:number}):string[]{
+export function admissibleCriterionProofRefs(contract:CriterionProofContract,refs:readonly string[],files:readonly CurrentFileProof[]=[],downloads:readonly CurrentDownloadProof[]=[],scope?:{goalId:string;invocationRunId:string;goalRevision:number},executions:readonly CurrentExecutionProof[]=[]):string[]{
+  if (contract.requiredProofKind === 'execution') return executions.map(proof => proof.ref);
   if (contract.requiredProofKind === 'host-scope') {
     if (!scope) return [];
     const captured = context(scope.goalId, scope.invocationRunId);

@@ -1,7 +1,8 @@
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
 import { attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
-import { observeMainMcpEffects, mcpEffectArgumentsDigest, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
+import { observeMainMcpEffects, mcpEffectArgumentsDigest, mainMcpExecutionCompletion, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
+import { recordMainExecutionProofs } from "../long-run/execution-proof";
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
@@ -1806,18 +1807,22 @@ async function runPreparedAntigravity(
   const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
   const hostEffects = new Map<string, MainMcpEffectReceipt>(), claimedEffects = new Set<string>();
+  const executionClaims: Array<{operationId: string; outputDigest: string | null; receipt: MainMcpEffectReceipt}> = [];
   let hostReceiptOverflow = false;
   const detachEffects = observeMainMcpEffects(effectBindings, receipt => {
     if (hostEffects.size >= 4096 && !hostEffects.has(receipt.id)) { hostReceiptOverflow = true; return; }
     hostEffects.set(receipt.id, receipt);
   });
-  const effectCoverage = new AntigravityEffectCoverage(effectRun?.scopeId ?? randomUUID(), (server, tool, args, failed) => {
+  const effectCoverage = new AntigravityEffectCoverage(effectRun?.scopeId ?? randomUUID(), (server, tool, args, failed, operationId, outputDigest) => {
     const digest = mcpEffectArgumentsDigest(args);
     // Reconcile the complete closed multiset, not arrival-order/FIFO: concurrent
     // identical requests may finish in reverse order. Any unmatched/pending
     // host request still makes the whole scope incomplete below.
-    const receipt = [...hostEffects.values()].find(row => !claimedEffects.has(row.id) && row.server === server && row.tool === tool && row.argumentsDigest === digest && row.failed === failed);
+    const candidates = [...hostEffects.values()].filter(row => !claimedEffects.has(row.id) && row.server === server && row.tool === tool && row.argumentsDigest === digest && row.failed === failed);
+    const exact = candidates.find(row => outputDigest && mainMcpExecutionCompletion(row, effectBindings)?.outputDigests.includes(outputDigest));
+    const receipt = exact ?? candidates[0];
     if (receipt) claimedEffects.add(receipt.id);
+    if (exact) executionClaims.push({operationId,outputDigest,receipt:exact});
     return receipt;
   }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps);
   let effectExitCode: number | null = null, effectStdoutEnded = false;
@@ -2169,6 +2174,7 @@ async function runPreparedAntigravity(
     });
   }).then(result => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
+    if (effectRun && !result.failure) recordMainExecutionProofs({scopeId:effectRun.scopeId,bindings:effectBindings,signal:req.signal,claims:executionClaims});
     return result;
   }, error => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));

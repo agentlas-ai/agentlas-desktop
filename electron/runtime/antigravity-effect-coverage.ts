@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AdapterEffectReport } from "../invocation/adapter-effect-context";
-import type { MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
+import { mcpEffectOutputDigest, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
 
 /** These synchronous read primitives have no background command/session handle.
  * DONE for shell, browser, MCP or delegated tools does not prove job quiescence. */
@@ -8,7 +8,7 @@ const SYNCHRONOUS_READS = new Set(["view_file", "list_dir"]);
 const MAX_TRACKED_TOOLS = 4096;
 const MAX_FRAME_KINDS = 128;
 export class AntigravityEffectCoverage {
-  private readonly tools = new Map<number, { id: string; name: string; started: boolean; completed: boolean; failed: boolean; parameters?: unknown; resultDigest: string | null }>();
+  private readonly tools = new Map<number, { id: string; name: string; started: boolean; completed: boolean; failed: boolean; parameters?: unknown; resultDigest: string | null; outputDigest: string | null }>();
   private readonly stepTypes = new Map<number, string>();
   private readonly metadataSteps = new Set<number>();
   private readonly reasons = new Set<string>();
@@ -17,7 +17,7 @@ export class AntigravityEffectCoverage {
   private resultSeen = false;
   private conversationId: string | null = null;
   constructor(private readonly scopeId: string,
-    private readonly claimMcpEffect?: (server: string, tool: string, args: unknown, failed: boolean) => MainMcpEffectReceipt | undefined,
+    private readonly claimMcpEffect?: (server: string, tool: string, args: unknown, failed: boolean, operationId: string, outputDigest: string | null) => MainMcpEffectReceipt | undefined,
     private readonly unmatchedMcpEffects?: () => number,
     private readonly attestMetadataSteps?: (conversationId: string, indices: readonly number[]) => boolean) {}
   toolId(id: string): string { return `${this.scopeId}:${id}`; }
@@ -93,7 +93,7 @@ export class AntigravityEffectCoverage {
     const prior = this.tools.get(index);
     if (!prior && this.tools.size >= MAX_TRACKED_TOOLS) { this.reasons.add("tool-count-limit-exceeded"); return; }
     if (prior && prior.name !== name) this.reasons.add("tool-identity-reused");
-    const tool = prior ?? { id: this.toolId(`agy-tool:${name}:${index}`), name, started: false, completed: false, failed: false, resultDigest: null, parameters: step.tool_info?.parameters };
+    const tool = prior ?? { id: this.toolId(`agy-tool:${name}:${index}`), name, started: false, completed: false, failed: false, resultDigest: null, outputDigest: null, parameters: step.tool_info?.parameters };
     if (step.tool_info?.parameters !== undefined) tool.parameters = step.tool_info.parameters;
     this.tools.set(index, tool);
     if (step.state === "ACTIVE") {
@@ -107,7 +107,7 @@ export class AntigravityEffectCoverage {
       if (!step.tool_info || !Object.hasOwn(step.tool_info, "output")) this.reasons.add("tool-result-payload-missing");
       const digest = createHash("sha256").update(JSON.stringify(step.tool_info?.output) ?? "undefined").digest("hex");
       if (tool.resultDigest && tool.resultDigest !== digest) this.reasons.add("conflicting-tool-result");
-      tool.resultDigest = digest; tool.completed = true;
+      tool.resultDigest = digest; tool.outputDigest = mcpEffectOutputDigest(step.tool_info?.output); tool.completed = true;
     } else this.reasons.add("unsupported-tool-state");
   }
   finish(input: { exitCode: number | null; stdoutEnded: boolean; cancelled: boolean; failed: boolean }): AdapterEffectReport {
@@ -126,7 +126,7 @@ export class AntigravityEffectCoverage {
         let call = tool.parameters as any;
         if (typeof call === "string") { try { call = JSON.parse(call); } catch { call = null; } }
         if (call && typeof call.ServerName === "string" && typeof call.ToolName === "string" && call.Arguments && typeof call.Arguments === "object" && !Array.isArray(call.Arguments)) {
-          const receipt = this.claimMcpEffect?.(call.ServerName, call.ToolName, call.Arguments, tool.failed);
+          const receipt = this.claimMcpEffect?.(call.ServerName, call.ToolName, call.Arguments, tool.failed, tool.id, tool.outputDigest);
           settled = receipt?.state === "settled";
           if (receipt && receipt.failed !== tool.failed) this.reasons.add("host-tool-outcome-mismatch");
           settledFailure = settled && receipt?.failed === true && tool.failed;

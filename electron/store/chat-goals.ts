@@ -186,6 +186,51 @@ function parseGoalRevision(payload: string): GoalRevision {
   return { ...revision, lifecycle: resolveGoalLifecycle(revision.lifecycle) };
 }
 
+/** Keep absence distinct from explicit finite (and corrupt/null values). This
+ * snapshot is Main-only CAS input, never a renderer-provided migration flag. */
+export function getLegacyGoalLifecycleSnapshot(goalId: string): { revision: GoalRevision; payloadJson: string } | null {
+  const row = getDb().prepare("SELECT payload_json FROM chat_goal_revisions WHERE goal_id = ? ORDER BY revision DESC LIMIT 1")
+    .get(goalId) as { payload_json: string } | undefined;
+  if (!row) return null;
+  const raw = JSON.parse(row.payload_json) as GoalRevision;
+  if (!raw || typeof raw !== "object" || Object.prototype.hasOwnProperty.call(raw, "lifecycle")) return null;
+  const revision = parseGoalRevision(row.payload_json);
+  if (revision.goalId !== goalId || revision.schemaVersion !== "agentlas.auto-goal.v1"
+    || !Number.isSafeInteger(revision.revision) || revision.revision < 1) throw new Error("goal_legacy_lifecycle_invalid");
+  return { revision, payloadJson: row.payload_json };
+}
+
+/** Lifecycle-only revision inside the caller's explicit-user resume transaction.
+ * Never acknowledges effects, grants authority, resets budget, or resumes work. */
+export function migrateLegacyGoalLifecycle(input: {
+  goalId: string;
+  expectedPayloadJson: string;
+  source: GoalSourceMessage;
+}): GoalRevision {
+  const db = getDb();
+  if (!db.inTransaction) throw new Error("goal_legacy_lifecycle_transaction_required");
+  assertStoredUserSource(input.source);
+  const snapshot = getLegacyGoalLifecycleSnapshot(input.goalId);
+  if (!snapshot || snapshot.payloadJson !== input.expectedPayloadJson) throw new Error("goal_legacy_lifecycle_conflict");
+  const current = snapshot.revision;
+  const contract = readRow(input.goalId);
+  const binding = db.prepare("SELECT goal_id FROM chats WHERE id = ?").get(input.source.chatId) as { goal_id: string | null } | undefined;
+  if (current.chatId !== input.source.chatId || contract?.chat_id !== current.chatId
+    || !["active", "blocked"].includes(contract.status) || binding?.goal_id !== current.goalId
+    || previouslyAppliedRevision(input.goalId, input.source)) throw new Error("goal_legacy_lifecycle_source_conflict");
+  const next: GoalRevision = {
+    ...current,
+    revision: current.revision + 1,
+    parentRevision: current.revision,
+    sourceMessage: { ...input.source },
+    reason: "legacy_lifecycle_user_confirmed",
+    lifecycle: "ongoing",
+    createdAt: new Date().toISOString(),
+  };
+  insertRevision(next);
+  return next;
+}
+
 export interface GoalAuthorityReauthorization {
   revision: GoalRevision;
   previousAuthorityRefs: string[];

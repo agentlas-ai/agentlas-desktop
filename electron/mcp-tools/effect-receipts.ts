@@ -7,6 +7,21 @@ export interface MainMcpEffectReceipt {
 }
 type Listener = (receipt: MainMcpEffectReceipt) => void;
 const listeners = new WeakMap<PreparedMcpBinding, Set<Listener>>();
+export interface MainMcpExecutionCompletion {
+  receiptId: string; contract: "time" | "native-browser"; server: string; tool: string;
+  argumentsDigest: string; resultDigest: string; outputDigests: string[]; resultPreview: string;
+}
+// Only actual Main publications carry this capability. Copying provider JSON,
+// including a plausible receipt ID or browser stamp, cannot manufacture it.
+const completions = new WeakMap<MainMcpEffectReceipt, {binding: PreparedMcpBinding; proof: MainMcpExecutionCompletion}>();
+export function mainMcpExecutionCompletion(receipt: MainMcpEffectReceipt, bindings: readonly PreparedMcpBinding[]): MainMcpExecutionCompletion | null {
+  const entry = completions.get(receipt);
+  return entry && bindings.includes(entry.binding) ? { ...entry.proof, outputDigests: [...entry.proof.outputDigests] } : null;
+}
+export function mcpEffectOutputDigest(value: unknown): string {
+  if (typeof value === "string") { try { value = JSON.parse(value); } catch { /* Exact opaque text. */ } }
+  return mcpEffectArgumentsDigest(value);
+}
 /** Main's opaque prepared binding, never a model/renderer-supplied server name. */
 export function observeMainMcpEffects(bindings: readonly PreparedMcpBinding[], listener: Listener): () => void {
   for (const binding of bindings) {
@@ -30,7 +45,12 @@ export function beginMainMcpEffect(binding: PreparedMcpBinding, tool: string, ar
   const targets = [...(listeners.get(binding) ?? [])];
   const receipt: MainMcpEffectReceipt = { id: randomUUID(), server: binding.configKey, tool,
     argumentsDigest: mcpEffectArgumentsDigest(args), state: "pending", failed: false };
-  const publish = () => { for (const listener of targets) listener({ ...receipt }); };
+  let completion: MainMcpExecutionCompletion | null = null;
+  const publish = () => { for (const listener of targets) {
+    const published = { ...receipt };
+    if (completion) completions.set(published, { binding, proof: completion });
+    listener(published);
+  } };
   publish(); let dispatched = false, finished = false;
   return {
     dispatched: () => { dispatched = true; },
@@ -52,6 +72,18 @@ export function beginMainMcpEffect(binding: PreparedMcpBinding, tool: string, ar
       // Even a snapshot may have an outstanding callback after a modal race;
       // every native browser operation needs the exact leaf-completion receipt.
       receipt.state = !dispatched || predispatch || (valid && !frame?.error && (time || (browserCompleted && !receipt.failed))) ? "settled" : "uncertain";
+      if (dispatched && receipt.state === "settled" && !receipt.failed && (time || browserCompleted)) {
+        const resultDigest = mcpEffectArgumentsDigest(result);
+        const outputDigests = [resultDigest];
+        if (result.content.length === 1 && result.content[0]?.type === "text" && typeof result.content[0].text === "string") {
+          outputDigests.push(mcpEffectOutputDigest(result.content[0].text));
+        }
+        completion = { receiptId: receipt.id, contract: time ? "time" : "native-browser", server: receipt.server, tool,
+          argumentsDigest: receipt.argumentsDigest, resultDigest, outputDigests: [...new Set(outputDigests)],
+          // Observation only; this preview is bounded/redacted again by the
+          // durable store, and never attests domain or business correctness.
+          resultPreview: JSON.stringify(result).slice(0, 1200) };
+      }
       publish();
     },
   };
