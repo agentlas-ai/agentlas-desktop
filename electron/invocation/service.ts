@@ -710,7 +710,7 @@ function isRetryableDecisionStoreError(error: unknown): boolean {
  * malformed response, or drained runner failure must retry the judge only;
  * it must never replay the already completed controller turn or block the
  * person's Goal. User stop/steering still aborts the retained lifetime. */
-function isTransientGoalVerificationError(error: unknown): boolean {
+export function isTransientGoalVerificationError(error: unknown): boolean {
   const reasonCode = error && typeof error === "object" && "reasonCode" in error
     ? String((error as { reasonCode?: unknown }).reasonCode ?? "")
     : error instanceof Error ? error.message : "";
@@ -734,6 +734,34 @@ function waitForGoalVerificationRetry(delayMs: number, signal: AbortSignal): Pro
     timer.unref?.();
     signal.addEventListener("abort", finish, { once: true });
   });
+}
+
+export async function retryTransientGoalVerification<T>(input: {
+  signal: AbortSignal;
+  verify: () => Promise<T>;
+  onRetry: (retry: { attempt: number; delayMs: number; reasonCode: string }) => void;
+}): Promise<T | null> {
+  let transientAttempts = 0;
+  while (!input.signal.aborted) {
+    try {
+      return await input.verify();
+    } catch (error) {
+      if (!isTransientGoalVerificationError(error) || input.signal.aborted) throw error;
+      const delayMs = VERIFICATION_TRANSIENT_RETRY_DELAYS_MS[
+        Math.min(transientAttempts, VERIFICATION_TRANSIENT_RETRY_DELAYS_MS.length - 1)
+      ]!;
+      transientAttempts += 1;
+      input.onRetry({
+        attempt: transientAttempts,
+        delayMs,
+        reasonCode: error && typeof error === "object" && "reasonCode" in error
+          ? String((error as { reasonCode?: unknown }).reasonCode ?? "verification_transient")
+          : "verification_transient",
+      });
+      await waitForGoalVerificationRetry(delayMs, input.signal);
+    }
+  }
+  return null;
 }
 
 export function attachOneSurfaceProjection(
@@ -2911,45 +2939,33 @@ export class InvocationService {
           this.pendingGoalVerifications.set(runId, record);
           this.publishActiveChats();
           lifetime.retain(import("../long-run/verifier")
-            .then(async ({ verifyGoalCompletionClaim }) => {
-              let transientAttempts = 0;
-              while (!controller.signal.aborted) {
-                try {
-                  return await verifyGoalCompletionClaim({
-                    goalId: completionClaim.goalId!,
-                    signal: controller.signal,
-                    outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
-                    evidence: completionClaim.evidence,
+            .then(({ verifyGoalCompletionClaim }) => retryTransientGoalVerification({
+              signal: controller.signal,
+              verify: () => verifyGoalCompletionClaim({
+                goalId: completionClaim.goalId!,
+                signal: controller.signal,
+                outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
+                evidence: completionClaim.evidence,
+                invocationRunId: runId,
+                projectDir: getChatWorkingFolder(chat.id),
+                hasTransientAttachments: record.hasTransientAttachments,
+              }),
+              onRetry: ({ attempt, delayMs, reasonCode }) => {
+                const current = getLongRunByGoalId(completionClaim.goalId!);
+                if (!current || current.status !== "verifying") throw new Error("verification_retry_state_changed");
+                appendLongRunEvent({
+                  runId: current.id,
+                  kind: "verification.transient_retry_scheduled",
+                  actorKind: "host",
+                  payload: {
                     invocationRunId: runId,
-                    projectDir: getChatWorkingFolder(chat.id),
-                    hasTransientAttachments: record.hasTransientAttachments,
-                  });
-                } catch (error) {
-                  if (!isTransientGoalVerificationError(error) || controller.signal.aborted) throw error;
-                  const delayMs = VERIFICATION_TRANSIENT_RETRY_DELAYS_MS[
-                    Math.min(transientAttempts, VERIFICATION_TRANSIENT_RETRY_DELAYS_MS.length - 1)
-                  ]!;
-                  transientAttempts += 1;
-                  const current = getLongRunByGoalId(completionClaim.goalId!);
-                  if (!current || current.status !== "verifying") throw error;
-                  appendLongRunEvent({
-                    runId: current.id,
-                    kind: "verification.transient_retry_scheduled",
-                    actorKind: "host",
-                    payload: {
-                      invocationRunId: runId,
-                      attempt: transientAttempts,
-                      delayMs,
-                      reasonCode: error && typeof error === "object" && "reasonCode" in error
-                        ? String((error as { reasonCode?: unknown }).reasonCode ?? "verification_transient")
-                        : "verification_transient",
-                    },
-                  });
-                  await waitForGoalVerificationRetry(delayMs, controller.signal);
-                }
-              }
-              return null;
-            })
+                    attempt,
+                    delayMs,
+                    reasonCode,
+                  },
+                });
+              },
+            }))
             .then((verification) => {
               /*
                * Close the goal that was verified, not the one that happened to be auto-admitted.
