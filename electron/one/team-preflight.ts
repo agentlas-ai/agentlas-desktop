@@ -1549,16 +1549,15 @@ export async function autoResolveOneTeamPreflight(
 function staleRecoveryWasSuperseded(
   proposal: OneTeamPreflightProposal,
   chatId: string,
-  db = getDb(),
 ): boolean {
   if (proposal.status !== "recovery_required" || proposal.binding.chatId !== chatId) return false;
-  const evidence = db.prepare(
+  const evidence = getDb().prepare(
     `SELECT chat_id, kind, ts
        FROM run_events
       WHERE chat_id = ?
         AND kind = 'invoke_started'
         AND ts > ?
-      ORDER BY ts ASC, rowid ASC
+      ORDER BY ts ASC
       LIMIT 1`,
   ).get(chatId, proposal.updatedAt) as { chat_id: string; kind: string; ts: string } | undefined;
   return evidence?.chat_id === chatId
