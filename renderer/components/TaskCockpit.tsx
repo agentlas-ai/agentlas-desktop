@@ -3,6 +3,7 @@
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
+import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
@@ -3653,7 +3654,26 @@ function ChatPage() {
     const events = ipcEvents();
     if (!api || !events?.onStoreChanged || !chatId) return;
     let generation = 0;
+    let historyGeneration = 0;
     let disposed = false;
+    const refreshHistory = () => {
+      if (hydratedChatId !== chatId) return;
+      const requestGeneration = ++historyGeneration;
+      void api.invoke.history(chatId).then((history) => {
+        if (disposed || requestGeneration !== historyGeneration || !isCurrentChat()) return;
+        const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
+        const notices = history.map(historyEntryToStreamMessage).filter(message => message.hostNotice?.purpose === "automation-report");
+        setMessages((current) => {
+          if (disposed || requestGeneration !== historyGeneration || !isCurrentChat()) return current;
+          const appended = mergeAutomationHostNotices(current, notices);
+          if (appended !== current) transcriptRevisionRef.current += 1;
+          return appended.map((message) => {
+            const result = states.get(message.durableMessageId ?? message.id);
+            return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
+          });
+        });
+      }).catch(() => undefined);
+    };
     const refresh = () => {
       const requestGeneration = ++generation;
       void api.runtime.detect().then((list) => {
@@ -3706,19 +3726,14 @@ function ChatPage() {
          * the user navigated away and back.
          */
         void api.chats.get(chatId).then((next) => { if (!disposed && next) setChat(next); }).catch(() => undefined);
-        void api.invoke.history(chatId).then((history) => {
-          if (disposed) return;
-          const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
-          setMessages((current) => current.map((message) => {
-            const result = states.get(message.durableMessageId ?? message.id);
-            return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
-          }));
-        }).catch(() => undefined);
+        refreshHistory();
         void api.chats.get(chatId).then((next) => { if (next) setChat(next); }).catch(() => undefined);
       }
     });
+    // Subscribe before catch-up so an append during initial hydration is read.
+    refreshHistory();
     return () => { disposed = true; unsubscribe(); };
-  }, [chat?.runtimeSelection, chatId]);
+  }, [chat?.runtimeSelection, chatId, hydratedChatId, isCurrentChat]);
 
   // The transcript is durable, so the Agent work panel must be durable too.
   // Rebuild terminal run activity from Main's redacted run ledger after a

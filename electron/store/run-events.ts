@@ -369,6 +369,93 @@ interface SafePayloadContext {
   runId: string;
   kind: string;
   chatId: string | null;
+  seq?: number;
+}
+
+/** Only Main-admitted AGY protocol identities bypass prose redaction. A UUID's
+ * decimal tail followed by the scope UUID can resemble a Telegram credential.
+ * Neither a UUID-shaped string alone nor arbitrary provider tool names confer
+ * this exemption; arguments, results and all other fields remain redacted. */
+function canonicalAdapterToolId(input: Record<string, unknown>, context?: SafePayloadContext): string | undefined {
+  if (context?.kind !== "mcp_tool-use" || !context.chatId || typeof input.toolId !== "string") return undefined;
+  const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):agy-tool:(call_mcp_tool|view_file|list_dir):(0|[1-9][0-9]{0,15})$/.exec(input.toolId);
+  if (!match || match[1] !== context.runId || !Number.isSafeInteger(Number(match[4]))) return undefined;
+  // reduceAgyLine retains call_mcp_tool in the identity, but expands its
+  // display name from the validated MCP envelope. That name is still redacted
+  // normally; it is never copied into an exempt identity.
+  const matchingName = match[3] === input.toolName || (match[3] === "call_mcp_tool"
+    && typeof input.toolName === "string" && /^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+$/.test(input.toolName));
+  if (!matchingName) return undefined;
+  const scopeId = `${match[1]}:${match[2]}`;
+  return admittedAdapterScope(scopeId, context) ? input.toolId : undefined;
+}
+
+function admittedAdapterScope(scopeId: string, context: SafePayloadContext): Record<string, unknown> | undefined {
+  try {
+    const rows = getDb().prepare(`SELECT payload_json FROM run_events
+      WHERE run_id = ? AND chat_id = ? AND kind = 'runtime_adapter_effect_started'
+        AND seq < ? AND json_extract(payload_json, '$.scopeId') = ? LIMIT 2`)
+      .all(context.runId, context.chatId, context.seq ?? Number.MAX_SAFE_INTEGER, scopeId) as Array<{ payload_json: string }>;
+    if (rows.length !== 1) return undefined;
+    const { runtimeEvidence: _evidence, ...metadata } = JSON.parse(rows[0].payload_json);
+    const admission = parseEffectMetadata("runtime_adapter_effect_started", metadata, context.runId);
+    return admission?.scopeId === scopeId && admission.adapterKind === "antigravity" && admission.chatId === context.chatId
+      ? admission : undefined;
+  } catch { return undefined; }
+}
+
+/** Re-scrubbing typed effect rows must not alter their authority identities.
+ * Restore only admitted AGY scope/tool IDs (and their exact operation keys),
+ * never the whole metadata object or its diagnostic strings. */
+function canonicalEffectMetadataForScrub(input: Record<string, unknown>, context: SafePayloadContext): Record<string, unknown> | undefined {
+  try {
+    const { runtimeEvidence, ...metadata } = input;
+    const exact = parseEffectMetadata(context.kind, metadata, context.runId);
+    if (!exact) return undefined;
+    // These closed-schema strings are identifiers, never prose. A bracketed
+    // redaction marker would invalidate the schema on the next startup and
+    // erase even unrelated, admitted IDs. Use a non-authoritative fingerprint
+    // when a secret-like unknown identifier must be removed instead.
+    const scrubIdentity = (value: string): string => redactRunEventSensitiveText(value) === value
+      ? value : `redacted-effect-id:${createHash("sha256").update(value).digest("hex")}`;
+    const scrubMetadata = (value: unknown): unknown => typeof value === "string" ? scrubIdentity(value)
+      : Array.isArray(value) ? value.map(scrubMetadata)
+      : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubMetadata(item)])) : value;
+    const output = scrubMetadata(exact) as Record<string, any>;
+    const scopes = context.kind === "runtime_effect_boundary" ? exact.adapterScopes : [exact];
+    if (!Array.isArray(scopes) || !scopes.length) return undefined;
+    const knownIds = new Set<string>();
+    for (let index = 0; index < scopes.length; index++) {
+      const scope = scopes[index] as Record<string, any>;
+      const { report, ...admission } = scope;
+      const bindingContext = { ...context, seq: context.kind === "runtime_adapter_effect_started" && context.seq !== undefined ? context.seq + 1 : context.seq };
+      const bound = admittedAdapterScope(scope.scopeId, bindingContext);
+      if (!bound || JSON.stringify(bound) !== JSON.stringify(admission)
+        || !canonicalAdapterToolId({ toolName: "call_mcp_tool", toolId: `${scope.scopeId}:agy-tool:call_mcp_tool:0` }, { ...bindingContext, kind: "mcp_tool-use" })) return undefined;
+      const target = context.kind === "runtime_effect_boundary" ? output.adapterScopes[index] : output;
+      target.scopeId = scope.scopeId;
+      if (report) {
+        for (const field of ["operationIds", "settledFailureIds"] as const) {
+          if (!Array.isArray(report[field])) continue;
+          target.report[field] = report[field].map((id: string) => {
+            const toolName = id.split(":")[3];
+            const canonical = id.startsWith(`${scope.scopeId}:`) && canonicalAdapterToolId({ toolId: id, toolName }, { ...context, kind: "mcp_tool-use" });
+            if (canonical) { knownIds.add(canonical); return canonical; }
+            return scrubIdentity(id);
+          });
+        }
+      }
+    }
+    if (Array.isArray(exact.operations)) exact.operations.forEach((value, index) => {
+      const operation = value as { toolId: string | null; key: string };
+      if (operation.toolId && knownIds.has(operation.toolId)) {
+        output.operations[index].toolId = operation.toolId;
+        if (operation.key === `root:root:${operation.toolId}`) output.operations[index].key = operation.key;
+      }
+    });
+    if (runtimeEvidence !== undefined) output.runtimeEvidence = redactPayloadValue(runtimeEvidence);
+    return output;
+  } catch { return undefined; }
 }
 
 function boundedReceiptIdentifier(value: unknown): value is string {
@@ -454,9 +541,14 @@ function safePayload(
   const canonicalReply = context && input
     ? canonicalQuestionContinuationReply(input, context)
     : undefined;
+  const canonicalToolId = input ? canonicalAdapterToolId(input, context) : undefined;
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    if (key === "toolId" && canonicalToolId !== undefined) {
+      out[key] = canonicalToolId;
+      continue;
+    }
     if (key === "runtimeEvidence") {
       const envelope = decodeRuntimeEvidence(value);
       if (envelope) out[key] = envelope;
@@ -559,18 +651,35 @@ export function scrubLegacyRunEventSecrets(): number {
   const where = markers.map(() => "LOWER(payload_json) LIKE ?").join(" OR ");
   let changed = 0;
   const scrubTable = (table: "run_events" | "failure_events") => {
-    const rows = db.prepare(`SELECT id, payload_json FROM ${table} WHERE ${where}`)
-      .all(...markers) as Array<{ id: string; payload_json: string }>;
+    const rows = db.prepare(`SELECT id, run_id, chat_id, ${table === "run_events" ? "kind, seq" : "'failure_event' AS kind, NULL AS seq"}, payload_json FROM ${table} WHERE ${where}`)
+      .all(...markers) as Array<{ id: string; run_id: string; chat_id: string | null; kind: string; seq: number | null; payload_json: string }>;
     const update = db.prepare(`UPDATE ${table} SET payload_json = ? WHERE id = ?`);
     for (const row of rows) {
       let next = redactRunEventSensitiveText(row.payload_json);
       try {
         const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+        const context = { runId: row.run_id, chatId: row.chat_id, kind: row.kind, seq: row.seq ?? undefined };
+        const exactEffectMetadata = canonicalEffectMetadataForScrub(parsed, context);
+        const canonicalToolId = canonicalAdapterToolId(parsed, context);
         if (typeof parsed.toolArgs === "string") parsed.toolArgs = sanitizeRunEventToolArgs(parsed.toolArgs);
         if (typeof parsed.toolResultPreview === "string") {
           parsed.toolResultPreview = redactRunEventSensitiveText(parsed.toolResultPreview);
         }
-        next = redactRunEventSensitiveText(JSON.stringify(parsed));
+        // Redact values, not JSON syntax: header/cookie rules can consume a
+        // quoted value's opening quote and leave an unparsable ledger row.
+        const scrubValue = (value: unknown, key?: string): unknown => {
+          if (key && /^(?:authorization|proxyAuthorization|cookie|cookies|set-cookie|setCookie|session|sessionId|sessionToken|api[_-]?key|access[_-]?token|refresh[_-]?token|auth_token|ct0|password|secret|token)$/i.test(key)) return "[redacted]";
+          if (typeof value === "string") return redactRunEventSensitiveText(value);
+          if (Array.isArray(value)) return value.map(item => scrubValue(item));
+          if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, scrubValue(item, field)]));
+          return value;
+        };
+        next = JSON.stringify(scrubValue(parsed));
+        if (canonicalToolId !== undefined) {
+          const scrubbed = JSON.parse(next) as Record<string, unknown>;
+          scrubbed.toolId = canonicalToolId;
+          next = JSON.stringify(scrubbed);
+        }
         if (typeof parsed.agentMessageId === "string" && /^task-force-handoff:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:result$/.test(parsed.agentMessageId)) {
           const scrubbed = JSON.parse(next) as Record<string, unknown>;
           scrubbed.agentMessageId = parsed.agentMessageId;
@@ -583,6 +692,7 @@ export function scrubLegacyRunEventSecrets(): number {
           scrubbed.workerReportJson = JSON.stringify({ ...report, text: redactRunEventSensitiveText(report.text) });
           next = JSON.stringify(scrubbed);
         }
+        if (exactEffectMetadata) next = JSON.stringify(exactEffectMetadata);
       } catch {
         // Keep the row parseable state unchanged while removing recognized values.
       }
@@ -620,13 +730,24 @@ function redactPayloadValue(value: unknown, fieldName?: string): unknown {
   );
 }
 
-function parsePayload(json: string): Record<string, unknown> {
+function parsePayload(json: string, context?: SafePayloadContext): Record<string, unknown> {
   try {
     const parsed = JSON.parse(json);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) delete parsed.workerReportJson;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      delete parsed.workerReportJson;
+      // Legacy rows may be read before startup maintenance reaches them.
+      // JSON-string arguments/previews need the same field-aware protection
+      // as their write boundary, not just token-shaped string matching.
+      if (typeof parsed.toolArgs === "string") parsed.toolArgs = sanitizeRunEventToolArgs(parsed.toolArgs);
+      if (typeof parsed.toolResultPreview === "string") parsed.toolResultPreview = redactRunEventSensitiveText(parsed.toolResultPreview);
+    }
+    const result = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? redactPayloadValue(parsed) as Record<string, unknown>
       : {};
+    const canonicalToolId = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? canonicalAdapterToolId(parsed, context) : undefined;
+    if (canonicalToolId !== undefined) result.toolId = canonicalToolId;
+    return result;
   } catch {
     return {};
   }
@@ -882,7 +1003,7 @@ function normalizeLimit(value: unknown, fallback: number): number {
 }
 
 function runRowToUi(row: RunEventRow): RunEventUi {
-  const payload = parsePayload(row.payload_json);
+  const payload = parsePayload(row.payload_json, { runId: row.run_id, chatId: row.chat_id, kind: row.kind, seq: row.seq });
   // The generic ledger API is diagnostic and broadly renderer-visible. Exact
   // semantic results may leave Main only through the Task/run-bound restore
   // API, never through runLedger.events.
@@ -998,6 +1119,7 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
         runId: input.runId,
         kind: input.kind,
         chatId: input.chatId ?? null,
+        seq,
       })),
     };
     getDb()

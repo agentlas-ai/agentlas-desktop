@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.21 — 2026-09-18
+
+- Automatic reports appear in their originating One or Work conversation without reloading. Report refreshes preserve in-flight replies and ignore stale reads after navigation.
+- Main-admitted Antigravity operation identifiers retain their exact identity when their numeric UUID segments resemble a credential. Arguments, results and untrusted identifiers remain redacted, and durable completion checks remain strict.
+- Known local Antigravity tool-configuration contention retries before model startup for up to 30 seconds. Cancellation remains immediate; another run's authority is never borrowed, and unresolved contention is reported as busy rather than a completed action.
+
+This release includes the 1.2.20 source changes below; the 1.2.20 installer release was cancelled before publication. It binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d, with runtime asset `hephaestus-runtime-v1.2.44.tar.gz` pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority. Local ongoing work requires the app and computer to remain available.
+
 ## 1.2.20 — 2026-09-18
 
 - Antigravity Goal waits reconcile actual Main-owned clock and native-browser tool completion with the runtime stream. Successful bounded operations can continue without being mistaken for uncertain effects; interrupted, unresolved and background operations retain their safety boundary.

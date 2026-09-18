@@ -1085,8 +1085,8 @@ export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): b
  *   cleanup은 우리가 넣거나 교체한 값이 아직 그대로일 때만 수행한다.
  * - 전역 파일이 깨진 JSON 이면 **덮어쓰지 않는다** — 사용자 설정을 지키는 쪽이
  *   이 실행에 도구를 주는 것보다 우선이고, 그 사실을 상태줄로 말한다(정직한 강등).
- * - 동시 실행은 exact transport entry만 공유한다. 같은 키에 다른 승인 채널을 요청하면
- *   뒤 실행을 모델 spawn 전에 typed conflict로 끝낸다.
+ * - 동시 실행은 exact transport entry만 공유한다. 같은 키의 다른 승인 채널은
+ *   기존 실행이 끝나기를 제한 시간 동안 기다리고, 계속 바쁘면 spawn 전에 종료한다.
  */
 /** AGY does not expand shell-style aliases in MCP env overrides. Keep vault
  * values in the child process environment, never in its shared config file. */
@@ -1114,7 +1114,61 @@ export function inheritAgyMcpSecretAliases(
   return result;
 }
 
+// This is bounded contention retry, not root/child admission: the runtime has
+// no attested ancestry contract. Even a parent waiting for this child is not
+// held indefinitely. Never wait while holding the configuration mutation lock.
+const AGY_MCP_LOCAL_CONTENTION_MS = 30_000;
+class AgyMcpLocalContention extends Error {
+  constructor() { super("agy_mcp_local_contention"); }
+}
+
+function waitForAgyMcpContentionRetry(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, 250);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function reconcileAgyMcpServers(
+  mcpConfigPath: string | undefined,
+  onStatus: (message: string) => void,
+  runtimeEnv: NodeJS.ProcessEnv = {},
+  signal?: AbortSignal,
+): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
+  const deadline = new AbortController();
+  const attemptSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let nextWaitNotice = 0;
+  try {
+    for (;;) {
+      try {
+        return await reconcileAgyMcpServersAttempt(mcpConfigPath, onStatus, runtimeEnv, attemptSignal);
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        if (deadline.signal.aborted) throw deadline.signal.reason;
+        if (!(error instanceof AgyMcpLocalContention)) throw error;
+        // One deadline for all retries, including any subsequent lease wait.
+        timer ??= setTimeout(() => deadline.abort(new Error("agy_mcp_scope_busy")), AGY_MCP_LOCAL_CONTENTION_MS);
+        if (Date.now() >= nextWaitNotice) {
+          nextWaitNotice = Date.now() + 10_000;
+          try { onStatus("[agy-mcp-scope] phase=waiting reason=local-contention"); } catch { /* observer only */ }
+        }
+        await waitForAgyMcpContentionRetry(attemptSignal);
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (!deadline.signal.aborted) throw error;
+    return { cleanup: async () => {}, failure: { kind: "unavailable", source: "marker", runtime: "antigravity",
+      providerCode: "agy_mcp_scope_busy", message: "Antigravity MCP configuration remained busy for 30 seconds; no model was started." } };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function reconcileAgyMcpServersAttempt(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
@@ -1131,6 +1185,7 @@ export async function reconcileAgyMcpServers(
       providerCode: error instanceof Error && error.message === "agy_mcp_lease_owner_unverified" ? error.message : "agy_mcp_scope_conflict",
       message: "Antigravity MCP configuration ownership could not be verified." } };
   }
+  let bound: Awaited<ReturnType<typeof reconcileAgyMcpServersUnderLease>> | undefined;
   try {
     signal?.throwIfAborted();
     const global = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
@@ -1147,8 +1202,15 @@ export async function reconcileAgyMcpServers(
         // A foreign extant channel is not proven stale. Old Desktop versions do
         // not know about this lease, so never overwrite their live/unknown grant.
         if (previousControl !== nextControl && typeof previousControl === "string") {
-          try { await fs.stat(previousControl); throw new Error("agy_mcp_foreign_owner_unverified"); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+          const knownLocal = (AGY_MCP_REFCOUNT.get("agentlas-browser") ?? 0) > 0
+            && isAgyMcpEntryEqual(browser, AGY_MCP_ACTIVE_ENTRIES.get("agentlas-browser"));
+          // Do not classify Main's exact active entry as an unknown foreign
+          // owner. The mutation-locked check below re-reads it and either
+          // shares the exact requested binding or signals bounded contention.
+          if (!knownLocal) {
+            try { await fs.stat(previousControl); throw new Error("agy_mcp_foreign_owner_unverified"); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+          }
         }
       } else if (!mcpConfigPath) {
         // 이 실행은 MCP 설정 자체가 없어 아래 조정 단계가 한 줄도 돌지 않는다 — 격리할
@@ -1159,14 +1221,21 @@ export async function reconcileAgyMcpServers(
       // 그 항목을 이 실행 동안만 격리하고 끝나면 되돌린다. 예전에는 여기서도 거절해서,
       // 브라우저를 한 번 쓴 기계에서는 Science 의 agy 실행이 영영 시작되지 못했다.
     }
-    const bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation);
+    bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation, signal);
     if (bound.failure) { await lease.release(); return bound; }
-    const stagedConfig = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
+    const stagedConfig = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
+      throw error;
+    }));
+    signal?.throwIfAborted();
     const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
     const assertReady = async () => {
       signal?.throwIfAborted();
       await lease.assertOwned();
-      const current = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch(() => "{}"));
+      const current = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
+        throw error;
+      }));
       for (const key of guardedKeys) {
         const entry = current.mcpServers?.[key];
         if (!isAgyMcpEntryEqual(entry, stagedConfig.mcpServers[key])) {
@@ -1176,10 +1245,12 @@ export async function reconcileAgyMcpServers(
       onStatus(`[agy-mcp-scope] phase=load generation=${lease.generation}`);
     };
     onStatus(`[agy-mcp-scope] phase=staged generation=${lease.generation}`);
-    return { assertReady, cleanup: async () => { try { await bound.cleanup(); } finally { await lease.release(); } } };
+    const admitted = bound;
+    return { assertReady, cleanup: async () => { try { await admitted.cleanup(); } finally { await lease.release(); } } };
   } catch (error) {
-    await lease.release().catch(() => {});
+    try { await bound?.cleanup(); } finally { await lease.release().catch(() => {}); }
     if (signal?.aborted) throw error;
+    if (error instanceof AgyMcpLocalContention) throw error;
     const code = error instanceof Error && /^agy_mcp_[a-z_]+$/.test(error.message) ? error.message : "agy_mcp_config_unavailable";
     return { ...noop, failure: { kind: "refused", source: "marker", runtime: "antigravity",
       providerCode: code, message: "Antigravity MCP configuration could not be bound to this authorized run." } };
@@ -1191,6 +1262,7 @@ async function reconcileAgyMcpServersUnderLease(
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
   generation?: string,
+  signal?: AbortSignal,
 ): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   if (!mcpConfigPath) return noop;
@@ -1239,7 +1311,7 @@ async function reconcileAgyMcpServersUnderLease(
   // 격리해야 할 수 있다. 정말 할 일이 없으면 아래에서 (added 0 + 변경 없음) 로 빠진다.
 
   return withAgyMcpMutationLock(async () => {
-
+    signal?.throwIfAborted();
     const globalPath = agyMcpConfigPath();
     let parsed: { mcpServers?: Record<string, AgyMcpServerEntry>; [key: string]: unknown };
     try {
@@ -1265,9 +1337,10 @@ async function reconcileAgyMcpServersUnderLease(
 
   // An agy process reads one global MCP file. Sharing is safe only when the
   // exact transport entry is already active; a matching key alone can point
-  // at another chat's approval proxy. Refuse the later run before spawning
-  // instead of lending it the first run's authority.
+  // at another chat's approval proxy. Only positively identified local
+  // contention may retry; configuration drift still fails closed.
     const collidedWithUserEntry: string[] = [];
+    let localContention = false;
     for (const [key, server] of entries) {
     const live = AGY_MCP_REFCOUNT.get(key);
     const requestedEntry = requestedAgyMcpEntry(server);
@@ -1288,6 +1361,10 @@ async function reconcileAgyMcpServersUnderLease(
     const activeEntry = AGY_MCP_ACTIVE_ENTRIES.get(key);
     if (requestedEntry && isAgyMcpEntryEqual(activeEntry, requestedEntry)
       && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) continue;
+    if (live > 0 && requestedEntry && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) {
+      localContention = true;
+      continue;
+    }
     return {
       cleanup: async () => {},
       failure: {
@@ -1299,6 +1376,10 @@ async function reconcileAgyMcpServersUnderLease(
       },
     };
     }
+    // No writes or refcount changes precede this check. Throwing unwinds the
+    // mutation lock and this attempt's lease reference before any retry wait.
+    if (localContention) throw new AgyMcpLocalContention();
+    signal?.throwIfAborted();
 
   if (collidedWithUserEntry.length) {
     entries = entries.filter(([key]) => !collidedWithUserEntry.includes(key));

@@ -2,6 +2,7 @@
 
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
+import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
@@ -3099,25 +3100,41 @@ export function OneShell() {
   // a picker started in chat A can settle after navigation and paint A's path
   // into chat B.
   activeThreadChatIdRef.current = activeThreadChatId;
+  const noticeChatReady = shownThreadChatIdRef.current === activeThreadChatId;
   useEffect(() => {
     const api = ipc();
-    if (!api || !activeThreadChatId) return;
+    if (!api || !activeThreadChatId || !noticeChatReady) return;
     let disposed = false;
+    let historyGeneration = 0;
     return (() => {
-      const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
-        if (change.entity !== "chat" || change.id !== activeThreadChatId) return;
+      const refreshHistory = () => {
+        const generation = ++historyGeneration;
         void api.invoke.history(activeThreadChatId).then((history) => {
-          if (disposed || activeThreadChatIdRef.current !== activeThreadChatId) return;
+          if (disposed || generation !== historyGeneration || activeThreadChatIdRef.current !== activeThreadChatId) return;
           const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
-          setMessages((current) => current.map((message) => {
-            const result = states.get(message.durableMessageId ?? message.id);
-            return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
-          }));
+          const notices = toUiMessages(history).filter(message => message.hostNotice?.purpose === "automation-report");
+          setMessages((current) => {
+            // React may apply this updater after navigation or a newer read.
+            if (disposed || generation !== historyGeneration || activeThreadChatIdRef.current !== activeThreadChatId
+              || shownThreadChatIdRef.current !== activeThreadChatId) return current;
+            const appended = mergeAutomationHostNotices(current, notices);
+            // Fence an older in-flight hydration from erasing a new report.
+            if (appended !== current) oneTranscriptRevisionRef.current += 1;
+            return appended.map((message) => {
+              const result = states.get(message.durableMessageId ?? message.id);
+              return result ? { ...message, goalResult: mergeGoalResults(message.goalResult, result) } : message;
+            });
+          });
         }).catch(() => undefined);
+      };
+      const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+        if (change.entity === "chat" && change.id === activeThreadChatId) refreshHistory();
       });
+      // Catch a report committed while the initial conversation was loading.
+      refreshHistory();
       return () => { disposed = true; unsubscribe?.(); };
     })();
-  }, [activeThreadChatId]);
+  }, [activeThreadChatId, noticeChatReady]);
   useEffect(() => {
     onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
   }, [activeThreadChatId, selectedConversationId]);
