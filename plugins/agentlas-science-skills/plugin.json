@@ -136,11 +136,6 @@
         "bytes": 3744
       },
       {
-        "path": "skills/aeon/references/datasets_benchmarking.md",
-        "sha256": "1830d335c9fb02fbd8cf9765f22309e81ee562fdd6f199435178ef2a18beb4ce",
-        "bytes": 9244
-      },
-      {
         "path": "skills/aeon/references/distances.md",
         "sha256": "1b9a0371bad5babf386cf52405fc48b93097b05706a5c79ef6d216f94f502d04",
         "bytes": 6409
@@ -5901,11 +5896,6 @@
         "bytes": 6668
       },
       {
-        "path": "skills/pufferlib/scripts/benchmark_vectorization.py",
-        "sha256": "4601b83d9493dd4fd1c21b84afb2bd17fcedb0674d2bf526e62e770a59b16d6b",
-        "bytes": 8332
-      },
-      {
         "path": "skills/pufferlib/scripts/env_contract_validator.py",
         "sha256": "2308a4f0076f6e5cba7a1a8328fa8764ba2f21828c252d0bd0bb0689321abade",
         "bytes": 6892
@@ -6509,11 +6499,6 @@
         "path": "skills/pytdc/scripts/_common.py",
         "sha256": "5400062833084d7dfbe6fa603901d2d931689c1d2ad587c9ae67052f50b98791",
         "bytes": 7346
-      },
-      {
-        "path": "skills/pytdc/scripts/benchmark_evaluation.py",
-        "sha256": "fd2f6918f53ff9674c761860e8cb426e313f565b0736ae1a94a63b37e79675ee",
-        "bytes": 12498
       },
       {
         "path": "skills/pytdc/scripts/cache_audit.py",
@@ -8251,34 +8236,9 @@
         "bytes": 17032
       },
       {
-        "path": "skills/timesfm-forecasting/examples/anomaly-detection/output/anomaly_detection.json",
-        "sha256": "f657f299b1bc0205cd242822bddaac92dc2b08c6a71dc19215cf98294a2dbdbc",
-        "bytes": 9019
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/anomaly-detection/output/anomaly_detection.png",
-        "sha256": "c4b30e01bb01847c0eabf8367f28cd16368fd28e450c38c1cc089abb18672276",
-        "bytes": 217028
-      },
-      {
         "path": "skills/timesfm-forecasting/examples/covariates-forecasting/demo_covariates.py",
         "sha256": "2f9d005a4feb3c796c802ec4b5cfbca90c75cc892621a068c5dc5a251676b3a1",
         "bytes": 19700
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/covariates-forecasting/output/covariates_data.png",
-        "sha256": "24682a190ecae753d5531bce9841040709a64abb044bfb372bab34a6c7c17070",
-        "bytes": 458505
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/covariates-forecasting/output/covariates_metadata.json",
-        "sha256": "0a0ece6fdf551000673ee1f763895b88e18dbee05471a44e71e9388593477006",
-        "bytes": 1586
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/covariates-forecasting/output/sales_with_covariates.csv",
-        "sha256": "765621c852fd31ce7803012fd100973f20a1be796d492092df2f0ecb884a9f1c",
-        "bytes": 7399
       },
       {
         "path": "skills/timesfm-forecasting/examples/global-temperature/README.md",
@@ -8299,36 +8259,6 @@
         "path": "skills/timesfm-forecasting/examples/global-temperature/generate_html.py",
         "sha256": "43ba538c8d7d1632c24f9b014daf3a488483d3fe5bdb2cfec2b44f8eda6ffcf0",
         "bytes": 21161
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/animation_data.json",
-        "sha256": "d54662e5e1d8cba1be036e397a64df5a868db2d807b82560423302e096f1f060",
-        "bytes": 133208
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/forecast_animation.gif",
-        "sha256": "ca9bbbe3206a0c2c7da26e154a6a5661490f97a024ccb7a833f26fd96bd0e51b",
-        "bytes": 794231
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/forecast_output.csv",
-        "sha256": "64ae6a900cdf76152de2aac7a5f068c342fc8f1d8fee7ed33ae68c37d11d2840",
-        "bytes": 1494
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/forecast_output.json",
-        "sha256": "4cfbede705b0abd82a6e8622dd93c89d5e7ae3563ac486fffe9c9736682f7aad",
-        "bytes": 4524
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/forecast_visualization.png",
-        "sha256": "d4b03c857b444842550fb711ee9951f0e5f159d52bbedebe4e8bbfe2d18bc2f5",
-        "bytes": 156559
-      },
-      {
-        "path": "skills/timesfm-forecasting/examples/global-temperature/output/interactive_forecast.html",
-        "sha256": "8ddfaf1ee3b089048e5b421160a601fb1ad355c7bfff9d8d94f6b3fb367f9658",
-        "bytes": 153063
       },
       {
         "path": "skills/timesfm-forecasting/examples/global-temperature/run_example.sh",
@@ -8944,11 +8874,6 @@
         "path": "skills/waypoint-bio/references/cli-reference.md",
         "sha256": "b5eb8fe1bd24f23731ce9166114f012839119d562bfcde8115af02984cb023ef",
         "bytes": 8988
-      },
-      {
-        "path": "skills/waypoint-bio/references/compass-benchmark.md",
-        "sha256": "05012e5c7409b5fb70f6893c4b3c7258b14495308bca4f8deba2c77aca5a5f58",
-        "bytes": 6952
       },
       {
         "path": "skills/waypoint-bio/references/data-preparation.md",
