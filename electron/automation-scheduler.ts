@@ -85,6 +85,7 @@ import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { rolePriorityRuntimes } from "./runtime/selection";
 import { withRunPriority } from "./runtime/run-priority";
+import { withMainScheduledRoot } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
@@ -1576,6 +1577,15 @@ async function runOne(
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
+  // Public/manual/headless callers do not acquire Main timer ancestry merely
+  // by invoking this API. Only tick supplies the private dispatch callback.
+  return runDueAutomations(now);
+}
+
+async function runDueAutomations(
+  now: Date,
+  dispatch: (action: () => Promise<void>) => Promise<void> = action => action(),
+): Promise<void> {
   if (installQuiescing) return;
   let due: Automation[];
   try {
@@ -1586,11 +1596,11 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
   }
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
   await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
-    await runOne(a, {
+    await dispatch(async () => { await runOne(a, {
       claim: true,
       fireTime: now,
       occurrenceId: scheduledOccurrenceIdForDueRun(a),
-    });
+    }); });
   });
 }
 
@@ -1701,7 +1711,8 @@ function tick(): void {
   } catch (err) {
     console.error("[automation] stale run recovery failed:", err);
   }
-  void runDueAutomationsNow();
+  void runDueAutomations(new Date(), withMainScheduledRoot)
+    .catch(error => console.error("[automation] scheduled dispatch failed:", error));
   // Goal subscriptions have their own ledger and the Main invocation dispatcher.
   // Reuse this timer only; they are never converted into automation jobs.
   void pollGoalWaitSubscriptions().catch(error => console.error("[goal-wait] observation failed:", error));

@@ -6,6 +6,7 @@ import { observeMainMcpEffects, mcpEffectArgumentsDigest, type MainMcpEffectRece
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
 import { acquireAgyMcpLease } from "./agy-mcp-lease";
+import { scheduledRootAgySignal, withAgyDispatchAncestry } from "./scheduled-root-context";
 import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { pathToFileURL } from "node:url";
@@ -1114,9 +1115,9 @@ export function inheritAgyMcpSecretAliases(
   return result;
 }
 
-// This is bounded contention retry, not root/child admission: the runtime has
-// no attested ancestry contract. Even a parent waiting for this child is not
-// held indefinitely. Never wait while holding the configuration mutation lock.
+// Unknown/nested callers stay bounded, including the initial foreign lease
+// acquisition. Only Main-attested independent scheduled roots may wait until
+// caller cancellation/deadline. Never wait holding the mutation lock.
 const AGY_MCP_LOCAL_CONTENTION_MS = 30_000;
 class AgyMcpLocalContention extends Error {
   constructor() { super("agy_mcp_local_contention"); }
@@ -1138,19 +1139,21 @@ export async function reconcileAgyMcpServers(
   signal?: AbortSignal,
 ): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
   const deadline = new AbortController();
-  const attemptSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const scheduledSignal = scheduledRootAgySignal(signal);
+  const callerSignal = scheduledSignal ?? signal;
+  const attemptSignal = callerSignal ? AbortSignal.any([callerSignal, deadline.signal]) : deadline.signal;
+  const timer = scheduledSignal ? undefined : setTimeout(
+    () => deadline.abort(new Error("agy_mcp_scope_busy")), AGY_MCP_LOCAL_CONTENTION_MS,
+  );
   let nextWaitNotice = 0;
   try {
     for (;;) {
       try {
         return await reconcileAgyMcpServersAttempt(mcpConfigPath, onStatus, runtimeEnv, attemptSignal);
       } catch (error) {
-        if (signal?.aborted) throw signal.reason;
+        if (callerSignal?.aborted) throw callerSignal.reason;
         if (deadline.signal.aborted) throw deadline.signal.reason;
         if (!(error instanceof AgyMcpLocalContention)) throw error;
-        // One deadline for all retries, including any subsequent lease wait.
-        timer ??= setTimeout(() => deadline.abort(new Error("agy_mcp_scope_busy")), AGY_MCP_LOCAL_CONTENTION_MS);
         if (Date.now() >= nextWaitNotice) {
           nextWaitNotice = Date.now() + 10_000;
           try { onStatus("[agy-mcp-scope] phase=waiting reason=local-contention"); } catch { /* observer only */ }
@@ -1159,7 +1162,7 @@ export async function reconcileAgyMcpServers(
       }
     }
   } catch (error) {
-    if (signal?.aborted) throw signal.reason;
+    if (callerSignal?.aborted) throw callerSignal.reason;
     if (!deadline.signal.aborted) throw error;
     return { cleanup: async () => {}, failure: { kind: "unavailable", source: "marker", runtime: "antigravity",
       providerCode: "agy_mcp_scope_busy", message: "Antigravity MCP configuration remained busy for 30 seconds; no model was started." } };
@@ -1242,6 +1245,7 @@ async function reconcileAgyMcpServersAttempt(
           throw new Error("agy_mcp_configuration_drift");
         }
       }
+      signal?.throwIfAborted();
       onStatus(`[agy-mcp-scope] phase=load generation=${lease.generation}`);
     };
     onStatus(`[agy-mcp-scope] phase=staged generation=${lease.generation}`);
@@ -2189,7 +2193,12 @@ export function antigravityReadToolFailure(req: RunnerRequest): RunnerFailure | 
 export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
-): Promise<RunnerResult> => {
+): Promise<RunnerResult> => withAgyDispatchAncestry(async () => {
+  // Propagate root lifetime through preparation, final pre-spawn checks and
+  // the child itself; an inherited detached callback cannot outlive its grant.
+  const scheduledSignal = scheduledRootAgySignal(req.signal);
+  if (scheduledSignal) req = { ...req, signal: scheduledSignal };
+  req.signal?.throwIfAborted();
   // agy 1.1.26 exposes terminal sandboxing and slash-command suppression,
   // but neither removes built-in tools or inherited global MCP servers. A
   // read permission without auto-approval is not a verified no-tools envelope.
@@ -2235,4 +2244,4 @@ export const runAntigravity: Runner = async (
     executableIdentity.fingerprint,
     stagedImages.directory ? [stagedImages.directory] : [],
   );
-};
+});
