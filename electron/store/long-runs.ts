@@ -1,6 +1,7 @@
 import { normalizeLongRunUsage, readLongRunCostAccounting, longRunMonetaryRefusal, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mcpEffectArgumentsDigest, mcpEffectOutputDigest } from "../mcp-tools/effect-receipts";
 import {
   LONG_RUN_ACTIVE_STATUSES,
   LONG_RUN_OPEN_TASK_STATES,
@@ -1343,11 +1344,62 @@ function verificationReferencesResolve(run: LongRunRecord, receipt: { evidenceRe
     .get(id) as { run_id: string; chat_id: string | null; seq: number; kind: string; payload_json: string } | undefined;
   return refs.every(ref => {
     try {
-      const event = /^(event|file-proof|download-proof):(.+)$/.exec(ref);
+      const event = /^(event|file-proof|download-proof|execution-proof):(.+)$/.exec(ref);
       if (event) {
         const row = eventRow(event[2]);
         if (!row || row.chat_id !== run.rootChatId || (binding && !ownsInvocation(row.run_id))) return false;
         if (event[1] === "event") return true;
+        if (event[1] === "execution-proof") {
+          if (row.kind !== "runtime_execution_observed" || !binding) return false;
+          const payload = JSON.parse(row.payload_json), evidence = decodeRuntimeEvidence(payload.runtimeEvidence);
+          const correlation = evidence?.correlation;
+          if (payload.schemaVersion !== "agentlas.main-execution-proof.v1"
+            || !["time", "native-browser"].includes(payload.contract)
+            || typeof payload.tool !== "string" || typeof payload.receiptId !== "string"
+            || correlation?.invocationRunId !== row.run_id || correlation.goalId !== run.goalId
+            || correlation.goalRevision !== binding.revision || correlation.longRunId !== run.id
+            || [payload.scopeStartSeq, payload.scopeEndSeq, payload.toolStartSeq, payload.toolResultSeq]
+              .some((value) => !Number.isSafeInteger(value) || value < 0)
+            || !(payload.scopeStartSeq < payload.toolStartSeq && payload.toolStartSeq < payload.toolResultSeq
+              && payload.toolResultSeq < payload.scopeEndSeq && payload.scopeEndSeq < row.seq)) return false;
+          const linked = db.prepare("SELECT run_id, chat_id, seq, kind, payload_json FROM run_events WHERE run_id = ? AND seq IN (?, ?, ?, ?) ORDER BY seq")
+            .all(row.run_id, payload.scopeStartSeq, payload.toolStartSeq, payload.toolResultSeq, payload.scopeEndSeq) as Array<{
+              run_id: string; chat_id: string | null; seq: number; kind: string; payload_json: string;
+            }>;
+          if (linked.length !== 4 || linked.some(item => item.chat_id !== row.chat_id)) return false;
+          const [scopeStart, toolStart, toolResult, scopeEnd] = linked;
+          if (scopeStart.kind !== "runtime_adapter_effect_started" || toolStart.kind !== "mcp_tool-use"
+            || toolResult.kind !== "mcp_tool-use" || scopeEnd.kind !== "runtime_adapter_effect_completed") return false;
+          const startScope = JSON.parse(scopeStart.payload_json), endScope = JSON.parse(scopeEnd.payload_json);
+          const before = JSON.parse(toolStart.payload_json), after = JSON.parse(toolResult.payload_json);
+          if (startScope.scopeId !== endScope.scopeId || startScope.rootBound !== true || startScope.chatId !== row.chat_id
+            || startScope.adapterKind !== "antigravity" || startScope.purpose !== undefined
+            || endScope.report?.complete !== true || endScope.report?.terminal !== "SUCCESS"
+            || endScope.report?.protocol !== "agy-stream-json-main-receipts.v2"
+            || !Array.isArray(endScope.report.operationIds) || endScope.report.operationIds.filter((id: unknown) => id === before.toolId).length !== 1
+            || endScope.report.settledFailureIds?.includes(before.toolId)
+            || typeof before.toolId !== "string" || !before.toolId.startsWith(`${startScope.scopeId}:agy-tool:call_mcp_tool:`)
+            || before.toolId !== after.toolId || before.toolName !== after.toolName
+            || typeof before.toolArgs !== "string" || before.toolArgs !== after.toolArgs
+            || typeof before.toolResultPreview === "string" || typeof after.toolResultPreview !== "string" || after.toolIsError !== false
+            || !before.toolName.endsWith(`__${payload.tool}`)) return false;
+          const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+          if (mcpEffectArgumentsDigest(JSON.parse(before.toolArgs)) !== payload.argumentsDigest
+            || mcpEffectOutputDigest(after.toolResultPreview) !== payload.outputDigest
+            || hash(after.toolResultPreview) !== payload.toolResultDigest
+            || typeof payload.toolResultPreview !== "string" || hash(payload.toolResultPreview) !== payload.previewDigest) return false;
+          const seals = db.prepare("SELECT seq, payload_json FROM run_events WHERE run_id = ? AND kind = 'runtime_effect_boundary' ORDER BY seq")
+            .all(row.run_id) as Array<{ seq: number; payload_json: string }>;
+          if (seals.length !== 1 || row.seq >= seals[0].seq) return false;
+          const seal = JSON.parse(seals[0].payload_json);
+          if (!seal.operations?.some((operation: any) => operation.toolId === before.toolId
+            && operation.startObserved === true && operation.resultObserved === true && operation.outcome === "succeeded")
+            || !seal.adapterScopes?.some((scope: any) => scope.scopeId === startScope.scopeId
+              && scope.rootBound === true && scope.chatId === row.chat_id)) return false;
+          const receiptUses = db.prepare("SELECT COUNT(*) AS n FROM run_events WHERE kind = 'runtime_execution_observed' AND json_extract(payload_json, '$.receiptId') = ?")
+            .get(payload.receiptId) as { n: number };
+          return receiptUses.n === 1;
+        }
         if (row.kind !== (event[1] === "file-proof" ? "runtime_file_observed" : "runtime_download_observed")) return false;
         const payload = JSON.parse(row.payload_json);
         if (typeof payload.startEventId !== "string" || typeof payload.resultEventId !== "string"
