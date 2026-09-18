@@ -285,7 +285,12 @@ function safeCaptureRect(value: unknown, active: ActiveScienceView): Rectangle {
   const width = right - x;
   const height = bottom - y;
   const bounds = active.view.getBounds();
-  if (x < 0 || y < 0 || width < 1 || height < 1 || right > bounds.width || bottom > bounds.height) throw new Error("science-capture-rect-out-of-bounds");
+  // The matched artifact is staged at the viewport origin before this value is
+  // accepted. Keep that origin invariant strict, but allow the staged target to
+  // be taller or wider than the visible Science view: CDP captures those pixels
+  // with captureBeyondViewport rather than truncating a full table to its first
+  // visible rows. The independent size budget below remains the hard limit.
+  if (bounds.width < 1 || bounds.height < 1 || x !== 0 || y !== 0 || width < 1 || height < 1) throw new Error("science-capture-rect-out-of-bounds");
   if (width > 4096 || height > 4096 || width * height > 12_000_000) throw new Error("science-capture-rect-too-large");
   return { x, y, width, height };
 }
@@ -315,16 +320,24 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
         );
         const target = host?.querySelector('[data-science-capture]');
         if (!host || !target) throw new Error('science-capture-target-missing');
+        const scrollPositions = [];
+        for (let node = target; node; node = node.parentElement) {
+          scrollPositions.push({ node, left: node.scrollLeft, top: node.scrollTop });
+        }
+        Object.defineProperty(target, '__agentlasScienceCaptureRestore', {
+          value: {
+            style: target.getAttribute('style'),
+            scrollPositions,
+            windowScroll: { x: window.scrollX, y: window.scrollY },
+          },
+          configurable: true,
+        });
+        target.dataset.scienceCaptureStage = captureToken;
         target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const style = getComputedStyle(target);
         const rect = target.getBoundingClientRect();
         if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 || rect.width < 1 || rect.height < 1) throw new Error('science-capture-target-hidden');
-        Object.defineProperty(target, '__agentlasScienceCaptureRestore', {
-          value: { style: target.getAttribute('style') },
-          configurable: true,
-        });
-        target.dataset.scienceCaptureStage = captureToken;
         const opaqueBackground = style.backgroundColor === 'rgba(0, 0, 0, 0)' || style.backgroundColor === 'transparent'
           ? 'rgb(255, 255, 255)'
           : style.backgroundColor;
@@ -337,6 +350,11 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
         target.style.setProperty('z-index', '2147483647', 'important');
         target.style.setProperty('isolation', 'isolate', 'important');
         target.style.setProperty('background-color', opaqueBackground, 'important');
+        // A fixed element is viewport-relative, while captureBeyondViewport's
+        // clip is document-relative. Normalize the temporary document origin or
+        // the current page scroll becomes blank pixels above the staged target
+        // and removes the same number of pixels from a tall table's last rows.
+        window.scrollTo(0, 0);
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const staged = target.getBoundingClientRect();
         if (Math.abs(staged.x) > 0.5 || Math.abs(staged.y) > 0.5 || Math.abs(staged.width - rect.width) > 1 || Math.abs(staged.height - rect.height) > 1) {
@@ -361,7 +379,7 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
       const result = await webContents.debugger.sendCommand("Page.captureScreenshot", {
         format: "png",
         fromSurface: true,
-        captureBeyondViewport: false,
+        captureBeyondViewport: true,
         clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
       }) as { data?: unknown };
       const capturedDocumentMatches = activeViewForSender(senderId) === active
@@ -398,7 +416,7 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
       };
     } finally {
       if (!webContents.isDestroyed()) {
-        await webContents.executeJavaScript(`(() => {
+        await webContents.executeJavaScript(`(async () => {
           const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
           if (!target) return false;
           const restore = target.__agentlasScienceCaptureRestore;
@@ -406,6 +424,16 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
           else if (typeof restore?.style === 'string') target.setAttribute('style', restore.style);
           delete target.__agentlasScienceCaptureRestore;
           delete target.dataset.scienceCaptureStage;
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          if (Array.isArray(restore?.scrollPositions)) {
+            for (const position of restore.scrollPositions) {
+              if (!position?.node?.isConnected) continue;
+              position.node.scrollLeft = position.left;
+              position.node.scrollTop = position.top;
+            }
+          }
+          if (restore?.windowScroll) window.scrollTo(restore.windowScroll.x, restore.windowScroll.y);
+          await new Promise((resolve) => requestAnimationFrame(resolve));
           return true;
         })()`).catch(() => false);
       }
