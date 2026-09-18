@@ -20,14 +20,15 @@ export class CredentialRecoveryStateError extends Error {
 }
 
 type Descriptor = { schemaVersion: 1; serviceHash: string; operation: "read" | "list"; account: string };
-type Attempt = Descriptor & { id: string; state: "unresolved" | "failed"; pid: number; instanceId: string };
-type Owner = { id: string; pid: number; instanceId: string };
+type Attempt = Descriptor & { id: string; state: "unresolved" | "failed"; pid: number; instanceId: string; recoveryGeneration?: string };
+type Owner = { id: string; pid: number; instanceId: string; recoveryGeneration?: string };
 const instanceId = randomUUID();
 const activeAttempts = new Set<string>();
 const observed = new Map<string, CredentialRecoveryResource>();
 const observedErrors = new Map<string, CredentialRecoveryCode>();
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
+const RECOVERY_GENERATION = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const invalid = (): CredentialRecoveryStateError => new CredentialRecoveryStateError("credential_recovery_state_invalid");
 const isMissing = (error: unknown): boolean => (error as { code?: string })?.code === "ENOENT";
@@ -63,7 +64,8 @@ async function readJson(file: string): Promise<unknown> {
 
 function validOwner(value: unknown): value is Owner {
   const row = value as Owner;
-  return !!row && UUID.test(row.id) && Number.isInteger(row.pid) && row.pid > 0 && UUID.test(row.instanceId);
+  return !!row && UUID.test(row.id) && Number.isInteger(row.pid) && row.pid > 0 && UUID.test(row.instanceId)
+    && (row.recoveryGeneration === undefined || RECOVERY_GENERATION.test(row.recoveryGeneration));
 }
 
 function ownerIsLive(owner: Owner): boolean {
@@ -122,10 +124,16 @@ async function attemptFiles(dir: string): Promise<string[]> {
   catch (error) { if (isMissing(error)) return []; throw error; }
 }
 
-async function inspect(dir: string, expected: Descriptor): Promise<{ files: string[]; errorCode: CredentialRecoveryCode | null; generation: string }> {
+async function inspect(
+  dir: string,
+  expected: Descriptor,
+  currentRecoveryGeneration = "",
+): Promise<{ files: string[]; errorCode: CredentialRecoveryCode | null; generation: string; automaticRetryAllowed: boolean }> {
   const files = await attemptFiles(dir);
   let errorCode: CredentialRecoveryCode | null = null;
   const generations: unknown[] = [];
+  let hasRecoverableState = false;
+  let belongsToOlderGeneration = Boolean(currentRecoveryGeneration && RECOVERY_GENERATION.test(currentRecoveryGeneration));
   for (const file of files) {
     try {
       const raw = await fs.readFile(path.join(dir, file), "utf8");
@@ -134,9 +142,15 @@ async function inspect(dir: string, expected: Descriptor): Promise<{ files: stri
       if (row.schemaVersion !== 1 || row.serviceHash !== expected.serviceHash || row.operation !== expected.operation
         || row.account !== expected.account || !UUID.test(row.id) || file !== `attempt-${row.id}.json`
         || !validOwner(row) || !["unresolved", "failed"].includes(row.state)) throw invalid();
+      hasRecoverableState = true;
+      if (row.recoveryGeneration === currentRecoveryGeneration) belongsToOlderGeneration = false;
       if (row.state === "unresolved" && errorCode !== "credential_recovery_state_invalid") errorCode = "credential_attempt_incomplete";
       else if (!errorCode) errorCode = "keychain_unavailable";
-    } catch { errorCode = "credential_recovery_state_invalid"; generations.push([file, "invalid"]); }
+    } catch {
+      errorCode = "credential_recovery_state_invalid";
+      belongsToOlderGeneration = false;
+      generations.push([file, "invalid"]);
+    }
   }
   try {
     const actual = await readJson(path.join(dir, "resource.json"));
@@ -145,21 +159,54 @@ async function inspect(dir: string, expected: Descriptor): Promise<{ files: stri
   try {
     const owner = await fs.readFile(path.join(dir, "lock", "owner.json"), "utf8");
     generations.push(["lock", hash(owner)]);
+    const parsedOwner = JSON.parse(owner) as Owner;
+    if (!validOwner(parsedOwner)) {
+      belongsToOlderGeneration = false;
+      errorCode = "credential_recovery_state_invalid";
+    } else {
+      hasRecoverableState = true;
+      if (parsedOwner.recoveryGeneration === currentRecoveryGeneration || ownerIsLive(parsedOwner)) {
+        belongsToOlderGeneration = false;
+      }
+    }
     if (!errorCode) errorCode = "credential_attempt_incomplete";
   } catch (error) {
-    if (!isMissing(error)) errorCode = "credential_recovery_state_invalid";
+    if (!isMissing(error)) {
+      errorCode = "credential_recovery_state_invalid";
+      belongsToOlderGeneration = false;
+    }
     else {
       try { await fs.stat(path.join(dir, "lock")); if (!errorCode) errorCode = "credential_attempt_incomplete"; }
-      catch (statError) { if (!isMissing(statError)) errorCode = "credential_recovery_state_invalid"; }
+      catch (statError) {
+        if (!isMissing(statError)) {
+          errorCode = "credential_recovery_state_invalid";
+          belongsToOlderGeneration = false;
+        }
+      }
     }
   }
-  return { files, errorCode, generation: hash(generations) };
+  return {
+    files,
+    errorCode,
+    generation: hash(generations),
+    automaticRetryAllowed: Boolean(
+      errorCode
+      && errorCode !== "credential_recovery_state_invalid"
+      && hasRecoverableState
+      && belongsToOlderGeneration,
+    ),
+  };
 }
 
 /** Persists an unresolved attempt before native work, including the first read.
  * Success removes only the captured generations. Failure never erases a marker.
  */
-export async function runWithCredentialRecovery<T>(resource: CredentialRecoveryResource, explicit: boolean, run: () => Promise<T>): Promise<T> {
+export async function runWithCredentialRecovery<T>(
+  resource: CredentialRecoveryResource,
+  explicit: boolean,
+  run: () => Promise<T>,
+  recoveryGeneration = "",
+): Promise<T> {
   let dir: string;
   try { dir = location(resource); } catch { throw invalid(); }
   const expected = descriptor(resource);
@@ -168,17 +215,23 @@ export async function runWithCredentialRecovery<T>(resource: CredentialRecoveryR
   let attemptDurable = false;
   let ownerId: string | undefined;
   try {
-    const previous = await inspect(dir, expected);
-    if (previous.errorCode && !explicit) throw new CredentialRecoveryStateError(previous.errorCode);
+    const previous = await inspect(dir, expected, recoveryGeneration);
+    const recoveryAttempt = explicit || previous.automaticRetryAllowed;
+    if (previous.errorCode && !recoveryAttempt) throw new CredentialRecoveryStateError(previous.errorCode);
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-    const owner: Owner = { id: randomUUID(), pid: process.pid, instanceId };
+    const owner: Owner = {
+      id: randomUUID(),
+      pid: process.pid,
+      instanceId,
+      ...(recoveryGeneration && RECOVERY_GENERATION.test(recoveryGeneration) ? { recoveryGeneration } : {}),
+    };
     ownerId = owner.id;
-    release = await acquireLock(dir, owner, explicit);
+    release = await acquireLock(dir, owner, recoveryAttempt);
     // Re-read after the cross-process lock: another host may have failed while
     // this caller was preparing. Passive calls must not bypass that new failure.
-    const captured = await inspect(dir, expected);
+    const captured = await inspect(dir, expected, recoveryGeneration);
     const oldFiles = captured.files;
-    if (oldFiles.length && !explicit) throw new CredentialRecoveryStateError(captured.errorCode ?? "credential_attempt_incomplete");
+    if (oldFiles.length && !recoveryAttempt) throw new CredentialRecoveryStateError(captured.errorCode ?? "credential_attempt_incomplete");
     await atomicJson(path.join(dir, "resource.json"), expected);
     const attempt: Attempt = { ...expected, ...owner, state: "unresolved" };
     attemptFile = path.join(dir, `attempt-${owner.id}.json`);

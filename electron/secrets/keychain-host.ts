@@ -42,7 +42,12 @@ function sharedNativeRequest<T>(operation: "read" | "list", service: string, acc
   const current = nativeRequests.get(key);
   if (current) return current as Promise<T>;
   if (failedRequests.has(key) && !explicit) return Promise.reject(new KeychainUnavailableError(operation, account || null, "automatic retry suppressed", true));
-  const started = Promise.resolve().then(() => runWithCredentialRecovery({ operation, service, account }, explicit, run));
+  const started = Promise.resolve().then(() => runWithCredentialRecovery(
+    { operation, service, account },
+    explicit,
+    run,
+    process.env.AGENTLAS_DESKTOP_VERSION,
+  ));
   nativeRequests.set(key, started);
   void started.then(
     () => { failedRequests.delete(key); if (nativeRequests.get(key) === started) nativeRequests.delete(key); },

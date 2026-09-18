@@ -218,6 +218,11 @@ import {
   renderScienceStatisticsFigureSvgPreviewPng,
   renderScienceStatisticsFigureTiff,
 } from "agentlas-science";
+
+// Credential recovery markers deliberately survive crashes, but an installed
+// upgrade must get one bounded chance to exercise its repaired native bridge.
+// Child/daemon hosts inherit this exact package generation from Desktop.
+process.env.AGENTLAS_DESKTOP_VERSION = app.getVersion();
 import { validateScienceNumericSurfacePngBytes } from "agentlas-science";
 import { validateScienceResidueInteraction } from "agentlas-science";
 import { draftManuscript } from "agentlas-science";

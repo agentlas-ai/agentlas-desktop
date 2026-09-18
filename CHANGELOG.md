@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.26 — 2026-09-18
+
+- **Recover credentials after an installed upgrade** — a durable keychain failure still suppresses repeated reads within the same app version, but a newer installed version now receives one bounded recovery attempt per exact resource. This lets the isolated signed-executable fallback repair failures left by an older build without creating a startup retry loop.
+- **Expose downloaded updates inside One** — One's own navigation rail now renders the update-and-restart control directly, so its full-height shell cannot cover the global sidebar action.
+- **Retain the 1.2.25 One, Work, and Science fixes** — Taskforce rooms stay chat-owned, durable generated and captured images reopen from chat, Full Access covers ordinary browser actions without an allow-once prompt, steering history is not painted as a fresh failure, and stale async results cannot overwrite the screen the user navigated to.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove that public installers or update feeds have been published; the public release and installed-app checks remain separate gates.
+
 ## 1.2.25 — 2026-09-18
 
 - One Taskforce group conversations retain their chat route and hydrated transcript even when runs in the room create canonical Tasks. Repeatedly clicking the same room no longer clears messages while the unchanged URL prevents a second hydration.

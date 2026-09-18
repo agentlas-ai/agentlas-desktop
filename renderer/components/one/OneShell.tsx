@@ -37,6 +37,7 @@ import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
+import { UpdateBanner } from "@/components/UpdateBanner";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import {
   IconArrowUp,
@@ -6799,6 +6800,7 @@ export function OneShell() {
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
             </nav>}
             <div className={styles.railBottomMenu}>
+              <UpdateBanner />
               <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />{appLocale === "ko" ? "로컬 모델" : "Local Models"}</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
               <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
