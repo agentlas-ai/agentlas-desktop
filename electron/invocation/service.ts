@@ -1924,12 +1924,14 @@ export class InvocationService {
     const lifetime = record.mainLifetime = new MainInvocationLifetime(mainAdmission, chat.id, runId);
     this.settlingRuns.set(runId, record);
     let retryGoalCheckpoint: { goalId: string; checkpointId: string } | undefined;
+    // Defer dispatch inside the captured lifetime/ALS so a synchronous throw
+    // reaches the same terminal and registry cleanup as a rejected runner.
     record.completion = lifetime.run(() => withBrowserDownloadProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? {goalId:goalLongRun.goalId,attemptId:goalControllerAttemptId} : null }, () => withBuiltinFileProofContext({ runId, chatId: chat.id, agentId: chat.agentId ?? null, signal: controller.signal,
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
       goalLongRun && goalLongRun.surface !== "science"
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
-        begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => runMcpInvocation(
+        begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => Promise.resolve().then(() => runMcpInvocation(
       runReq,
       (rawEvent) => {
         effectBoundary.observe(rawEvent);
@@ -2760,7 +2762,7 @@ export class InvocationService {
       // foreground work even when their system coordinator is inventory-hidden.
       // Background divisions and external job contexts keep quiet native grants.
       chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
-    )
+    ))
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
         // before a fast verifier can produce or claim a retry checkpoint.
