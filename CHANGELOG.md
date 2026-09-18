@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.23 — 2026-09-18
+
+- Extend independent-run contention handling to admitted interactive requests and Goal continuations, while preserving bounded waits for nested or unproven callers. A request waiting for the selected Antigravity connection remains cancellable and retains its original permission and runtime binding.
+- Keep an invocation attached until its transport cleanup and Goal verification finish. Queued steering starts once after that boundary; cancellation and removing a queued message remain effective during cleanup. Native manual automation runs and Goal resumes use the same independent-run admission.
+
+This release includes the 1.2.20–1.2.22 source changes below; their installer candidates were cancelled before publication after extended verification. It binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d, with runtime asset `hephaestus-runtime-v1.2.44.tar.gz` pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority. Local ongoing work requires the app and computer to remain available.
+
 ## 1.2.22 — 2026-09-18
 
 - Independently scheduled Antigravity runs can wait for another run's tool configuration to be released within their own execution deadline. Only a live Main scheduler scope grants this wait; nested and unproven callers retain bounded contention handling, and cancellation never interrupts the holder.

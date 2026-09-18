@@ -85,7 +85,7 @@ import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { rolePriorityRuntimes } from "./runtime/selection";
 import { withRunPriority } from "./runtime/run-priority";
-import { withMainScheduledRoot } from "./runtime/scheduled-root-context";
+import { withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
@@ -1605,7 +1605,8 @@ async function runDueAutomations(
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
-export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean }): Promise<TriggerDispatchResult> {
+export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean }, mainAdmission?: MainInvocationAdmission): Promise<TriggerDispatchResult> {
+  mainAdmission = takeMainInvocationAdmission(mainAdmission);
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
@@ -1614,13 +1615,14 @@ export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fr
   const freshRunId = opts?.fresh
     ? `run-${id}-${Date.now()}-${randomUUID().slice(0, 8)}`
     : undefined;
-  return runOne(a, {
+  const lifetime = new MainInvocationLifetime(mainAdmission, id, freshRunId ?? id, "automation");
+  return lifetime.run(() => runOne(a, {
     claim: true,
     advanceSchedule: false,
     allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
     ...(opts?.fresh ? { fresh: true, runId: freshRunId } : {}),
-  });
+  }));
 }
 
 export interface AutomationRunNowAck {
@@ -1635,7 +1637,8 @@ export interface AutomationRunNowAck {
  * cross-process lease synchronously, durably bind a runId, then execute in the
  * background. listRuns/live state are the result channel.
  */
-export function enqueueAutomationRunNow(id: string): AutomationRunNowAck {
+export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocationAdmission): AutomationRunNowAck {
+  mainAdmission = takeMainInvocationAdmission(mainAdmission);
   if (installQuiescing) return { accepted: false, automationId: id, runId: null, status: "rejected" };
   const automation = getAutomation(id);
   if (!automation) throw new Error(`Automation not found: ${id}`);
@@ -1655,13 +1658,14 @@ export function enqueueAutomationRunNow(id: string): AutomationRunNowAck {
     try { releaseAutomationRun(id, LEASE_OWNER); } catch {}
     throw error;
   }
-  void runOne(automation, {
+  const lifetime = new MainInvocationLifetime(mainAdmission, id, runId, "automation");
+  void lifetime.run(() => runOne(automation, {
     claim: true,
     preclaimed: true,
     runId,
     advanceSchedule: false,
     allowDisabledLease: true,
-  }).catch((error) => console.error(`[automation] queued run failed (${id})`, error));
+  })).catch((error) => console.error(`[automation] queued run failed (${id})`, error));
   return { accepted: true, automationId: id, runId, status: "queued" };
 }
 

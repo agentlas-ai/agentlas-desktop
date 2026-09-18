@@ -5,6 +5,7 @@ import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, shell } from "electron";
+import { admitMainInvocation, admitMainAutomation } from "./runtime/scheduled-root-context";
 import { developmentEffectsSuppressed, developmentIpcBoundary } from "./development-effect-policy";
 import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { checkComputerUsePermissions } from "./mac-permissions";
@@ -2887,11 +2888,15 @@ export function registerIpcHandlers(): void {
     chatId?: unknown;
     sourceMessageId?: unknown;
     reply?: unknown;
-  }) => invocationService.continueCommittedQuestion(
-    typeof input?.chatId === "string" ? input.chatId : "",
-    typeof input?.sourceMessageId === "string" ? input.sourceMessageId : "",
-    typeof input?.reply === "string" ? input.reply : "",
-  ));
+  }) => {
+    assertTrustedSitePublishIpcSender(_e);
+    return invocationService.continueCommittedQuestion(
+      typeof input?.chatId === "string" ? input.chatId : "",
+      typeof input?.sourceMessageId === "string" ? input.sourceMessageId : "",
+      typeof input?.reply === "string" ? input.reply : "",
+      admitMainInvocation(typeof input?.chatId === "string" ? input.chatId : ""),
+    );
+  });
   ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
     listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));
   ipcMain.handle("confirm:snooze", (_e, input: { chatId?: unknown; sourceMessageId?: unknown; resumeAt?: unknown }) =>
@@ -4438,6 +4443,7 @@ export function registerIpcHandlers(): void {
     return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {
+    assertTrustedSitePublishIpcSender(_e);
     const chat = getChat(id);
     if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
       throw new Error("goal_control_binding_changed");
@@ -4457,7 +4463,8 @@ export function registerIpcHandlers(): void {
       const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);
       try {
         confirmDesktopLongRunResumeDispatched(queued.id);
-        invocationService.start(request);
+        invocationService.start(request, undefined, undefined, undefined, undefined,
+          admitMainInvocation(request.chatId, request.runId));
       } catch (error) {
         failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
         throw error;
@@ -4476,7 +4483,7 @@ export function registerIpcHandlers(): void {
         || current.version !== queued.version || current.status !== "queued") {
         throw new Error("goal_control_binding_changed");
       }
-      const accepted = enqueueAutomationRunNow(continuation.id);
+      const accepted = enqueueAutomationRunNow(continuation.id, admitMainAutomation(continuation.id));
       if (!accepted.accepted) throw new Error("long_run_resume_dispatch_rejected");
       confirmDesktopLongRunResumeDispatched(queued.id);
     } catch (error) {
@@ -4928,6 +4935,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneBriefing:getAction", (_e, input: PrepareOneBriefingActionInput) =>
     getOneBriefingActionPacketForCandidate(input));
   ipcMain.handle("oneBriefing:startAction", (_e, input: StartOneBriefingActionInput) => {
+    assertTrustedSitePublishIpcSender(_e);
     try {
       const reservation = reserveOneBriefingActionExecution(input);
       if (reservation.kind === "already_started") {
@@ -4953,7 +4961,8 @@ export function registerIpcHandlers(): void {
           sessionRouting: false,
           hubMode: "local-only",
           borrowAgents: [],
-        });
+        }, undefined, undefined, undefined, undefined,
+          admitMainInvocation(reservation.chatId, reservation.ref.reservedRunId));
         const packet = getOneBriefingActionPacket(reservation.packet.packetId);
         if (!packet || packet.status !== "started" || packet.run?.runId !== started.runId) {
           const recovered = failOneBriefingActionStart(reservation.ref, "recovery_required");
@@ -5126,6 +5135,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     "automations:reconcileGraph",
     async (_e, input: AutomationGraphReconcileInput) => {
+      assertTrustedSitePublishIpcSender(_e);
       const result = reconcileAutomationGraph(input);
       if (result.resumeRequired && result.eventStatus === "pending") {
         const { wakeTriggerOutbox } = await import("./triggers/outbox");
@@ -5135,6 +5145,7 @@ export function registerIpcHandlers(): void {
         void runAutomationNow(
           result.automationId,
           result.simulation ? { dryRun: true } : undefined,
+          admitMainAutomation(result.automationId),
         ).catch((error) => {
           console.error(`[automation] reconciled graph resume failed (${result.automationId}):`, error);
         });
@@ -5717,6 +5728,7 @@ export function registerIpcHandlers(): void {
     id: string,
     opts?: { dryRun?: boolean; input?: Record<string, unknown>; fresh?: boolean },
   ) => {
+    assertTrustedSitePublishIpcSender(_e);
     // 켜도 되는가의 판단은 **한 곳**에서 한다(shared/graph-run-request).
     // 입구마다 각자 검사하면 같은 그래프가 부르는 쪽에 따라 다르게 돈다 — 지금 터미널은
     // SQL을 직접 쓰고 여기는 IPC에서 따로 검사하고 있었다.
@@ -5750,7 +5762,7 @@ export function registerIpcHandlers(): void {
       throw new Error("automation_reconciliation_pending");
     }
     const { runAutomationNow } = await import("./automation-scheduler");
-    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), ...(opts?.fresh === true ? { fresh: true } : {}) });
+    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), ...(opts?.fresh === true ? { fresh: true } : {}) }, admitMainAutomation(id));
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
@@ -6508,6 +6520,7 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
+    assertTrustedSitePublishIpcSender(_event);
     const request = rendererInvocationRequest(req);
     // One's intent and personal-memory judges belong to the One surface only.
     // A Work project turn goes directly to the project execution contract and
@@ -6590,7 +6603,8 @@ export function registerIpcHandlers(): void {
       ])).catch(() => undefined);
     }
     try {
-      return invocationService.start(request);
+      return invocationService.start(request, undefined, undefined, undefined, undefined,
+        admitMainInvocation(request.chatId, request.runId));
     } catch (cause) {
       // The renderer has already accepted and displayed this turn. Several
       // Main-owned start gates (participant snapshot, capability claim, durable
@@ -6613,7 +6627,11 @@ export function registerIpcHandlers(): void {
       throw cause;
     }
   });
-  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
+  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const request = rendererInvocationRequest(req);
+    return invocationService.steer(request, undefined, undefined, undefined, admitMainInvocation(request.chatId));
+  });
   ipcMain.handle("invoke:cancel", (_event, runId: string) => ({
     runId,
     status: invocationService.cancel(runId),
