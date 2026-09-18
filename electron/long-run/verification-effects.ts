@@ -25,6 +25,8 @@ export interface VerificationSession {
   readonly anchorId: string;
   runStage<T>(stage: "classification" | "judgment", action: () => Promise<T>): Promise<T>;
   assertSettledEmpty(): void;
+  /** Effect projection for failed/interrupted worker settlement, not a verdict. */
+  effectState(): "none" | "uncertain";
   /** Revokes future dispatch; does not claim that pending runners have drained. */
   close(): void;
   /** Actual raw runners only. The caller retains this in its cleanup lifetime. */
@@ -34,6 +36,7 @@ type Stage = { name: "classification" | "judgment"; open: boolean };
 type NativeScope = AdapterEffectAdmission & { report: AdapterEffectReport | null };
 type Dispatch = {
   id: string; kind: string; stage: Stage; settled: boolean;
+  started: boolean; rawSucceeded: boolean;
   controller: AbortController; scopes: Map<string, NativeScope>;
 };
 const active = new AsyncLocalStorage<{ session: EffectSession; stage: Stage }>();
@@ -150,7 +153,7 @@ class EffectSession implements VerificationSession {
       this.fail("verification_effects_coverage_unknown");
       this.checkLive();
     }
-    const dispatch: Dispatch = { id: randomUUID(), kind, stage, settled: false,
+    const dispatch: Dispatch = { id: randomUUID(), kind, stage, settled: false, started: false, rawSucceeded: false,
       controller: new AbortController(), scopes: new Map() };
     this.dispatches.push(dispatch);
     const onAbort = () => this.fail("verification_effects_aborted");
@@ -193,11 +196,13 @@ class EffectSession implements VerificationSession {
     const raw = Promise.resolve().then(() => {
       this.checkLive();
       if (combined.aborted) throw new VerificationEffectsError("verification_effects_aborted");
+      dispatch.started = true;
       return withAdapterEffectContext({ runId: this.executionId, chatId: this.binding.chatId,
         rootAgentId: null, purpose: "preparation", begin, finish }, () => start(combined, onTool));
     });
     const observed = raw.then(result => {
       dispatch.settled = true;
+      dispatch.rawSucceeded = Boolean(result && !result.failure);
       if (!result || result.failure) this.fail("verification_effects_runner_failed");
       if (!hasCallbackResultCoverage(kind) && dispatch.scopes.size === 0) this.fail("verification_effects_native_report_missing");
       for (const scope of dispatch.scopes.values()) if (!this.emptyReport(kind, scope.report)) this.fail("verification_effects_native_not_empty_complete");
@@ -234,6 +239,30 @@ class EffectSession implements VerificationSession {
       }
     } catch { this.fail("verification_effects_boundary_changed"); }
     this.checkLive();
+  }
+
+  effectState(): "none" | "uncertain" {
+    // A grace-race return or an abort request never settles the real runner.
+    if (this.dispatches.some(dispatch => !dispatch.settled)) return "uncertain";
+    const started = this.dispatches.filter(dispatch => dispatch.started);
+    for (const reason of this.failures) {
+      // A changed task snapshot or invalid verdict invalidates the decision,
+      // not an independently observed empty verifier execution.
+      if (["verification_effects_stage_failed", "verification_effects_boundary_changed",
+        "verification_effects_invalid_output", "verification_effects_session_closed"].includes(reason)) continue;
+      if (!started.length && ["verification_effects_cancelled", "verification_effects_aborted",
+        "verification_effects_timeout", "verification_effects_runner_failed"].includes(reason)) continue;
+      // Unknown future reasons fail closed too. In particular, tool/native/
+      // ledger/untracked/late observations remain poisoned after raw drainage.
+      return "uncertain";
+    }
+    for (const dispatch of started) {
+      if (!dispatch.rawSucceeded) return "uncertain";
+      if (!hasCallbackResultCoverage(dispatch.kind)
+        && (!["antigravity", "acp"].includes(dispatch.kind) || !dispatch.scopes.size)) return "uncertain";
+      if ([...dispatch.scopes.values()].some(scope => !this.emptyReport(dispatch.kind, scope.report))) return "uncertain";
+    }
+    return "none";
   }
 
   close(): void {

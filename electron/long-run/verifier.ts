@@ -1,6 +1,6 @@
 import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
-import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection } from "./criterion-proof";
+import { ensureCriterionProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, GOAL_VERIFICATION_MODEL_TIMEOUT_MS } from "./criterion-proof";
 import { withVerificationAccounting } from "./accounting-context";
 import { createVerificationSession } from "./verification-effects";
 import { createHash, randomUUID } from "node:crypto";
@@ -1065,7 +1065,7 @@ export async function verifyGoalCompletionClaim(input: {
       } catch (error) {
         if (controller.signal.aborted) throw error;
         if (getLongRunByGoalId(input.goalId)?.status !== "verifying") {
-          settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"criterion_proof_boundary_changed"});
+          settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:verificationSession?.effectState()??"none",errorCode:"criterion_proof_boundary_changed"});
           return null;
         }
         appendLongRunEvent({runId:run.id,kind:"verification.criterion_proof_unavailable",actorKind:"host",payload:{attemptId:attempt.attemptId,
@@ -1120,7 +1120,7 @@ export async function verifyGoalCompletionClaim(input: {
         // Preserve full criteria, then the host observation before model prose.
         // The batch shares one bounded packet across every criterion.
         maxInputChars: judgeInputCeiling,
-        timeoutMs: 60_000,
+        timeoutMs: GOAL_VERIFICATION_MODEL_TIMEOUT_MS,
       }))) : null;
     const verdicts: JudgedCriterion[] = judgments
       ? judgments.map((judged, criterionIndex) => {
@@ -1162,7 +1162,7 @@ export async function verifyGoalCompletionClaim(input: {
       const currentByRef = new Map(current.proofs.map(item => [item.ref,JSON.stringify(item)]));
       const capturedByRef = new Map(downloadProofs.map(item => [item.ref,JSON.stringify(item)]));
       if (current.reasonCode || [...chosenDownloadRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
-        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_download_changed"});
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:verificationSession?.effectState()??"none",errorCode:"verification_download_changed"});
         return null;
       }
     }
@@ -1173,7 +1173,7 @@ export async function verifyGoalCompletionClaim(input: {
       let current: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
       try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Refuse stale result. */ }
       if (current?.digest !== verificationBoundary.digest) {
-        settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: "none", errorCode: "verification_boundary_changed"});
+        settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: verificationSession?.effectState()??"none", errorCode: "verification_boundary_changed"});
         return null;
       }
     }
@@ -1183,7 +1183,7 @@ export async function verifyGoalCompletionClaim(input: {
       const currentByRef = new Map(currentFiles.map(file => [file.ref,JSON.stringify(file)]));
       const capturedByRef = new Map(fileProofs.map(file => [file.ref,JSON.stringify(file)]));
       if ([...chosenFileRefs].some(ref => currentByRef.get(ref) !== capturedByRef.get(ref) || !currentByRef.has(ref))) {
-        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_file_changed"});
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:verificationSession?.effectState()??"none",errorCode:"verification_file_changed"});
         return null;
       }
     }
@@ -1297,7 +1297,7 @@ export async function verifyGoalCompletionClaim(input: {
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
       state: controller.signal.aborted ? "interrupted" : "failed",
-      sideEffectState: "none",
+      sideEffectState: verificationSession?.effectState()??"none",
       errorCode: controller.signal.aborted ? "verification_interrupted" : "verification_failed",
       errorMessage: error instanceof Error ? error.message : String(error),
     });

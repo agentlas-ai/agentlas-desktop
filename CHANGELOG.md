@@ -4,6 +4,7 @@
 
 - Goal completion checks keep their execution and usage records separate from the completed task. A successful task's evidence is no longer invalidated by its own evidence classification or final judgment.
 - Evidence requirements are saved only after the classifier has finished without tool effects. Completion judgments also require settled verification execution; cancellation, timeout, unknown effects and late output cannot become a successful completion.
+- Mandatory completion checks have a bounded three-minute model allowance while preserving the selected model, cancellation and the Goal's deadline. Uncertain verification effects remain visible to resume and startup safety checks.
 
 This release includes the 1.2.20–1.2.23 source changes below; their installer candidates were cancelled before publication after extended verification. It binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d, with runtime asset `hephaestus-runtime-v1.2.44.tar.gz` pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority. Local ongoing work requires the app and computer to remain available.
 
