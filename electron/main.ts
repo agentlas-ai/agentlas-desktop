@@ -111,7 +111,7 @@ import { startMcpProxyApprovalServer, stopMcpProxyApprovalServer } from "./mcp-t
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
-import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
+import { backfillDurableOneArtifactChatImages, serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
 import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
@@ -1760,6 +1760,14 @@ app.whenReady().then(async () => {
     // pre-update snapshot has passed continuity verification may ordinary boot
     // repair projections mutate protected local rows.
     runPostContinuityStoreRepairs();
+  }
+  try {
+    const imageBackfill = backfillDurableOneArtifactChatImages();
+    if (imageBackfill.attached > 0) {
+      console.info(`[one-artifacts] backfilled ${imageBackfill.attached} durable chat image(s) across ${imageBackfill.messages} message(s)`);
+    }
+  } catch (error) {
+    console.error("[one-artifacts] durable chat image backfill failed:", error);
   }
   {
     try {

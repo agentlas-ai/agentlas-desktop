@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.25 — 2026-09-18
+
+- One Taskforce group conversations retain their chat route and hydrated transcript even when runs in the room create canonical Tasks. Repeatedly clicking the same room no longer clears messages while the unchanged URL prevents a second hydration.
+- Native browser captures, generated images and exact bound image artifacts can become durable One or Work message attachments under canonical-path, run-binding, count and byte limits. Existing unambiguous completed One captures are backfilled idempotently; stale or ambiguous bindings are left untouched.
+- The One split pane renders durable image-only messages and reopens a closed result rail when an artifact requests it. Bound image previews retry briefly before showing an explicit recoverable failure instead of a silent empty card.
+- One and Work discard late route-specific reads and events after the user changes conversations. Science 0.1.33 applies the same destination ownership to background artifacts and manuscript completion so research updates cannot steal the active chat or lab.
+- Signed GUI builds fall back to the existing bounded isolated keychain boundary when the in-process native binding rejects a read, write, delete or account-list request. The fallback keeps secrets out of argv and preserves failure latching.
+
+This release pins Agentlas Science 0.1.33 at d84cf35e64593d99239cfba1a2ba327c9fadc804 and Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d, with runtime asset `hephaestus-runtime-v1.2.44.tar.gz` pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.2.24 — 2026-09-18
 
 - Goal completion checks keep their execution and usage records separate from the completed task. A successful task's evidence is no longer invalidated by its own evidence classification or final judgment.

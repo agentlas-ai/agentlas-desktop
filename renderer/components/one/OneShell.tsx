@@ -107,7 +107,7 @@ import type {
 } from "@/lib/types";
 import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
-import type { OneTaskforce } from "@shared/one-taskforces";
+import { isOneTaskforceChat, type OneTaskforce } from "@shared/one-taskforces";
 import type { ComputerHistoryState } from "@shared/computer-history";
 import {
   type OneFeatureIntroBlockingStateCategory,
@@ -2251,18 +2251,25 @@ export function OneShell() {
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
           ?? await getOneTaskProjection(api, wanted, active, pending, profile, appLocale);
-        if (detail) {
+        // Navigation can change while the projection lookup is in flight. An
+        // old Task refresh must never repaint its result over the group chat
+        // the person has just opened.
+        const taskRouteStillOwnsScreen = () => (
+          selectedTaskIdRef.current === wanted
+          && selectedConversationIdRef.current === null
+        );
+        if (detail && taskRouteStillOwnsScreen()) {
           setSelected(detail);
           setConversation(null);
           setReceipt(detail.latestReceipt ?? null);
-        } else {
+        } else if (!detail && taskRouteStillOwnsScreen()) {
           // A projection is a moving view of the Task. Never turn a transient
           // version mismatch into an empty home that clears the chat history.
           const canonical = await api.tasks.get(wanted).catch(() => null);
           const origin = canonical?.originChatId
             ? await api.chats.get(canonical.originChatId).catch(() => null)
             : null;
-          if (origin?.originSurface === "one") {
+          if (origin?.originSurface === "one" && taskRouteStillOwnsScreen()) {
             selectedTaskIdRef.current = null;
             selectedConversationIdRef.current = origin.id;
             setSelected(null);
@@ -2273,28 +2280,38 @@ export function OneShell() {
         }
       } else if (selectedConversationIdRef.current) {
         const chatId = selectedConversationIdRef.current;
+        const conversationRouteStillOwnsScreen = () => (
+          selectedConversationIdRef.current === chatId
+          && selectedTaskIdRef.current === null
+        );
+        const stableTaskforceRoute = isOneTaskforceChat(chatId, taskforceRows);
         const [chat, promotedTask] = await Promise.all([
           api.chats.get(chatId).catch(() => null),
-          api.tasks.findForChat(chatId).catch(() => null),
+          stableTaskforceRoute
+            ? Promise.resolve(null)
+            : api.tasks.findForChat(chatId).catch(() => null),
         ]);
-        if (promotedTask) {
+        if (!conversationRouteStillOwnsScreen()) {
+          // A newer navigation owns the pane. Keep the freshly loaded list
+          // state, but discard this route-specific result.
+        } else if (promotedTask) {
           const detail = items.find((item) => item.taskId === promotedTask.id)
             ?? await getOneTaskProjection(api, promotedTask.id, active, pending, profile, appLocale);
-          if (detail?.chatId === chatId) {
+          if (detail?.chatId === chatId && conversationRouteStillOwnsScreen()) {
             selectedTaskIdRef.current = promotedTask.id;
             selectedConversationIdRef.current = null;
             setSelected(detail);
             setConversation(null);
             setReceipt(detail.latestReceipt ?? null);
             router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
-          } else {
+          } else if (conversationRouteStillOwnsScreen()) {
             // Keep the stable chat owner visible until the Task projection is
             // coherent. The next store refresh retries the promotion.
             setSelected(null);
             setConversation(chat);
             setReceipt(null);
           }
-        } else if (chat && chat.originSurface !== "one") {
+        } else if (chat && chat.originSurface !== "one" && conversationRouteStillOwnsScreen()) {
           // One never ejects the person into Work. Reject stale/non-One deep
           // links in place and return to One's own conversation home instead.
           selectedConversationIdRef.current = null;
@@ -2302,7 +2319,7 @@ export function OneShell() {
           setConversation(null);
           setReceipt(null);
           router.replace("/one");
-        } else {
+        } else if (conversationRouteStillOwnsScreen()) {
           setSelected(null);
           setConversation(chat);
           setReceipt(null);
@@ -2491,6 +2508,10 @@ export function OneShell() {
       requestOneOperationalRecovery("one-task-reconcile", new Error("Desktop bridge unavailable"));
       return null;
     }
+    // A Taskforce card is a group-chat navigation target. Runs in that room
+    // may create Tasks, but those Tasks are activity within the conversation,
+    // not a replacement route for the conversation itself.
+    if (isOneTaskforceChat(chatId, taskforces)) return null;
     const task = await api.tasks.findForChat(chatId).catch(() => null);
     if (!task) return null;
     runTaskIdRef.current = task.id;
@@ -2499,7 +2520,7 @@ export function OneShell() {
     router.replace(`/one?task=${encodeURIComponent(task.id)}`);
     await refreshAll();
     return task;
-  }, [refreshAll, router]);
+  }, [refreshAll, router, taskforces]);
 
   const settleRun = useCallback(async (chatId: string, taskId: string | null, settledRunId: string | null) => {
     const api = ipc();
@@ -2516,7 +2537,11 @@ export function OneShell() {
         || (activityRunIdRef.current && activityRunIdRef.current !== settledRunId)),
     );
     if (supersededByNewerRun()) return;
-    const promotedTask = taskId ? await api.tasks.get(taskId).catch(() => null) : await reconcileConversationTask(chatId);
+    const promotedTask = isOneTaskforceChat(chatId, taskforces)
+      ? null
+      : taskId
+        ? await api.tasks.get(taskId).catch(() => null)
+        : await reconcileConversationTask(chatId);
     if (supersededByNewerRun()) return;
     const pending = await api.confirm.listPending().catch(() => []);
     if (supersededByNewerRun()) return;
@@ -2586,7 +2611,7 @@ export function OneShell() {
     setActivityStateRunId(latestReceipt.runId);
     setActivity(restoredActivity);
     setRunStartedAt(latestReceipt.startedAt ? Date.parse(latestReceipt.startedAt) : null);
-  }, [reconcileConversationTask, refreshAll]);
+  }, [reconcileConversationTask, refreshAll, taskforces]);
 
   const consumeRunEvent = useCallback((event: McpInvocationEvent, sourceRunId?: string) => {
     const chatId = runChatIdRef.current;
@@ -5679,6 +5704,8 @@ export function OneShell() {
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
+    const sameConversationRoute = selectedTaskIdRef.current === null
+      && selectedConversationIdRef.current === chatId;
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = chatId;
     const nextConversation = conversations.find((chat) => chat.id === chatId) ?? null;
@@ -5686,9 +5713,14 @@ export function OneShell() {
       setSelected(null);
       setConversation(nextConversation);
       setActiveThreadChat(nextConversation);
-      oneTranscriptRevisionRef.current += 1;
-      setMessages([]);
-      setReceipt(null);
+      // Re-clicking this room keeps the same URL, so the hydration effect does
+      // not run again. Clearing here used to cancel an in-flight read (or erase
+      // an already loaded transcript) and leave only run/result cards behind.
+      if (!sameConversationRoute) {
+        oneTranscriptRevisionRef.current += 1;
+        setMessages([]);
+        setReceipt(null);
+      }
     }
     rememberLastOneConversation(chatId);
     router.replace(`/one?chat=${encodeURIComponent(chatId)}`);

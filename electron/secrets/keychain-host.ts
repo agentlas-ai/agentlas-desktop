@@ -196,7 +196,15 @@ export async function keychainGet(
   return sharedNativeRequest("read", service, account, async () => {
     if (keychainPromptsAreAnswerable()) {
       try { return await direct(); }
-      catch { throw new KeychainUnavailableError("read", account, "native request rejected"); }
+      catch {
+        // A signed GUI build can still lose the in-process keytar binding after
+        // an update while the same signed executable succeeds in isolated Node
+        // mode. Keep the ordinary prompt-capable path first, then use the
+        // already bounded child boundary before latching this resource failed.
+        const fallback = await runKeychainChild("get", service, account, null);
+        if (!fallback.error) return fallback.value ?? null;
+        throw new KeychainUnavailableError("read", account, `native request rejected; isolated fallback: ${fallback.error}`);
+      }
     }
     const result = await runKeychainChild("get", service, account, null);
     if (result.error) throw new KeychainUnavailableError("read", account, result.error);
@@ -223,11 +231,12 @@ export async function keychainSet(
   direct: () => Promise<void>,
 ): Promise<void> {
   await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
-    if (keychainPromptsAreAnswerable()) await direct();
-    else {
-      const result = await runKeychainChild("set", service, account, value);
-      if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+    if (keychainPromptsAreAnswerable()) {
+      try { await direct(); return; }
+      catch { /* use the bounded isolated fallback below */ }
     }
+    const result = await runKeychainChild("set", service, account, value);
+    if (result.error) throw new KeychainUnavailableError("write", account, result.error);
   });
   failedRequests.delete(requestKey("read", service, account));
 }
@@ -238,11 +247,12 @@ export async function keychainDelete(
   direct: () => Promise<void>,
 ): Promise<void> {
   await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
-    if (keychainPromptsAreAnswerable()) await direct();
-    else {
-      const result = await runKeychainChild("delete", service, account, null);
-      if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+    if (keychainPromptsAreAnswerable()) {
+      try { await direct(); return; }
+      catch { /* use the bounded isolated fallback below */ }
     }
+    const result = await runKeychainChild("delete", service, account, null);
+    if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
   });
   failedRequests.delete(requestKey("read", service, account));
 }
@@ -256,7 +266,11 @@ export async function keychainListAccounts(
   return sharedNativeRequest("list", service, "", async () => {
     if (keychainPromptsAreAnswerable()) {
       try { return await direct(); }
-      catch { throw new KeychainUnavailableError("list", null, "native request rejected"); }
+      catch {
+        const fallback = await runKeychainChild("find", service, "", null);
+        if (!fallback.error) return fallback.accounts ?? [];
+        throw new KeychainUnavailableError("list", null, `native request rejected; isolated fallback: ${fallback.error}`);
+      }
     }
     const result = await runKeychainChild("find", service, "", null);
     if (result.error) throw new KeychainUnavailableError("list", null, result.error);

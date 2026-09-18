@@ -2629,6 +2629,7 @@ function ChatPage() {
     writeRightPanelPreference(false, rightPanelTab);
   }, [restorePreferredRightPanelWidth, rightPanelTab]);
   const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview) => {
+    if (!isCurrentChat()) return;
     const requestChatId = chatId;
     let next = preview;
     const api = ipc();
@@ -2655,6 +2656,7 @@ function ChatPage() {
      * 없어진다(2026-09-03 실측: 완료 직후 2.5초간 레일 소멸, 그 길이는 읽기 시간과 일치).
      * 먼저 열면 빈 프레임이 잠깐 보이지만, 사라졌다 돌아오는 것보다 낫다.
      */
+    if (!isCurrentChat()) return;
     setSurface(null);
     setArtifact(null);
     setMediaPreview(next);
@@ -2668,7 +2670,7 @@ function ChatPage() {
       const text = await api.fs.readTextFile(readablePath, { kind: "chat-assets", chatId: requestChatId }).catch(() => null);
       // The user may have moved to another chat while Main was reading. Do
       // not let that late response put the old file back into the new rail.
-      if (currentChatIdRef.current !== requestChatId) return;
+      if (!isCurrentChat() || currentChatIdRef.current !== requestChatId) return;
       if (text) {
         next = {
           ...next,
@@ -2693,9 +2695,9 @@ function ChatPage() {
       }
     }
     // 읽은 내용으로 채운다. 자리는 위에서 이미 열었으므로 여기서 다시 열지 않는다.
-    if (currentChatIdRef.current !== requestChatId) return;
+    if (!isCurrentChat() || currentChatIdRef.current !== requestChatId) return;
     setMediaPreview(next);
-  }, [chatId, openPanelTab]);
+  }, [chatId, isCurrentChat, openPanelTab]);
 
   // Restore the latest rich result when a conversation is reopened. The
   // transcript is durable, so this also covers route changes and app restarts
@@ -2761,6 +2763,7 @@ function ChatPage() {
       lastStatusRef: { text: string },
       sourceRunId?: string,
     ) => {
+      if (!isCurrentChat()) return;
       // A subscription can outlive a steering/reconnect transition by one
       // queued event. Main's run id is the authority; a stale event must not
       // mutate the replacement bubble or its canonical One activity state.
@@ -3411,7 +3414,7 @@ function ChatPage() {
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
         const api = ipc();
         void api?.chats.get(chatId).then((c) => {
-          if (c) setChat(c);
+          if (c && isCurrentChat() && c.id === currentChatIdRef.current) setChat(c);
         });
       } else if (ev.kind === "error") {
         // 어느 경로든 이미 스트리밍된 텍스트는 지우지 않고 완료된 버블로 남긴다.
@@ -3497,7 +3500,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [agent, chat?.title, chatId, locale, mediaBasePaths, openPanelTab, openWorkspaceFilePreview, project?.name, t],
+    [agent, chat?.title, chatId, isCurrentChat, locale, mediaBasePaths, openPanelTab, openWorkspaceFilePreview, project?.name, t],
   );
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
@@ -3725,9 +3728,10 @@ function ChatPage() {
          * refreshing messages alone left a closed Goal drawn as still running until
          * the user navigated away and back.
          */
-        void api.chats.get(chatId).then((next) => { if (!disposed && next) setChat(next); }).catch(() => undefined);
+        void api.chats.get(chatId).then((next) => {
+          if (!disposed && next?.id === currentChatIdRef.current && isCurrentChat()) setChat(next);
+        }).catch(() => undefined);
         refreshHistory();
-        void api.chats.get(chatId).then((next) => { if (next) setChat(next); }).catch(() => undefined);
       }
     });
     // Subscribe before catch-up so an append during initial hydration is read.
@@ -6254,7 +6258,10 @@ function ChatPage() {
   ) {
     return null;
   }
-  if (!chat) {
+  // The URL owns the pane. During A -> B navigation, keep the loading surface
+  // until B's metadata arrives instead of rendering A's title/composer beside
+  // B's transcript and result state.
+  if (!chat || (chatId && chat.id !== chatId)) {
     if (chatId) {
       /*
        * ★대화를 여는 동안 화면이 **완전히 비어 있었다** (느린 브리지 실측 2026-09-08:

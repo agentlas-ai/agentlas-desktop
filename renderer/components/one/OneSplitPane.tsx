@@ -26,6 +26,7 @@ export interface OneSplitPaneMessage {
   text: string;
   createdAt?: string | null;
   hostNotice?: ChatHostNotice;
+  imageDataUrls?: string[];
 }
 
 export function OneSplitPane({
@@ -202,7 +203,8 @@ export function OneSplitPane({
         )}
         {(messages ?? []).map((message) => {
           const text = typeof message.text === "string" ? message.text.trim() : "";
-          if (!text) return null;
+          const images = Array.isArray(message.imageDataUrls) ? message.imageDataUrls.filter(Boolean) : [];
+          if (!text && images.length === 0) return null;
           if (message.role === "system") {
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
             if (notice) return <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} />;
@@ -213,7 +215,13 @@ export function OneSplitPane({
           return (
             <article key={message.id} className={styles.message} data-role={message.role}>
               <div className={styles.messageBody}>
-                <Markdown text={text} messageId={message.id} chatId={chatId} />
+                {images.length > 0 && <div className={styles.messageImages} data-one-message-media="true">
+                  {images.map((src, index) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={`${message.id}-img-${index}`} src={src} alt="" className={styles.messageImage} />
+                  ))}
+                </div>}
+                {text && <Markdown text={text} messageId={message.id} chatId={chatId} />}
               </div>
             </article>
           );
@@ -225,6 +233,7 @@ export function OneSplitPane({
             locale={locale}
             visible={railOpen}
             onClose={() => setRailOpen(false)}
+            onRequestOpen={() => setRailOpen(true)}
             onBrowserObserved={() => setRailOpen(true)}
             screenChatId={chatId}
             browserScopeKey={chatId}

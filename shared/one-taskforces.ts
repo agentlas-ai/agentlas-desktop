@@ -47,3 +47,15 @@ export interface OneTaskforceReceipt {
   revision: number;
   memberAgentIds: string[];
 }
+
+/**
+ * A Taskforce owns a stable group-conversation route even when one of its
+ * runs also produced a canonical Task. The Task is execution state inside the
+ * room; it must not replace the room when the person clicks the group card.
+ */
+export function isOneTaskforceChat(
+  chatId: string,
+  taskforces: readonly Pick<OneTaskforce, "chatId">[],
+): boolean {
+  return taskforces.some((taskforce) => taskforce.chatId === chatId);
+}

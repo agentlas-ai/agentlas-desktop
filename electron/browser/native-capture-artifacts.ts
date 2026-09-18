@@ -14,6 +14,7 @@ export function createNativeCapturePublisher(input: {
   runId: string;
   signal?: AbortSignal;
   emit: (event: McpInvocationEvent) => void;
+  onCommittedImage?: (filePath: string) => void;
 }) {
   const retained = new Set<string>();
   let retainedBytes = 0;
@@ -76,6 +77,7 @@ export function createNativeCapturePublisher(input: {
         message: currentUiLocale() === "ko" ? "브라우저 캡처를 저장했습니다." : "Browser capture saved." }, oneArtifacts: artifacts.map((artifact) => ({
           ...artifact, taskId: task.id, taskVersion: task.version, chatId: input.chatId, runId: input.runId,
         })) });
+      input.onCommittedImage?.(file);
       committed = true;
       retained.add(digest);
       if (retained.size > 64) retained.delete(retained.values().next().value!);

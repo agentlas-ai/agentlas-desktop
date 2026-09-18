@@ -19,6 +19,8 @@ import { getDb } from "../store/db";
 import { getDurableOneSurfaceResult } from "../store/one-surface-results";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { getCanonicalTask } from "../store/tasks";
+import { chatImageAttachmentFromTrustedFile, persistChatMessageImages } from "../store/chat-message-attachments";
+import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 
 export const ONE_ARTIFACT_PREVIEW_TTL_MS = 5 * 60 * 1_000;
 export const ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE = 24;
@@ -894,6 +896,98 @@ export function issueOneArtifactPreviewCapability(
     expiresAt: new Date(expiresAtMs).toISOString(),
     sha256: verified.row.sha256,
   };
+}
+
+/**
+ * Upgrade path for completed One/Work runs from builds that persisted only a
+ * path-backed output binding. A row is copied into chat history only when one
+ * exact final message owns the run and the original file still passes the full
+ * binding identity/hash check. Ambiguous or stale runs remain untouched.
+ */
+export function backfillDurableOneArtifactChatImages(limit = 128): {
+  scanned: number;
+  attached: number;
+  messages: number;
+} {
+  ensureBindingTable();
+  const db = getDb();
+  const rows = db.prepare(
+    `WITH final_messages AS (
+       SELECT run_id, chat_id,
+              MIN(json_extract(payload_json, '$.durableMessageId')) AS message_id,
+              COUNT(DISTINCT json_extract(payload_json, '$.durableMessageId')) AS message_count
+       FROM run_events
+       WHERE kind = 'mcp_final'
+         AND json_type(payload_json, '$.durableMessageId') = 'text'
+       GROUP BY run_id, chat_id
+       HAVING message_count = 1
+     )
+     SELECT b.task_id, b.bound_task_version, b.chat_id, b.run_id, b.manifest_id,
+            b.artifact_ref, b.source_path, b.mime_type, b.sha256,
+            m.id AS message_id, m.created_at,
+            (SELECT COUNT(*) FROM chat_message_attachments a WHERE a.message_id = m.id) AS attachment_count,
+            (SELECT COALESCE(SUM(a.size_bytes), 0) FROM chat_message_attachments a WHERE a.message_id = m.id) AS attachment_bytes
+     FROM one_artifact_bindings b
+     JOIN final_messages f ON f.run_id = b.run_id AND f.chat_id = b.chat_id
+     JOIN chat_messages m ON m.id = f.message_id AND m.chat_id = b.chat_id AND m.role = 'assistant'
+     WHERE b.kind = 'image'
+       AND b.mime_type IN ('image/png', 'image/jpeg', 'image/gif', 'image/webp')
+       AND NOT EXISTS (
+         SELECT 1 FROM chat_message_attachments a
+         WHERE a.message_id = m.id AND a.sha256 = b.sha256
+       )
+     ORDER BY b.created_at DESC
+     LIMIT ?`,
+  ).all(Math.max(1, Math.min(512, Math.trunc(limit)))) as Array<{
+    task_id: string; bound_task_version: number; chat_id: string; run_id: string;
+    manifest_id: string; artifact_ref: string; source_path: string; mime_type: string;
+    sha256: string; message_id: string; created_at: string; attachment_count: number;
+    attachment_bytes: number;
+  }>;
+  const budgets = new Map<string, { count: number; bytes: number }>();
+  const changedMessages = new Set<string>();
+  let attached = 0;
+  for (const row of rows) {
+    const budget = budgets.get(row.message_id) ?? {
+      count: Number(row.attachment_count) || 0,
+      bytes: Number(row.attachment_bytes) || 0,
+    };
+    budgets.set(row.message_id, budget);
+    if (budget.count >= ONE_ATTACHMENT_LIMITS.maxCount) continue;
+    const verified = verifiedFile({
+      taskId: row.task_id,
+      taskVersion: row.bound_task_version,
+      chatId: row.chat_id,
+      runId: row.run_id,
+      manifestId: row.manifest_id,
+      artifactRef: row.artifact_ref,
+    });
+    if (!verified) continue;
+    fs.closeSync(verified.fd);
+    try {
+      const image = chatImageAttachmentFromTrustedFile({
+        filePath: row.source_path,
+        trustedRoot: path.dirname(row.source_path),
+      });
+      const bytes = Buffer.from(image.data, "base64");
+      if (createHash("sha256").update(bytes).digest("hex") !== row.sha256
+        || budget.bytes + bytes.length > ONE_ATTACHMENT_LIMITS.maxTotalBytes) continue;
+      persistChatMessageImages({
+        messageId: row.message_id,
+        chatId: row.chat_id,
+        images: [image],
+        createdAt: row.created_at,
+      });
+      budget.count += 1;
+      budget.bytes += bytes.length;
+      attached += 1;
+      changedMessages.add(row.message_id);
+    } catch {
+      // A stale/malformed source remains available only as its existing output
+      // record. Never weaken the binding or guess another final message.
+    }
+  }
+  return { scanned: rows.length, attached, messages: changedMessages.size };
 }
 
 /** Main-only Office source read, under the existing exact task/run binding. */

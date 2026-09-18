@@ -208,8 +208,9 @@ import { agentRunCwd } from "../runtime/exec";
 import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
 import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
-import { browserCaptureDir } from "../media/capture-artifacts";
+import { browserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
+import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import {
   revalidateInvocationWorkspaceBinding,
@@ -3436,9 +3437,11 @@ ${effectiveUserPrompt}`;
   const canonicalTask = findCanonicalTaskForChat(chat.id);
   let nativeCaptureBound = false;
   let blindVisionRuntime = false;
+  let collectDurableToolImages: ((paths: readonly string[], allowResultFolder?: boolean) => boolean) | null = null;
   const publishNativeCapture = createNativeCapturePublisher({
     task: canonicalTask, chatId: chat.id, runId: req.runId ?? "", signal,
     emit: (event) => { sink(event); nativeCaptureBound = true; },
+    onCommittedImage: (filePath) => { collectDurableToolImages?.([filePath]); },
   });
 
   const imageGenerationRequired = !req.agentAppMode
@@ -5081,25 +5084,50 @@ ${effectiveUserPrompt}`;
       }
       return added;
     };
-    const collectWorkToolImages = (paths: readonly string[]): boolean => {
-      if (req.agentAppMode || req.oneMode || !paths.length) return false;
+    const collectToolImages = (paths: readonly string[], allowResultFolder = false): boolean => {
+      if (req.agentAppMode || !paths.length) return false;
       let added = false;
-      const maxImages = imageGenerationRequired ? 1 : 4;
+      const maxImages = imageGenerationRequired ? 1 : ONE_ATTACHMENT_LIMITS.maxCount;
+      let retainedBytes = pendingWorkToolImages.reduce(
+        (total, item) => total + Buffer.byteLength(item.image.data, "base64"),
+        0,
+      );
       for (const sourcePath of paths) {
         if (pendingWorkToolImages.length >= maxImages) break;
         if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath)) continue;
-        generatedImageSourcePaths.add(sourcePath);
         // 임의의 읽기 대상이 채팅 이미지로 승격되면 안 된다. 그 경계는 도구 이름이 아니라
-        // **정본 폴더 소속**으로 긋는다 — 우리가 쓴 파일만 우리 폴더에 있다.
-        // 정본 폴더는 둘이다: 내장 이미지 도구의 산출물과 캡처 정본.
-        // 어느 쪽에도 안 들어 있으면 봉인이 거절한다(추론 없음).
-        const trustedRoot = sourcePath.startsWith(browserCaptureDir())
-          ? browserCaptureDir()
-          : userDataPath("multimodal-images");
+        // Main 정본 폴더 소속 + 이번 run의 exact artifact binding으로 긋는다.
+        // 문자열 prefix가 아니라 realpath-relative containment를 써서 형제 폴더와
+        // symlink alias가 정본으로 오인되지 않게 한다.
         try {
+          const resolvedSource = fs.realpathSync.native(path.resolve(sourcePath));
+          const candidateRoots = [
+            browserCaptureDir(),
+            screenCaptureDir(),
+            userDataPath("generated-assets", "native-browser"),
+            userDataPath("multimodal-images"),
+            ...(allowResultFolder && resolvedResultFolder ? [resolvedResultFolder] : []),
+          ];
+          const trustedRoot = candidateRoots.map((root) => {
+            try {
+              const resolvedRoot = fs.realpathSync.native(path.resolve(root));
+              const relative = path.relative(resolvedRoot, resolvedSource);
+              return relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+                ? resolvedRoot
+                : null;
+            } catch { return null; }
+          }).find((root): root is string => Boolean(root));
+          if (!trustedRoot) continue;
+          if (allowResultFolder && resolvedResultFolder
+            && trustedRoot === fs.realpathSync.native(path.resolve(resolvedResultFolder))
+            && req.runId
+            && isWorkAttachmentInput(req.runId, chat.id, resolvedResultFolder, resolvedSource)) continue;
           const image = chatImageAttachmentFromTrustedFile({ filePath: sourcePath, trustedRoot });
           if (pendingWorkToolImages.some((item) => item.sourcePath === sourcePath)) continue;
+          const imageBytes = Buffer.byteLength(image.data, "base64");
+          if (retainedBytes + imageBytes > ONE_ATTACHMENT_LIMITS.maxTotalBytes) continue;
           pendingWorkToolImages.push({ sourcePath, image });
+          retainedBytes += imageBytes;
           added = true;
           if (imageGenerationRequired) observedImageArtifactEvidence = true;
         } catch {
@@ -5109,6 +5137,7 @@ ${effectiveUserPrompt}`;
       }
       return added;
     };
+    collectDurableToolImages = collectToolImages;
     const runnerEvents = {
       onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => sink({
         kind: "tool-use",
@@ -5154,12 +5183,17 @@ ${effectiveUserPrompt}`;
         // 못했다(2026-09-03 실측: 산출물 0 · 레일 이미지 0 · 채팅 이미지 0).
         // 도구 이름을 추측하는 대신 **우리 정본 폴더 안에 있는가**로 판정한다 —
         // 아래 봉인이 fail-closed 라 남의 경로는 어차피 통과하지 못한다.
-        if (!isError && artifactPaths?.length) {
-          collectWorkToolImages(artifactPaths);
-        }
         const oneArtifacts = !isError && id && artifactPaths?.length
           ? bindInvocationOneArtifacts(id, artifactPaths)
           : undefined;
+        if (!isError && artifactPaths?.length) {
+          const boundImageLabels = new Set((oneArtifacts ?? [])
+            .filter((artifact) => artifact.type === "image")
+            .map((artifact) => artifact.label));
+          const boundImagePaths = artifactPaths.filter((candidate) => boundImageLabels.has(path.basename(candidate)));
+          collectToolImages(artifactPaths);
+          if (boundImagePaths.length > 0) collectToolImages(boundImagePaths, true);
+        }
         sink({
           kind: "tool-use",
           tool: {
@@ -5544,7 +5578,7 @@ ${effectiveUserPrompt}`;
         throw new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`);
       }
       generatedImageSourcePaths.add(generated.artifactPath);
-      collectWorkToolImages([generated.artifactPath]);
+      collectToolImages([generated.artifactPath]);
       if (!pendingWorkToolImages.length) {
         throw new Error("image_tool_unavailable: generated bytes failed Main sealing");
       }
@@ -6681,7 +6715,7 @@ ${effectiveUserPrompt}`;
       allowSurfaceRender: !req.agentAppMode,
     });
     const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(finalDisplay.durableText));
-    const finalWorkImages = (!req.agentAppMode && !req.oneMode)
+    const finalWorkImages = !req.agentAppMode
       ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
       : [];
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
