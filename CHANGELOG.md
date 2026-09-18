@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.27 — 2026-09-19
+
+- Capture the full matched Science artifact when a table extends beyond the visible viewport, retaining artifact identity checks and independent image-size limits. Restore the original styles and scroll position after capture.
+- Stop presenting an old One preparation-recovery warning after a later invocation has started in the same conversation. This read-only display correction does not clear blocked Goals or retry uncertain external actions.
+- Restore Scientific Skills tool registration with explicit supported platforms, a complete file-integrity manifest, and a supported tool category. The bundled procedure search is checked through the same installed-plugin catalog on macOS, Windows, and Linux.
+- Science's independently installed interface is updated through its signed extension catalog; the Desktop dependency version alone does not update that interface.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove that public installers or update feeds have been published; the public release and installed-app checks remain separate gates.
+
 ## 1.2.26 — 2026-09-18
 
 - **Recover credentials after an installed upgrade** — a durable keychain failure still suppresses repeated reads within the same app version, but a newer installed version now receives one bounded recovery attempt per exact resource. This lets the isolated signed-executable fallback repair failures left by an older build without creating a startup retry loop.
