@@ -1,6 +1,5 @@
 import { longRunMonetaryRefusal, type LongRunCostAccounting } from "./budget";
-import { getDb } from "../store/db";
-import { getLongRun, type LongRunRecord } from "../store/long-runs";
+import { getLongRun, unsettledLongRunAttemptCount, type LongRunRecord } from "../store/long-runs";
 
 /**
  * Whether a goal that the host paused may pick itself up again.
@@ -72,12 +71,6 @@ export interface StartupReconcileEntry {
  * truthful list rather than a silent no-op.
  */
 export function reconcileHostPausedLongRuns(runIds: readonly string[]): StartupReconcileEntry[] {
-  const db = getDb();
-  const unsettled = db.prepare(
-    // Shutdown marks running attempts interrupted but retains uncertainty in
-    // side_effect_state. Looking only at state would incorrectly allow replay.
-    "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
-  );
   const entries: StartupReconcileEntry[] = [];
   for (const runId of runIds) {
     let run: LongRunRecord | null = null;
@@ -86,13 +79,13 @@ export function reconcileHostPausedLongRuns(runIds: readonly string[]): StartupR
       entries.push({ runId, decision: { resume: false, reason: "not-paused" } });
       continue;
     }
-    const { n } = unsettled.get(runId) as { n: number };
+    const unsettledAttempts = unsettledLongRunAttemptCount(runId);
     entries.push({
       runId,
       decision: startupResumeDecision({
         status: run.status,
         pauseReason: run.pauseReason ?? null,
-        unsettledAttempts: n,
+        unsettledAttempts,
         cycleCount: run.cycleCount,
         costUsedUsd: run.costUsedUsd,
         costAccounting: run.costAccounting,

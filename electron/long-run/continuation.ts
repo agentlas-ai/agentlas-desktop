@@ -12,6 +12,7 @@ import { latestRuntimePlan } from "./plan";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 import { ExactDesktopRuntimeBindingError, restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import type { LongRunRuntimeSelection } from "../../shared/long-run";
+import { agentRunCwd } from "../runtime/exec";
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /** Pure host admission check, shared by live and startup continuation. It uses
@@ -47,11 +48,14 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   if (getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND rowid > ? LIMIT 1").get(chat.id, cursor.cursor)
     || getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
       .get(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
-  const cwd = getChatWorkingFolder(chat.id);
+  const explicitCwd = getChatWorkingFolder(chat.id);
+  const cwd = explicitCwd ?? (checkpoint.workspacePath === agentRunCwd() ? agentRunCwd() : null);
   if (!cwd || cwd !== checkpoint.workspacePath || !statSync(cwd).isDirectory()) throw new Error("checkpoint_workspace_changed");
   if (!same(checkpoint.capsule.plan, latestRuntimePlan(run.id))) throw new Error("checkpoint_plan_changed");
-  const snapshot = compileProjectInstructionSnapshot({ projectDir: cwd }).snapshot;
-  if (!checkpoint.capsule.instructionSnapshot || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision) throw new Error("checkpoint_instructions_changed");
+  if (explicitCwd) {
+    const snapshot = compileProjectInstructionSnapshot({ projectDir: cwd }).snapshot;
+    if (!checkpoint.capsule.instructionSnapshot || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision) throw new Error("checkpoint_instructions_changed");
+  } else if (checkpoint.capsule.instructionSnapshot) throw new Error("checkpoint_instructions_changed");
   const artifacts = listAgentSurfaces(chat.id).map(surface => ({ artifactId: surface.id,
     artifactRevision: surface.artifactRevision ?? null, sourceDigest: surface.artifactRef?.sourceDigest ?? null,
     dataDigest: surface.artifactRef?.dataDigest ?? null, stateRevision: surface.stateRevision ?? null,
@@ -75,9 +79,19 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     .get(run.id) as { runtime_selection_json: string } | undefined;
   if (!worker) throw new Error("checkpoint_runtime_binding_missing");
   const storedRuntimeSelection = JSON.parse(worker.runtime_selection_json) as LongRunRuntimeSelection;
-  const producer = getDb().prepare("SELECT id, runtime_selection_json FROM long_run_worker_attempts WHERE invocation_run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY attempt DESC LIMIT 1")
-    .get(checkpoint.invocationRunId, run.id) as { id: string; runtime_selection_json: string } | undefined;
-  if (!producer || !same(storedRuntimeSelection, JSON.parse(producer.runtime_selection_json))) throw new Error("checkpoint_runtime_binding_changed");
+  const producer = getDb().prepare(`SELECT a.id, a.runtime_selection_json, a.state, a.side_effect_state, w.workspace_binding_json
+    FROM long_run_worker_attempts AS a JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+    WHERE a.invocation_run_id = ? AND a.run_id = ? AND w.role = 'controller' ORDER BY a.attempt DESC LIMIT 1`)
+    .get(checkpoint.invocationRunId, run.id) as { id: string; runtime_selection_json: string; state: string;
+      side_effect_state: string; workspace_binding_json: string } | undefined;
+  let producerWorkspace: string | null | undefined;
+  try {
+    const value = producer ? JSON.parse(producer.workspace_binding_json)?.cwd : undefined;
+    producerWorkspace = typeof value === "string" && value.trim() ? value.trim() : value === null ? null : undefined;
+  } catch { producerWorkspace = undefined; }
+  if (!producer || producer.state !== "completed" || producer.side_effect_state !== "committed"
+    || producerWorkspace === undefined || producerWorkspace !== checkpoint.workspacePath
+    || !same(storedRuntimeSelection, JSON.parse(producer.runtime_selection_json))) throw new Error("checkpoint_runtime_binding_changed");
   let runtimeSelection: RuntimeSelection;
   try {
     runtimeSelection = restoreExactDesktopRuntimeSelection({

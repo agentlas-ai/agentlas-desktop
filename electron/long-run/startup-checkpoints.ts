@@ -11,6 +11,7 @@ import { appendLongRunEvent, getLongRun, listLongRuns, transitionLongRun } from 
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
+import { agentRunCwd } from "../runtime/exec";
 
 export interface CheckpointStartupDispatcher {
   activeChatIds(): string[];
@@ -67,7 +68,8 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       const chat = chatId ? getChat(chatId) : null;
       if (!chat || chat.goalId !== candidate.goalId || chat.originSurface !== candidate.surface) { refuse("chat_binding_changed"); continue; }
       if (dispatcher.activeChatIds().includes(chat.id)) { refuse("chat_busy"); continue; }
-      const cwd = getChatWorkingFolder(chat.id);
+      const explicitCwd = getChatWorkingFolder(chat.id);
+      const cwd = explicitCwd ?? (checkpoint.workspacePath === agentRunCwd() ? agentRunCwd() : null);
       if (!cwd || cwd !== checkpoint.workspacePath || !statSync(cwd).isDirectory()) { refuse("workspace_changed"); continue; }
       // A human direction queued during the old invocation must not disappear
       // merely because boot recovery changed its delivery state to cancelled.

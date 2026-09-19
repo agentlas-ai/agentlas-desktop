@@ -7,7 +7,9 @@ import { createHash } from "node:crypto";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, longRunContinueDecision } from "../store/long-runs";
+import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch,
+  listLongRunTasks, longRunContinueDecision, unsettledLongRunAttempts } from "../store/long-runs";
+import { agentRunCwd } from "../runtime/exec";
 
 /** The existing append-only event ledger is the checkpoint store. No second
  * mutable goal record or provider transcript is introduced. */
@@ -28,13 +30,13 @@ export function recordTaskCheckpoint(input: {
     if (!run || run.surface === "science") throw new Error("long_run_checkpoint_run_invalid");
     const tasks = listLongRunTasks(run.id);
     const revision = getChatGoalRevision(run.goalId);
-    const attempts = getDb().prepare("SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')")
-      .all(run.id) as Array<{ id: string; state: string; side_effect_state: string }>;
+    const attempts = unsettledLongRunAttempts(run.id);
     let boundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
     if (input.invocationRunId && run.rootChatId) {
       try { boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId }); }
       catch { /* Missing or foreign producer evidence stays uncertain. */ }
     }
+    const requestedWorkspacePath = input.projectDir?.trim() || null;
     const instructionSnapshot = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
     const currentPlan = latestRuntimePlan(run.id);
     const plan = !currentPlan || currentPlan.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)
@@ -54,7 +56,33 @@ export function recordTaskCheckpoint(input: {
     const nativeAttempt = effects.find((effect) => effect.invocation_run_id === input.invocationRunId);
     const nativeCoordinate = nativeAttempt?.native_coordinate_json ? JSON.parse(nativeAttempt.native_coordinate_json) : null;
     const observedFiles = instructionSnapshot?.sources.map(({ sourceRef, contentHash }) => ({ sourceRef, contentHash })) ?? [];
-    const pathHash = createHash("sha256").update(input.projectDir ?? "").digest("hex");
+    const producer = getDb().prepare(
+      `SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state, w.workspace_binding_json
+       FROM long_run_worker_attempts AS a
+       JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+       WHERE a.run_id = ? AND w.role = 'controller'
+       ORDER BY a.rowid DESC LIMIT 1`,
+    ).get(run.id) as { id: string; invocation_run_id: string | null; state: string;
+      side_effect_state: string; workspace_binding_json: string } | undefined;
+    let producerWorkspace: string | null | undefined;
+    try {
+      const value = producer ? JSON.parse(producer.workspace_binding_json)?.cwd : undefined;
+      producerWorkspace = typeof value === "string" && value.trim() ? value.trim() : value === null ? null : undefined;
+    } catch { producerWorkspace = undefined; }
+    const workspacePath = requestedWorkspacePath ?? producerWorkspace ?? null;
+    const defaultWorkspace = requestedWorkspacePath === null && workspacePath === agentRunCwd();
+    const instructionBindingExact = requestedWorkspacePath !== null
+      ? instructionSnapshot !== null
+      : defaultWorkspace && instructionSnapshot === null;
+    // A checkpoint may describe uncertainty, but only the newest completed Main
+    // controller run with an exact workspace and complete effect receipt can mint
+    // settled replay authority.
+    const settledProducer = Boolean(input.invocationRunId && producer && workspacePath && instructionBindingExact
+      && producer.invocation_run_id === input.invocationRunId
+      && producer.state === "completed" && producer.side_effect_state === "committed"
+      && producerWorkspace !== undefined && producerWorkspace === workspacePath
+      && boundary?.effects === "settled");
+    const pathHash = createHash("sha256").update(workspacePath ?? "").digest("hex");
     const eventCursor = getLongRunByGoalId(input.goalId)!.lastEventSeq;
     const checkpointId = `checkpoint:${run.id}:${eventCursor + 1}`;
     const checkpoint: LongRunTaskCheckpoint = {
@@ -64,14 +92,14 @@ export function recordTaskCheckpoint(input: {
       invocationRunId: input.invocationRunId ?? null, disposition: input.disposition,
       objective: run.objective,
       acceptanceCriteria: [...run.acceptanceCriteria],
-      workspacePath: input.projectDir ?? null,
+      workspacePath,
       completedTaskIds: tasks.filter((task) => task.state === "completed").map((task) => task.id),
       currentOperation: "verify_output",
       nextActions: input.verdicts.filter((item) => item.verdict !== "passed"),
       recoveryFingerprint: input.recoveryFingerprint ?? null,
       recoveryStreak: Math.max(0, Math.floor(input.recoveryStreak ?? 0)),
-      sideEffects: { state: attempts.length || boundary?.effects !== "settled" ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id),
-        ...(boundary?.terminalEventId && boundary.receiptEventId && boundary.snapshotDigest ? { boundary: {
+      sideEffects: { state: attempts.length || !settledProducer ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id),
+        ...(settledProducer && boundary?.terminalEventId && boundary.receiptEventId && boundary.snapshotDigest ? { boundary: {
           invocationRunId: boundary.invocationRunId, terminalEventId: boundary.terminalEventId,
           receiptEventId: boundary.receiptEventId, snapshotDigest: boundary.snapshotDigest,
         } } : {}),
@@ -105,9 +133,13 @@ export function recordTaskCheckpoint(input: {
 export function latestTaskCheckpoint(goalId: string): LongRunTaskCheckpoint | null {
   const run = getLongRunByGoalId(goalId);
   if (!run || run.surface === "science") return null;
-  const row = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint' ORDER BY seq DESC LIMIT 1")
-    .get(run.id) as { payload_json: string } | undefined;
+  const row = getDb().prepare("SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint' ORDER BY seq DESC LIMIT 1")
+    .get(run.id) as { seq: number; payload_json: string } | undefined;
   if (!row) return null;
+  const safeEpoch = latestLongRunAttemptSafeEpoch(run.id);
+  // An acknowledgment invalidates every earlier checkpoint. Only a fresh Main
+  // turn may establish the next settled continuation boundary.
+  if (safeEpoch && row.seq <= safeEpoch.eventSeq) return null;
   const checkpoint = JSON.parse(row.payload_json).checkpoint as LongRunTaskCheckpoint;
   const revision = getChatGoalRevision(goalId);
   if (!["agentlas.task-checkpoint.v1", "agentlas.task-checkpoint.v2"].includes(checkpoint.schemaVersion) || checkpoint.goalId !== goalId

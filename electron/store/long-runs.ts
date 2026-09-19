@@ -29,6 +29,7 @@ import {
 import { emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
+import { agentRunCwd } from "../runtime/exec";
 
 export interface LongRunRecord {
   id: string;
@@ -345,31 +346,179 @@ function appendEventInDb(input: {
  * 재개 단추·타이핑·자동 재개가 전부 auto_goal_resume_attempt_unsettled 로 거부됐고, 그 상태를 풀 길이
  * 아무 데도 없어 대화가 영구 막다른 길이 됐다. 살아 있는(state='running') 시도만 진짜로 막는다.
  */
-export function acknowledgeUncertainLongRunAttempts(runId: string): { attemptIds: string[]; version: number } {
+export interface LongRunAttemptSafeEpoch {
+  schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1";
+  throughEventSeq: number;
+  attemptSetDigest: string;
+}
+
+export interface LongRunAttemptAcknowledgment {
+  attemptIds: string[];
+  version: number;
+  safeEpoch: LongRunAttemptSafeEpoch | null;
+}
+
+interface UnsettledLongRunAttempt {
+  id: string;
+  state: LongRunAttemptState;
+  sideEffectState: "none" | "committed" | "uncertain";
+  startEventSeq: number | null;
+}
+
+interface LongRunAttemptSafeEpochRecord extends LongRunAttemptSafeEpoch {
+  eventSeq: number;
+  attemptIds: string[];
+}
+
+interface LongRunAcknowledgedAttemptReceipt {
+  attemptId: string;
+  state: LongRunAttemptState;
+  sideEffectState: "none" | "committed" | "uncertain";
+  updatedAt: string;
+  completedAt: string | null;
+  lastAttemptEventSeq: number;
+}
+
+function longRunAttemptSetDigest(runId: string, throughEventSeq: number, receipts: readonly LongRunAcknowledgedAttemptReceipt[]): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({ runId, throughEventSeq, receipts })).digest("hex")}`;
+}
+
+/** Read the latest exact human acknowledgment. Malformed or legacy prose is
+ * never replay authority: it fails closed and leaves every uncertain attempt
+ * unsettled. The event sequence is the epoch; attempt rows remain immutable
+ * audit evidence. */
+export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafeEpochRecord | null {
+  const row = getDb().prepare(
+    `SELECT seq, payload_json FROM long_run_events
+     WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user'
+       AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts'
+     ORDER BY seq DESC LIMIT 1`,
+  ).get(runId) as { seq: number; payload_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const payload = JSON.parse(row.payload_json) as {
+      attemptIds?: unknown;
+      attemptReceipts?: unknown;
+      safeEpoch?: { schemaVersion?: unknown; throughEventSeq?: unknown; attemptSetDigest?: unknown };
+    };
+    if (!Array.isArray(payload.attemptIds) || payload.attemptIds.some((id) => typeof id !== "string" || !id)) return null;
+    const attemptIds = [...payload.attemptIds].sort();
+    if (new Set(attemptIds).size !== attemptIds.length || JSON.stringify(attemptIds) !== JSON.stringify(payload.attemptIds)) return null;
+    if (!Array.isArray(payload.attemptReceipts) || payload.attemptReceipts.length !== attemptIds.length) return null;
+    const receipts = payload.attemptReceipts as LongRunAcknowledgedAttemptReceipt[];
+    if (receipts.some((receipt) => !receipt || typeof receipt !== "object"
+      || typeof receipt.attemptId !== "string" || !attemptIds.includes(receipt.attemptId)
+      || !["completed", "failed", "interrupted", "cancelled", "uncertain"].includes(receipt.state)
+      || !["none", "committed", "uncertain"].includes(receipt.sideEffectState)
+      || typeof receipt.updatedAt !== "string" || !receipt.updatedAt
+      || (receipt.completedAt !== null && typeof receipt.completedAt !== "string")
+      || !Number.isSafeInteger(receipt.lastAttemptEventSeq) || receipt.lastAttemptEventSeq < 0)
+      || JSON.stringify(receipts.map((receipt) => receipt.attemptId)) !== JSON.stringify(attemptIds)) return null;
+    const safeEpoch = payload.safeEpoch;
+    if (safeEpoch?.schemaVersion !== "agentlas.long-run-attempt-safe-epoch.v1"
+      || !Number.isSafeInteger(safeEpoch.throughEventSeq) || Number(safeEpoch.throughEventSeq) < 0
+      || safeEpoch.throughEventSeq !== row.seq - 1
+      || safeEpoch.attemptSetDigest !== longRunAttemptSetDigest(runId, Number(safeEpoch.throughEventSeq), receipts)) return null;
+    const bound = getDb().prepare(
+      `SELECT a.id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
+         MIN(CASE WHEN e.kind = 'worker.attempt_started' THEN e.seq END) AS start_seq,
+         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
+       FROM long_run_worker_attempts AS a
+       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
+         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
+         AND json_extract(e.payload_json, '$.attemptId') = a.id
+       WHERE a.run_id = ? AND a.id IN (${attemptIds.map(() => "?").join(",") || "NULL"})
+       GROUP BY a.id`,
+    ).all(runId, ...attemptIds) as Array<{ id: string; state: LongRunAttemptState;
+      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
+      start_seq: number | null; last_attempt_event_seq: number }>;
+    const receiptById = new Map(receipts.map((receipt) => [receipt.attemptId, receipt]));
+    if (bound.length !== attemptIds.length || bound.some((attempt) => attempt.start_seq === null
+      || attempt.start_seq > Number(safeEpoch.throughEventSeq)
+      || attempt.last_attempt_event_seq > Number(safeEpoch.throughEventSeq)
+      || attempt.state !== receiptById.get(attempt.id)?.state
+      || attempt.side_effect_state !== receiptById.get(attempt.id)?.sideEffectState
+      || attempt.updated_at !== receiptById.get(attempt.id)?.updatedAt
+      || attempt.completed_at !== receiptById.get(attempt.id)?.completedAt
+      || attempt.last_attempt_event_seq !== receiptById.get(attempt.id)?.lastAttemptEventSeq)) return null;
+    return { schemaVersion: safeEpoch.schemaVersion, throughEventSeq: Number(safeEpoch.throughEventSeq),
+      attemptSetDigest: safeEpoch.attemptSetDigest, eventSeq: row.seq, attemptIds };
+  } catch {
+    return null;
+  }
+}
+
+/** Attempts still unsafe to replay after applying only an exact, durable human
+ * acknowledgment. Running attempts always remain unsafe, as does every attempt
+ * created after the acknowledged ledger epoch. */
+export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt[] {
+  const rows = getDb().prepare(
+    `SELECT a.id, a.state, a.side_effect_state,
+       (SELECT MIN(e.seq) FROM long_run_events AS e
+        WHERE e.run_id = a.run_id AND e.kind = 'worker.attempt_started'
+          AND json_extract(e.payload_json, '$.attemptId') = a.id) AS start_event_seq
+     FROM long_run_worker_attempts AS a
+     WHERE a.run_id = ? AND (a.state IN ('running','uncertain') OR a.side_effect_state = 'uncertain')
+     ORDER BY a.started_at, a.id`,
+  ).all(runId) as Array<{ id: string; state: LongRunAttemptState;
+    side_effect_state: "none" | "committed" | "uncertain"; start_event_seq: number | null }>;
+  const safeEpoch = latestLongRunAttemptSafeEpoch(runId);
+  const acknowledged = new Set(safeEpoch?.attemptIds ?? []);
+  return rows.filter((row) => row.state === "running" || !safeEpoch || !acknowledged.has(row.id)
+    || row.start_event_seq === null || row.start_event_seq > safeEpoch.throughEventSeq).map((row) => ({
+      id: row.id, state: row.state, sideEffectState: row.side_effect_state, startEventSeq: row.start_event_seq,
+    }));
+}
+
+export function acknowledgeUncertainLongRunAttempts(runId: string): LongRunAttemptAcknowledgment {
   const db = getDb();
-  const rows = db.prepare(
-    "SELECT id FROM long_run_worker_attempts WHERE run_id = ? AND state <> 'running' AND (state = 'uncertain' OR side_effect_state = 'uncertain')",
-  ).all(runId) as { id: string }[];
-  const attemptIds = rows.map((row) => row.id);
+  let result: LongRunAttemptAcknowledgment | null = null;
+  let changed = false;
+  db.transaction(() => {
+    const receipts = db.prepare(
+      `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
+         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
+       FROM long_run_worker_attempts AS a
+       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
+         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
+         AND json_extract(e.payload_json, '$.attemptId') = a.id
+       WHERE a.run_id = ? AND a.state <> 'running'
+         AND (a.state = 'uncertain' OR a.side_effect_state = 'uncertain')
+       GROUP BY a.id ORDER BY a.id`,
+    ).all(runId) as Array<{ attempt_id: string; state: LongRunAttemptState;
+      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
+      last_attempt_event_seq: number }>;
+    const attemptReceipts: LongRunAcknowledgedAttemptReceipt[] = receipts.map((row) => ({
+      attemptId: row.attempt_id, state: row.state, sideEffectState: row.side_effect_state,
+      updatedAt: row.updated_at, completedAt: row.completed_at, lastAttemptEventSeq: row.last_attempt_event_seq,
+    }));
+    const attemptIds = attemptReceipts.map((receipt) => receipt.attemptId);
+    let safeEpoch: LongRunAttemptSafeEpoch | null = null;
   /*
    * 인지 이벤트는 원장 판번호를 올린다(appendLongRunEvent). 라운드 2 실측(2026-09-14): 호출부가 사람이 보낸
    * 옛 판번호로 그다음 재개를 시도해 long_run_resume_version_conflict 로 두 번 다 거부됐다. 그래서 인지 뒤의
    * 판번호를 함께 돌려주고, 호출부는 그 값으로 이어간다 — 사람이 확인한 판은 위에서 이미 대조했다.
    */
-  if (attemptIds.length) {
-    appendLongRunEvent({ runId, kind: "run.user_control", actorKind: "user", payload: { action: "acknowledge_uncertain_attempts", attemptIds } });
-  }
-  const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
-  if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
-  return { attemptIds, version };
+    if (attemptIds.length) {
+      const run = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?").get(runId) as { last_event_seq: number } | undefined;
+      if (!run) throw new Error(`long_run_not_found:${runId}`);
+      safeEpoch = { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1", throughEventSeq: run.last_event_seq,
+        attemptSetDigest: longRunAttemptSetDigest(runId, run.last_event_seq, attemptReceipts) };
+      appendEventInDb({ runId, kind: "run.user_control", actorKind: "user",
+        payload: { action: "acknowledge_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch }, at: new Date().toISOString() });
+      changed = true;
+    }
+    const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
+    if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
+    result = { attemptIds, version, safeEpoch };
+  })();
+  if (changed) emitDesktopStoreChange({ entity: "long-run", id: runId });
+  return result!;
 }
 
 /** 자동 재개(재시작 체크포인트 등)가 보는 수 — 불확실한 부작용은 사람만 풀 수 있으므로 그것도 센다. */
 export function unsettledLongRunAttemptCount(runId: string): number {
-  const row = getDb().prepare(
-    "SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain')",
-  ).get(runId) as { n: number };
-  return row.n;
+  return unsettledLongRunAttempts(runId).length;
 }
 
 /** 아직 실제로 돌고 있는 시도 수 — 명시적 재개는 이것만 본다. */
@@ -911,6 +1060,16 @@ export function bindLongRunWorker(input: Omit<LongRunWorkerBinding, "attempt" | 
   const run = getLongRun(input.runId);
   if (!run) throw new Error(`long_run_not_found:${input.runId}`);
   if (run.surface === "science") throw new Error("science_projection_read_only");
+  // Native Main adapters all resolve an absent request cwd through the same
+  // agentRunCwd() function. Persist that concrete path when the controller is
+  // bound so a no-folder One run has an exact producer workspace after restart.
+  // Host-managed/in-process adapters stay null: their implicit process cwd is
+  // not a workspace receipt and must not gain replay authority by inference.
+  const defaultWorkspaceKinds = new Set(["antigravity", "claude-code", "codex", "acp", "kimi", "grok", "cursor"]);
+  const workspaceBinding: LongRunWorkspaceBinding = input.role === "controller"
+    && !input.workspaceBinding.cwd && defaultWorkspaceKinds.has(input.runtimeSelection.kind)
+    ? { ...input.workspaceBinding, cwd: agentRunCwd() }
+    : input.workspaceBinding;
   const existing = getDb().prepare(
     `SELECT run_id, parent_worker_id, task_id, role, agent_definition_id,
             current_attempt, state
@@ -944,12 +1103,12 @@ export function bindLongRunWorker(input: Omit<LongRunWorkerBinding, "attempt" | 
       input.agentRelease ? JSON.stringify(input.agentRelease) : null,
       JSON.stringify(input.runtimeSelection),
       input.runtimeSelection.capabilityDescriptorId ?? null,
-      JSON.stringify(input.workspaceBinding),
+      JSON.stringify(workspaceBinding),
       input.permissionProfile,
       now,
       input.workerId,
     );
-    return { ...input, attempt: existing.current_attempt, state: existing.state };
+    return { ...input, workspaceBinding, attempt: existing.current_attempt, state: existing.state };
   }
   if (run.budget.maxWorkers != null) {
     const active = getDb().prepare(
@@ -984,7 +1143,7 @@ export function bindLongRunWorker(input: Omit<LongRunWorkerBinding, "attempt" | 
     input.agentRelease ? JSON.stringify(input.agentRelease) : null,
     JSON.stringify(input.runtimeSelection),
     input.runtimeSelection.capabilityDescriptorId ?? null,
-    JSON.stringify(input.workspaceBinding),
+    JSON.stringify(workspaceBinding),
     input.permissionProfile,
     state,
     now,
@@ -1006,6 +1165,7 @@ export function bindLongRunWorker(input: Omit<LongRunWorkerBinding, "attempt" | 
   }
   return {
     ...input,
+    workspaceBinding,
     attempt: 0,
     state,
   };
