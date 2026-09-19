@@ -52,10 +52,13 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const cwd = explicitCwd ?? (checkpoint.workspacePath === agentRunCwd() ? agentRunCwd() : null);
   if (!cwd || cwd !== checkpoint.workspacePath || !statSync(cwd).isDirectory()) throw new Error("checkpoint_workspace_changed");
   if (!same(checkpoint.capsule.plan, latestRuntimePlan(run.id))) throw new Error("checkpoint_plan_changed");
-  if (explicitCwd) {
-    const snapshot = compileProjectInstructionSnapshot({ projectDir: cwd }).snapshot;
-    if (!checkpoint.capsule.instructionSnapshot || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision) throw new Error("checkpoint_instructions_changed");
-  } else if (checkpoint.capsule.instructionSnapshot) throw new Error("checkpoint_instructions_changed");
+  // The instruction authority follows the verified effective workspace, not
+  // whether that workspace happened to be saved explicitly on the chat. One
+  // projectless runs still execute in Main's concrete agentRunCwd and record a
+  // snapshot there. Never interpret an implicit folder as an empty snapshot.
+  const snapshot = compileProjectInstructionSnapshot({ projectDir: cwd }).snapshot;
+  if (!checkpoint.capsule.instructionSnapshot
+    || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision) throw new Error("checkpoint_instructions_changed");
   const artifacts = listAgentSurfaces(chat.id).map(surface => ({ artifactId: surface.id,
     artifactRevision: surface.artifactRevision ?? null, sourceDigest: surface.artifactRef?.sourceDigest ?? null,
     dataDigest: surface.artifactRef?.dataDigest ?? null, stateRevision: surface.stateRevision ?? null,
