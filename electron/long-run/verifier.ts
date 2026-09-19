@@ -34,6 +34,7 @@ import {
 } from "../../shared/long-run-checkpoint";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
+import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
 import { registerOngoingGoalCycle } from "./wait-subscriptions";
 
@@ -514,6 +515,12 @@ export function buildBoundedObservation(input: {
 function concreteEvent(event: RunEventUi): boolean {
   if (!CONCRETE_EVENT_KINDS.has(event.kind)) return false;
   if (event.kind === "mcp_tool-use") {
+    if (isEffectStatusOnlyTool({
+      name: typeof event.payload.toolName === "string" ? event.payload.toolName : "",
+      id: event.payload.toolId,
+      args: event.payload.toolArgs,
+      isError: event.payload.toolIsError,
+    })) return false;
     return Boolean(
       event.payload.toolResultPreview
       || event.payload.toolSourceUrls

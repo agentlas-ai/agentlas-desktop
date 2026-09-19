@@ -890,7 +890,7 @@ export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
   text: string,
-  options?: { images?: readonly ImageAttachment[]; hostNotice?: ChatHostNotice },
+  options?: ChatMessageAppendOptions,
 ): ChatHistoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -927,6 +927,11 @@ export function appendChatMessage(
       : {}),
   };
 }
+
+type ChatMessageAppendOptions = {
+  images?: readonly ImageAttachment[];
+  hostNotice?: ChatHostNotice;
+};
 
 /** Completion may be published only after its exact assistant body is durable. */
 export function hasDurableAssistantMessage(chatId: string, text: string, notBefore?: string): boolean {
@@ -996,6 +1001,75 @@ export function bindGoalResultMessage(p: { chatId: string; goalId: string; runId
   })();
   if (id) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
   return id;
+}
+
+/** Bind a producer-owned durable message directly; copy and time are not identities. */
+export function bindGoalResultMessageId(p: { chatId: string; messageId: string; goalId: string; runId: string }): boolean {
+  const db = getDb();
+  const bound = db.transaction(() => {
+    const chat = db.prepare("SELECT goal_id FROM chats WHERE id = ?").get(p.chatId) as {goal_id: string | null} | undefined;
+    if (chat?.goal_id !== p.goalId) return false;
+    const message = db.prepare("SELECT 1 FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'assistant'")
+      .get(p.messageId, p.chatId);
+    if (!message) return false;
+    const existing = storedGoalResults(p.chatId, [p.messageId]).get(p.messageId);
+    if (existing && (existing.goalId !== p.goalId || (existing.runId && existing.runId !== p.runId))) return false;
+    if (existing?.runId === p.runId) return true;
+    persistGoalResult(p.chatId, p.messageId, { goalId: p.goalId, runId: p.runId, status: "pending" });
+    return true;
+  })();
+  if (bound) emitDesktopStoreChange({ entity: "chat", id: p.chatId });
+  return bound;
+}
+
+/**
+ * Persist one assistant result per exact Goal invocation and body. Continuous
+ * passes may independently produce the same copy; the invocation id, never a
+ * timestamp, proves that reusing the earlier durable row is safe.
+ */
+export function appendInvocationAssistantResult(p: {
+  chatId: string;
+  text: string;
+  goalId?: string | null;
+  runId?: string | null;
+  options?: ChatMessageAppendOptions;
+}): ChatHistoryEntry {
+  const activeGoalId = getChat(p.chatId)?.goalId ?? null;
+  const hasExactInvocation = Boolean(p.goalId && p.runId && activeGoalId === p.goalId);
+  const hasDisplayMetadata = Object.keys(p.options ?? {}).length > 0;
+  if (hasExactInvocation && !hasDisplayMetadata) {
+    const existing = getDb().prepare(`SELECT m.id, m.created_at
+      FROM chat_messages m
+      WHERE m.chat_id = ? AND m.role = 'assistant' AND m.text = ? AND m.host_notice_json IS NULL
+        AND NOT EXISTS (SELECT 1 FROM chat_message_attachments a WHERE a.message_id = m.id)
+        AND EXISTS (
+          SELECT 1 FROM run_events e
+          WHERE e.chat_id = m.chat_id AND e.kind = 'goal_result_presentation'
+            AND e.run_id = ?
+            AND json_extract(e.payload_json, '$.messageId') = m.id
+            AND json_extract(e.payload_json, '$.goalId') = ?
+            AND json_extract(e.payload_json, '$.runId') = ?
+        )
+      ORDER BY m.rowid DESC LIMIT 1`).get(
+        p.chatId, p.text, p.runId, p.goalId, p.runId,
+      ) as {id: string; created_at: string} | undefined;
+    if (existing) {
+      return {
+        id: existing.id,
+        durableMessageId: existing.id,
+        goalResult: storedGoalResults(p.chatId, [existing.id]).get(existing.id)
+          ?? { goalId: p.goalId!, runId: p.runId!, status: "pending" },
+        role: "assistant",
+        text: p.text,
+        createdAt: existing.created_at,
+      };
+    }
+  }
+  const entry = appendChatMessage(p.chatId, "assistant", p.text, p.options);
+  if (!hasExactInvocation) return entry;
+  return bindGoalResultMessageId({ chatId: p.chatId, messageId: entry.id, goalId: p.goalId!, runId: p.runId! })
+    ? { ...entry, goalResult: { goalId: p.goalId!, runId: p.runId!, status: "pending" } }
+    : entry;
 }
 
 /** Promotion is scoped to the exact host verification and its bound message. */

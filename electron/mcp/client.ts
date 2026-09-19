@@ -66,6 +66,7 @@ import { AUTOMATION_SUPERVISOR_SYSTEM_AGENT } from "../system-agents/automation-
 import { ROUTER_AGENT_ID, ROUTER_SYSTEM_AGENT } from "../system-agents/router";
 import {
   appendChatMessage,
+  appendInvocationAssistantResult,
   autoTitleFromFirstMessage,
   clearChatGoalBindingByGoalId,
   getChat,
@@ -5756,7 +5757,12 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(chat.id, "assistant", stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))));
+        appendInvocationAssistantResult({
+          chatId: chat.id,
+          text: stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))),
+          goalId: activeGoalId,
+          runId: req.runId,
+        });
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
@@ -6745,7 +6751,13 @@ ${effectiveUserPrompt}`;
        * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
        */
       if (persistedDisplay.trim() || finalImageOptions?.images?.length) {
-        durableAssistantEntry = appendChatMessage(chat.id, "assistant", persistedDisplay, finalImageOptions);
+        durableAssistantEntry = appendInvocationAssistantResult({
+          chatId: chat.id,
+          text: persistedDisplay,
+          goalId: activeGoalId,
+          runId: req.runId,
+          options: finalImageOptions,
+        });
       } else {
         tryRecordRunEvent({
           runId: req.runId ?? `chat:${chat.id}`,

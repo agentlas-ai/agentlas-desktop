@@ -132,7 +132,6 @@ import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
 import { mergeDurableChatCatchup } from "./durable-chat-catchup";
-import { collapseRepeatedPendingGoalPasses } from "./repeated-goal-pass";
 import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
@@ -740,7 +739,7 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       createdAt: entry.createdAt,
     });
   }
-  return collapseRepeatedPendingGoalPasses(visible);
+  return visible;
 }
 
 /**
