@@ -15,6 +15,7 @@ import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
 import {
@@ -46,7 +47,7 @@ import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { claimCheckpointContinuation, latestTaskCheckpoint } from "../long-run/checkpoint";
-import { runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
+import { inferWorkingFolderFromPrompt, runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
 import { applyFinalDisplayBackstop } from "../mcp/final-display-backstop";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import {
@@ -86,6 +87,7 @@ import {
   tryRecordRunEvent,
 } from "../store/run-events";
 import { getProject } from "../store/projects";
+import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
 import { listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
@@ -1362,14 +1364,53 @@ export class InvocationService {
         })),
       };
     }
-    const projectFolder = runWorkspaceBinding
+    const judgedTaskIntent = requestedOneMode
+      && invocationRequest.taskIntent === "conversation"
+      && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task";
+    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = resumesPausedGoal || requestedOneAttachmentRef
+      ? "task"
+      : judgedTaskIntent
+        ? "task"
+        : invocationRequest.taskIntent;
+    const invocationPermission = effectiveInvocationPermission(
+      !workspaceBinding && requestedOneMode
+        ? preparedOneBriefingAction
+          ? "read"
+          : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent)
+        : invocationRequest.permissions,
+      invocationRequest.planMode,
+    );
+    const suppressProjectBinding = executionContext?.source === "site-studio";
+    const suppressMutableProjectContext = executionContext?.source === "science"
+      || (executionContext?.source === "automation" && invocationPermission === "read");
+    const storedWorkingFolder = runWorkspaceBinding || suppressProjectBinding
+      ? null
+      : getChatWorkingFolder(req.chatId);
+    const projectFolder = runWorkspaceBinding || suppressProjectBinding || suppressMutableProjectContext
       ? null
       : chat.projectId
         ? getProject(chat.projectId)?.folderPath ?? null
         : null;
-    const resultFolder = runWorkspaceBinding
+    const targetAppFolder = !runWorkspaceBinding && !suppressProjectBinding && invocationRequest.targetAppId
+      ? getAgentApp(invocationRequest.targetAppId)?.rootPath ?? null
+      : null;
+    const promptFolder = !runWorkspaceBinding
+      && !storedWorkingFolder
+      && !projectFolder
+      && (invocationPermission === "write" || invocationPermission === "full")
+      && !["automation", "site-studio", "trex"].includes(executionContext?.source ?? "")
+      ? inferWorkingFolderFromPrompt(invocationRequest.userPrompt, { authored: "human" })
+      : null;
+    // Freeze the same Main-owned cwd that runMcpInvocation will hand to every
+    // provider: immutable binding, target App, saved chat, Project, explicit
+    // human folder, then the concrete agentRunCwd fallback. A provider may
+    // return a different resultFolder later, but that is output metadata only.
+    const executionCwd = runWorkspaceBinding
       ? runWorkspaceBinding.canonicalPath ?? agentRunCwd()
-      : getChatWorkingFolder(req.chatId) ?? projectFolder ?? agentRunCwd();
+      : targetAppFolder
+        ? path.resolve(targetAppFolder)
+        : storedWorkingFolder ?? projectFolder ?? promptFolder ?? agentRunCwd();
+    const resultFolder = executionCwd;
     const claimedOneAttachments = requestedOneAttachmentRef
       ? claimOneAttachments({
           ref: requestedOneAttachmentRef,
@@ -1397,14 +1438,6 @@ export class InvocationService {
     const attachmentCapabilitySummary = hasTransientAttachments
       ? `[ATTACHMENT CAPABILITIES - host verified]\n${attachmentDescriptors.map((item, index) => `${index + 1}. ${item}`).join("\n")}\n[/ATTACHMENT CAPABILITIES]`
       : undefined;
-    const judgedTaskIntent = requestedOneMode
-      && invocationRequest.taskIntent === "conversation"
-      && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task";
-    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = resumesPausedGoal || claimedOneAttachments
-      ? "task"
-      : judgedTaskIntent
-        ? "task"
-        : invocationRequest.taskIntent;
     const runReq: OneInvocationRequest = {
       ...invocationRequest,
       runId,
@@ -1412,14 +1445,7 @@ export class InvocationService {
       // invoke paths warm the judgment cache (prejudgeOneRequestIntent) and this
       // sync site peeks it; without a judged verdict the intent remains undecided.
       taskIntent: effectiveTaskIntent,
-      permissions: effectiveInvocationPermission(
-        !workspaceBinding && requestedOneMode
-          ? preparedOneBriefingAction
-            ? "read"
-            : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent)
-          : invocationRequest.permissions,
-        invocationRequest.planMode,
-      ),
+      permissions: invocationPermission,
       ...(oneProfileContext ? { oneProfileContext } : {}),
       ...(claimedOneAttachments ? {
         images: claimedOneAttachments.images,
@@ -1818,7 +1844,7 @@ export class InvocationService {
           goalId: projectionGoalId,
           objective,
           acceptanceCriteria,
-          projectDir: getChatWorkingFolder(chat.id),
+          projectDir: executionCwd,
         })) {
           projectionGoalId = null;
         } else {
@@ -1873,7 +1899,7 @@ export class InvocationService {
           controllerAgentId: chat.agentId ?? `controller:${chat.id}`,
           workspaceBinding: {
             projectId: chat.projectId,
-            cwd: getChatWorkingFolder(chat.id),
+            cwd: executionCwd,
             revision: null,
           },
           permissionProfile: runReq.permissions ?? "read",
@@ -1912,7 +1938,7 @@ export class InvocationService {
           runtimeSelection: longRunRuntimeSelection,
           workspaceBinding: {
             projectId: chat.projectId,
-            cwd: getChatWorkingFolder(chat.id),
+            cwd: executionCwd,
             revision: null,
           },
           permissionProfile: runReq.permissions ?? "read",
@@ -2906,7 +2932,8 @@ export class InvocationService {
             const goalId = getChat(chat.id)?.goalId;
             if (!goalId || goalId !== goalLongRun?.goalId) throw new Error("goal_wait_goal_binding_changed");
             const subscription = registerGoalWaitSubscription({ goalId, invocationRunId: runId,
-              intent: result.goalWaitRequest.intent, hasTransientAttachments: record.hasTransientAttachments });
+              intent: result.goalWaitRequest.intent, hasTransientAttachments: record.hasTransientAttachments,
+              projectDir: executionCwd });
             const message = pickLocale(runReq) === "ko" ? "대기를 등록했어요. 앱 실행 중 확인하며, 조건이 바뀌면 이어서 진행합니다."
               : "The wait is registered. While the app is running, the Goal continues when its condition changes.";
             appendChatMessage(chat.id, "assistant", message);
@@ -2915,7 +2942,11 @@ export class InvocationService {
               goalId, subjectRef: subscription.subjectRef, nextCheckAt: subscription.nextCheckAt, deadline: subscription.deadline, executionAvailability: "app-running" } });
             this.publishRunEvent(record, { runId, chatId: chat.id, event });
           } catch (error) {
-            const reason = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_registration_failed";
+            // Keep typed checkpoint refusals visible. Masking
+            // checkpoint_workspace_changed as goal_wait_registration_failed
+            // hid the actual projectless-One continuity failure in native QA.
+            const reason = error instanceof Error && /^(?:goal_wait|checkpoint)_[a-z_]+$/.test(error.message)
+              ? error.message : "goal_wait_registration_failed";
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
             if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
             tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
@@ -2947,7 +2978,7 @@ export class InvocationService {
                 outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
                 evidence: completionClaim.evidence,
                 invocationRunId: runId,
-                projectDir: getChatWorkingFolder(chat.id),
+                projectDir: executionCwd,
                 hasTransientAttachments: record.hasTransientAttachments,
               }),
               onRetry: ({ attempt, delayMs, reasonCode }) => {

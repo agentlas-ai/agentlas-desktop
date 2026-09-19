@@ -91,7 +91,7 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
 
 /** Actual service result producer. The request is accepted only after its own
  * host effect receipt is settled; waiting is never a model completion claim. */
-export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; now?: number }): GoalWaitSubscription {
+export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; projectDir?: string | null; now?: number }): GoalWaitSubscription {
   assertDesktopLongRunAdmissionOpen();
   const validated = parseGoalWaitIntent("```agentlas-goal-wait\n" + JSON.stringify(input.intent) + "\n```").request;
   if (validated?.status !== "requested") throw new Error("goal_wait_request_invalid");
@@ -119,7 +119,8 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     const observation = observeGoalWaitSubject({ chatId: run.rootChatId, sourceInvocationId: input.invocationRunId, intent: input.intent }, now);
     const checkpoint = recordTaskCheckpoint({ goalId: run.goalId, workerId: attempt.worker_id, attempt: attempt.attempt,
       invocationRunId: input.invocationRunId, disposition: "retry_required", verdicts: [{ criterionIndex: 0, verdict: "inconclusive",
-        reason: "Waiting for the registered subject; no completion verification has been claimed.", nextAction: input.intent.nextAction }], evidenceRefs: [], projectDir: getChatWorkingFolder(run.rootChatId) });
+        reason: "Waiting for the registered subject; no completion verification has been claimed.", nextAction: input.intent.nextAction }], evidenceRefs: [],
+      projectDir: input.projectDir?.trim() || getChatWorkingFolder(run.rootChatId) });
     prepareCheckpointContinuation(checkpoint);
     const subscription: GoalWaitSubscription = { schemaVersion: "agentlas.goal-wait-subscription.v1", waitId: randomUUID(), runId: run.id,
       goalId: run.goalId, goalRevision: revision.revision, chatId: run.rootChatId, revision: 1, sourceInvocationId: input.invocationRunId,
