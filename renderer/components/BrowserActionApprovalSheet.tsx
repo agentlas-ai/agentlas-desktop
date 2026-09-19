@@ -8,8 +8,8 @@ import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
 //    않는다. gated 실행에서 도달하는 결제(payment)/임의코드(unsafe-code)는 allowAlways=false라
 //    "항상 승인" 버튼은 뜨지 않는다(승인 캐시 금지 = 매번 확인). 버튼은 플래그로만 살아난다.
 //  - "거부"는 electron이 site+action 으로 기억 → 다음부터 시트 없이 차단(browser:revokePermission으로 해제).
-import { useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
@@ -25,50 +25,77 @@ const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   action: { ko: "브라우저 작업", en: "Browser action" },
 };
 
-export function BrowserActionApprovalSheet({ permission }: {
+export function BrowserActionApprovalSheet({ chatId }: {
+  // Kept temporarily for call-site compatibility only. Main owns authority;
+  // the renderer must never auto-resolve from the currently visible setting.
   permission?: "auto" | "read" | "write" | "full";
+  chatId?: string | null;
 } = {}) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { locale } = useT();
   const ko = locale === "ko";
   const oneRoute = pathname.startsWith("/one");
+  const surface = oneRoute ? "one" : pathname.startsWith("/science") ? "science" : "work";
+  const currentChatId = chatId !== undefined ? chatId : (oneRoute ? null : searchParams.get("id"));
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
-  const req = queue[0] ?? null;
-  const permissionRef = useRef(permission);
-  permissionRef.current = permission;
+  const eventRevisionRef = useRef(0);
+  const latestEventRevisionRef = useRef(new Map<string, number>());
+  const ownedQueue = queue.filter((request) => request.owner?.surface === surface
+    && (surface === "science"
+      ? true
+      : currentChatId === null
+        ? request.owner.chatId === null
+        : request.owner.chatId === currentChatId));
+  const ownerlessQueue = queue.filter((request) => request.owner === null);
+  const visibleQueue = ownedQueue.length > 0 ? ownedQueue : ownerlessQueue;
+  const req = visibleQueue[0] ?? null;
 
-  const resolveFullAccessRequest = (requestId: string) => {
-    void ipc()?.browser.resolveApproval(requestId, "once");
-  };
-
-  useEffect(() => {
-    const events = ipcEvents();
-    if (!events) return;
-    return events.onBrowserApproval((r) => {
-      if (permissionRef.current === "full") {
-        // A stale gated request may arrive while the person explicitly
-        // switches this One session to Full access. Do not paint an Allow once
-        // chip; settle the already-issued request under that new authority.
-        resolveFullAccessRequest(r.requestId);
-        return;
+  const mergePending = useCallback((incoming: BrowserApprovalRequestEvent | BrowserApprovalRequestEvent[]) => {
+    const additions = Array.isArray(incoming) ? incoming : [incoming];
+    setQueue((current) => {
+      const timestamp = Date.now();
+      const cancelledIds = new Set(additions.filter((item) => item.expiresAt <= timestamp).map((item) => item.requestId));
+      const next = current.filter((item) => item.expiresAt > timestamp && !cancelledIds.has(item.requestId));
+      const known = new Set(next.map((item) => item.requestId));
+      for (const item of additions) {
+        if (item.expiresAt <= timestamp || known.has(item.requestId)) continue;
+        known.add(item.requestId);
+        next.push(item);
       }
-      setQueue((current) => {
-        if (r.expiresAt <= Date.now()) {
-          return current.filter((item) => item.requestId !== r.requestId);
-        }
-        return current.some((item) => item.requestId === r.requestId) ? current : [...current, r];
-      });
+      return next;
     });
   }, []);
 
   useEffect(() => {
-    if (permission !== "full" || queue.length === 0) return;
-    const pending = queue;
-    setQueue([]);
-    for (const item of pending) resolveFullAccessRequest(item.requestId);
-  }, [permission, queue]);
+    const events = ipcEvents();
+    if (!events) return;
+    return events.onBrowserApproval((request) => {
+      const revision = ++eventRevisionRef.current;
+      latestEventRevisionRef.current.set(request.requestId, revision);
+      mergePending(request);
+    });
+  }, [mergePending]);
+
+  useEffect(() => {
+    let active = true;
+    const browser = ipc()?.browser;
+    if (!browser) return;
+    const hydrationRevision = eventRevisionRef.current;
+    void browser.listPendingApprovals()
+      .then((pending) => {
+        if (!active) return;
+        mergePending(pending.filter((request) => (
+          latestEventRevisionRef.current.get(request.requestId) ?? 0
+        ) <= hydrationRevision));
+      })
+      .catch(() => { /* push events remain the fail-closed fallback */ });
+    return () => { active = false; };
+  }, [currentChatId, mergePending, pathname]);
+
+  useLayoutEffect(() => { setExpiredNotice(null); }, [currentChatId, pathname]);
 
   useEffect(() => {
     if (!req) return;
@@ -172,7 +199,7 @@ export function BrowserActionApprovalSheet({ permission }: {
         {/* 남은 시간은 안전 문구가 있어도 사라지면 안 된다 — 만료되면 이 요청은
             fail-closed 로 조용히 죽으므로, 매번 묻는 종류일수록 더 필요하다. */}
         <span className="baa-chip-timer">
-          {ko ? `${remainingSeconds}초 · 대기 ${queue.length}건` : `${remainingSeconds}s · ${queue.length} pending`}
+          {ko ? `${remainingSeconds}초 · 대기 ${visibleQueue.length}건` : `${remainingSeconds}s · ${visibleQueue.length} pending`}
         </span>
         <div className="baa-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
           <button type="button" className="baa-chip-once" onClick={() => resolve("once")}>{ko ? "이번만 허용" : "Allow once"}</button>
@@ -189,10 +216,12 @@ export function BrowserActionApprovalSheet({ permission }: {
         </details>
       )}
       <style jsx>{`
-        .baa-code-review { margin-top: 12px; }
+        .baa-code-review { margin-top: 12px; pointer-events: auto; }
         .baa-code-review summary { cursor: pointer; font-size: 13px; }
         .baa-code-review pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 12px; line-height: 1.5; }
-        .baa-wrap {
+      `}</style>
+      <style jsx global>{`
+        [data-browser-action-approval-wrap="true"] {
           position: fixed;
           left: 50%;
           bottom: 96px;
@@ -201,6 +230,8 @@ export function BrowserActionApprovalSheet({ permission }: {
           z-index: 90;
           pointer-events: none;
         }
+      `}</style>
+      <style jsx>{`
         .baa-chip {
           pointer-events: auto;
           display: flex;
@@ -236,7 +267,13 @@ export function BrowserActionApprovalSheet({ permission }: {
       `}</style>
     </>
   );
-  return <ComposerDecisionPortal enabled><div className="baa-wrap" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">{content}</div></ComposerDecisionPortal>;
+  return (
+    <ComposerDecisionPortal enabled={req.owner !== null}>
+      <div className="baa-wrap" data-browser-action-approval-wrap="true" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">
+        {content}
+      </div>
+    </ComposerDecisionPortal>
+  );
 }
 
 function browserActionName(actionType: string, ko: boolean): string {
