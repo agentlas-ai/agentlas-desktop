@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.29 — 2026-09-19
+
+- Preserve the Main-resolved execution folder for projectless One Goals, including timer waits and completion checkpoints. Provider-reported output folders cannot change continuation authority.
+- Record exact user acknowledgments of interrupted attempts without erasing their history. Only a fresh settled execution can establish a new restart checkpoint; new uncertainty, user pauses and changed folders still prevent automatic replay. Older unproven checkpoints remain manual.
+- Distinguish internal Goal and capability status notices from actual tool operations during result verification, keeping real provider tool calls in the evidence.
+- Bind intermediate and final assistant results to their exact invocation when saving them. Repeated persistence of the same result no longer produces duplicate bubbles, while separate executions and image-bearing results remain distinct.
+- Includes the browser authority and cross-product approval layout fixes from 1.2.28.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a public installer, installed update or long-running outcome; those remain separate verification gates.
+
 ## 1.2.28 — 2026-09-19
 
 - Preserve the run's browser autonomy through the actual child-process environment wrapper. Full access no longer silently falls back to gated browser execution.
