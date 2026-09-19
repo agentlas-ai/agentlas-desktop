@@ -36,6 +36,7 @@ export function BrowserActionApprovalSheet({ chatId }: {
   const { locale } = useT();
   const ko = locale === "ko";
   const oneRoute = pathname.startsWith("/one");
+  const buildRoute = pathname === "/build" || pathname.startsWith("/build/");
   const surface = oneRoute ? "one" : pathname.startsWith("/science") ? "science" : "work";
   const currentChatId = chatId !== undefined ? chatId : (oneRoute ? null : searchParams.get("id"));
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
@@ -43,15 +44,26 @@ export function BrowserActionApprovalSheet({ chatId }: {
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
   const eventRevisionRef = useRef(0);
   const latestEventRevisionRef = useRef(new Map<string, number>());
-  const ownedQueue = queue.filter((request) => request.owner?.surface === surface
-    && (surface === "science"
-      ? true
-      : currentChatId === null
-        ? request.owner.chatId === null
-        : request.owner.chatId === currentChatId));
+  const ownedQueue = queue.filter((request) => {
+    const owner = request.owner;
+    if (!owner) return false;
+    if (buildRoute) {
+      return owner.surface === "work" && owner.chatId === null && owner.context === "build";
+    }
+    if (owner.context === "build" || owner.surface !== surface) return false;
+    if (surface === "science") return true;
+    return currentChatId === null ? owner.chatId === null : owner.chatId === currentChatId;
+  });
   const ownerlessQueue = queue.filter((request) => request.owner === null);
   const visibleQueue = ownedQueue.length > 0 ? ownedQueue : ownerlessQueue;
   const req = visibleQueue[0] ?? null;
+  const usesConversationComposer = Boolean(
+    req?.owner
+    && req.owner.context !== "build"
+    && req.owner.surface !== "science"
+    && currentChatId !== null
+    && req.owner.chatId === currentChatId,
+  );
 
   const mergePending = useCallback((incoming: BrowserApprovalRequestEvent | BrowserApprovalRequestEvent[]) => {
     const additions = Array.isArray(incoming) ? incoming : [incoming];
@@ -176,6 +188,11 @@ export function BrowserActionApprovalSheet({ chatId }: {
    */
   const remainingSeconds = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
   const askTitle = `${actionName}${req.site ? ` · ${req.site}` : ""}`;
+  const approvalKicker = req.owner?.context === "build"
+    ? (ko ? "Build 승인 필요" : "Build approval needed")
+    : req.owner?.surface === "science"
+      ? (ko ? "Science 승인 필요" : "Science approval needed")
+      : (ko ? "승인 필요" : "Approval needed");
   const summaryLine = isUnsafeCode ? (unsafeCodeDetail || req.summary) : req.summary;
   const safetyNote = isPayment
     ? (ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety.")
@@ -191,7 +208,7 @@ export function BrowserActionApprovalSheet({ chatId }: {
             두면 짧은 카운트다운용으로 만든 자리(flex 0 0 auto · nowrap)를 긴 문장이 차지해
             정작 무엇을 승인하는지(제목·코드)가 줄임표로 잘린다. */}
         <div className="baa-chip-copy">
-          <span className="baa-chip-kicker">{ko ? "승인 필요" : "Approval needed"}</span>
+          <span className="baa-chip-kicker">{approvalKicker}</span>
           <strong>{askTitle}</strong>
           <small>{summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running.")}</small>
           {safetyNote && <small className="baa-chip-note">{safetyNote}</small>}
@@ -268,8 +285,15 @@ export function BrowserActionApprovalSheet({ chatId }: {
     </>
   );
   return (
-    <ComposerDecisionPortal enabled={req.owner !== null}>
-      <div className="baa-wrap" data-browser-action-approval-wrap="true" data-composer-decision-card="true" role="alertdialog" aria-live="assertive">
+    <ComposerDecisionPortal enabled={usesConversationComposer}>
+      <div
+        className="baa-wrap"
+        data-browser-action-approval-wrap="true"
+        data-browser-action-approval-placement={usesConversationComposer ? "conversation" : "standalone"}
+        data-composer-decision-card="true"
+        role="alertdialog"
+        aria-live="assertive"
+      >
         {content}
       </div>
     </ComposerDecisionPortal>
