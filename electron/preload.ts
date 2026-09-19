@@ -651,6 +651,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("browser:revokePermission", site, actionType),
     resolveApproval: (requestId: string, decision) =>
       ipcRenderer.invoke("browser:resolveApproval", requestId, decision),
+    listPendingApprovals: () => ipcRenderer.invoke("browser:listPendingApprovals"),
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
     captureLiveFrame: (preferredUrl?: string, viewport?: "desktop" | "phone") =>
       ipcRenderer.invoke("browser:captureLiveFrame", preferredUrl, viewport),

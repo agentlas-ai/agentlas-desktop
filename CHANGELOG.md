@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.28 — 2026-09-19
+
+- Preserve the run's browser autonomy through the actual child-process environment wrapper. Full access no longer silently falls back to gated browser execution.
+- Bind browser approvals to Main-owned execution authority and their originating conversation. Switching from One to Work does not relocate a One approval into the Work page or approve it using another conversation's settings.
+- Keep the browser approval fallback out of page layout, so a pending request cannot compress Agent Market or hide Agent Graphs. Restore pending requests when returning to their conversation and remove resolved requests from every projection.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a public installer or update feed; published artifacts and installed-app verification remain separate gates.
+
 ## 1.2.27 — 2026-09-19
 
 - Capture the full matched Science artifact when a table extends beyond the visible viewport, retaining artifact identity checks and independent image-size limits. Restore the original styles and scroll position after capture.

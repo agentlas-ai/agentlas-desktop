@@ -24,9 +24,10 @@ import {
   validateOpenCrabMcpUrl,
   vaultUrlKey,
 } from "../opencrab/constants";
-import type { InstalledMcpServer } from "../../shared/types";
+import type { BrowserApprovalRequestEvent, InstalledMcpServer } from "../../shared/types";
 import { isAuthenticSystemTimeMcpLaunch, isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import { BROWSER_APPROVAL_FILE_ENV, browserApprovalInfoPath } from "../browser/approval-channel";
+import { registerBrowserApprovalAuthority } from "../browser/approval-authority";
 import { WORKSPACE_PREVIEW_CONTROL_ENV, type WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { createWorkspacePreviewCapability, removeWorkspacePreviewCapabilityForConfig } from "../workspace-preview/control-server";
 import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-server";
@@ -148,6 +149,11 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Main-owned non-chat Build plan authority; never accepted from a runtime payload. */
+  browserApproval?: {
+    owner: NonNullable<BrowserApprovalRequestEvent["owner"]>;
+    permission: "read" | "write" | "full";
+  };
   /** Exact Main-authorized workspace, including runs without a tool-gate proxy. */
   workingFolder?: string;
   /** Main-only, run-scoped native guest grant; token remains in runtime secret aliases. */
@@ -184,10 +190,17 @@ export interface McpConfigBuildOptions {
     simulation?: true;
     cwd?: string;
     chatId?: string;
+    /** Main-authored exact product/chat owner for browser approvals. */
+    approvalScope?: BrowserApprovalScope;
     unattended?: boolean;
     /** 그래프 노드의 도구 중개 계획 파일(workflow/tool-broker-runtime.ts). */
     planPath?: string;
   };
+}
+
+export interface BrowserApprovalScope {
+  surface: "one" | "work" | "science";
+  chatId: string;
 }
 
 /**
@@ -277,7 +290,8 @@ const OPERATIONAL_KEYS = [
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "NPM_CONFIG_PREFIX",
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
-  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
+  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_BROWSER_AUTONOMY", "AGENTLAS_BROWSER_APPROVAL_AUTHORITY",
+  "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
   "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT",
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
@@ -620,6 +634,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let workspacePreviewCapabilityCleanup: (() => void) | undefined;
   const proxyHandles: string[] = [];
+  const browserAuthorityCleanup: Array<() => void> = [];
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
   const cleanup = () => {
@@ -627,6 +642,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     released = true;
     const ownsFile = releasePrepared?.() === true;
     for (const handle of proxyHandles) revokeMcpProxyLaunch(handle);
+    for (const revoke of browserAuthorityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
       if (ownsFile) {
         try { fs.rmSync(configPath, { force: true }); } catch { /* Authority is already revoked. */ }
@@ -736,15 +752,36 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         command = browserRuntime.command;
         args = browserRuntime.args;
       }
+      let browserAuthority: ReturnType<typeof registerBrowserApprovalAuthority> | null = null;
+      if (s.catalogId === "agentlas-browser" && opts?.toolGate) {
+        const scope = opts.toolGate.approvalScope;
+        if (!scope || !scope.chatId || scope.chatId !== opts.toolGate.chatId
+          || (scope.surface !== "one" && scope.surface !== "work" && scope.surface !== "science")) {
+          throw new Error("browser-approval-scope-missing");
+        }
+        browserAuthority = registerBrowserApprovalAuthority({
+          sessionKey: opts.toolGate.sessionKey,
+          chatId: scope.chatId,
+          surface: scope.surface,
+        }, opts.toolGate.permission ?? "read");
+      } else if (s.catalogId === "agentlas-browser" && opts?.browserApproval) {
+        const { owner, permission } = opts.browserApproval;
+        if (owner.surface !== "work" || owner.context !== "build" || owner.chatId !== null || !owner.sessionKey) {
+          throw new Error("browser-approval-build-scope-invalid");
+        }
+        browserAuthority = registerBrowserApprovalAuthority(owner, permission);
+      }
+      if (browserAuthority) browserAuthorityCleanup.push(browserAuthority.revoke);
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? {
               [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
               ...(browserRuntime?.env ?? {}),
+              ...(browserAuthority ? { AGENTLAS_BROWSER_APPROVAL_AUTHORITY: browserAuthority.token } : {}),
               // Full access is an explicit user choice for this run. Carry it
               // into the browser launcher after runtime-provided env so the
               // requested authority cannot silently be downgraded to gated.
-              AGENTLAS_BROWSER_AUTONOMY: opts?.toolGate?.permission === "full" ? "trust" : "gated",
+              AGENTLAS_BROWSER_AUTONOMY: (opts?.toolGate?.permission ?? opts?.browserApproval?.permission) === "full" ? "trust" : "gated",
               ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
               ...(canonicalComputerUseSelected ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() } : {}),
               ...(canonicalComputerUseSelected && opts?.toolGate && mcpProxyApprovalPort() > 0 ? {

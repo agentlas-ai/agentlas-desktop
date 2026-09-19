@@ -25,11 +25,12 @@ const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   action: { ko: "브라우저 작업", en: "Browser action" },
 };
 
-export function BrowserActionApprovalSheet({ chatId }: {
+export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }: {
   // Kept temporarily for call-site compatibility only. Main owns authority;
   // the renderer must never auto-resolve from the currently visible setting.
   permission?: "auto" | "read" | "write" | "full";
   chatId?: string | null;
+  onStandaloneHeightChange?: (height: number) => void;
 } = {}) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -42,6 +43,7 @@ export function BrowserActionApprovalSheet({ chatId }: {
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const eventRevisionRef = useRef(0);
   const latestEventRevisionRef = useRef(new Map<string, number>());
   const ownedQueue = queue.filter((request) => {
@@ -64,6 +66,19 @@ export function BrowserActionApprovalSheet({ chatId }: {
     && currentChatId !== null
     && req.owner.chatId === currentChatId,
   );
+  useLayoutEffect(() => {
+    if (!onStandaloneHeightChange) return;
+    const wrapper = wrapperRef.current;
+    if (!req || usesConversationComposer || !wrapper) {
+      onStandaloneHeightChange(0);
+      return;
+    }
+    const measure = () => onStandaloneHeightChange(Math.ceil(wrapper.getBoundingClientRect().height) + 112);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(wrapper);
+    return () => { observer.disconnect(); onStandaloneHeightChange(0); };
+  }, [req, usesConversationComposer, onStandaloneHeightChange]);
 
   const mergePending = useCallback((incoming: BrowserApprovalRequestEvent | BrowserApprovalRequestEvent[]) => {
     const additions = Array.isArray(incoming) ? incoming : [incoming];
@@ -287,6 +302,7 @@ export function BrowserActionApprovalSheet({ chatId }: {
   return (
     <ComposerDecisionPortal enabled={usesConversationComposer}>
       <div
+        ref={wrapperRef}
         className="baa-wrap"
         data-browser-action-approval-wrap="true"
         data-browser-action-approval-placement={usesConversationComposer ? "conversation" : "standalone"}

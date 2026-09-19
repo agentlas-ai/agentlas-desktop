@@ -2511,6 +2511,8 @@ export interface ComputerUsePreview {
 /** electron → renderer 로 밀리는 승인 요청(경량 바텀시트가 받는다). */
 export interface BrowserApprovalRequestEvent {
   requestId: string;
+  /** Main-minted execution ownership, never inferred from the visible page. */
+  owner: { surface: "one" | "work" | "science"; chatId: string | null; sessionKey: string; context?: "build" } | null;
   site: string;
   actionType: string;
   summary: string;
@@ -7488,6 +7490,7 @@ export interface AgentlasIpc {
     listPermissions: () => Promise<BrowserPermissionEntry[]>;
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
     resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;
+    listPendingApprovals: () => Promise<BrowserApprovalRequestEvent[]>;
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
     /** Capture the current task's already-open page when supplied; never navigates. */
     captureLiveFrame: (preferredUrl?: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveFrame>;

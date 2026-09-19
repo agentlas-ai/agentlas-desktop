@@ -2738,12 +2738,10 @@ function browserApprovalFailure(denied) {
 }
 function requestApproval(site, actionType, summary, signal) {
   const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
-  // Full access is Main-authored per run. It is the user's explicit instruction
-  // to release every browser checkpoint for this run, including payment. A
-  // gated run remains fail-closed and reaches the approval sheet.
-  const trustedRun = autonomy === 'trust';
+  // Main resolves the opaque run authority even for Full access. Full returns
+  // immediately without a UI checkpoint, but a revoked run cannot keep using
+  // a surviving child process merely because its environment still says trust.
   if (signal && signal.aborted) return Promise.resolve('cancelled');
-  if (trustedRun) return Promise.resolve('approved');
   return new Promise((resolve) => {
     let req = null;
     let settled = false;
@@ -2761,7 +2759,7 @@ function requestApproval(site, actionType, summary, signal) {
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     const info = readApprovalInfo();
     if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish('unavailable'); }
-    const payload = JSON.stringify({ site, actionType, summary });
+    const payload = JSON.stringify({ site, actionType, summary, authority: process.env.AGENTLAS_BROWSER_APPROVAL_AUTHORITY });
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
       let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
     });

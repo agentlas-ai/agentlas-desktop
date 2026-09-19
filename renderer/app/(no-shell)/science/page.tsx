@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
 import { ProductModeMenu } from "@/components/one/ProductModeMenu";
+import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
@@ -27,6 +28,7 @@ export default function ScienceHostPage() {
   const mountEpochRef = useRef(0);
   const [extension, setExtension] = useState<ProductExtensionStatus | null>(null);
   const [view, setView] = useState<ProductExtensionViewStatus | null>(null);
+  const [approvalHeight, setApprovalHeight] = useState(0);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -118,7 +120,11 @@ export default function ScienceHostPage() {
   const failed = view?.state === "error";
   return (
     <>
-      <div className={styles.page}>
+      <div className={styles.page} style={approvalHeight > 0 ? {
+        // Native WebContentsViews paint above renderer overlays. Reserve an
+        // actual host-owned area; the surface observer updates native bounds.
+        gridTemplateRows: `56px minmax(0, 1fr) ${approvalHeight}px`,
+      } : undefined}>
         <header className={`${styles.header} titlebar-drag`}>
           <div className="titlebar-nodrag"><ProductModeMenu current="science" darkText locale={ko ? "ko" : "en"} /></div>
           <div className={styles.title}>{ko ? "재현 가능한 연구 워크벤치" : "Reproducible research workbench"}</div>
@@ -136,6 +142,7 @@ export default function ScienceHostPage() {
           )}
         </div>
       </div>
+      <BrowserActionApprovalSheet onStandaloneHeightChange={setApprovalHeight} />
     </>
   );
 }

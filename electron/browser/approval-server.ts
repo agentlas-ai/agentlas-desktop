@@ -9,6 +9,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { browserRequestApproval } from "./connect";
 import { browserApprovalInfoPath } from "./approval-channel";
+import { resolveBrowserApprovalAuthority } from "./approval-authority";
 
 let server: http.Server | null = null;
 let boundPort = 0;
@@ -46,20 +47,36 @@ export function startBrowserApprovalServer(): Promise<number> {
         if (!res.writableEnded) controller.abort();
       });
       void readBody(req).then(async (body) => {
-        let parsed: { site?: string; actionType?: string; summary?: string; target?: string };
+        let parsed: { site?: string; actionType?: string; summary?: string; target?: string; authority?: string };
         try {
           parsed = JSON.parse(body);
         } catch {
           res.writeHead(400).end("bad json");
           return;
         }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          res.writeHead(400).end(JSON.stringify({ decision: "unavailable", error: "browser_approval_request_invalid" }));
+          return;
+        }
         try {
+          const authority = resolveBrowserApprovalAuthority(parsed.authority);
+          if (!authority) {
+            res.writeHead(403).end(JSON.stringify({
+              decision: typeof parsed.authority === "string" && parsed.authority ? "cancelled" : "unavailable",
+              error: "browser_authority_unavailable",
+            }));
+            return;
+          }
           const decision = await browserRequestApproval({
             site: parsed.site ?? "",
             actionType: parsed.actionType ?? "action",
             summary: parsed.summary ?? "Approve browser action",
             target: parsed.target,
-          }, { signal: controller.signal });
+          }, {
+            signal: AbortSignal.any([controller.signal, authority.signal]),
+            owner: authority.owner,
+            permission: authority.permission,
+          });
           if (controller.signal.aborted || res.destroyed) return;
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));
         } catch (err) {

@@ -43,6 +43,7 @@ import {
   type BrowserPermissionDecision,
 } from "../store/browser-vault";
 import { currentUiLocale } from "../ui-locale";
+import type { BrowserApprovalRequestEvent } from "../../shared/types";
 
 export type {
   BrowserSiteRow,
@@ -407,6 +408,8 @@ export interface BrowserApprovalRequest {
 }
 export interface BrowserApprovalOptions {
   signal?: AbortSignal;
+  owner?: BrowserApprovalRequestEvent["owner"];
+  permission?: "read" | "write" | "full";
 }
 export type BrowserApprovalResult = "approved" | "denied" | "cancelled" | "expired";
 
@@ -419,6 +422,7 @@ const pendingApprovals = new Map<string, PendingApproval>();
 
 export interface BrowserApprovalLifecycleRequest {
   requestId: string;
+  owner: BrowserApprovalRequestEvent["owner"];
   site: string;
   actionType: string;
   summary: string;
@@ -526,6 +530,10 @@ export async function browserRequestApproval(
     });
     return "cancelled";
   }
+  if (options.permission === "full") {
+    logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "run-full-access" });
+    return "approved";
+  }
   const stored = getBrowserPermission(site, req.actionType);
   if (stored === "always") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "always" });
@@ -553,6 +561,7 @@ export async function browserRequestApproval(
     const createdAt = Date.now();
     const request: BrowserApprovalLifecycleRequest = {
       requestId,
+      owner: options.owner ?? null,
       site,
       actionType: req.actionType,
       summary: req.summary,
@@ -578,6 +587,7 @@ export async function browserRequestApproval(
     };
     const timer = setTimeout(() => {
       pendingApprovals.delete(requestId);
+      emitToRenderer(APPROVAL_CHANNEL, { ...request, expiresAt: 0 });
       emitApprovalLifecycle({ status: "expired", requestId });
       resolve("timeout"); // 이번 요청만 fail-closed; 영구 deny로 저장하지 않는다.
     }, timeoutMs);
@@ -635,6 +645,7 @@ export function browserResolveApproval(
   if (!pending) return { ok: false };
   clearTimeout(pending.timer);
   pendingApprovals.delete(requestId);
+  emitToRenderer(APPROVAL_CHANNEL, { ...pending.request, expiresAt: 0 });
   emitApprovalLifecycle({ status: "resolved", requestId, decision });
   pending.resolve(decision); // 원본 once/always/deny 그대로 → requestApproval이 기억/판정
   return { ok: true };

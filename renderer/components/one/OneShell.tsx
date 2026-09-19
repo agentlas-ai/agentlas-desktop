@@ -8297,7 +8297,7 @@ export function OneShell() {
           approval listener is not mounted here. Keep the native approval
           checkpoint in this route explicitly; otherwise browser actions can
           wait behind an invisible sheet. */}
-      <BrowserActionApprovalSheet permission={onePermission} />
+      <BrowserActionApprovalSheet permission={onePermission} chatId={activeThreadChatId} />
 
       <OneSettingsSheet
         open={settingsSheet}

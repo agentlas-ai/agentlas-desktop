@@ -681,6 +681,7 @@ import {
   browserListPermissions,
   browserRevokePermission,
   browserResolveApproval,
+  listPendingBrowserApprovals,
   browserListLogs,
 } from "./browser/connect";
 import type { BrowserPermissionDecision } from "./browser/connect";
@@ -3790,6 +3791,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:resolveApproval", (_e, requestId: string, decision: BrowserPermissionDecision) =>
     browserResolveApproval(requestId, decision),
   );
+  ipcMain.handle("browser:listPendingApprovals", () => listPendingBrowserApprovals());
 
   /*
    * 도구 승인 — 런타임이 승인을 필요로 하거나(live) 이미 자동 거부한(post-denial) 사실을
