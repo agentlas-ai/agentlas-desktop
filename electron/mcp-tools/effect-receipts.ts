@@ -77,7 +77,7 @@ export function beginMainMcpEffect(binding: PreparedMcpBinding, tool: string, ar
       // A definite local rejection is settled; a dropped wire after send never is.
       // Even a snapshot may have an outstanding callback after a modal race;
       // every native browser operation needs the exact leaf-completion receipt.
-      receipt.state = !dispatched || predispatch || (valid && !frame?.error && (time || (browserCompleted && !receipt.failed))) ? "settled" : "uncertain";
+      receipt.state = !dispatched || predispatch || (valid && !frame?.error && (time || browserCompleted)) ? "settled" : "uncertain";
       if (dispatched && receipt.state === "settled" && !receipt.failed && (time || browserCompleted)) {
         const resultDigest = mcpEffectArgumentsDigest(result);
         const outputDigests = [resultDigest];

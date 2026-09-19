@@ -121,7 +121,7 @@ export class AntigravityEffectCoverage {
     const settledFailureIds: string[] = [];
     for (const tool of this.tools.values()) {
       if (!tool.started || !tool.completed) this.reasons.add("tool-incomplete");
-      let settled = SYNCHRONOUS_READS.has(tool.name), settledFailure = false;
+      let settled = SYNCHRONOUS_READS.has(tool.name), settledFailure = settled && tool.failed;
       if (tool.name === "call_mcp_tool") {
         let call = tool.parameters as any;
         if (typeof call === "string") { try { call = JSON.parse(call); } catch { call = null; } }

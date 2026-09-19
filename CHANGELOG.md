@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.31 — 2026-09-19
+
+- Let Full access browser runs authorize unsafe code before the first page is
+  available, while still validating the run-scoped Main authority.
+- Treat fully drained read and browser failures as settled failures so ongoing
+  Goals can recover, wait, and continue instead of becoming permanently blocked.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a public installer, installed update or long-running outcome; those remain separate verification gates.
+
 ## 1.2.30 — 2026-09-19
 
 - Let a Full Access One Goal continue after page-scoped browser code only when Main observed the exact Playwright callback finish with no pending callback, modal interruption, cancellation or tool error. The receipt proves that dispatch settled; Goal completion still requires its separate outcome evidence.

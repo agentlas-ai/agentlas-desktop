@@ -2437,12 +2437,14 @@ function installBrowserLeafHooks(tools) {
     if (evaluationCallback) scope.callbacks++;
     try {
       const value = await callback();
-      if (evaluationCallback) scope.completedCallbacks++;
       return value;
     } catch (error) {
       scope.failed = true;
       throw error;
     } finally {
+      // Rejection still proves that the callback itself reached a terminal
+      // state. Keep domain success separate from quiescence.
+      if (evaluationCallback) scope.completedCallbacks++;
       scope.pending--;
     }
   };
@@ -2467,9 +2469,10 @@ function installBrowserLeafHooks(tools) {
       if (actions.has(name)) {
         let unpaused = false;
         try { unpaused = this._context.debugger().pausedDetails() == null; } catch { /* Missing hook is not proof. */ }
-        const completed = Array.isArray(result.content) && (result.isError === undefined || result.isError === false)
+        const completed = Array.isArray(result.content)
+          && (result.isError === undefined || typeof result.isError === 'boolean')
           && result.task === undefined && result.isClose !== true && !signal?.aborted && unpaused
-          && !scope.failed && !scope.interrupted && scope.pending === 0
+          && !scope.interrupted && scope.pending === 0
           && (!['browser_evaluate', 'browser_run_code', 'browser_run_code_unsafe'].includes(name)
             || (scope.callbacks > 0 && scope.callbacks === scope.completedCallbacks));
         metadata.agentlasBrowserLeaf = {
@@ -2965,11 +2968,25 @@ async function main() {
     const contextUrl = approvalContextUrl(name, args, observedUrl);
     const actionType = classifyAction(name, args, contextUrl);
     if (!actionType) return null;
-    // 민감 행동에서 현재 페이지를 확인할 수 없으면 stale currentUrl/권한 캐시로 진행하지 않는다.
-    if (!contextUrl) { log('blocked sensitive action: CDP current page unavailable', name); return 'unverified-site'; }
+    // Full access is run-scoped Main authority, not a site permission. A fresh
+    // browser legitimately starts at about:blank, so verify that authority with
+    // Main even before a page exists. Gated runs remain fail-closed here.
+    if (!contextUrl) {
+      if (process.env.AGENTLAS_BROWSER_AUTONOMY === 'trust') {
+        const decision = await requestApproval('agentlas-full-access.local', actionType, actionType + ': ' + String(args.function || args.expression || args.code || args.filename || name), signal);
+        return decision === 'approved' ? null : (decision === 'denied' ? actionType : 'approval-' + decision);
+      }
+      log('blocked sensitive action: CDP current page unavailable', name); return 'unverified-site';
+    }
     currentUrl = contextUrl;
     let site = ''; try { site = new URL(contextUrl).host; } catch (e) { site = ''; }
-    if (!site) { log('blocked sensitive action: invalid approval URL', contextUrl); return 'unverified-site'; }
+    if (!site) {
+      if (process.env.AGENTLAS_BROWSER_AUTONOMY === 'trust') {
+        const decision = await requestApproval('agentlas-full-access.local', actionType, actionType + ': ' + String(args.function || args.expression || args.code || args.filename || name), signal);
+        return decision === 'approved' ? null : (decision === 'denied' ? actionType : 'approval-' + decision);
+      }
+      log('blocked sensitive action: invalid approval URL', contextUrl); return 'unverified-site';
+    }
     const detail = actionType === 'unsafe-code'
       ? String(args.function || args.expression || args.code || args.filename || name)
       : (args.element || args.url || args.key || name);
