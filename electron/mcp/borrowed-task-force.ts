@@ -111,6 +111,7 @@ import {
   type WorkforcePairRuntimeGrant,
   type WorkforcePlannerCapabilityBinding,
 } from "./workforce-tool-inventory";
+import type { BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import {
   oneAttachmentExecutionPrompt,
   redactOneAttachmentText,
@@ -491,6 +492,8 @@ export interface BorrowedTaskForceParams {
   isolatedMcpConfig?: true;
   /** Main-authored execution restriction, independent of MCP inventory isolation. */
   browserOnly?: true;
+  /** Main-authored approval owner propagated unchanged to workforce MCP children. */
+  browserApprovalScope?: BrowserApprovalScope;
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
@@ -5387,6 +5390,7 @@ async function runPlanner(
             ),
           })),
           gateChatId: p.chat.id,
+          ...(p.browserApprovalScope ? { approvalScope: p.browserApprovalScope } : {}),
           ...(p.req.simulation === true ? { gateSimulation: true as const } : {}),
           signal: p.signal,
         });

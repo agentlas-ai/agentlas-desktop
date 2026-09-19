@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { InstalledMcpServer, RuntimeStatus } from "../../shared/types";
 import type { WorkforceRuntimeToolGrant } from "../runtime/runner";
 import { testServerConnection } from "../mcp-tools/client";
-import { buildMcpConfigFile, mcpConfigKey } from "../mcp-tools/mcp-config";
+import { buildMcpConfigFile, mcpConfigKey, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import type { WorkforceExecutionContext, WorkforcePermissionPolicy } from "./workforce-orchestrator";
 import { isHostAuthorityPolicy } from "./workforce-orchestrator";
@@ -536,6 +536,7 @@ export async function finalizeWorkforceCapabilityBinding(input: {
   packets: Array<{ agent: string; allocation: { runtimeId?: string }; capabilityBindings?: WorkforcePlannerCapabilityBinding[];
     gatePermission?: "read" | "write" | "full" }>;
   gateChatId: string;
+  approvalScope?: BrowserApprovalScope;
   gateSimulation?: true;
   signal?: AbortSignal;
 }): Promise<FinalizedWorkforceCapabilityBinding> {
@@ -622,6 +623,7 @@ export async function finalizeWorkforceCapabilityBinding(input: {
             permission: packet.gatePermission,
             ...(input.projectDir ? { cwd: input.projectDir } : {}),
             chatId: input.gateChatId,
+            ...(input.approvalScope ? { approvalScope: input.approvalScope } : {}),
             ...(input.gateSimulation ? { simulation: true as const } : {}),
           },
         });

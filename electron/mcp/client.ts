@@ -190,7 +190,7 @@ import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown } from "../runtime/runtime-cooldown";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
-import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate } from "../mcp-tools/mcp-config";
+import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
 import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
@@ -1830,6 +1830,13 @@ async function runMcpInvocationInContext(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  const browserApprovalScope: BrowserApprovalScope | undefined = chat.id === req.chatId
+    ? executionContext?.source === "science"
+      ? Object.freeze({ surface: "science" as const, chatId: chat.id })
+      : chat.originSurface === "one" || chat.originSurface === "work"
+        ? Object.freeze({ surface: chat.originSurface, chatId: chat.id })
+        : undefined
+    : undefined;
   // Freeze conversation state before this turn becomes durable. Every routing
   // decision and model history below must see only earlier turns; otherwise the
   // current request is duplicated as both history and the active user prompt.
@@ -3217,6 +3224,7 @@ ${effectiveUserPrompt}`;
           ...(workingFolder ? { cwd: workingFolder } : {}),
           ...(req.chatId ? { chatId: req.chatId } : {}),
           ...(workspacePreviewOwnerGrant ? { chatId: workspacePreviewOwnerGrant.chatId } : {}),
+          ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
           ...(executionContext ? { unattended: true } : {}),
         },
       });
@@ -3291,6 +3299,7 @@ ${effectiveUserPrompt}`;
                 ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
                 toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
+                  ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
@@ -3504,6 +3513,7 @@ ${effectiveUserPrompt}`;
       onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
       bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
       prepareWorkerCapabilities,
+      ...(browserApprovalScope ? { browserApprovalScope } : {}),
     });
   };
   const workforceProjectDir = workingFolder ?? process.cwd();
