@@ -311,8 +311,21 @@ async function keyState(
 
 function cleanupExpired(now: Date): void {
   for (const [id, plan] of plans) {
-    if (Date.parse(plan.publicPlan.expiresAt) <= now.getTime()) plans.delete(id);
+    if (Date.parse(plan.publicPlan.expiresAt) > now.getTime()) continue;
+    plans.delete(id);
+    cleanupPlanApplication(plan);
   }
+}
+
+function cleanupPlanApplication(plan: StoredBuildPlan): void {
+  const application = plan.application;
+  if (!application) return;
+  void application.promise.then(
+    (attachment) => {
+      try { attachment.config?.cleanup?.(); } catch { /* cleanup is best-effort and idempotent */ }
+    },
+    () => { /* rejected applications own no usable config */ },
+  );
 }
 
 function ruleFor(entry: McpToolCatalogEntry): CatalogRule {
@@ -755,5 +768,6 @@ function persistAttachmentBestEffort(
 
 /** Test-only isolation. Production callers never enumerate or mutate plan internals. */
 export function clearMcpBuildPlansForTest(): void {
+  for (const plan of plans.values()) cleanupPlanApplication(plan);
   plans.clear();
 }

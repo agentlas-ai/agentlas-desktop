@@ -82,6 +82,17 @@ const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
       serverIds,
       skipDefaultSeed: true,
       configKey: `build-${planId}`,
+      browserApproval: {
+        owner: {
+          surface: "work",
+          context: "build",
+          chatId: null,
+          sessionKey: `build:${planId}`,
+        },
+        // Build has no Full-control switch. Keep irreversible browser actions
+        // gated even though the builder itself has filesystem write authority.
+        permission: "write",
+      },
     }),
 };
 
@@ -373,6 +384,7 @@ export async function resolveApprovedMcpCandidates(input: {
       config = nextConfig;
       break;
     }
+    nextConfig?.cleanup?.();
     for (const state of rejectedStates) {
       const rejected = state.attached!;
       state.degraded.push({
@@ -421,7 +433,10 @@ export async function resolveApprovedMcpCandidates(input: {
       state.attached = null;
     }
   }
-  if (attached.length === 0) config = null;
+  if (attached.length === 0) {
+    config?.cleanup?.();
+    config = null;
+  }
 
   const order = new Map(input.candidates.map((candidate, index) => [candidate.public.id, index]));
   const sortItems = (items: McpBuildReceiptItem[]) =>
@@ -459,6 +474,17 @@ export async function resolveApprovedMcpCandidates(input: {
   };
 
   if (input.allowRuntimeRecovery !== false && config && receipt.attached.length > 0) {
+    const baseCleanup = config.cleanup;
+    const recoveryCleanups = new Set<() => void>();
+    let cleaned = false;
+    config.cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { baseCleanup?.(); } finally {
+        for (const cleanup of recoveryCleanups) cleanup();
+        recoveryCleanups.clear();
+      }
+    };
     resolvedAttachment.recoverRuntimeFailure = async (failedCandidateId) => {
       const failedItem = receipt.attached.find((item) => item.candidateId === failedCandidateId);
       if (!failedItem || !selected.has(failedCandidateId)) return null;
@@ -480,7 +506,13 @@ export async function resolveApprovedMcpCandidates(input: {
       // explicitly unavailable while unrelated Build work continues. If no
       // healthy MCP remains, the resolver's emptyMode is authoritative.
       if (healthyCandidateIds.some((id) => !recoveredIds.has(id))) {
+        recovered.config?.cleanup?.();
         return null;
+      }
+      const recoveredCleanup = recovered.config?.cleanup;
+      if (recoveredCleanup) {
+        if (cleaned) recoveredCleanup();
+        else recoveryCleanups.add(recoveredCleanup);
       }
       const replacement = recovered.receipt.attached.find((item) =>
         item.fallbackGroup === failedItem.fallbackGroup && item.candidateId !== failedCandidateId);
