@@ -2430,7 +2430,8 @@ function installBrowserLeafHooks(tools) {
   const actions = new Set(['browser_evaluate', 'browser_navigate', 'browser_navigate_back', 'browser_snapshot',
     'browser_click', 'browser_hover', 'browser_type', 'browser_fill_form', 'browser_select_option',
     'browser_press_key', 'browser_drag', 'browser_tabs', 'browser_take_screenshot', 'browser_console_messages',
-    'browser_network_requests', 'browser_wait_for', 'browser_handle_dialog', 'browser_file_upload', 'browser_resize']);
+    'browser_network_requests', 'browser_wait_for', 'browser_handle_dialog', 'browser_file_upload', 'browser_resize',
+    'browser_run_code', 'browser_run_code_unsafe']);
   const track = async (scope, callback, evaluationCallback) => {
     scope.pending++;
     if (evaluationCallback) scope.callbacks++;
@@ -2469,7 +2470,8 @@ function installBrowserLeafHooks(tools) {
         const completed = Array.isArray(result.content) && (result.isError === undefined || result.isError === false)
           && result.task === undefined && result.isClose !== true && !signal?.aborted && unpaused
           && !scope.failed && !scope.interrupted && scope.pending === 0
-          && (name !== 'browser_evaluate' || (scope.callbacks > 0 && scope.callbacks === scope.completedCallbacks));
+          && (!['browser_evaluate', 'browser_run_code', 'browser_run_code_unsafe'].includes(name)
+            || (scope.callbacks > 0 && scope.callbacks === scope.completedCallbacks));
         metadata.agentlasBrowserLeaf = {
           schemaVersion: 'agentlas.browser-leaf.v1', tool: name, state: completed ? 'completed' : 'uncertain',
         };

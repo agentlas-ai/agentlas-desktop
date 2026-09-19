@@ -17,6 +17,7 @@ import {
   IconSparkles,
 } from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
+import type { OneThreadRunBlock } from "@/lib/one-thread-work";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import { ToolObservation } from "../ToolObservation";
 import { toolObservationAction } from "@/lib/tool-observation";
@@ -509,6 +510,7 @@ export function OneTurnWork({
   locale,
   workspacePath,
   runStatus,
+  interruptionCause,
   onRetry,
   retryDisabled = false,
   onInspectWorker,
@@ -532,6 +534,8 @@ export function OneTurnWork({
    * (실측 2026-08-25: 같은 대화에서 질문 3개 중 2개가 이 상태였다).
    */
   runStatus?: InvocationRunReceipt["status"];
+  /** Typed ledger cause; absent means an interrupted run remains an actual unanswered interruption. */
+  interruptionCause?: OneThreadRunBlock["interruptionCause"];
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
   retryDisabled?: boolean;
@@ -553,7 +557,8 @@ export function OneTurnWork({
   const liveElapsedMs = useElapsed(startedAt, active);
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
   // 종료 줄을 쓸 주체가 없으므로, "종료 이벤트가 없다"는 사실 자체가 유일한 증거다.
-  const interrupted = !active && runStatus === "interrupted";
+  const steeringInterrupted = !active && runStatus === "interrupted" && interruptionCause === "steering";
+  const interrupted = !active && runStatus === "interrupted" && !steeringInterrupted;
   // Only active runs use a wall clock. Settled rows require a measured,
   // immutable lifecycle duration; revisiting a task must not add idle time.
   const settledMs = active ? liveElapsedMs : presentation.durationMs;
@@ -588,14 +593,14 @@ export function OneTurnWork({
   const inlineCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId || cell.kind !== "agent"), [visibleCells]);
   const hasRows = visibleCells.length > 0;
 
-  if (!active && !hasRows && !presentation.terminalMessage && !interrupted && !state.artifacts.length) {
+  if (!active && !hasRows && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
   }
 
   const terminal = presentation.terminal;
-  const failed = !active && (terminal === "failed" || terminal === "cancelled");
+  const failed = !active && !steeringInterrupted && (terminal === "failed" || terminal === "cancelled");
   const workedFor = settledMs != null
     ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
     : (ko ? "작업" : "Work");
@@ -631,11 +636,14 @@ export function OneTurnWork({
           className={styles.header}
           onClick={() => setExpanded((current) => !current)}
           aria-expanded={expanded}
-          data-terminal={terminal ?? "completed"}
+          data-terminal={steeringInterrupted ? "steered" : terminal ?? "completed"}
         >
           <span>{workedFor}</span>
           {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
           {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
+          {steeringInterrupted && (
+            <span className={styles.muted}>· {ko ? "방향 수정됨" : "direction updated"}</span>
+          )}
           {failed && (
             <span className={terminal === "cancelled" ? styles.muted : styles.headerTerminal}>
               · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}
@@ -660,7 +668,7 @@ export function OneTurnWork({
         </div>
       )}
       {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}
-      {presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
+      {!steeringInterrupted && presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
         <div className={styles.rows}>
           <details className={styles.row} data-kind="notice" data-status="failed" data-terminal-error={presentation.terminalErrorCode ?? "unknown"}>
             <summary className={styles.rowHead} style={{ cursor: "pointer", listStyle: "none" }}>
@@ -706,6 +714,22 @@ export function OneTurnWork({
               </button>
             </div>
           )}
+        </div>
+      )}
+      {steeringInterrupted && (
+        <div className={styles.rows} data-one-turn-steered="true">
+          <div className={styles.row} data-kind="notice" data-status="completed">
+            <span className={styles.rowHead}>
+              <span className={styles.rowMark} data-status="completed" aria-hidden="true"><IconRefresh size={13} /></span>
+              <span className={styles.rowText}>
+                <span className={styles.notice}>
+                  {ko
+                    ? "새 지시를 반영하기 위해 이 실행을 중단했습니다."
+                    : "This run was interrupted to apply your new direction."}
+                </span>
+              </span>
+            </span>
+          </div>
         </div>
       )}
     </section>

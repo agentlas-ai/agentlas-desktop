@@ -19,7 +19,29 @@ export interface OneThreadRunBlock {
   startedAt: string;
   finishedAt?: string;
   status: InvocationRunReceipt["status"];
+  interruptionCause?: "steering";
   state: OneActivityState;
+}
+
+/**
+ * Keep deliberate steering separate from an unexplained interrupted receipt.
+ * This is intentionally fail-closed: only the exact typed ledger sequence
+ * written by InvocationService may neutralize the ordinary interruption UI.
+ */
+export function oneRunInterruptionCause(
+  receipt: InvocationRunReceipt,
+  events: RunEventUi[],
+): OneThreadRunBlock["interruptionCause"] {
+  if (receipt.status !== "interrupted") return undefined;
+  if (events.some((event) => event.runId !== receipt.runId || (event.chatId && event.chatId !== receipt.chatId))) {
+    return undefined;
+  }
+  const hasSteeringSignal = events.some((event) => event.kind === "user_steering");
+  const hasSteeringCancel = events.some((event) => (
+    event.kind === "invoke_cancel_requested" && event.payload?.reason === "steering"
+  ));
+  const hasInterruptedTerminal = events.some((event) => event.kind === "invoke_interrupted");
+  return hasSteeringSignal && hasSteeringCancel && hasInterruptedTerminal ? "steering" : undefined;
 }
 
 export function projectThreadRuns(
@@ -27,13 +49,17 @@ export function projectThreadRuns(
 ): OneThreadRunBlock[] {
   return timeline
     .filter((entry) => entry.receipt && entry.receipt.runId)
-    .map((entry) => ({
-      runId: entry.receipt.runId,
-      startedAt: entry.receipt.startedAt,
-      ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
-      status: entry.receipt.status,
-      state: projectOneActivityFromLedger(entry.events, entry.receipt),
-    }))
+    .map((entry) => {
+      const interruptionCause = oneRunInterruptionCause(entry.receipt, entry.events);
+      return {
+        runId: entry.receipt.runId,
+        startedAt: entry.receipt.startedAt,
+        ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
+        status: entry.receipt.status,
+        ...(interruptionCause ? { interruptionCause } : {}),
+        state: projectOneActivityFromLedger(entry.events, entry.receipt),
+      };
+    })
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }
 

@@ -39,7 +39,13 @@ export function mcpEffectArgumentsDigest(value: unknown): string {
 // A normal MCP response alone is insufficient: upstream may race a modal dialog.
 const BROWSER_ACTIONS = new Set(["browser_evaluate", "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_click", "browser_hover",
   "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key", "browser_drag", "browser_tabs",
-  "browser_take_screenshot", "browser_console_messages", "browser_network_requests", "browser_wait_for", "browser_handle_dialog", "browser_file_upload", "browser_resize"]);
+  "browser_take_screenshot", "browser_console_messages", "browser_network_requests", "browser_wait_for", "browser_handle_dialog", "browser_file_upload", "browser_resize",
+  // The pinned implementation runs arbitrary code inside Tab.waitForCompletion
+  // and awaits its ManualPromise before BrowserBackend.callTool resolves. Main's
+  // leaf hook below additionally requires that callback to finish, no modal
+  // interruption, no abort, and no tracked callback left pending. This proves
+  // dispatch settlement only; it does not attest the page's business outcome.
+  "browser_run_code", "browser_run_code_unsafe"]);
 /** Called at the actual Main proxy request, before policy/upstream dispatch. */
 export function beginMainMcpEffect(binding: PreparedMcpBinding, tool: string, args: Record<string, unknown>, contract: "time" | "native-browser" | null) {
   const targets = [...(listeners.get(binding) ?? [])];

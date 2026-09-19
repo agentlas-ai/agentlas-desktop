@@ -7054,6 +7054,7 @@ export function OneShell() {
                         onInspectWorker={(group) => inspectWorkerPanel(block.runId, group)}
                         busy={false}
                         runStatus={block.status}
+                        interruptionCause={block.interruptionCause}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -7204,6 +7205,7 @@ export function OneShell() {
                               locale={appLocale}
                               workspacePath={workspacePath}
                               runStatus={block.status}
+                              interruptionCause={block.interruptionCause}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
