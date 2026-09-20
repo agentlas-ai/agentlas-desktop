@@ -113,6 +113,19 @@ export interface RunnerRequest {
   mcpConfigPath?: string;
   /** Ignore provider-global MCP/plugins and admit only Main's per-run config. */
   isolatedMcpConfig?: true;
+  /**
+   * Main-authored: this run's tool authority is a single-use, per-run grant (Science: a fresh token and config file per
+   * invocation, revoked when the turn settles). Such a process can never serve the next turn, so it is never pooled.
+   * Measured 2026-09-20: a Science loop left one resident CLI (~0.5 GB with its MCP child) per turn, each holding a dead token.
+   * Continuity is unaffected: it comes from --resume / history, not from residency.
+   */
+  ephemeralToolGrant?: true;
+  /**
+   * Main-authored: this run has no next turn (a throwaway chat id, e.g. the post-turn memory review). Pooling it parks a
+   * CLI nobody can lease again until the 12h idle reap. Measured 2026-09-20: a Science loop left one resident claude
+   * (~0.2 GB plus its plugin MCP children) per reviewed turn -- 6 after 40 minutes.
+   */
+  singleUse?: true;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */
   mcpAllowedTools?: string[];
   /**

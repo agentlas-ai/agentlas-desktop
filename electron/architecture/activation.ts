@@ -107,13 +107,24 @@ function captureActivatedFolderIdentity(projectPath: string): ActivatedFolderIde
 }
 
 function fingerprintMatches(expected: StableFsFingerprint, actual: StableFsFingerprint): boolean {
-  if (expected.dev !== null && actual.dev !== null && expected.dev !== actual.dev) return false;
   if (expected.ino !== null && actual.ino !== null && expected.ino !== actual.ino) return false;
   if (
     expected.birthtimeNs !== null &&
     actual.birthtimeNs !== null &&
     expected.birthtimeNs !== actual.birthtimeNs
   ) return false;
+  if (expected.dev !== null && actual.dev !== null && expected.dev !== actual.dev) {
+    // APFS may renumber a mounted device across a reboot while preserving the
+    // directory inode and nanosecond birth time. Accept that remount only when
+    // both independent replacement signals remain available and exact; a
+    // missing or partial identity still fails closed.
+    return expected.ino !== null &&
+      actual.ino !== null &&
+      expected.ino === actual.ino &&
+      expected.birthtimeNs !== null &&
+      actual.birthtimeNs !== null &&
+      expected.birthtimeNs === actual.birthtimeNs;
+  }
   // At least one stable filesystem signal is required when canonical paths
   // alone cannot distinguish a same-path replacement.
   const sharedStableSignal =

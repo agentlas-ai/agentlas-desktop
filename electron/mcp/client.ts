@@ -2820,6 +2820,8 @@ ${effectiveUserPrompt}`;
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
+  // Set when the run's tool authority is a single-use grant (Science): the runner must not keep the process resident.
+  let ephemeralToolGrant = false;
   let isolatedMcpConfig = false;
   let prepareWorkerCapabilities: PrepareWorkerCapabilities | undefined;
   // Selecting an authenticated browser adds a capability; it does not revoke
@@ -3372,6 +3374,7 @@ ${effectiveUserPrompt}`;
     mcpAllowedTools = scienceGrant.allowedTools;
     mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
     mcpRuntimeEnv = scienceGrant.runtimeEnv;
+    ephemeralToolGrant = true;
     mcpIncludedServers = [scienceGrant.includedServer];
     mcpAutoSelectionPrompt = scienceReview ? "Independently assess the reserved scientific input. All tools and native runtime actions remain read-only. Only read_criterion_review_input is granted; do not create research state or borrow another agent. Return the exact requested findings JSON." : planReadOnly
       ? "Agentlas Science Plan mode is read-only for files, shell, and research state. Only the exact granted discovery tools may be called. Describe a plan without creating contracts, hypotheses, studies, artifacts, approvals, downloads, or other state. Unavailable research tools remain unavailable until a separate execution turn."
@@ -3474,21 +3477,27 @@ ${effectiveUserPrompt}`;
     paths: readonly string[],
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
+    // A conversational One run can become a canonical Task on its first tool
+    // event. The Task did not exist when this invocation was prepared, but it
+    // is already durable by the successful completion event that carries the
+    // artifact. Resolve it again here so that first-turn outputs bind to the
+    // Task that the invocation service just materialized.
+    const artifactTask = findCanonicalTaskForChat(chat.id) ?? canonicalTask;
     // Work and One use the same canonical Task output rail. Admission depends
     // on that exact Task/run binding, not on which product opened the chat.
-    if (req.agentAppMode || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
+    if (req.agentAppMode || !artifactTask || !runId || !toolId || paths.length === 0) return [];
     paths = paths.filter(target => !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, path.resolve(resolvedResultFolder, target)));
     if (!paths.length) return [];
     return bindOneRuntimeToolArtifacts({
-      taskId: canonicalTask.id,
-      taskVersion: canonicalTask.version,
+      taskId: artifactTask.id,
+      taskVersion: artifactTask.version,
       chatId: chat.id,
       runId,
       toolId,
       paths,
     }).map((artifact) => ({
-      taskId: canonicalTask.id,
-      taskVersion: canonicalTask.version,
+      taskId: artifactTask.id,
+      taskVersion: artifactTask.version,
       chatId: chat.id,
       runId,
       manifestId: artifact.manifestId,
@@ -4976,6 +4985,7 @@ ${effectiveUserPrompt}`;
       agentId: agent.id,
       mcpConfigPath,
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
+      ...(ephemeralToolGrant ? { ephemeralToolGrant: true as const } : {}),
       mcpAllowedTools,
       mcpCodexConfigArgs,
       // C38 — 관문을 실제로 건 것은 **이 경로**뿐이다. 관문 파일이 여기 실리는 순간에만
@@ -5116,6 +5126,7 @@ ${effectiveUserPrompt}`;
             browserCaptureDir(),
             screenCaptureDir(),
             userDataPath("generated-assets", "native-browser"),
+            userDataPath("generated-assets", "antigravity"),
             userDataPath("multimodal-images"),
             ...(allowResultFolder && resolvedResultFolder ? [resolvedResultFolder] : []),
           ];

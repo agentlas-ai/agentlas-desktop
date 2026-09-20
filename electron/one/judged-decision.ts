@@ -18,6 +18,8 @@ import {
 } from "../../shared/one-decision";
 import type { PendingConfirmation } from "../../shared/types";
 import { judgeRequired, peekJudgment, runtimeSelectionCacheScope } from "../system-agents/judgment";
+import { onHostShutdown } from "../host-lifecycle";
+import { emitDesktopStoreChange } from "../store/change-bus";
 
 const RISK_LABELS = ["R0", "R1", "R2", "R3", "R4"] as const;
 const DISPOSITION_LABELS = ["choice", "approve", "reject", "modify"] as const;
@@ -78,17 +80,193 @@ export const oneDecisionJudgedReaders: OneDecisionJudgedReaders = {
   authorityReadiness: judgedOneDecisionAuthorityReadiness,
 };
 
-// Only successful llm verdicts enter the judgment cache, so a failing warm (model
-// down, timeout) would otherwise re-run on EVERY mobile snapshot. Remember inputs
-// already attempted this session; the sync sites simply fail closed.
-const attemptedWarm = new Set<string>();
-const ATTEMPTED_MAX = 500;
+type OneDecisionJudgmentConfirmation = Pick<
+  PendingConfirmation,
+  "chatId" | "sourceMessageId" | "question" | "header" | "options"
+>;
 
-function markAttempted(key: string): void {
-  attemptedWarm.add(key);
-  if (attemptedWarm.size > ATTEMPTED_MAX) {
-    const oldest = attemptedWarm.values().next().value;
-    if (oldest !== undefined) attemptedWarm.delete(oldest);
+type OneDecisionJudgeRequired = typeof judgeRequired;
+
+interface OneDecisionPrejudgeOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Private verifier seam. Production always uses the resident judge. */
+  judgeRequiredFn?: OneDecisionJudgeRequired;
+  /** Private verifier seam. Production emits the existing content-free store event. */
+  onComplete?: () => void;
+  /** Private verifier seam. Production retries at 0, 2, and 8 seconds. */
+  retryDelaysMs?: readonly number[];
+}
+
+interface DeferredDecisionJudgment {
+  key: string;
+  confirmation: OneDecisionJudgmentConfirmation;
+  attempt: number;
+  controller: AbortController | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  options: OneDecisionPrejudgeOptions;
+}
+
+interface ReadyDecisionJudgment {
+  combined: string;
+  optionInputs: string[];
+  risk: OneDecisionRiskLevel;
+  authorityReadiness: OneDecisionAuthorityReadiness;
+  dispositions: OneDecisionOptionDisposition[];
+}
+
+// A live packaged Codex/Sol judge takes about 18–21 seconds on this host even
+// for compact classification prompts. The runtime pool reserves half of this
+// total for fallback candidates, so 60 seconds gives the first configured
+// runtime a 30-second cold-start window. The old 8-second ceiling guaranteed a
+// fail-closed R4 projection before the resident model could answer. The normal
+// projection path is deferred and does not block snapshot delivery.
+export const ONE_DECISION_JUDGE_TIMEOUT_MS = 60_000;
+export const ONE_DECISION_JUDGE_RETRY_DELAYS_MS = [0, 2_000, 8_000] as const;
+
+const JUDGMENT_STATE_MAX = 500;
+const readyDecisionJudgments = new Map<string, ReadyDecisionJudgment>();
+const deferredDecisionJudgments = new Map<string, DeferredDecisionJudgment>();
+let activeDeferredDecisionKeys = new Set<string>();
+
+function decisionJudgmentKey(confirmation: OneDecisionJudgmentConfirmation): string {
+  const texts = oneDecisionJudgmentTexts(confirmation);
+  return JSON.stringify([
+    runtimeSelectionCacheScope(),
+    confirmation.chatId,
+    confirmation.sourceMessageId,
+    texts.combined,
+    texts.options,
+  ]);
+}
+
+function rememberReadyDecision(key: string, judgment: ReadyDecisionJudgment): void {
+  readyDecisionJudgments.delete(key);
+  readyDecisionJudgments.set(key, judgment);
+  if (readyDecisionJudgments.size > JUDGMENT_STATE_MAX) {
+    const oldest = readyDecisionJudgments.keys().next().value;
+    if (oldest !== undefined) readyDecisionJudgments.delete(oldest);
+  }
+}
+
+function clearDeferredJob(job: DeferredDecisionJudgment): void {
+  if (job.timer) clearTimeout(job.timer);
+  job.timer = null;
+  job.controller?.abort(new Error("One Decision judgment is no longer current"));
+  job.controller = null;
+  if (deferredDecisionJudgments.get(job.key) === job) {
+    deferredDecisionJudgments.delete(job.key);
+  }
+}
+
+function completeDecisionJudgment(
+  confirmation: OneDecisionJudgmentConfirmation,
+  key: string,
+  judgment: ReadyDecisionJudgment,
+  onComplete?: () => void,
+): boolean {
+  const texts = oneDecisionJudgmentTexts(confirmation);
+  if (
+    decisionJudgmentKey(confirmation) !== key
+    || judgment.combined !== texts.combined
+    || judgment.optionInputs.length !== texts.options.length
+    || judgment.optionInputs.some((value, index) => value !== texts.options[index])
+    || judgment.dispositions.length !== texts.options.length
+  ) return false;
+  if (readyDecisionJudgments.has(key)) return true;
+  rememberReadyDecision(key, judgment);
+  const job = deferredDecisionJudgments.get(key);
+  if (job) clearDeferredJob(job);
+  (onComplete ?? (() => emitDesktopStoreChange({ entity: "runtime" })))();
+  return true;
+}
+
+function closedDecisionReaders(): OneDecisionJudgedReaders {
+  return {
+    risk: () => null,
+    disposition: () => null,
+    authorityReadiness: () => null,
+  };
+}
+
+/**
+ * Expose a decision's cached verdicts atomically. A partial raw judgment cache
+ * (for example risk succeeded while one option timed out) remains fail-closed.
+ */
+export function oneDecisionJudgedReadersFor(
+  confirmation: OneDecisionJudgmentConfirmation,
+): OneDecisionJudgedReaders {
+  const key = decisionJudgmentKey(confirmation);
+  const judgment = readyDecisionJudgments.get(key);
+  if (!judgment) return closedDecisionReaders();
+  const texts = oneDecisionJudgmentTexts(confirmation);
+  return {
+    risk: (text) => text === texts.combined ? judgment.risk : null,
+    authorityReadiness: (text) => text === texts.combined ? judgment.authorityReadiness : null,
+    disposition: (text) => {
+      const index = judgment.optionInputs.indexOf(text);
+      return index >= 0 ? judgment.dispositions[index] ?? null : null;
+    },
+  };
+}
+
+async function runOneDecisionJudgments(
+  confirmation: OneDecisionJudgmentConfirmation,
+  options: OneDecisionPrejudgeOptions,
+  signal: AbortSignal | undefined,
+): Promise<ReadyDecisionJudgment | null> {
+  const texts = oneDecisionJudgmentTexts(confirmation);
+  const run = options.judgeRequiredFn ?? judgeRequired;
+  const timeoutMs = options.timeoutMs ?? ONE_DECISION_JUDGE_TIMEOUT_MS;
+  try {
+    const risk = run<OneDecisionRiskLevel>({
+      kind: ONE_DECISION_RISK_JUDGMENT_KIND,
+      question: RISK_QUESTION,
+      labels: RISK_LABELS,
+      input: texts.combined,
+      guidance: RISK_GUIDANCE,
+      signal,
+      timeoutMs,
+    });
+    const authorityReadiness = run<OneDecisionAuthorityReadiness>({
+      kind: ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
+      question: AUTHORITY_READINESS_QUESTION,
+      labels: AUTHORITY_READINESS_LABELS,
+      input: texts.combined,
+      guidance: AUTHORITY_READINESS_GUIDANCE,
+      signal,
+      timeoutMs,
+    });
+    const dispositions = texts.options.map((optionText) => run<OneDecisionOptionDisposition>({
+      kind: ONE_DECISION_DISPOSITION_JUDGMENT_KIND,
+      question: DISPOSITION_QUESTION,
+      labels: DISPOSITION_LABELS,
+      input: optionText,
+      guidance: DISPOSITION_GUIDANCE,
+      signal,
+      timeoutMs,
+    }));
+    const [riskResult, readinessResult, dispositionResults] = await Promise.all([
+      risk,
+      authorityReadiness,
+      Promise.all(dispositions),
+    ]);
+    if (
+      riskResult.source !== "llm"
+      || riskResult.verdict === null
+      || readinessResult.source !== "llm"
+      || readinessResult.verdict === null
+      || dispositionResults.some((value) => value.source !== "llm" || value.verdict === null)
+    ) return null;
+    return {
+      combined: texts.combined,
+      optionInputs: [...texts.options],
+      risk: riskResult.verdict,
+      authorityReadiness: readinessResult.verdict,
+      dispositions: dispositionResults.map((value) => value.verdict as OneDecisionOptionDisposition),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -97,58 +275,98 @@ function markAttempted(key: string): void {
  * failure leaves the synchronous sites in their fail-closed state.
  */
 export async function prejudgeOneDecision(
-  confirmation: Pick<PendingConfirmation, "question" | "header" | "options">,
-  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  confirmation: OneDecisionJudgmentConfirmation,
+  opts: OneDecisionPrejudgeOptions = {},
 ): Promise<void> {
-  const texts = oneDecisionJudgmentTexts(confirmation);
-  const key = JSON.stringify([runtimeSelectionCacheScope(), texts.combined]);
-  if (attemptedWarm.has(key)) return;
-  markAttempted(key);
-  const timeoutMs = opts.timeoutMs ?? 8_000;
-  try {
-    // These judgments are independent. Serial execution made one cold mobile
-    // snapshot wait for every risk/readiness/option timeout in sequence (and
-    // then repeat that cost for every pending decision). Run the bounded
-    // resident judgments concurrently; a miss still remains a fail-closed
-    // cache miss and no deterministic semantic substitute is introduced.
-    await Promise.all([
-      judgeRequired<OneDecisionRiskLevel>({
-        kind: ONE_DECISION_RISK_JUDGMENT_KIND,
-        question: RISK_QUESTION,
-        labels: RISK_LABELS,
-        input: texts.combined,
-        guidance: RISK_GUIDANCE,
-        signal: opts.signal,
-        timeoutMs,
-      }),
-      judgeRequired<OneDecisionAuthorityReadiness>({
-        kind: ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
-        question: AUTHORITY_READINESS_QUESTION,
-        labels: AUTHORITY_READINESS_LABELS,
-        input: texts.combined,
-        guidance: AUTHORITY_READINESS_GUIDANCE,
-        signal: opts.signal,
-        timeoutMs,
-      }),
-      ...texts.options.map((optionText) => judgeRequired<OneDecisionOptionDisposition>({
-        kind: ONE_DECISION_DISPOSITION_JUDGMENT_KIND,
-        question: DISPOSITION_QUESTION,
-        labels: DISPOSITION_LABELS,
-        input: optionText,
-        guidance: DISPOSITION_GUIDANCE,
-        signal: opts.signal,
-        timeoutMs,
-      })),
-    ]);
-  } catch {
-    // Warm-only path; sync peeks simply miss and fail closed.
+  const key = decisionJudgmentKey(confirmation);
+  if (readyDecisionJudgments.has(key)) return;
+  const judgment = await runOneDecisionJudgments(confirmation, opts, opts.signal);
+  if (judgment) completeDecisionJudgment(confirmation, key, judgment, opts.onComplete);
+}
+
+function scheduleDeferredAttempt(job: DeferredDecisionJudgment): void {
+  const delays = job.options.retryDelaysMs ?? ONE_DECISION_JUDGE_RETRY_DELAYS_MS;
+  if (job.attempt >= delays.length || !activeDeferredDecisionKeys.has(job.key)) {
+    clearDeferredJob(job);
+    return;
+  }
+  const delay = Math.max(0, Math.floor(delays[job.attempt] ?? 0));
+  job.timer = setTimeout(() => {
+    job.timer = null;
+    if (
+      deferredDecisionJudgments.get(job.key) !== job
+      || !activeDeferredDecisionKeys.has(job.key)
+      || decisionJudgmentKey(job.confirmation) !== job.key
+    ) {
+      clearDeferredJob(job);
+      return;
+    }
+    job.attempt += 1;
+    const controller = new AbortController();
+    job.controller = controller;
+    const signal = job.options.signal
+      ? AbortSignal.any([controller.signal, job.options.signal])
+      : controller.signal;
+    void runOneDecisionJudgments(job.confirmation, job.options, signal).then((judgment) => {
+      if (
+        deferredDecisionJudgments.get(job.key) !== job
+        || !activeDeferredDecisionKeys.has(job.key)
+        || signal.aborted
+      ) return;
+      job.controller = null;
+      if (judgment && completeDecisionJudgment(job.confirmation, job.key, judgment, job.options.onComplete)) return;
+      scheduleDeferredAttempt(job);
+    });
+  }, delay);
+}
+
+/**
+ * Reconcile background judgment work for the exact pending Decision generation.
+ * This function never awaits a model and therefore never blocks a snapshot.
+ */
+export function deferPrejudgeOneDecisions(
+  confirmations: readonly OneDecisionJudgmentConfirmation[],
+  opts: OneDecisionPrejudgeOptions = {},
+): void {
+  const current = new Map(confirmations.map((confirmation) => [decisionJudgmentKey(confirmation), confirmation]));
+  activeDeferredDecisionKeys = new Set(current.keys());
+  for (const job of deferredDecisionJudgments.values()) {
+    if (!activeDeferredDecisionKeys.has(job.key)) clearDeferredJob(job);
+  }
+  for (const [key, confirmation] of current) {
+    if (readyDecisionJudgments.has(key)) continue;
+    const existing = deferredDecisionJudgments.get(key);
+    if (existing) continue;
+    const job: DeferredDecisionJudgment = {
+      key,
+      confirmation,
+      attempt: 0,
+      controller: null,
+      timer: null,
+      options: opts,
+    };
+    deferredDecisionJudgments.set(key, job);
+    scheduleDeferredAttempt(job);
   }
 }
 
-/** Warm every listed pending decision (mobile snapshot pre-pass). */
+/** Warm every listed pending decision when an explicit caller chooses to wait. */
 export async function prejudgeOneDecisions(
-  confirmations: readonly Pick<PendingConfirmation, "question" | "header" | "options">[],
-  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  confirmations: readonly OneDecisionJudgmentConfirmation[],
+  opts: OneDecisionPrejudgeOptions = {},
 ): Promise<void> {
   await Promise.all(confirmations.map((confirmation) => prejudgeOneDecision(confirmation, opts)));
 }
+
+export function cancelDeferredOneDecisionJudgments(): void {
+  activeDeferredDecisionKeys.clear();
+  for (const job of [...deferredDecisionJudgments.values()]) clearDeferredJob(job);
+}
+
+/** Private verifier reset; production lifecycle uses host shutdown instead. */
+export function resetOneDecisionJudgmentStateForTests(): void {
+  cancelDeferredOneDecisionJudgments();
+  readyDecisionJudgments.clear();
+}
+
+onHostShutdown(cancelDeferredOneDecisionJudgments);

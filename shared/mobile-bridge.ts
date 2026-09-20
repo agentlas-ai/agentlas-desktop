@@ -58,6 +58,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "firms.list",
   "projects.list",
   "projects.get",
+  "projects.filePreview",
   "projects.setAgentPool",
   "chats.listRecent",
   "chats.get",
@@ -96,6 +97,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "composer.context",
   "plugins.list",
   "invoke.history",
+  "request.status",
   "one.invoke.start",
   "invoke.start",
   "invoke.steer",
@@ -749,6 +751,8 @@ export interface MobileBridgeInvocationEventDto {
    */
   noticeLevel?: "info" | "success" | "warning" | "error";
   noticeDisplay?: "row" | "divider";
+  /** Closed machine identity for transient runtime-selection presentation. */
+  noticeCode?: "runtime-selected";
   /**
    * kind:"notice" only — the same sentence in both product locales.
    *
@@ -791,6 +795,10 @@ export interface MobileBridgeHostDto {
 export interface MobileBridgeRuntimeDto {
   kind: string;
   backend: string;
+  /** Exact ACP seat identity; null for non-ACP runtimes. */
+  acpAgentId: string | null;
+  /** Display-only runtime name. It never grants selection authority. */
+  label: string | null;
   version: string | null;
   active: boolean;
   /** Secret-free marker for a retained runtime whose credential cannot be read. */
@@ -1093,6 +1101,10 @@ export interface MobileBridgeProjectDto {
     path: string;
     kind: "file" | "directory";
     updatedAt: string | null;
+    fileRef?: string | null;
+    openable?: boolean;
+    previewKind?: "text" | null;
+    sizeBytes?: number | null;
   }>;
   latestResult: {
     summary: string;
@@ -1118,6 +1130,15 @@ export interface MobileBridgeProjectDto {
 
 /** Rich fields are populated only by projects.get, never by snapshot/list projection. */
 export type MobileBridgeProjectDetailDto = MobileBridgeProjectDto;
+
+export interface MobileBridgeProjectFilePreviewDto {
+  fileRef: string;
+  mimeType: string;
+  byteLength: number;
+  sha256: string;
+  text: string;
+  truncated: boolean;
+}
 
 /**
  * One project tool the phone asks Desktop to keep attached.
@@ -1205,6 +1226,10 @@ export interface MobileBridgeChatDto {
 export interface MobileBridgeRuntimeSelectionDto {
   kind: string;
   backend: string | null;
+  /** Exact ACP seat identity; required when kind is "acp". */
+  acpAgentId: string | null;
+  /** Display-only snapshot. Desktop resolves the canonical label from acpAgentId. */
+  label: string | null;
   model: string | null;
   effort: string | null;
   longContext: boolean;
@@ -1269,6 +1294,8 @@ export interface MobileBridgeChatMessageDto {
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
+  /** Exact prompt-owning run from invoke_prompt_bound; absent on older Desktop builds. */
+  runId?: string;
   /** Bounded references; bytes are fetched only for an exact chat/message binding. */
   images?: MobileBridgeChatImageDto[];
   /** Bounded generic-file metadata; raw paths, URLs, bytes, and manifests stay on Desktop. */
@@ -2309,13 +2336,15 @@ function validateRuntimeSelectionValue(
   role?: "orchestrator" | "worker",
 ): string | null {
   if (!isRecord(value)) return "runtime selection must be an object";
-  if (!hasOnlyKeys(value, ["kind", "backend", "model", "effort", "longContext", "role", "inherit"])) {
+  if (!hasOnlyKeys(value, ["kind", "backend", "acpAgentId", "label", "model", "effort", "longContext", "role", "inherit"])) {
     return "runtime selection contains unsupported fields";
   }
   const selectedRole = value.role ?? role;
   return firstError(
     validateEnum(value, "kind", MOBILE_RUNTIME_KINDS, false),
     validateEnum(value, "backend", MOBILE_RUNTIME_BACKENDS),
+    optionalString(value, "acpAgentId", 256),
+    optionalString(value, "label", 256),
     optionalString(value, "model", 512),
     optionalString(value, "effort", 80),
     optionalBoolean(value, "longContext"),
@@ -2326,6 +2355,12 @@ function validateRuntimeSelectionValue(
       : null,
     value.inherit === true && selectedRole !== "worker"
       ? "inherit is allowed only for the worker runtime role"
+      : null,
+    value.kind === "acp" && (typeof value.acpAgentId !== "string" || value.acpAgentId.trim().length === 0)
+      ? "acpAgentId is required for ACP runtime selection"
+      : null,
+    value.kind !== "acp" && value.acpAgentId !== undefined
+      ? "acpAgentId is allowed only for ACP runtime selection"
       : null,
   );
 }
@@ -2706,6 +2741,26 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
   }
 
   switch (method) {
+    case "request.status": {
+      if (!hasOnlyKeys(params, ["requestId", "idempotencyKey", "method", "params"])) {
+        return "request.status accepts only the exact original request envelope";
+      }
+      const originalMethod = params.method;
+      if (typeof originalMethod !== "string" || !isMobileBridgeMethod(originalMethod)) {
+        return "request.status method must be an allowlisted method";
+      }
+      if (!MOBILE_BRIDGE_WRITE_METHODS.has(originalMethod)) {
+        return "request.status can inspect only a state-changing request";
+      }
+      if (!isRecord(params.params)) {
+        return "request.status params must be the original request params object";
+      }
+      return firstError(
+        requiredString(params, "requestId", 128),
+        requiredString(params, "idempotencyKey", 160),
+        validateParams(originalMethod, params.params),
+      );
+    }
     case "visualSession.create":
       return hasOnlyKeys(params, ["schemaVersion", "requestedWidth", "requestedHeight", "devicePixelRatio"])
         ? firstError(
@@ -2775,6 +2830,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     // the fail-closed default, so project detail was unreachable from Mobile.
     case "projects.get":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
+    case "projects.filePreview":
+      return hasOnlyKeys(params, ["projectId", "fileRef"])
+        ? firstError(
+            requiredString(params, "projectId", 240),
+            requiredString(params, "fileRef", 80),
+          )
+        : "projects.filePreview accepts only projectId and fileRef";
     case "projects.setAgentPool":
       return validateProjectAgentPool(params);
     case "one.org.add":
@@ -3067,6 +3129,8 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       if (!hasOnlyKeys(params, [
         "kind",
         "backend",
+        "acpAgentId",
+        "label",
         "model",
         "effort",
         "longContext",
@@ -3078,6 +3142,8 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       const error = firstError(
         validateEnum(params, "kind", MOBILE_RUNTIME_KINDS, false),
         validateEnum(params, "backend", MOBILE_RUNTIME_BACKENDS),
+        optionalString(params, "acpAgentId", 256),
+        optionalString(params, "label", 256),
         optionalString(params, "model", 200),
         optionalString(params, "effort", 80),
         optionalBoolean(params, "longContext"),
@@ -3085,6 +3151,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         optionalBoolean(params, "inherit"),
       );
       if (error) return error;
+      if (params.kind === "acp" && (typeof params.acpAgentId !== "string" || params.acpAgentId.trim().length === 0)) {
+        return "acpAgentId is required for ACP runtime selection";
+      }
+      if (params.kind !== "acp" && params.acpAgentId !== undefined) {
+        return "acpAgentId is allowed only for ACP runtime selection";
+      }
       return params.inherit === true && params.role !== "worker"
         ? "inherit is allowed only for the worker runtime role"
         : null;

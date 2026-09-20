@@ -743,6 +743,10 @@ export interface RuntimeSelection {
   kind: RuntimeKind;
   backend?: RuntimeBackend;
   source?: string;
+  /** Exact ACP seat identity. Required for kind "acp"; labels are display-only. */
+  acpAgentId?: string;
+  /** User-facing runtime name. Never use this value for runtime authority matching. */
+  label?: string;
   /** Persistent role default. Omitted means orchestrator for backward compatibility. */
   role?: RuntimeRole;
   /** Worker-only quality-first inheritance. true means use the orchestrator selection. */

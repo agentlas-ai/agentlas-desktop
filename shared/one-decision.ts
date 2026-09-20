@@ -2,6 +2,7 @@ import { redactSecrets } from "./secret-patterns";
 import type { PendingConfirmation } from "./types";
 
 export const ONE_DECISION_CONTRACT_VERSION = "1.0.0" as const;
+export const ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY = "Reject. Do not take the proposed action." as const;
 
 export type OneDecisionRiskLevel = "R0" | "R1" | "R2" | "R3" | "R4";
 export type OneDecisionRiskCertainty = "inferred" | "ambiguous";
@@ -333,7 +334,7 @@ export function normalizeOneDecision(
     controls: {
       reject: explicitRejectIndex >= 0
         ? { enabled: true, reply: rawOptions[explicitRejectIndex].label, source: "explicit_option" }
-        : { enabled: true, reply: "Reject. Do not take the proposed action.", source: "product_safe_default" },
+        : { enabled: true, reply: ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY, source: "product_safe_default" },
       modify: { enabled: true, destination: "one" },
       snooze: { enabled: true, durationHours: 24 },
     },

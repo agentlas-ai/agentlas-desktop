@@ -14,17 +14,19 @@ import type {
 } from "../../shared/types";
 import {
   activatedProjectMemoryFileExists,
+  activatedProjectMemoryFileExistsAsync,
   PROJECT_CODE_MAP_MAX_BYTES,
   PROJECT_CODE_MAP_SEED_MAX_BYTES,
   PROJECT_MEMORY_TEXT_MAX_BYTES,
   PROJECT_SITEMAP_MAX_BYTES,
   readActivatedProjectMemoryJson,
+  readActivatedProjectMemoryJsonAsync,
   readActivatedProjectMemoryText,
+  readActivatedProjectMemoryTextAsync,
 } from "./safe-project-read";
 import { listProjectMemoryEpisodes } from "./tickets";
 import { summarizeCompletedWork } from "./work-summary";
 import { localizePolicyTurnSummary } from "./policy-turn-summary";
-import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { currentUiLocale } from "../ui-locale";
 
 const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
@@ -148,6 +150,78 @@ function inspectProjectKnowledge(projectPath: string | null): ProjectKnowledgeSo
   return [soulState, sitemapState, codeMapState];
 }
 
+export async function getProjectKnowledgeSourcesAsync(
+  projectPath: string | null,
+): Promise<ProjectKnowledgeSourceState[]> {
+  if (!projectPath) {
+    return [
+      sourceState("pm_soul", "unavailable", "project-folder-not-connected"),
+      sourceState("sitemap", "unavailable", "project-folder-not-connected"),
+      sourceState("code_map", "unavailable", "project-folder-not-connected"),
+    ];
+  }
+  if (!verifyActivatedFolderIdentity(projectPath)) {
+    return [
+      sourceState("pm_soul", "unavailable", "folder-reactivation-required"),
+      sourceState("sitemap", "unavailable", "folder-reactivation-required"),
+      sourceState("code_map", "unavailable", "folder-reactivation-required"),
+    ];
+  }
+
+  const soul = await readActivatedProjectMemoryTextAsync(
+    projectPath,
+    PROJECT_SOUL_FILE,
+    PROJECT_MEMORY_TEXT_MAX_BYTES,
+  );
+  const soulState = soul?.trim()
+    ? sourceState("pm_soul", "ready", `characters:${soul.trim().length}`)
+    : await activatedProjectMemoryFileExistsAsync(projectPath, PROJECT_SOUL_FILE, PROJECT_CODE_MAP_MAX_BYTES)
+      ? sourceState("pm_soul", "invalid", "empty-or-unreadable")
+      : sourceState("pm_soul", "missing");
+
+  const sitemap = await readActivatedProjectMemoryJsonAsync<SitemapShape>(
+    projectPath,
+    SITEMAP_FILE,
+    PROJECT_SITEMAP_MAX_BYTES,
+  );
+  const sitemapNodes = Array.isArray(sitemap?.nodes) ? sitemap.nodes.length : null;
+  const sitemapState = sitemapNodes !== null
+    ? sourceState("sitemap", "ready", `nodes:${sitemapNodes}`)
+    : await activatedProjectMemoryFileExistsAsync(projectPath, SITEMAP_FILE, PROJECT_SITEMAP_MAX_BYTES)
+      ? sourceState("sitemap", "invalid", "invalid-json-or-shape")
+      : sourceState("sitemap", "missing");
+
+  const seed = await readActivatedProjectMemoryJsonAsync<CodeMapShape>(
+    projectPath,
+    CODE_MAP_SEED_FILE,
+    PROJECT_CODE_MAP_SEED_MAX_BYTES,
+  );
+  const full = seed ?? await readActivatedProjectMemoryJsonAsync<CodeMapShape>(
+    projectPath,
+    CODE_MAP_FULL_FILE,
+    PROJECT_CODE_MAP_MAX_BYTES,
+  );
+  const codeFiles = cleanCount(full?.stats?.codeFiles)
+    ?? (Array.isArray(full?.files) ? full.files.length : null);
+  const symbols = cleanCount(full?.stats?.symbols)
+    ?? (Array.isArray(full?.symbols) ? full.symbols.length : null);
+  const hasCodeMapShape = Boolean(full && (full.stats || Array.isArray(full.files) || Array.isArray(full.symbols)));
+  const hasCodeMapFile =
+    await activatedProjectMemoryFileExistsAsync(projectPath, CODE_MAP_SEED_FILE, PROJECT_CODE_MAP_SEED_MAX_BYTES)
+    || await activatedProjectMemoryFileExistsAsync(projectPath, CODE_MAP_FULL_FILE, PROJECT_CODE_MAP_MAX_BYTES);
+  const codeDetail = [
+    codeFiles !== null ? `files:${codeFiles}` : null,
+    symbols !== null ? `symbols:${symbols}` : null,
+  ].filter(Boolean).join(",");
+  const codeMapState = hasCodeMapShape
+    ? sourceState("code_map", "ready", codeDetail || "map-ready")
+    : hasCodeMapFile
+      ? sourceState("code_map", "invalid", "invalid-json-or-shape")
+      : sourceState("code_map", "missing");
+
+  return [soulState, sitemapState, codeMapState];
+}
+
 function safeTimestamp(value: string): number | null {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -186,11 +260,13 @@ function lastTimelineMessage(messages: ChatHistoryEntry[]): ChatHistoryEntry | n
 export function getProjectTimelineSnapshot(
   projectId: string,
   limit = DEFAULT_TIMELINE_LIMIT,
+  options: { includeKnowledge?: boolean } = {},
 ): ProjectTimelineSnapshot {
   const id = String(projectId ?? "").trim();
   if (!id) throw new Error("Project id is required.");
   const project = getProject(id);
   if (!project) throw new Error("Project not found.");
+  const locale = currentUiLocale();
   const cappedLimit = Math.max(1, Math.min(MAX_TIMELINE_LIMIT, Math.floor(limit)));
   const episodes = listProjectMemoryEpisodes(project.id, project.folderPath, MAX_TIMELINE_LIMIT);
   const entries: ProjectTimelineEntry[] = [];
@@ -218,9 +294,13 @@ export function getProjectTimelineSnapshot(
   };
 
   for (const episode of episodes) {
-    const fallback = currentUiLocale() === "ko" ? "작업 기록" : "Work record";
+    const fallback = locale === "ko" ? "작업 기록" : "Work record";
     // 정책이 적은 문장("답이 나오기 전에 …")은 저장 당시 언어라 — 지금 화면 언어로 바꿔 보여준다.
-    const summary = summarizeCompletedWork(stripStrayProtocolTokens(localizePolicyTurnSummary(episode.summary, currentUiLocale())), fallback);
+    const summary = summarizeCompletedWork(
+      localizePolicyTurnSummary(episode.summary, locale),
+      fallback,
+      locale,
+    );
     if (!episode.chatId) {
       entries.push({
         id: episode.id,
@@ -280,7 +360,11 @@ export function getProjectTimelineSnapshot(
     entries.push({
       id: `chat-fallback:${chat.id}`,
       occurredAt: anchor?.createdAt ?? chat.updatedAt,
-      summary: summarizeCompletedWork(anchor?.text ?? chat.title, chat.title.trim() || (currentUiLocale() === "ko" ? "작업 기록" : "Work record")),
+      summary: summarizeCompletedWork(
+        anchor?.text ?? chat.title,
+        chat.title.trim() || (locale === "ko" ? "작업 기록" : "Work record"),
+        locale,
+      ),
       source: "chat_fallback",
       chatId: chat.id,
       messageId: anchor?.id ?? null,
@@ -298,7 +382,7 @@ export function getProjectTimelineSnapshot(
   return {
     projectId: project.id,
     generatedAt: new Date().toISOString(),
-    sources: inspectProjectKnowledgeCached(project.folderPath),
+    sources: options.includeKnowledge === false ? [] : inspectProjectKnowledgeCached(project.folderPath),
     entries: entries.slice(0, cappedLimit),
     truncated: entries.length > cappedLimit,
   };

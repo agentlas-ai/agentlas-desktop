@@ -55,6 +55,8 @@ type ActiveRuntimeRow = {
   kind: RuntimeKind;
   backend: RuntimeBackend | null;
   source: string | null;
+  acp_agent_id: string | null;
+  runtime_label: string | null;
   model: string | null;
   long_context: number;
 };
@@ -211,6 +213,12 @@ function setStoredEffort(effort: string | null | undefined): void {
 
 function isActiveRuntime(status: RuntimeStatus, active: ActiveRuntimeRow | null): boolean {
   if (!active) return false;
+  if (status.kind === "acp" || active.kind === "acp") {
+    return status.kind === "acp"
+      && active.kind === "acp"
+      && Boolean(active.acp_agent_id)
+      && status.acpAgentId === active.acp_agent_id;
+  }
   // migration-only Ollama와 managed/local servers are single-runtime identities;
   // the selected model is projected separately on status.model.
   if (status.kind === "ollama" || status.kind === "lmstudio" || status.kind === "mlx" || status.kind === "agentlas-local") {
@@ -237,6 +245,8 @@ function runtimeMatchesSelection(
     kind: selection.kind,
     backend: selection.backend ?? null,
     source: selection.source ?? null,
+    acp_agent_id: selection.acpAgentId ?? null,
+    runtime_label: selection.label ?? null,
     model: selection.model ?? null,
     long_context: selection.longContext ? 1 : 0,
   });
@@ -250,7 +260,7 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
     false;
   const db = getDb();
   const outgoing = db
-    .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+    .prepare("SELECT kind, backend, source, acp_agent_id, runtime_label, model, long_context FROM active_runtime WHERE id = 1")
     .get() as ActiveRuntimeRow | undefined;
   db.transaction(() => {
     // Seed an install that predates per-runtime memory before replacing id=1.
@@ -264,11 +274,13 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
     }
     rememberRuntimeSelection(status.kind, status.backend, status.model, longCtx);
     db.prepare(
-      "INSERT OR REPLACE INTO active_runtime(id, kind, backend, source, model, long_context) VALUES (1, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO active_runtime(id, kind, backend, source, acp_agent_id, runtime_label, model, long_context) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
       status.kind,
       status.backend ?? null,
       status.source ?? null,
+      status.acpAgentId ?? null,
+      status.label ?? null,
       status.model ?? null,
       longCtx ? 1 : 0,
     );
@@ -398,7 +410,7 @@ function hasAgentlasServingAccess(): boolean {
 async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const db = getDb();
   const activeRow = db
-    .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+    .prepare("SELECT kind, backend, source, acp_agent_id, runtime_label, model, long_context FROM active_runtime WHERE id = 1")
     .get() as ActiveRuntimeRow | undefined;
   const active = activeRow ?? null;
   if (active) {
@@ -406,6 +418,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       kind: active.kind,
       ...(active.backend ? { backend: active.backend } : {}),
       ...(active.source ? { source: active.source } : {}),
+      ...(active.acp_agent_id ? { acpAgentId: active.acp_agent_id } : {}),
+      ...(active.runtime_label ? { label: active.runtime_label } : {}),
       ...(active.model ? { model: active.model } : {}),
       longContext: Boolean(active.long_context),
       role: "orchestrator",
@@ -921,6 +935,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       kind: firstAvailable.kind,
       backend: firstAvailable.backend,
       source: firstAvailable.source,
+      ...(firstAvailable.acpAgentId ? { acpAgentId: firstAvailable.acpAgentId } : {}),
+      ...(firstAvailable.label ? { label: firstAvailable.label } : {}),
       model: firstAvailable.model ?? undefined,
       longContext: firstAvailable.longContextEnabled,
       effort: firstAvailable.effort ?? undefined,
@@ -1021,7 +1037,10 @@ function credentialBlockedRolePick(
   const assignment = assignments[role];
   if (!assignment) return null;
   const selected = list.find((runtime) => runtime.kind === assignment.selection.kind
-    && (assignment.selection.backend == null || runtime.backend === assignment.selection.backend));
+    && (assignment.selection.backend == null || runtime.backend === assignment.selection.backend)
+    && (assignment.selection.kind !== "acp"
+      || Boolean(assignment.selection.acpAgentId)
+        && runtime.acpAgentId === assignment.selection.acpAgentId));
   if (!isRuntimeCredentialUnavailable(selected)) return null;
   return {
     role, selection: { ...assignment.selection }, inherited: assignment.inherited,

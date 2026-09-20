@@ -267,7 +267,11 @@ export class MobileBridgeAccountPairingClient {
     } catch {
       return "unreachable";
     }
-    if (!response.ok) return "inactive";
+    if (!response.ok) {
+      return response.status === 401 || response.status === 403 || response.status === 404
+        ? "inactive"
+        : "unreachable";
+    }
     if (!isRecord(raw) || !exactKeys(raw, ["active"])) return "unreachable";
     return raw.active === true ? "active" : "inactive";
   }

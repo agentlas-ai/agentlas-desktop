@@ -43,6 +43,13 @@ export type MobileBridgeReplayBeginResult =
   | { kind: "uncertain" }
   | { kind: "conflict" };
 
+export type MobileBridgeReplayLookupResult =
+  | { kind: "missing" }
+  | { kind: "completed"; response: MobileBridgeReplayResponse }
+  | { kind: "in-progress" }
+  | { kind: "uncertain" }
+  | { kind: "conflict" };
+
 export interface MobileBridgeReplayStoreOptions {
   ttlMs?: number;
   maxEntries?: number;
@@ -190,6 +197,34 @@ export class MobileBridgeRequestReplayStore {
     });
     this.writeLedger(ledger);
     return { kind: "execute" };
+  }
+
+  /**
+   * Read-only reconciliation for a client that lost a write acknowledgement.
+   * Missing and expired entries are reported, never created, so this path can
+   * never execute the original command.
+   */
+  lookup(deviceId: string, key: string, fingerprint: string): MobileBridgeReplayLookupResult {
+    this.assertIdentity(deviceId, key, fingerprint);
+    const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
+    const ledger = this.readLedger();
+    const now = this.checkedNow().getTime();
+    const entry = ledger.entries.find(
+      (candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash,
+    );
+    if (!entry || Date.parse(entry.updatedAt) < now - this.ttlMs) return { kind: "missing" };
+    if (entry.fingerprint !== fingerprint) return { kind: "conflict" };
+    if (entry.state === "completed" && entry.response) {
+      return { kind: "completed", response: entry.response };
+    }
+    if (entry.state === "uncertain" || entry.ownerInstanceId !== this.instanceId) {
+      return { kind: "uncertain" };
+    }
+    return { kind: "in-progress" };
+  }
+
+  capability(): { schemaVersion: 1; retentionMs: number } {
+    return { schemaVersion: 1, retentionMs: this.ttlMs };
   }
 
   complete(

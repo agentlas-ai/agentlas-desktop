@@ -19,6 +19,38 @@ import { assertInvocationChatAvailable } from "./run-id";
  */
 export const STOPPED_BY_USER = "stopped_by_user";
 
+export type MainOwnedTerminalDisposition = {
+  errorCode: "cancelled" | "interrupted" | null;
+  terminalKind: "invoke_completed" | "invoke_cancelled" | "invoke_interrupted" | "invoke_failed";
+};
+
+/**
+ * Classify a terminal from Main-owned lifecycle facts only. Runtime/provider
+ * prose is deliberately absent from this contract: the same text can describe
+ * a user stop, steering, or an ordinary runner failure.
+ */
+export function classifyMainOwnedTerminal(input: {
+  eventKind: "final" | "error";
+  steeringInterruptRequested: boolean;
+  signalAborted: boolean;
+  abortReason: unknown;
+}): MainOwnedTerminalDisposition {
+  if (input.eventKind === "final") {
+    return { errorCode: null, terminalKind: "invoke_completed" };
+  }
+  if (input.steeringInterruptRequested) {
+    return { errorCode: "interrupted", terminalKind: "invoke_interrupted" };
+  }
+  if (
+    input.signalAborted
+    && input.abortReason instanceof Error
+    && input.abortReason.message === STOPPED_BY_USER
+  ) {
+    return { errorCode: "cancelled", terminalKind: "invoke_cancelled" };
+  }
+  return { errorCode: null, terminalKind: "invoke_failed" };
+}
+
 export interface InvocationLifecycleRecord {
   controller: AbortController;
   chatId: string;

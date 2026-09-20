@@ -14,7 +14,19 @@ import { pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { lstatSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -41,6 +53,7 @@ import {
 import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { currentUiLocale } from "../ui-locale";
+import { userDataPath } from "../runtime-paths";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -396,6 +409,103 @@ export function freshAgyArtifactPaths(paths: readonly string[], invocationStarte
       return false;
     }
   });
+}
+
+const AGY_GENERATED_IMAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/u;
+const AGY_CONVERSATION_ID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
+const AGY_GENERATED_IMAGE_MAX_BYTES = 24 * 1_024 * 1_024;
+
+function hasSupportedGeneratedImageSignature(file: string, extension: string): boolean {
+  let fd: number | null = null;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const header = Buffer.alloc(12);
+    const length = readSync(fd, header, 0, header.length, 0);
+    if (extension === ".png") {
+      return length >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    }
+    if (extension === ".jpg" || extension === ".jpeg") {
+      return length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    }
+    return extension === ".webp" && length >= 12
+      && header.subarray(0, 4).toString("ascii") === "RIFF"
+      && header.subarray(8, 12).toString("ascii") === "WEBP";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
+ * Antigravity's `generate_image` completion currently returns an empty output,
+ * while the provider writes one timestamped image into its exact conversation
+ * directory. Admit that image only from the structured tool completion: UUID
+ * conversation, bounded ImageName, fresh regular file, real directory, and
+ * matching image bytes. The staged copy then enters the ordinary Main-owned
+ * task/run binding; provider storage never crosses the Mobile bridge directly.
+ */
+export function stageFreshAgyGeneratedImage(input: {
+  conversationId?: string;
+  imageName?: string;
+  invocationStartedAtMs: number;
+  destinationRoot: string;
+  home?: string;
+  excludedSources?: ReadonlySet<string>;
+}): { sourcePath: string; artifactPath: string } | null {
+  const conversationId = input.conversationId?.trim() ?? "";
+  const imageName = input.imageName?.trim() ?? "";
+  if (!AGY_CONVERSATION_ID_RE.test(conversationId)
+    || !AGY_GENERATED_IMAGE_NAME_RE.test(imageName)
+    || !Number.isFinite(input.invocationStartedAtMs)
+    || !path.isAbsolute(input.destinationRoot)) return null;
+  try {
+    const sourceDir = path.resolve(
+      input.home ?? os.homedir(),
+      ".gemini",
+      "antigravity-cli",
+      "brain",
+      conversationId,
+    );
+    if (realpathSync(sourceDir) !== sourceDir || lstatSync(sourceDir).isSymbolicLink()) return null;
+    const escapedName = imageName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const filenameRe = new RegExp(`^${escapedName}_[0-9]{10,17}\\.(?:png|jpe?g|webp)$`, "iu");
+    const now = Date.now();
+    const candidates = readdirSync(sourceDir)
+      .filter((name) => filenameRe.test(name))
+      .map((name) => path.join(sourceDir, name))
+      .filter((candidate) => !input.excludedSources?.has(candidate))
+      .flatMap((candidate) => {
+        try {
+          const stat = lstatSync(candidate);
+          const extension = path.extname(candidate).toLowerCase();
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0
+            || stat.size > AGY_GENERATED_IMAGE_MAX_BYTES
+            || stat.mtimeMs < input.invocationStartedAtMs || stat.mtimeMs > now + 5_000
+            || !hasSupportedGeneratedImageSignature(candidate, extension)) return [];
+          return [{ candidate, extension, mtimeMs: stat.mtimeMs }];
+        } catch {
+          return [];
+        }
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || a.candidate.localeCompare(b.candidate));
+    const selected = candidates[0];
+    if (!selected) return null;
+    mkdirSync(input.destinationRoot, { recursive: true, mode: 0o700 });
+    const destinationRoot = path.resolve(input.destinationRoot);
+    if (realpathSync(destinationRoot) !== destinationRoot || lstatSync(destinationRoot).isSymbolicLink()) return null;
+    const artifactPath = path.join(destinationRoot, `antigravity-${randomUUID()}${selected.extension}`);
+    try {
+      copyFileSync(selected.candidate, artifactPath, fsConstants.COPYFILE_EXCL);
+      chmodSync(artifactPath, 0o600);
+      return { sourcePath: selected.candidate, artifactPath };
+    } catch {
+      rmSync(artifactPath, { force: true });
+      return null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1885,6 +1995,7 @@ async function runPreparedAntigravity(
     } = { text: "", inputTokens: 0, outputTokens: 0 };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
+    const stagedAgyGeneratedImageSources = new Set<string>();
     let agyLineBuf = "";
 
     const stdoutDecoder = new StringDecoder("utf8");
@@ -1906,7 +2017,34 @@ async function runPreparedAntigravity(
         const key = `${step.tool.id}:${step.tool.done ? "done" : "active"}`;
         if (!reportedAgyTools.has(key)) {
           reportedAgyTools.add(key);
-          const artifactPaths = freshAgyArtifactPaths(step.tool.artifactPaths ?? [], invocationStartedAtMs);
+          const toolArtifactPaths = [...(step.tool.artifactPaths ?? [])];
+          if (step.tool.done && !step.tool.failed && step.tool.name === "generate_image"
+            && runReq.chatId) {
+            let imageName: string | undefined;
+            try {
+              const parsed = JSON.parse(step.tool.args ?? "null") as { ImageName?: unknown } | null;
+              if (typeof parsed?.ImageName === "string") imageName = parsed.ImageName;
+            } catch {
+              // Malformed provider arguments never gain filesystem authority.
+            }
+            const scope = createHash("sha256")
+              .update(`${runReq.chatId}\0${invocationStartedAtMs}`)
+              .digest("hex")
+              .slice(0, 32);
+            const staged = stageFreshAgyGeneratedImage({
+              conversationId: agyState.conversationId,
+              imageName,
+              invocationStartedAtMs,
+              destinationRoot: userDataPath("generated-assets", "antigravity", scope),
+              home: env.HOME,
+              excludedSources: stagedAgyGeneratedImageSources,
+            });
+            if (staged) {
+              stagedAgyGeneratedImageSources.add(staged.sourcePath);
+              toolArtifactPaths.push(staged.artifactPath);
+            }
+          }
+          const artifactPaths = freshAgyArtifactPaths(toolArtifactPaths, invocationStartedAtMs);
           events.onTool?.(step.tool.name, step.tool.args, step.tool.result, effectCoverage.toolId(step.tool.id), step.tool.failed, artifactPaths);
         }
       }

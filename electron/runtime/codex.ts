@@ -2091,6 +2091,8 @@ export const runCodex: Runner = async (
     !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
     !runReq.untrustedNoTools &&
     !runReq.isolatedMcpConfig &&
+    !runReq.ephemeralToolGrant &&
+    !runReq.singleUse &&
     runReq.chatId &&
     fingerprint
   ) {

@@ -61,10 +61,15 @@ import {
 } from "../confirm";
 import {
   ONE_DECISION_CONTRACT_VERSION,
+  ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
 } from "../../shared/one-decision";
-import { oneDecisionJudgedReaders, prejudgeOneDecision } from "../one/judged-decision";
+import {
+  cancelDeferredOneDecisionJudgments,
+  oneDecisionJudgedReadersFor,
+  prejudgeOneDecision,
+} from "../one/judged-decision";
 import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
 import { prejudgeOneMemoryIntent } from "../one/memory-detector";
 import {
@@ -117,7 +122,6 @@ import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
 import {
-  isOneInvocationChat,
   iterateRecentChatOneArtifactEvents,
   listRecentOneArtifactsForMobile,
 } from "../store/run-events";
@@ -195,17 +199,20 @@ import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-
 import type { MobileBridgeHostIdentity } from "./pairing";
 import type { MobileBridgeRevocationCause } from "./pairing";
 import {
+  isMobileBridgeOneChat,
   projectMobileBridgeAutomation,
   projectMobileBridgeChat,
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
   projectMobileBridgeProject,
+  projectMobileBridgeProjectAsync,
   projectMobileBridgeRuntimeRolePool,
   projectMobileBridgeRuntimeSelection,
   projectMobileBridgeRuntimes,
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
 } from "./projector";
+import { MobileProjectFilePreviewRegistry } from "./project-file-preview";
 import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   sanitizeMobileBridgeText,
@@ -812,8 +819,16 @@ function mobileDecisionAnswerAcknowledgement(expected: MobileDecisionAnswerPreco
   };
 }
 
-/** Warm the judged decision verdicts the synchronous validator peeks. Best-effort. */
-async function prejudgePendingDecisionAnswer(chatId: string, decisionId: string): Promise<void> {
+/** Warm semantic verdicts unless the reply is the always-safe product rejection. */
+async function prejudgePendingDecisionAnswer(
+  chatId: string,
+  decisionId: string,
+  reply: string,
+): Promise<void> {
+  // Rejecting cannot grant authority. Waiting for risk/disposition judgments
+  // here made the safe escape hatch inherit every provider timeout and could
+  // outlive Mobile's 30-second RPC deadline.
+  if (reply === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY) return;
   const pending = listPendingConfirmations().find((candidate) =>
     candidate.chatId === chatId && candidate.sourceMessageId === decisionId);
   if (pending) await prejudgeOneDecision(pending).catch(() => undefined);
@@ -841,10 +856,16 @@ function validateCurrentMobileDecisionAnswer(
   if (!pending || isPendingConfirmationSnoozed(pending, Date.now())) {
     throw new Error("Decision is stale, snoozed, or no longer pending");
   }
+  const reply = invocation.userPrompt ?? "";
+  if (reply === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY) return;
   // The async invoke paths warm the judged risk/disposition verdicts before this
   // synchronous validation; a cache miss remains fail-closed and cannot create
   // a lexical or static verdict.
-  const view = normalizeOneDecision(pending, currentTask.id, oneDecisionJudgedReaders);
+  const view = normalizeOneDecision(
+    pending,
+    currentTask.id,
+    oneDecisionJudgedReadersFor(pending),
+  );
   if (
     view.contractVersion !== expected.contractVersion
     || view.decisionId !== expected.decisionId
@@ -853,7 +874,6 @@ function validateCurrentMobileDecisionAnswer(
   ) {
     throw new Error("Decision projection changed; refresh before answering");
   }
-  const reply = invocation.userPrompt ?? "";
   const optionAllowed = view.options.some((option) =>
     option.label === reply
     && option.enabled
@@ -1030,10 +1050,17 @@ function mobileRuntimeSelectionFromValue(
   if (!isRecord(value)) throw new TypeError("Runtime selection must be an object");
   assertOnlyKeys(
     value,
-    ["kind", "backend", "model", "effort", "longContext", "role", "inherit"],
+    ["kind", "backend", "acpAgentId", "label", "model", "effort", "longContext", "role", "inherit"],
     "runtime selection",
   );
   const kind = requiredEnum(value, "kind", MOBILE_RUNTIME_KINDS) as RuntimeKind;
+  const acpAgentId = optionalIdentifier(value, "acpAgentId", 256);
+  if (kind === "acp" && !acpAgentId) {
+    throw new TypeError("ACP runtime selection requires acpAgentId");
+  }
+  if (kind !== "acp" && acpAgentId !== undefined) {
+    throw new TypeError("Only an ACP runtime selection can include acpAgentId");
+  }
   const selectedRole = optionalEnum(value, "role", MOBILE_RUNTIME_ROLES) ?? role;
   if (selectedRole !== role) {
     throw new TypeError(`Runtime selection role must be ${role}`);
@@ -1047,6 +1074,7 @@ function mobileRuntimeSelectionFromValue(
   const effort = optionalIdentifier(value, "effort", 80);
   return {
     kind,
+    ...(acpAgentId !== undefined ? { acpAgentId } : {}),
     ...(backend !== undefined ? { backend } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(effort !== undefined ? { effort } : {}),
@@ -1062,7 +1090,8 @@ async function resolveMobileRoleSelection(
   const candidates = await detectRuntimes();
   const runtime = candidates.find((candidate) =>
     candidate.kind === selection.kind &&
-    (selection.backend === undefined || candidate.backend === selection.backend),
+    (selection.backend === undefined || candidate.backend === selection.backend) &&
+    (selection.kind !== "acp" || candidate.acpAgentId === selection.acpAgentId),
   );
   if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
   if (runtimeCredentialUnavailable(runtime)) {
@@ -1086,6 +1115,9 @@ async function resolveMobileRoleSelection(
     ...selection,
     backend: runtime.backend,
     source: runtime.source,
+    ...(runtime.kind === "acp"
+      ? { acpAgentId: runtime.acpAgentId, label: runtime.label }
+      : {}),
   };
 }
 
@@ -1425,6 +1457,9 @@ export function projectMobileBridgeInvocationEvent(
     // "결과를 정리하지 못했습니다"를 같은 회색 줄로 그리게 된다.
     projected.status = boundedRedactedText(event.notice.message, 1_000);
     projected.noticeLevel = event.notice.level;
+    if (event.notice.code === "runtime-selected") {
+      projected.noticeCode = "runtime-selected";
+    }
     if (event.notice.display === "divider" || event.notice.display === "row") {
       projected.noticeDisplay = event.notice.display;
     }
@@ -1623,6 +1658,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly buildActions: MobileBridgeBuildActions;
   private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview">;
   private readonly visualSessions: MobileVisualSessionManager;
+  private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
    * phone. A reconnect therefore cannot silently reuse an old takeover epoch.
@@ -1653,6 +1689,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private lastConfirmationFingerprint: string | null = null;
   private lastOntologyFingerprint: string | null = null;
   private ontologyRefreshRequested = false;
+  private reconnectUsageRefreshRunning = false;
   private disposed = false;
 
   constructor(private readonly options: AgentlasDesktopMobileBridgeAuthorityOptions) {
@@ -1682,10 +1719,31 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   /** DESKTOP_MOBILE_BRIDGE: Initial state is always a fresh Desktop projection; no seed fallback. */
   async snapshot(_context: MobileBridgeConnectionContext): Promise<MobileBridgeSnapshot> {
     this.assertAvailable();
+    // The authority baseline is rebuilt from the live Desktop stores on every
+    // connection. Provider usage is optional telemetry with its own shared
+    // cache; forcing its network refresh here used to hold bridge.ready (and
+    // therefore visualSessionV2) behind provider timeouts. Refresh it after the
+    // baseline instead, then publish the result through the ordinary fresh
+    // snapshot path. Server-side initialized remains false until this baseline
+    // has been validated and sent, so no request gains early authority.
     const snapshot = await this.projectSnapshot();
     this.lastConfirmationFingerprint = this.confirmationFingerprint(snapshot);
     this.lastOntologyFingerprint = this.ontologyFingerprint(snapshot);
+    void this.refreshUsageAfterReconnect();
     return snapshot;
+  }
+
+  private async refreshUsageAfterReconnect(): Promise<void> {
+    if (this.disposed || this.reconnectUsageRefreshRunning) return;
+    this.reconnectUsageRefreshRunning = true;
+    try {
+      await getUsageSnapshot({ force: true });
+      if (!this.disposed) this.scheduleSnapshotUpdated();
+    } catch (error) {
+      this.onError(errorOf(error));
+    } finally {
+      this.reconnectUsageRefreshRunning = false;
+    }
   }
 
   async pairingVerification(_context: MobileBridgeConnectionContext): Promise<{
@@ -2130,7 +2188,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         throw new Error("visualSession.frame must use the binary frame path");
       case "snapshot.get": {
         noParams(request);
-        return asJsonValue(await this.projectSnapshot(), request.method);
+        // A foreground/resume refresh must not keep showing the provider
+        // values captured by an older Mobile session. Provider-side cooldowns
+        // still coalesce reconnect bursts to one request per 10 seconds.
+        return asJsonValue(await this.projectSnapshot(true), request.method);
       }
       case "host.status": {
         noParams(request);
@@ -2197,8 +2258,33 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["id"]);
         const project = getProject(requiredIdentifier(params, "id"));
         if (!project) throw new Error("The selected Desktop project is unavailable");
+        const projected = await projectMobileBridgeProjectAsync(project);
         return asJsonValue(
-          projectMobileBridgeProject(project, { includeDetails: true }),
+          {
+            ...projected,
+            files: await this.projectFilePreviews.issue(
+              project.id,
+              project.folderPath,
+              projected.files,
+            ),
+          },
+          request.method,
+        );
+      }
+      case "projects.filePreview": {
+        const params = guardedParams(request, ["projectId", "fileRef"]);
+        const projectId = requiredIdentifier(params, "projectId");
+        const fileRef = requiredIdentifier(params, "fileRef", /^file_[a-f0-9]{32}$/u);
+        const project = getProject(projectId);
+        if (!project) throw new Error("The selected Desktop project is unavailable");
+        const projected = await projectMobileBridgeProjectAsync(project);
+        return asJsonValue(
+          await this.projectFilePreviews.read({
+            projectId,
+            folderPath: project.folderPath,
+            fileRef,
+            currentFiles: projected.files,
+          }),
           request.method,
         );
       }
@@ -2305,7 +2391,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const updated = updateProject(project.id, { agentPool: nextPool });
         this.scheduleSnapshotUpdated();
         return asJsonValue(
-          projectMobileBridgeProject(updated, { includeDetails: true }),
+          await projectMobileBridgeProjectAsync(updated),
           request.method,
         );
       }
@@ -2805,7 +2891,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.start": {
         const { invocation, decisionAnswer } = invocationParams(request, false);
-        if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
+        if (decisionAnswer) {
+          await prejudgePendingDecisionAnswer(
+            invocation.chatId,
+            decisionAnswer.decisionId,
+            invocation.userPrompt ?? "",
+          );
+        }
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
         // The host keeps this identity through preflight and actual admission.
         invocation.runId ??= randomUUID();
@@ -2813,7 +2905,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           prejudgeOneRequestIntent(invocation, { timeoutMs: 4_000 }),
           prejudgeOneMemoryIntent(invocation, { timeoutMs: 4_000 }),
         ])).catch(() => undefined);
-        const mobileOneTurn = isOneInvocationChat(invocation.chatId);
+        const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
           : invocation;
@@ -2843,9 +2935,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
-        if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
+        if (decisionAnswer) {
+          await prejudgePendingDecisionAnswer(
+            invocation.chatId,
+            decisionAnswer.decisionId,
+            invocation.userPrompt ?? "",
+          );
+        }
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
-        const mobileOneTurn = isOneInvocationChat(invocation.chatId);
+        const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
           : invocation;
@@ -3057,8 +3155,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             // 다른 질문이다. outcome 을 빼고 보내면 폰은 실패한 실행 옆에 이유를
             // 하나도 못 보여준다 — 실측 스크린샷 5번이 그 상태였다.
             outcome: run.outcome ?? null,
-            outcomeReason: run.outcomeReason
-              ? sanitizeMobileBridgeText(run.outcomeReason, MOBILE_BRIDGE_DISPLAY_TEXT_BYTES)
+            // A graph can fail before result judgment, leaving outcomeReason
+            // empty while run.error contains the only actionable explanation.
+            // Keep the stable error marker above for machine handling, but
+            // mirror the sanitized reason so Mobile does not collapse a real
+            // Desktop failure into "No reason has arrived yet."
+            outcomeReason: run.outcomeReason || run.error
+              ? sanitizeMobileBridgeText(
+                  run.outcomeReason ?? run.error ?? "",
+                  MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
+                )
               : null,
             acknowledgedAt: run.acknowledgedAt ?? null,
           })),
@@ -3070,7 +3176,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // Desktop producers, then drop source paths and credential detail.
       case "usage.snapshot": {
         const params = guardedParams(request, ["force"]);
-        const force = optionalBoolean(params, "force") ?? false;
+        // This RPC is an explicit user-facing read. Default it to fresh while
+        // retaining force:false for callers that deliberately want the shared
+        // low-cost cache used by background projections.
+        const force = optionalBoolean(params, "force") ?? true;
         return asJsonValue(
           projectMobileBridgeUsage(await getUsageSnapshot({ force })),
           request.method,
@@ -3084,6 +3193,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, [
           "kind",
           "backend",
+          "acpAgentId",
+          "label",
           "model",
           "effort",
           "longContext",
@@ -3091,6 +3202,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           "inherit",
         ]);
         const kind = requiredEnum(params, "kind", MOBILE_RUNTIME_KINDS) as RuntimeKind;
+        const acpAgentId = optionalIdentifier(params, "acpAgentId", 256);
+        if (kind === "acp" && !acpAgentId) {
+          throw new TypeError("ACP runtime selection requires acpAgentId");
+        }
+        if (kind !== "acp" && acpAgentId !== undefined) {
+          throw new TypeError("Only an ACP runtime selection can include acpAgentId");
+        }
         const role =
           optionalEnum(params, "role", ["orchestrator", "worker"] as const) ??
           "orchestrator";
@@ -3101,7 +3219,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const backend = optionalEnum(params, "backend", MOBILE_RUNTIME_BACKENDS) as RuntimeBackend | undefined;
         const candidates = await detectRuntimes();
         const runtime = candidates.find((candidate) =>
-          candidate.kind === kind && (backend === undefined || candidate.backend === backend));
+          candidate.kind === kind &&
+          (backend === undefined || candidate.backend === backend) &&
+          (kind !== "acp" || candidate.acpAgentId === acpAgentId));
         if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
         if (runtimeCredentialUnavailable(runtime)) {
           throw new Error("The selected Desktop runtime credential is unavailable");
@@ -3123,6 +3243,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           kind: runtime.kind,
           backend: runtime.backend,
           source: runtime.source,
+          ...(runtime.kind === "acp"
+            ? { acpAgentId: runtime.acpAgentId, label: runtime.label }
+            : {}),
           ...(model !== undefined ? { model } : runtime.model ? { model: runtime.model } : {}),
           ...(effort !== undefined ? { effort } : runtime.effort ? { effort: runtime.effort } : {}),
           ...(longContext !== undefined ? { longContext } : { longContext: runtime.longContextEnabled === true }),
@@ -3625,6 +3748,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.options.revokeDevice(context.deviceId, "device_requested");
         return { revoked: true };
       }
+      case "request.status":
+        // The server handles this read-only ledger lookup before authority
+        // dispatch so a missing receipt can never execute a command.
+        throw new TypeError("request.status must be handled by Mobile Bridge server");
       default: {
         const unsupported: never = request.method;
         throw new TypeError(`Unsupported Mobile Bridge method: ${String(unsupported)}`);
@@ -3662,7 +3789,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.detachDesktopSubscriptions();
     this.listeners.clear();
     this.visualSessions.dispose();
+    this.projectFilePreviews.clear();
     this.terminalLeases.clear();
+    cancelDeferredOneDecisionJudgments();
     this.pendingAutomationIds.clear();
     this.refreshRequested = false;
     this.refreshQueued = false;
@@ -4002,7 +4131,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
   }
 
-  private async projectSnapshot(): Promise<MobileBridgeSnapshot> {
+  private async projectSnapshot(forceUsageRefresh = false): Promise<MobileBridgeSnapshot> {
     const activeChatIds = invocationService.activeChatIds();
     const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
       this.projectBrowserApproval(approval));
@@ -4069,6 +4198,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       pendingBrowserApprovals,
       pendingToolApprovals,
       pendingUserInputs,
+      forceUsageRefresh,
       ontology,
     });
   }

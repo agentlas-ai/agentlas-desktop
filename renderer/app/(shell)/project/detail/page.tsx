@@ -25,7 +25,7 @@ import {
   IconUsers,
 } from "@/components/Icon";
 import { pickLocalized, useT } from "@/lib/i18n";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { openProjectSettings } from "@/lib/project-settings";
 import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
@@ -397,14 +397,48 @@ function ProjectPage() {
   }, [id, recoverMissingBridge]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let refreshing = false;
+    let refreshQueued = false;
 
-  useEffect(() => {
-    const onChanged = () => { void refresh(); };
+    const scheduleRefresh = () => {
+      if (disposed || timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (refreshing) {
+          refreshQueued = true;
+          return;
+        }
+        refreshing = true;
+        void refresh().finally(() => {
+          refreshing = false;
+          if (refreshQueued && !disposed) {
+            refreshQueued = false;
+            scheduleRefresh();
+          }
+        });
+      }, 0);
+    };
+
+    const onChanged = () => scheduleRefresh();
     window.addEventListener("agentlas:projects-changed", onChanged);
-    return () => window.removeEventListener("agentlas:projects-changed", onChanged);
-  }, [refresh]);
+    window.addEventListener("agentlas:tasks-changed", onChanged);
+    const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
+      if ((change.entity === "project" && change.id === id) || change.entity === "task") {
+        scheduleRefresh();
+      }
+    });
+    scheduleRefresh();
+
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      unsubscribe?.();
+      window.removeEventListener("agentlas:projects-changed", onChanged);
+      window.removeEventListener("agentlas:tasks-changed", onChanged);
+    };
+  }, [id, refresh]);
 
   useEffect(() => {
     try {

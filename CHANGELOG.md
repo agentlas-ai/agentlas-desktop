@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+## 1.2.32 — 2026-09-20
+
+- Mark runtime-selection notices with a closed machine code so Mobile can
+  retire the temporary verification row after that exact run settles.
+- Keep Mobile snapshots responsive while One decision judgments retry in the
+  background, and publish a card update only after the complete exact verdict
+  is available.
+- Bind each Mobile user-history row to its exact invocation so a sanitized
+  Desktop copy replaces the matching optimistic message without hiding a
+  separate run.
+- Refresh an open project when tasks or project details change remotely.
+- Show readable question summaries in project history and memory.
+- Report explicit user stops and steering interruptions consistently to Mobile.
+- Keep synchronized evidence bound to the task versions included in each Mobile snapshot.
+- Update the Office document viewer to the release that rejects unsafe legacy
+  DOC hyperlink schemes.
+- Carry the Agentlas Science 0.1.34 service: Full Autonomy (Beta) as an execution
+  mode in the Science composer, offered on macOS only and refused by the service
+  elsewhere, and Reference-to-Document manuscripts written in the document
+  language of a reference DOCX or HWPX. One and Work do not get Full Autonomy.
+- Stop leaving a resident CLI process behind every Science turn: a run whose tool
+  grant is minted per turn is never pooled.
+- Stop leaving a resident CLI process behind every post-turn memory review: a run
+  with no next turn is never pooled. Measured in a Science loop: eight idle
+  processes after forty minutes before, none after.
+- Science manuscripts whose methods section is titled the way economics and
+  finance papers title it ("Data and Empirical Design") are no longer refused
+  as missing a methods section; section roles come from the blueprint, and an
+  assembly refusal now says which section is short and by how much.
+- A Science manuscript with an equation labelled `$$ … $$ {#eq:label}` is stored
+  as headings and paragraphs again instead of one opaque paragraph.
+- **Pinned runtime** — this release binds Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a public installer, installed update or long-running outcome; those remain separate verification gates.
+
 ## 1.2.31 — 2026-09-19
 
 - Let Full access browser runs authorize unsafe code before the first page is

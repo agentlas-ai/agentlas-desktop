@@ -392,6 +392,7 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   if (runtime.kind !== selection.kind) return false;
   if (selection.backend && runtime.backend !== selection.backend) return false;
   if (selection.source && runtime.source !== selection.source) return false;
+  if (selection.kind === "acp" && runtime.acpAgentId !== selection.acpAgentId) return false;
   return true;
 }
 
@@ -431,6 +432,8 @@ function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/ty
     kind: runtime.kind,
     backend: runtime.backend,
     source: runtime.source,
+    acpAgentId: runtime.acpAgentId,
+    label: runtime.label,
     model: runtime.model ?? undefined,
     effort: runtime.effort ?? undefined,
     longContext: runtime.longContextEnabled,
@@ -439,11 +442,12 @@ function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/ty
 
 function runtimeMatchesSelection(
   runtime: RuntimeStatus,
-  selection: Pick<RuntimeSelection, "kind" | "backend" | "source">,
+  selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "acpAgentId">,
 ): boolean {
   return runtime.kind === selection.kind
     && (!selection.backend || runtime.backend === selection.backend)
-    && (!selection.source || runtime.source === selection.source);
+    && (!selection.source || runtime.source === selection.source)
+    && (selection.kind !== "acp" || Boolean(selection.acpAgentId) && runtime.acpAgentId === selection.acpAgentId);
 }
 
 function applyStoredRoleSelection(
@@ -571,6 +575,7 @@ export function selectExactRuntime(
     if (runtime.kind !== selection.kind) return false;
     if (selection.backend && runtime.backend !== selection.backend) return false;
     if (selection.source && runtime.source !== selection.source) return false;
+    if (selection.kind === "acp" && (!selection.acpAgentId || runtime.acpAgentId !== selection.acpAgentId)) return false;
     return true;
   });
   if (!matched) return null;

@@ -106,10 +106,19 @@ function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null 
   ) {
     throw new TypeError("Invalid chat runtime longContext");
   }
+  const acpAgentId = legacyGemini ? undefined : boundedOptionalText(input.acpAgentId, "acpAgentId", 256);
+  if (normalizedKind === "acp" && !acpAgentId) {
+    throw new TypeError("An ACP chat runtime pin requires acpAgentId");
+  }
+  if (normalizedKind !== "acp" && acpAgentId !== undefined) {
+    throw new TypeError("Only an ACP chat runtime pin can include acpAgentId");
+  }
   return {
     kind: normalizedKind as RuntimeKind,
     backend: input.backend as RuntimeBackend | undefined,
     source: legacyGemini ? undefined : boundedOptionalText(input.source, "source", 2_048),
+    acpAgentId,
+    label: legacyGemini ? undefined : boundedOptionalText(input.label, "label", 256),
     model: legacyGemini ? undefined : boundedOptionalText(input.model, "model", 512),
     effort: boundedOptionalText(input.effort, "effort", 80),
     longContext: input.longContext === true,

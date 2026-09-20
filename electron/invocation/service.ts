@@ -23,8 +23,10 @@ import {
   type AgentResidencyChange,
 } from "../runtime/agent-residency";
 import {
+  classifyMainOwnedTerminal,
   InvocationLifecycleRegistry,
   registerDurableInvocationStart,
+  STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
 import {
   appendLongRunEvent,
@@ -1959,12 +1961,18 @@ export class InvocationService {
     const settleGoalControllerAttempt = (completed: boolean): void => {
       if (!goalControllerAttemptId || goalControllerAttemptSettled) return;
       goalControllerAttemptSettled = true;
+      const terminalDisposition = classifyMainOwnedTerminal({
+        eventKind: completed ? "final" : "error",
+        steeringInterruptRequested: record.steeringInterruptRequested,
+        signalAborted: controller.signal.aborted,
+        abortReason: controller.signal.reason,
+      });
       settleLongRunWorkerAttempt({
         attemptId: goalControllerAttemptId,
         state: completed ? "completed" : "interrupted",
         sideEffectState: completed ? "committed" : "uncertain",
         ...(!completed
-          ? { errorCode: controller.signal.aborted ? "cancelled" : "runtime_interrupted" }
+          ? { errorCode: terminalDisposition.errorCode ?? "runtime_interrupted" }
           : {}),
       });
       goalInvocationProjection?.settleOpenWorkers(completed);
@@ -2417,6 +2425,17 @@ export class InvocationService {
             if (messageId) event = { ...event, durableMessageId: messageId };
           }
         }
+        const terminalDisposition = event.kind === "final" || event.kind === "error"
+          ? classifyMainOwnedTerminal({
+              eventKind: event.kind,
+              steeringInterruptRequested: record.steeringInterruptRequested,
+              signalAborted: controller.signal.aborted,
+              abortReason: controller.signal.reason,
+            })
+          : null;
+        if (event.kind === "error" && event.error && terminalDisposition?.errorCode) {
+          event = { ...event, error: { ...event.error, code: terminalDisposition.errorCode } };
+        }
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence);
 
         let wireEvent = event;
@@ -2503,22 +2522,15 @@ export class InvocationService {
           // history refresh cannot make it disappear. Browser Agent Apps and
           // bounded remote workspaces retain their stricter isolation rules.
           if (event.kind === "error") persistRecoverableAssistantPartial();
-          const terminalKind =
-            event.kind === "final"
-              ? "invoke_completed"
-              : record.steeringInterruptRequested
-                ? "invoke_interrupted"
-                : controller.signal.aborted
-                ? "invoke_cancelled"
-              : "invoke_failed";
+          const terminalKind = terminalDisposition!.terminalKind;
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
             terminalTaskStatus({
               kind: event.kind,
               requestsDecision: terminalRequestsDecision,
-              cancelled: controller.signal.aborted && !record.steeringInterruptRequested,
-              interrupted: record.steeringInterruptRequested,
+              cancelled: terminalKind === "invoke_cancelled",
+              interrupted: terminalKind === "invoke_interrupted",
               hasPartialText: Boolean(record.partialText.trim()),
             }),
             taskMaterialized,
@@ -3073,18 +3085,27 @@ export class InvocationService {
           runReq,
           error instanceof Error ? error.message : String(error),
         ));
+        const terminalDisposition = classifyMainOwnedTerminal({
+          eventKind: "error",
+          steeringInterruptRequested: record.steeringInterruptRequested,
+          signalAborted: controller.signal.aborted,
+          abortReason: controller.signal.reason,
+        });
         const safeFailure = runReq.agentAppMode
-          ? untrustedRuntimeFailurePayload()
-          : { code: record.steeringInterruptRequested ? "interrupted" : controller.signal.aborted ? "cancelled" : "invoke-threw", message: rawMessage };
+          ? {
+              ...untrustedRuntimeFailurePayload(),
+              ...(terminalDisposition.errorCode ? { code: terminalDisposition.errorCode } : {}),
+            }
+          : { code: terminalDisposition.errorCode ?? "invoke-threw", message: rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
           kind: "invoke_threw",
           chatId: runReq.chatId,
           agentId: record.actualAgentId,
-          payload: { errorMessage: message },
+          payload: { errorCode: safeFailure.code, errorMessage: message },
         });
-        if (!record.steeringInterruptRequested) {
+        if (!terminalDisposition.errorCode) {
           tryRecordFailureEvent({
             runId,
             source: "invoke",
@@ -3098,7 +3119,13 @@ export class InvocationService {
           terminalObserved = true;
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            record.steeringInterruptRequested ? "partial" : controller.signal.aborted ? "cancelled" : "failed",
+            terminalTaskStatus({
+              kind: "error",
+              requestsDecision: false,
+              cancelled: terminalDisposition.terminalKind === "invoke_cancelled",
+              interrupted: terminalDisposition.terminalKind === "invoke_interrupted",
+              hasPartialText: Boolean(record.partialText.trim()),
+            }),
             taskMaterialized,
             invocationOrigin,
           );
@@ -3115,15 +3142,13 @@ export class InvocationService {
           record.events.push(event);
           recordMcpInvocationEvent(runId, runReq, event);
           this.publishRunEvent(record, { runId, chatId: runReq.chatId, event });
-          const terminalKind = record.steeringInterruptRequested
-            ? "invoke_interrupted" as const
-            : controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
+          const terminalKind = terminalDisposition.terminalKind;
           tryRecordRunEvent({
             runId,
             kind: terminalKind,
             chatId: runReq.chatId,
             agentId: record.actualAgentId,
-            payload: { resultFolder: record.resultFolder, errorMessage: message },
+            payload: { resultFolder: record.resultFolder, errorCode: safeFailure.code, errorMessage: message },
           });
           recordTaskTerminalEvidence({ task: canonicalTask, runId, terminalKind });
           if (requestedOneMode && canonicalTask) {
@@ -3142,16 +3167,26 @@ export class InvocationService {
         settleGoalControllerAttempt(false);
         if (!this.pendingGoalVerifications.has(runId)) this.settleAutomaticGoalInterruption(record);
         if (!terminalObserved) {
+          const terminalDisposition = classifyMainOwnedTerminal({
+            eventKind: "error",
+            steeringInterruptRequested: record.steeringInterruptRequested,
+            signalAborted: controller.signal.aborted,
+            abortReason: controller.signal.reason,
+          });
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            record.steeringInterruptRequested ? "partial" : controller.signal.aborted ? "cancelled" : "failed",
+            terminalTaskStatus({
+              kind: "error",
+              requestsDecision: false,
+              cancelled: terminalDisposition.terminalKind === "invoke_cancelled",
+              interrupted: terminalDisposition.terminalKind === "invoke_interrupted",
+              hasPartialText: Boolean(record.partialText.trim()),
+            }),
             taskMaterialized,
             invocationOrigin,
           );
           taskMaterialized = Boolean(canonicalTask);
-          const terminalKind = record.steeringInterruptRequested
-            ? "invoke_interrupted" as const
-            : controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
+          const terminalKind = terminalDisposition.terminalKind;
           tryRecordRunEvent({
             runId,
             kind: terminalKind,
@@ -3159,6 +3194,7 @@ export class InvocationService {
             agentId: record.actualAgentId,
             payload: {
               resultFolder: record.resultFolder,
+              ...(terminalDisposition.errorCode ? { errorCode: terminalDisposition.errorCode } : {}),
               errorMessage: "Runtime settled without a terminal event",
             },
           });
@@ -3416,7 +3452,7 @@ export class InvocationService {
   }
 
   cancel(runId: string): "requested" | "already-requested" | "not-found" {
-    return this.cancelWithReason(runId, new Error("stopped_by_user"));
+    return this.cancelWithReason(runId, new Error(STOPPED_BY_USER));
   }
 
   private cancelWithReason(
@@ -3429,8 +3465,8 @@ export class InvocationService {
         const goal = getLongRunByGoalId(record.automaticGoalId);
         if (goal && !["completed", "failed", "cancelled", "cancelling", "paused"].includes(goal.status)) {
           transitionLongRun({ runId: goal.id,
-            to: reason.message === "stopped_by_user" ? "cancelling" : "pausing",
-            actorKind: reason.message === "stopped_by_user" ? "user" : "host",
+            to: reason.message === STOPPED_BY_USER ? "cancelling" : "pausing",
+            actorKind: reason.message === STOPPED_BY_USER ? "user" : "host",
             reason: reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
         }
       } catch { /* Always abort the actual invocation even if persistence fails. */ }

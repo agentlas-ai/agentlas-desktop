@@ -1133,6 +1133,9 @@ const runClaudeTurn = async (
     executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
     !runReq.untrustedNoTools &&
+    // A per-run tool grant dies with its turn; a process that carries it cannot serve the next one.
+    !runReq.ephemeralToolGrant &&
+    !runReq.singleUse &&
     // A pooled process does not repeat system/init for each turn. This
     // Workforce call needs fresh native observations; existing pools stay intact.
     !hostAuthorityWorkforce &&
@@ -2084,7 +2087,7 @@ const runClaudeTurn = async (
   } finally {
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
-      if (broken || req.signal?.aborted) pool.discard(lease);
+      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse) pool.discard(lease);
       else pool.release(lease);
     }
   }

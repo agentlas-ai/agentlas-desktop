@@ -96,6 +96,7 @@ interface TerminalProcess {
   nextSeq: number;
   dropped: boolean;
   partial: { stdout: string; stderr: string };
+  pendingCarriageReturn: { stdout: boolean; stderr: boolean };
   previews: Map<string, TerminalPreview>;
   requests: Map<string, TerminalRequest>;
   mobileOwner: boolean;
@@ -479,6 +480,7 @@ export class DesktopMobileTerminalController
       nextSeq: 1,
       dropped: false,
       partial: { stdout: "", stderr: "" },
+      pendingCarriageReturn: { stdout: false, stderr: false },
       previews: new Map(),
       requests: new Map(),
       mobileOwner: false,
@@ -511,10 +513,7 @@ export class DesktopMobileTerminalController
   }
 
   private consumeOutput(terminal: TerminalProcess, stream: "stdout" | "stderr", chunk: string): void {
-    let value = terminal.partial[stream] + chunk;
-    const parts = value.split(/\r\n|\n|\r/);
-    terminal.partial[stream] = parts.pop() ?? "";
-    for (const line of parts) {
+    const emit = (line: string) => {
       const cleaned = stripControlText(line);
       const marker = cleaned.match(new RegExp(`^${DONE_PREFIX}([a-zA-Z0-9_-]+):(-?\\d+)$`));
       if (marker) {
@@ -523,9 +522,36 @@ export class DesktopMobileTerminalController
           if (request.status !== "cancelled") request.status = "completed";
           this.appendLine(terminal, "system", `Command completed (exit ${marker[2]}).`);
         }
-        continue;
+        return;
       }
+      // Interactive shells echo the fixed completion command before running
+      // it. The prefix is reserved for the controller, so neither that shell
+      // plumbing nor a partial redraw of it belongs in the mobile transcript.
+      if (cleaned.includes(DONE_PREFIX)) return;
       this.appendLine(terminal, stream, cleaned);
+    };
+
+    // PTYs use CRLF for completed lines and bare CR for in-place redraws.
+    // Treating both as line endings leaks one-character zle redraw fragments;
+    // retain the current visible row until LF, while a bare CR replaces it.
+    for (const character of chunk) {
+      if (terminal.pendingCarriageReturn[stream]) {
+        terminal.pendingCarriageReturn[stream] = false;
+        if (character === "\n") {
+          emit(terminal.partial[stream]);
+          terminal.partial[stream] = "";
+          continue;
+        }
+        terminal.partial[stream] = "";
+      }
+      if (character === "\r") {
+        terminal.pendingCarriageReturn[stream] = true;
+      } else if (character === "\n") {
+        emit(terminal.partial[stream]);
+        terminal.partial[stream] = "";
+      } else {
+        terminal.partial[stream] += character;
+      }
     }
   }
 

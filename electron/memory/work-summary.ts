@@ -1,4 +1,11 @@
 import { redactSecrets } from "../../shared/secret-patterns";
+import {
+  canonicalAskFenceText,
+  extractAskFences,
+  flattenAskFences,
+  type AgentlasAskQuestion,
+} from "../../shared/ask-fence-flatten";
+import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 
 export const WORK_SUMMARY_MAX_SENTENCES = 2;
 export const WORK_SUMMARY_MAX_CHARS_CJK = 120;
@@ -107,13 +114,31 @@ function truncateSummary(value: string): string {
   return `${end.trimEnd()}…`;
 }
 
+function summarizeQuestions(
+  questions: AgentlasAskQuestion[],
+  locale: "ko" | "en",
+): string {
+  const plainText = flattenAskFences(canonicalAskFenceText(questions), locale);
+  const value = splitSentences(cleanSource(plainText)).join(" ");
+  return value ? truncateSummary(value) : "";
+}
+
 /**
  * Produces the customer-facing project timeline label. Raw PM Soul, code maps,
  * chat transcripts, and logs are never returned: at most two outcome sentences
  * cross this boundary, with a strict script-aware character cap.
  */
-export function summarizeCompletedWork(raw: string | null | undefined, fallback = "작업 기록"): string {
-  const candidates = splitSentences(cleanSource(String(raw ?? "")));
+export function summarizeCompletedWork(
+  raw: string | null | undefined,
+  fallback = "작업 기록",
+  locale: "ko" | "en" = "ko",
+): string {
+  const source = stripStrayProtocolTokens(String(raw ?? ""));
+  const extracted = extractAskFences(source);
+  if (extracted.questions.length > 0) {
+    return summarizeQuestions(extracted.questions, locale);
+  }
+  const candidates = splitSentences(cleanSource(extracted.text));
   const selected = pickSentences(candidates);
   const fallbackCandidates = splitSentences(cleanSource(fallback));
   const value = selected.join(" ")

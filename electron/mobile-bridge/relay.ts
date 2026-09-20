@@ -10,14 +10,17 @@ const SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CHANNEL_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,256}$/;
 const MAX_PENDING_BYTES = 8 * 1024 * 1024;
+const CONTROL_HEARTBEAT_MS = 20_000;
 
 interface RelaySocket {
   readyState: number;
   on(event: "open", listener: () => void): this;
   on(event: "message", listener: (data: unknown, isBinary: boolean) => void): this;
+  on(event: "pong", listener: () => void): this;
   on(event: "close" | "error", listener: (...args: unknown[]) => void): this;
   on(event: "unexpected-response", listener: (request: unknown, response: unknown) => void): this;
   send(data: unknown, options?: { binary?: boolean }): void;
+  ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
 }
@@ -223,6 +226,7 @@ export class MobileBridgeCloudRelay {
   private readonly secret: string;
   private control: RelaySocket | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
+  private controlHeartbeatTimer: NodeJS.Timeout | null = null;
   private stopped = true;
   private retryAttempt = 0;
   // Deduplicates control-channel diagnostics so a 5s retry loop cannot spam the
@@ -248,6 +252,8 @@ export class MobileBridgeCloudRelay {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
+    this.controlHeartbeatTimer = null;
     this.control?.close(1000, "desktop stopping");
     this.control = null;
     for (const tunnel of this.tunnels) tunnel.close(1000, "desktop stopping");
@@ -313,11 +319,33 @@ export class MobileBridgeCloudRelay {
     });
     this.control = socket;
     let opened = false;
+    let controlAlive = true;
     socket.on("open", () => {
       opened = true;
       this.retryAttempt = 0;
       this.logControl("connected", "remote access control channel connected");
       this.options.onStatusChanged?.();
+      this.controlHeartbeatTimer = setInterval(() => {
+        if (this.stopped || this.control !== socket) {
+          if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
+          this.controlHeartbeatTimer = null;
+          return;
+        }
+        if (!controlAlive) {
+          socket.terminate();
+          return;
+        }
+        controlAlive = false;
+        try {
+          socket.ping();
+        } catch {
+          socket.terminate();
+        }
+      }, CONTROL_HEARTBEAT_MS);
+      this.controlHeartbeatTimer.unref?.();
+    });
+    socket.on("pong", () => {
+      controlAlive = true;
     });
     socket.on("unexpected-response", (_request, response) => {
       const status =
@@ -332,6 +360,8 @@ export class MobileBridgeCloudRelay {
     const disconnected = (...args: unknown[]) => {
       if (this.control !== socket) return;
       this.control = null;
+      if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
+      this.controlHeartbeatTimer = null;
       if (!opened) {
         socket.terminate();
         const detail = args[0] instanceof Error ? `: ${args[0].message}` : "";

@@ -28,7 +28,7 @@ import {
 } from "../store/tasks";
 import { listFirms } from "../store/firms";
 import { listProjects } from "../store/projects";
-import { isOneInvocationChat } from "../store/run-events";
+import { invocationPromptRunIdsForMessages, isOneInvocationChat } from "../store/run-events";
 import { listPendingConfirmations } from "../confirm";
 import { listEnvKeys } from "../secrets/vault";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
@@ -36,10 +36,14 @@ import { getUsageSnapshot } from "../usage";
 import { getOneBriefingSnapshot } from "../one/briefing";
 import { getOneMemoryMap } from "../one/memory-map";
 import { getOneProfile } from "../store/one-profile";
-import { getProjectTimelineSnapshot } from "../memory/project-timeline";
+import {
+  getProjectKnowledgeSourcesAsync,
+  getProjectTimelineSnapshot,
+} from "../memory/project-timeline";
 import {
   PROJECT_SITEMAP_MAX_BYTES,
   readActivatedProjectMemoryJson,
+  readActivatedProjectMemoryJsonAsync,
 } from "../memory/safe-project-read";
 import { SITEMAP_FILE } from "../architecture/manifest";
 import { createOneTaskProjectionRuntime } from "../one/task-projection";
@@ -72,7 +76,10 @@ import {
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
 } from "../../shared/one-decision";
-import { oneDecisionJudgedReaders, prejudgeOneDecisions } from "../one/judged-decision";
+import {
+  deferPrejudgeOneDecisions,
+  oneDecisionJudgedReadersFor,
+} from "../one/judged-decision";
 import {
   isOneValueClosureState,
   type OneValueClosureState,
@@ -92,6 +99,8 @@ import {
 } from "../../shared/schedule-describe";
 import { getOneExperienceReuseState } from "../one/experience-reuse";
 import { projectOneMobileEcosystemSuggestions } from "../one/mobile-suggestions";
+import type { AgentlasOneTaskProjectionV1 } from "../../shared/one-task-projection";
+import type { OneMobileEcosystemSuggestionV1 } from "../../shared/one-mobile-suggestion";
 
 import type { MobileBridgeHostIdentity } from "./pairing";
 
@@ -139,7 +148,6 @@ import {
 } from "./sanitize";
 
 const INITIAL_PROJECTION_BUDGET_MS = 2_500;
-const INITIAL_DECISION_JUDGE_BUDGET_MS = 1_500;
 const CHAT_ATTACHMENT_ID_PATTERN = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
 const CHAT_ATTACHMENT_URL_RE = new RegExp(
   `^agentlas://chat-attachment/(${CHAT_ATTACHMENT_ID_PATTERN})$`,
@@ -262,6 +270,8 @@ export interface MobileBridgeProjectionOptions {
   pendingToolApprovals?: readonly MobileBridgeToolApprovalDto[];
   /** Chat-bound synchronous runtime questions. */
   pendingUserInputs?: readonly MobileBridgeUserInputDto[];
+  /** Explicit client refreshes bypass the shared usage cache, subject to the provider cooldown. */
+  forceUsageRefresh?: boolean;
   now?: Date;
   ontology?: {
     supported: boolean;
@@ -728,12 +738,48 @@ function projectFilesDto(project: ReturnType<typeof listProjects>[number]): Mobi
   return files;
 }
 
+async function projectFilesDtoAsync(
+  project: ReturnType<typeof listProjects>[number],
+): Promise<MobileBridgeProjectDto["files"]> {
+  if (!project.folderPath) return [];
+  const sitemap = await readActivatedProjectMemoryJsonAsync<{ nodes?: unknown[] }>(
+    project.folderPath,
+    SITEMAP_FILE,
+    PROJECT_SITEMAP_MAX_BYTES,
+  );
+  if (!Array.isArray(sitemap?.nodes)) return [];
+  const files: MobileBridgeProjectDto["files"] = [];
+  for (const candidate of sitemap.nodes) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const node = candidate as Record<string, unknown>;
+    if (node.kind !== "file" && node.kind !== "directory") continue;
+    if (typeof node.relative_path !== "string") continue;
+    const relativePath = node.relative_path.trim().replaceAll("\\", "/");
+    if (!relativePath || relativePath === ".agentlas" || relativePath.startsWith(".agentlas/")) continue;
+    files.push({
+      path: displayText(relativePath, 1_024),
+      kind: node.kind,
+      updatedAt: typeof node.last_modified === "string" && Number.isFinite(Date.parse(node.last_modified))
+        ? node.last_modified
+        : null,
+    });
+    if (files.length >= 160) break;
+  }
+  return files;
+}
+
 export function projectMobileBridgeProject(
   project: ReturnType<typeof listProjects>[number],
-  options: { includeDetails?: boolean } = {},
+  options: {
+    includeDetails?: boolean;
+    includeFiles?: boolean;
+    includeKnowledge?: boolean;
+  } = {},
 ): MobileBridgeProjectDto {
   const includeDetails = options.includeDetails === true;
-  const timeline = includeDetails ? getProjectTimelineSnapshot(project.id, 24) : null;
+  const timeline = includeDetails
+    ? getProjectTimelineSnapshot(project.id, 24, { includeKnowledge: options.includeKnowledge })
+    : null;
   const latest = timeline?.entries[0] ?? null;
   return {
     id: project.id,
@@ -757,7 +803,7 @@ export function projectMobileBridgeProject(
     controllerName: null,
     agentCount: project.agentPool.length,
     hasWorkingFolder: Boolean(project.folderPath),
-    files: includeDetails ? projectFilesDto(project) : [],
+    files: includeDetails && options.includeFiles !== false ? projectFilesDto(project) : [],
     latestResult: latest
       ? {
           summary: displayText(latest.summary, 4_000),
@@ -781,8 +827,40 @@ export function projectMobileBridgeProject(
   };
 }
 
+export async function projectMobileBridgeProjectAsync(
+  project: ReturnType<typeof listProjects>[number],
+): Promise<MobileBridgeProjectDto> {
+  const projected = projectMobileBridgeProject(project, {
+    includeDetails: true,
+    includeFiles: false,
+    includeKnowledge: false,
+  });
+  const [files, sources] = await Promise.all([
+    projectFilesDtoAsync(project),
+    getProjectKnowledgeSourcesAsync(project.folderPath),
+  ]);
+  return {
+    ...projected,
+    files,
+    memory: {
+      ...projected.memory,
+      sources,
+    },
+  };
+}
+
 function projectsDto(): MobileBridgeProjectDto[] {
   return listProjects().map((project) => projectMobileBridgeProject(project));
+}
+
+/**
+ * Durable One ownership for Mobile, with the invocation receipt retained only
+ * as a compatibility proof for chats created before origin_surface existed.
+ */
+export function isMobileBridgeOneChat(
+  chat: Pick<Chat, "id" | "originSurface">,
+): boolean {
+  return chat.originSurface === "one" || isOneInvocationChat(chat.id);
 }
 
 /** DESKTOP_MOBILE_BRIDGE: One canonical secret-free chat DTO for snapshots and RPC replies. */
@@ -798,7 +876,7 @@ export function projectMobileBridgeChat(
   }
   return {
     id: chat.id,
-    oneOrigin: isOneInvocationChat(chat.id),
+    oneOrigin: isMobileBridgeOneChat(chat),
     taskId: task?.id ?? chat.taskId ?? null,
     taskVersion: task?.version ?? null,
     taskStatus: task?.status ?? null,
@@ -851,6 +929,12 @@ export function projectMobileBridgeHistory(
   // 느렸다. JSON 배열 크기 = 괄호 2 + 원소 합 + 쉼표(n-1)이므로 합만 굴린다.
   let outBytes = 2;
   const selected = history.slice(-Math.max(1, Math.min(200, Math.floor(limit))));
+  const promptRunIds = chatId
+    ? invocationPromptRunIdsForMessages(
+        chatId,
+        selected.filter((message) => message.role === "user").map((message) => message.id),
+      )
+    : new Map<string, string>();
   // Newest messages are authoritative when a byte budget forces a shorter page.
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const message = selected[index];
@@ -861,6 +945,9 @@ export function projectMobileBridgeHistory(
       role: message.role,
       text: "",
       createdAt: message.createdAt,
+      ...(message.role === "user" && promptRunIds.has(message.id)
+        ? { runId: promptRunIds.get(message.id)! }
+        : {}),
       ...(images.length ? { images } : {}),
       ...(files.length ? { files } : {}),
     };
@@ -1026,7 +1113,11 @@ export function projectMobileBridgeOneDecisionsFromCurrent(
 
     // Main-side projection reads the resident judge's verdicts (warmed on the
     // async snapshot path); a cache miss keeps the deterministic fallback.
-    const view = normalizeOneDecision(confirmation, task.id, oneDecisionJudgedReaders);
+    const view = normalizeOneDecision(
+      confirmation,
+      task.id,
+      oneDecisionJudgedReadersFor(confirmation),
+    );
     const row: MobileBridgeOneDecisionDto = {
       authoritativeHostRef: hostIdentity.hostId,
       canonicalTaskVersion: task.version,
@@ -1456,13 +1547,20 @@ export function projectMobileBridgeAutomation(
             : "automation_failed",
     graph: automation.graph
       ? {
-          nodes: automation.graph.nodes.slice(0, 160).map((node) => ({
-            id: displayText(node.id, 160),
-            type: node.type,
-            label: displayText(node.label || node.type, 160),
-            x: Number.isFinite(node.position.x) ? node.position.x : 0,
-            y: Number.isFinite(node.position.y) ? node.position.y : 0,
-          })),
+          nodes: automation.graph.nodes.slice(0, 160).map((node) => {
+            // Graphs written before positions became required can still be
+            // present in a retained Desktop profile. One malformed visual
+            // coordinate must not abort the authenticated Mobile snapshot.
+            const x = node.position?.x;
+            const y = node.position?.y;
+            return {
+              id: displayText(node.id, 160),
+              type: node.type,
+              label: displayText(node.label || node.type, 160),
+              x: typeof x === "number" && Number.isFinite(x) ? x : 0,
+              y: typeof y === "number" && Number.isFinite(y) ? y : 0,
+            };
+          }),
           edges: automation.graph.edges.slice(0, 320).map((edge) => ({
             id: displayText(edge.id, 160),
             source: displayText(edge.source, 160),
@@ -1499,6 +1597,8 @@ export function projectMobileBridgeRuntimes(
   return runtimes.map((runtime) => ({
     kind: runtime.kind,
     backend: runtime.backend,
+    acpAgentId: runtime.kind === "acp" ? runtime.acpAgentId ?? null : null,
+    label: runtime.label ? displayText(runtime.label, 256) : null,
     version: runtime.version,
     active: runtime.active,
     ...(runtimeCredentialUnavailable(runtime)
@@ -1527,6 +1627,8 @@ export function projectMobileBridgeRuntimeSelection(
   return {
     kind: selection.kind,
     backend: selection.backend ?? null,
+    acpAgentId: selection.kind === "acp" ? selection.acpAgentId ?? null : null,
+    label: selection.label ? displayText(selection.label, 256) : null,
     model: selection.model ?? null,
     effort: selection.effort ?? null,
     longContext: selection.longContext === true,
@@ -1579,6 +1681,86 @@ export function projectMobileBridgeRuntimeRolePool(
       ...(orchestratorPick ? { orchestrator: orchestratorPick } : {}),
       ...(workerPick ? { worker: workerPick } : {}),
     },
+  };
+}
+
+interface MobileBridgeOneEvidenceSnapshotRows {
+  valueClosures: MobileBridgeOneValueClosureDto[];
+  experienceReuseReceipts: MobileBridgeOneExperienceReuseDto[];
+  improvementProofs: MobileBridgeOneImprovementProofDto[];
+  ecosystemSuggestions: OneMobileEcosystemSuggestionV1[];
+}
+
+/**
+ * Preserve the exact reference closure of the bounded Task projection already
+ * selected for this snapshot. Evidence never pulls an older Task across the
+ * bridge, and a Closure-dependent row is omitted when its Closure was omitted.
+ */
+export function bindOneEvidenceToSnapshotTasks(
+  taskProjections: readonly AgentlasOneTaskProjectionV1[],
+  rows: MobileBridgeOneEvidenceSnapshotRows,
+): MobileBridgeOneEvidenceSnapshotRows {
+  const taskBinding = (hostId: string, taskId: string, taskVersion: number): string =>
+    `${hostId}\0${taskId}\0${taskVersion}`;
+  const closureBinding = (
+    hostId: string,
+    taskId: string,
+    taskVersion: number,
+    closureId: string,
+    closureVersion: number,
+  ): string => `${taskBinding(hostId, taskId, taskVersion)}\0${closureId}\0${closureVersion}`;
+  const emittedTasks = new Set(taskProjections.map((task) => taskBinding(
+    task.sync.authoritativeHostRef,
+    task.taskId,
+    task.canonicalVersion,
+  )));
+  const valueClosures = rows.valueClosures.filter((row) => emittedTasks.has(taskBinding(
+    row.authoritativeHostRef,
+    row.taskId,
+    row.canonicalTaskVersion,
+  )));
+  const emittedClosures = new Set(valueClosures.map((row) => closureBinding(
+    row.authoritativeHostRef,
+    row.taskId,
+    row.canonicalTaskVersion,
+    row.valueClosureId,
+    row.valueClosureVersion,
+  )));
+  const hasTask = (row: {
+    authoritativeHostRef: string;
+    taskId: string;
+    canonicalTaskVersion: number;
+  }): boolean => emittedTasks.has(taskBinding(
+    row.authoritativeHostRef,
+    row.taskId,
+    row.canonicalTaskVersion,
+  ));
+
+  return {
+    valueClosures,
+    experienceReuseReceipts: rows.experienceReuseReceipts.filter((row) =>
+      hasTask(row) && emittedClosures.has(closureBinding(
+        row.authoritativeHostRef,
+        row.taskId,
+        row.canonicalTaskVersion,
+        row.valueClosureId,
+        row.valueClosureVersion,
+      )),
+    ),
+    improvementProofs: rows.improvementProofs.filter(hasTask),
+    ecosystemSuggestions: rows.ecosystemSuggestions.filter((row) =>
+      emittedTasks.has(taskBinding(
+        row.authoritativeHostRef,
+        row.originTask.taskId,
+        row.originTask.taskVersion,
+      )) && emittedClosures.has(closureBinding(
+        row.authoritativeHostRef,
+        row.originTask.taskId,
+        row.originTask.taskVersion,
+        row.originTask.valueClosureId,
+        row.originTask.valueClosureVersion,
+      )),
+    ),
   };
 }
 
@@ -1644,7 +1826,7 @@ export async function projectMobileBridgeSnapshot(
     settleInitialProjectionWithin("runtime", detectRuntimes(), []),
     settleInitialProjectionWithin(
       "usage",
-      getUsageSnapshot(),
+      getUsageSnapshot(options.forceUsageRefresh ? { force: true } : undefined),
       { providers: [], fetchedAt: Date.now() } satisfies UsageSnapshot,
     ),
     settleInitialProjectionWithin("environment", listEnvKeys(), [] as string[]),
@@ -1682,24 +1864,26 @@ export async function projectMobileBridgeSnapshot(
   // Read once so the legacy DTO and Main-normalized Decision projection cannot
   // describe different pending-message generations inside one snapshot.
   const pendingConfirmations = listPendingConfirmations();
-  // Async pre-pass: warm the resident judge's risk/disposition verdicts so the
-  // synchronous projection below can peek them (miss = deterministic fallback).
-  await prejudgeOneDecisions(
+  // A missing verdict projects immediately as the existing fail-closed locked
+  // card. Resident judgment runs after this turn and publishes one ordinary
+  // store-change event only when the complete decision verdict is ready.
+  deferPrejudgeOneDecisions(
     pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT),
-    { timeoutMs: INITIAL_DECISION_JUDGE_BUDGET_MS },
-  ).catch(() => undefined);
+  );
   const oneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
     options.hostIdentity,
     pendingConfirmations,
     { now: options.now },
   );
-  const oneValueClosures = projectMobileBridgeOneValueClosures(options.hostIdentity);
-  const oneExperienceReuseReceipts = projectMobileBridgeOneExperienceReuse(options.hostIdentity);
-  const oneImprovementProofs = projectMobileBridgeOneImprovementProofs(options.hostIdentity);
-  const oneEcosystemSuggestions = projectOneMobileEcosystemSuggestions(
-    options.hostIdentity.hostId,
-    options.now ?? new Date(),
-  );
+  const boundOneEvidence = bindOneEvidenceToSnapshotTasks(taskProjections, {
+    valueClosures: projectMobileBridgeOneValueClosures(options.hostIdentity),
+    experienceReuseReceipts: projectMobileBridgeOneExperienceReuse(options.hostIdentity),
+    improvementProofs: projectMobileBridgeOneImprovementProofs(options.hostIdentity),
+    ecosystemSuggestions: projectOneMobileEcosystemSuggestions(
+      options.hostIdentity.hostId,
+      options.now ?? new Date(),
+    ),
+  });
   const fullMemoryMap = (() => {
     try {
       return getOneMemoryMap();
@@ -1733,10 +1917,10 @@ export async function projectMobileBridgeSnapshot(
     activeChatIds,
     taskProjections,
     oneDecisions,
-    oneValueClosures,
-    oneExperienceReuseReceipts,
-    oneImprovementProofs,
-    oneEcosystemSuggestions,
+    oneValueClosures: boundOneEvidence.valueClosures,
+    oneExperienceReuseReceipts: boundOneEvidence.experienceReuseReceipts,
+    oneImprovementProofs: boundOneEvidence.improvementProofs,
+    oneEcosystemSuggestions: boundOneEvidence.ecosystemSuggestions,
     oneProfile: projectMobileBridgeOneProfile(getOneProfile()),
     oneBriefing: projectMobileBridgeOneBriefing(getOneBriefingSnapshot({ now: options.now })),
     ...(fullMemoryMap ? { oneMemoryMap: {

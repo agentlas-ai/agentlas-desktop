@@ -15,6 +15,8 @@ interface ModelRoleRow {
   kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
+  acp_agent_id: string | null;
+  runtime_label: string | null;
   model: string | null;
   effort: string | null;
   long_context: number;
@@ -57,6 +59,8 @@ interface ModelRoleMemberRow {
   kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
+  acp_agent_id: string | null;
+  runtime_label: string | null;
   model: string | null;
   effort: string | null;
   long_context: number;
@@ -83,14 +87,18 @@ function canonicalStoredSelection(row: {
   kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
+  acp_agent_id?: string | null;
+  runtime_label?: string | null;
   model: string | null;
-}): Pick<RuntimeSelection, "kind" | "backend" | "source" | "model"> {
+}): Pick<RuntimeSelection, "kind" | "backend" | "source" | "acpAgentId" | "label" | "model"> {
   const legacyGemini = row.kind === "gemini";
   return {
     kind: canonicalStoredKind(row.kind),
     backend: row.backend ?? undefined,
     // A legacy Google CLI source/model is not a valid Antigravity executable pin.
     source: legacyGemini ? undefined : row.source ?? undefined,
+    acpAgentId: legacyGemini ? undefined : row.acp_agent_id ?? undefined,
+    label: legacyGemini ? undefined : row.runtime_label ?? undefined,
     model: legacyGemini ? undefined : row.model ?? undefined,
   };
 }
@@ -125,12 +133,14 @@ function getStoredRow(role: RuntimeRole): ModelRoleRow | null {
 function getLegacyOrchestrator(): ResolvedModelRole | null {
   try {
     const row = getDb()
-      .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+      .prepare("SELECT kind, backend, source, acp_agent_id, runtime_label, model, long_context FROM active_runtime WHERE id = 1")
       .get() as
       | {
           kind: string;
           backend: RuntimeBackend | null;
           source: string | null;
+          acp_agent_id: string | null;
+          runtime_label: string | null;
           model: string | null;
           long_context: number;
         }
@@ -271,8 +281,8 @@ export function setModelRoleMembers(
     db.prepare("DELETE FROM model_role_members WHERE role = ?").run(role);
     const insert = db.prepare(
       `INSERT INTO model_role_members
-       (role, position, kind, backend, source, model, effort, long_context, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (role, position, kind, backend, source, acp_agent_id, runtime_label, model, effort, long_context, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     selections.forEach((selection, index) => {
       insert.run(
@@ -281,6 +291,8 @@ export function setModelRoleMembers(
         selection.kind,
         selection.backend ?? null,
         cleanText(selection.source),
+        cleanText(selection.acpAgentId),
+        cleanText(selection.label),
         cleanText(selection.model),
         cleanText(selection.effort),
         selection.longContext ? 1 : 0,
@@ -394,12 +406,14 @@ export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
   getDb()
     .prepare(
       `INSERT INTO model_roles
-       (role, kind, backend, source, model, effort, long_context, inherit, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (role, kind, backend, source, acp_agent_id, runtime_label, model, effort, long_context, inherit, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(role) DO UPDATE SET
          kind = excluded.kind,
          backend = excluded.backend,
          source = excluded.source,
+         acp_agent_id = excluded.acp_agent_id,
+         runtime_label = excluded.runtime_label,
          model = excluded.model,
          effort = excluded.effort,
          long_context = excluded.long_context,
@@ -411,6 +425,8 @@ export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
       selection.kind,
       selection.backend ?? null,
       cleanText(selection.source),
+      cleanText(selection.acpAgentId),
+      cleanText(selection.label),
       cleanText(selection.model),
       cleanText(selection.effort),
       selection.longContext ? 1 : 0,
@@ -429,13 +445,15 @@ export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
       getDb()
         .prepare(
           `UPDATE model_role_members
-           SET kind = ?, backend = ?, source = ?, model = ?, effort = ?, long_context = ?, updated_at = ?
+           SET kind = ?, backend = ?, source = ?, acp_agent_id = ?, runtime_label = ?, model = ?, effort = ?, long_context = ?, updated_at = ?
            WHERE role = ? AND position = 1`,
         )
         .run(
           selection.kind,
           selection.backend ?? null,
           cleanText(selection.source),
+          cleanText(selection.acpAgentId),
+          cleanText(selection.label),
           cleanText(selection.model),
           cleanText(selection.effort),
           selection.longContext ? 1 : 0,

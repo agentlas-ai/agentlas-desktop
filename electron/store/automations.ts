@@ -136,7 +136,7 @@ const RUNTIME_BACKENDS = new Set<string>(SHARED_RUNTIME_BACKENDS);
  * 예약 실행 때마다 pinned_runtime_contract_invalid 로 죽었다(2026-09-13 프로덕션 1.2.0 실측:
  * "오늘 할 일 3개" 자동화의 즉시 실행이 실패 보고만 남겼다). 타입이 아는 키는 계약도 안다.
  */
-const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "model", "longContext", "effort", "role", "inherit"]);
+const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "acpAgentId", "label", "model", "longContext", "effort", "role", "inherit"]);
 
 type StoredContractState = "missing" | "valid" | "invalid";
 
@@ -156,11 +156,16 @@ export function decodeRuntimeSelection(raw: string | null | undefined): {
       typeof normalized.kind === "string" && RUNTIME_KINDS.has(normalized.kind) &&
       (normalized.backend === undefined || typeof normalized.backend === "string" && RUNTIME_BACKENDS.has(normalized.backend)) &&
       (normalized.source === undefined || typeof normalized.source === "string" && normalized.source.length > 0 && normalized.source.length <= 2_048) &&
+      (normalized.acpAgentId === undefined || typeof normalized.acpAgentId === "string" && normalized.acpAgentId.length > 0 && normalized.acpAgentId.length <= 256) &&
+      (normalized.label === undefined || typeof normalized.label === "string" && normalized.label.length > 0 && normalized.label.length <= 256) &&
       (normalized.model === undefined || typeof normalized.model === "string" && normalized.model.length > 0 && normalized.model.length <= 512) &&
       (normalized.longContext === undefined || typeof normalized.longContext === "boolean") &&
       (normalized.effort === undefined || typeof normalized.effort === "string" && normalized.effort.length <= 128) &&
       (normalized.role === undefined || normalized.role === "orchestrator" || normalized.role === "worker") &&
       (normalized.inherit === undefined || typeof normalized.inherit === "boolean")
+      && (normalized.kind === "acp"
+        ? typeof normalized.acpAgentId === "string" && normalized.acpAgentId.length > 0
+        : normalized.acpAgentId === undefined)
     ) {
       return { state: "valid", value: normalized as unknown as RuntimeSelection };
     }

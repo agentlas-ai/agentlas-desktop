@@ -180,6 +180,8 @@ export async function runSemanticMemoryReview(input: {
       // and MCP-less without rejecting the selected runtime before it starts.
       untrustedNoTools: false,
       chatId: `memory-curator:${randomUUID()}`,
+      // The chat id above is never seen again, so a pooled process could never be reused.
+      singleUse: true,
       locale: input.locale,
     }, {
       onStatus: () => undefined,

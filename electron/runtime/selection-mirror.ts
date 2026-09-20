@@ -23,6 +23,8 @@ function portableSelection(value: RuntimeSelection | RuntimeStatus): RuntimeSele
     kind: value.kind,
     ...(value.backend ? { backend: value.backend } : {}),
     ...(value.source ? { source: value.source } : {}),
+    ...(value.acpAgentId ? { acpAgentId: value.acpAgentId } : {}),
+    ...(value.label ? { label: value.label } : {}),
     ...(value.model ? { model: value.model } : {}),
     ...(value.effort ? { effort: value.effort } : {}),
     longContext: typeof selected.longContext === "boolean"
@@ -61,6 +63,8 @@ export function readRuntimeSelectionMirror(): RuntimeSelection | null {
     const selection = parsed.selection;
     if (parsed.contract !== CONTRACT || !selection || typeof selection.kind !== "string") return null;
     if (selection.source !== undefined && typeof selection.source !== "string") return null;
+    if (selection.acpAgentId !== undefined && typeof selection.acpAgentId !== "string") return null;
+    if (selection.label !== undefined && typeof selection.label !== "string") return null;
     if (selection.model !== undefined && typeof selection.model !== "string") return null;
     return portableSelection(selection);
   } catch {

@@ -22,7 +22,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 119;
+const SCHEMA_VERSION = 120;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6557,6 +6557,22 @@ export function initStore(options: StoreInitOptions = {}): void {
       CREATE INDEX IF NOT EXISTS idx_memory_revocation_cleanup_revocation
         ON memory_revocation_cleanup_targets(revocation_id, state);
     `);
+  }
+
+  // v120: an ACP runtime kind is an open seat. Persist its exact spec id across
+  // the active-runtime compatibility mirror and both role tables; source paths
+  // and display labels are not authoritative because multiple profiles may use
+  // the same executable and labels may change. Keep the additions idempotent so
+  // interim development databases repair themselves without rebuilding tables.
+  for (const table of ["active_runtime", "model_roles", "model_role_members"] as const) {
+    if (!tableExists(_db, table)) continue;
+    const columns = new Set(schemaColumns(_db, table).map((column) => column.name));
+    if (!columns.has("acp_agent_id")) {
+      _db.exec(`ALTER TABLE ${table} ADD COLUMN acp_agent_id TEXT`);
+    }
+    if (!columns.has("runtime_label")) {
+      _db.exec(`ALTER TABLE ${table} ADD COLUMN runtime_label TEXT`);
+    }
   }
 
   } catch (error) {

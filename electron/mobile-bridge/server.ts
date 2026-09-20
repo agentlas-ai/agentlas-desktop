@@ -846,11 +846,17 @@ export class AgentlasMobileBridgeServer {
       // same secret-free-per-contract payload the pair exchange returns, and it
       // only ever crosses an already-authenticated, host-verified socket.
       const relay = this.relayPairingInfo?.() ?? null;
+      const authorityCapabilities = this.authority.capabilities?.();
       this.sendEvent(state, "bridge.ready", {
         protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
         connectionId: state.context.connectionId,
         hostId: snapshot.host.id,
-        capabilities: this.authority.capabilities?.() ?? {},
+        capabilities: {
+          ...(authorityCapabilities && typeof authorityCapabilities === "object" && !Array.isArray(authorityCapabilities)
+            ? authorityCapabilities
+            : {}),
+          ...(this.replayStore ? { requestStatusV1: this.replayStore.capability() } : {}),
+        },
         ...(relay ? { relay } : {}),
       });
       this.sendEvent(state, "snapshot.updated", snapshot as unknown as MobileBridgeJsonValue);
@@ -948,6 +954,10 @@ export class AgentlasMobileBridgeServer {
     if (state.revoked || !this.clients.has(state)) return;
     if (request.method === "visualSession.frame") {
       await this.dispatchVisualFrame(state, request);
+      return;
+    }
+    if (request.method === "request.status") {
+      this.dispatchRequestStatus(state, request);
       return;
     }
     const selfRevocation = request.method === "device.revokeSelf";
@@ -1090,6 +1100,48 @@ export class AgentlasMobileBridgeServer {
       }
       if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
       this.send(state, response);
+    }
+  }
+
+  private dispatchRequestStatus(state: ConnectionState, request: MobileBridgeRpcRequest): void {
+    if (!this.replayStore) {
+      this.send(state, mobileBridgeFailure(
+        request.id,
+        "idempotency_unavailable",
+        "Desktop request reconciliation is unavailable",
+      ));
+      return;
+    }
+    const originalRequest: MobileBridgeRpcRequest = {
+      v: MOBILE_BRIDGE_PROTOCOL_VERSION,
+      type: "request",
+      id: String(request.params.requestId),
+      idempotencyKey: String(request.params.idempotencyKey),
+      method: request.params.method as MobileBridgeRpcRequest["method"],
+      params: request.params.params as MobileBridgeRpcRequest["params"],
+    };
+    try {
+      const result = this.replayStore.lookup(
+        state.context.deviceId,
+        originalRequest.idempotencyKey!,
+        fingerprintMobileBridgeRequest(originalRequest),
+      );
+      const statusResult = {
+        schemaVersion: 1,
+        status: result.kind,
+        ...(result.kind === "completed" ? { response: result.response } : {}),
+      };
+      if (!isMobileBridgeJsonValue(statusResult)) {
+        throw new Error("Desktop retained an invalid request receipt");
+      }
+      this.send(state, mobileBridgeSuccess(request.id, statusResult));
+    } catch (error) {
+      this.onError(errorOf(error));
+      this.send(state, mobileBridgeFailure(
+        request.id,
+        "idempotency_unavailable",
+        "Desktop could not inspect the retained request receipt",
+      ));
     }
   }
 

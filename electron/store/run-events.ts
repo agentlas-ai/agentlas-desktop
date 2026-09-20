@@ -474,6 +474,65 @@ function canonicalQuestionContinuationRunId(chatId: string, sourceMessageId: str
 }
 
 /**
+ * Exact durable prompt identity for Mobile transcript reconciliation.
+ *
+ * A run can publish many prose-bearing events, but only invoke_prompt_bound is
+ * authored after the canonical user row is committed and carries that row's
+ * id. Ambiguous ledger rows fail closed instead of guessing by text or time.
+ */
+export function invocationPromptRunIdsForMessages(
+  chatId: string,
+  messageIds: readonly string[],
+): ReadonlyMap<string, string> {
+  const selected = [
+    ...new Set(
+      messageIds.filter((id) => boundedReceiptIdentifier(id) && id.length <= 256),
+    ),
+  ].slice(0, 200);
+  if (
+    !boundedReceiptIdentifier(chatId)
+    || chatId.length > 256
+    || selected.length === 0
+  ) return new Map();
+  const placeholders = selected.map(() => "?").join(", ");
+  let rows: Array<{ run_id: string; message_id: string | null }>;
+  try {
+    rows = getDb().prepare(
+      `SELECT run_id,
+              json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+                           '$.promptMessageId') AS message_id
+         FROM run_events
+        WHERE chat_id = ?
+          AND kind = 'invoke_prompt_bound'
+          AND json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+                           '$.promptMessageId') IN (${placeholders})
+        ORDER BY ts ASC, id ASC`,
+    ).all(chatId, ...selected) as Array<{ run_id: string; message_id: string | null }>;
+  } catch {
+    return new Map();
+  }
+  const allowed = new Set(selected);
+  const result = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const row of rows) {
+    if (
+      typeof row.message_id !== "string"
+      || !allowed.has(row.message_id)
+      || !boundedReceiptIdentifier(row.run_id)
+      || row.run_id.length > 160
+    ) continue;
+    const prior = result.get(row.message_id);
+    if (prior && prior !== row.run_id) {
+      result.delete(row.message_id);
+      ambiguous.add(row.message_id);
+    } else if (!ambiguous.has(row.message_id)) {
+      result.set(row.message_id, row.run_id);
+    }
+  }
+  return result;
+}
+
+/**
  * A Decision reply is user-authored canonical input, not diagnostic prose.
  * Preserve it only for the exact Main receipt envelope that can restore the
  * same source/chat/run/hash binding. The encoded value never leaves through
