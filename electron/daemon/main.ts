@@ -1,7 +1,6 @@
-// `agentlasd` — Agentlas Desktop이 켜져 있는 동안만 함께 도는 내부 호스트 헬퍼.
-// 이름은 기존 제어면 호환을 위해 유지하지만 독립 제품이나 OS 서비스가 아니다.
-// Desktop 부모 PID를 필수로 받고, 정상 종료·크래시 어느 쪽이든 부모가 끝나면
-// 제어 소켓, 모바일 브리지, 로컬 자식 프로세스를 정리한 뒤 함께 종료한다.
+// `agentlasd` is the persistent local host. Desktop is an attachable client;
+// closing the GUI does not end daemon-owned work. Updates and explicit service
+// stop use the fenced control socket and drain owned work before process exit.
 //
 // ★실행 방법 — **Electron 의 node 로 돈다**(GUI 없음):
 //     ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js
@@ -30,7 +29,8 @@ import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { drainRunChildrenForHostShutdown } from "../runtime/exec";
 import { startControlSocket, type ControlSocketHandle } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
-import { storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
+import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
+import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 
 /**
  * 데몬이 쓸 사용자 데이터 경로. **추측하지 않는다** — 잘못 고르면 사용자의 실제 DB 가
@@ -67,7 +67,7 @@ export function resolveDaemonUserDataDir(
  * 데몬이 보고하는 버전. Electron 의 `app.getVersion()` 을 못 쓰므로 package.json 을
  * 읽는다 — 모바일이 호환성을 이 값으로 판단하므로 "unknown" 을 보내면 안 된다.
  */
-function daemonVersion(): string {
+function readDaemonVersion(): string {
   try {
     // dist/electron/daemon/main.js 기준 저장소 루트.
     const pkg = path.join(__dirname, "..", "..", "..", "package.json");
@@ -77,14 +77,55 @@ function daemonVersion(): string {
   }
 }
 
+// Freeze the loaded binary generation. Reading package.json on every ping
+// would make an old live process claim the new version after an app update.
+const runningVersion = readDaemonVersion();
+function daemonVersion(): string { return runningVersion; }
+
 let controlSocket: ControlSocketHandle | null = null;
 let desktopParentPid: number | null = null;
-let desktopParentWatch: NodeJS.Timeout | null = null;
+let serviceHeartbeat: NodeJS.Timeout | null = null;
 const bootId = randomUUID();
 const startedAtMs = Date.now();
 let lastHeartbeatAtMs = startedAtMs;
-const appInstanceId = validAppInstanceId(process.env.AGENTLAS_APP_INSTANCE_ID)
+let appInstanceId = validAppInstanceId(process.env.AGENTLAS_APP_INSTANCE_ID)
   ? process.env.AGENTLAS_APP_INSTANCE_ID : null;
+let attachedExpectedStoreIdentity = process.env.AGENTLAS_EXPECTED_STORE_IDENTITY ?? null;
+let serviceIdentity: string | null = null;
+let socketFence: (() => void) | null = null;
+let selfDiagnostics: DaemonDiagnosticLog | null = null;
+let scienceService: ReturnType<typeof import("./science-service")["createDaemonScienceService"]> | null = null;
+
+function recordServicePhase(phase: string): void {
+  try { selfDiagnostics?.record("child_report", { phase, pid: process.pid, bootId, appInstanceId }); }
+  catch { /* Diagnostics do not gate service execution. */ }
+}
+
+function assertServiceOwner(): void {
+  if (!controlSocket || !socketFence) throw new Error("daemon_service_ownership_lost");
+  // Admission closes before shutdown, but the owner fence remains valid until
+  // Science has persisted its terminal receipts and released the store.
+  socketFence();
+}
+
+function assertServiceControl(params: unknown): void {
+  const guard = params as { serviceIdentity?: unknown; bootId?: unknown } | null;
+  if (!serviceIdentity || guard?.serviceIdentity !== serviceIdentity || guard.bootId !== bootId) {
+    throw new Error("daemon_service_identity_mismatch");
+  }
+}
+
+async function getScienceService() {
+  if (closing) throw new Error("daemon_shutting_down");
+  assertServiceOwner();
+  if (!scienceService) {
+    const { createDaemonScienceService } = await import("./science-service");
+    if (closing) throw new Error("daemon_shutting_down");
+    assertServiceOwner();
+    scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000 });
+  }
+  return scienceService;
+}
 
 function restartMetadata(): { restartCount: number; lastExitReason: string } {
   const count = Number(process.env.AGENTLAS_DAEMON_RESTART_COUNT);
@@ -111,10 +152,10 @@ function restartMetadata(): { restartCount: number; lastExitReason: string } {
 const processPool = new WarmProcessPool();
 
 /*
- * Exactly one app-scoped process may own the physical Mobile Bridge listener
+ * Exactly one process may own the physical Mobile Bridge listener
  * for a user-data directory. Desktop claims a pid-bound lease so its Settings
- * IPC and bridge state events stay authoritative. A dead Desktop parent causes
- * the entire helper to shut down; it never restores service after app exit.
+ * IPC and bridge state events stay authoritative. After GUI detach/exit, the
+ * service may restore the listener without restarting autonomous work.
  */
 let mobileBridgeLeaseOwnerPid: number | null = null;
 let mobileBridgeLeaseWatch: NodeJS.Timeout | null = null;
@@ -148,7 +189,7 @@ function startDaemonMobileBridge(): Promise<void> {
     const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } = runtime;
     // The owner can change while the dynamic import is resolving. Never race a
     // late daemon start against a Desktop that already received the lease.
-    if (mobileBridgeLeaseOwnerPid !== null || mobileBridgeRuntimeStatus().running) return;
+    if (closing || mobileBridgeLeaseOwnerPid !== null || mobileBridgeRuntimeStatus().running) return;
     await startAgentlasMobileBridge({ userDataPath: userDataDir(), appVersion: daemonVersion() });
     mobileBridgeRecoveryFailureLogged = false;
   })().finally(() => {
@@ -187,8 +228,9 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
   if (closing && method !== "daemon.ping" && method !== "daemon.shutdown") {
     throw new Error("daemon_shutting_down");
   }
+  if (method !== "daemon.ping" && method !== "daemon.shutdown") assertServiceOwner();
   if (method === "daemon.ping") {
-    const { openedStorePath } = await import("../store/db");
+    const { openedStorePath, getDb } = await import("../store/db");
     // Control-plane health cannot depend on optional GUI-backed services.
     // In Electron's Node mode importing those services may fail before a
     // listener exists; that must not hide an otherwise healthy daemon.
@@ -200,6 +242,11 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       parentPid: desktopParentPid,
       appInstanceId,
       bootId,
+      serviceIdentity,
+      serviceProtocolVersion: 2,
+      lifetime: "service",
+      storeSchemaVersion: getDb().pragma("user_version", { simple: true }),
+      science: scienceService?.status() ?? null,
       processRole: "desktop-daemon",
       startedAt: new Date(startedAtMs).toISOString(),
       lastHeartbeatAt: new Date(lastHeartbeatAtMs).toISOString(),
@@ -229,9 +276,53 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       },
     };
   }
+  if (method === "daemon.attach") {
+    assertServiceControl(params);
+    const request = params as { parentPid?: unknown; appInstanceId?: unknown; expectedStoreIdentity?: unknown };
+    const pid = Number(request.parentPid);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !processIsAlive(pid)) throw new Error("daemon_desktop_client_not_alive");
+    const nextAppInstanceId = validAppInstanceId(request.appInstanceId) ? request.appInstanceId : null;
+    const { openedStorePath } = await import("../store/db");
+    const expected = request.expectedStoreIdentity;
+    if (closing) throw new Error("daemon_shutting_down");
+    if (expected && storeIdentityDigest(openedStorePath(), nextAppInstanceId) !== expected) {
+      throw new Error("daemon_diagnostics_store_identity_mismatch");
+    }
+    desktopParentPid = pid;
+    appInstanceId = nextAppInstanceId;
+    attachedExpectedStoreIdentity = typeof expected === "string" ? expected : null;
+    return { ok: true, pid: process.pid, bootId, serviceIdentity, parentPid: desktopParentPid };
+  }
+  if (method === "daemon.detach") {
+    assertServiceControl(params);
+    const pid = Number((params as { parentPid?: unknown }).parentPid);
+    if (desktopParentPid !== pid) return { ok: true, detached: false };
+    desktopParentPid = null;
+    appInstanceId = null;
+    attachedExpectedStoreIdentity = null;
+    // Do not block GUI exit on an optional bridge; its lease watcher repairs it.
+    if (mobileBridgeLeaseOwnerPid === pid) {
+      mobileBridgeLeaseOwnerPid = null;
+      void startDaemonMobileBridge().catch(() => {});
+    }
+    return { ok: true, detached: true, pid: process.pid, bootId };
+  }
+  if (method === "science.start") {
+    assertServiceControl(params);
+    return (await getScienceService()).start();
+  }
+  if (method === "science.status") {
+    assertServiceControl(params);
+    return scienceService?.status() ?? { state: "idle", ownerEpoch: bootId, settled: true };
+  }
+  if (method === "science.command") {
+    assertServiceControl(params);
+    const service = await getScienceService();
+    return service.dispatch((params as { command: Parameters<typeof service.dispatch>[0] }).command);
+  }
   if (method === "daemon.diagnostics") {
     const { openedStorePath } = await import("../store/db");
-    const expected = process.env.AGENTLAS_EXPECTED_STORE_IDENTITY;
+    const expected = attachedExpectedStoreIdentity;
     const actual = storeIdentityDigest(openedStorePath(), appInstanceId);
     if (!expected || !/^[0-9a-f]{64}$/.test(expected) || !actual || expected !== actual) {
       throw new Error("daemon_diagnostics_store_identity_mismatch");
@@ -243,6 +334,7 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     });
   }
   if (method === "mobileBridge.claim") return serializeMobileBridgeLease(async () => {
+    if (closing) throw new Error("daemon_shutting_down");
     const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
     if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1 || !processIsAlive(ownerPid)) {
       throw new Error("mobileBridge.claim requires a live owner pid");
@@ -292,7 +384,7 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
   });
   if (method === "agents.residency") {
     /*
-     * ★상주 관측 — "앱이 켜져 있는 동안 유지된다"를 **실측 가능한 사실**로 만든다.
+     * ★상주 관측 — 서비스가 붙든 실제 프로세스만 보고한다.
      *
      * 경계를 분명히 해 둔다: 이 응답은 **이 프로세스(데몬)가 들고 있는 상주**다.
      * 데스크탑 앱이 자기 프로세스에서 돌리는 채팅 세션은 앱의 등록소에 있고, 여기서는
@@ -303,10 +395,8 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
   }
   if (method === "agents.releaseResidency") {
     /*
-     * ★상주는 "앱이 켜져 있는 동안"이다 — 오너 규칙(2026-08-20).
-     *
-     * 헬퍼와 상주 CLI 모두 Desktop 앱 수명에 묶인다. 이 메서드는 앱 종료 전 정리나
-     * 업데이트 교체 중 상주 세션만 먼저 놓아야 할 때 쓰는 멱등 경계다.
+     * 명시적 서비스 유지보수 경계다. GUI 종료는 detach만 수행하며 서비스의
+     * 상주 CLI를 해제하지 않는다. 업데이트 교체는 전체 shutdown을 사용한다.
      * 연속성은 손실되지 않는다: 다음 턴은 지금처럼 세션 id + 히스토리로 이어진다.
      */
     const { agentResidencySnapshot: snapshot, disposeAgentResidency } =
@@ -324,10 +414,7 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
      * 종료 경로(shutdown hooks → 풀 dispose → exit)를 그대로 돈다. 응답을 먼저 쓰고
      * 다음 틱에 죽는다 — 그래야 요청자가 "부탁이 접수됐다"를 안다.
      */
-    const requestedParentPid = Number((params as { parentPid?: unknown } | null)?.parentPid);
-    if (desktopParentPid !== null && requestedParentPid !== desktopParentPid) {
-      throw new Error("daemon.shutdown owner mismatch");
-    }
+    assertServiceControl(params);
     setTimeout(() => performShutdown("daemon.shutdown rpc"), 50).unref?.();
     return { ok: true, pid: process.pid, version: daemonVersion() };
   }
@@ -383,17 +470,7 @@ function performShutdown(reason: string): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
   console.log(`[agentlasd] ${reason} — running shutdown hooks`);
-  // Capture process handles before synchronous hooks clear their registries.
-  const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
-  try {
-    runHostShutdownHooks();
-  } catch (error) {
-    console.error("[agentlasd] shutdown hooks failed:", error);
-  }
-  const socket = controlSocket;
-  controlSocket = null;
-  // 붙든 프로세스를 전부 죽인다(host-lifecycle 도 부르지만, 순서와 무관하게 멱등).
-  processPool.dispose();
+  recordServicePhase("shutdown_started");
   if (keepAlive) {
     clearInterval(keepAlive);
     keepAlive = null;
@@ -402,12 +479,30 @@ function performShutdown(reason: string): Promise<void> {
     clearInterval(mobileBridgeLeaseWatch);
     mobileBridgeLeaseWatch = null;
   }
-  if (desktopParentWatch) {
-    clearInterval(desktopParentWatch);
-    desktopParentWatch = null;
+  if (serviceHeartbeat) {
+    clearInterval(serviceHeartbeat);
+    serviceHeartbeat = null;
   }
   shutdownPromise = (async () => {
     let timeout: NodeJS.Timeout | null = null;
+    // Science closes while it still holds the fence, so it can persist final
+    // receipts. A non-settling service must not make explicit stop permanent.
+    if (scienceService) {
+      let serviceTimeout: NodeJS.Timeout | null = null;
+      try {
+        await Promise.race([scienceService.close(), new Promise<void>((resolve) => {
+          serviceTimeout = setTimeout(resolve, 10_000);
+        })]);
+      } catch (error) { console.error("[agentlasd] science shutdown failed:", error); }
+      finally { if (serviceTimeout) clearTimeout(serviceTimeout); }
+    }
+    const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
+    try { runHostShutdownHooks(); }
+    catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }
+    const socket = controlSocket;
+    controlSocket = null;
+    socketFence = null;
+    processPool.dispose();
     try {
       const drained = await Promise.race([
         Promise.all([
@@ -440,17 +535,12 @@ function installSignalHandlers(): void {
 }
 
 export async function startDaemon(): Promise<void> {
-  const dir = resolveDaemonUserDataDir();
-  fs.mkdirSync(dir, { recursive: true });
+  const requestedDir = resolveDaemonUserDataDir();
+  fs.mkdirSync(requestedDir, { recursive: true, mode: 0o700 });
+  const dir = canonicalDaemonPath(requestedDir);
   setUserDataDir(dir);
   const rawParentPid = Number(process.env.AGENTLAS_DESKTOP_PARENT_PID);
-  if (!Number.isSafeInteger(rawParentPid) || rawParentPid <= 1) {
-    throw new Error("agentlasd requires a live Desktop parent pid");
-  }
-  desktopParentPid = rawParentPid;
-  if (!processIsAlive(desktopParentPid)) {
-    throw new Error("Desktop parent exited before agentlasd startup");
-  }
+  desktopParentPid = Number.isSafeInteger(rawParentPid) && rawParentPid > 1 && processIsAlive(rawParentPid) ? rawParentPid : null;
 
   // Desktop owns the authenticated mobile authority from boot. Reserving its
   // lease avoids opening an unauthenticated listener in the headless helper,
@@ -465,21 +555,32 @@ export async function startDaemon(): Promise<void> {
     await import("../install-identity");
   const rawIdentity = process.env.AGENTLAS_INSTALL_IDENTITY?.trim();
   if (!rawIdentity) {
-    throw new Error("agentlasd requires AGENTLAS_INSTALL_IDENTITY from its Desktop parent");
+    throw new Error("agentlasd requires an explicit install identity");
   }
   const installIdentity = deserializeInstallIdentity(rawIdentity);
-  if (installIdentity.channel === "qa" && installIdentity.userDataOverride !== dir) {
+  if (installIdentity.channel === "qa" && canonicalDaemonPath(installIdentity.userDataOverride!) !== dir) {
     throw new Error("agentlasd QA identity does not match its user-data directory");
   }
   configureInstallIdentity(installIdentity);
+  const identity = resolveDaemonServiceIdentity({ userDataDir: dir, installIdentity });
+  serviceIdentity = identity.serviceIdentity;
+  if (process.env.AGENTLAS_DAEMON_SERVICE_IDENTITY && process.env.AGENTLAS_DAEMON_SERVICE_IDENTITY !== serviceIdentity) {
+    throw new Error("agentlasd_service_identity_mismatch");
+  }
+  process.env.AGENTLAS_STORE_PATH = identity.storePath;
+  try { selfDiagnostics = new DaemonDiagnosticLog(dir); } catch { /* supplementary */ }
   installSignalHandlers();
+  recordServicePhase("identity_ready");
   console.log(`[agentlasd] identity ready: ${installIdentity.channel}`);
   console.log(`[agentlasd] user data: ${userDataDir()}`);
-  desktopParentWatch = setInterval(() => {
+  serviceHeartbeat = setInterval(() => {
     lastHeartbeatAtMs = Date.now();
     const ownerPid = desktopParentPid;
     if (ownerPid !== null && !processIsAlive(ownerPid)) {
-      performShutdown("Desktop parent exited");
+      desktopParentPid = null;
+      appInstanceId = null;
+      attachedExpectedStoreIdentity = null;
+      recordServicePhase("parent_exited");
     }
   }, 500);
 
@@ -488,7 +589,7 @@ export async function startDaemon(): Promise<void> {
   // 조용히 승급하지 않고 **거절한다**(store/db.ts). 데몬이 앱보다 먼저 떠서 사다리를
   // 돌리면 앱이 자기 DB 를 못 알아본다.
   const { initStore } = await import("../store/db");
-  initStore();
+  initStore({ migrationRole: "follower" });
   if (process.env.AGENTLAS_EXPECTED_STORE_IDENTITY) {
     const { openedStorePath } = await import("../store/db");
     const actualStoreIdentity = storeIdentityDigest(openedStorePath(), appInstanceId);
@@ -497,10 +598,10 @@ export async function startDaemon(): Promise<void> {
     }
   }
   console.log("[agentlasd] store ready");
+  recordServicePhase("store_ready");
 
   /*
-   * ★모바일 브리지 — Desktop 앱 수명 안에서만 내부 헬퍼와 GUI가 단일 리스너를
-   * 교대 소유한다. 앱이 완전히 종료되면 브리지도 함께 종료된다.
+   * ★모바일 브리지 — 서비스와 GUI가 단일 리스너를 교대 소유한다.
    *
    * 새 프로토콜을 만들지 않는다 — 이미 60개 메서드 계약(invoke/chats/projects/
    * automations/runtime/build)이 모바일용으로 살아 있고, 기획서가 데몬 제어면으로
@@ -523,6 +624,8 @@ export async function startDaemon(): Promise<void> {
   try {
     const socket = await startControlSocket(dir, { handle: handleControlMethod });
     controlSocket = socket;
+    socketFence = captureDaemonSocketFence(socket.address);
+    recordServicePhase("control_socket_ready");
     console.log(`[agentlasd] control socket: ${socket.address}`);
   } catch (error) {
     // A duplicate helper must not continue and compete for the bridge or
@@ -542,7 +645,7 @@ export async function startDaemon(): Promise<void> {
   }
 
   /*
-   * ★Desktop 부모가 살아 있는 동안만 헬퍼 이벤트 루프를 유지하고 정리한다.
+   * ★서비스가 켜져 있는 동안 이벤트 루프를 유지하고 정리한다.
    *
    * 실측 2026-08-19: keepAlive 인터벌이 없을 때 데몬은 store 를 열고 "ready" 를 찍은 뒤
    * 스스로 종료했다(이벤트 루프에 붙잡을 것이 없으면 Node 는 그냥 나간다). 이 인터벌은

@@ -1,17 +1,8 @@
-// 앱 → 내부 호스트 기동. 이름은 기존 제어면 호환을 위해 agentlasd를 유지하지만,
-// 수명은 Desktop 프로세스에 종속된다.
-//
-// ★수명 계약:
-//  - 앱이 뜨면 제어 소켓에 daemon.ping 을 시도한다. 응답이 없으면 내부 호스트를
-//    띄우고 Desktop 부모 PID를 넘긴다. 앱이 정상 종료하면 RPC로 내리고, 앱이
-//    크래시하면 내부 호스트의 부모 감시기가 스스로 종료한다.
-//  - 버전 스큐: 핑이 응답했는데 버전이 앱과 다르면(업데이트 직후의 옛 바이너리)
-//    daemon.shutdown 을 부탁해 정중히 내려보내고 새 바이너리로 재스폰한다.
-//  - 마이그레이션 권위: 이 함수는 **앱이 initStore() 로 사다리를 다 돌린 뒤**에만
-//    불러야 한다(main.ts 배선 참조). 데몬은 AGENTLAS_STORE_MIGRATION_ROLE=follower 로
-//    띄운다 — 스키마가 이미 맞으므로 follower 로 그냥 열리고, 만에 하나 어긋나 있으면
-//    승급을 시도하는 대신 정직하게 거절한다(store/db.ts 의 owner/follower 계약).
-//    앱과 데몬이 동시에 사다리를 돌려 DB 를 태우는 조합이 원천적으로 없다.
+// Desktop attaches to a persistent local agentlasd service. Its identity is the
+// installation and canonical store, not whichever GUI process is currently open.
+// Before GUI migrations, quiesceDaemonBeforeStoreMigration proves that an older
+// service has exited. After migrations, ensureDaemonRunning attaches or starts
+// the follower service. Ordinary GUI quit detaches; update/user stop is explicit.
 //
 // 이 모듈은 의도적으로 electron 을 import 하지 않는다 — 버전·경로를 인자로 받아
 // 게이트(scripts/test-daemon-autospawn.cjs)가 순수 Node(ELECTRON_RUN_AS_NODE)에서
@@ -22,7 +13,6 @@ import path from "node:path";
 import net from "node:net";
 import {
   callControlSocket,
-  defaultControlSocketPath,
 } from "./control-socket";
 import {
   isAutostartInstalled,
@@ -37,8 +27,15 @@ import {
 } from "../install-identity";
 import { DaemonDiagnosticLog, type DaemonDiagnosticFields, validAppInstanceId } from "./diagnostic-log";
 import { serializeRuntimeAppMetadata } from "../runtime-paths";
+import {
+  canonicalDaemonPath,
+  daemonControlSocketPath,
+  resolveDaemonServiceIdentity,
+  type DaemonServiceIdentity,
+  type DaemonServiceOptions,
+} from "./service-identity";
 
-export interface EnsureDaemonOptions {
+export interface EnsureDaemonOptions extends DaemonServiceOptions {
   /** 앱과 데몬이 같은 DB 를 보게 하는 단일 진실 — 앱의 userData 디렉터리. */
   userDataDir: string;
   /** 앱 버전(app.getVersion()). 데몬 핑의 version 과 다르면 스큐로 판정한다. */
@@ -48,7 +45,7 @@ export interface EnsureDaemonOptions {
   /** 데몬을 띄울 실행 파일. 기본: process.execPath (Electron 바이너리). */
   execPath?: string;
   log?: (line: string) => void;
-  /** Desktop owner. The helper exits when this process is no longer alive. */
+  /** Attached GUI client. Its exit does not terminate the service. */
   parentPid?: number;
   /** The already-resolved identity of this Desktop install. */
   installIdentity?: InstallIdentity;
@@ -56,7 +53,7 @@ export interface EnsureDaemonOptions {
   startupTimeoutMs?: number;
   /** Main-owned process instance, never a Goal progress indicator. */
   appInstanceId?: string;
-  /** Digest of Main's actually opened store, salted with appInstanceId. */
+  /** Legacy per-GUI diagnostic digest; never the service ownership identity. */
   expectedStoreIdentity?: string | null;
 }
 
@@ -77,6 +74,9 @@ interface DaemonPing {
   bootId?: string;
   appInstanceId?: string | null;
   storeIdentity?: string | null;
+  serviceIdentity?: string;
+  serviceProtocolVersion?: number;
+  storeSchemaVersion?: number;
 }
 
 function logDaemonIdentity(log: (line: string) => void, ping: DaemonPing): void {
@@ -146,7 +146,7 @@ export async function claimDaemonMobileBridge(
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1) {
     throw new Error("Mobile Bridge lease owner pid is invalid");
   }
-  const socketPath = defaultControlSocketPath(userDataDir);
+  const socketPath = daemonControlSocketPath(userDataDir);
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   do {
     try {
@@ -165,8 +165,7 @@ export async function claimDaemonMobileBridge(
   return false;
 }
 
-/** Returns Mobile Bridge ownership during an in-app handoff or startup rollback.
- * Full app shutdown calls shutdownDaemon instead; no listener survives exit. */
+/** Returns Mobile Bridge ownership during handoff, GUI quit or rollback. */
 export async function releaseDaemonMobileBridge(
   userDataDir: string,
   ownerPid: number,
@@ -175,7 +174,7 @@ export async function releaseDaemonMobileBridge(
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return false;
   try {
     const result = (await callControlSocket(
-      defaultControlSocketPath(userDataDir),
+      daemonControlSocketPath(userDataDir),
       "mobileBridge.release",
       { ownerPid },
       timeoutMs,
@@ -192,7 +191,7 @@ interface SpawnedDaemon {
 }
 
 function spawnDaemonForDesktop(
-  opts: EnsureDaemonOptions,
+  opts: EnsureDaemonOptions & DaemonServiceIdentity,
   diagnostics: DaemonDiagnosticLog | null,
   reason: "initial" | "version_skew" | "owner_mismatch",
 ): SpawnedDaemon {
@@ -206,12 +205,16 @@ function spawnDaemonForDesktop(
     appInstanceId: opts.appInstanceId,
   });
   const child = spawn(opts.execPath ?? process.execPath, [entry], {
-    detached: false,
-    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+    // Raw runtime output can contain private tool arguments. The service writes
+    // structured lifecycle diagnostics itself; no pipe depends on the GUI.
+    stdio: "ignore",
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       AGENTLAS_USER_DATA: opts.userDataDir,
+      AGENTLAS_STORE_PATH: opts.storePath,
+      AGENTLAS_DAEMON_SERVICE_IDENTITY: opts.serviceIdentity,
       AGENTLAS_RUNTIME_APP_METADATA: serializeRuntimeAppMetadata(opts.appVersion),
       // The headless child cannot read the packaged app marker itself. Pass
       // the identity resolved by Desktop so it can configure protected storage
@@ -224,21 +227,12 @@ function spawnDaemonForDesktop(
       AGENTLAS_DESKTOP_PARENT_PID: String(opts.parentPid ?? process.pid),
       AGENTLAS_DAEMON_RESTART_COUNT: String(restartCount),
       AGENTLAS_DAEMON_LAST_EXIT_REASON: lastExitReason ?? "unknown",
-      ...(validAppInstanceId(opts.appInstanceId) ? { AGENTLAS_APP_INSTANCE_ID: opts.appInstanceId } : {}),
-      ...(opts.expectedStoreIdentity ? { AGENTLAS_EXPECTED_STORE_IDENTITY: opts.expectedStoreIdentity } : {}),
+      AGENTLAS_APP_INSTANCE_ID: validAppInstanceId(opts.appInstanceId) ? opts.appInstanceId : "",
+      AGENTLAS_EXPECTED_STORE_IDENTITY: opts.expectedStoreIdentity ?? "",
     },
   });
   const pid = child.pid ?? null;
   (opts.log ?? console.log)(`[daemon] spawn requested pid=${pid ?? "?"} parent=${opts.parentPid ?? process.pid}`);
-  if (diagnostics) {
-    diagnostics.capture(child.stdout, "stdout", pid, opts.appInstanceId);
-    diagnostics.capture(child.stderr, "stderr", pid, opts.appInstanceId);
-  } else {
-    // Always drain pipes even if the private log cannot be opened. Otherwise
-    // a verbose child can block on a full stdout/stderr pipe during boot.
-    child.stdout?.resume();
-    child.stderr?.resume();
-  }
   child.once("exit", (exitCode, signal) => {
     lastExitReason = signal ? "signal" : exitCode === 0 ? "exited" : "error";
     recordDiagnostic(diagnostics, "spawn_exit", { pid, exitCode, signal, reason: lastExitReason,
@@ -249,8 +243,8 @@ function spawnDaemonForDesktop(
     lastExitReason = "error";
     recordDiagnostic(diagnostics, "spawn_error", { pid, reason: "error", appInstanceId: opts.appInstanceId });
   });
-  // The control socket is the graceful owner channel. unref keeps startup from
-  // blocking, while the helper's parent watchdog enforces the crash path.
+  // The control socket remains the graceful service-control channel after the
+  // GUI process exits. The detached child owns its own event loop and logs.
   child.unref();
   return { child, pid };
 }
@@ -269,7 +263,7 @@ async function waitForSpawnedDaemonReadiness(
   socketPath: string,
   diagnostics: DaemonDiagnosticLog | null,
   timeoutMs = 30_000,
-  expectedStoreIdentity?: string | null,
+  expectedServiceIdentity?: string,
   appInstanceId?: string,
   lifecycleLog?: (line: string) => void,
 ): Promise<"ready" | "exited" | "timeout" | "store_mismatch"> {
@@ -285,8 +279,7 @@ async function waitForSpawnedDaemonReadiness(
       }
       const ping = await pingDaemon(socketPath, Math.min(800, Math.max(250, deadline - Date.now())));
       if (ping?.ok && ping.pid === spawned.pid) {
-        if (expectedStoreIdentity && (ping.storeIdentity !== expectedStoreIdentity
-          || ping.appInstanceId !== appInstanceId)) return "store_mismatch";
+        if (expectedServiceIdentity && ping.serviceIdentity !== expectedServiceIdentity) return "store_mismatch";
         const heartbeatAgeMs = ping.lastHeartbeatAt
           ? Math.max(0, Date.now() - Date.parse(ping.lastHeartbeatAt)) : undefined;
         recordDiagnostic(diagnostics, "spawn_ready", { pid: spawned.pid, heartbeatAgeMs,
@@ -329,7 +322,7 @@ async function stopUnreadyDaemon(spawned: SpawnedDaemon): Promise<boolean> {
   const exited = () => spawned.child.exitCode !== null || spawned.child.signalCode !== null;
   if (exited()) return true;
   spawned.child.kill("SIGTERM");
-  for (let attempt = 0; attempt < 30 && !exited(); attempt += 1) await sleep(100);
+  for (let attempt = 0; attempt < 90 && !exited(); attempt += 1) await sleep(100);
   if (!exited()) {
     spawned.child.kill("SIGKILL");
     for (let attempt = 0; attempt < 20 && !exited(); attempt += 1) await sleep(100);
@@ -337,117 +330,171 @@ async function stopUnreadyDaemon(spawned: SpawnedDaemon): Promise<boolean> {
   return exited();
 }
 
-/**
- * 데몬이 떠 있게 만든다(있으면 그대로, 스큐면 교체, 없으면 스폰).
- * 실패는 앱 기능을 막지 않는다 — 데몬 없는 앱은 예전과 똑같이 동작하므로,
- * 호출자는 결과를 로그만 하고 지나간다.
- */
-export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
-  const log = opts.log ?? ((line: string) => console.log(line));
-  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
-  if (opts.expectedStoreIdentity === null) return { status: "failed", reason: "daemon_store_identity_unavailable" };
-  const socketPath = defaultControlSocketPath(opts.userDataDir);
-  const diagnostics = diagnosticLog(opts.userDataDir);
+function matchesService(ping: DaemonPing, identity: DaemonServiceIdentity): boolean {
+  if (ping.serviceIdentity) return ping.serviceIdentity === identity.serviceIdentity;
+  // One-time compatibility with the old parent-bound helper, which reported
+  // its opened store but had no service identity. Never replace a foreign DB.
+  try { return Boolean(ping.storePath && canonicalDaemonPath(ping.storePath) === identity.storePath); }
+  catch { return false; }
+}
 
+function serviceControlGuard(ping: DaemonPing): Record<string, unknown> {
+  return ping.serviceIdentity
+    ? { serviceIdentity: ping.serviceIdentity, bootId: ping.bootId }
+    : { parentPid: ping.parentPid };
+}
+
+function processHasExited(pid: number): boolean {
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+}
+
+function anotherDesktopIsAttached(ping: DaemonPing, requestingPid = process.pid): boolean {
+  const attachedPid = Number(ping.parentPid);
+  // Stopping a daemon does not stop a still-running older GUI writer. Require
+  // that client to exit before version replacement or schema migration; never
+  // terminate a GUI process for which this launcher has no child handle.
+  return Number.isSafeInteger(attachedPid) && attachedPid > 1
+    && attachedPid !== requestingPid && !processHasExited(attachedPid);
+}
+
+async function stopObservedDaemon(socketPath: string, ping: DaemonPing, timeoutMs: number): Promise<boolean> {
+  if (!Number.isSafeInteger(ping.pid) || Number(ping.pid) <= 1) return false;
+  const pid = Number(ping.pid);
+  try { await callControlSocket(socketPath, "daemon.shutdown", serviceControlGuard(ping), 3_000); }
+  catch { /* A closed response alone does not prove the process exited. */ }
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    if (processHasExited(pid) && await controlSocketIsAbsent(socketPath)) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+async function attachDesktop(socketPath: string, ping: DaemonPing, opts: EnsureDaemonOptions): Promise<void> {
+  await callControlSocket(socketPath, "daemon.attach", {
+    ...serviceControlGuard(ping),
+    parentPid: opts.parentPid ?? process.pid,
+    appInstanceId: opts.appInstanceId ?? null,
+    expectedStoreIdentity: opts.expectedStoreIdentity ?? null,
+  }, 3_000);
+}
+
+/** Attach to the same service across GUI restarts, or start its follower after
+ * the GUI has completed migration. Version replacement drains the old process. */
+export async function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
+  const log = options.log ?? console.log;
+  const diagnostics = diagnosticLog(options.userDataDir);
   try {
+    const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
+    const socketPath = daemonControlSocketPath(opts.userDataDir);
     const ping = await pingDaemon(socketPath);
+    let previousVersion: string | null = null;
     if (ping?.ok) {
-      const daemonVersion = ping.version ?? "0.0.0";
-      const expectedParentPid = opts.parentPid ?? process.pid;
-      if (daemonVersion === opts.appVersion && ping.parentPid === expectedParentPid) {
-        if (opts.expectedStoreIdentity && (ping.storeIdentity !== opts.expectedStoreIdentity
-          || ping.appInstanceId !== opts.appInstanceId)) {
-          return { status: "failed", reason: "daemon_store_identity_mismatch" };
-        }
-        recordDiagnostic(diagnostics, "already_running", {
-          pid: ping.pid, parentPid: ping.parentPid,
-          appInstanceId: ping.appInstanceId, bootId: ping.bootId,
-          heartbeatAgeMs: ping.lastHeartbeatAt
-            ? Math.max(0, Date.now() - Date.parse(ping.lastHeartbeatAt)) : undefined,
-        });
+      if (!matchesService(ping, opts)) return { status: "failed", reason: "daemon_service_identity_mismatch" };
+      if (ping.version === opts.appVersion && ping.serviceProtocolVersion === 2) {
+        await attachDesktop(socketPath, ping, opts);
+        recordDiagnostic(diagnostics, "already_running", { pid: ping.pid, bootId: ping.bootId,
+          parentPid: opts.parentPid ?? process.pid, appInstanceId: opts.appInstanceId });
         logDaemonIdentity(log, ping);
-        return { status: "already-running", pid: ping.pid ?? -1, version: daemonVersion };
+        return { status: "already-running", pid: ping.pid ?? -1, version: ping.version };
       }
-      // 버전 스큐 — 옛 데몬을 정중히 내려보내고 재스폰한다. 강제 kill 은 마지막 수단도
-      // 아니다: PID 를 모르는 채 소켓만 아는 상태라, 부탁이 안 통하면 그냥 두고 보고한다
-      // (다음 앱 실행이 다시 시도한다. 옛 데몬이 계속 돌더라도 스키마는 follower 라 안전).
-      const replacementReason = daemonVersion === opts.appVersion ? "owner_mismatch" : "version_skew";
-      log(`[daemon] ${replacementReason} — requesting controlled shutdown`);
-      recordDiagnostic(diagnostics, replacementReason, { pid: ping.pid, parentPid: ping.parentPid });
-      try {
-        // The daemon is owner-bound. Reuse the parent pid reported by the
-        // ping so its shutdown authorization is explicit; an unparameterized
-        // RPC is rejected by the same owner check used during Desktop quit.
-        const shutdownParams = Number.isSafeInteger(ping.parentPid) && Number(ping.parentPid) > 1
-          ? { parentPid: Number(ping.parentPid) }
-          : undefined;
-        await callControlSocket(socketPath, "daemon.shutdown", shutdownParams, 3_000);
-      } catch {
-        /* 응답 전에 소켓이 닫히는 것도 정상 종료의 모양이다 */
+      if (anotherDesktopIsAttached(ping, opts.parentPid ?? process.pid)) {
+        return { status: "failed", reason: "daemon_attached_desktop_alive" };
       }
-      // 소켓이 실제로 죽을 때까지 기다린다(최대 ~10s). 살아 있는 채 스폰하면
-      // 새 데몬이 "another daemon is already listening" 으로 못 뜬다.
-      let gone = false;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await sleep(500);
-        if (!(await pingDaemon(socketPath, 800))) { gone = true; break; }
-      }
-      if (!gone) {
-        recordDiagnostic(diagnostics, "shutdown_timeout", { pid: ping.pid, reason: "timeout" });
+      previousVersion = ping.version ?? "0.0.0";
+      recordDiagnostic(diagnostics, "version_skew", { pid: ping.pid });
+      if (!await stopObservedDaemon(socketPath, ping, 25_000)) {
         return { status: "failed", reason: "old_daemon_shutdown_timeout" };
       }
-      lastExitReason = replacementReason;
-      const spawned = spawnDaemonForDesktop(opts, diagnostics, replacementReason);
-      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, diagnostics,
-        opts.startupTimeoutMs, opts.expectedStoreIdentity, opts.appInstanceId, log);
-      if (readiness !== "ready") {
-        recordDiagnostic(diagnostics, "spawn_unready", { pid: spawned.pid,
-          reason: readiness === "store_mismatch" ? "error" : readiness,
-          appInstanceId: opts.appInstanceId });
-        const stopped = await stopUnreadyDaemon(spawned);
-        return {
-          status: "failed",
-          reason: `daemon_${readiness}_before_control_ready:pid=${spawned.pid ?? "?"}`,
-          mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath),
-        };
-      }
-      log(`[daemon] respawned v${opts.appVersion} (pid ${spawned.pid ?? "?"})`);
-      return { status: "respawned", pid: spawned.pid, previousVersion: daemonVersion };
+      lastExitReason = "version_skew";
+    } else if (!await controlSocketIsAbsent(socketPath)) {
+      return { status: "failed", reason: "daemon_control_owner_unconfirmed" };
     }
 
-    const spawned = spawnDaemonForDesktop(opts, diagnostics, "initial");
-    const pid = spawned.pid;
-    const readiness = await waitForSpawnedDaemonReadiness(
-      spawned,
-      socketPath,
-      diagnostics,
-      opts.startupTimeoutMs,
-      opts.expectedStoreIdentity,
-      opts.appInstanceId,
-      log,
-    );
+    const spawned = spawnDaemonForDesktop(opts, diagnostics, previousVersion ? "version_skew" : "initial");
+    const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, diagnostics,
+      opts.startupTimeoutMs, opts.serviceIdentity, opts.appInstanceId, log);
     if (readiness !== "ready") {
-      recordDiagnostic(diagnostics, "spawn_unready", { pid,
-        reason: readiness === "store_mismatch" ? "error" : readiness,
-        appInstanceId: opts.appInstanceId });
       const stopped = await stopUnreadyDaemon(spawned);
-      return {
-        status: "failed",
-        reason: `daemon_${readiness}_before_control_ready:pid=${pid ?? "?"}`,
-        mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath),
-      };
+      // Another GUI may have won publication during our spawn. Reuse that
+      // exact service; never stop a process for which we have no child handle.
+      const winner = await pingDaemon(socketPath);
+      if (winner?.ok && matchesService(winner, opts) && winner.version === opts.appVersion
+        && winner.serviceProtocolVersion === 2) {
+        await attachDesktop(socketPath, winner, opts);
+        return { status: "already-running", pid: winner.pid ?? -1, version: winner.version };
+      }
+      recordDiagnostic(diagnostics, "spawn_unready", { pid: spawned.pid,
+        reason: readiness === "store_mismatch" ? "error" : readiness });
+      return { status: "failed", reason: `daemon_${readiness}_before_control_ready`,
+        mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath) };
     }
-    log(`[daemon] spawned v${opts.appVersion} (pid ${pid ?? "?"})`);
-    return { status: "spawned", pid, version: opts.appVersion };
+    const ready = await pingDaemon(socketPath);
+    if (!ready?.ok || ready.pid !== spawned.pid || ready.version !== opts.appVersion || !matchesService(ready, opts)) {
+      await stopUnreadyDaemon(spawned);
+      return { status: "failed", reason: "daemon_ready_identity_changed" };
+    }
+    await attachDesktop(socketPath, ready, opts);
+    return previousVersion
+      ? { status: "respawned", pid: spawned.pid, previousVersion }
+      : { status: "spawned", pid: spawned.pid, version: opts.appVersion };
   } catch {
     recordDiagnostic(diagnostics, "spawn_error", { reason: "error" });
     return { status: "failed", reason: "daemon_launcher_failed" };
   }
 }
 
+export type DaemonMigrationQuiescence =
+  | { status: "absent" | "compatible" | "stopped"; pid: number | null }
+  | { status: "failed"; reason: string; pid: number | null };
+
+/** MUST run before initStore/migration. Socket disappearance is insufficient:
+ * stopObservedDaemon also proves the old writer process exited. */
+export async function quiesceDaemonBeforeStoreMigration(
+  options: DaemonServiceOptions & { appVersion: string; requiredSchemaVersion: number; timeoutMs?: number },
+): Promise<DaemonMigrationQuiescence> {
+  try {
+    const identity = resolveDaemonServiceIdentity(options);
+    const socketPath = daemonControlSocketPath(identity.userDataDir);
+    const ping = await pingDaemon(socketPath);
+    if (!ping?.ok) return await controlSocketIsAbsent(socketPath)
+      ? { status: "absent", pid: null }
+      : { status: "failed", reason: "daemon_control_owner_unconfirmed", pid: null };
+    if (!matchesService(ping, identity)) return { status: "failed", reason: "daemon_service_identity_mismatch", pid: ping.pid ?? null };
+    if (ping.serviceProtocolVersion === 2 && ping.version === options.appVersion
+      && ping.storeSchemaVersion === options.requiredSchemaVersion) return { status: "compatible", pid: ping.pid ?? null };
+    if (anotherDesktopIsAttached(ping)) return { status: "failed", reason: "daemon_attached_desktop_alive", pid: ping.pid ?? null };
+    return await stopObservedDaemon(socketPath, ping, options.timeoutMs ?? 25_000)
+      ? { status: "stopped", pid: ping.pid ?? null }
+      : { status: "failed", reason: "daemon_migration_quiescence_timeout", pid: ping.pid ?? null };
+  } catch { return { status: "failed", reason: "daemon_migration_quiescence_failed", pid: null }; }
+}
+
+/** Explicit service stop for update or user request, independent of GUI PID. */
+export async function stopDaemonService(options: DaemonServiceOptions, timeoutMs = 25_000): Promise<{ stopped: boolean; pid: number | null }> {
+  const identity = resolveDaemonServiceIdentity(options);
+  const socketPath = daemonControlSocketPath(identity.userDataDir);
+  const ping = await pingDaemon(socketPath);
+  if (!ping?.ok) return { stopped: await controlSocketIsAbsent(socketPath), pid: null };
+  if (!matchesService(ping, identity)) throw new Error("daemon_service_identity_mismatch");
+  return { stopped: await stopObservedDaemon(socketPath, ping, timeoutMs), pid: ping.pid ?? null };
+}
+
+/** Ordinary GUI quit releases its attachment, leaving autonomous work alive. */
+export async function detachDaemonDesktop(userDataDir: string, parentPid: number): Promise<boolean> {
+  const socketPath = daemonControlSocketPath(userDataDir);
+  const ping = await pingDaemon(socketPath);
+  if (!ping?.ok) return await controlSocketIsAbsent(socketPath);
+  if (ping.serviceProtocolVersion !== 2) return false;
+  const reply = await callControlSocket(socketPath, "daemon.detach", { ...serviceControlGuard(ping), parentPid }, 3_000) as { ok?: boolean };
+  return reply?.ok === true;
+}
+
 /**
- * 앱이 나가거나 업데이트 교체를 시작할 때 헬퍼의 상주 CLI를 먼저 놓게 한다.
- * 최종 종료는 shutdownDaemon이 담당하며 헬퍼 자체도 Desktop과 함께 끝난다.
+ * Explicitly release idle residency during service maintenance. GUI quit must
+ * only detach, since daemon-owned autonomous work may still be running.
  */
 export async function releaseDaemonAgentResidency(
   userDataDir: string,
@@ -456,7 +503,7 @@ export async function releaseDaemonAgentResidency(
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return null;
   try {
     const result = (await callControlSocket(
-      defaultControlSocketPath(userDataDir),
+      daemonControlSocketPath(userDataDir),
       "agents.releaseResidency",
       undefined,
       timeoutMs,
@@ -467,35 +514,25 @@ export async function releaseDaemonAgentResidency(
   }
 }
 
-/** Stop the exact helper bound to this Desktop instance. */
+/** Legacy explicit stop entrypoint, retained for callers bound to a GUI PID. */
 export async function shutdownDaemon(
   userDataDir: string,
   expectedParentPid: number,
   timeoutMs = 10_000,
 ): Promise<{ stopped: boolean; pid: number | null }> {
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { stopped: true, pid: null };
-  const socketPath = defaultControlSocketPath(userDataDir);
+  const socketPath = daemonControlSocketPath(userDataDir);
   const diagnostics = diagnosticLog(userDataDir);
   const ping = await pingDaemon(socketPath, Math.min(timeoutMs, 2_000));
-  if (!ping?.ok) return { stopped: true, pid: null };
+  if (!ping?.ok) return { stopped: await controlSocketIsAbsent(socketPath), pid: null };
   if (ping.parentPid !== expectedParentPid) {
     throw new Error(`daemon_owner_mismatch:${ping.parentPid ?? "none"}`);
   }
   const pid = Number.isSafeInteger(ping.pid) && Number(ping.pid) > 1 ? Number(ping.pid) : null;
   recordDiagnostic(diagnostics, "shutdown_requested", { pid, parentPid: expectedParentPid });
-  try {
-    await callControlSocket(socketPath, "daemon.shutdown", { parentPid: expectedParentPid }, 3_000);
-  } catch {
-    // Closing the socket before the reply is a valid graceful-shutdown shape.
-  }
-  const deadline = Date.now() + Math.max(1_000, timeoutMs);
-  while (Date.now() < deadline) {
-    const current = await pingDaemon(socketPath, 500);
-    if (!current?.ok) return { stopped: true, pid };
-    await sleep(100);
-  }
-  recordDiagnostic(diagnostics, "shutdown_timeout", { pid, reason: "timeout" });
-  return { stopped: false, pid };
+  const stopped = await stopObservedDaemon(socketPath, ping, timeoutMs);
+  if (!stopped) recordDiagnostic(diagnostics, "shutdown_timeout", { pid, reason: "timeout" });
+  return { stopped, pid };
 }
 
 /**
@@ -513,8 +550,9 @@ export function reconcileDaemonAutostart(
 ): { installed: boolean; changed: boolean } {
   const plan = planAutostart(command, runtime?.platform, runtime?.home);
   const already = isAutostartInstalled(plan);
-  // Desktop local work is deliberately app-scoped. Remove legacy login items
-  // even if an older build stored the preference as enabled.
+  // These legacy login definitions omit the installation/store identity needed
+  // by a persistent service. Supervised autostart uses a separate integration;
+  // never reactivate a stale definition against a guessed production store.
   if (already) {
     removeAutostart(plan);
     return { installed: false, changed: true };
