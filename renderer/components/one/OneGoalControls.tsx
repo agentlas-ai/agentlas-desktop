@@ -235,6 +235,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   const effectBoundaryUncertain = view.context?.blockedReason === "goal_resume_effect_boundary_uncertain";
   const claimedWaitNeedsReview = claimedDispatchUncertain || claimedBindingChanged || effectBoundaryUncertain;
   const needsOngoingConfirmation = view.context?.blockedReason === "goal_wait_ongoing_authority_required";
+  const verificationUnavailable = view.context?.blockedReason === "verification_unavailable";
   // A failed refresh leaves the last confirmed context visible so the Goal is
   // not mistaken for deleted. It must not leave a Resume/Pause/Edit action
   // armed against that old version while an independent schedule continues.
@@ -260,6 +261,9 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : view.pending === "pause" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
     : !observationFresh ? (ko ? "Goal 상태 재확인 중 · 실행 여부 미확인" : "Rechecking Goal state · run status unconfirmed")
     : status === "pausing" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
+    : status === "blocked" && verificationUnavailable
+      ? (ko ? "앱의 결과 검증이 실패해 다음 자율작업이 멈췄습니다. 작업 자체가 실패한 것으로 확인된 것은 아닙니다. 실제 결과를 확인한 뒤 재개 여부를 결정하세요."
+        : "The app could not verify the result, so further autonomous work stopped. This does not confirm that the task itself failed. Check the actual outcome before deciding whether to resume.")
     : observationFresh && surface.state !== "unknown"
       ? goalSurfaceStatusLabel(surface.state, locale)
     : status === "paused" ? (ko ? "일시정지됨" : "Paused")
@@ -280,6 +284,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : view.context?.objective || (ko ? "다음 요청으로 목표를 확정합니다" : "Your next request will define the goal");
   const shortStatus = view.pending ? (ko ? "처리 중" : "Working")
     : !observationFresh ? (ko ? "확인 중" : "Checking")
+    : status === "blocked" && verificationUnavailable ? (ko ? "검증 오류" : "Verification error")
     : surface.state === "active_run" ? (ko ? "실행 중" : "Running")
     : surface.state === "active_unconfirmed" ? (ko ? "실행 확인 중" : "Checking run")
     : surface.state === "queued" ? (ko ? "준비 중" : "Queued")
