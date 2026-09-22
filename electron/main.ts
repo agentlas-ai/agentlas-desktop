@@ -4366,7 +4366,7 @@ app.whenReady().then(async () => {
       const resumed = resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
       const scheduled = scheduleUnverifiedOngoingGoalCycles();
-      if (scheduled.length) console.info("[long-run] ongoing verification outage reconciliation", scheduled);
+      if (scheduled.length) console.info("[long-run] ongoing observation recovery", scheduled);
       // A pinned-runtime classification may take time. Do not hold the UI or
       // other startup recovery behind this narrow legacy metadata repair.
       void resumeLegacyOngoingBlockedGoals(invocationService)

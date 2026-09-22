@@ -35,15 +35,16 @@ export interface CheckpointStartupResult {
   reason: string;
 }
 
-/** Old verifier outages are not a permanent stop for an ongoing mandate.
- * Recover only a current, fully settled producer; schedule observation rather
- * than replaying its actions or promoting its unverified result to success. */
+/** A lost verifier or failed wait insertion is not a permanent stop for an
+ * ongoing mandate. Recover only a current, fully settled producer; schedule
+ * observation rather than replaying its actions or promoting the result. */
 export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[] {
   const results: CheckpointStartupResult[] = [];
   let afterId = "";
   while (true) {
     const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ? AND status='blocked'
-      AND blocked_reason='verification_unavailable' AND surface IN ('one','work')
+      AND blocked_reason IN ('verification_unavailable','goal_wait_registration_failed')
+      AND surface IN ('one','work')
       AND execution_location='desktop-local' ORDER BY id LIMIT 100`).all(afterId) as Array<{ id: string }>;
     if (!rows.length) break;
     for (const { id } of rows) {
@@ -51,14 +52,15 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
       try {
         assertDesktopLongRunAdmissionOpen();
         const candidate = getLongRun(id);
-        if (!candidate || candidate.status !== "blocked" || candidate.blockedReason !== "verification_unavailable"
+        if (!candidate || candidate.status !== "blocked"
+          || !["verification_unavailable", "goal_wait_registration_failed"].includes(candidate.blockedReason ?? "")
           || getChatGoalRevision(candidate.goalId)?.lifecycle !== "ongoing"
           || legacyStartupWaitBlocksRecovery(latestGoalWaitSubscription(candidate.goalId))) continue;
         const producer = preflightMissingStartupCheckpoint(candidate, { unverifiedOngoing: true });
         const result = getDb().transaction(() => {
           const current = getLongRun(id);
           if (!current || current.version !== candidate.version || current.status !== "blocked"
-            || current.blockedReason !== "verification_unavailable"
+            || current.blockedReason !== candidate.blockedReason
             || unsettledLongRunAttemptCount(id)
             || getChatGoalRevision(current.goalId)?.lifecycle !== "ongoing") throw new Error("ongoing_verification_recovery_changed");
           const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocationRunId,
@@ -66,9 +68,9 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
           if (effect.effects !== "settled" || effect.snapshotDigest !== producer.effect.snapshotDigest)
             throw new Error("goal_wait_effects_uncertain");
           transitionLongRun({ runId: id, to: "queued", actorKind: "host",
-            reason: "ongoing-verification-outage-recovered", expectedVersion: current.version });
+            reason: "ongoing-observation-recovered", expectedVersion: current.version });
           transitionLongRun({ runId: id, to: "running", actorKind: "host",
-            reason: "ongoing-verification-outage-recovered" });
+            reason: "ongoing-observation-recovered" });
           recordLongRunCycle({ goalId: current.goalId, sourceInvocationId: producer.invocationRunId,
             progressState: "unknown", outcome: "ongoing-episode-unverified" });
           const wait = registerOngoingGoalCycle({ goalId: current.goalId,
@@ -77,7 +79,7 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
             sourceEventId: `ongoing-unverified:${producer.invocationRunId}`,
             payload: { invocationRunId: producer.invocationRunId, waitId: wait.waitId,
               nextCheckAt: wait.nextCheckAt, recoveredAtStartup: true } });
-          return { runId: id, status: "scheduled" as const, reason: "verification_outage_observation_scheduled" };
+          return { runId: id, status: "scheduled" as const, reason: "ongoing_observation_scheduled" };
         }).immediate();
         results.push(result);
       } catch (error) {
