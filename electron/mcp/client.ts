@@ -631,6 +631,11 @@ class InvocationRunnerFailureError extends Error {
     this.#failure = Object.freeze({ ...failure });
   }
 
+  static isMarkedQuota(error: unknown): boolean {
+    return error instanceof InvocationRunnerFailureError && (#failure in error)
+      && error.#failure.kind === "quota" && error.#failure.source === "marker";
+  }
+
   static imageInputFailure(error: unknown): { code: string; message: string } | null {
     // Only the host's typed runner-result boundary can mint this brand. A
     // provider message, serialized error or forged prototype is not evidence.
@@ -1439,6 +1444,8 @@ export interface InvocationExecutionContext {
 export interface McpInvocationResult {
   finalText?: string;
   tokens?: number;
+  /** Host-created structured quota marker; never inferred from error prose. */
+  markedQuotaFailure?: true;
   stormbreakerContinueRequested: boolean;
   /**
    * 모델이 이 턴에서 goal 전체 완료를 선언했는가(+ 같이 적은 근거).
@@ -7189,7 +7196,9 @@ ${effectiveUserPrompt}`;
       }
     }
     sink({ kind: "error", error: invocationFailure(req, "runner-failed", err) });
-    return earlyResult();
+    return InvocationRunnerFailureError.isMarkedQuota(err)
+      ? { ...earlyResult(), markedQuotaFailure: true }
+      : earlyResult();
   }
   } finally {
     try { nativeBrowserGrant?.release(); } finally { mcpConfigCleanup?.(); }

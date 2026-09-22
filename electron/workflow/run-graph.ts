@@ -32,6 +32,9 @@ import {
   type ToolBrokerLevel,
 } from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
+import { detectRuntimes } from "../runtime/detect";
+import { rolePriorityRuntimes } from "../runtime/selection";
+import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
 import type { WorkforcePrepareCheckpointReceipt } from "../mcp/workforce-orchestrator";
 import { listChatMessages } from "../store/chats";
 import { getOrCreateAutomationSession } from "../store/automation-sessions";
@@ -2254,7 +2257,11 @@ export async function runGraph(
   // 어디선가 조용히 기본값으로 떨어진다 — 여기서 막는다.
   const isRuntimeKind = (value: string): value is RuntimeKind => isSharedRuntimeKind(value);
 
+  const quotaRuntimeOverrides = new Map<string, RuntimeSelection>();
+  const observedRuntimeByNode = new Map<string, RuntimeSelection>();
   const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
+    const quotaOverride = quotaRuntimeOverrides.get(node.id);
+    if (quotaOverride) return quotaOverride;
     const base = automation.runtimeSelection ?? undefined;
     const declared = str(node.config, "runtime");
     if (!declared) return base;
@@ -3639,6 +3646,8 @@ export async function runGraph(
         beginNode(node, executionPrompt);
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;
+        let unsafeToolRequested = false;
+        const readOnlyToolCallIds = new Map<string, string>();
         const refreshUnsafeToolObservation = (): void => {
           unsafeToolObserved = (checkpoint!.toolReceipts[node.id] ?? []).some((receipt) => (
             receipt.succeeded && !isReplaySafeGraphToolReceipt(checkpoint!, node.id, receipt)
@@ -3681,6 +3690,7 @@ export async function runGraph(
           nodeTimedOut = true;
           nodeAbort.abort(new Error("automation_node_timeout"));
         }, nodeDeadlineMs);
+        let markedQuotaFailure = false;
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
@@ -3730,6 +3740,7 @@ export async function runGraph(
                 && (ev.notice?.code === "runtime-selected" || ev.notice?.code === "runtime-fallback")
                 && ev.runtimeSelection
               ) {
+                observedRuntimeByNode.set(node.id, ev.runtimeSelection);
                 tryRecordRunEvent({
                   runId,
                   kind: "runtime_selection",
@@ -3755,7 +3766,19 @@ export async function runGraph(
               // 했는데 run_events에는 mcp_tool-use 0건이라, 지어낸 실행과
               // 진짜 실행을 캡처 파일로만 구분해야 했다. 관측 없는 성공은
               // 성공이 아니라는 규칙(판정기·완주 루프)이 읽을 사실이 이 행이다.
+              const eventReadOnly = ev.kind === "tool-use" && !!ev.tool?.name && (
+                isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args) ||
+                (ev.tool.args === undefined && !!ev.tool.id &&
+                  readOnlyToolCallIds.get(ev.tool.id) === ev.tool.name)
+              );
+              if (eventReadOnly && ev.tool?.id && typeof ev.tool.args === "string") {
+                readOnlyToolCallIds.set(ev.tool.id, ev.tool.name);
+              }
               if (ev.kind === "tool-use" && ev.tool?.name) {
+                // A request can reach a mutating tool before its completion
+                // receipt arrives. Its absence must not become proof that no
+                // external action happened when the runner exits mid-call.
+                if (!eventReadOnly) unsafeToolRequested = true;
                 // 호스트 자신의 예비 조회(Agentlas Plugins ·, workforce 감사)는 "일했다"의
                 // 근거가 아니다 — 세지 않는다. 정본은 shared/tool-activity.
                 /*
@@ -3765,7 +3788,7 @@ export async function runGraph(
                  *   읽기만 하고 "저장했다"고 적은 답을 관측이 보증해 준 셈이다.
                  *   모르는 이름은 여전히 "바꿨을 수 있음"으로 센다(정본: shared/tool-activity).
                  */
-                if (!isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args)) {
+                if (!eventReadOnly) {
                   externalToolCallsByNode.set(
                     node.id,
                     (externalToolCallsByNode.get(node.id) ?? 0) + 1,
@@ -3810,7 +3833,7 @@ export async function runGraph(
                 const receipt: GraphToolReceipt = {
                   name: ev.tool.name.slice(0, 240),
                   resultDigest: sha256Value(ev.tool.result ?? null),
-                  readOnly: isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args),
+                  readOnly: eventReadOnly,
                   succeeded: ev.tool.isError !== true,
                 };
                 const rows = checkpoint!.toolReceipts[node.id] ?? [];
@@ -3860,6 +3883,7 @@ export async function runGraph(
               onWorkforcePrepareReceipt: persistWorkforcePrepareReceipt,
             },
           );
+          markedQuotaFailure = result.markedQuotaFailure === true;
           if (result.workforcePrepareReceipt) {
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
           }
@@ -4002,17 +4026,64 @@ export async function runGraph(
           const replaySafeFailure = effectivePermission === "read" ||
             replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect ||
             replaySafeObservedReceipts;
-          const ambiguous = checkpointPersistenceError !== null || unsafeToolObserved || !replaySafeFailure;
+          const ambiguous = checkpointPersistenceError !== null || unsafeToolRequested ||
+            unsafeToolObserved || !replaySafeFailure;
           // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면
           // 재시도가 곧 이중 실행이므로, 그 판단은 사람에게 넘긴다.
           const claimedWithoutTools = graphFailureOf(nodeErr)?.code === "NODE_CLAIMED_WITHOUT_TOOLS";
           const attempts = (nodeAttempts.get(node.id) ?? 0) + 1;
           nodeAttempts.set(node.id, attempts);
+          // A quota failure is a typed runtime fact. If every observed action
+          // was read-only, the same node can continue on another connected
+          // provider without replaying a post or changing the saved model pin.
+          let quotaHandoff = false;
+          if (!ambiguous && markedQuotaFailure &&
+              !nodeTimedOut && !runSignal.aborted &&
+              attempts < Math.max(3, nodeMaxAttempts(node))) {
+            const failedRuntime = observedRuntimeByNode.get(node.id);
+            const cooldown = failedRuntime && runtimeCooldownForSelection(failedRuntime);
+            if (failedRuntime?.backend && cooldown?.kind === "quota") {
+              try {
+                const alternate = rolePriorityRuntimes(await detectRuntimes(true), "worker")
+                  .find((candidate) => candidate.backend !== failedRuntime.backend);
+                if (alternate) {
+                  const selection: RuntimeSelection = {
+                    kind: alternate.kind,
+                    backend: alternate.backend,
+                    source: alternate.source,
+                    ...(alternate.acpAgentId ? { acpAgentId: alternate.acpAgentId } : {}),
+                    ...(alternate.model ? { model: alternate.model } : {}),
+                    longContext: alternate.longContextEnabled,
+                    ...(alternate.effort ? { effort: alternate.effort } : {}),
+                    role: "worker",
+                  };
+                  quotaRuntimeOverrides.set(node.id, selection);
+                  quotaHandoff = true;
+                  tryRecordRunEvent({
+                    runId,
+                    kind: "workflow_runtime_quota_handoff_planned",
+                    automationId: automation.id,
+                    nodeId: node.id,
+                    payload: {
+                      fromKind: failedRuntime.kind,
+                      fromBackend: failedRuntime.backend,
+                      toKind: selection.kind,
+                      toBackend: selection.backend,
+                      toModel: selection.model ?? null,
+                      cooldownUntil: cooldown.until,
+                    },
+                  });
+                }
+              } catch (handoffError) {
+                console.warn(`[graph] quota handoff unavailable (${node.id}):`, handoffError);
+              }
+            }
+          }
           // 변경 단계는 멱등키 없이 재시도하지 않는다(이중 발행). 그 금지의 근거는 "이미
           // 발행했는지 모른다"인데, '도구 0건 주장'은 **아무것도 부르지 않았음이 관측된**
           // 경우라 그 근거가 성립하지 않는다. 한 번은 다시 시켜야 사용자가 원한 일이 일어난다.
-          const maxAttempts = claimedWithoutTools
-            ? Math.max(2, nodeMaxAttempts(node))
+          const maxAttempts = claimedWithoutTools || quotaHandoff
+            ? Math.max(quotaHandoff ? 3 : 2, nodeMaxAttempts(node))
             : nodeMaxAttempts(node);
           // 계약 실패는 원칙적으로 재시도하지 않는다 — 다만 '도구 0건 주장'은 예외다.
           // 그 실패의 근거 자체가 '아무 일도 일어나지 않았다'이므로 다시 시키는 것이 안전하고,
@@ -4025,7 +4096,7 @@ export async function runGraph(
           // "도구 0건 주장"은 일시 오류는 아니지만 **관측으로 부수효과 0이 증명된** 실패다.
           // 다시 시키는 것이 이중 실행을 만들 수 없고, 그대로 두면 사용자가 원한 일이 영영
           // 일어나지 않는다(오너 원칙: 목적은 실패를 잘 보고하는 게 아니라 완주하는 것).
-          const transientSignal = claimedWithoutTools || receipts.some((receipt) =>
+          const transientSignal = claimedWithoutTools || quotaHandoff || receipts.some((receipt) =>
             receipt.name.startsWith("error:") &&
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);
