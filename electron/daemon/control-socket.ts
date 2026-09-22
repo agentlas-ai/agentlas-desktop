@@ -163,8 +163,9 @@ export async function startControlSocket(
         if (socket.destroyed) return false;
         // A stalled viewer must not buffer an unbounded research transcript in
         // the service. Durable event replay recovers a disconnected viewer.
-        if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return false; }
-        socket.write(jsonLine({ method, params }));
+        const payload = jsonLine({ method, params });
+        if (socket.writableLength + Buffer.byteLength(payload, "utf8") > 4 * 1024 * 1024) { socket.destroy(); return false; }
+        socket.write(payload);
         return true;
       },
       onClose(handler) {
@@ -274,6 +275,7 @@ export function callControlSocket(
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(address);
+    socket.setEncoding("utf8");
     const id = randomUUID();
     let buffer = "";
     let settled = false;
@@ -308,6 +310,7 @@ export function callControlSocket(
       }
     });
     socket.on("error", (error) => finish(() => reject(error)));
+    socket.on("close", () => finish(() => reject(Object.assign(new Error("daemon_control_connection_closed"), { code: "ECONNRESET" }))));
   });
 }
 
