@@ -55,6 +55,7 @@ import {
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
+import { nativeCliCandidates } from "./native-cli";
 import { observeCliExecutableIdentity, type CliExecutableIdentity } from "./cli-executable-identity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createUntrustedRuntimeFailure } from "./untrusted-error";
@@ -562,7 +563,7 @@ export async function probeClaudeCode(): Promise<ClaudeCodeProbe | null> {
 
 function getExecutable(source?: string, cwd = process.cwd(), env = process.env): CliExecutableIdentity | null {
   const childEnv = withCliPath(env);
-  for (const bin of source ? [source] : CANDIDATES) {
+  for (const bin of source ? [source] : [...nativeCliCandidates("claude-code"), ...CANDIDATES]) {
     const identity = observeCliExecutableIdentity({ bin, cwd, env: childEnv });
     if (identity) return identity;
   }
