@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.34 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Windows: connecting a provider no longer dead-ends when Agentlas cannot copy its bundled
+  Node executable out of the app folder. That copy exists only so an already-installed CLI
+  keeps working if the portable app is deleted — it is not required to install one — so a
+  blocked copy now falls back to the bundled executable that already passed checksum
+  verification, and the next launch retries the copy.
+- Windows: the install path also tries `%LOCALAPPDATA%` when the user profile location
+  cannot be written, and records the failing errno locally, so diagnosing a failed install
+  no longer depends on the person reading an error string back to us.
+- The npm install step now retries twice before giving up, so one momentary registry or
+  network fault does not cost a first connection.
+- A failed install no longer tells the person to reinstall Agentlas Desktop. That advice
+  never fixed this class of failure.
+
 ## 1.2.33 — 2026-09-22
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
