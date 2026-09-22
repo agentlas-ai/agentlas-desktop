@@ -20,6 +20,7 @@ import {
 } from "../../shared/model-catalog";
 import { MODEL_CATALOG_SNAPSHOT } from "../../shared/model-catalog.snapshot";
 import { setContextWindowResolver } from "../../shared/models";
+import { isPackagedRuntime, userDataPath } from "../runtime-paths";
 
 export const MODELS_DEV_URL = "https://models.dev/api.json";
 export const REMOTE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -44,11 +45,9 @@ export function modelCatalogRemotePath(): string {
   const override = process.env.AGENTLAS_MODEL_CATALOG_REMOTE_PATH?.trim();
   if (override) return override;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const electron = require("electron") as { app?: { getPath?: (name: string) => string; isPackaged?: boolean } };
-    // Dev/QA instances stay out of the live userData (see model-discovery-store.ts).
-    const userData = electron?.app?.isPackaged ? electron.app.getPath?.("userData") : undefined;
-    if (userData) return path.join(userData, "model-catalog.remote.json");
+    // The Node-mode daemon receives the same immutable runtime metadata and
+    // canonical user-data as Desktop. It must not silently use a second catalog.
+    if (isPackagedRuntime()) return userDataPath("model-catalog.remote.json");
   } catch {
     /* plain node */
   }
