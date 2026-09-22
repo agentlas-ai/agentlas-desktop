@@ -397,8 +397,30 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     const due = !wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now || (wait.deadline !== null && Date.parse(wait.deadline) <= now);
     if (!due && candidate.status !== "paused") continue;
     let observation: GoalWaitObservation | null = null, failure: string | null = null;
+    let storageBusy = false;
     try { if (due) observation = await (options.observe ? options.observe(wait) : observeGoalWaitSubject(wait, clock())); }
-    catch (error) { failure = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_source_unavailable"; }
+    catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : null;
+      if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) storageBusy = true;
+      else failure = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message)
+        ? error.message : "goal_wait_source_unavailable";
+    }
+    if (storageBusy) {
+      // A concurrent SQLite writer is no evidence that the watched subject or
+      // Goal authority changed. Keep the exact pending wait and try the same
+      // read later; never dispatch work from a failed observation.
+      try {
+        getDb().transaction(() => {
+          const current = getLongRun(candidate.id), latest = latestGoalWaitSubscription(wait.goalId);
+          if (!current || !latest || current.version !== candidate.version
+            || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
+            || !["waiting_tool", "paused"].includes(current.status)) return;
+          persist({ ...latest, revision: latest.revision + 1,
+            nextCheckAt: new Date(clock() + 30_000).toISOString(), wakeReason: "goal_wait_observation_retry" });
+        }).immediate();
+      } catch { /* The next poll may retry the still-due original wait. */ }
+      continue;
+    }
     let replan: StallReplanResult | null = null;
     if (due && !failure && wait.recoveryMode === "stall_replan") {
       // A scheduled no-tools call still spends the Goal's inference budget.
