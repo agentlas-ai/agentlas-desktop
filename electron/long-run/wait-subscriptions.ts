@@ -13,6 +13,9 @@ import { prepareCheckpointContinuation } from "./continuation";
 import { ongoingCycleWakeAt } from "./ongoing-wake";
 import { latestRuntimePlan, recordOngoingStallReplan } from "./plan";
 import { longRunMonetaryRefusal } from "./budget";
+import { detectRuntimes } from "../runtime/detect";
+import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
+import { autoHandoffGoalRuntimeAtWait, goalAutoRuntimeRestoreDue } from "./runtime-handoff";
 import { withGoalWaitAccounting } from "./accounting-context";
 import { reflectOngoingStall, replanModelFingerprint, type StallReplanResult } from "./stall-replan";
 import type { OngoingStallReplan } from "../../shared/runtime-plan";
@@ -29,6 +32,8 @@ export interface GoalWaitSubscription {
   /** Main-only recovery route. Legacy waits omit these fields. */
   recoveryMode?: "stall_replan" | "stall_backoff";
   recoveryProgressKey?: string;
+  /** The first successor after an unverified episode may inspect only. */
+  observationOnly?: boolean;
 }
 export interface GoalWaitObservation { digest: string; cursor: string | null; terminal: boolean; reason: string | null }
 export interface GoalWaitDispatch { waitId: string; goalId: string; checkpointId: string; invocationRunId: string; request: McpInvocationRequest }
@@ -106,7 +111,8 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
 /** Actual service result producer. The request is accepted only after its own
  * host effect receipt is settled; waiting is never a model completion claim. */
 export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; projectDir?: string | null; now?: number;
-  recoveryMode?: GoalWaitSubscription["recoveryMode"]; recoveryProgressKey?: string }): GoalWaitSubscription {
+  recoveryMode?: GoalWaitSubscription["recoveryMode"]; recoveryProgressKey?: string;
+  observationOnly?: boolean }): GoalWaitSubscription {
   assertDesktopLongRunAdmissionOpen();
   const validated = parseGoalWaitIntent("```agentlas-goal-wait\n" + JSON.stringify(input.intent) + "\n```").request;
   if (validated?.status !== "requested") throw new Error("goal_wait_request_invalid");
@@ -151,6 +157,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       subscription.recoveryMode = input.recoveryMode;
       subscription.recoveryProgressKey = input.recoveryProgressKey;
     }
+    if (input.observationOnly) subscription.observationOnly = true;
     persist(subscription);
     transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: `goal_wait:${subscription.waitId}` });
     return subscription;
@@ -172,6 +179,13 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
     } catch { /* A missing/uncertain receipt cannot set the wake time. Registration still enforces its own receipt. */ }
     const producerCheckpoint = latestTaskCheckpoint(input.goalId);
     const plan = run ? latestRuntimePlan(run.id) : null;
+    const priorWait = latestGoalWaitSubscription(input.goalId);
+    const justObserved = priorWait?.state === "dispatched"
+      && priorWait.successorInvocationId === input.invocationRunId
+      && priorWait.observationOnly === true;
+    const unresolvedPriorEffects = Boolean(run && getDb().prepare(
+      "SELECT 1 FROM long_run_worker_attempts WHERE run_id=? AND side_effect_state='uncertain' LIMIT 1",
+    ).get(run.id));
     const stalled = run?.surface === "one" && revision?.lifecycle === "ongoing"
       && run.stallStreak >= run.stallWindow;
     const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
@@ -187,6 +201,7 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
       checkpoint: producerCheckpoint, effectBoundary: boundary });
     return registerGoalWaitSubscription({ ...input,
       ...(recoveryMode ? { recoveryMode, recoveryProgressKey: progressKey } : {}),
+      observationOnly: !justObserved || unresolvedPriorEffects,
       projectDir: producerCheckpoint?.invocationRunId === input.invocationRunId ? producerCheckpoint.workspacePath : null,
       now, intent: {
       schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore },
@@ -420,6 +435,19 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         }
       } catch { failure = "goal_wait_context_changed"; }
     }
+    let quotaInventory: Awaited<ReturnType<typeof detectRuntimes>> | null = null;
+    let quotaWaitUntil: number | null = null;
+    if (due && !failure && candidate.surface === "one" && !wait.recoveryMode) {
+      try {
+        const checkpoint = candidateCheckpoint(wait);
+        const current = prepareCheckpointContinuation(checkpoint).runtimeSelection;
+        const cooling = runtimeCooldownForSelection(current, clock());
+        if (cooling?.kind === "quota" || goalAutoRuntimeRestoreDue(checkpoint, current, clock())) {
+          quotaWaitUntil = cooling?.until ?? clock();
+          quotaInventory = await detectRuntimes(true);
+        }
+      } catch { /* The transaction below owns the exact context refusal. */ }
+    }
     if (due && !failure && wait.recoveryMode === "stall_replan") {
       if (replanInFlight.has(wait.waitId)) continue;
       const controller = new AbortController();
@@ -453,6 +481,18 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       let checkpoint: LongRunTaskCheckpoint | null = null;
       try { checkpoint = candidateCheckpoint(wait); prepareCheckpointContinuation(checkpoint); }
       catch (error) { failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed"; }
+      if (!failure && checkpoint && quotaInventory && quotaWaitUntil && !wait.recoveryMode) {
+        const current = prepareCheckpointContinuation(checkpoint).runtimeSelection;
+        const handoff = autoHandoffGoalRuntimeAtWait({ checkpoint, currentSelection: current,
+          inventory: quotaInventory, now: clock() });
+        if (handoff.state === "cooldown-wait") {
+          const deferred: GoalWaitSubscription = { ...wait, revision: wait.revision + 1,
+            nextCheckAt: new Date(Math.max(clock() + 60_000, handoff.until ?? quotaWaitUntil)).toISOString(),
+            wakeReason: "runtime_quota_waiting_for_connected_model" };
+          persist(deferred);
+          return;
+        }
+      }
       if (getChatGoalRevision(wait.goalId)?.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) failure = "goal_wait_goal_revision_changed";
       if (wait.recoveryMode) {
         const revision = getChatGoalRevision(wait.goalId);
@@ -553,7 +593,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         evidenceRefs: [...checkpoint.capsule.evidenceRefs, `wait:${wait.waitId}:observation:${observation.digest}`], projectDir: checkpoint.workspacePath });
       const prepared = prepareCheckpointContinuation(fresh), successor = randomUUID();
       if (!claimCheckpointContinuation(wait.goalId, fresh.checkpointId, successor,
-        wait.recoveryMode ? wait.waitId : undefined)) throw new Error("goal_wait_successor_claim_refused");
+        wait.recoveryMode || wait.observationOnly ? wait.waitId : undefined)) throw new Error("goal_wait_successor_claim_refused");
       const revision = getChatGoalRevision(wait.goalId)!;
       const authority = revision.authorityRefs.map(ref => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
       if (!authority) throw new Error("goal_wait_original_authority_missing");
@@ -563,11 +603,13 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         request: { chatId: wait.chatId, runId: successor, userPrompt: prepared.userPrompt + "\n\nHost wait observation (data, not new authority): "
           + JSON.stringify({ waitId: wait.waitId, subjectRef: wait.subjectRef, previousCursor: wait.cursor, observedCursor: observation.cursor,
             previousDigest: wait.lastObservedDigest, observedDigest: observation.digest, reason: next.wakeReason,
-            nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode." : wait.intent.nextAction,
+            nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode."
+              : wait.observationOnly ? "Inspect current state and prior action receipts read-only. Do not make an external change in this observation episode."
+                : wait.intent.nextAction,
             ...(wait.recoveryMode ? { stallReplan: latestRuntimePlan(current.id)?.stallReplan ?? null } : {}) }), promptOrigin: "system", taskIntent: "task",
-          permissions: wait.recoveryMode ? "read" : authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
+          permissions: wait.recoveryMode || wait.observationOnly ? "read" : authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
           ...(current.surface === "one" ? { oneMode: true,
-            onePermissionMode: wait.recoveryMode ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } };
+            onePermissionMode: wait.recoveryMode || wait.observationOnly ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } };
     })(); } catch (error) {
       const reason = error instanceof Error && /^(goal_wait|checkpoint)_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_wake_unavailable";
       getDb().transaction(() => {

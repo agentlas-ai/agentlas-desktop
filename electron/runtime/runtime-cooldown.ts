@@ -21,7 +21,7 @@
  * "다시 해 봐"라고 말한 것이고, 잘못된 시한 때문에 멀쩡한 런타임이 잠기면 안 된다.
  */
 import type { RunnerFailure, RunnerFailureKind } from "./runner";
-import type { RuntimeStatus } from "../../shared/types";
+import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 
 /** 시한을 못 읽었을 때의 보수적 기본값. 너무 길면 멀쩡해진 런타임을 잠근다. */
 const DEFAULT_COOLDOWN_MS = 10 * 60_000;
@@ -132,6 +132,26 @@ export function runtimeCooldown(
     return null;
   }
   return entry;
+}
+
+/** Exact checkpoint selections from older runs may lack backend. Match their
+ * observed source/model only when the active cooldown has one unambiguous
+ * provider identity; never guess across two accounts or backends. */
+export function runtimeCooldownForSelection(selection: RuntimeSelection, now = Date.now()): RuntimeCooldown | null {
+  if (!selection.source) return null;
+  if (selection.backend) return runtimeCooldown({ kind: selection.kind, backend: selection.backend,
+    source: selection.source, model: selection.model }, now);
+  const matches: RuntimeCooldown[] = [];
+  for (const [key] of cooldowns) {
+    let identity: unknown;
+    try { identity = JSON.parse(key); } catch { continue; }
+    if (!Array.isArray(identity) || identity.length !== 4 || identity[0] !== selection.kind
+      || identity[2] !== selection.source || identity[3] !== (selection.model ?? null)) continue;
+    const entry = runtimeCooldown({ kind: selection.kind,
+      backend: identity[1] as RuntimeStatus["backend"], source: selection.source, model: selection.model }, now);
+    if (entry) matches.push(entry);
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /** 사용자가 그 런타임을 직접 다시 고르면 우리 짐작보다 사용자가 우선이다. */

@@ -5714,6 +5714,10 @@ ${effectiveUserPrompt}`;
         // A measured context refusal must retain the user's exact local binding.
         if (result.failure?.kind === "refused" && result.failure.runtime === "agentlas-local" && result.failure.source === "marker"
           && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable")) return result;
+        // A pinned Goal continuation cannot retry inside this invocation, but
+        // its next settled checkpoint still needs the typed quota signal to
+        // choose another connected provider before dispatch.
+        if (result.failure) noteRuntimeFailure(active, result.failure);
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
         // First failure: this is when recovery actually begins.
@@ -5724,7 +5728,6 @@ ${effectiveUserPrompt}`;
          * 런타임에 또 7분을 쓰고(실측), 폴백은 이미 한도 초과인 후보를 다시 고른다.
          * 시한이 지나면 스스로 후보로 돌아오므로 사용자가 손댈 일이 없다.
          */
-        noteRuntimeFailure(active, failed);
         const fallback = rolePriorityRuntimes(runtimes, "orchestrator", {
           failedRuntime: active,
           failure: failed,
