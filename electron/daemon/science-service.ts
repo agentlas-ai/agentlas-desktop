@@ -4,6 +4,10 @@
  * through close(). GUI processes are authenticated clients, never co-owners.
  * Importing this module does not load Science, open a database, or recover work.
  */
+import type { ToolApprovalDecision, ToolApprovalRequestEvent, AskUserRequestEvent } from "../../shared/types";
+import { randomUUID } from "node:crypto";
+import { toolApprovalActionId } from "../../shared/tool-approval-action";
+import { dispatchSciencePublicationCommand, type DaemonSciencePublicationCommand } from "./science-publication-commands";
 type Science = typeof import("agentlas-science");
 type Store = ReturnType<Science["scienceStore"]>;
 type Conversations = ReturnType<Science["scienceConversationService"]>;
@@ -13,6 +17,7 @@ type TurnScope = Scope & { turnId: string };
 
 /** Native, authenticated control operations, NOT an agent-callable tool surface. */
 export type DaemonScienceCommand =
+  | DaemonSciencePublicationCommand
   | { op: "runtime.inspect"; input: Parameters<Science["inspectScienceRuntime"]>[1] }
   | { op: "runtime.select"; input: Parameters<Science["selectScienceRuntime"]>[1] }
   | { op: "loops.inspect"; input: { projectId: string } }
@@ -24,6 +29,14 @@ export type DaemonScienceCommand =
   | { op: "composer.attach" | "composer.steering" | "questions.list" | "messages.list"; input: Scope }
   | { op: "questions.register" }
   | { op: "questions.answer"; input: Omit<Parameters<Questions["answer"]>[0], "source"> }
+  | { op: "toolApprovals.state"; input: { projectId: string; chatId: string } }
+  | { op: "toolApprovals.setAlwaysApproved"; input: { projectId: string; chatId: string; enabled: boolean } }
+  | { op: "toolApprovals.resolve"; input: { projectId: string; chatId: string; requestId: string; decision: ToolApprovalDecision } }
+  | { op: "toolApprovals.receipt"; input: { projectId: string; chatId: string; requestId: string } }
+  | { op: "askUser.list" }
+  | { op: "askUser.answer"; input: { requestId: string; answer: string | null } }
+  | { op: "lifecycle.get"; input: { projectId: string } }
+  | { op: "lifecycle.revisions"; input: { projectId: string; studyId: string } }
   | { op: "math.command"; input: { projectId: string; requestId: string; command: unknown } }
   | { op: "math.cancel"; input: { projectId: string; requestId: string } }
   | { op: "events.replay"; input: TurnScope & { afterSequence?: number; limit?: number } }
@@ -44,7 +57,7 @@ export interface DaemonScienceStatus {
 export interface DaemonScienceEvent {
   schema: "agentlas.science-daemon-event.v1";
   ownerEpoch: string;
-  kind: "turn" | "lifecycle" | "researcher-question";
+  kind: "turn" | "lifecycle" | "researcher-question" | "tool-approval" | "ask-user";
   payload: unknown;
 }
 
@@ -67,7 +80,7 @@ const errorCode = (error: unknown) => (error instanceof Error ? error.message : 
 export function createDaemonScienceService(options: {
   ownerEpoch: string;
   assertOwner(): void;
-  onEvent?(event: DaemonScienceEvent): void;
+  onEvent?(event: DaemonScienceEvent): boolean | void;
   shutdownTimeoutMs?: number;
 }): DaemonScienceService {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(options.ownerEpoch)) throw new Error("science_daemon_owner_epoch_invalid");
@@ -85,14 +98,33 @@ export function createDaemonScienceService(options: {
   let activeToolCount: (() => number) | null = null;
   const commands = new Set<Promise<unknown>>();
   const unsubscribe: Array<() => void> = [];
+  let approvals: typeof import("../runtime/tool-approval") | null = null;
+  let grants: typeof import("../store/capability-grants") | null = null;
+  let questionsUi: typeof import("../confirm/ask-user") | null = null;
+  const approvalScopes = new Map<string, Scope>();
 
   const assertExecution = () => {
     options.assertOwner();
     if (state !== "ready" && state !== "starting") throw new Error("science_daemon_admission_closed");
   };
   const emit = (kind: DaemonScienceEvent["kind"], payload: unknown) => {
-    try { options.onEvent?.({ schema: "agentlas.science-daemon-event.v1", ownerEpoch: options.ownerEpoch, kind, payload }); }
-    catch { /* Durable turn/loop events are authoritative; a disconnected GUI cannot fail research. */ }
+    try { return options.onEvent?.({ schema: "agentlas.science-daemon-event.v1", ownerEpoch: options.ownerEpoch, kind, payload }) === true; }
+    catch { return false; /* A disconnected GUI cannot fail research. */ }
+  };
+  const questionProjection = (request: AskUserRequestEvent) => {
+    if (request.askedBy !== "agentlas-science" || !request.chatId || !science || !runtimeOpened) return null;
+    const scope = science.scienceStore().getConversationScopeForRuntimeChat(request.chatId);
+    return scope ? { ...request, ...scope, chatId: scope.conversationId } : null;
+  };
+  const approvalProjection = (request: ToolApprovalRequestEvent) => {
+    if (!request.chatId || !science || !runtimeOpened) return null;
+    const scope = science.scienceStore().getConversationScopeForRuntimeChat(request.chatId);
+    if (!scope) return null;
+    approvalScopes.set(request.id, scope);
+    // Match the existing bounded resolution ledger; active requests can always
+    // recover their scope from the authoritative pending map.
+    if (approvalScopes.size > 1_000) approvalScopes.delete(approvalScopes.keys().next().value!);
+    return { ...request, ...scope, chatId: scope.conversationId };
   };
   const settled = () => adapter ? adapter.isSettled() : state !== "starting" && !runtimeOpened;
   const status = (): DaemonScienceStatus => ({
@@ -121,6 +153,7 @@ export function createDaemonScienceService(options: {
       executionOwner = options.ownerEpoch;
       science = await import("agentlas-science");
       assertExecution();
+      science.configureScienceRuntimeRole("execution-owner");
       science.configureScienceServiceAvailability(() => {
         const current = extension.scienceExtensionStatus();
         return current.phase === "installed" && current.enabled;
@@ -135,6 +168,25 @@ export function createDaemonScienceService(options: {
       // reconciliation/projection and only changes proven Science-owned rows.
       science.scienceStore();
       runtimeOpened = true;
+      [approvals, grants, questionsUi] = await Promise.all([
+        import("../runtime/tool-approval"), import("../store/capability-grants"), import("../confirm/ask-user"),
+      ]);
+      assertExecution();
+      for (const request of approvals.listPendingToolApprovals()) approvalProjection(request);
+      unsubscribe.push(approvals.onToolApprovalRequested(request => {
+        const projected = approvalProjection(request);
+        if (projected) emit("tool-approval", { type: "requested", projectId: projected.projectId,
+          conversationId: projected.conversationId, chatId: projected.chatId, request: projected });
+      }));
+      unsubscribe.push(approvals.onToolApprovalResolved((requestId) => {
+        const scope = approvalScopes.get(requestId);
+        if (scope) emit("tool-approval", { type: "resolved", ...scope, chatId: scope.conversationId, requestId,
+          outcome: approvals!.getToolApprovalResolution(requestId) });
+      }));
+      unsubscribe.push(questionsUi.onAskUserLifecycle(request => {
+        const projected = questionProjection(request);
+        return projected ? emit("ask-user", projected) : false;
+      }));
       const gateway = science.scienceToolGateway();
       activeToolCount = () => gateway.activeRequestCount();
       projection.adoptScienceLongRunOwnership({ appInstanceId: options.ownerEpoch, assertOwner: options.assertOwner });
@@ -180,6 +232,20 @@ export function createDaemonScienceService(options: {
       throw new Error("science_daemon_event_cursor_invalid");
     }
     return { after, limit };
+  };
+  const approvalScope = (store: Store, input: { projectId: string; chatId: string }) => {
+    if (typeof input.projectId !== "string" || !input.projectId.trim() || input.projectId.length > 256) throw new Error("science-tool-approval-project-invalid");
+    if (typeof input.chatId !== "string" || !input.chatId.trim() || input.chatId.length > 256) throw new Error("science-tool-approval-chat-invalid");
+    if (!store.listConversations(input.projectId).some(row => row.id === input.chatId)) throw new Error("science-tool-approval-chat-not-found");
+    const binding = store.getConversationRuntimeBinding(input.projectId, input.chatId);
+    return { projectId: input.projectId, conversationId: input.chatId, runtimeChatId: binding?.runtimeChatId ?? null };
+  };
+  const approvalState = (store: Store, input: { projectId: string; chatId: string }) => {
+    const scope = approvalScope(store, input);
+    return { projectId: input.projectId, chatId: input.chatId,
+      alwaysApproved: Boolean(scope.runtimeChatId && grants!.isChatAlwaysApproved(scope.runtimeChatId)),
+      pending: approvals!.listPendingToolApprovals().filter(request => request.chatId === scope.runtimeChatId)
+        .map(request => approvalProjection(request)).filter(request => request !== null) };
   };
   async function runCommand(command: DaemonScienceCommand): Promise<unknown> {
     if (!command || typeof command !== "object" || Array.isArray(command) || typeof command.op !== "string") throw new Error("science_daemon_command_invalid");
@@ -252,10 +318,92 @@ export function createDaemonScienceService(options: {
       case "composer.steering": return store.listSteering(command.input.projectId, command.input.conversationId);
       case "questions.register": return activeHost.registerQuestionUi();
       case "questions.list": return store.researcherQuestions().list(command.input.projectId, command.input.conversationId);
-      case "questions.answer": return store.researcherQuestions().answer({ ...command.input, source: "authenticated-user" });
+      case "questions.answer": {
+        const answered = store.researcherQuestions().answer({ ...command.input, source: "authenticated-user" });
+        emit("researcher-question", answered);
+        return answered;
+      }
+      case "toolApprovals.state": return approvalState(store, command.input);
+      case "toolApprovals.setAlwaysApproved": {
+        const scope = approvalScope(store, command.input);
+        if (!scope.runtimeChatId) {
+          // The user can choose standing consent before the first research turn.
+          // Establish the same durable runtime-chat binding the composer uses;
+          // this creates no invocation or model call.
+          const { ensureScienceRuntimeChat } = await import("../store/chats");
+          assertExecution();
+          const conversation = store.listConversations(scope.projectId).find(row => row.id === scope.conversationId)!;
+          const chat = ensureScienceRuntimeChat({ conversationId: scope.conversationId, title: conversation.title });
+          store.bindConversationRuntime({ requestId: randomUUID(), projectId: scope.projectId,
+            conversationId: scope.conversationId, runtimeChatId: chat.id });
+          scope.runtimeChatId = chat.id;
+        }
+        if (command.input.enabled === true) {
+          // Commit the standing grant before releasing any pending runtime waiters.
+          grants!.grantChatAlwaysApproval(scope.runtimeChatId, "science-dropdown");
+          for (const request of approvals!.listPendingToolApprovals()) {
+            if (request.chatId !== scope.runtimeChatId) continue;
+            approvalProjection(request);
+            approvals!.resolveToolApproval(request.id, "allow_session", toolApprovalActionId(request.id, "allow_session"));
+          }
+        } else grants!.revokeChatAlwaysApproval(scope.runtimeChatId);
+        return approvalState(store, command.input);
+      }
+      case "toolApprovals.resolve":
+      case "toolApprovals.receipt": {
+        const scope = approvalScope(store, command.input);
+        const { requestId } = command.input;
+        if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 256) throw new Error("science-tool-approval-request-invalid");
+        if (command.op === "toolApprovals.resolve" && !["allow_once", "allow_session", "allow_always", "deny"].includes(command.input.decision)) throw new Error("science-tool-approval-decision-invalid");
+        const pending = approvals!.listPendingToolApprovals().find(request => request.id === requestId);
+        if (pending) {
+          if (pending.chatId !== scope.runtimeChatId) throw new Error("science-tool-approval-chat-mismatch");
+          approvalProjection(pending);
+          return command.op === "toolApprovals.receipt" ? approvals!.getToolApprovalResolution(requestId)
+            : approvals!.resolveToolApproval(requestId, command.input.decision, toolApprovalActionId(requestId, command.input.decision));
+        }
+        const priorScope = approvalScopes.get(requestId);
+        if (priorScope && (priorScope.projectId !== scope.projectId || priorScope.conversationId !== scope.conversationId)) throw new Error("science-tool-approval-chat-mismatch");
+        const receipt = approvals!.getToolApprovalResolution(requestId);
+        if (!priorScope && receipt.status !== "not_found") throw new Error("science-tool-approval-request-scope-unavailable");
+        if (priorScope && receipt.status === "not_found" && command.op === "toolApprovals.resolve") {
+          // Explicit post-denial consent applies to future calls only. Receipt
+          // replay above never replays an action or invents a missing grant.
+          return approvals!.resolveToolApproval(requestId, command.input.decision, toolApprovalActionId(requestId, command.input.decision));
+        }
+        return receipt;
+      }
+      case "askUser.list": return questionsUi!.listPendingAskUserRequests().map(questionProjection).filter(question => question !== null);
+      case "askUser.answer": {
+        const pending = questionsUi!.listPendingAskUserRequests().find(question => question.requestId === command.input.requestId);
+        if (!pending || !questionProjection(pending)) return false;
+        return questionsUi!.submitAskUserAnswer(pending.requestId, typeof command.input.answer === "string" ? command.input.answer : null);
+      }
+      case "lifecycle.get": {
+        const lifecycle = store.getResearchLifecycleForProject(command.input.projectId);
+        if (!lifecycle) throw new Error("science-research-lifecycle-canonical-missing");
+        return lifecycle;
+      }
+      case "lifecycle.revisions": {
+        const lifecycle = store.getResearchLifecycleForProject(command.input.projectId);
+        if (!lifecycle || lifecycle.studyId !== command.input.studyId) throw new Error("science-research-lifecycle-noncanonical-study");
+        return store.listResearchLifecycleRevisions(command.input.projectId, command.input.studyId);
+      }
+      case "publication.getPublicationPreference": case "publication.setPublicationPreference":
+      case "publication.prepareRenderJob": case "publication.createRenderJob":
+      case "publication.getRenderJob": case "publication.listRenderJobs":
+      case "publication.retryRenderJob": case "publication.cancelRenderJob":
+      case "publication.readRenderOutput": case "publication.listTypesetProfiles":
+      case "manuscripts.render": case "manuscripts.editNode":
+      case "journal.listJournalProfiles": case "journal.inspectOfficialGuidelines":
+      case "journal.recordManualGuidelineText": case "journal.ensureNeutralJournalProfile":
+      case "journal.inspectGuidelineMirror": case "journal.createJournalProfile":
+      case "journal.confirmJournalIdentity": case "journal.confirmHumanAttestation":
+      case "journal.createSubmissionExport": case "journal.validate":
+        return dispatchSciencePublicationCommand(api, store, command, assertExecution);
       case "math.command":
       case "math.cancel": {
-        const provider = (api as Science & { scienceMathWorkspace?: () => MathWorkspace }).scienceMathWorkspace;
+        const provider = (api as unknown as { scienceMathWorkspace?: () => MathWorkspace }).scienceMathWorkspace;
         if (!provider) throw new Error("science-math-service-update-required");
         if (!store.getProject(command.input.projectId)) throw new Error("science-project-not-found");
         if (typeof command.input.requestId !== "string" || !command.input.requestId.trim()
