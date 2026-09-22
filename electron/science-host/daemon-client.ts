@@ -22,6 +22,11 @@ export interface ScienceDaemonRequestOptions {
   timeoutMs?: number;
 }
 
+export interface ScienceDaemonSubscriptionOptions {
+  /** Signed native viewers actually displaying the synchronous ask UI. */
+  askUserScopes?: Array<{ projectId: string; conversationId: string }>;
+}
+
 export interface ScienceDaemonClientFailure {
   schema: "agentlas.science-daemon-client-error.v1";
   code: string;
@@ -49,9 +54,12 @@ export interface ScienceDaemonClient {
   /** Read only: does not spawn a daemon or start Science. */
   status(): Promise<DaemonScienceStatus>;
   command(command: DaemonScienceCommand, options?: ScienceDaemonRequestOptions): Promise<unknown>;
+  /** Current daemon only: no spawn, Science start, or automatic retry. */
+  commandObserved(command: DaemonScienceCommand, options?: ScienceDaemonRequestOptions): Promise<unknown>;
   cancelMath(input: { projectId: string; requestId: string }): Promise<{ requested: boolean }>;
   /** One socket, no automatic reconnect. Reattach/replay explicitly after disconnect. */
-  subscribe(onEvent: (event: DaemonScienceEvent) => void, onDisconnect?: (error: ScienceDaemonClientError) => void): Promise<() => void>;
+  subscribe(onEvent: (event: DaemonScienceEvent) => void, onDisconnect?: (error: ScienceDaemonClientError) => void,
+    options?: ScienceDaemonSubscriptionOptions): Promise<() => void>;
   /** Closes GUI-side waits, not autonomous work or the daemon service. */
   close(): void;
   readonly eventTransport: "push-and-replay";
@@ -180,7 +188,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
           if (stream && message?.method === "science.event") {
             const event = record(message.params);
             if (!event || event.schema !== "agentlas.science-daemon-event.v1" || event.ownerEpoch !== stream.ownerEpoch
-              || !["turn", "lifecycle", "researcher-question"].includes(String(event.kind))) {
+              || !["turn", "lifecycle", "researcher-question", "tool-approval", "ask-user"].includes(String(event.kind))) {
               done(failure("science_daemon_event_identity_mismatch", "protocol", "unknown")); return;
             }
             if (subscribed) {
@@ -298,6 +306,19 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);
   }
 
+  async function commandObserved(command: DaemonScienceCommand, request: ScienceDaemonRequestOptions = {}): Promise<unknown> {
+    if (request.signal?.aborted) throw failure("science_daemon_wait_aborted", "request", "not-dispatched");
+    const daemon = await inspectDaemon();
+    const current = statusReply(await rpc("science.status", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId },
+      { signal: request.signal, timeoutMs: 5_000 }), daemon);
+    if (current.state !== "ready") throw failure("science_daemon_science_unavailable", "identity", "not-dispatched", {
+      remoteMessage: current.errorCode ?? current.state,
+    });
+    // The server rejects a boot/identity mismatch before command admission. A
+    // lost connection is unknown execution, never a reason to retry mutations.
+    return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);
+  }
+
   async function cancelMath(input: { projectId: string; requestId: string }): Promise<{ requested: boolean }> {
     // Independent connection: Stop never queues behind the long computation.
     // It targets the currently verified daemon without starting/recovering work.
@@ -309,13 +330,21 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
   }
 
   async function subscribe(onEvent: (event: DaemonScienceEvent) => void,
-    onDisconnect?: (error: ScienceDaemonClientError) => void): Promise<() => void> {
+    onDisconnect?: (error: ScienceDaemonClientError) => void, subscription: ScienceDaemonSubscriptionOptions = {}): Promise<() => void> {
+    const askUserScopes = subscription.askUserScopes ?? [];
+    if (!Array.isArray(askUserScopes) || askUserScopes.length > 128 || askUserScopes.some(scope => !scope
+      || typeof scope.projectId !== "string" || !scope.projectId || scope.projectId.length > 256
+      || typeof scope.conversationId !== "string" || !scope.conversationId || scope.conversationId.length > 256
+      || /[\u0000-\u001f]/u.test(scope.projectId + scope.conversationId))) {
+      throw failure("science_daemon_subscription_scope_invalid", "request", "not-dispatched");
+    }
     const daemon = await inspectDaemon();
-    return await rpc("science.subscribe", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId },
+    return await rpc("science.subscribe", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId,
+      askUserScopes: askUserScopes.map(({ projectId, conversationId }) => ({ projectId, conversationId })) },
       { timeoutMs: 5_000 }, { ownerEpoch: daemon.bootId, onEvent, onDisconnect }) as () => void;
   }
 
-  return { ensureStarted, status, command, cancelMath, subscribe, eventTransport: "push-and-replay",
+  return { ensureStarted, status, command, commandObserved, cancelMath, subscribe, eventTransport: "push-and-replay",
     close() {
       if (closed) return;
       closed = true;

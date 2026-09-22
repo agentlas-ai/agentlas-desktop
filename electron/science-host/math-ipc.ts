@@ -1,17 +1,5 @@
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
-
-interface MathWorkspacePort {
-  command(projectId: string, requestId: string, command: unknown): Promise<Record<string, unknown>>;
-  cancel(projectId: string, requestId: string): { requested: boolean };
-}
-
-function workspace(): MathWorkspacePort {
-  // Science is released independently. Older extension services remain usable
-  // and report this missing capability only when the Math command is requested.
-  const science = require("agentlas-science") as { scienceMathWorkspace?: () => MathWorkspacePort };
-  if (typeof science.scienceMathWorkspace !== "function") throw new Error("science-math-service-update-required");
-  return science.scienceMathWorkspace();
-}
+import type { ScienceDaemonClient } from "./daemon-client";
 
 function inputEnvelope(value: unknown): { projectId: string; requestId: string; command?: unknown } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science-math-request-invalid");
@@ -31,18 +19,22 @@ function inputEnvelope(value: unknown): { projectId: string; requestId: string; 
 export function registerScienceMathHandlers(input: {
   ipcMain: Pick<IpcMain, "handle">;
   assertScienceSender(event: IpcMainInvokeEvent, envelope: unknown): unknown;
+  client: Pick<ScienceDaemonClient, "command" | "cancelMath">;
 }): void {
   input.ipcMain.handle("science:math:command", (event, envelope: unknown) => {
     input.assertScienceSender(event, envelope);
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-math-subframe-denied");
     const request = inputEnvelope(envelope);
     if (!request.command || typeof request.command !== "object" || Array.isArray(request.command)) {
       throw new Error("science-math-command-invalid");
     }
-    return workspace().command(request.projectId, request.requestId, request.command);
+    // No reply deadline: a GUI wait is not the lifetime of a computation.
+    return input.client.command({ op: "math.command", input: { ...request, command: request.command } });
   });
   input.ipcMain.handle("science:math:cancel", (event, envelope: unknown) => {
     input.assertScienceSender(event, envelope);
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-math-subframe-denied");
     const request = inputEnvelope(envelope);
-    return workspace().cancel(request.projectId, request.requestId);
+    return input.client.cancelMath({ projectId: request.projectId, requestId: request.requestId });
   });
 }
