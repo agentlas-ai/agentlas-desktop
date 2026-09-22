@@ -1,5 +1,5 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
-import { getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
+import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
@@ -4500,10 +4500,11 @@ export function registerIpcHandlers(): void {
     const review = getLongRunAttemptReview(run.id);
     if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
     if (!review.attempts.length) return null;
-    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running"
-      : review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS ? "too_many"
-      : findAutomationByGoalId(expectedGoalId) ? "automation"
-      : review.attempts.some((attempt) => !attempt.invocationRunId) ? "missing_activity" : null;
+    // ★오너 지시(2026-09-22) "블락되는거 전부 치워". 재개는 불확실한 옛 시도를 **다시 실행하지
+    //   않고** 다음 작업부터 이어간다 — 중복의 원천이 없다. 그래서 사람을 막을 이유는 "아직 도는
+    //   시도가 있다" 하나뿐이다. 건수 상한·자동화 연결·활동 기록 없음은 사람에게 목록을 검사시키던
+    //   시절의 차단이었고, 그 검사는 없앴다(사람은 한 문장과 버튼 하나만 본다).
+    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running" : null;
     const attempts = review.attempts.map((attempt) => {
       const recordedActivity = attempt.invocationRunId
         ? listRunEvents(attempt.invocationRunId, 200)
@@ -4553,12 +4554,6 @@ export function registerIpcHandlers(): void {
       if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) {
         throw new Error("goal_resume_uncertain_review_too_large");
       }
-      if (continuation) {
-        throw new Error("goal_resume_uncertain_automation_reconciliation_required");
-      }
-      if (review.attempts.some((attempt) => !attempt.invocationRunId)) {
-        throw new Error("goal_resume_uncertain_review_unverifiable");
-      }
       if (!submittedConfirmation) throw new Error("goal_resume_uncertain_review_required");
       if (!matchesGoalResumeReview(review, submittedConfirmation)) {
         throw new Error("goal_resume_uncertain_review_changed");
@@ -4587,9 +4582,12 @@ export function registerIpcHandlers(): void {
       if (!current || current.id !== run.id || current.version !== expectedVersion || getChat(id)?.goalId !== chat.goalId) {
         throw new Error("long_run_resume_version_conflict");
       }
-      // This branch has no inspect-before-action gate. The native Resume path
-      // above refuses any unresolved attempt instead of writing an attestation.
-      return resumeDesktopLongRunManually(current.id, expectedVersion);
+      // 자동화가 이어받는 Goal 도 일반 재개와 같은 사람 확인을 같은 트랜잭션에서 기록한다.
+      // 예전에는 이 기록 절차가 없어 불확실 시도가 하나라도 있으면 재개 자체를 거절했다 —
+      // 이어갈 방법이 없는 막다른 길. 재개는 옛 시도를 재실행하지 않으며, 자동화의 옛 발생분
+      // 재실행은 자동화 자신의 그래프 조정 관문이 따로 막는다.
+      const acknowledged = acknowledgeUncertainLongRunAttempts(current.id, confirmation);
+      return resumeDesktopLongRunManually(current.id, acknowledged.version);
     })();
     try {
       if (!continuation.enabled) toggleAutomation(continuation.id, true);
