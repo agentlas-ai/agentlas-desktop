@@ -461,36 +461,71 @@ function validatePersistentNode(
   }
 }
 
-function materializePersistentNode(
+/**
+ * Where a Windows persistent copy may live, best first.
+ *
+ * `%LOCALAPPDATA%` is the conventional per-user application directory: folder
+ * redirection and cloud sync clients leave it alone, while the user profile
+ * root can be redirected, synced, or covered by ransomware protection. The home
+ * path stays first so existing installs keep the copy they already validated.
+ */
+function persistentNodeParents(): string[] {
+  const parents = [path.join(os.homedir(), ".agentlas", "runtime", "node")];
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (localAppData) parents.push(path.join(localAppData, "Agentlas", "runtime", "node"));
+  return [...new Set(parents)];
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && code) return code;
+  return error instanceof Error ? error.constructor.name : "unknown";
+}
+
+/**
+ * Leave a content-free breadcrumb for a materialization that fell back.
+ *
+ * The user must never be asked to read an error string back to us, so the app
+ * records the failing step and its errno itself. Never raises: an unwritable
+ * breadcrumb must not be able to affect the install it is describing.
+ */
+function recordMaterializeFallback(detail: string): void {
+  try {
+    const dir = path.join(os.homedir(), ".agentlas", "runtime");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      path.join(dir, "node-materialize-fallback.json"),
+      `${JSON.stringify({
+        schemaVersion: "agentlas.node-materialize-fallback.v1",
+        at: new Date().toISOString(),
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: MANAGED_NODE_VERSION,
+        detail,
+      }, null, 2)}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch {
+    // Observability is best-effort by construction.
+  }
+}
+
+function copyPersistentNode(
+  parent: string,
   packaged: ManagedNodeRuntime,
+  locked: LockedNodeAsset,
   platform: NodeJS.Platform,
   arch: string,
-  parentOverride?: string,
-): ManagedNodeResolution {
-  const locked = LOCKED_NODE_ASSETS[`${platform}:${arch}`];
-  if (!locked || platform !== "win32") return { ok: true, runtime: packaged };
-  const sourceLicense = path.join(packaged.root, "LICENSE");
-  let licenseSha256: string;
-  try {
-    const stat = fs.lstatSync(sourceLicense);
-    const rootReal = fs.realpathSync(packaged.root);
-    const licenseReal = fs.realpathSync(sourceLicense);
-    if (!stat.isFile() || stat.isSymbolicLink() || !isInside(licenseReal, rootReal)) {
-      return { ok: false, reason: "managed Node license is missing from the packaged runtime" };
-    }
-    licenseSha256 = sha256File(sourceLicense);
-  } catch {
-    return { ok: false, reason: "managed Node license is missing from the packaged runtime" };
-  }
-
-  const parent = parentOverride ?? path.join(os.homedir(), ".agentlas", "runtime", "node");
+  sourceLicense: string,
+  licenseSha256: string,
+): { node: string } | { error: string } {
   const destination = path.join(
     parent,
     `v${MANAGED_NODE_VERSION}-${arch}-${locked.runtimeTreeSha256.slice(0, 16)}`,
   );
   const expected = persistentNodeManifest(locked, platform, arch, licenseSha256);
   const existing = validatePersistentNode(destination, expected);
-  if (existing) return { ok: true, runtime: { ...packaged, node: existing } };
+  if (existing) return { node: existing };
 
   const staging = `${destination}.tmp-${process.pid}-${Date.now()}`;
   try {
@@ -505,17 +540,75 @@ function materializePersistentNode(
       { encoding: "utf8", mode: 0o600 },
     );
     if (!validatePersistentNode(staging, expected)) {
-      throw new Error("persistent Node copy failed verification");
+      throw new Error("copy-verification-failed");
     }
     fs.rmSync(destination, { recursive: true, force: true });
     fs.renameSync(staging, destination);
     const node = validatePersistentNode(destination, expected);
-    if (!node) throw new Error("persistent Node activation failed verification");
-    return { ok: true, runtime: { ...packaged, node } };
-  } catch {
-    fs.rmSync(staging, { recursive: true, force: true });
-    return { ok: false, reason: "could not create Agentlas's persistent private Node executable" };
+    if (!node) throw new Error("activation-verification-failed");
+    return { node };
+  } catch (error) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* staging already gone */ }
+    return { error: errorCode(error) };
   }
+}
+
+/**
+ * Windows only: keep a copy of `node.exe` outside the app folder.
+ *
+ * ★ This is a DURABILITY optimization, not a correctness requirement.
+ *   It exists so the portable build can be deleted while an already-installed
+ *   CLI keeps running (verify-cli-bootstrap-contract.cjs states that contract).
+ *   The CLI works perfectly well from the packaged executable, which has
+ *   already passed checksum verification by the time we get here.
+ *
+ * ★ Before 2026-09-23 every failure here ended the install with
+ *   "could not create Agentlas's persistent private Node executable", which
+ *   `resolveNpmRunner` turned into "Reinstall or update Agentlas Desktop".
+ *   On Windows a single copy or rename can fail for entirely ordinary reasons —
+ *   antivirus holding a freshly written .exe, a sync client locking the folder,
+ *   a leftover node process pinning the destination — so a first install could
+ *   die on a machine where nothing was actually wrong, and reinstalling the app
+ *   could not fix it. A later-only benefit must never block the first run.
+ *   Failure now falls back to the packaged executable and leaves a breadcrumb;
+ *   the next launch retries the copy.
+ */
+function materializePersistentNode(
+  packaged: ManagedNodeRuntime,
+  platform: NodeJS.Platform,
+  arch: string,
+  parentOverride?: string,
+): ManagedNodeResolution {
+  const locked = LOCKED_NODE_ASSETS[`${platform}:${arch}`];
+  if (!locked || platform !== "win32") return { ok: true, runtime: packaged };
+
+  const fallback = (detail: string): ManagedNodeResolution => {
+    recordMaterializeFallback(detail);
+    return { ok: true, runtime: packaged };
+  };
+
+  const sourceLicense = path.join(packaged.root, "LICENSE");
+  let licenseSha256: string;
+  try {
+    const stat = fs.lstatSync(sourceLicense);
+    const rootReal = fs.realpathSync(packaged.root);
+    const licenseReal = fs.realpathSync(sourceLicense);
+    if (!stat.isFile() || stat.isSymbolicLink() || !isInside(licenseReal, rootReal)) {
+      return fallback("license:not-a-regular-file-inside-root");
+    }
+    licenseSha256 = sha256File(sourceLicense);
+  } catch (error) {
+    return fallback(`license:${errorCode(error)}`);
+  }
+
+  const parents = parentOverride ? [parentOverride] : persistentNodeParents();
+  const failures: string[] = [];
+  for (const parent of parents) {
+    const outcome = copyPersistentNode(parent, packaged, locked, platform, arch, sourceLicense, licenseSha256);
+    if ("node" in outcome) return { ok: true, runtime: { ...packaged, node: outcome.node } };
+    failures.push(outcome.error);
+  }
+  return fallback(`copy:${failures.join(",")}`);
 }
 
 function resolveManagedNodeRuntimeRoot(
@@ -528,6 +621,22 @@ function resolveManagedNodeRuntimeRoot(
   return verified.ok
     ? materializePersistentNode(verified.runtime, platform, arch, persistentParent)
     : verified;
+}
+
+/**
+ * Contract-test seam for the durability fallback.
+ *
+ * Drives `materializePersistentNode` with an already-verified runtime so the
+ * "a failed copy must not end the install" contract can be asserted from any
+ * host platform, not only from Windows.
+ */
+export function materializePersistentNodeForTests(
+  packaged: ManagedNodeRuntime,
+  platform: NodeJS.Platform,
+  arch: string,
+  parentOverride: string,
+): ManagedNodeResolution {
+  return materializePersistentNode(packaged, platform, arch, parentOverride);
 }
 
 /** Contract-test seam with an explicit temporary destination; production resolution never calls this export. */

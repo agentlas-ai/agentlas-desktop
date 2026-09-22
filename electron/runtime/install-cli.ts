@@ -170,6 +170,10 @@ interface NpmRunner {
   managedRuntime?: ManagedNodeRuntime;
 }
 
+/** 첫 설치를 한 번의 일시 장애로 잃지 않기 위한 상한 있는 재시도. */
+const NPM_INSTALL_RETRIES = 2;
+const NPM_INSTALL_RETRY_DELAY_MS = 1_500;
+
 const installInFlight = new Map<string, Promise<CliActionResult>>();
 let installTail: Promise<void> = Promise.resolve();
 
@@ -413,9 +417,15 @@ function resolveNpmRunner(): { ok: true; runner: NpmRunner } | { ok: false; reas
   }
   const external = resolveBinary("npm");
   if (external) return { ok: true, runner: { command: external, argvPrefix: [] } };
+  // ★ Do not tell the user to reinstall. The bundled runtime failing to verify
+  //   is not fixed by reinstalling the app, and sending a beginner down that
+  //   path is how a first-run install becomes an uninstall (2026-09-23 report:
+  //   "연결을 눌러도 설치가 안 되고 다시 연결 버튼 화면으로 돌아온다").
+  //   State what happened and that retrying is the next step; the caller shows
+  //   a single retry affordance.
   return {
     ok: false,
-    reason: `Agentlas managed Node runtime is unavailable (${bundled.reason}). Reinstall or update Agentlas Desktop.`,
+    reason: `Agentlas could not start its bundled Node runtime (${bundled.reason}).`,
   };
 }
 
@@ -474,7 +484,7 @@ async function installCliUnlocked(
     "--no-fund",
   ];
 
-  const installed = await new Promise<CliActionResult>((resolve) => {
+  const runNpmInstall = () => new Promise<CliActionResult>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
     let outputTail = "";
@@ -518,6 +528,16 @@ async function installCliUnlocked(
         : { ok: false, message: `CLI package installation failed (exit ${code ?? "unknown"})`, command: fallbackCommand });
     });
   });
+
+  // ★ 첫 설치는 한 번 막히면 사용자가 떠난다. npm 단계의 흔한 실패(레지스트리 순간 장애,
+  //   DNS 흔들림, 백신이 방금 쓴 파일을 잠깐 잡는 것)는 대부분 다시 하면 된다 — 그런데
+  //   지금까지는 단 한 번 시도하고 끝냈다. 사용자에게 "다시 눌러 보세요"를 시키는 대신
+  //   앱이 스스로 두 번 더 해 본다. 상한이 있어 매달리지 않는다.
+  let installed = await runNpmInstall();
+  for (let attempt = 1; !installed.ok && attempt <= NPM_INSTALL_RETRIES; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, NPM_INSTALL_RETRY_DELAY_MS * attempt));
+    installed = await runNpmInstall();
+  }
   if (!installed.ok) return installed;
 
   let binary = managedBinary(plan.bin);
