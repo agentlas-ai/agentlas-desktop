@@ -27,7 +27,7 @@ import {
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { drainRunChildrenForHostShutdown } from "../runtime/exec";
-import { startControlSocket, type ControlSocketHandle } from "./control-socket";
+import { startControlSocket, type ControlSocketHandle, type ControlSocketPeer } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
 import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
@@ -95,6 +95,7 @@ let serviceIdentity: string | null = null;
 let socketFence: (() => void) | null = null;
 let selfDiagnostics: DaemonDiagnosticLog | null = null;
 let scienceService: ReturnType<typeof import("./science-service")["createDaemonScienceService"]> | null = null;
+const scienceSubscribers = new Set<ControlSocketPeer>();
 
 function recordServicePhase(phase: string): void {
   try { selfDiagnostics?.record("child_report", { phase, pid: process.pid, bootId, appInstanceId }); }
@@ -122,7 +123,14 @@ async function getScienceService() {
     const { createDaemonScienceService } = await import("./science-service");
     if (closing) throw new Error("daemon_shutting_down");
     assertServiceOwner();
-    scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000 });
+    scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000,
+      onEvent: event => {
+        assertServiceOwner();
+        for (const subscriber of scienceSubscribers) {
+          if (!subscriber.notify("science.event", event)) scienceSubscribers.delete(subscriber);
+        }
+      },
+    });
   }
   return scienceService;
 }
@@ -224,7 +232,7 @@ function ensureMobileBridgeLeaseWatch(): void {
  * 제어 소켓의 메서드 처리. **터미널이 실제로 필요로 하는 것부터** 연다 —
  * 쓰이지 않을 메서드를 미리 만드는 것은 배선이 아니라 선언이다.
  */
-async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
+async function handleControlMethod(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
   if (closing && method !== "daemon.ping" && method !== "daemon.shutdown") {
     throw new Error("daemon_shutting_down");
   }
@@ -310,6 +318,16 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
   if (method === "science.start") {
     assertServiceControl(params);
     return (await getScienceService()).start();
+  }
+  if (method === "science.subscribe") {
+    assertServiceControl(params);
+    assertServiceOwner();
+    if (closing) throw new Error("daemon_shutting_down");
+    if (!scienceSubscribers.has(peer)) {
+      scienceSubscribers.add(peer);
+      peer.onClose(() => { scienceSubscribers.delete(peer); });
+    }
+    return { subscribed: true, ownerEpoch: bootId };
   }
   if (method === "science.status") {
     assertServiceControl(params);

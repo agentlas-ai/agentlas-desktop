@@ -151,7 +151,7 @@ import { classifyStartupNavigationFailure } from "./startup-navigation";
 import {
   recoverAgentlasBrowserRuntimeAtStartup,
   sweepAgentlasBrowserOrphans,
-  withBrowserCdpMaintenance,
+  closeBrowserCdpIfIdle,
 } from "./mcp-tools/browser-cdp-launcher";
 import {
   installScienceExtension,
@@ -1339,7 +1339,9 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     try { runHostShutdownHooks(); } catch {}
     try { stopCliRuntimeAutoUpdate(); } catch {}
     await stopQuitServices().catch(() => {});
-    await withBrowserCdpMaintenance(() => undefined).catch((error) => {
+    // GUI shutdown has released its own leases. A daemon or another client
+    // may still be using this browser: never cancel their leases on Quit.
+    await closeBrowserCdpIfIdle().catch((error) => {
       console.error("[agentlas-browser] quit cleanup failed", error);
     });
     // Child termination resolves through the invocation lifecycle. Do not

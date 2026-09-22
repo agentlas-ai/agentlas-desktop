@@ -28,9 +28,15 @@ export interface ControlSocketRequest {
 
 export interface ControlSocketOptions {
   /** 메서드 하나를 처리한다. 던지면 JSON-RPC 에러로 나간다. */
-  handle: (method: string, params: unknown) => Promise<unknown> | unknown;
+  handle: (method: string, params: unknown, peer: ControlSocketPeer) => Promise<unknown> | unknown;
   /** 소켓/파이프 경로. 기본은 userData 아래. */
   socketPath?: string;
+}
+
+/** A subscription belongs to its connection, never to the lifetime of a GUI. */
+export interface ControlSocketPeer {
+  notify(method: string, params: unknown): boolean;
+  onClose(handler: () => void): () => void;
 }
 
 export interface ControlSocketHandle {
@@ -147,7 +153,31 @@ export async function startControlSocket(
     bindAddress = path.join(privateDir, "s");
   }
 
+  const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.setEncoding("utf8");
+    const cleanup = new Set<() => void>();
+    const peer: ControlSocketPeer = {
+      notify(method, params) {
+        if (socket.destroyed) return false;
+        // A stalled viewer must not buffer an unbounded research transcript in
+        // the service. Durable event replay recovers a disconnected viewer.
+        if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return false; }
+        socket.write(jsonLine({ method, params }));
+        return true;
+      },
+      onClose(handler) {
+        if (socket.destroyed) { handler(); return () => {}; }
+        cleanup.add(handler);
+        return () => { cleanup.delete(handler); };
+      },
+    };
+    socket.once("close", () => {
+      sockets.delete(socket);
+      for (const handler of cleanup) { try { handler(); } catch { /* transport cleanup cannot fail the service */ } }
+      cleanup.clear();
+    });
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -169,11 +199,11 @@ export async function startControlSocket(
         }
         void (async () => {
           try {
-            const result = await opts.handle(request.method, request.params);
-            socket.write(jsonLine({ id: request.id, result }));
+            const result = await opts.handle(request.method, request.params, peer);
+            if (!socket.destroyed) socket.write(jsonLine({ id: request.id, result }));
           } catch (error) {
             // 실패 사유를 그대로 전한다 — 클라이언트가 사람에게 보여 줄 유일한 문장이다.
-            socket.write(
+            if (!socket.destroyed) socket.write(
               jsonLine({
                 id: request.id,
                 error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
@@ -217,6 +247,9 @@ export async function startControlSocket(
     close: () => {
       if (closePromise) return closePromise;
       closePromise = new Promise<void>((resolve) => {
+        // Subscriptions are deliberately long lived. Service shutdown has
+        // already drained execution; do not wait forever for viewers to quit.
+        for (const socket of sockets) socket.destroy();
         server.close(() => {
           if (publishedIdentity) {
             try {
