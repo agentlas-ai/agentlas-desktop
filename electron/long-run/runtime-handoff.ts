@@ -7,13 +7,85 @@ import { getDb } from "../store/db";
 import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 import { pickRunner } from "../runtime/selection";
+import { rolePriorityRuntimes } from "../runtime/selection";
+import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 
 type HandoffEvent = {
   goalId: string; goalRevision: number; chatId: string; selectionRevision: number;
   state: "pending" | "claimed"; requested: RuntimeSelection;
   checkpointId?: string; successorInvocationId?: string;
+  origin?: "quota-auto";
+  preferred?: RuntimeSelection;
+  cooldownUntil?: number;
 };
+
+export function goalAutoRuntimeRestoreDue(checkpoint: LongRunTaskCheckpoint,
+  currentSelection: RuntimeSelection, now = Date.now()): boolean {
+  const event = latest(checkpoint.capsule.runId);
+  if (event?.origin !== "quota-auto" || event.state !== "claimed" || !event.preferred
+    || !event.preferred.source
+    || event.requested.kind !== currentSelection.kind
+    || event.requested.backend !== currentSelection.backend
+    || event.requested.model !== currentSelection.model) return false;
+  return now >= (event.cooldownUntil ?? 0)
+    && !runtimeCooldownForSelection(event.preferred, now);
+}
+
+/** Only a known, typed quota cooldown can change an unattended Goal model.
+ * The handoff is bound to the next settled checkpoint and leaves the chat's
+ * saved preference untouched. A claimed handoff remembers that preference so
+ * a later observation can restore it when the cooldown expires. */
+export function autoHandoffGoalRuntimeAtWait(input: {
+  checkpoint: LongRunTaskCheckpoint; currentSelection: RuntimeSelection;
+  inventory: readonly RuntimeStatus[];
+  now?: number;
+}): { state: "unchanged" | "handoff" | "cooldown-wait"; until?: number } {
+  const now = input.now ?? Date.now();
+  const run = getLongRunByGoalId(input.checkpoint.goalId);
+  const revision = getChatGoalRevision(input.checkpoint.goalId);
+  if (!run || run.surface !== "one" || revision?.lifecycle !== "ongoing"
+    || revision.revision !== input.checkpoint.goalRevision
+    || getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision
+    || input.checkpoint.sideEffects.state !== "settled") return { state: "unchanged" };
+  const prior = latest(run.id);
+  const cooling = runtimeCooldownForSelection(input.currentSelection, now);
+  // prepareCheckpointContinuation already resolves a pending user choice, so
+  // cooling here is the requested model itself, not the prior producer.
+  if (prior?.state === "pending") return cooling?.kind === "quota"
+    ? { state: "cooldown-wait", until: cooling.until } : { state: "unchanged" };
+  let preferred = prior?.origin === "quota-auto" && prior.preferred
+    ? prior.preferred : input.currentSelection;
+  let next: RuntimeSelection | null = null;
+  if (cooling?.kind === "quota") {
+    const fallback = rolePriorityRuntimes([...input.inventory], "orchestrator")
+      .find(candidate => candidate.kind !== input.currentSelection.kind
+        || candidate.backend !== input.currentSelection.backend);
+    if (!fallback) return { state: "cooldown-wait", until: cooling.until };
+    try {
+      next = resolveRequestedGoalRuntimeSelection({ kind: fallback.kind, backend: fallback.backend,
+        source: fallback.source, model: fallback.model ?? undefined,
+        effort: fallback.effort ?? undefined, longContext: fallback.longContextEnabled,
+        ...(fallback.acpAgentId ? { acpAgentId: fallback.acpAgentId } : {}) }, input.inventory);
+    } catch { return { state: "cooldown-wait", until: cooling.until }; }
+  } else if (prior?.origin === "quota-auto" && prior.state === "claimed" && prior.preferred
+    && prior.requested.kind === input.currentSelection.kind
+    && prior.requested.backend === input.currentSelection.backend
+    && prior.requested.model === input.currentSelection.model
+    && prior.preferred.source && now >= (prior.cooldownUntil ?? 0)
+    && !runtimeCooldownForSelection(prior.preferred, now)) {
+    try { next = resolveRequestedGoalRuntimeSelection(prior.preferred, input.inventory); }
+    catch { /* Keep using the working fallback until the preferred model is available. */ }
+  }
+  if (!next || (next.kind === input.currentSelection.kind && next.backend === input.currentSelection.backend
+    && next.source === input.currentSelection.source && next.model === input.currentSelection.model)) return { state: "unchanged" };
+  appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection", actorKind: "host",
+    payload: { goalId: run.goalId, goalRevision: revision.revision, chatId: run.rootChatId!,
+      selectionRevision: (prior?.selectionRevision ?? 0) + 1, state: "pending",
+      requested: next, origin: "quota-auto", preferred,
+      cooldownUntil: cooling?.kind === "quota" ? cooling.until : prior?.cooldownUntil } satisfies HandoffEvent });
+  return { state: "handoff" };
+}
 
 function publicSelection(selection: RuntimeSelection): RuntimeSelection {
   // Main keeps the executable source in its durable handoff event. Renderer

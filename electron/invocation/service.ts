@@ -7,7 +7,7 @@ import { RunEventDeliveryJournal } from "./event-delivery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
-import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
+import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
@@ -39,6 +39,7 @@ import {
   getLongRunGoalRevisionBinding,
   listLongRunTasks,
   longRunContinueDecision,
+  recordLongRunCycle,
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
@@ -1734,6 +1735,8 @@ export class InvocationService {
           agentId: chat.agentId,
           payload: {
             oneMode: runReq.oneMode,
+            latestUserMessageRowId: (getDb().prepare("SELECT MAX(rowid) AS cursor FROM chat_messages WHERE chat_id=? AND role='user'")
+              .get(runReq.chatId) as { cursor: number | null }).cursor ?? undefined,
             onePermissionMode: selectedOnePermissionMode ?? undefined,
             fastMode: runReq.fastMode === true || undefined,
             locale: pickLocale(runReq),
@@ -3154,6 +3157,38 @@ export class InvocationService {
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
           : undefined);
         if (completionClaim?.claimed && completionClaim.goalId) {
+          const ongoingRevision = getChatGoalRevision(completionClaim.goalId);
+          if (ongoingRevision?.lifecycle === "ongoing" && getChat(chat.id)?.goalId === completionClaim.goalId
+            && !controller.signal.aborted) {
+            // A continuing mandate needs a settled execution boundary and a
+            // next observation, not a model judge declaring the entire mandate
+            // complete after every episode. The wait checkpoint keeps this
+            // result unverified and forces inspection before another action.
+            settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId, runId, verified: false });
+            try {
+              const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
+              if (boundary.effects !== "settled") throw new Error("goal_wait_effects_uncertain");
+              getDb().transaction(() => {
+                recordLongRunCycle({ goalId: completionClaim.goalId!, sourceInvocationId: runId,
+                  progressState: "unknown", outcome: "ongoing-episode-unverified" });
+                const wait = registerOngoingGoalCycle({ goalId: completionClaim.goalId!, invocationRunId: runId,
+                  hasTransientAttachments: record.hasTransientAttachments });
+                const current = getLongRunByGoalId(completionClaim.goalId!);
+                if (current) appendLongRunEvent({ runId: current.id, kind: "run.ongoing_cycle_unverified", actorKind: "host",
+                  payload: { invocationRunId: runId, waitId: wait.waitId, nextCheckAt: wait.nextCheckAt } });
+              }).immediate();
+            } catch (error) {
+              // A missing effect receipt, changed authority or transient
+              // attachment is a real continuation boundary. Never replay the
+              // producer invocation just to hide that uncertainty.
+              console.warn("[long-run] ongoing cycle wait unavailable:", error);
+              const current = getLongRunByGoalId(completionClaim.goalId);
+              if (current?.status === "running") transitionLongRun({ runId: current.id,
+                to: "blocked", actorKind: "host", reason: error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message)
+                  ? error.message : "goal_wait_registration_failed" });
+            }
+            return;
+          }
           let retryCheckpointId: string | null = null;
           // The client records only a verification request. The independent
           // judge starts here, after invoke_completed/mcp_final and the result
@@ -3417,7 +3452,7 @@ export class InvocationService {
       || wait.successorInvocationId !== input.invocationRunId || wait.checkpointId !== input.checkpointId
       || !run || run.status !== "running" || getChat(wait.chatId)?.goalId !== input.goalId
       || input.request.chatId !== wait.chatId || input.request.runId !== input.invocationRunId
-      || (wait.recoveryMode && (input.request.permissions !== "read"
+      || ((wait.recoveryMode || wait.observationOnly) && (input.request.permissions !== "read"
         || (run.surface === "one" && input.request.onePermissionMode !== "read")))
       || this.activeChatIds().includes(wait.chatId) || this.steerQueues.get(wait.chatId)?.length) throw new Error("goal_wait_dispatch_state_changed");
     const checkpoint = latestTaskCheckpoint(input.goalId);

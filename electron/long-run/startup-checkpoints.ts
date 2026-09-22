@@ -1,4 +1,4 @@
-import { latestGoalWaitSubscription, type GoalWaitSubscription } from "./wait-subscriptions";
+import { latestGoalWaitSubscription, registerOngoingGoalCycle, type GoalWaitSubscription } from "./wait-subscriptions";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import type { McpInvocationRequest } from "../../shared/types";
@@ -16,7 +16,7 @@ import { latestRuntimePlan } from "./plan";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
-  blockHostPausedForEffectBoundaryUncertainty, listLongRunTasks, unsettledLongRunAttemptCount } from "../store/long-runs";
+  blockHostPausedForEffectBoundaryUncertainty, listLongRunTasks, recordLongRunCycle, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
@@ -31,8 +31,62 @@ export interface CheckpointStartupDispatcher {
 
 export interface CheckpointStartupResult {
   runId: string;
-  status: "started" | "skipped";
+  status: "started" | "scheduled" | "skipped";
   reason: string;
+}
+
+/** Old verifier outages are not a permanent stop for an ongoing mandate.
+ * Recover only a current, fully settled producer; schedule observation rather
+ * than replaying its actions or promoting its unverified result to success. */
+export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[] {
+  const results: CheckpointStartupResult[] = [];
+  let afterId = "";
+  while (true) {
+    const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ? AND status='blocked'
+      AND blocked_reason='verification_unavailable' AND surface IN ('one','work')
+      AND execution_location='desktop-local' ORDER BY id LIMIT 100`).all(afterId) as Array<{ id: string }>;
+    if (!rows.length) break;
+    for (const { id } of rows) {
+      afterId = id;
+      try {
+        assertDesktopLongRunAdmissionOpen();
+        const candidate = getLongRun(id);
+        if (!candidate || candidate.status !== "blocked" || candidate.blockedReason !== "verification_unavailable"
+          || getChatGoalRevision(candidate.goalId)?.lifecycle !== "ongoing"
+          || legacyStartupWaitBlocksRecovery(latestGoalWaitSubscription(candidate.goalId))) continue;
+        const producer = preflightMissingStartupCheckpoint(candidate, { unverifiedOngoing: true });
+        const result = getDb().transaction(() => {
+          const current = getLongRun(id);
+          if (!current || current.version !== candidate.version || current.status !== "blocked"
+            || current.blockedReason !== "verification_unavailable"
+            || unsettledLongRunAttemptCount(id)
+            || getChatGoalRevision(current.goalId)?.lifecycle !== "ongoing") throw new Error("ongoing_verification_recovery_changed");
+          const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocationRunId,
+            expectedChatId: producer.chat.id });
+          if (effect.effects !== "settled" || effect.snapshotDigest !== producer.effect.snapshotDigest)
+            throw new Error("goal_wait_effects_uncertain");
+          transitionLongRun({ runId: id, to: "queued", actorKind: "host",
+            reason: "ongoing-verification-outage-recovered", expectedVersion: current.version });
+          transitionLongRun({ runId: id, to: "running", actorKind: "host",
+            reason: "ongoing-verification-outage-recovered" });
+          recordLongRunCycle({ goalId: current.goalId, sourceInvocationId: producer.invocationRunId,
+            progressState: "unknown", outcome: "ongoing-episode-unverified" });
+          const wait = registerOngoingGoalCycle({ goalId: current.goalId,
+            invocationRunId: producer.invocationRunId });
+          appendLongRunEvent({ runId: id, kind: "run.ongoing_cycle_unverified", actorKind: "host",
+            sourceEventId: `ongoing-unverified:${producer.invocationRunId}`,
+            payload: { invocationRunId: producer.invocationRunId, waitId: wait.waitId,
+              nextCheckAt: wait.nextCheckAt, recoveredAtStartup: true } });
+          return { runId: id, status: "scheduled" as const, reason: "verification_outage_observation_scheduled" };
+        }).immediate();
+        results.push(result);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "ongoing_verification_recovery_unavailable";
+        results.push({ runId: id, status: "skipped", reason });
+      }
+    }
+  }
+  return results;
 }
 
 /** A live/pending wait owns the next observation or dispatch boundary. A
@@ -106,7 +160,8 @@ function parsedRuntimeSelection(raw: string): import("../../shared/long-run").Lo
 /** Read-only authority gate for minting a checkpoint after a host pause. A
  * completed/committed row is insufficient until its invocation receipt,
  * workspace, instructions, runtime and current Goal state all line up. */
-function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typeof getLongRun>>): {
+function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typeof getLongRun>>,
+  options: { unverifiedOngoing?: boolean } = {}): {
   chat: NonNullable<ReturnType<typeof getChat>>;
   workerId: string;
   attempt: number;
@@ -133,7 +188,7 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
   }
   const newestUser = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1")
     .get(chat.id) as { id: string } | undefined;
-  if (newestUser?.id !== revision.sourceMessage.messageId) startupReplayRefusal("newer_user_direction");
+  if (!options.unverifiedOngoing && newestUser?.id !== revision.sourceMessage.messageId) startupReplayRefusal("newer_user_direction");
 
   // The missing-checkpoint path has no checkpoint history cursor to reuse, so
   // bind the source to the exact controller invocation before examining any
@@ -142,14 +197,14 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
 
   const unsettled = unsettledLongRunAttemptCount(candidate.id);
   if (unsettled > 0) startupReplayRefusal("attempt_unsettled");
-  const producer = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state, a.attempt,
+  const producer = getDb().prepare(`SELECT a.id, a.task_id, a.invocation_run_id, a.state, a.side_effect_state, a.attempt,
       a.runtime_selection_json, w.id AS worker_id, w.runtime_selection_json AS worker_runtime_selection_json,
       w.workspace_binding_json
     FROM long_run_worker_attempts a
     JOIN long_run_workers w ON w.id = a.worker_id AND w.run_id = a.run_id
     WHERE a.run_id = ? AND w.role = 'controller'
     ORDER BY a.rowid DESC LIMIT 1`).get(candidate.id) as {
-      id: string; invocation_run_id: string | null; state: string; side_effect_state: string; attempt: number;
+      id: string; task_id: string; invocation_run_id: string | null; state: string; side_effect_state: string; attempt: number;
       runtime_selection_json: string; worker_id: string; worker_runtime_selection_json: string; workspace_binding_json: string;
     } | undefined;
   if (!producer || !producer.invocation_run_id || producer.state !== "completed" || producer.side_effect_state !== "committed") {
@@ -165,8 +220,25 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
     const payload = invocationIntake ? JSON.parse(invocationIntake.payload_json) as { sourceMessageId?: unknown } : null;
     intakeSourceMessageId = typeof payload?.sourceMessageId === "string" ? payload.sourceMessageId : null;
   } catch { intakeSourceMessageId = null; }
-  if (!intakeSourceMessageId) startupReplayRefusal("history_missing");
-  if (intakeSourceMessageId !== revision.sourceMessage.messageId) startupReplayRefusal("history_changed");
+  if (options.unverifiedOngoing) {
+    // A normal continuation has no automatic_goal_intake event. It may have
+    // seen later chat directions than the edited Goal source; require the
+    // latest user direction to precede this exact One invocation instead.
+    const started = getDb().prepare("SELECT ts, payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' ORDER BY seq ASC LIMIT 1")
+      .get(producer.invocation_run_id, chat.id) as { ts: string; payload_json: string } | undefined;
+    let startPayload: { oneMode?: unknown; latestUserMessageRowId?: unknown } = {};
+    try { startPayload = JSON.parse(started?.payload_json ?? "{}"); } catch { /* invalid start */ }
+    if (!started || (candidate.surface === "one" && startPayload.oneMode !== true) || !newestUser)
+      startupReplayRefusal("history_missing");
+    const latestUser = getDb().prepare("SELECT rowid AS cursor, created_at FROM chat_messages WHERE id=? AND chat_id=? AND role='user'")
+      .get(newestUser.id, chat.id) as { cursor: number; created_at: string } | undefined;
+    if (!latestUser || (typeof startPayload.latestUserMessageRowId === "number"
+      ? latestUser.cursor > startPayload.latestUserMessageRowId
+      : latestUser.created_at >= started.ts)) startupReplayRefusal("newer_user_direction");
+  } else {
+    if (!intakeSourceMessageId) startupReplayRefusal("history_missing");
+    if (intakeSourceMessageId !== revision.sourceMessage.messageId) startupReplayRefusal("history_changed");
+  }
   if (getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
     .get(producer.invocation_run_id)) startupReplayRefusal("newer_user_direction");
   const attemptRuntime = parsedRuntimeSelection(producer.runtime_selection_json);
@@ -189,8 +261,16 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
 
   const plan = latestRuntimePlan(candidate.id);
   const expectedSteps = listLongRunTasks(candidate.id).map((task) => ({ taskId: task.id, title: task.title, state: task.state }));
+  const verifierOnlyStateChange = options.unverifiedOngoing && plan?.steps.length === expectedSteps.length
+    && plan.steps.every((step, index) => {
+      const current = expectedSteps[index];
+      return step.taskId === current.taskId && step.title === current.title
+        && (step.state === current.state || (step.taskId === producer.task_id
+          && step.state === "verifying" && current.state === "failed"));
+    });
   if (!plan || plan.schemaVersion !== "agentlas.runtime-plan.v1" || plan.runId !== candidate.id
-    || plan.goalRevision !== revision.revision || !sameJson(plan.steps, expectedSteps)) startupReplayRefusal("plan_changed");
+    || plan.goalRevision !== revision.revision
+    || (!sameJson(plan.steps, expectedSteps) && !verifierOnlyStateChange)) startupReplayRefusal("plan_changed");
 
   let effect: ReturnType<typeof readInvocationEffectBoundary>;
   try { effect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id, expectedChatId: chat.id }); }

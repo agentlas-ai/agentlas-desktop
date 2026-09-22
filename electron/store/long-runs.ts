@@ -2103,6 +2103,8 @@ export function recordLongRunCycle(input: {
   progressState?: "unknown" | "evidence_observed";
   /** Exact settled checkpoint, used only by the host verifier for one episode. */
   verifiedCheckpointId?: string;
+  /** Completed invocation for an ongoing episode whose result was not judged. */
+  sourceInvocationId?: string;
   outcome?: string | null;
   /** Legacy callers remain unknown unless accompanied by a real billing reference. */
   costUsd?: number;
@@ -2119,9 +2121,10 @@ export function recordLongRunCycle(input: {
       throw new Error("long_run_usage_cost_invalid");
     }
     if (input.usage) recordLongRunUsage(input.goalId, input.usage);
-    if (input.verifiedCheckpointId && usage) throw new Error("long_run_cycle_source_ambiguous");
+    if ([input.verifiedCheckpointId, input.sourceInvocationId, usage].filter(Boolean).length > 1) throw new Error("long_run_cycle_source_ambiguous");
     const sourceEventId = usage ? `cycle:${usage.sourceId}`
-      : input.verifiedCheckpointId ? `cycle:checkpoint:${input.verifiedCheckpointId}` : undefined;
+      : input.verifiedCheckpointId ? `cycle:checkpoint:${input.verifiedCheckpointId}`
+      : input.sourceInvocationId ? `cycle:invocation:${input.sourceInvocationId}` : undefined;
     if (sourceEventId) {
       const prior = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
         .get(run.id, sourceEventId) as { payload_json: string } | undefined;
@@ -2138,7 +2141,7 @@ export function recordLongRunCycle(input: {
       || Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
     const stallStreak = sameProgress ? run.stallStreak + 1 : 0;
     const replanRequired = stallStreak >= run.stallWindow && run.surface === "one"
-      && Boolean(input.verifiedCheckpointId && input.progressState)
+      && Boolean((input.verifiedCheckpointId || input.sourceInvocationId) && input.progressState)
       && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing";
     const shouldBlock = stallStreak >= run.stallWindow && !replanRequired;
     db.prepare(
@@ -2156,6 +2159,7 @@ export function recordLongRunCycle(input: {
       payload: { progressKey: input.progressKey ?? null, ...(input.progressState ? { progressState: input.progressState } : {}),
         outcome: input.outcome?.slice(0, 240) ?? null,
         stallStreak, blocked: shouldBlock, replanRequired, usage,
+        ...(input.sourceInvocationId ? { invocationRunId: input.sourceInvocationId, verification: "unverified" } : {}),
         ...(usage ? { invocationRunId: usage.invocationRunId, attemptId: usage.attemptId } : {}) },
       at: now,
     });
