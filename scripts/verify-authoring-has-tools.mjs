@@ -55,7 +55,13 @@ check(
 
 check(
   "the-tool-lock-follows-the-flag",
-  /untrustedNoTools: !opts\.authoring/.test(judgment)
+  // 2026-09-23: ed18cf2a(1.2.13)부터 잠금은 `!opts.authoring` 이 아니라 "명시적으로 무도구를 요구한 판정"
+  // (requiresNoTools = opts.requireNoTools === true || 정책 capability "no_tools")을 따른다. 계약은 그대로 —
+  // 잠금이 무조건 켜지지 않고, 그래프를 짓는 호출부(authoring: true)는 무도구를 요구하지 않는다.
+  (/untrustedNoTools: !opts\.authoring/.test(judgment)
+    || (/untrustedNoTools: requiresNoTools/.test(judgment)
+      && /const requiresNoTools = opts\.requireNoTools === true \|\| opts\.selectionPolicy\?\.capability === "no_tools";/.test(judgment)
+      && [...ipc.matchAll(/authoring: true/g)].every((m) => !/requireNoTools|"no_tools"/.test(ipc.slice(Math.max(0, m.index - 600), m.index + 600)))))
   && !/untrustedNoTools: true/.test(judgment),
   "도구 잠금이 다시 무조건 켜졌습니다 — 빌더는 눈 감고 그래프를 씁니다.",
 );

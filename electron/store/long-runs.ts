@@ -377,7 +377,8 @@ export interface LongRunAttemptReview {
 }
 
 export type LongRunAttemptReviewConfirmation = Pick<LongRunAttemptReview, "runId" | "version" | "attemptIds" | "attemptSetDigest">;
-export const MAX_GOAL_RESUME_REVIEW_ATTEMPTS = 20;
+/** 사람에게 목록을 보이지 않으므로 사람 검토 상한이 아니라 한 번의 확인 기록 크기 상한이다. */
+export const MAX_GOAL_RESUME_REVIEW_ATTEMPTS = 500;
 
 interface UnsettledLongRunAttempt {
   id: string;
@@ -549,7 +550,6 @@ export function acknowledgeUncertainLongRunAttempts(
     const review = getLongRunAttemptReview(runId);
     if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) throw new Error("goal_resume_uncertain_review_too_large");
     if (review.attempts.some((attempt) => attempt.state === "running")) throw new Error("auto_goal_resume_attempt_unsettled");
-    if (review.attempts.some((attempt) => !attempt.invocationRunId)) throw new Error("goal_resume_uncertain_review_unverifiable");
     if (review.attemptIds.length) {
       if (!confirmation) throw new Error("goal_resume_uncertain_review_required");
       if (confirmation.runId !== runId || confirmation.version !== review.version
