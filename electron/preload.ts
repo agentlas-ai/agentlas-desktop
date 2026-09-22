@@ -732,6 +732,10 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
     setRuntimeSelection: (id: string, selection: RuntimeSelection | null) =>
       ipcRenderer.invoke("chats:setRuntimeSelection", id, selection),
+    requestGoalRuntimeSelection: (id, input) =>
+      ipcRenderer.invoke("chats:requestGoalRuntimeSelection", id, input),
+    getGoalRuntimeSelection: (id) => ipcRenderer.invoke("chats:getGoalRuntimeSelection", id),
+    getContinuitySnapshot: (id) => ipcRenderer.invoke("chats:getContinuitySnapshot", id),
     recap: (id: string) => ipcRenderer.invoke("chats:recap", id),
     markViewed: (id: string) => ipcRenderer.invoke("chats:markViewed", id),
   },
@@ -862,6 +866,20 @@ const api: AgentlasIpc = {
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),
+    listStrategyProposals: (id: string, limit?: number) => ipcRenderer.invoke("automations:listStrategyProposals", id, limit),
+    reviewStrategyProposal: (input: {
+      automationId: string;
+      proposalId: string;
+      decision: "apply" | "reject";
+      goalAmendment?: {
+        text: string;
+        objective: string;
+        acceptanceCriteria: Array<{ id: string; text: string }>;
+        expectedGoalRevision: number;
+        expectedRunVersion: number;
+      };
+    }) =>
+      ipcRenderer.invoke("automations:reviewStrategyProposal", input),
     create: (input: AutomationCreateInput) =>
       ipcRenderer.invoke("automations:create", input),
     toggle: (id: string, enabled: boolean) =>
@@ -1090,6 +1108,11 @@ const api: AgentlasIpc = {
   invoke: {
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),
     steer: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:steer", req),
+    preflightSubmissionBegin: (input) => ipcRenderer.invoke("invoke:preflightSubmissionBegin", input),
+    preflightSteerEnqueue: (input) => ipcRenderer.invoke("invoke:preflightSteerEnqueue", input),
+    preflightSteers: (chatId: string) => ipcRenderer.invoke("invoke:preflightSteers", chatId),
+    preflightSteerReceipt: (input) => ipcRenderer.invoke("invoke:preflightSteerReceipt", input),
+    preflightSubmissionHold: (submissionId: string) => ipcRenderer.invoke("invoke:preflightSubmissionHold", submissionId),
     eventChannel: (runId: string) => `invoke:event:${runId}`,
     replay: (input) => ipcRenderer.invoke("invoke:replay", input),
     cancel: (runId: string) => ipcRenderer.invoke("invoke:cancel", runId),
@@ -1100,8 +1123,10 @@ const api: AgentlasIpc = {
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
     attach: (chatId: string, options?: { includeEvents?: boolean }) => ipcRenderer.invoke("invoke:attach", chatId, options),
     receipt: (runId: string) => ipcRenderer.invoke("invoke:receipt", runId),
+    admission: (runId: string) => ipcRenderer.invoke("invoke:admission", runId),
     workerReport: (scope) => ipcRenderer.invoke("invoke:workerReport", scope),
     latestReceipt: (chatId: string) => ipcRenderer.invoke("invoke:latestReceipt", chatId),
+    steeringRecovery: (chatId: string) => ipcRenderer.invoke("invoke:steeringRecovery", chatId),
     latestOneSurface: (input) => ipcRenderer.invoke("invoke:latestOneSurface", input),
   },
   hephaestus: {

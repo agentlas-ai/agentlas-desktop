@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-academic-search",
   "name": "Academic Search",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -63,18 +63,18 @@
     "files": [
       {
         "path": "README.md",
-        "sha256": "700a85c572cb14fa21dfcd5717a888cb3362c1b8556ef7b44703cc1eef150557",
-        "bytes": 757
+        "sha256": "d1e8d09f5718f6155ff44888f6e5dc4a5e24aff76fba811e68c8b1e6de2eb8ff",
+        "bytes": 796
       },
       {
         "path": "skills/full-text/SKILL.md",
-        "sha256": "09a6539e80aeb1af89d1efbb09d38417ba81071d3fa7a5758ae3ad9684d2fe39",
-        "bytes": 1409
+        "sha256": "74dafe54aab635577fa99c650374bfd9b7beab3b6e2efd1252b2cc454810732e",
+        "bytes": 1989
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "b809d33b3ce7040f693ecda9735520e45408056227dd2cc3db3e8766a3cb45fe",
-        "bytes": 1094
+        "sha256": "ab1acc6b6d0312cf4ad24551860d6aead7c5221d349e68d4bd190e2814986a3c",
+        "bytes": 1266
       },
       {
         "path": "skills/search/SKILL.md",

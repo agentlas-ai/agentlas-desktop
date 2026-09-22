@@ -11,4 +11,4 @@ After discovery, use `$full-text` when a claim depends on the article body and t
 
 Do not invoke it for a purely local calculation or for manipulating an already-bound artifact unless that work introduces a new literature claim.
 
-The search workflow requires `search_academic_literature`; full-text verification requires `retrieve_open_access_full_text`. If either tool is absent, state the exact unavailable step and do not substitute invented sources or arbitrary publisher scraping.
+The search workflow requires `search_academic_literature`. Full-text verification uses `retrieve_open_access_full_text` for the Europe PMC Open Access route or `retrieve_source_full_text_from_location` for a lawful public HTTPS article location or a project-folder file. If the relevant tool or lawful location is unavailable, state the exact unavailable step; never substitute invented sources or arbitrary publisher scraping.

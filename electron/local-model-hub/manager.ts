@@ -63,6 +63,8 @@ interface ProcessLease {
 export interface LocalModelHubManagerOptions {
   fetchImpl?: typeof fetch;
   spawnImpl?: typeof spawn;
+  /** Clock used by the resident-process idle reaper; injectable for lifecycle tests. */
+  now?: () => number;
   engineInstaller?: LocalEngineInstaller;
   healthTimeoutMs?: number;
   /** Maximum time to drain aborted inference before the resident engine is terminated. */
@@ -72,6 +74,10 @@ export interface LocalModelHubManagerOptions {
   /** Resident llama-server changed; callers invalidate runtime projections. */
   onResidentChanged?: () => void;
 }
+
+/** A managed llama-server is retained between turns, but never indefinitely. */
+export const LOCAL_MODEL_IDLE_REAP_MS = 12 * 60 * 60_000;
+const LOCAL_MODEL_IDLE_REAP_CHECK_MS = 10 * 60_000;
 
 export interface LocalCapabilityTestSelection {
   strictJson?: boolean;
@@ -203,6 +209,7 @@ export class LocalModelHubManager {
   private readonly installer: LocalEngineInstaller;
   private readonly fetchImpl: typeof fetch;
   private readonly spawnImpl: typeof spawn;
+  private readonly now: () => number;
   private readonly healthTimeoutMs: number;
   private readonly cancellationDrainTimeoutMs: number;
   private readonly onResidentChanged: () => void;
@@ -215,10 +222,13 @@ export class LocalModelHubManager {
   private residentProcess: ChildProcess | null = null;
   private residentReceipt: LocalModelLoadReceipt | null = null;
   private residentAuthToken: string | null = null;
+  private residentLastActivityAt: number | null = null;
   private lifecycleChain: Promise<void> = Promise.resolve();
   private loadGeneration = 0;
   private deviceProbe: Promise<void> | null = null;
   private readonly activeInference = new Map<string, { controller: AbortController; done: Promise<void> }>();
+  private idleReaperTimer: ReturnType<typeof setInterval> | null = null;
+  private idleReaperQueued = false;
 
   constructor(readonly rootPath: string, options: LocalModelHubManagerOptions = {}) {
     this.packageRoot = join(rootPath, "packages");
@@ -229,11 +239,13 @@ export class LocalModelHubManager {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.modelIndex = new HuggingFaceModelIndex(join(rootPath, "hf-cache"), this.fetchImpl);
     this.spawnImpl = options.spawnImpl ?? spawn;
+    this.now = options.now ?? Date.now;
     this.healthTimeoutMs = options.healthTimeoutMs ?? 60_000;
     this.cancellationDrainTimeoutMs = options.cancellationDrainTimeoutMs ?? 2_000;
     this.onResidentChanged = options.onResidentChanged ?? (() => {});
     this.downloader = new LocalPackageDownloadManager(this.packageRoot);
     this.installer = options.engineInstaller ?? new LocalEngineInstaller(this.engineRoot, { windowsRuntimeDir: options.windowsRuntimeDir });
+    this.startIdleReaper();
   }
 
   async initialize(): Promise<void> {
@@ -605,6 +617,79 @@ export class LocalModelHubManager {
     return await result;
   }
 
+  /** Keep the manager-owned server warm between turns without keeping it forever. */
+  private startIdleReaper(): void {
+    if (this.idleReaperTimer || this.shutdownPromise) return;
+    this.idleReaperTimer = setInterval(() => this.scheduleIdleReap(), LOCAL_MODEL_IDLE_REAP_CHECK_MS);
+    this.idleReaperTimer.unref?.();
+  }
+
+  private stopIdleReaper(): void {
+    if (!this.idleReaperTimer) return;
+    clearInterval(this.idleReaperTimer);
+    this.idleReaperTimer = null;
+  }
+
+  private scheduleIdleReap(): void {
+    if (this.idleReaperQueued || this.shutdownPromise) return;
+    this.idleReaperQueued = true;
+    void this.enqueueLifecycle(() => this.reapIdleResidentProcess()).then((reaped) => {
+      if (reaped) this.notifyResidentChanged();
+    }, (error) => {
+      // A failed sweep must not take down the Electron main process or prevent a
+      // later pass from retrying. The ownership/lease check fails closed below.
+      console.error("[local-model-hub] idle reaper failed", error);
+    }).finally(() => {
+      this.idleReaperQueued = false;
+    });
+  }
+
+  /**
+   * Reap only this manager's resident process. The lease check is deliberate:
+   * a stale in-memory child must never make a timer kill a process that another
+   * manager now owns after a quit/reopen race.
+   */
+  private async reapIdleResidentProcess(): Promise<boolean> {
+    if (!this.initialized || this.unavailableReason || this.shutdownPromise) return false;
+    const child = this.residentProcess;
+    const receipt = this.residentReceipt;
+    const lastActivityAt = this.residentLastActivityAt;
+    if (!child || receipt?.state !== "resident" || lastActivityAt === null) return false;
+    if (this.activeInference.size > 0 || this.now() - lastActivityAt < LOCAL_MODEL_IDLE_REAP_MS) return false;
+    if (!(await this.ownsResidentProcess(receipt.processEpoch, child.pid))) return false;
+
+    // Lease I/O yields to inference admission. Recheck every mutable guard
+    // immediately before terminateResidentProcess() takes ownership of the
+    // child and clears the resident fields synchronously.
+    if (this.residentProcess !== child
+      || this.residentReceipt?.processEpoch !== receipt.processEpoch
+      || this.residentLastActivityAt !== lastActivityAt
+      || this.activeInference.size > 0
+      || this.shutdownPromise) return false;
+    await this.terminateResidentProcess();
+    return true;
+  }
+
+  private async ownsResidentProcess(processEpoch: string, pid: number | undefined): Promise<boolean> {
+    if (!pid) return false;
+    try {
+      const [ownerRaw, processRaw] = await Promise.all([
+        readFile(this.ownerLeasePath, "utf8"),
+        readFile(this.processLeasePath, "utf8"),
+      ]);
+      const owner = JSON.parse(ownerRaw) as Partial<OwnerLease>;
+      const lease = JSON.parse(processRaw) as Partial<ProcessLease>;
+      return owner.schemaVersion === 1 && owner.instanceId === this.instanceId && owner.pid === process.pid
+        && lease.schemaVersion === 1 && lease.processEpoch === processEpoch && lease.pid === pid;
+    } catch {
+      return false;
+    }
+  }
+
+  private touchResidentActivity(): void {
+    if (this.residentProcess && this.residentReceipt?.state === "resident") this.residentLastActivityAt = this.now();
+  }
+
   private async loadModelExclusive(
     installationId: string,
     contextTokens: number,
@@ -738,11 +823,13 @@ export class LocalModelHubManager {
         acceleration: parseEngineLoadLog(engineLog),
       };
       this.residentReceipt = receipt;
+      this.residentLastActivityAt = this.now();
       child.once("exit", (code, exitSignal) => {
         if (this.residentProcess === child && this.residentReceipt?.processEpoch === receipt.processEpoch) {
           this.residentProcess = null;
           this.residentReceipt = null;
           this.residentAuthToken = null;
+          this.residentLastActivityAt = null;
           this.notifyResidentChanged();
           // Keep the successful load observation, and append the exact process's
           // later failure. Intentional unload clears ownership before killing it.
@@ -853,6 +940,7 @@ export class LocalModelHubManager {
     this.residentProcess = null;
     this.residentReceipt = null;
     this.residentAuthToken = null;
+    this.residentLastActivityAt = null;
     if (!child) return;
     if (child.exitCode !== null || child.signalCode !== null) {
       await this.removeProcessLease(processEpoch, child.pid);
@@ -902,6 +990,7 @@ export class LocalModelHubManager {
     const queuedAt = new Date().toISOString();
     const startedAt = new Date().toISOString();
     const active = this.beginActiveInference(signal);
+    this.touchResidentActivity();
     let state: LocalModelRunReceipt["state"] = "completed";
     let reasonCode: string | null = null;
     let result: T;
@@ -933,6 +1022,9 @@ export class LocalModelHubManager {
         reasonCode,
       };
       this.state.runReceipts = bounded([...this.state.runReceipts, receipt]);
+      // A long inference is activity too: once it releases the active slot,
+      // the 12h window starts at completion, not at the request's start.
+      this.touchResidentActivity();
       if (state === "cancelled") {
         // Cancellation is a control-plane boundary: release the public caller
         // and lifecycle slot even if durable receipt I/O is stalled. The
@@ -986,6 +1078,7 @@ export class LocalModelHubManager {
     try {
       return await this.testCapabilitiesActive(installationId, selection, active.signal);
     } finally {
+      this.touchResidentActivity();
       active.finish();
     }
   }
@@ -1000,6 +1093,7 @@ export class LocalModelHubManager {
     if (!resident || !this.residentProcess || resident.installationId !== installationId) {
       throw new Error("capability_test_model_not_resident");
     }
+    this.touchResidentActivity();
     const installation = this.residentInstallation();
     const model = this.modelPackage(installation.modelPackageId);
     if (!model) throw new Error("model_package_not_found");
@@ -1138,6 +1232,7 @@ export class LocalModelHubManager {
 
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return await this.shutdownPromise;
+    this.stopIdleReaper();
     this.shutdownPromise = (async () => {
       await this.unload(undefined, { cancelActiveRuns: true });
       await this.saveChain;

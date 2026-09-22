@@ -1,6 +1,6 @@
 ---
 name: write-manuscript
-description: Compose a journal-quality IMRaD manuscript in the Agentlas manuscript Markdown dialect, with every figure, table, citation, and equation bound to an exact project artifact or source version, then profile the target journal and validate the submission package.
+description: Compose a journal-quality, article-family-appropriate manuscript in the Agentlas manuscript Markdown dialect, with every figure, table, citation, and equation bound to an exact project artifact or source version, then profile the target journal and validate the submission package.
 ---
 
 # Write the Manuscript
@@ -11,7 +11,10 @@ phases that precede this one. This skill covers the `manuscript`, `journal_profi
 
 ## Preconditions
 
-- The lifecycle head is at `conclusions` with a bounded-conclusions gate, or a later phase.
+- Drafting and lifecycle advancement are separate. A current Blueprint and exact bindings permit
+  a durable drafting session and evidence-supported body sections before `conclusions`; a bounded-
+  conclusions gate is not a prerequisite for saving draft prose. This does not advance the
+  lifecycle, authorize unsupported Results, or satisfy any study-completion gate.
 - `inspect_research_workspace` and `inspect_evidence_graph` have been called this turn; every claim
   you intend to write has a non-invalidated support path, or is known to be unsupported.
 - Every figure to be placed has an exact run-backed export artifact (SVG via
@@ -20,6 +23,12 @@ phases that precede this one. This skill covers the `manuscript`, `journal_profi
 - Every table to be placed is an exact run-backed table artifact version.
 - Every source to be cited is an exact `sourceId + sourceVersionId` from the committed evidence
   ledger (`list_project_evidence`).
+
+Start with substantive sections supported by the evidence already held. Missing evidence blocks
+the dependent claims or sections, not independent writing. Do not wait for all experiments or all
+sections to finish before saving supported prose. Keep unresolved gaps explicit, retrieve missing
+sources lawfully, and preserve the host's current Blueprint, binding, abstract-last, and assembly
+requirements. An empty skeleton is not useful prose; it is not a reason to refuse a real partial draft.
 
 Manuscript drafting is one phase of a continuing study. Unless the researcher explicitly requested a
 bounded manuscript deliverable, a completed section, assembled manuscript version, page/word target,
@@ -60,9 +69,11 @@ retrieved literature and the target article type. This is not a prose-only check
   A non-empty `conflicts` list is not silently reordered: the Blueprint records an explicit
   limitation. Resolve it by correcting the section plan or documenting an exact article- or
   journal-specific reason. Do not describe a conflicting unexplained plan as corpus-conformant.
-- Re-read the stored blueprint with `inspect_manuscript_blueprint`. One to four comparable full
-  texts remain `collecting`; five or more permit a current corpus calibration. Do not create a
-  Research Director manuscript or close one out against `collecting` or `stale`.
+- Re-read the stored blueprint with `inspect_manuscript_blueprint`. One eligible comparable full
+  text is enough for a `current` Blueprint; five or more only raise the calibration confidence, and
+  fewer is recorded as a limitation. The number of comparables is never a reason to stop, pause the
+  loop, or ask the researcher for PDFs: draft with what you hold and keep looking for open full
+  texts as you go. Do not create a Research Director manuscript or close one out against `stale`.
 - Pass the exact returned `blueprintId + currentVersion + contentSha256` as `blueprint_binding`
   when calling `start_manuscript_drafting_session`. Do not try to fit a full paper into one model
   response. Re-read the returned durable plan and use its exact `session.id + version +
@@ -80,11 +91,13 @@ Then construct the blueprint content as follows:
 2. Select structurally comparable papers from exact project Sources. Prefer lawful full text in the
    same field, article family, and target journal; abstract-only Sources may inform the question but
    cannot calibrate body structure. Record and inspect the immutable eligibility receipt for every
-   candidate before calling the Blueprint tool. Use 5--20 quantitatively eligible comparable full
-   texts from one source domain. If fewer than five full texts
-   are available, retain the host-returned `collecting` state, continue searching,
-   and use only explicit official-journal rules as hard constraints. Never pretend an abstract
-   reveals the paper's section flow.
+   candidate before calling the Blueprint tool. Use 1--20 quantitatively eligible comparable full
+   texts from one source domain. With one to four, use the host-returned `current` Blueprint with
+   its lower-confidence limitation and continue drafting while searching for additional eligible
+   full texts. Five is a calibration-confidence target, not an admission or drafting requirement.
+   Re-read the actual Blueprint status; never infer `collecting` from a count below five. With no
+   eligible full text, the Blueprint prerequisite remains open. Never pretend an abstract reveals
+   the paper's section flow.
 3. Inspect the host-derived structure profile for every comparable paper: observed section order,
    words per section, paragraph count, abstract/reference/appendix depth, explicit
    figure/table/equation labels, reference-entry count, consensus role order, and transition
@@ -141,9 +154,11 @@ complete externally authored draft; never use it to bypass section planning or t
    section per tool call with `save_manuscript_section_draft` and the exact latest version and state
    hash. Section Markdown is body-only: do not include YAML, `#`, or `##` headings; `###`
    subsections are allowed when the Blueprint needs them.
-3. Treat `status: draft` as unfinished. Inspect the host-measured word and substantive-paragraph
-   counts, revise the same section into a new immutable revision, and continue only when it is
-   `ready`. Readiness is structural depth, not truth or publication approval.
+3. Treat `status: draft` as a saved, unfinished section, not a refusal or a reason to pause the
+   whole study. Inspect the host-measured word and substantive-paragraph counts and revise the
+   same section into a new immutable revision. Independent supported body sections may proceed
+   while this section still needs work; all required sections must be `ready` before assembly.
+   Readiness is structural depth, not truth or publication approval.
 4. Draft the Abstract last. It may synthesize only claims, estimates, uncertainty, scope, and
    limitations already present in ready body sections. The host rejects an early Abstract.
 5. After every required section is ready, call `assemble_manuscript_drafting_session`. The host
@@ -187,6 +202,12 @@ Author and affiliation values come from the researcher or the project; never inv
 emails, or institutions. If they are missing, leave the field empty and list it as a manual
 attestation.
 
+This YAML is not the renderer's author-metadata input. At render/validation/export time, pass the
+schema's `metadata` object explicitly: `authors[].affiliations` contains affiliation strings, not
+the numeric indexes shown above; include all required metadata keys and use null for unknown
+statements. Do not fabricate author records. Keep the Abstract in the durable Abstract section;
+the Markdown parser strips leading YAML rather than turning its `abstract` field into body prose.
+
 ### Section structure
 
 Use the article-family blueprint's section order unless the verified journal profile requires
@@ -202,22 +223,23 @@ their blueprint rather than cosmetic IMRaD headings.
 
 | Purpose | Syntax | Binds to |
 |---|---|---|
-| Place a figure | `{{figure:<locator>}}` | exact export artifact `artifactId@version` |
-| Place a table | `{{table:<locator>}}` | exact table artifact `artifactId@version` |
+| Place a figure | `{{figure:<locator> \| Caption}}` | exact export artifact `artifactId@version` |
+| Place a table | `{{table:<locator> \| Caption}}` | exact table artifact `artifactId@version` |
 | Cite a source | `{{cite:<locator>}}` | exact `sourceId@sourceVersionId` |
 | Reference a figure in text | `{{ref:fig:<locator>}}` | the same locator used in `{{figure:...}}` |
 | Reference a table in text | `{{ref:tab:<locator>}}` | the same locator used in `{{table:...}}` |
-| Reference an equation | `{{eq:<label>}}` | a `$$...$$` block with the label in the binding manifest |
+| Reference an equation | `{{ref:eq:<label>}}` | a display-math block ending with `$$ {#eq:<label>}` |
 
 Rules:
 
 - A locator is an opaque token you assign once per asset (for example `fig-lmm-coefficients`); the
   binding manifest maps each locator to its exact artifact or source version and content hash. The
   same locator must not point at two different versions.
-- Place a figure or table placeholder on its own line, immediately followed by its caption line.
-  Captions are numbered by the renderer in placement order; write the caption text without a
-  number: `Figure caption text.` becomes "Figure 1. Figure caption text." Tables use the same
-  rule with "Table N.".
+- Place a bound figure or table placeholder on its own line with its caption inside the braces,
+  after ` | `. Captions are numbered by the renderer in placement order; supply no number.
+  For example, `{{figure:fig-primary | Primary effect and uncertainty.}}`. A separate following
+  paragraph is ordinary body text, not the caption. Caption lines above/below a table apply only
+  to inline GFM tables, not to bound placeholders.
 - Multiple citations in one sentence use adjacent placeholders: `{{cite:a}}{{cite:b}}`. The
   renderer formats them and generates the numbered or author-year reference list from the bound
   source versions according to the journal profile. Never write a reference entry by hand.
@@ -228,10 +250,15 @@ Rules:
 
 ### Math
 
-Inline math uses `$...$`; display math uses `$$...$$` on its own lines. Give a display equation a
-label in the binding manifest and refer to it with `{{eq:<label>}}`. Write estimands and models
-explicitly, for example the frozen LMM as
-`$$ y_{ij} = \beta_0 + \beta_1 x_{ij} + b_{0j} + \varepsilon_{ij}, \quad b_{0j} \sim \mathcal{N}(0, \sigma_b^2) $$`.
+Inline math uses `$...$`; display math uses `$$...$$`. Put a unique `{#eq:<label>}` immediately
+after the closing `$$`, and reference it in prose with `{{ref:eq:<label>}}`. Equation labels belong
+to the Markdown, not the artifact binding list, whose schema has no equation role. For example:
+
+```markdown
+$$ y_{ij} = \beta_0 + \beta_1 x_{ij} + b_{0j} + \varepsilon_{ij} $$ {#eq:lmm}
+
+The model in {{ref:eq:lmm}} separates fixed and group-level effects.
+```
 
 ### Tables written inline
 
@@ -253,14 +280,14 @@ positive one.
    result/figure/table binding, and evidence scope. Abstract-only support cannot carry a
    methods, results, or limitations sentence.
 2. Assemble the binding manifest: locator -> exact artifact version + content hash (figures,
-   tables), locator -> exact source version (citations), label -> equation. Only host-returned IDs
-   and hashes enter it.
+   tables), locator -> exact source version (citations). Only host-returned IDs and hashes enter
+   it; equation labels are declared in Markdown, not as invented binding targets.
 3. Build and inspect the manuscript blueprint, then write the front matter and article-family
    sections in the dialect above, in the researcher's language unless the target journal requires
    another. Do not create version 1 while any section card lacks its evidence path or an explicit
    unresolved marker. An outline stays in planning/chat: never send a heading scaffold, one-line
-   section, or visually padded placeholder prose to `create_science_manuscript`. Use at least five
-   eligible comparable full texts for a current Blueprint.
+   section, or visually padded placeholder prose to `create_science_manuscript`. Prefer five or more
+   eligible comparable full texts; with fewer, proceed and state the limitation.
    The global anti-stub floor is only a rejection floor, never the writing target; the host-derived
    section and document ranges in the exact Blueprint are the target.
 4. Create version 1 through the durable section session and
@@ -272,20 +299,36 @@ positive one.
    reported shallow section. If it is true, still compare the measured section metrics with the
    corpus blueprint; the host explicitly reports that anti-stub success is not journal readiness.
 5. Run `prepare_manuscript_claim_context`, then explicitly classify every returned canonical
-   sentence before calling `seal_manuscript_claim_ledger` (revision 1), or append a complete sealed
-   manifest with `append_manuscript_claim_ledger_revision`. There is no blanket or default
+   sentence before calling `seal_manuscript_claim_ledger` (revision 1). For ordinary later changes,
+   use `revise_manuscript_claim_ledger` with only new or changed classifications and the exact
+   manuscript version/hash and ledger revision/manifest hash. Unchanged exact active claims carry
+   forward; a rewritten sentence names its predecessor with `replaces_claim_id`. Full-manifest
+   `append_manuscript_claim_ledger_revision` remains an advanced compatibility path, not the
+   normal sentence-revision loop. There is no blanket or default
    `non-factual` classification: omission fails closed, and marking a sentence non-factual is
-   itself an explicit review decision. For every supported `method` or `result`, first run
-   `validate_artifact_for_manuscript`, bind that exact artifact target into the manuscript, include
-   its receipt in `prepare_manuscript_claim_context`, and submit `evidence_assessments` that pair the
-   exact citation and validation receipt with an explicit direction, relevance, and assessment
-   confidence. Never put artifact IDs, versions, or hashes in that assessment: the host derives
+   itself an explicit review decision. For a sentence reporting this project's own `method` or
+   `result`, first run `validate_artifact_for_manuscript`, bind that exact artifact target into the
+   manuscript, include its receipt in `prepare_manuscript_claim_context`, and submit
+   `own_result_assessments` with `validation_receipt_id`, `direction`, and `assessment_confidence`.
+   List the receipt in `validation_receipt_ids`; no external citation is required for an own result.
+   Claims about prior work instead use `evidence_assessments` with the exact supporting
+   `citation_id`, `direction`, `relevance`, and `assessment_confidence`; list that citation in
+   `citation_ids`. Supply a validation receipt where that assessment requires artifact support.
+   A comparison may carry both kinds of assessment. Never add an unrelated citation as an anchor;
+   without the required evidence, classify the claim unresolved. Never put artifact IDs, versions, or hashes in an assessment: the host derives
    them from the receipt and rejects a missing run-output closure, failed receipt, or artifact not
    bound into the exact manuscript version. Citation-only evidence cannot make a method or result
    publication-ready. Then run `evaluate_manuscript_claim_gate`. Resolve failing
    claims by fixing the sentence or its binding, never by removing the ledger entry. Use the ready
    claim-gate report hash for the `conclusions -> manuscript` gate and the exact manuscript content
    hash for `manuscript -> journal_profile`.
+   Render the assembled or revised stored manuscript with `render_science_manuscript` before
+   delivery, even while submission gates remain open. Request the needed `outputs` and
+   `required_outputs` (for example DOCX and PDF), provide actual `metadata`, and select an explicit
+   supported PDF engine/fallback policy. Inspect the returned numbering/warning report and verify
+   the returned files exist before offering links. Missing required files are a render failure,
+   not a delivered manuscript. Ordinary renders remain DRAFT -- NOT FOR SUBMISSION; only the
+   validated `export_journal_submission_bundle` path can produce a clean submission export.
 6. Journal profile: when the target journal is named, call `inspect_official_journal_guidelines`
    for each official page that carries manuscript, figure, data, or review rules, then
    `create_journal_profile_from_official_guidelines` from those exact inspection IDs. If no journal
@@ -337,8 +380,9 @@ positive one.
 
 ## Verification
 
-- Every `{{figure:...}}`, `{{table:...}}`, `{{cite:...}}`, `{{ref:...}}`, and `{{eq:...}}` locator
-  resolves in the binding manifest to a host-returned ID, version, and hash.
+- Every figure, table, and citation locator resolves in the binding manifest to an exact
+  host-returned target. Figure/table references resolve to placed locators; equation references
+  resolve to a unique Markdown equation label, not an artifact binding.
 - No reference entry, figure number, or table number was written by hand.
 - Every Results sentence maps to a claim-ledger entry with status `supported`; weakened or
   contradicted findings are stated as such in Results and Discussion.

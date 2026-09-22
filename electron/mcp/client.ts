@@ -1,10 +1,16 @@
 import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
+import { issueScienceCollectionCapability, assertScienceCollectionRuntimeSelection } from "../runtime/science-collection-boundary";
+import { readScienceCollectionAuthority } from "../science-host/collection-authority";
+import { resolveScienceRecoveryAuthority, freshScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { readScienceRecoveryAuthority } from "../science-host/recovery-mint";
+import { ALIVE_DECISION_OUTPUT_SCHEMA } from "../alive-decision-schema";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
+import { goalContinuationSessionIdentity } from "../long-run/goal-session-owner";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
 import { renderInstructionSnapshot } from "../../shared/runtime-instructions";
 import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
@@ -15,7 +21,7 @@ import type { ChatHostNotice } from "../../shared/types";
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
-import { passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
+import { modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -88,6 +94,7 @@ import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
+import { bindCreatedAutomationToOngoingGoal } from "../long-run/automation-provenance";
 import { compileLongRunCheckpoint } from "../../shared/long-run-checkpoint";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
@@ -136,6 +143,7 @@ import { runSwarmInvocation } from "./swarm-run";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { ensureDesktopProjectBootstrap } from "../architecture/project-bootstrap";
 import { buildMemoryContext } from "../memory/context";
+import { invocationMemoryScope } from "../memory/invocation-scope";
 import {
   ingestWorkingFolderOntologyInBackground,
   queryWorkingFolderOntologyContext,
@@ -229,6 +237,7 @@ import {
   ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
   pickActive,
@@ -635,8 +644,32 @@ class InvocationRunnerFailureError extends Error {
   static localContextFailure(error: unknown): { code: string; message: string } | null {
     if (!(error instanceof InvocationRunnerFailureError) || !(#failure in error)) return null;
     const failure = error.#failure;
-    if (failure.kind !== "refused" || failure.runtime !== "agentlas-local" || failure.source !== "marker"
-      || (failure.providerCode !== "local_context_limit_exceeded" && failure.providerCode !== "local_context_measurement_unavailable")) return null;
+    if (!modelContextFailureReason(failure) || !failure.providerCode) return null;
+    return { code: failure.providerCode, message: failure.message };
+  }
+
+  static readToolScopeFailure(error: unknown): { code: string; message: string } | null {
+    if (!(error instanceof InvocationRunnerFailureError) || !(#failure in error)) return null;
+    const failure = error.#failure;
+    if (failure.kind !== "refused" || failure.runtime !== "antigravity"
+      || failure.source !== "marker" || failure.providerCode !== "agy_read_tools_unsupported") return null;
+    return { code: failure.providerCode, message: failure.message };
+  }
+
+  static projectResidencyBusyFailure(error: unknown): { code: string; message: string } | null {
+    if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+      return {
+        code: WORK_PROJECT_RESIDENCY_BUSY_CODE,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const failure = error instanceof InvocationRunnerFailureError && (#failure in error)
+      ? error.#failure
+      : error && typeof error === "object" && "failure" in error && error.failure && typeof error.failure === "object"
+        ? error.failure as RunnerFailure
+        : null;
+    if (!failure) return null;
+    if (failure.kind !== "refused" || failure.source !== "marker" || failure.providerCode !== WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
     return { code: failure.providerCode, message: failure.message };
   }
 }
@@ -647,7 +680,15 @@ function invocationFailure(
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
-  const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error) ?? InvocationRunnerFailureError.localContextFailure(error);
+  const projectResidencyFailure = InvocationRunnerFailureError.projectResidencyBusyFailure(error);
+  if (projectResidencyFailure) {
+    const ko = "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 새 CLI를 시작하지 않았습니다. 현재 실행이 끝난 뒤 다시 보내 주세요. 기존 대화와 입력은 보존됩니다.";
+    const en = "Another chat in this Work project is still using its provider. The new CLI was not started; send again after the current turn finishes. Your existing transcript and input are preserved.";
+    return { code: projectResidencyFailure.code, message: pickLocale(req) === "ko" ? ko : en };
+  }
+  const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error)
+    ?? InvocationRunnerFailureError.localContextFailure(error)
+    ?? InvocationRunnerFailureError.readToolScopeFailure(error);
   if (capabilityFailure) return capabilityFailure;
   const raw = error instanceof Error ? error.message : String(error);
   if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
@@ -1353,9 +1394,13 @@ export async function pickActiveRunner(): Promise<
  *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
+  /** Main-minted exact-run capability; future Science recovery writer only. */
+  scienceRecovery?: object;
   /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
   scienceReview?: object;
-  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science";
+  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive";
+  /** An Alive wake's attached Science playground, not a Research Director turn. Main-only. */
+  aliveScience?: Readonly<{ agentId: string; wakeId: string; controlEpoch: number; attachmentId: string }>;
   /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
   science?: Readonly<{
     projectId: string;
@@ -1454,7 +1499,8 @@ function isUnattendedExecution(executionContext?: InvocationExecutionContext): b
   return (
     executionContext?.source === "automation" ||
     executionContext?.source === "site-studio" ||
-    executionContext?.source === "trex"
+    executionContext?.source === "trex" ||
+    executionContext?.source === "alive"
   );
 }
 
@@ -1603,7 +1649,7 @@ function deterministicOneCompletionCopy(
  */
 export interface DurableUserMessageHookBlock {
   blockInvocation: true;
-  code: "automatic-goal-intake-unavailable" | "automatic-goal-resume-state-changed";
+  code: "automatic-goal-intake-unavailable" | "automatic-goal-resume-state-changed" | "goal_wait_claimed_reconciliation_required" | "goal_resume_effect_boundary_uncertain";
   message: string;
 }
 
@@ -1652,6 +1698,22 @@ async function runMcpInvocationInContext(
   // site generation, legacy scripts) still receive one internal identity so their
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  // Alive's host-supplied state, not its hidden Work chat, owns this wake.
+  const isAliveControllerRun = executionContext?.source === "alive";
+  const scienceRecovery = readScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, req.runtimeSelection);
+  if (scienceRecovery) {
+    if (req.oneMode || req.agentAppMode || req.borrowAgents?.length || req.taskForceTargets !== undefined
+      || req.routerAgent || req.goalMode || req.stormbreakerMode) throw new Error("science_recovery_orchestration_denied");
+    req = { ...req, sessionRouting: false, hubMode: "local-only", taskIntent: "conversation" };
+  }
+  const scienceCollectionCurrent = readScienceCollectionAuthority(executionContext, req.runId!, req.chatId, req.runtimeSelection);
+  let scienceCollectionCapability: object | undefined;
+  if (scienceCollectionCurrent) {
+    if (req.oneMode || req.agentAppMode || req.borrowAgents?.length || req.taskForceTargets !== undefined || req.routerAgent) {
+      throw new Error("science_collection_orchestration_denied");
+    }
+    req = { ...req, permissions: "read", sessionRouting: false, planMode: false, taskIntent: "conversation" };
+  }
   const scienceReview = executionContext?.scienceReview
     ? (await import("../science-host/criterion-review")).resolveScienceReviewAuthority(executionContext.scienceReview,req.runId!,req.chatId) : null;
   if (scienceReview && (executionContext?.source!=="science" || req.planMode!==true || req.permissions!=="read")) throw new Error("science-review-read-ceiling-required");
@@ -1845,11 +1907,11 @@ async function runMcpInvocationInContext(
   // graph checkpoint, node variables, and the current node prompt. Replaying
   // the automation's durable chat here only injects stale recovery prose and
   // can make a model change rebuild an enormous, unrelated transcript.
-  const history = req.agentAppMode || executionContext?.source === "automation"
+  const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
     ? []
     : listChatMessages(chat.id, 80);
   const priorHistory = history;
-  const hadPriorConversationContext = req.agentAppMode
+  const hadPriorConversationContext = scienceRecovery || req.agentAppMode || isAliveControllerRun
     ? false
     : hasPriorConversationContext(chat.id);
   // Group, firm, borrowed-task-force, and Stormbreaker branches return before
@@ -1916,18 +1978,17 @@ async function runMcpInvocationInContext(
   // ontology, or project-scoped Experience. This is deliberately narrower than
   // `restrictedReadBoundary`: the selected runtime and its read tools remain
   // available, preserving Desktop/Mobile execution parity.
-  // Science owns its research state in its private store. Selecting a runtime
-  // directory must not seed/activate Work memory or write evolution proposals there.
-  const scienceWorkspaceBound = executionContext?.source === "science" && workspaceBinding?.source === "science";
-  const suppressMutableProjectContext = scienceWorkspaceBound
+  // Science and Alive own their state outside Work. A runtime directory must
+  // not seed Work memory or evolution proposals into either actor.
+  const suppressMutableProjectContext = isAliveControllerRun || executionContext?.source === "science"
     || (executionContext?.source === "automation" && !canWrite);
   // Permission still controls normal Desktop write authority. It is unrelated
   // to whether the request originated from a paired phone.
   const projectReadOnlyBoundary = !canWrite || restrictedReadBoundary;
-  const suppressProjectBinding = executionContext?.source === "site-studio";
-  // Site Studio owns a project-scoped hidden conversation, but that identity is
+  const suppressProjectBinding = executionContext?.source === "site-studio" || isAliveControllerRun;
+  // Site Studio and Alive have hidden conversations, but those chat rows are
   // not authority to consume an arbitrary Desktop Project. Freeze the effective
-  // project id once in Main so a stale/tampered chat row cannot re-enter through
+  // project id once in Main so a stale/tampered row cannot re-enter through
   // context notes, Experience selection, firm delegation, or curation.
   const invocationProjectId = suppressProjectBinding || suppressMutableProjectContext
     ? null
@@ -2455,6 +2516,11 @@ ${effectiveUserPrompt}`;
   // turn a Gemini failure into a Codex answer; show the actual failure so the
   // user can repair the selected runtime or graph.
   const automationRuntimePinned = Boolean(req.automationId && req.runtimeSelection);
+  if (executionContext?.source === "alive" && (req.promptOrigin !== "system" || !req.runtimeSelection?.model)) {
+    sink({ kind: "error", error: { code: "alive-runtime-selection-required",
+      message: "An Alive wake requires its exact selected model and a system-origin prompt." } });
+    return earlyResult();
+  }
   if (executionContext?.source === "science" && !req.runtimeSelection?.model) {
     sink({ kind: "error", error: {
       code: "science-runtime-selection-required",
@@ -2465,6 +2531,7 @@ ${effectiveUserPrompt}`;
   // Science owns the model for the whole research session, independently of
   // Library assignments and the Work/One role pools, including error recovery.
   const scienceRuntimePinned = executionContext?.source === "science" && Boolean(req.runtimeSelection);
+  const aliveRuntimePinned = executionContext?.source === "alive" && Boolean(req.runtimeSelection);
   // Main-only checkpoint dispatch retains its exact producer binding. A model
   // handoff requires a separate validated boundary, not the recovery pool.
   const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(req.runtimeSelection);
@@ -2479,7 +2546,7 @@ ${effectiveUserPrompt}`;
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     pinIsAuthoritative:
-      directUserRuntimePinRequested || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || continuationRuntimePinned,
+      directUserRuntimePinRequested || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned,
     agentAppMode: req.agentAppMode === true,
   });
   const directUserRuntimePinHonored = directUserRuntimePinRequested && runtimeResolution.pinHonored;
@@ -2487,7 +2554,7 @@ ${effectiveUserPrompt}`;
     && !restrictedOrchestrationBoundary
     && req.agentAppMode !== true;
   let runtimeChoice = runtimeResolution.choice;
-  if ((scienceRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
+  if ((scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
     const selected = runtimeChoice.active;
     const modelListIsAuthoritative = ["ollama", "lmstudio", "mlx"].includes(selected.kind)
       || selected.modelDiscovery?.status === "ok";
@@ -2554,13 +2621,14 @@ ${effectiveUserPrompt}`;
     sink({
       kind: "error",
       error: {
-        code: scienceRuntimePinned ? "science-runtime-unavailable" : req.oneMode
+        code: aliveRuntimePinned ? "alive-runtime-unavailable" : scienceRuntimePinned ? "science-runtime-unavailable" : continuationRuntimePinned
+          ? "goal-runtime-unavailable" : req.oneMode
           ? "one-runtime-unavailable"
           : runtimeResolution.pinHonored
             ? "pinned-runtime-unavailable"
             : "no-runtime",
         message: runtimeResolution.pinHonored && req.runtimeSelection
-          ? `Pinned ${scienceRuntimePinned ? "Science" : continuationRuntimePinned ? "Goal checkpoint" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
+          ? `Pinned ${aliveRuntimePinned ? "Alive" : scienceRuntimePinned ? "Science" : continuationRuntimePinned ? "Goal checkpoint" : "automation"} runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
           : tStatus(locale, "errNoRuntime"),
       },
     });
@@ -2604,6 +2672,11 @@ ${effectiveUserPrompt}`;
 
   let active = runtimeChoice.active;
   let picked = runtimeChoice.picked;
+  if (scienceCollectionCurrent) {
+    scienceCollectionCurrent();
+    assertScienceCollectionRuntimeSelection(active, req.runtimeSelection);
+    if (chat.kind !== "division" || chat.firmId || agent.kind === "team") throw new Error("science_collection_orchestration_denied");
+  }
   if (boundOneTeamRuntime && oneTeamRuntimeBinding(active).digest !== boundOneTeamRuntime.digest) {
     sink({
       kind: "error",
@@ -2620,7 +2693,7 @@ ${effectiveUserPrompt}`;
     sink({
       kind: "error",
       error: {
-        code: scienceRuntimePinned ? "science-runtime-unavailable" : "no-runner",
+        code: aliveRuntimePinned ? "alive-runtime-unavailable" : scienceRuntimePinned ? "science-runtime-unavailable" : "no-runner",
         message: tStatus(locale, "errNoRunner", {
           kind: active.kind,
           backend: active.backend,
@@ -2638,6 +2711,19 @@ ${effectiveUserPrompt}`;
     longContext: active.longContextEnabled,
     effort: active.effort ?? undefined,
   };
+  if (continuationRuntimePinned && req.runtimeSelection && (
+    confirmedRuntime.kind !== req.runtimeSelection.kind
+    || confirmedRuntime.backend !== req.runtimeSelection.backend
+    || confirmedRuntime.source !== req.runtimeSelection.source
+    || confirmedRuntime.model !== req.runtimeSelection.model
+    || (req.runtimeSelection.effort !== undefined && confirmedRuntime.effort !== req.runtimeSelection.effort)
+    || (req.runtimeSelection.longContext !== undefined && confirmedRuntime.longContext !== req.runtimeSelection.longContext)
+    || (req.runtimeSelection.acpAgentId !== undefined && active.acpAgentId !== req.runtimeSelection.acpAgentId)
+  )) {
+    sink({ kind: "error", error: { code: "goal-runtime-binding-mismatch",
+      message: "The requested Goal runtime changed during selection; continuation was stopped before execution." } });
+    return earlyResult();
+  }
   bindInvocationJudgmentRuntime(confirmedRuntime);
   const runtimeLabel = `${confirmedRuntime.kind}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
   console.info(
@@ -2664,7 +2750,7 @@ ${effectiveUserPrompt}`;
     },
   });
   let controllerSelectionForFallback: RuntimeSelection = req.runtimeSelection ?? confirmedRuntime;
-  const oneControllerFallbackEligible = req.oneMode === true && runtimeResolution.pinHonored;
+  const oneControllerFallbackEligible = req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned;
   const emitControllerRuntimeFallback = (
     fallback: RuntimeStatus,
     failure: Pick<RunnerFailure, "kind" | "runtime" | "source" | "providerCode" | "exitCode" | "retryAfterHint"> | null,
@@ -2707,14 +2793,14 @@ ${effectiveUserPrompt}`;
      */
     const fromLabel = `${previous.kind}${previous.model ? ` · ${previous.model}` : ""}`;
     const toLabel = `${nextSelection.kind}${nextSelection.model ? ` · ${nextSelection.model}` : ""}`;
-    const contextLimited = failure?.providerCode === "local_context_limit_exceeded";
+    const contextLimited = failure && modelContextFailureReason(failure) === "context_capacity";
     const reason = failure?.kind === "quota"
       ? locale === "ko" ? "사용 한도에 걸려" : "hit its usage limit"
       : contextLimited
-        ? locale === "ko" ? "팀 계획 입력이 모델 문맥 한도를 넘어" : "exceeded its context limit while planning the team"
+        ? locale === "ko" ? "요청이 모델의 문맥 한도를 넘어" : "exceeded its context limit"
         : locale === "ko" ? "실행할 수 없어" : "became unavailable";
     const koMessage = `One 모델 ${fromLabel}이 ${reason} 이번 실행만 ${toLabel}로 이어갑니다. 저장된 선택은 ${previous.kind}${previous.model ? ` · ${previous.model}` : ""} 그대로이고, 사용할 수 있게 되면 자동으로 돌아갑니다.`;
-    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : contextLimited ? "exceeded its context limit while planning the team" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
+    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : contextLimited ? "exceeded its context limit" : "became unavailable"}; continuing this run on ${toLabel}. Your saved selection is unchanged and will be used again as soon as it works.`;
     const message = locale === "ko"
       ? koMessage
       : enMessage;
@@ -2773,7 +2859,7 @@ ${effectiveUserPrompt}`;
   const explicitStormbreakerGoal = explicitStormbreakerRequest
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
-  const oneTeamAllowsStorm = !oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked";
+  const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked");
   const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
@@ -2928,7 +3014,7 @@ ${effectiveUserPrompt}`;
    */
   // ★Site 도 같은 자동 선택을 지난다(오너 결정 2026-08-20). 예전에는 agentAppMode 가
   // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
-  if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
+  if (runtimeCanUseMcp && !isAliveControllerRun && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
     try {
       if (req.forceBrowserCredentialRefresh) {
         const report = await refreshBrowserCredentialsIfDue({ force: true });
@@ -3116,6 +3202,35 @@ ${effectiveUserPrompt}`;
       const selectedTools = selectedContext.tools;
       const installedTools = selectedTools.filter((tool) => tool.installed);
       const degradedTools = selectedTools.filter((tool) => tool.state !== "ready");
+      // AGY browser turns may share one CLI only when the config is exactly the
+      // canonical Agentlas Browser. The opaque hash is a Main-owned identity;
+      // it is never a caller-authored handle or a browser credential.
+      const antigravityBrowserResidentKey = browserOnly
+        && active.kind === "antigravity"
+        && Boolean(req.chatId)
+        && installedTools.length > 0
+        && installedTools.every((tool) => tool.id === "agentlas-browser")
+        ? createHash("sha256")
+          .update("antigravity-browser-resident-v1\0")
+          .update(req.chatId ?? "")
+          .update("\0")
+          .update(browserApprovalScope?.surface ?? "")
+          .update("\0")
+          .update(req.mcpBrowserProfileKey ?? "")
+          .update("\0")
+          .update(workingFolder ?? "")
+          .update("\0")
+          .update(active.model ?? "")
+          .update("\0")
+          .update(agent.id)
+          .update("\0")
+          .update(agent.systemPrompt)
+          .update("\0")
+          .update(normalizedPermission)
+          .update("\0")
+          .update(locale)
+          .digest("hex")
+        : undefined;
       if (
         selectedContext.effectiveToolMode === "browser" &&
         !selectedTools.some((tool) => tool.id === "agentlas-browser" && tool.state === "ready")
@@ -3229,6 +3344,7 @@ ${effectiveUserPrompt}`;
           ...(workspacePreviewOwnerGrant ? { chatId: workspacePreviewOwnerGrant.chatId } : {}),
           ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
           ...(executionContext ? { unattended: true } : {}),
+          ...(antigravityBrowserResidentKey ? { residentKey: antigravityBrowserResidentKey } : {}),
         },
       });
       mcpConfigCleanup = cfg?.cleanup;
@@ -3367,18 +3483,74 @@ ${effectiveUserPrompt}`;
     // downstream Science receipts. The built-in catalog already contains the
     // trusted adapters for every installed Science Lab; other MCP servers are
     // intentionally not carried into this turn.
-    const scienceGrant = scienceReview ? await materializeScienceReviewMcpGrant(executionContext.scienceReview!,req.runId!,req.chatId) : await materializeScienceMcpGrant(
-      executionContext.science, undefined, undefined, { planMode: planReadOnly },
-    );
+    // Codex launches with this exact cwd (see the root RunnerRequest below and
+    // codex.ts's agentRunCwd fallback). Science must bind its isolated CODEX_HOME
+    // project-trust entry to that directory, not infer a workspace from the
+    // research project or the model's prompt. Keep the extra argument optional
+    // at the TypeScript boundary while the published Science pin is older.
+    const codexLaunch = { cwd: workingFolder ?? agentRunCwd() };
+    const reviewGrantWithCwd = materializeScienceReviewMcpGrant as unknown as (
+      authority: object, invocationRunId: string, runtimeChatId: string, launch: { cwd: string },
+    ) => ReturnType<typeof materializeScienceReviewMcpGrant>;
+    const turnGrantWithCwd = materializeScienceMcpGrant as unknown as (
+      context: NonNullable<NonNullable<typeof executionContext>["science"]>, baseConfigPath: undefined,
+      testDescriptor: undefined, executionPolicy: { planMode: boolean }, launch: { cwd: string },
+    ) => ReturnType<typeof materializeScienceMcpGrant>;
+    const scienceGrant = scienceReview
+      ? await reviewGrantWithCwd(executionContext.scienceReview!, req.runId!, req.chatId, codexLaunch)
+      : await turnGrantWithCwd(executionContext.science!, undefined, undefined, { planMode: planReadOnly }, codexLaunch);
     mcpConfigPath = scienceGrant.configPath;
+    if (scienceCollectionCurrent) scienceCollectionCapability = issueScienceCollectionCapability(mcpConfigPath, scienceCollectionCurrent);
     mcpAllowedTools = scienceGrant.allowedTools;
     mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
     mcpRuntimeEnv = scienceGrant.runtimeEnv;
-    ephemeralToolGrant = true;
+    /*
+     * The daemon stays with the project (owner, 2026-09-21: "매번 턴마다 cli 리셋으로 초기화 띄우면 안 됨 … 런타임 변경 때만
+     * 데몬 죽이고, 앱 끄면 죽여야지"). A Science build that returns a SESSION grant keeps one token, config file and
+     * catalogue for the conversation on this runtime kind, so the CLI that carries it serves the next turn too and may
+     * stay resident like any other chat. Authority still ends with the turn: Science refuses calls made between turns.
+     * Plan mode, criterion review and older Science builds keep a per-run grant, and those processes still die with the turn.
+     */
+    ephemeralToolGrant = (scienceGrant as { sessionScoped?: true }).sessionScoped !== true;
     mcpIncludedServers = [scienceGrant.includedServer];
     mcpAutoSelectionPrompt = scienceReview ? "Independently assess the reserved scientific input. All tools and native runtime actions remain read-only. Only read_criterion_review_input is granted; do not create research state or borrow another agent. Return the exact requested findings JSON." : planReadOnly
       ? "Agentlas Science Plan mode is read-only for files, shell, and research state. Only the exact granted discovery tools may be called. Describe a plan without creating contracts, hypotheses, studies, artifacts, approvals, downloads, or other state. Unavailable research tools remain unavailable until a separate execution turn."
-      : `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report the returned analytic false-alarm upper bound, model period standard error, assumptions, and warnings without upgrading a grid peak into a confirmed physical period or a standard error into a confidence interval. Call analyze_light_curve_periodicity_depth with explicit inputs when the frozen plan requires sampling-window, alias, bootstrap, or robustness analysis; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix. The turn's sandbox is read-only for FILES and SHELL, and that is deliberate: this work is not done by writing files. Recording research state through the Agentlas Science tools above -- proposing a research contract, recording hypotheses, freezing an analysis plan, running a Lab, appending a lifecycle revision, composing a manuscript version -- is the sanctioned way to do this work, and every one of those writes is validated by the host, not by the sandbox. Call them. Do not treat them as forbidden external state, and do not ask to escalate to full access in order to use them: a study that stops for that never leaves intake. Escalate only if you genuinely need to write a file or run a command outside these tools.`.trim();
+      : `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report the returned analytic false-alarm upper bound, model period standard error, assumptions, and warnings without upgrading a grid peak into a confirmed physical period or a standard error into a confidence interval. Call analyze_light_curve_periodicity_depth with explicit inputs when the frozen plan requires sampling-window, alias, bootstrap, or robustness analysis; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix. This Science research turn may use its granted Science tools directly. Research-state tool calls are validated by the host; do not ask for an extra tool permission or treat a granted Science tool as forbidden. Native file and shell actions follow the selected runtime's actual permission and project workspace, not a separate Science read-only rule. Claim a research state change or artifact only after its typed receipt.`.trim();
+  }
+
+  // Alive is a separate actor: its attachment, not its hidden Work chat or
+  // prompt text, authorizes Science. A reserved wake may prepare this bridge;
+  // the Science endpoint admits calls only after that same wake is running.
+  if (isAliveControllerRun && executionContext?.aliveScience) {
+    const authority = executionContext.aliveScience;
+    if (authority.wakeId !== req.runId) throw new Error("alive-science-wake-run-mismatch");
+    const science = await import("agentlas-science") as unknown as {
+      materializeAliveScienceMcpGrant?: (authority: NonNullable<InvocationExecutionContext["aliveScience"]>,
+        launch: { cwd: string }) => Promise<{ configPath: string; allowedTools: string[];
+          codexConfigArgs: string[]; runtimeEnv: Record<string, string>;
+          includedServer: { serverId: string; catalogId: string; configKey: string }; sessionScoped?: true }>;
+      revokeAliveScienceMcpGrant?: (wakeId: string) => boolean;
+    };
+    if (typeof science.materializeAliveScienceMcpGrant !== "function"
+      || typeof science.revokeAliveScienceMcpGrant !== "function") {
+      // An older installed Science pin must not stop the Alive actor's other
+      // branches. It receives no Science tools and is told so explicitly.
+      mcpAutoSelectionPrompt = "The attached Science tool bridge is unavailable in this installed build. No Science tools are granted; do not claim a Science tool call or receipt. You may still reason about the observed state and propose only a host-validated action.";
+    } else {
+      const aliveGrant = await science.materializeAliveScienceMcpGrant(authority, { cwd: workingFolder ?? agentRunCwd() });
+      mcpConfigPath = aliveGrant.configPath;
+      mcpAllowedTools = aliveGrant.allowedTools;
+      mcpCodexConfigArgs = aliveGrant.codexConfigArgs;
+      mcpRuntimeEnv = aliveGrant.runtimeEnv;
+      mcpIncludedServers = [aliveGrant.includedServer];
+      const canProposeAliveHypothesis = aliveGrant.allowedTools.some((tool) => tool.endsWith("__alive_propose_research_hypothesis"));
+      mcpAutoSelectionPrompt = "The attached Agentlas Science playground is available through its separately granted tools. Read exact project state before decisions. Its tool authority is separate from your Alive identity and from the LLM runtime. Do not claim a tool action without its receipt."
+        + (canProposeAliveHypothesis
+          ? " You may call alive_propose_research_hypothesis for an evidence-bound proposal; Science independently requires a current standing hypothesis grant and may refuse. Copy wake_id exactly from this wake's host-provided context. A proposal is not an approval or an experimental result; inspect the returned receipt before changing your plan."
+          : " No Alive-specific Science write tool is granted in this installed build; do not claim you changed research state through one.");
+      ephemeralToolGrant = aliveGrant.sessionScoped !== true;
+      mcpConfigCleanup = () => { science.revokeAliveScienceMcpGrant?.(authority.wakeId); };
+    }
   }
 
   /*
@@ -3542,7 +3714,7 @@ ${effectiveUserPrompt}`;
   // next explicit "bring an expert" confirmation to local-only, so the run
   // falsely claimed no PDF/file tools were available without invoking the
   // selected Workforce at all.
-  if (oneTeamExecutionPolicy !== "confirmed_external_workforce") {
+  if (!scienceCollectionCurrent && oneTeamExecutionPolicy !== "confirmed_external_workforce") {
     try {
       const durableContext = await loadDesktopWorkforceGoal(workforceProjectDir, durableWorkforceGoalId);
       const goal = durableContext.goals[0];
@@ -4406,9 +4578,12 @@ ${effectiveUserPrompt}`;
   }
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
+  // Projectless One executes in agentRunCwd(), not Electron's process cwd.
+  // Bind instructions to that same producer workspace so the settled checkpoint
+  // can carry the completed episode into its next scheduled cycle.
   const projectInstructions = req.runId
-    ? recordInvocationInstructionSnapshot({ runId: req.runId, chatId: chat.id, projectDir: workforceProjectDir })
-    : compileProjectInstructionSnapshot({ projectDir: workforceProjectDir });
+    ? recordInvocationInstructionSnapshot({ runId: req.runId, chatId: chat.id, projectDir: resolvedResultFolder })
+    : compileProjectInstructionSnapshot({ projectDir: resolvedResultFolder });
   if (projectInstructions.snapshot.sources.length > 0 || projectInstructions.delta.changedRefs.length > 0) {
     turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
@@ -4573,7 +4748,7 @@ ${effectiveUserPrompt}`;
   // project-memory injection, so it stays gated on write permission: a read run
   // gets a map, never someone else's memory.
   let activePath: string | null = null;
-  if (!req.agentAppMode && workingFolder && !scienceWorkspaceBound) {
+  if (!req.agentAppMode && workingFolder && executionContext?.source !== "science") {
     try {
       if (canWrite) {
         const visit = await recordFolderVisit(workingFolder, undefined, {
@@ -4607,15 +4782,16 @@ ${effectiveUserPrompt}`;
   )
     ? workingFolder
     : null;
-  if (!req.agentAppMode) {
+  const memoryScope = invocationMemoryScope(executionContext, agent.id, invocationProjectId);
+  if (!req.agentAppMode && !isAliveControllerRun) {
     if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
     try {
-      // `agent` may have changed through auto-routing above. Scope memory to the
-      // actual executing agent so another agent's agent_repo never leaks in.
-      const memoryContext = await buildMemoryContext(memoryReadPath, agent.id, {
+      // Science uses a hidden transport chat that may be owned by One. Its
+      // director and study, not that chat owner, own recall and new memories.
+      const memoryContext = await buildMemoryContext(memoryReadPath, memoryScope.agentId, {
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
-        projectId: invocationProjectId,
+        projectId: memoryScope.projectId,
         // Content-free recall observability — records which sources (pm_soul /
         // code_map / sitemap / memory) actually entered this turn's prompt.
         runId: req.runId ?? null,
@@ -4625,7 +4801,7 @@ ${effectiveUserPrompt}`;
       if (memoryContext) turnContextParts.push(memoryContext);
       // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
       // 읽게), 고위험 대기분이 있으면 세션 컨텍스트에 한 줄 주입. 실패-무해.
-      if (workingFolder && canWrite && !projectReadOnlyBoundary && !scienceWorkspaceBound) {
+      if (workingFolder && canWrite && !projectReadOnlyBoundary && executionContext?.source !== "science") {
         try {
           const growth = writeEvolutionProposalsForProject(workingFolder);
           const line = evolutionSessionContextLine(growth.pending, locale === "ko" ? "ko" : "en");
@@ -4654,7 +4830,7 @@ ${effectiveUserPrompt}`;
     throwIfInvocationAborted(signal, locale);
   }
   let remoteOperationalSnapshot: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
-  if (!req.agentAppMode) {
+  if (!req.agentAppMode && !isAliveControllerRun) {
     try {
       // Runs before Taste so a previously approved next-session loadout is
       // activated once for this new chat. The local task and chat id stay local.
@@ -4667,7 +4843,7 @@ ${effectiveUserPrompt}`;
     }
   }
   let tasteSnapshot: Awaited<ReturnType<typeof resolveDesktopTasteRuntimeSession>> = null;
-  if (!req.agentAppMode) {
+  if (!req.agentAppMode && !isAliveControllerRun) {
     try {
       tasteSnapshot = await resolveDesktopTasteRuntimeSession({
         sessionId: chat.id,
@@ -4682,7 +4858,7 @@ ${effectiveUserPrompt}`;
   const applicableTasteSnapshot = tasteSnapshot && tasteRuntimeOverlayMatchesTask(tasteSnapshot.overlay, effectiveUserPrompt)
     ? tasteSnapshot
     : null;
-  if (!req.agentAppMode) {
+  if (!req.agentAppMode && !isAliveControllerRun) {
     const applicableRemoteOperational = remoteOperationalSnapshot && operationalRuntimeOverlayMatchesTask(
       remoteOperationalSnapshot.overlay,
       effectiveUserPrompt,
@@ -4697,16 +4873,16 @@ ${effectiveUserPrompt}`;
       });
     } else {
       try {
-        const experienceContext = buildExperienceContext({
-          agentId: agent.id,
-          projectId: invocationProjectId,
+        const experienceContext = memoryScope.agentId ? buildExperienceContext({
+          agentId: memoryScope.agentId,
+          projectId: memoryScope.projectId,
           projectPath: suppressMutableProjectContext ? null : workingFolder,
           environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
           basePackageHash: agent.packageHash ?? null,
           task: effectiveUserPrompt,
           reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
-        });
-        if (experienceContext.prompt) {
+        }) : null;
+        if (experienceContext?.prompt) {
           turnContextParts.push(experienceContext.prompt); stableTurnContextParts.push(experienceContext.prompt);
           if (req.runId) {
             recordContextSourceMarker({
@@ -4726,7 +4902,7 @@ ${effectiveUserPrompt}`;
       }
     }
   }
-  if (!req.agentAppMode && applicableTasteSnapshot) {
+  if (!req.agentAppMode && !isAliveControllerRun && applicableTasteSnapshot) {
     // Taste stays a separate, lower-authority aesthetic overlay. The exact
     // verified snapshot is frozen for this chat and can change only when a
     // new runtime session starts.
@@ -4740,11 +4916,11 @@ ${effectiveUserPrompt}`;
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  if (!req.agentAppMode && !restrictedReadBoundary) {
+  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary) {
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
-  if (!req.agentAppMode && chat.kind === "division" && (req.toolMode || req.hubMode)) {
+  if (!req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
       AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
       [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
@@ -4816,10 +4992,11 @@ ${effectiveUserPrompt}`;
     );
     if (judgedTaskSurfaceRecipe) turnContextParts.push(judgedTaskSurfaceRecipe);
   }
-  // 무인 실행은 질문을 받을 사람이 없다. ASK_PROTOCOL(래퍼가 앞에 주입)보다 뒤에 오는 최종
+  // 일반 무인 실행은 질문을 받을 사람이 없다. Alive의 질문은 별도 작업공간 도구로
+  // 연결되어야 하므로 이 Work 지침을 상속하지 않는다. ASK_PROTOCOL보다 뒤에 오는 최종
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
-  if (isUnattendedExecution(executionContext)) {
+  if (isUnattendedExecution(executionContext) && !isAliveControllerRun) {
     systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
   } else if (usesMobileDurableDecision(executionContext)) {
     systemPrompt = `${systemPrompt}\n\n${MOBILE_DURABLE_ASK_DIRECTIVE}`;
@@ -4860,7 +5037,7 @@ ${effectiveUserPrompt}`;
     // execution guidance and therefore cannot upsert the objective.
     let activeGoalId: string | null = null;
     let activeGoal: GoalLedgerSnapshot | null = null;
-    if (!req.agentAppMode && chat.kind !== "division") {
+    if (!scienceRecovery && !req.agentAppMode && chat.kind !== "division") {
       activeGoalId = getChatGoalId(chat.id);
       if (!activeGoalId && req.goalMode && canWrite) {
         activeGoalId = durableWorkforceGoalId;
@@ -4904,6 +5081,11 @@ ${effectiveUserPrompt}`;
     // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
+    // A settled Goal checkpoint is the authoritative handoff packet. When no
+    // valid checkpoint exists yet (for example on the first or a failed Goal
+    // turn), preserve the bounded frozen transcript so a fresh model session
+    // does not lose the only conversational context available to it.
+    const goalCheckpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
     const sessionCapableRuntime =
       active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity";
     const runnerReq = {
@@ -4913,12 +5095,19 @@ ${effectiveUserPrompt}`;
       ...(sessionCapableRuntime && turnContext ? { turnContext } : {}),
       // Long-run state comes from the versioned goal and checkpoint. Replaying
       // the whole chat into a fresh native session is neither recovery nor state.
-      history: activeGoalId ? [] : history,
+      // The no-checkpoint fallback above is intentionally bounded and only
+      // covers the period before a Goal checkpoint can carry that state.
+      history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) ? [] : history,
+      // A checkpoint successor is seeded from host-owned neutral state. Its
+      // native owner is assigned only after the exact checkpoint is validated
+      // for the selected runtime below.
       userPrompt: runtimeUserPrompt,
       surfaceUserPrompt: req.oneUserAuthoredPrompt ?? req.userPrompt,
       images: req.images,
       backendLabel: picked.label,
+      ...(scienceCollectionCapability ? { scienceCollectionCapability, unattended: true as const, noSynchronousAsk: true as const } : {}),
       model: active.model ?? undefined,
+      ...(isAliveControllerRun ? { outputSchema: { name: "agentlas_alive_decision_v2", schema: ALIVE_DECISION_OUTPUT_SCHEMA } } : {}),
       longContext: active.longContextEnabled ?? false,
       effort: req.oneMode && req.fastMode === true && active.kind === "codex"
         ? effortForSelectedModel(active, active.model, "minimal") ?? undefined
@@ -4944,7 +5133,14 @@ ${effectiveUserPrompt}`;
         : {
             sessionFingerprintSeed: JSON.stringify(
               isUnattendedExecution(executionContext)
-                ? {
+                ? executionContext?.source === "alive"
+                  ? {
+                    v: "agentlas.alive-session-seed.v1",
+                    chatId: chat.id,
+                    agentId: agent.id,
+                    locale,
+                  }
+                  : {
                     agentId: agent.id,
                     agentSystemPrompt: agent.systemPrompt,
                     permission: req.permissions,
@@ -4981,6 +5177,9 @@ ${effectiveUserPrompt}`;
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,
+      // Work project admission is a separate Main-owned partition. Keep the
+      // visible chat id above as the session/transcript identity.
+      workProjectId: chat.originSurface === "work" && invocationProjectId ? invocationProjectId : null,
       // 도구 승인의 에이전트 스코프 규칙 대상 — 누가 이 도구를 부르는지.
       agentId: agent.id,
       mcpConfigPath,
@@ -5017,6 +5216,17 @@ ${effectiveUserPrompt}`;
       runtimePicked: { runner: Runner; label: string },
       userPrompt = runtimeUserPrompt,
     ) => {
+      if (scienceRecovery) {
+        if (signal?.aborted) throw new Error("science_recovery_dispatch_cancelled");
+        resolveScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, runtime);
+        return freshScienceRecoveryRequest({ ...runnerReq, backendLabel: runtimePicked.label,
+          model: runtime.model ?? undefined, effort: runtime.effort ?? undefined }, scienceRecovery);
+      }
+      if (scienceCollectionCurrent) {
+        scienceCollectionCurrent();
+        assertScienceCollectionRuntimeSelection(runtime, req.runtimeSelection);
+        if (!scienceCollectionCapability) throw new Error("science_collection_transport_unsupported");
+      }
       const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
       const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
       // Runtime resolution can await capability probes. Recheck after those
@@ -5025,8 +5235,16 @@ ${effectiveUserPrompt}`;
         if (signal?.aborted) throw new Error("checkpoint_dispatch_cancelled");
         if (!checkpoint) throw new Error("checkpoint_dispatch_context_missing");
         if (getLongRunByGoalId(checkpoint.goalId)?.status !== "running") throw new Error("checkpoint_dispatch_goal_not_running");
-        prepareCheckpointContinuation(checkpoint, req.runId);
+        const admitted = prepareCheckpointContinuation(checkpoint, req.runId);
+        if (JSON.stringify(admitted.runtimeSelection) !== JSON.stringify(req.runtimeSelection))
+          throw new Error("checkpoint_dispatch_runtime_selection_changed");
       }
+      const continuationSession = continuationRuntimePinned && checkpoint && req.runId && checkpoint.workspacePath
+        ? goalContinuationSessionIdentity({ chatId: chat.id, goalId: checkpoint.goalId,
+            goalRevision: checkpoint.goalRevision!, workspacePath: checkpoint.workspacePath,
+            runtime, permission: req.permissions ?? null, baseSeed: runnerReq.sessionFingerprintSeed ?? "",
+            invocationRunId: req.runId }) : null;
+      if (continuationRuntimePinned && !continuationSession) throw new Error("checkpoint_session_identity_missing");
       // Interactive model changes may follow a newer artifact/user-state edit.
       // Read one canonical snapshot without rewriting the stored checkpoint or
       // weakening the stricter automatic-continuation admission above.
@@ -5044,6 +5262,8 @@ ${effectiveUserPrompt}`;
       const runtimeTurnContext = [turnContext, checkpointContext].filter(Boolean).join("\n\n");
       return {
         ...runnerReq,
+        ...(continuationSession ? { runtimeSessionOwnerId: continuationSession.ownerId,
+          sessionFingerprintSeed: continuationSession.fingerprintSeed } : {}),
         systemPrompt: sessionCapable || !runtimeTurnContext
           ? systemPrompt
           : systemPrompt + "\n\n" + runtimeTurnContext,
@@ -5362,7 +5582,7 @@ ${effectiveUserPrompt}`;
       let terminalNoticeEmitted = false;
       let requestForRuntime: RunnerRequest = {
         ...runnerRequestForRuntime(active, currentPicked, request.userPrompt),
-        images: request.images,
+        images: scienceRecovery ? undefined : request.images,
       };
       const emitTerminalRecoveryFailure = (
         result: Awaited<ReturnType<Runner>>,
@@ -5487,6 +5707,10 @@ ${effectiveUserPrompt}`;
         // outage. Keep the selected binding; forwarding the attachment to a
         // different provider requires a new model choice.
         if (result.failure?.kind === "unsupported" && request.images?.length) return result;
+        // A Work project has one resident provider owner. Busy is an explicit
+        // admission result, not a provider outage that may fall back to a
+        // second runtime and create another CLI for the same project.
+        if (result.failure?.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return result;
         // A measured context refusal must retain the user's exact local binding.
         if (result.failure?.kind === "refused" && result.failure.runtime === "agentlas-local" && result.failure.source === "marker"
           && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable")) return result;
@@ -5568,9 +5792,9 @@ ${effectiveUserPrompt}`;
     // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 라이브 루프를 기본으로 쓴다 —
     // "goal 명령은 완성될 때까지 계속 도는 루프가 기본"(오너 요구). 정지 판단은 모델이 아니라
     // goal 원장(예산·무진전·명시 종료)이 내린다.
-    const continuousMode = !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" &&
+    const continuousMode = !scienceRecovery && !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" &&
       (chat.continuousMode === true || activeGoalId != null);
-    const maxPasses = req.agentAppMode || (req.oneMode && req.fastMode === true)
+    const maxPasses = req.agentAppMode || (req.oneMode && req.fastMode === true) || scienceRecovery
       ? 1
       : continuousMode
         ? CONTINUOUS_MODE_MAX_PASSES
@@ -5709,7 +5933,8 @@ ${effectiveUserPrompt}`;
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
           usage: lastGoalUsage,
-          progressKey: goalProgressKeyForText(continuation.text),
+          progressText: continuation.text,
+          progressAuthority: "one-host-receipts",
           outcome: passClaim.claimed
             ? "pass-goal-complete-claim"
             : passShouldContinue ? "pass-continue-marker" : "pass-final-output",
@@ -5977,7 +6202,8 @@ ${effectiveUserPrompt}`;
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
           usage: lastGoalUsage,
-          progressKey: goalProgressKeyForText(goalCompletion.text),
+          progressText: goalCompletion.text,
+          progressAuthority: "one-host-receipts",
           outcome: goalCompletion.claimed
             ? "turn-goal-complete-claim"
             : stormbreakerContinueRequested ? "turn-continue-marker" : "turn-final-output",
@@ -6334,6 +6560,21 @@ ${effectiveUserPrompt}`;
               timezone: a.tz && a.tz.trim() ? a.tz : null,
               graphJson: a.graph ?? null,
             });
+            // Only this newly created automation, inside an exact ongoing-Goal
+            // invocation, may acquire a Goal revision provenance receipt.
+            // Existing same-name/goal_id automations are never auto-adopted.
+            if (activeGoalId && typeof req.runId === "string") {
+              const revision = getChatGoalRevision(activeGoalId);
+              if (revision?.lifecycle === "ongoing" && revision.chatId === chat.id) {
+                try {
+                  bindCreatedAutomationToOngoingGoal({ goalId: activeGoalId,
+                    expectedGoalRevision: revision.revision, chatId: chat.id,
+                    invocationRunId: req.runId, automationId: created.id });
+                } catch (error) {
+                  console.warn("[goal-automation-provenance] created automation remains independent:", error);
+                }
+              }
+            }
             const registration: AutomationRegistrationResult = {
               action: "created",
               enabled: created.enabled,
@@ -6536,8 +6777,8 @@ ${effectiveUserPrompt}`;
           // cannot write project files. The read-only curator path records only
           // a one-way hash and never appends project artifacts.
           projectPath: memoryReadPath,
-          projectId: invocationProjectId,
-          agentId: agent.id,
+          projectId: memoryScope.projectId,
+          agentId: memoryScope.agentId,
           chatId: chat.id,
           runId: req.runId,
           cwdAtRequest: workingFolder,
@@ -6589,8 +6830,8 @@ ${effectiveUserPrompt}`;
           recordTerminalMemoryTurn({
             turnId: memoryTurnId,
             projectPath: req.agentAppMode ? null : memoryReadPath,
-            projectId: req.agentAppMode ? null : invocationProjectId,
-            agentId: agent.id,
+            projectId: req.agentAppMode ? null : memoryScope.projectId,
+            agentId: memoryScope.agentId,
             chatId: chat.id,
             runId: req.runId,
             cwdAtRequest: req.agentAppMode ? null : workingFolder,
@@ -6700,8 +6941,8 @@ ${effectiveUserPrompt}`;
           ctx: {
             runId: req.runId,
             projectPath: memoryReadPath,
-            projectId: invocationProjectId,
-            agentId: agent.id,
+            projectId: memoryScope.projectId,
+            agentId: memoryScope.agentId,
             chatId: chat.id,
             cwdAtRequest: workingFolder,
             experienceIntake: {
@@ -6837,9 +7078,12 @@ ${effectiveUserPrompt}`;
            *
            * 원인은 "모델 미지정으로 돌렸으니 적을 모델이 없다"였다. 하지만 우리는 실제로
            * 무엇이 돌았는지 **알고 있다** — 러너가 result.observedModel 로 알려준다.
-           * 요청값(비어 있음)이 아니라 관측값을 적는다. 관측이 없을 때만 요청값이다.
+           * 요청값(비어 있음)이 아니라 관측값을 적는다. Claude는 관측이 없으면
+           * 요청 별칭으로 추정하지 않고 미상으로 남긴다(재개 세션이 다른 모델일 수 있다).
            */
-          model: result.observedModel ?? active.model ?? null,
+          // Claude's requested alias is not proof of what a resumed native session ran.
+          // If its per-turn assistant events supplied no unambiguous model, record unknown.
+          model: result.observedModel ?? (active.kind === "claude-code" ? null : active.model ?? null),
           // Persist the exact effort that the runner applied. The model may
           // have clamped a stale UI value (for example Spark max -> xhigh), so
           // the runner result is authoritative; the resolved runtime value is
@@ -6886,6 +7130,7 @@ ${effectiveUserPrompt}`;
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
         : {}),
       tokens: finalObservedTokens || undefined,
+      ...(result.observedUsage ? { observedUsage: result.observedUsage } : {}),
       model: active.model ?? active.kind,
       observedModel: result.observedModel,
       modelRole: invocationModelRole,
@@ -6926,8 +7171,8 @@ ${effectiveUserPrompt}`;
         recordTerminalMemoryTurn({
           turnId: memoryTurnId,
           projectPath: memoryReadPath,
-          projectId: invocationProjectId,
-          agentId: agent.id,
+          projectId: memoryScope.projectId,
+          agentId: memoryScope.agentId,
           chatId: chat.id,
           runId: req.runId,
           cwdAtRequest: workingFolder,

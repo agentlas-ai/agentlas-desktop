@@ -4,10 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  listGlobalMemory,
-  listGlobalMemoryForAgent,
-  listMemoryByPath,
-  listMemoryByPathForAgent,
+  listMemoryForContext,
   type MemoryEntry,
 } from "./store";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
@@ -479,8 +476,11 @@ function timelineSection(
   projectId: string | null | undefined,
   projectPath: string | null,
   taskPrompt?: string,
+  owner?: { agentId?: string | null; chatId?: string | null },
 ): string | null {
-  const episodes = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath);
+  const episodes = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath)
+    .filter((episode) => episode.projectId || episode.projectPathHash
+      || (Boolean(owner?.chatId) && episode.chatId === owner?.chatId && episode.agentId === (owner?.agentId ?? null)));
   if (episodes.length === 0) return null;
   const query = String(taskPrompt ?? "").trim();
   const picked = query && localEmbeddingTokens(query).length > 0
@@ -632,10 +632,9 @@ function selectSoulText(soul: string, taskPrompt: string | undefined, projectPat
 }
 
 
-function globalMemorySections(perAgent: boolean, agentId?: string | null, taskPrompt?: string): string[] {
-  const entries = perAgent
-    ? listGlobalMemoryForAgent(agentId ?? null, MEMORY_CANDIDATE_LIMIT)
-    : listGlobalMemory(MEMORY_CANDIDATE_LIMIT);
+function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
+  options: { projectId?: string | null; chatId?: string | null }): string[] {
+  const entries = listMemoryForContext({ ...options, agentId }, MEMORY_CANDIDATE_LIMIT);
   const selected = selectMemoryEntries(entries, taskPrompt);
   return selected.length > 0
     ? [`### Curated memory (global)\n${entryLines(selected)}`]
@@ -712,9 +711,6 @@ export async function buildMemoryContext(
 ): Promise<string> {
   if (options.signal?.aborted) return "";
   const sections: string[] = [];
-  // agentId가 주어지면 per-agent 스코프(공유 + 본인 agent_repo만)로 읽어, 각 본부/전문가
-  // 세션이 자기 메모리만 보게 한다. 미지정이면 기존 동작(전체) 유지(단일 에이전트 경로).
-  const perAgent = agentId !== undefined;
 
   // Content-free observability: track which recall sources actually entered this
   // turn's prompt and their approximate injected token size. Emitted only when a
@@ -740,7 +736,7 @@ export async function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
+      return formatMemorySections(globalMemorySections(agentId, options.taskPrompt, options));
     }
     const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     const soul = rawSoul ? filterRevokedProjectSoul(rawSoul, options.projectId, projectPath) : null;
@@ -791,27 +787,23 @@ export async function buildMemoryContext(
       sections.push(contextSlice);
       injected.push({ source: "code_map", text: contextSlice });
     }
-    const entries = (
-      perAgent
-        ? listMemoryByPathForAgent(projectPath, agentId ?? null, MEMORY_CANDIDATE_LIMIT)
-        : listMemoryByPath(projectPath, MEMORY_CANDIDATE_LIMIT)
-    ).filter((e) => e.scope !== "session");
+    const entries = listMemoryForContext({ projectPath, projectId: options.projectId, agentId, chatId: options.chatId }, MEMORY_CANDIDATE_LIMIT);
     const selectedEntries = selectMemoryEntries(entries, options.taskPrompt);
     if (selectedEntries.length > 0) {
       const memorySection = `### Relevant curated memory\n${entryLines(selectedEntries)}`;
       sections.push(memorySection);
       injected.push({ source: "memory", text: memorySection });
     }
-    const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt);
+    const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt, { agentId, chatId: options.chatId });
     if (timeline) sections.push(timeline);
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
+      return formatMemorySections(globalMemorySections(agentId, options.taskPrompt, options));
     }
   } else {
-    const globalSections = globalMemorySections(perAgent, agentId, options.taskPrompt);
+    const globalSections = globalMemorySections(agentId, options.taskPrompt, options);
     sections.push(...globalSections);
     if (globalSections.length > 0) injected.push({ source: "memory", text: globalSections.join("\n\n") });
-    const timeline = timelineSection(null, null, options.taskPrompt);
+    const timeline = timelineSection(options.projectId, null, options.taskPrompt, { agentId, chatId: options.chatId });
     if (timeline) sections.push(timeline);
   }
 

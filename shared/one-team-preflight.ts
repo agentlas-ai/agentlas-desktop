@@ -204,6 +204,14 @@ export type PrepareOneTeamPreflightResult =
   | { kind: "input_unsupported"; code: "local_model_image_input_unsupported" }
   | { kind: "proposal"; proposal: OneTeamPreflightProposal };
 
+/** Expected Main admission refusals cross Electron IPC as data. Electron does
+ * not preserve custom properties on a thrown Error, so callers must not parse
+ * its message to decide whether a bounded binding retry is safe. */
+export type PrepareOneTeamPreflightIpcResult = PrepareOneTeamPreflightResult
+  | { kind: "preflight_error"; code: "invalid_request" | "stale_binding" | "expired"
+    | "external_selection_unavailable" | "judgment_unavailable" | "runtime_changed"
+    | "candidate_changed" | "already_resolved" | "recovery_required" };
+
 export type OneTeamPreflightResolution =
   | "confirm_team"
   | "confirm_workforce"

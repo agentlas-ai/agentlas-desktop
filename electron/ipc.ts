@@ -1,7 +1,10 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
-import { getLongRunByGoalId, acknowledgeUncertainLongRunAttempts, bindCurrentGoalRevisionToLongRun, liveLongRunAttemptCount } from "./store/long-runs";
+import { getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
+import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
+import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
+import { getChatContinuitySnapshot } from "./long-run/continuity-snapshot";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, shell } from "electron";
@@ -35,6 +38,7 @@ import {
 import { disposeAcpSessionPool } from "./runtime/acp";
 import { disposeClaudeSessionPool } from "./runtime/claude-session";
 import { disposeCodexSessionPool } from "./runtime/codex-session";
+import { disposeAntigravitySessionPool } from "./runtime/antigravity-session";
 import {
   listModelRoleMembers,
   pickModelRoleFromPool,
@@ -177,6 +181,28 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
+import {
+  canonicalInvocationRequestJson,
+  createInvocationAdmission,
+  decideInvocationAdmission,
+  getVerifiedStartRejectedReceipt,
+  getInvocationPreflightGoalId,
+  getInvocationAdmission,
+  getPendingInvocationAdmissionForChat,
+  type InvocationAdmissionIdentity,
+} from "./store/invocation-admissions";
+import {
+  assertOnePreflightSubmissionReady,
+  beginOnePreflightSubmission,
+  bindOnePreflightSubmission,
+  enqueueOnePreflightSteer,
+  getOnePreflightSteerReceipt,
+  holdOnePreflightSubmission,
+  listOnePreflightSteers,
+  reserveOnePreflightParent,
+} from "./store/one-preflight-steers";
+import { dispatchOnePreflightSteers, recoverOnePreflightSteers } from "./invocation/preflight-steer-admission";
+import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSubmissionInput } from "../shared/one-preflight-steers";
 import { getResolvedOrg } from "./store/org-spec";
 import { listInstalledAgentHubBindings } from "./ontology/hub-bindings";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
@@ -472,6 +498,7 @@ import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
 import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
 import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
+import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
 import { continueOneFromTaskResult } from "./one/task-continuation";
@@ -512,6 +539,7 @@ import {
   autoResolveOneTeamPreflight,
   failOneTeamPreflightStart,
   getOneTeamPreflightForChat,
+  OneTeamPreflightError,
   prepareOneTeamPreflight,
   resolveOneTeamPreflight,
 } from "./one/team-preflight";
@@ -584,6 +612,7 @@ import {
 import { createOneTaskProjectionRuntime } from "./one/task-projection";
 import { loadOrCreateMobileBridgeHostIdentity } from "./mobile-bridge/pairing";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
+import { enforceAgentResidencyBudget } from "./runtime/agent-residency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
 import {
   createAutomation,
@@ -1428,6 +1457,7 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     oneTeamRuntimeBinding: _oneTeamRuntimeBinding,
     oneAttachmentContext: _oneAttachmentContext,
     oneAttachmentRedactions: _oneAttachmentRedactions,
+    preflightSubmissionId: _preflightSubmissionId,
     forceBrowserCredentialRefresh: _forceBrowserCredentialRefresh,
     ...rendererFields
   } = req as McpInvocationRequest & {
@@ -1448,6 +1478,14 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
       ? undefined
       : rendererTaskForceTargets(rendererFields.taskForceTargets),
   };
+}
+
+// A PID can be reused. This boot-local identity is never accepted from the renderer.
+const rendererInvocationProcessEpoch = randomUUID();
+
+/** Run after runtime bootstrap, before ordinary queued-steer recovery. */
+export function recoverRendererPreflightSteers(): ReturnType<typeof recoverOnePreflightSteers> {
+  return recoverOnePreflightSteers(rendererInvocationProcessEpoch);
 }
 
 // registeredUploadRoot / registeredUploadOptions moved to
@@ -1507,6 +1545,7 @@ export function registerIpcHandlers(): void {
   registerBrowserProfileImportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerWorkStartIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAnnotationIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerAutomationStrategyIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;
   subscribePluginBuilderProgress((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -2959,6 +2998,7 @@ export function registerIpcHandlers(): void {
         disposeAcpSessionPool();
         disposeClaudeSessionPool();
         disposeCodexSessionPool();
+        disposeAntigravitySessionPool();
         // 렌더러의 IPC/view snapshot도 즉시 비우게 한다. TTL(최대 5분)을 기다리거나 모델
         // 선택을 다시 눌러야 연결이 살아나는 현재 증상을 막는다.
         emitDesktopStoreChange({ entity: "runtime" });
@@ -3080,6 +3120,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("interview:setMode", (_e, mode: InterviewMode) => setInterviewMode(mode));
   ipcMain.handle("system:setConcurrency", (_e, value: unknown) => {
     setAgentConcurrency(Number(value));
+    enforceAgentResidencyBudget();
     return getAgentConcurrencyInfo();
   });
 
@@ -4445,7 +4486,7 @@ export function registerIpcHandlers(): void {
     return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {
-    assertTrustedSitePublishIpcSender(_e);
+    const win = assertTrustedSitePublishIpcSender(_e);
     const chat = getChat(id);
     if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
       throw new Error("goal_control_binding_changed");
@@ -4458,11 +4499,86 @@ export function registerIpcHandlers(): void {
     if (!context || context.version !== expectedVersion) {
       throw new Error("long_run_resume_version_conflict");
     }
+    const recoveryBlocker = goalResumeRecoveryBlockerCode(context.blockedReason);
+    if (recoveryBlocker) throw new Error(recoveryBlocker);
     if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
+    const run = getLongRunByGoalId(chat.goalId);
+    if (!run || !context.runId || run.id !== context.runId || run.version !== expectedVersion) {
+      throw new Error("long_run_resume_version_conflict");
+    }
+    const review = getLongRunAttemptReview(run.id);
+    if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+    if (review.attempts.some((attempt) => attempt.state === "running")) {
+      throw new Error("auto_goal_resume_attempt_unsettled");
+    }
     const continuation = findAutomationByGoalId(chat.goalId);
+    let confirmation: LongRunAttemptReviewConfirmation | undefined;
+    if (review.attempts.length) {
+      const ko = currentUiLocale() === "ko";
+      if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) {
+        await dialog.showMessageBox(win, {
+          type: "warning", buttons: [ko ? "중단 유지" : "Keep paused"], defaultId: 0, cancelId: 0, noLink: true,
+          title: ko ? "개별 확인이 필요한 실행이 너무 많습니다" : "Too many interrupted attempts to review here",
+          message: ko
+            ? `${review.attempts.length}건의 결과를 이 창에서 빠짐없이 표시할 수 없어 재개하지 않습니다.`
+            : `This dialog cannot reliably display all ${review.attempts.length} attempts, so the goal was not resumed.`,
+          detail: ko
+            ? "목표와 기록은 보존됩니다. Activity에서 개별 시도와 외부 결과를 확인해 주세요. 이 창은 결과 인지를 기록하지 않습니다."
+            : "The goal and history are preserved. Inspect individual attempts in Activity and their external results. No acknowledgement was recorded.",
+        });
+        throw new Error("goal_resume_uncertain_review_too_large");
+      }
+      if (continuation) {
+        await dialog.showMessageBox(win, {
+          type: "warning", buttons: [ko ? "중단 유지" : "Keep paused"], defaultId: 0, cancelId: 0, noLink: true,
+          title: ko ? "자동화 결과를 먼저 확인해야 합니다" : "Review the automation's external result",
+          message: ko
+            ? `이 Goal에는 외부 결과가 불확실한 실행 ${review.attempts.length}건이 있으며 자동화를 바로 재개할 수 없습니다.`
+            : `${review.attempts.length} interrupted attempt(s) have unknown external outcomes; the automation cannot resume yet.`,
+          detail: ko
+            ? "Activity와 외부 시스템에서 결과를 대조해 주세요. 자동화에는 다음 실행 전에 읽기 전용 대조를 보장하는 게이트가 없어 이 창에서 인지·재개하지 않습니다. 목표와 기록은 보존됩니다."
+            : "Inspect Activity and the external system. This automation has no guaranteed read-only reconciliation gate before its next action, so this dialog cannot acknowledge or resume it. The goal and history are preserved.",
+        });
+        throw new Error("goal_resume_uncertain_automation_reconciliation_required");
+      }
+      const missingCorrelation = review.attempts.some((attempt) => !attempt.invocationRunId);
+      const decision = await dialog.showMessageBox(win, {
+        type: "warning",
+        buttons: missingCorrelation
+          ? [ko ? "중단 유지" : "Keep paused"]
+          : ko
+            ? ["중단 유지", "결과를 직접 대조했으며 새 단계 재개"]
+            : ["Keep paused", "I checked the outcomes; resume new work"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: ko ? "이전 실행 결과 확인 필요" : "Review interrupted attempts before resuming",
+        message: ko
+          ? `이전 실행 ${review.attempts.length}건의 외부 결과를 Agentlas가 확인하지 못했습니다.`
+          : `Agentlas cannot verify the external outcomes of ${review.attempts.length} interrupted attempt(s).`,
+        detail: [
+          ...(ko ? [
+            "Activity 기록과 실제 외부 시스템에서 아래 각 시도의 결과를 직접 대조한 경우에만 재개하세요.",
+            "이 확인은 사용자의 진술만 기록합니다. 외부 결과의 증거 또는 성공 판정이 아니며, 이전 요청을 자동으로 재실행하지 않습니다.",
+            ...(missingCorrelation ? ["일부 시도에 Activity 호출 ID가 없어 결과 대조가 불가능할 수 있습니다. 이 창에서는 재개할 수 없습니다."] : []),
+          ] : [
+            "Resume only after checking each attempt in Activity and the actual external system.",
+            "This records your statement, not proof or success of any external outcome. It does not replay the old request.",
+            ...(missingCorrelation ? ["Some attempts have no Activity invocation ID. Their outcome may be impossible to verify, so resume is unavailable here."] : []),
+          ]),
+          "",
+          ...review.attempts.map((attempt) => `${attempt.startedAt} · Activity: ${attempt.invocationRunId ?? "unavailable"}\n  Attempt: ${attempt.id} · ${attempt.state} · effects: ${attempt.sideEffectState}`),
+        ].join("\n"),
+      });
+      if (missingCorrelation) throw new Error("goal_resume_uncertain_review_unverifiable");
+      if (decision.response !== 1) throw new Error("goal_resume_uncertain_review_cancelled");
+      assertTrustedSitePublishIpcSender(_e);
+      confirmation = { runId: review.runId, version: review.version,
+        attemptIds: review.attemptIds, attemptSetDigest: review.attemptSetDigest };
+    }
     if (!continuation) {
       // 사람이 누른 재개다: 인지 이벤트·판번호 갱신·재개를 한 트랜잭션으로(queueAutomaticGoalResume).
-      const { request, queued } = queueAutomaticGoalResume(id, expectedVersion);
+      const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion, confirmation);
       try {
         confirmDesktopLongRunResumeDispatched(queued.id);
         invocationService.start(request, undefined, undefined, undefined, undefined,
@@ -4473,10 +4589,15 @@ export function registerIpcHandlers(): void {
       }
       return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     }
-    // 사람이 누른 재개다: 끊긴 시도의 불확실성은 인지된 것으로 원장에 적고(판번호가 오른다), 살아 있는 시도만 막는다.
-    const acknowledged = acknowledgeUncertainLongRunAttempts(context.runId);
-    if (liveLongRunAttemptCount(context.runId)) throw new Error("auto_goal_resume_attempt_unsettled");
-    const queued = resumeDesktopLongRunManually(context.runId, acknowledged.version);
+    const queued = getDb().transaction(() => {
+      const current = getLongRunByGoalId(chat.goalId!);
+      if (!current || current.id !== run.id || current.version !== expectedVersion || getChat(id)?.goalId !== chat.goalId) {
+        throw new Error("long_run_resume_version_conflict");
+      }
+      // This branch has no inspect-before-action gate. The native Resume path
+      // above refuses any unresolved attempt instead of writing an attestation.
+      return resumeDesktopLongRunManually(current.id, expectedVersion);
+    })();
     try {
       if (!continuation.enabled) toggleAutomation(continuation.id, true);
       const { enqueueAutomationRunNow } = await import("./automation-scheduler");
@@ -4503,6 +4624,12 @@ export function registerIpcHandlers(): void {
     (_e, id: string, selection: RuntimeSelection | null) =>
       setChatRuntimeSelection(id, selection),
   );
+  ipcMain.handle("chats:requestGoalRuntimeSelection", async (_e, id: string, input: {
+    expectedGoalId: string; expectedGoalRevision: number; selection: RuntimeSelection;
+  }) => requestGoalRuntimeSelection({ chatId: id, ...input }, await detectRuntimes()));
+  ipcMain.handle("chats:getGoalRuntimeSelection", (_e, id: string) => getGoalRuntimeSelection(id));
+  ipcMain.handle("chats:getContinuitySnapshot", (_e, id: string) =>
+    getChatContinuitySnapshot(id, invocationService.attach(id, { includeEvents: false })?.runId ?? null));
   ipcMain.handle("externalCliSessions:list", (_e, input?: { projectId?: unknown; query?: unknown; limit?: unknown }) =>
     listExternalCliSessions({
       projectId: typeof input?.projectId === "string" ? input.projectId : "",
@@ -4920,8 +5047,16 @@ export function registerIpcHandlers(): void {
     const resolved = await resolveOneRequestIntent(prompt, { timeoutMs: 4_000 });
     return { intent: resolved.intent, source: resolved.source };
   });
-  ipcMain.handle("oneTeamPreflight:prepare", (_e, input: PrepareOneTeamPreflightInput) =>
-    prepareOneTeamPreflight(input));
+  ipcMain.handle("oneTeamPreflight:prepare", async (_e, input: PrepareOneTeamPreflightInput) => {
+    try {
+      return await prepareOneTeamPreflight(input);
+    } catch (error) {
+      if (error instanceof OneTeamPreflightError) {
+        return { kind: "preflight_error" as const, code: error.code };
+      }
+      throw error;
+    }
+  });
   ipcMain.handle("oneTeamPreflight:getForChat", (_e, chatId: string) =>
     getOneTeamPreflightForChat(chatId));
   ipcMain.handle("oneTeamPreflight:autoResolve", (_e, input: AutoResolveOneTeamPreflightInput) =>
@@ -6521,9 +6656,68 @@ export function registerIpcHandlers(): void {
       }
     }
   });
+  ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return beginOnePreflightSubmission(input, rendererInvocationProcessEpoch);
+  });
+  ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const receipt = enqueueOnePreflightSteer(input);
+    dispatchOnePreflightSteers(input.submissionId);
+    return listOnePreflightSteers(input.chatId).find((item) => item.steerId === receipt.steerId) ?? receipt;
+  });
+  ipcMain.handle("invoke:preflightSteers", (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return listOnePreflightSteers(chatId);
+  });
+  ipcMain.handle("invoke:preflightSteerReceipt", (_event, input: OnePreflightSteerLookupInput) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return getOnePreflightSteerReceipt(input);
+  });
+  ipcMain.handle("invoke:preflightSubmissionHold", (_event, submissionId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return holdOnePreflightSubmission(submissionId);
+  });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    const preflightSubmissionId = req?.preflightSubmissionId;
+    if (preflightSubmissionId !== undefined && (typeof preflightSubmissionId !== "string"
+      || !preflightSubmissionId || !req.oneMode)) {
+      throw new Error("one_preflight_submission_invalid_run");
+    }
     const request = rendererInvocationRequest(req);
+    request.runId ??= randomUUID();
+    if (preflightSubmissionId) {
+      assertOnePreflightSubmissionReady(preflightSubmissionId, request, rendererInvocationProcessEpoch);
+    }
+    // Check the durable reservation before One's asynchronous preflight. Exact
+    // retries and a different run in the same pending chat must never cross
+    // Main's execution boundary, even after a Desktop restart.
+    const existingAdmission = getInvocationAdmission(request.runId);
+    if (existingAdmission) {
+      throw new Error(existingAdmission.chatId === request.chatId
+        ? `invocation_admission_${existingAdmission.status}; inspect invoke:receipt for this runId`
+        : "invocation_admission_run_identity_conflict");
+    }
+    if (getPendingInvocationAdmissionForChat(request.chatId)) {
+      throw new Error("invocation_admission_chat_pending");
+    }
+    let durableAdmission: InvocationAdmissionIdentity | null = null;
+    const reserveAdmission = (): InvocationAdmissionIdentity => {
+      if (durableAdmission) return durableAdmission;
+      const candidate = {
+        runId: request.runId!,
+        chatId: request.chatId,
+        canonicalRequestJson: canonicalInvocationRequestJson(request),
+        ownerProcessEpoch: rendererInvocationProcessEpoch,
+      };
+      const reserved = createInvocationAdmission(candidate);
+      if (reserved.kind !== "created") {
+        throw new Error(`invocation_admission_${reserved.kind === "conflict" ? reserved.reason : reserved.admission.status}`);
+      }
+      durableAdmission = candidate;
+      return candidate;
+    };
     // One's intent and personal-memory judges belong to the One surface only.
     // A Work project turn goes directly to the project execution contract and
     // must not silently spend time in, or inherit policy from, One's judges.
@@ -6598,31 +6792,107 @@ export function registerIpcHandlers(): void {
       }
       // Best-effort with a tight budget: a miss remains unresolved and must
       // never be replaced by a lexical or static verdict.
-      request.runId ??= randomUUID();
-      await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
-        prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
-        prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
-      ])).catch(() => undefined);
+      // Reserve before this first await so a concurrent IPC request or a
+      // restarted Main cannot both observe an absent admission.
+      const preflightAdmission = reserveAdmission();
+      try {
+        await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
+          prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
+          prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
+        ]));
+      } catch (cause) {
+        // start() was never called. This control-flow proof is stronger than
+        // a missing receipt in the still-live Main process.
+        const rejected = decideInvocationAdmission({
+          ...preflightAdmission,
+          decision: "rejected",
+          reasonCode: "main_preflight_refused",
+          noStartProof: {
+            kind: "owner-start-boundary-not-crossed",
+            verifiedOwnerProcessEpoch: rendererInvocationProcessEpoch,
+          },
+        });
+        if (rejected.kind !== "rejected") {
+          throw new Error("invocation_admission_preflight_rejection_failed", { cause });
+        }
+        throw cause;
+      }
+    }
+    const acceptedAdmission = reserveAdmission();
+    if (preflightSubmissionId) {
+      try {
+        reserveOnePreflightParent(preflightSubmissionId, request.runId, request, rendererInvocationProcessEpoch);
+      } catch (cause) {
+        // No call to start() has happened. Close only this proven pre-start
+        // admission; a failed reservation must not strand the chat pending.
+        const rejected = decideInvocationAdmission({
+          ...acceptedAdmission, decision: "rejected", reasonCode: "one_preflight_parent_reservation_refused",
+          noStartProof: { kind: "owner-start-boundary-not-crossed",
+            verifiedOwnerProcessEpoch: rendererInvocationProcessEpoch },
+        });
+        if (rejected.kind !== "rejected") {
+          throw new Error("one_preflight_parent_reservation_rejection_failed", { cause });
+        }
+        holdOnePreflightSubmission(preflightSubmissionId);
+        throw cause;
+      }
     }
     try {
-      return invocationService.start(request, undefined, undefined, undefined, undefined,
-        admitMainInvocation(request.chatId, request.runId));
+      const started = invocationService.start(request, undefined, undefined, undefined, undefined,
+        admitMainInvocation(request.chatId, request.runId), acceptedAdmission);
+      if (preflightSubmissionId) {
+        try {
+          bindOnePreflightSubmission(preflightSubmissionId, started.runId, request, rendererInvocationProcessEpoch);
+          dispatchOnePreflightSteers(preflightSubmissionId);
+        } catch (cause) {
+          // The parent has already crossed admitted+invoke_started. Never turn
+          // this post-start queue failure into permission to resend the parent.
+          holdOnePreflightSubmission(preflightSubmissionId);
+          console.error("[invocation] preflight steer bind failed", cause);
+        }
+      }
+      return started;
     } catch (cause) {
       // The renderer has already accepted and displayed this turn. Several
       // Main-owned start gates (participant snapshot, capability claim, durable
       // run receipt) execute before runMcpInvocation reaches its normal
       // transcript write. Preserve the person's message even when one of those
       // gates refuses the run; otherwise a reload makes the request disappear.
-      if (!request.agentAppMode && request.chatId && request.promptOrigin !== "system") {
+      // A response-loss retry using the same runId is refused by start() once
+      // invoke_started exists. That refusal must not append a second user turn
+      // to an invocation which may already be affecting the outside world.
+      // If the receipt lookup itself fails, fail closed on transcript writes.
+      let previouslyRecorded = true;
+      try {
+        // A rejected start may have bound the same request ID to a user row
+        // without ever reaching invoke_started. Treat either durable marker
+        // as a consumed transcript identity, including mismatched reuses.
+        const priorPrompt = request.runId ? getDb().prepare(
+          "SELECT 1 AS found FROM run_events WHERE run_id = ? AND kind = 'invoke_prompt_bound' LIMIT 1",
+        ).get(request.runId) as { found?: number } | undefined : undefined;
+        previouslyRecorded = Boolean(request.runId && (hasInvocationRunReceipt(request.runId) || priorPrompt?.found === 1));
+      }
+      catch { /* Unknown is not proof that this is a fresh rejected prompt. */ }
+      if (!previouslyRecorded && !request.agentAppMode && request.chatId && request.promptOrigin !== "system") {
         const row = appendChatMessage(request.chatId, "user", request.userPrompt,
           request.images?.length ? { images: request.images } : undefined);
         autoTitleFromFirstMessage(request.chatId, request.userPrompt);
         if (request.runId) {
+          // The preflight marker is Main-owned and captures the Goal before
+          // service.start's synchronous gate. Carry that exact identity into
+          // the no-start prompt receipt; it is a durable direction link, not
+          // permission to resume or replay the rejected request.
+          let goalId: string | null = null;
+          try { goalId = getInvocationPreflightGoalId(request.runId, request.chatId); } catch { /* no marker, no inferred Goal */ }
           tryRecordRunEvent({
             runId: request.runId,
             chatId: request.chatId,
             kind: "invoke_prompt_bound",
-            payload: { promptMessageId: row.id, startRejected: true },
+            payload: {
+              promptMessageId: row.id,
+              startRejected: true,
+              ...(goalId ? { goalId } : {}),
+            },
           });
         }
       }
@@ -6647,9 +6917,50 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) =>
     invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
+  ipcMain.handle("invoke:admission", (_event, runId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    let admission: ReturnType<typeof getInvocationAdmission> = null;
+    try {
+      admission = getInvocationAdmission(runId);
+    } catch (error) {
+      // Stores opened by older Desktop builds may not have the admission
+      // table yet. Only the exact missing-table error is recoverable here;
+      // other store failures remain unknown and fail closed.
+      if (!(error instanceof Error && /no such table:\s*invocation_admissions/u.test(error.message))) throw error;
+    }
+    const rejected = getVerifiedStartRejectedReceipt(runId);
+    const rejectedReceipt = rejected ? {
+      runId,
+      chatId: rejected.chatId,
+      status: "rejected" as const,
+      pendingAt: rejected.rejectedAt,
+      updatedAt: rejected.rejectedAt,
+      rejectionReasonCode: rejected.rejectionReasonCode ?? "legacy_start_rejected_receipt",
+      ...(rejected.goalId ? { goalId: rejected.goalId } : {}),
+      promptMessageId: rejected.promptMessageId,
+    } : null;
+    // A proven startRejected marker is stronger than a stale pending row: the
+    // marker is written only after start() has proven its dispatch boundary
+    // was not crossed. An admitted row remains authoritative if the store is
+    // internally inconsistent, because it implies an atomic invoke_started
+    // receipt that must be reviewed rather than reclassified.
+    if (rejectedReceipt && admission?.status !== "admitted") return rejectedReceipt;
+    if (!admission) return { runId, status: "absent" as const };
+    return {
+      runId: admission.runId,
+      chatId: admission.chatId,
+      status: admission.status,
+      pendingAt: admission.pendingAt,
+      updatedAt: admission.updatedAt,
+      rejectionReasonCode: rejected?.rejectionReasonCode ?? admission.rejectionReasonCode,
+      ...(rejected?.goalId ? { goalId: rejected.goalId } : {}),
+      ...(rejected?.promptMessageId ? { promptMessageId: rejected.promptMessageId } : {}),
+    };
+  });
   ipcMain.handle("invoke:replay", (_event, input: unknown) => invocationService.replay(input));
   ipcMain.handle("invoke:workerReport", (_event, scope) => getWorkerReport(scope));
   ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
+  ipcMain.handle("invoke:steeringRecovery", (_event, chatId: string) => invocationService.steeringRecovery(chatId));
   ipcMain.handle("invoke:latestOneSurface", (_event, input: unknown) => {
     if (
       !input ||

@@ -71,9 +71,11 @@ a materially different evidence-bound action or persist the concrete blocker.
    answers to compose the surface; do not answer a generic feature checklist.
 6. After academic search, build the evidence matrix (design, population/system, n, exposure,
    outcome, effect and uncertainty, agreement direction, evidence scope); keep PRISMA-style counts
-   when the review is systematic. Call `retrieve_open_access_full_text` before making any
-   body-dependent methods/results/limitations claim, then stage byte-exact evidence from that
-   immutable full-text SourceVersion. When lawful OA retrieval is unavailable, use
+   when the review is systematic. Before any body-dependent methods/results/limitations claim,
+   use `retrieve_open_access_full_text` for the Europe PMC OA route or
+   `retrieve_source_full_text_from_location` with one lawful public HTTPS article URL or
+   project-folder file. Then stage byte-exact evidence from the returned immutable full-text
+   SourceVersion. When no lawful full-text route is available, use
    `promote_source_abstract_to_evidence` only for explicitly abstract-only claims and retain every
    body-dependent question as a gap. Confirm staged evidence in the committed ledger on the next
    turn; metadata-only and rejected stages never count as evidence.
@@ -181,7 +183,7 @@ a materially different evidence-bound action or persist the concrete blocker.
    contradictory, or merely metadata-discovered claims stay visibly unresolved. Before creating or
    revising a manuscript, inspect the Evidence Graph for each substantive sentence and its citation,
    exact support path, result/figure/table binding, and evidence scope. An abstract-only source cannot
-   support an article-body claim, and a citation without a support path cannot pass the claim gate. Then follow `../write-manuscript/SKILL.md` for the IMRaD draft in the manuscript
+   support an article-body claim, and a citation without a support path cannot pass the claim gate. Then follow `../write-manuscript/SKILL.md` for the article-family-appropriate draft in the manuscript
    Markdown dialect, the journal profile, and submission validation.
 12. Emit a new state revision after every material transition. Never rewrite an earlier revision.
 13. For `phase_gate.evidenceSha256`, echo only the canonical hash returned by the current lifecycle,

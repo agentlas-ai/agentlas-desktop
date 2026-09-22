@@ -4,6 +4,7 @@ import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
 import { boundEffectBoundary } from "./effect-metadata";
+import { verifyScienceFailureSettlement, type ScienceToolCorrelation } from "./science-failure-settlement";
 
 // These adapters forward a provider tool-result block or a completed Main tool
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
@@ -47,7 +48,20 @@ export class InvocationEffectBoundaryTracker {
   private observedTools = 0;
   private durableTools = 0;
   private readonly adapterScopes = new Map<string, AdapterEffectAdmission & { report: AdapterEffectReport | null }>();
+  private readonly scienceCorrelations = new Map<string, ScienceToolCorrelation>();
   constructor(private readonly runId: string, private readonly chatId: string) {}
+  nativeScienceTool(binding: ScienceToolCorrelation): void {
+    if (binding.invocationRunId !== this.runId || binding.chatId !== this.chatId) { this.uncertainties.add("science-native-binding-mismatch"); return; }
+    const previous = this.scienceCorrelations.get(binding.providerToolId);
+    if (previous) {
+      if (JSON.stringify(previous) !== JSON.stringify(binding)) this.uncertainties.add("science-native-binding-conflict");
+      return;
+    }
+    this.scienceCorrelations.set(binding.providerToolId, binding);
+    try { recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_science_tool_correlation",
+      sourceEventId: `science-native:${this.runId}:${binding.providerToolId}`, payload: { ...binding } }); }
+    catch { this.recordingFailed(); }
+  }
   adapterStarted(admission: AdapterEffectAdmission): void {
     if (this.adapterScopes.has(admission.scopeId)) { this.uncertainties.add("adapter-scope-duplicate"); return; }
     this.adapterScopes.set(admission.scopeId, { ...admission, report: null });
@@ -120,6 +134,15 @@ export class InvocationEffectBoundaryTracker {
       if (terminal.kind !== "invoke_completed") pending.add(`terminal:${terminal.id}:not-successful`);
       const ledgerComplete=this.ledgerComplete && this.observedTools===this.durableTools;
       if (!ledgerComplete) pending.add("runtime-effect-ledger-incomplete");
+      for (const operation of this.operations.values()) {
+        const correlation = operation.toolId && this.scienceCorrelations.get(operation.toolId);
+        if (operation.outcome !== "failed" || !correlation) continue;
+        // Intentionally no producer: capture is not proof of effect settlement.
+        // Adding a producer also requires durable reader/snapshot verification;
+        // never retrofit the old immutable uncertain boundary in this loop.
+        const decision = verifyScienceFailureSettlement(correlation);
+        if (!decision.settled) pending.add(`operation:${operation.key}:${decision.code}`);
+      }
       for(const operation of this.operations.values()) if(operation.outcome !== (operation.toolId && settledFailures.has(operation.toolId) ? "failed" : "succeeded")) pending.add(`operation:${operation.key}:${operation.outcome}`);
       const receipt=boundEffectBoundary({schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
         adapterKinds:[...this.adapters].sort(),coverage,effects:pending.size?"uncertain":"settled",ledgerComplete,observedToolEventCount:this.observedTools,

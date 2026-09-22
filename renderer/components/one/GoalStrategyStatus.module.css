@@ -1,0 +1,20 @@
+.root { box-sizing: border-box; width: 100%; margin: 0 0 6px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink); font-size: 11px; line-height: 1.45; }
+.root > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; min-height: 29px; padding: 4px 8px; cursor: pointer; list-style-position: inside; }
+.root > summary::marker { color: var(--muted-deep); }
+.root > summary strong { flex: 0 0 auto; }
+.root > summary span { min-width: 0; color: var(--muted-deep); overflow-wrap: anywhere; }
+.body { display: grid; gap: 5px; padding: 2px 9px 9px 24px; }
+.body p { margin: 0; color: var(--muted-deep); overflow-wrap: anywhere; }
+.body strong { color: var(--ink); }
+.state { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.state span { color: var(--ink); }
+.state[data-strategy-state="changed"] span { color: var(--ink); }
+.state[data-strategy-state="unknown"] span { color: var(--muted-deep); }
+.metrics, .next { font-variant-numeric: tabular-nums; }
+.automations { display: grid; gap: 3px; padding-top: 2px; }
+.automations > span { color: var(--muted-deep); }
+.automations ul { display: grid; gap: 3px; margin: 1px 0 0; padding: 0; list-style: none; }
+.automations li { display: grid; grid-template-columns: minmax(80px, max-content) minmax(0, 1fr) max-content; gap: 5px; color: var(--muted-deep); overflow-wrap: anywhere; }
+.automations li time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.disclaimer { margin-top: 3px !important; padding-top: 6px; border-top: 1px solid var(--paper-edge); font-size: 10px; }
+@media (max-width: 480px) { .body { padding-left: 19px; } .automations li { grid-template-columns: minmax(70px, max-content) minmax(0, 1fr); } .automations li time { grid-column: 2; } }

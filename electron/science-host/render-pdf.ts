@@ -47,6 +47,14 @@ export interface ManuscriptPdfResult {
   typesetFiles?: Array<{ name: string; bytes: Uint8Array }>;
 }
 
+/** Chromium navigation errors can echo the whole base64 manuscript data URL. */
+export function chromiumPdfFailureReason(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/data:[^\s'"<>]+/gu, "[redacted data URL]");
+  const navigationCode = message.match(/\b(ERR_[A-Z_]+ \(-?\d+\))/);
+  return navigationCode ? `chromium navigation failed: ${navigationCode[1]}` : message.slice(0, 500);
+}
+
 /** Platform-native executable candidates; no shell or inferred engine fallback. */
 export function tectonicCandidates(input: { platform: NodeJS.Platform; home: string; pathValue: string }): string[] {
   const windows = input.platform === "win32";
@@ -164,7 +172,7 @@ export async function renderPdfWithChromium(html: string): Promise<ManuscriptPdf
     const bytes = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4", margins: { top: 0.87, bottom: 0.87, left: 0.79, right: 0.79 }, preferCSSPageSize: true });
     return { ok: true, engine: "chromium", bytes };
   } catch (error) {
-    return { ok: false, engine: "chromium", reason: error instanceof Error ? error.message : String(error) };
+    return { ok: false, engine: "chromium", reason: chromiumPdfFailureReason(error) };
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }

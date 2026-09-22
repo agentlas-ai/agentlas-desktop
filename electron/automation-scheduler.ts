@@ -34,7 +34,7 @@ import {
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { appendChatMessage, clearChatGoalBindingByGoalId, listChatMessages } from "./store/chats";
-import { completeChatGoalContract } from "./store/chat-goals";
+import { completeChatGoalContract, getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
 import {
   closeOpenGoalLedgerTasks,
   completeGoalLedgerGoal,
@@ -48,6 +48,7 @@ import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph } from "./workflow/run-graph";
+import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
 import {
   GOAL_COMPLETE_MARKER,
@@ -94,7 +95,6 @@ import {
   collectAutomationFailureContext,
   type AutomationFailureContext,
 } from "./automation-strategy";
-
 import { recordAutomationRecovery } from "./automation-recovery";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "./automation-continuity";
 import type {
@@ -560,14 +560,6 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
 
 }
 
-function requiresGraphReconciliation(detail: string | null | undefined): boolean {
-  // A user-requested fresh occurrence can be rejected by the graph kernel
-  // while the prior receipt is being reviewed. That rejection does not mean
-  // the scheduler discovered a new unresolved side effect, so it must not
-  // suspend the automation or manufacture another reconciliation card.
-  return /(?:partial_reconciliation_required|ambiguous_side_effect|automation_partial_graph_changed)/i.test(detail ?? "");
-}
-
 export { stopAutomationRun } from "./automation-execution-control";
 
 async function runOne(
@@ -646,6 +638,7 @@ async function runOne(
    */
   let runOutcome: AutomationRunRecord["outcome"] = null;
   let runOutcomeReason: string | null = null;
+  let runReasonCode: string | null = null;
   /** 이번 실행이 "실패"가 아니라 "판정 불가"로 끝났는가 — 복구 워커·실패 표시의 억제 조건. */
   let judgmentUnavailableRun = false;
   let runError: string | null = null;
@@ -656,12 +649,15 @@ async function runOne(
   let machineError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  let graphRunAttempted = false;
+  const isGraphAutomation = Boolean(a.graph && a.graph.nodes.length > 0);
   const scheduledOccurrenceId =
     (opts?.advanceSchedule ?? true) &&
     opts?.occurrenceId?.startsWith(`schedule:${a.id}:`)
       ? opts.occurrenceId
       : null;
   let scheduledAttemptRecorded = false;
+  let runLedgerRecorded = false;
   // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
   // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
   let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
@@ -691,6 +687,11 @@ async function runOne(
         sourceEventId: "automation_schedule_attempt_started",
       });
       scheduledAttemptRecorded = true;
+      console.info("[automation] scheduled occurrence started", JSON.stringify({
+        automationId: a.id,
+        occurrenceId: scheduledOccurrenceId,
+        runId: currentRunId,
+      }));
     }
     /*
      * ★사람이 멈출 수 있게 이 실행의 중단 손잡이를 등록한다.
@@ -835,6 +836,7 @@ async function runOne(
         );
     } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
+      graphRunAttempted = true;
       const runId = currentRunId ?? opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       opts?.triggerDelivery?.onRunBound(runId);
@@ -890,6 +892,7 @@ async function runOne(
           runId,
           occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
           initialVars: graphInitialVars,
+          strategyCycle: "defer",
           sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
               // boundary. Do not revive watchdog/live state after this run has been finalized.
@@ -924,13 +927,19 @@ async function runOne(
         clearInterval(graphStallTimer);
       }
       if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
+      const graphHasUnconfirmedMutation = Object.values(result.nodeFailures ?? {}).some((failure: unknown) =>
+        failure && typeof failure === "object" && "code" in failure
+        && (failure as { code?: unknown }).code === "MUTATION_UNVERIFIED",
+      );
       const graphError = graphStall
         ? automationWatchdogError(graphStall)
         : result.error ?? null;
       runStatus = result.ok && !graphStall ? "ok" : "error";
       runError = graphError;
       // 판정이 이 문장을 사용자용으로 갈아끼우기 전에 원문을 붙들어 둔다(안전 판단용).
-      machineError = graphError;
+      machineError = graphHasUnconfirmedMutation
+        ? `MUTATION_UNVERIFIED: ${graphError ?? "graph node effect was not confirmed"}`
+        : graphError;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
@@ -973,6 +982,7 @@ async function runOne(
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
         runOutcomeReason = classified.reason ?? null;
+        runReasonCode = classified.reasonCode ?? null;
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
@@ -982,6 +992,7 @@ async function runOne(
           runtimeSelection: a.runtimeSelection,
         });
         runStatus = outVals.length > 0 ? "partial" : classified.status;
+        runReasonCode = classified.reasonCode ?? null;
         runError = classified.reasonCode
           ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
           : classified.reason ?? graphError;
@@ -1161,6 +1172,7 @@ async function runOne(
         // 여기서 runStatus를 덮으면 "끝까지 돌았다"는 사실이 다시 지워진다.
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
         runOutcomeReason = classified.reason ?? null;
+        runReasonCode = classified.reasonCode ?? null;
         // 다만 판정이 명시적으로 "실패"·"건너뜀"이라고 본 것은 실행 결과 자체의 성질이라
         // (레거시 경로엔 커널이 없어 이 판정이 유일한 종료 신호다) runStatus에 반영한다.
         if (classified.outcome === "error" || classified.outcome === "partial"
@@ -1284,6 +1296,7 @@ async function runOne(
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
       : await classifyAutomationFailure(rawError, { runtimeSelection: a.runtimeSelection });
     runStatus = controller.signal.aborted ? "partial" : classified.status;
+    runReasonCode = classified.reasonCode ?? null;
     // Keep the graph kernel's machine gate alongside the human explanation.
     // The fresh-run UI must be able to distinguish an intentional replay
     // refusal from an unrelated failed preflight; the judgment service is
@@ -1355,6 +1368,7 @@ async function runOne(
             sourceRunId: currentRunId,
             output,
           });
+          runLedgerRecorded = true;
           break;
         } catch (err) {
           const busy = err && typeof err === "object" && "code" in err &&
@@ -1366,6 +1380,32 @@ async function runOne(
           console.error("[automation] markAutomationRun failed:", err);
           break;
         }
+      }
+    }
+    // Scheduled Graph runs pass their durable lease, run ledger, and
+    // reconciliation decision through this single shared cycle. Direct Graph
+    // runs use the same module from runGraph; keeping the scheduler's guard
+    // here prevents reflection from observing an uncommitted or abandoned run.
+    if (isGraphAutomation && graphRunAttempted && runLedgerRecorded && !opts?.dryRun
+      && !parentMissing && !leaseOwnershipLost && currentRunId) {
+      try {
+        await runAutomationStrategyCycle({
+          automationId: a.id,
+          sourceRunId: currentRunId,
+          status: runStatus,
+          outcome: runOutcome,
+          reasonCode: runReasonCode,
+          output: output ?? null,
+          effectsUnconfirmed: requiresGraphReconciliation(machineError ?? runError),
+          runError: machineError ?? runError,
+          runtimeSelection: a.runtimeSelection,
+          signal: controller.signal,
+        });
+      } catch (strategyError) {
+        // The Graph run is already settled and its ledger is durable. Strategy
+        // review is advisory, so a temporary DB/model handoff failure cannot
+        // change the execution result or lease settlement.
+        console.error("[automation] strategy cycle handoff failed:", strategyError);
       }
     }
     // 재실행 정지는 커널이 남긴 결정론적 신호(부수효과가 반영됐는지 알 수 없음)만 보고 정한다.
@@ -1426,11 +1466,15 @@ async function runOne(
     //    "결과가 수용되지 않았다"는 거짓 전제로 사람만 할 수 있는 일을 시키는 셈이고,
     //    매 실행마다 호출이 한 번씩 더 나간다. 이 상태는 사용자에게 표면화하면 된다.
     // blocked·partial·error는 외부 제약 해소나 재시도로 실제로 나아질 수 있으므로 그대로 둔다.
+    // 다만 외부 mutation의 성패가 확인되지 않은 실행은 예외다. 스케줄을 정지시킨 뒤
+    // System Optimizer를 띄우면, 그 에이전트가 독립적으로 같은 효과를 재시도할 수 있다.
+    // 이 경우는 사용자가 실제 반영 여부를 조정할 때까지 모델 복구도 보류한다.
     if (
       runStatus !== "ok" && runStatus !== "skipped" && runStatus !== "needs_input" &&
       runOutcome !== "needs_input" &&
       !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
-      !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
+      !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost &&
+      !requiresGraphReconciliation(machineError ?? runError)
     ) {
       try {
         handleAutomationFailure(a, runError ?? "unknown error", currentRunId);
@@ -1474,6 +1518,25 @@ async function runOne(
         });
       }
     } catch (error) { console.error("[automation] notification claim failed:", error); }
+    if (currentRunId) {
+      // The run ledger is authoritative; this compact Main log joins app
+      // startup/shutdown with successful as well as failed scheduled ticks.
+      // Never log prompt/output/account content here.
+      try {
+        console.info("[automation] occurrence settled", JSON.stringify({
+          automationId: a.id,
+          occurrenceId: scheduledOccurrenceId ?? opts?.occurrenceId ?? null,
+          runId: currentRunId,
+          status: runStatus,
+          outcome: runOutcome,
+          settlement: leaseOwnershipLost ? "lease_lost" : parentMissing ? "parent_missing"
+            : runLedgerRecorded ? "recorded" : "ledger_unconfirmed",
+          nextRunAt: getAutomation(a.id)?.nextRunAt ?? null,
+        }));
+      } catch {
+        /* diagnostics must never change the run outcome or leak a lease */
+      }
+    }
     running.delete(a.id);
     // Durable chain fan-out은 markAutomationRun transaction에서 이미 끝났다.
     // 이 신호는 GUI outbox를 즉시 깨우는 저지연 가속일 뿐이다.

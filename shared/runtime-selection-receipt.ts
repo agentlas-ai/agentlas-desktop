@@ -17,6 +17,8 @@ export function runtimeSelectionReceiptMatches(
   if (!acknowledged) return false;
   return requested.kind.trim() === acknowledged.kind.trim()
     && optionalText(requested.backend) === optionalText(acknowledged.backend)
+    && (!requested.source || optionalText(requested.source) === optionalText(acknowledged.source))
+    && (!requested.acpAgentId || optionalText(requested.acpAgentId) === optionalText(acknowledged.acpAgentId))
     && optionalText(requested.model) === optionalText(acknowledged.model)
     && optionalText(requested.effort) === optionalText(acknowledged.effort)
     && Boolean(requested.longContext) === Boolean(acknowledged.longContext)

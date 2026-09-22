@@ -273,24 +273,13 @@ function canonicalProjection(
 
 function reconcileDormantProjection(
   projection: OneTaskProjection,
-  activeChatIds: string[],
+  _activeChatIds: string[],
 ): OneTaskProjection {
-  if (projection.status.value !== "working" || !projection.chatId || activeChatIds.includes(projection.chatId)) {
-    return projection;
-  }
-  const stopped = projection.latestReceipt?.status === "failed" || projection.latestReceipt?.status === "interrupted";
-  return {
-    ...projection,
-    status: {
-      ...projection.status,
-      value: stopped ? "failed" : "waiting",
-    },
-    truth: {
-      ...projection.truth,
-      mayStartExecution: projection.sync.mutationMode === "direct",
-      mayClaimNewCompletion: false,
-    },
-  };
+  // activeChatIds is an invocation-observation snapshot, not Task lifecycle
+  // authority. A transiently missing chat must not relabel a canonical
+  // `working` Task as waiting/failed; Main's canonical projection remains the
+  // status source of truth while connection freshness is represented elsewhere.
+  return projection;
 }
 
 /**

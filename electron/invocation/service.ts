@@ -8,9 +8,11 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
+import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
 import { InvocationEffectBoundaryTracker } from "./effect-boundary";
+import { readInvocationEffectBoundary } from "./effect-boundary-reader";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
@@ -40,7 +42,7 @@ import {
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
-  transitionLongRun, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount } from "../store/long-runs";
+  transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
@@ -91,15 +93,23 @@ import {
 import { getProject } from "../store/projects";
 import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
+import {
+  admitInvocationWithStartReceipt,
+  decideInvocationAdmission,
+  type InvocationAdmissionIdentity,
+} from "../store/invocation-admissions";
 import { listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
   beginQueuedSteerDrain,
   cancelQueuedSteersForChat,
+  holdQueuedSteerForRecovery,
   listRecoverableQueuedSteers,
   persistQueuedSteer,
   settleQueuedSteer,
+  type DurableQueuedSteer,
+  type DurableQueuedSteerRecoveryReason,
 } from "../store/invocation-steers";
 import {
   appendChatMessage,
@@ -190,6 +200,8 @@ import {
 } from "../../shared/one-profile";
 import type {
   InvocationRunReceipt,
+  InvocationSteerRecovery,
+  InvocationSteerRecoveryReport,
   InvocationSteerResult,
   AgentlasUserDecisionRequest,
   McpInvocationEvent,
@@ -215,9 +227,12 @@ export interface InvocationAttachResult {
   /** Main-owned pending directions. A renderer route change must not erase the
    *  user's already accepted steering turn from the visible conversation. */
   queuedSteers: Array<{
+    id: string;
     text: string;
     queuedAt: string;
     position: number;
+    recoveryState?: "ready" | "held";
+    recoveryReason?: DurableQueuedSteerRecoveryReason;
   }>;
 }
 
@@ -290,6 +305,8 @@ interface QueuedSteer {
   workspaceBinding?: InvocationWorkspaceBinding;
   executionContext?: InvocationExecutionContext;
   drainedRunId?: string;
+  recoveryState?: "ready" | "held";
+  recoveryReason?: DurableQueuedSteerRecoveryReason;
 }
 
 function runReqChatFileGroupIds(prompt: string): Set<string> {
@@ -346,6 +363,37 @@ const VERIFICATION_TRANSIENT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 480_000]
 const ONE_TASK_KIND_MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const ONE_TASK_KIND_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const ONE_TASK_KIND_PARTICIPANT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+function steerReceiptIsTerminal(receipt: InvocationRunReceipt | null): boolean {
+  return receipt !== null && (receipt.status === "completed" || receipt.status === "failed" || receipt.status === "cancelled");
+}
+
+function queuedSteerFromDurable(row: DurableQueuedSteer): QueuedSteer {
+  return {
+    id: row.id,
+    originalRunId: row.originalRunId,
+    promptHash: row.promptHash,
+    request: row.request,
+    queuedAt: row.queuedAt,
+    ...(row.workspaceBinding ? { workspaceBinding: row.workspaceBinding } : {}),
+    ...(row.executionContext ? { executionContext: row.executionContext } : {}),
+    ...(row.drainedRunId ? { drainedRunId: row.drainedRunId } : {}),
+    recoveryState: row.recoveryState,
+    ...(row.recoveryReason ? { recoveryReason: row.recoveryReason } : {}),
+  };
+}
+
+function steeringRecoveryFromDurable(row: DurableQueuedSteer): InvocationSteerRecovery {
+  return {
+    id: row.id,
+    chatId: row.chatId,
+    originalRunId: row.originalRunId,
+    promptText: row.promptText,
+    promptHash: row.promptHash,
+    queuedAt: row.queuedAt,
+    reason: row.recoveryReason ?? "original-run-start-uncertain",
+  };
+}
 
 function oneTaskKindImageRef(image: ImageAttachment): string | null {
   if (
@@ -1006,19 +1054,74 @@ export class InvocationService {
   }
 
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
-  recoverQueuedSteers(): number {
+  recoverQueuedSteers(): InvocationSteerRecoveryReport {
     const rows = listRecoverableQueuedSteers();
+    let resumed = 0;
+    let settled = 0;
+    let held = 0;
     for (const row of rows) {
-      if (row.drainedRunId && hasInvocationRunReceipt(row.drainedRunId)) {
-        settleQueuedSteer(row.id, "started");
+      if (row.recoveryState === "held") {
+        held += 1;
         continue;
       }
-      // A queued direction belonged to a host process that no longer exists.
-      // Never auto-dispatch it on a later app launch; a long run is restored as
-      // paused by AppRuntimeCoordinator and only a user resume may continue it.
-      settleQueuedSteer(row.id, "cancelled");
+      if (row.status === "draining" && !row.drainedRunId) {
+        holdQueuedSteerForRecovery(row.id, "draining-run-id-missing");
+        held += 1;
+        continue;
+      }
+      if (row.drainedRunId) {
+        const drainedReceipt = getInvocationRunReceipt(row.drainedRunId);
+        if (steerReceiptIsTerminal(drainedReceipt)) {
+          if (settleQueuedSteer(row.id, "started")) settled += 1;
+        } else {
+          // A start row without a terminal receipt may already have crossed an
+          // external provider boundary. Holding is the only honest restart
+          // action; absence of the row is not proof that no effect occurred.
+          holdQueuedSteerForRecovery(
+            row.id,
+            drainedReceipt ? "drained-run-start-uncertain" : "drained-run-receipt-missing",
+          );
+          held += 1;
+        }
+        continue;
+      }
+      const originalReceipt = getInvocationRunReceipt(row.originalRunId);
+      if (!steerReceiptIsTerminal(originalReceipt)) {
+        holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
+        held += 1;
+        continue;
+      }
+      // A terminal invocation receipt only closes the model/runtime lifecycle;
+      // it does not prove that provider or adapter effects have quiesced. The
+      // exact Main-owned boundary is the only safe proof that a queued follow-
+      // up may be dispatched after a restart.
+      let originalBoundary: ReturnType<typeof readInvocationEffectBoundary>;
+      try {
+        originalBoundary = readInvocationEffectBoundary({
+          invocationRunId: row.originalRunId,
+          expectedChatId: row.chatId,
+        });
+      } catch {
+        holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
+        held += 1;
+        continue;
+      }
+      if (!originalBoundary.terminal || originalBoundary.effects !== "settled") {
+        holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
+        held += 1;
+        continue;
+      }
+      // The original run is durably terminal and this direction has never
+      // crossed beginQueuedSteerDrain. Rehydrate it exactly once and let the
+      // normal Main-owned drain create the next run.
+      const queue = this.steerQueues.get(row.chatId) ?? [];
+      if (!queue.some((queued) => queued.id === row.id)) queue.push(queuedSteerFromDurable(row));
+      this.steerQueues.set(row.chatId, queue);
+      resumed += 1;
     }
-    return rows.length;
+    for (const chatId of this.steerQueues.keys()) this.drainSteerQueue(chatId);
+    if (rows.length > 0) this.publishActiveChats();
+    return { examined: rows.length, resumed, settled, held };
   }
 
   start(
@@ -1034,8 +1137,48 @@ export class InvocationService {
     /** Main-only system-turn display purpose; not accepted in an IPC request. */
     hostNoticePurpose?: ChatHostNotice["purpose"],
     mainAdmission?: MainInvocationAdmission,
+    /** Main-only renderer admission identity; never accepted from an IPC request. */
+    durableAdmission?: InvocationAdmissionIdentity,
+  ): InvocationStartResult {
+    const startBoundary = { crossed: false };
+    try {
+      return this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
+        hostNoticePurpose, mainAdmission, durableAdmission, startBoundary);
+    } catch (error) {
+      if (durableAdmission && !startBoundary.crossed) {
+        // Direct control flow proves no provider dispatch occurred. Absence of
+        // a receipt alone would not prove that, especially across epochs.
+        const decision = decideInvocationAdmission({
+          ...durableAdmission,
+          decision: "rejected",
+          reasonCode: "main_start_pre_dispatch_refused",
+          noStartProof: {
+            kind: "owner-start-boundary-not-crossed",
+            verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch,
+          },
+        });
+        if (decision.kind === "conflict" && decision.reason !== "already-decided") {
+          throw new Error(`invocation_admission_rejection_${decision.reason}`, { cause: error });
+        }
+      }
+      throw error;
+    }
+  }
+
+  private startPrepared(
+    req: McpInvocationRequest,
+    workspaceBinding: InvocationWorkspaceBinding | undefined,
+    executionContext: InvocationExecutionContext | undefined,
+    questionContinuation: { sourceMessageId: string; requestHash: string } | undefined,
+    hostNoticePurpose: ChatHostNotice["purpose"] | undefined,
+    mainAdmission: MainInvocationAdmission | undefined,
+    durableAdmission: InvocationAdmissionIdentity | undefined,
+    startBoundary: { crossed: boolean },
   ): InvocationStartResult {
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
+    if (durableAdmission && (durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId)) {
+      throw new Error("invocation_admission_request_identity_mismatch");
+    }
     assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
     if ([...this.settlingRuns.values()].some((record) => record.chatId === req.chatId)) throw new Error("invocation_cleanup_pending");
@@ -1090,6 +1233,13 @@ export class InvocationService {
       && !workspaceBinding
       && !executionContext
       && req.agentAppMode !== true;
+    // A new message is not an attestation of prior external effects. Reject
+    // before this service claims attachments or dispatches the Goal runtime;
+    // renderer-side preflight can have occurred before this admission call.
+    if (boundGoal && ["paused", "blocked"].includes(boundGoal.status)
+      && localUserTurn && unsettledLongRunAttemptCount(boundGoal.id)) {
+      throw new Error("auto_goal_resume_attempt_unsettled");
+    }
     // Sending a new local message is an explicit resume plus steering command.
     // Host retries and remote jobs cannot turn a paused Goal back on. A stop
     // still draining is not a paused Goal and must finish before a new start.
@@ -1382,8 +1532,8 @@ export class InvocationService {
         : invocationRequest.permissions,
       invocationRequest.planMode,
     );
-    const suppressProjectBinding = executionContext?.source === "site-studio";
-    const suppressMutableProjectContext = executionContext?.source === "science"
+    const suppressProjectBinding = executionContext?.source === "site-studio" || executionContext?.source === "alive";
+    const suppressMutableProjectContext = executionContext?.source === "science" || executionContext?.source === "alive"
       || (executionContext?.source === "automation" && invocationPermission === "read");
     const storedWorkingFolder = runWorkspaceBinding || suppressProjectBinding
       ? null
@@ -1400,7 +1550,7 @@ export class InvocationService {
       && !storedWorkingFolder
       && !projectFolder
       && (invocationPermission === "write" || invocationPermission === "full")
-      && !["automation", "site-studio", "trex"].includes(executionContext?.source ?? "")
+      && !["automation", "site-studio", "trex", "alive"].includes(executionContext?.source ?? "")
       ? inferWorkingFolderFromPrompt(invocationRequest.userPrompt, { authored: "human" })
       : null;
     // Freeze the same Main-owned cwd that runMcpInvocation will hand to every
@@ -1458,12 +1608,16 @@ export class InvocationService {
     };
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused")
       && localUserTurn && runReq.taskIntent !== "conversation") {
+      // A new task message must not silently reactivate a claimed wait whose
+      // successor may already have reached an external runtime before crash.
+      const recoveryBlocker = goalResumeRecoveryBlockerCode(boundGoal.blockedReason);
+      if (recoveryBlocker) throw new Error(recoveryBlocker);
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
         throw new Error("goal_control_scope_mismatch");
       }
       // Admission is read-only. The durable-message hook records the user's
       // resume authority atomically with the state transition, not before it.
-      if (liveLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
+      if (unsettledLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
       const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
         || Boolean(longRunMonetaryRefusal(boundGoal))
         || (boundGoal.budget.wallclockDeadline != null
@@ -1572,7 +1726,8 @@ export class InvocationService {
         runId,
         record,
         publishActiveState: () => this.publishActiveChats(),
-        persistStart: () => recordRunEvent({
+        persistStart: () => {
+          const persistReceipt = () => recordRunEvent({
           runId,
           kind: "invoke_started",
           chatId: runReq.chatId,
@@ -1586,7 +1741,7 @@ export class InvocationService {
             // makes conversation -> Task promotion auditable without trying to
             // reconstruct it later from human-readable Activity text.
             taskIntent: runReq.taskIntent,
-            invocationSource: runWorkspaceBinding?.source,
+            invocationSource: executionContext?.source === "science" ? "science" : runWorkspaceBinding?.source,
             synchronousAskSurface: executionContext?.source === "mobile"
               ? "durable-decision"
               : undefined,
@@ -1620,8 +1775,18 @@ export class InvocationService {
               ? "proposal_evidence_only_review_required"
               : undefined,
           },
-        }),
+          });
+          if (!durableAdmission) {
+            persistReceipt();
+            return;
+          }
+          const admitted = admitInvocationWithStartReceipt(durableAdmission, persistReceipt);
+          if (admitted.kind !== "admitted") {
+            throw new Error(`invocation_admission_${admitted.kind === "conflict" ? admitted.reason : admitted.admission.status}`);
+          }
+        },
       });
+      startBoundary.crossed = true;
     } catch (error) {
       releaseOneAttachmentRun(requestedOneAttachmentRef);
       throw error;
@@ -2026,6 +2191,7 @@ export class InvocationService {
       readOwner: () => goalLongRun && goalLongRun.surface !== "science" ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withInvocationAccounting({ runId, chatId: chat.id, readOwner: () =>
       goalLongRun && goalLongRun.surface !== "science"
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
+        source: executionContext?.source, nativeScienceTool: binding => effectBoundary.nativeScienceTool(binding),
         begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => Promise.resolve().then(() => runMcpInvocation(
       runReq,
       (rawEvent) => {
@@ -2693,7 +2859,7 @@ export class InvocationService {
           // Preserve a machine-coded refusal when another action changes the
           // exact Goal while this turn is preparing. No provider dispatch may
           // follow a failed resume transaction.
-          const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" } = { reason: "state-changed" };
+          const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" | "claimed-wait" | "effect-boundary-uncertain" } = { reason: "state-changed" };
           try {
             resumed = getDb().transaction(() => {
               const current = getLongRun(stoppedGoalReactivation!.runId);
@@ -2703,6 +2869,8 @@ export class InvocationService {
                 || current.status !== stoppedGoalReactivation!.status || current.version !== stoppedGoalReactivation!.version
                 || getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id
                 || source?.chat_id !== chat.id || source.role !== "user" || source.text !== runReq.userPrompt) return null;
+              const recoveryBlocker = goalResumeRecoveryBlockerCode(current.blockedReason);
+              if (recoveryBlocker) throw new Error(recoveryBlocker);
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
               stall.reason = "revision";
@@ -2717,16 +2885,15 @@ export class InvocationService {
               if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return null;
               // Never replay an old attempt; the new message owns a new turn.
               stall.reason = "attempt-live";
-              if (liveLongRunAttemptCount(current.id)) return null;
+              if (unsettledLongRunAttemptCount(current.id)) return null;
               stall.reason = "budget";
               const budgetExhausted = (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles)
                 || Boolean(longRunMonetaryRefusal(current))
                 || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
               if (budgetExhausted) return null;
-              const acknowledged = acknowledgeUncertainLongRunAttempts(current.id);
               appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
                 payload: { action: "resume_with_message", sourceMessageId, invocationRunId: runId,
-                  previousStatus: current.status, acknowledgedAttemptIds: acknowledged.attemptIds } });
+                  previousStatus: current.status } });
               stall.reason = "contract";
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
@@ -2763,7 +2930,9 @@ export class InvocationService {
               supersedeGoalWaitForInvocation(current.goalId, runId);
               return getLongRun(running.id);
             })();
-          } catch {
+          } catch (error) {
+            if (error instanceof Error && error.message === "goal_wait_claimed_reconciliation_required") stall.reason = "claimed-wait";
+            if (error instanceof Error && error.message === GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN) stall.reason = "effect-boundary-uncertain";
             resumed = null;
           }
           if (!resumed) {
@@ -2771,14 +2940,22 @@ export class InvocationService {
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
             projectionGoalId = null;
-            const ko = stall.reason === "attempt-live"
+            const ko = stall.reason === "claimed-wait"
+              ? "재시작 전에 대기 목표의 후속 호출이 시작됐는지 확인할 수 없어 이 메시지를 실행하지 않았습니다. 기존 작업의 실제 결과를 확인한 뒤 새 목표로 시작해 주세요. 중지는 언제든 가능합니다."
+              : stall.reason === "effect-boundary-uncertain"
+              ? "이전 호출의 효과 경계를 확인할 수 없어 이 메시지를 실행하지 않았습니다. 기존 작업의 실제 결과를 확인한 뒤 새 목표로 시작해 주세요."
+              : stall.reason === "attempt-live"
               ? "이 목표의 이전 실행이 아직 돌고 있어 이번 메시지를 시작하지 않았습니다. 그 실행이 끝난 뒤 다시 보내 주세요."
               : stall.reason === "budget"
                 ? "이 목표의 예산(반복 횟수·시간)이 다 써서 이번 메시지를 시작하지 않았습니다. 목표 칩에서 새 목표로 이어가 주세요."
                 : stall.reason === "revision"
                   ? "이 목표의 기준이 다른 대화에서 바뀌어 이번 메시지를 시작하지 않았습니다. 그 대화에서 이어가거나 여기서 새 목표로 시작해 주세요."
                   : "목표 상태가 방금 바뀌어 이번 메시지를 시작하지 않았습니다. 목표 칩의 현재 상태를 확인한 뒤 다시 보내 주세요.";
-            const en = stall.reason === "attempt-live"
+            const en = stall.reason === "claimed-wait"
+              ? "The waiting Goal's successor may have started before restart, so this message did not run. Inspect its actual result before starting a new Goal. Stop is still available."
+              : stall.reason === "effect-boundary-uncertain"
+              ? "The previous effect boundary could not be verified, so this message did not run. Inspect the actual result before starting a new Goal."
+              : stall.reason === "attempt-live"
               ? "An earlier run of this Goal is still going, so this message did not start. Send it again once that run finishes."
               : stall.reason === "budget"
                 ? "This Goal's budget (cycles or time) is used up, so this message did not start. Continue as a new Goal from the goal chip."
@@ -2787,7 +2964,9 @@ export class InvocationService {
                   : "The Goal just changed state, so this message did not start. Check the goal chip and send it again.";
             return {
               blockInvocation: true as const,
-              code: "automatic-goal-resume-state-changed" as const,
+              code: stall.reason === "claimed-wait" ? "goal_wait_claimed_reconciliation_required" as const
+                : stall.reason === "effect-boundary-uncertain" ? GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN
+                : "automatic-goal-resume-state-changed" as const,
               message: pickLocale(runReq) === "ko" ? ko : en,
             };
           }
@@ -3238,10 +3417,14 @@ export class InvocationService {
       || wait.successorInvocationId !== input.invocationRunId || wait.checkpointId !== input.checkpointId
       || !run || run.status !== "running" || getChat(wait.chatId)?.goalId !== input.goalId
       || input.request.chatId !== wait.chatId || input.request.runId !== input.invocationRunId
+      || (wait.recoveryMode && (input.request.permissions !== "read"
+        || (run.surface === "one" && input.request.onePermissionMode !== "read")))
       || this.activeChatIds().includes(wait.chatId) || this.steerQueues.get(wait.chatId)?.length) throw new Error("goal_wait_dispatch_state_changed");
     const checkpoint = latestTaskCheckpoint(input.goalId);
     if (!checkpoint || checkpoint.checkpointId !== input.checkpointId) throw new Error("goal_wait_checkpoint_changed");
-    prepareCheckpointContinuation(checkpoint);
+    const prepared = prepareCheckpointContinuation(checkpoint, input.invocationRunId);
+    if (JSON.stringify(prepared.runtimeSelection) !== JSON.stringify(input.request.runtimeSelection))
+      throw new Error("goal_wait_runtime_selection_changed");
     return this.start(input.request, undefined, undefined, undefined, "goal-continuation",
       admitMainInvocation(wait.chatId, input.invocationRunId));
   }
@@ -3547,6 +3730,8 @@ export class InvocationService {
     workspaceBinding?: InvocationWorkspaceBinding,
     executionContext?: InvocationExecutionContext,
     mainAdmission?: MainInvocationAdmission,
+    /** Main-owned idempotency key for a preflight direction. */
+    preflightSteerId?: string,
   ): InvocationSteerResult {
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     if (req.oneAttachmentRef) {
@@ -3579,12 +3764,21 @@ export class InvocationService {
       throw new Error("Steering queue is full; wait for the current Desktop run to settle");
     }
     const durable = persistQueuedSteer({
+      ...(preflightSteerId ? { id: preflightSteerId } : {}),
       chatId: req.chatId,
       originalRunId: active[0],
       request: { ...steerRequest, runId: undefined },
       ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
       ...(executionContext ? { executionContext } : {}),
     });
+    if (durable.status === "draining" || queue.some((queued) => queued.id === durable.id)) {
+      return {
+        accepted: true, chatId: req.chatId, queued: durable.status === "queued",
+        interruptsCurrent: false, activeRunId: active[0],
+        position: Math.max(1, queue.findIndex((queued) => queued.id === durable.id) + 1),
+        queuedRequestId: durable.id, promptHash: durable.promptHash,
+      };
+    }
     queue.push({
       mainAdmission,
       id: durable.id,
@@ -3650,9 +3844,12 @@ export class InvocationService {
           events: options?.includeEvents === false ? [] : record.events.slice(),
           startedAt: record.startedAt,
           queuedSteers: (this.steerQueues.get(chatId) ?? []).map((queued, index) => ({
+            id: queued.id,
             text: queued.request.userPrompt,
             queuedAt: queued.queuedAt,
             position: index + 1,
+            ...(queued.recoveryState ? { recoveryState: queued.recoveryState } : {}),
+            ...(queued.recoveryReason ? { recoveryReason: queued.recoveryReason } : {}),
           })),
         };
       }
@@ -3670,11 +3867,24 @@ export class InvocationService {
     return { ...replay, receipt, ...(record && record.partialText.length <= 8 * 1024 * 1024 ? { partialText: record.partialText } : {}) };
   }
 
+  /** Main-owned recovery receipt; held directions are never replay permission. */
+  steeringRecovery(chatId: string): InvocationSteerRecovery[] {
+    return listRecoverableQueuedSteers()
+      .filter((row) => row.chatId === chatId && row.recoveryState === "held")
+      .map(steeringRecoveryFromDurable);
+  }
+
+  private withSteeringRecovery(receipt: InvocationRunReceipt | null): InvocationRunReceipt | null {
+    if (!receipt) return null;
+    const steeringRecovery = this.steeringRecovery(receipt.chatId);
+    return steeringRecovery.length > 0 ? { ...receipt, steeringRecovery } : receipt;
+  }
+
   receipt(runId: string): InvocationRunReceipt | null {
     const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId) ?? this.settlingRuns.get(runId);
     const durable = getInvocationRunReceipt(runId);
-    if (!record) return durable;
-    return {
+    if (!record) return this.withSteeringRecovery(durable);
+    return this.withSteeringRecovery({
       ...(durable ?? {
         runId,
         chatId: record.chatId,
@@ -3686,14 +3896,14 @@ export class InvocationService {
       updatedAt: record.cancelRequestedAt ?? durable?.updatedAt ?? record.startedAt,
       eventCount: Math.max(durable?.eventCount ?? 0, record.events.length),
       ...(record.resultFolder ? { resultFolder: record.resultFolder } : {}),
-    };
+    });
   }
 
   latestReceipt(chatId: string): InvocationRunReceipt | null {
     for (const [runId, record] of new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
       if (record.chatId === chatId) return this.receipt(runId);
     }
-    return getLatestInvocationRunReceipt(chatId);
+    return this.withSteeringRecovery(getLatestInvocationRunReceipt(chatId));
   }
 
   latestOneSurface(input: { runId: string; chatId: string; taskId: string }) {

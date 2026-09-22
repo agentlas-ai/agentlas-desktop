@@ -164,6 +164,13 @@ export function spawnCli(
       [AGENTLAS_SPAWN_MARKER_ENV]: `agentlas:${process.pid}`,
     },
   });
+  // A CLI may exit normally while an MCP grandchild keeps running, possibly
+  // holding stdout/stderr open so `close` never arrives. Reclaim its owned
+  // group on `exit`, with the same TERM -> KILL escalation as cancellation.
+  // Only a detached child owns its group; never signal a shared host group.
+  if (options.detached && process.platform !== "win32" && child.pid) {
+    child.once("exit", () => killCliTree(child));
+  }
   // On Windows cross-spawn executes a .cmd shim through cmd.exe, so
   // child.spawnfile alone loses the provider executable identity. Remember the
   // original command (never its arguments) for the crash-recovery ledger.

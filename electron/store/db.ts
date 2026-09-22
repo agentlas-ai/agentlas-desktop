@@ -22,7 +22,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 120;
+const SCHEMA_VERSION = 124;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -4567,6 +4567,38 @@ export function initStore(options: StoreInitOptions = {}): void {
     "CREATE INDEX IF NOT EXISTS idx_automation_graph_versions ON automation_graph_versions(automation_id, saved_at DESC)",
   );
 
+  // Strategy revisions are an append-only, Main-owned event ledger.  A future
+  // trusted observation -> proposal route can consume the latest row, while
+  // this foundation keeps raw model prose and renderer/IPC writes out of the
+  // definition update path.  The unique request/revision keys provide the
+  // durable idempotency and CAS anchors used by the store API.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_strategy_revision_events (
+      id                    TEXT PRIMARY KEY,
+      automation_id         TEXT NOT NULL,
+      revision              INTEGER NOT NULL CHECK(revision >= 1),
+      previous_revision     INTEGER NOT NULL CHECK(previous_revision >= 0),
+      request_id            TEXT NOT NULL,
+      source_run_id         TEXT NOT NULL,
+      base_graph_digest     TEXT NOT NULL,
+      graph_digest          TEXT NOT NULL,
+      base_definition_digest TEXT NOT NULL,
+      definition_digest     TEXT NOT NULL,
+      strategy_digest       TEXT NOT NULL,
+      strategy_json         TEXT NOT NULL,
+      graph_patch_json      TEXT,
+      input_digest          TEXT NOT NULL,
+      receipt_json          TEXT NOT NULL,
+      created_at            TEXT NOT NULL,
+      UNIQUE(automation_id, revision),
+      UNIQUE(request_id)
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_automation_strategy_revision_events_latest "
+    + "ON automation_strategy_revision_events(automation_id, revision DESC)",
+  );
+
   // v88: 입력 트리거 그래프가 사람에게 받은 값이 앉는 자리.
   // 이전에는 이 자리가 없어서, 터미널이 값을 물어보고도 버렸고(사용자에겐 전달된 것처럼 보였다)
   // 데스크탑 "지금 실행"은 아예 묻지 않았다. 그러면 {{topic}} 같은 구멍이 빈 문자열로 메꿔진 채
@@ -5217,6 +5249,8 @@ export function initStore(options: StoreInitOptions = {}): void {
       execution_context_json TEXT,
       status TEXT NOT NULL CHECK(status IN ('queued','draining','started','cancelled','failed')),
       drained_run_id TEXT,
+      recovery_state TEXT NOT NULL DEFAULT 'ready' CHECK(recovery_state IN ('ready','held')),
+      recovery_reason TEXT,
       queued_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -5240,7 +5274,6 @@ export function initStore(options: StoreInitOptions = {}): void {
     CREATE INDEX IF NOT EXISTS idx_prompt_chat_start_chat
       ON prompt_chat_start_intents(chat_id);
   `);
-
   // v107 — Science is a first-class projection of the durable Desktop
   // invocation runtime. Every redacted Science runtime event enters this
   // append-only delivery ledger before Main publishes it to the extension.
@@ -6573,6 +6606,140 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (!columns.has("runtime_label")) {
       _db.exec(`ALTER TABLE ${table} ADD COLUMN runtime_label TEXT`);
     }
+  }
+
+  // v121: exact, content-free One invocation admission ledger. A partial
+  // unique index permits history while allowing only one pending run per chat.
+  // The canonical request itself is never stored here. The writer must commit
+  // an invoke_started receipt and the admitted transition in one transaction.
+  if (userVersion < 121) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS invocation_admissions (
+          run_id TEXT PRIMARY KEY,
+          chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          input_digest TEXT NOT NULL
+            CHECK(length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'),
+          digest_version TEXT NOT NULL CHECK(digest_version = 'main-canonical-json-v1'),
+          owner_process_epoch TEXT NOT NULL CHECK(length(owner_process_epoch) BETWEEN 1 AND 128),
+          status TEXT NOT NULL CHECK(status IN ('pending','admitted','rejected')),
+          pending_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          admitted_at TEXT,
+          rejected_at TEXT,
+          rejection_reason_code TEXT,
+          CHECK(
+            (status = 'pending' AND admitted_at IS NULL AND rejected_at IS NULL AND rejection_reason_code IS NULL)
+            OR (status = 'admitted' AND admitted_at IS NOT NULL AND rejected_at IS NULL AND rejection_reason_code IS NULL)
+            OR (status = 'rejected' AND admitted_at IS NULL AND rejected_at IS NOT NULL AND rejection_reason_code IS NOT NULL)
+          )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_invocation_admissions_pending_chat
+          ON invocation_admissions(chat_id) WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_invocation_admissions_chat_time
+          ON invocation_admissions(chat_id, pending_at DESC);
+      `);
+    })();
+  }
+
+  // v122 — queued steering restart holds. Keep the existing status CHECK so a
+  // held row remains queued/draining, while the drain CAS rejects it until an
+  // explicit recovery decision. The version bump is required because follower
+  // processes must refuse before observing a partially upgraded queue table.
+  if (userVersion < 122) {
+    _db.transaction(() => {
+      addColumnIfMissing(_db!, "invocation_steers", "recovery_state", "recovery_state TEXT NOT NULL DEFAULT 'ready'");
+      addColumnIfMissing(_db!, "invocation_steers", "recovery_reason", "recovery_reason TEXT");
+      _db!.exec(`CREATE INDEX IF NOT EXISTS idx_invocation_steers_recovery
+        ON invocation_steers(chat_id, recovery_state, queued_at, id)`);
+    })();
+  }
+
+  // v123 — typed strategy proposal receipts. The proposal is a Main-owned
+  // handoff only: raw model prose is never parsed here, and graph mutation
+  // remains behind the existing exact-digest CAS revision ledger.
+  if (userVersion < 123) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS automation_strategy_proposals (
+          id                    TEXT PRIMARY KEY,
+          automation_id         TEXT NOT NULL,
+          source_run_id         TEXT NOT NULL,
+          request_id            TEXT NOT NULL UNIQUE,
+          actor                 TEXT NOT NULL CHECK(actor = 'main'),
+          input_digest          TEXT NOT NULL,
+          intent                TEXT NOT NULL CHECK(intent IN ('keep','change','schedule-change')),
+          rationale             TEXT NOT NULL,
+          conflict              TEXT NOT NULL CHECK(conflict IN ('within_scope','needs_user_approval','uncertain')),
+          state                  TEXT NOT NULL CHECK(state IN ('pending','approved','rejected','applied')),
+          source_graph_digest   TEXT NOT NULL,
+          current_graph_digest  TEXT NOT NULL,
+          expected_graph_digest TEXT NOT NULL,
+          current_definition_digest  TEXT NOT NULL,
+          expected_definition_digest TEXT NOT NULL,
+          goal_bound            INTEGER NOT NULL CHECK(goal_bound IN (0,1)),
+          expected_revision     INTEGER NOT NULL CHECK(expected_revision >= 0),
+          strategy_json         TEXT,
+          graph_patch_json       TEXT,
+          receipt_json           TEXT NOT NULL,
+          created_at             TEXT NOT NULL,
+          updated_at             TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_strategy_proposals_automation
+          ON automation_strategy_proposals(automation_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_automation_strategy_proposals_source
+          ON automation_strategy_proposals(source_run_id);
+      `);
+    })();
+  }
+
+  // v124 — a direction typed while One is still preparing its parent run
+  // receives its own durable Main receipt. It cannot enter the ordinary
+  // invocation_steers queue until an exact admitted parent is proven.
+  if (userVersion < 124) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS one_preflight_submissions (
+          submission_id TEXT PRIMARY KEY,
+          chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          prompt_digest TEXT NOT NULL CHECK(length(prompt_digest) = 64),
+          runtime_digest TEXT NOT NULL CHECK(length(runtime_digest) = 64),
+          runtime_selection_json TEXT,
+          owner_process_epoch TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('open','reserved','bound','held','cancelled')),
+          parent_run_id TEXT UNIQUE,
+          steer_template_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK((state = 'open' AND parent_run_id IS NULL AND steer_template_json IS NULL)
+            OR (state = 'reserved' AND parent_run_id IS NOT NULL AND steer_template_json IS NOT NULL)
+            OR (state = 'bound' AND parent_run_id IS NOT NULL AND steer_template_json IS NOT NULL)
+            OR state IN ('held','cancelled'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_preflight_submission_open_chat
+          ON one_preflight_submissions(chat_id) WHERE state = 'open';
+        CREATE INDEX IF NOT EXISTS idx_one_preflight_submission_chat
+          ON one_preflight_submissions(chat_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS one_preflight_steers (
+          steer_id TEXT PRIMARY KEY,
+          submission_id TEXT NOT NULL REFERENCES one_preflight_submissions(submission_id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          prompt_text TEXT NOT NULL,
+          prompt_digest TEXT NOT NULL CHECK(length(prompt_digest) = 64),
+          status TEXT NOT NULL CHECK(status IN ('queued','claimed','attached','held','cancelled')),
+          parent_run_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK((status = 'queued' AND parent_run_id IS NULL)
+            OR (status IN ('claimed','attached') AND parent_run_id IS NOT NULL)
+            OR status IN ('held','cancelled'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_one_preflight_steers_submission
+          ON one_preflight_steers(submission_id, created_at, steer_id);
+        CREATE INDEX IF NOT EXISTS idx_one_preflight_steers_chat_status
+          ON one_preflight_steers(chat_id, status, created_at);
+      `);
+    })();
   }
 
   } catch (error) {

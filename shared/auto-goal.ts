@@ -32,6 +32,17 @@ export interface GoalCriterion {
   text: string;
 }
 
+/**
+ * A host-owned authority link for an explicit human amendment.  The original
+ * request and its criteria remain audit data; this metadata only explains why
+ * a later revision may carry a new, separately approved execution change.
+ */
+export interface GoalAmendment {
+  kind: "automation_strategy";
+  proposalId: string;
+  proposalInputDigest: string;
+}
+
 export interface GoalRevision {
   schemaVersion: typeof AUTO_GOAL_SCHEMA;
   goalId: string;
@@ -47,6 +58,8 @@ export interface GoalRevision {
   acceptanceCriteria: GoalCriterion[];
   /** References to existing host grants; this model cannot issue new grants. */
   authorityRefs: string[];
+  /** Present only when a human explicitly approved a typed strategy change. */
+  amendment?: GoalAmendment;
   /** Host-authored reauthorization metadata; changing permission is not a model amendment. */
   authorityChangedAt?: string;
   authorityChangeReason?: "user_permission_changed";
@@ -78,6 +91,16 @@ function criteriaCopy(criteria: readonly GoalCriterion[]): GoalCriterion[] {
 
 function validateTime(at: string): void {
   if (!Number.isFinite(Date.parse(at))) throw new Error("goal_timestamp_invalid");
+}
+
+function validateAmendment(amendment: GoalAmendment | undefined): void {
+  if (amendment === undefined) return;
+  if (amendment.kind !== "automation_strategy"
+    || typeof amendment.proposalId !== "string" || !amendment.proposalId.trim()
+    || typeof amendment.proposalInputDigest !== "string"
+    || !/^sha256:[a-f0-9]{64}$/i.test(amendment.proposalInputDigest)) {
+    throw new Error("goal_amendment_invalid");
+  }
 }
 
 /** Conservative admission: uncertainty never arms a background campaign. */
@@ -130,6 +153,7 @@ export function reviseAutomaticGoal(input: {
   addedCriteria: readonly GoalCriterion[];
   explicitlyRemovedCriterionIds: readonly string[];
   createdAt: string;
+  amendment?: GoalAmendment;
 }): GoalRevision {
   const { current, source } = input;
   validateSource(source);
@@ -140,6 +164,7 @@ export function reviseAutomaticGoal(input: {
   if (Date.parse(input.createdAt) < Date.parse(current.createdAt)) throw new Error("goal_timestamp_regression");
   required(input.objective, "goal_objective_required");
   required(input.reason, "goal_revision_reason_required");
+  validateAmendment(input.amendment);
   const removed = new Set(input.explicitlyRemovedCriterionIds);
   const previous = new Map(current.acceptanceCriteria.map((criterion) => [criterion.id, criterion.text]));
   if (removed.size !== input.explicitlyRemovedCriterionIds.length || [...removed].some((id) => !previous.has(id))) {
@@ -151,8 +176,9 @@ export function reviseAutomaticGoal(input: {
     throw new Error("goal_criteria_silently_redefined");
   }
   if (input.addedCriteria.some((criterion) => previous.has(criterion.id))) throw new Error("goal_criterion_id_reused");
+  const { amendment: _previousAmendment, ...currentWithoutAmendment } = current;
   return {
-    ...current,
+    ...currentWithoutAmendment,
     revision: current.revision + 1,
     parentRevision: current.revision,
     originalRequest: { ...current.originalRequest },
@@ -163,6 +189,7 @@ export function reviseAutomaticGoal(input: {
     lifecycle: resolveGoalLifecycle(current.lifecycle),
     acceptanceCriteria: criteriaCopy([...input.retainedCriteria, ...input.addedCriteria]),
     authorityRefs: [...current.authorityRefs],
+    ...(input.amendment ? { amendment: { ...input.amendment } } : {}),
     createdAt: input.createdAt,
   };
 }

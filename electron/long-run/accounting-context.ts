@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { getLongRunByGoalId, appendLongRunEvent, recordLongRunUsage } from "../store/long-runs";
+import { getChatGoalRevision } from "../store/chat-goals";
 import { recordRunEvent } from "../store/run-events";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "./budget";
 
@@ -11,6 +12,7 @@ interface Scope {
   chatId: string;
   anchorId: string;
   readOwner: () => InvocationAccountingOwner | null;
+  allowHostPausedWait?: boolean;
 }
 const accountingContext = new AsyncLocalStorage<Scope>();
 
@@ -64,6 +66,39 @@ export function withInvocationPreflightAccounting<T>(input: { runId: string; cha
     readOwner: () => capturedGoalId ? { goalId: capturedGoalId, attemptId: null } : null }, call);
 }
 
+/** A scheduled stall diagnosis is not an invocation. Its inference usage is
+ * anchored to the exact host-stored pending wait, never a caller's Goal hint. */
+export function withGoalWaitAccounting<T>(input: {
+  waitId: string; goalId: string; goalRevision: number; checkpointId: string; chatId: string;
+}, call: () => T): T {
+  const readOwner = (): InvocationAccountingOwner => {
+    const run = getLongRunByGoalId(input.goalId);
+    const revision = getChatGoalRevision(input.goalId);
+    const row = run ? getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
+      .get(run.id) as { payload_json: string } | undefined : undefined;
+    let wait: Record<string, unknown> | null = null;
+    try { wait = row ? JSON.parse(row.payload_json).subscription : null; } catch { /* Refuse malformed host state. */ }
+    if (!run || run.surface !== "one" || run.rootChatId !== input.chatId
+      || !["waiting_tool", "paused"].includes(run.status)
+      || (run.status === "paused" && !["app_closed", "crash_recovery"].includes(run.pauseReason ?? ""))
+      || revision?.lifecycle !== "ongoing" || revision.revision !== input.goalRevision
+      || wait?.waitId !== input.waitId || wait?.goalId !== input.goalId
+      || wait?.goalRevision !== input.goalRevision || wait?.chatId !== input.chatId
+      || wait?.checkpointId !== input.checkpointId || wait?.state !== "pending"
+      || wait?.recoveryMode !== "stall_replan") throw new Error("accounting_goal_wait_anchor_missing");
+    return { goalId: input.goalId, attemptId: null };
+  };
+  readOwner();
+  const executionId = `goal-wait-replan:${input.waitId}`;
+  const anchor = recordRunEvent({ runId: executionId, chatId: input.chatId, kind: "goal_wait_replan_started",
+    sourceEventId: `goal-wait-replan:${input.waitId}:started`, payload: {
+      schemaVersion: "agentlas.goal-wait-replan-accounting.v1", waitId: input.waitId,
+      goalId: input.goalId, goalRevision: input.goalRevision, checkpointId: input.checkpointId,
+    } });
+  return accountingContext.run({ invocationRunId: executionId, chatId: input.chatId,
+    anchorId: anchor.id, readOwner, allowHostPausedWait: true }, call);
+}
+
 export interface AccountedInferenceAttempt {
   sourceId: string;
   complete(usage: LongRunUsageInput["observedUsage"], outcome: "returned" | "failed" | "timeout" | "cancelled"): void;
@@ -77,7 +112,9 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
   if (owner) {
     const goal = getLongRunByGoalId(owner.goalId);
     if (!goal || goal.surface === "science") throw new Error("accounting_goal_owner_invalid");
-    if (["completed", "cancelled", "cancelling", "failed", "paused", "pausing"].includes(goal.status)) {
+    if (["completed", "cancelled", "cancelling", "failed", "pausing"].includes(goal.status)
+      || (goal.status === "paused" && !(scope.allowHostPausedWait
+        && ["app_closed", "crash_recovery"].includes(goal.pauseReason ?? "")))) {
       throw new Error("accounting_goal_terminal");
     }
     const refusal = longRunMonetaryRefusal(goal);

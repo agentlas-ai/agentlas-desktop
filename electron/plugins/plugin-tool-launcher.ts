@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { verifiedInstalledPluginRelease } from "./materialize";
+import { verifiedPinnedPluginRelease } from "./materialize";
 
 type LaunchInput = {
   root: string;
@@ -37,8 +37,8 @@ function assertContainedFile(root: string, target: string): void {
 
 async function main(): Promise<void> {
   const input = parseLaunch(process.argv.slice(2));
-  const release = verifiedInstalledPluginRelease(input.root);
-  if (!release || release.digest !== input.digest) throw new Error("plugin_tool_release_changed");
+  const release = verifiedPinnedPluginRelease(input.root, input.digest);
+  if (!release) throw new Error("plugin_tool_release_changed");
   assertContainedFile(release.directory, input.entry);
 
   const child = spawn(process.execPath, [input.entry, ...input.args], {

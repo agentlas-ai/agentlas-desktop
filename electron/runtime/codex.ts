@@ -4,12 +4,14 @@
 // 호출 형식: codex exec "<prompt>"  (—— Codex CLI의 exec 모드)
 // V0는 single-turn; 이전 대화를 user 입력에 inline.
 import path from "node:path";
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
@@ -65,6 +67,7 @@ import type { AcpSessionLease } from "./acp-session-pool";
 import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { bindNativeFileProofObserver } from "../long-run/file-proof";
+import { bindScienceNativeToolObserver } from "../invocation/adapter-effect-context";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -384,19 +387,10 @@ function resumePermissionArgs(
  * is a different conversation.
  */
 function systemFingerprint(req: RunnerRequest): string {
-  // The model is part of the session identity. A runtime session belongs to the
-  // model that created it, so resuming it under a different model is a false
-  // resume, not continuity. Leaving the model out made every BYOK model switch
-  // reuse the previous model's session id.
-  //
-  // This does NOT reintroduce the 2026-07-16 세션유지 사고. That incident came
-  // from hashing the whole system prompt and settings, so any unrelated setting
-  // change severed the conversation; the seed exists to keep those out. The
-  // model is different in kind — it genuinely cannot inherit another model's
-  // session — and the user does not experience a cut, because the fresh-session
-  // path reseeds the compacted conversation history with continuity framing
-  // (renderConversationContext). The thread the user sees lives in Agentlas's
-  // own store, not in the runtime session.
+  // Model choice is deliberately absent from this fingerprint. A resident Codex
+  // process can fork the held thread for a new model, retaining its history
+  // without treating the old thread as if it had changed models. The seed keeps
+  // unrelated settings from severing conversation continuity.
   if (req.sessionFingerprintSeed) {
     return crypto
       .createHash("sha256")
@@ -573,6 +567,7 @@ function runCodexProcess(
   usageBaseline: CodexUsageBaseline,
   observeNativeFile: NativeFileProofObserver,
 ): Promise<CodexRunResult> {
+  const observeScienceTool = bindScienceNativeToolObserver(req);
   const reportedOutputTokenBaseline = usageBaseline.output;
   return new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
@@ -824,6 +819,7 @@ function runCodexProcess(
       } else if ((ev.type === "item.started" || ev.type === "item.completed") && isToolItem(ev.item?.type)) {
         closeThinking();
         const item = ev.item!;
+        observeScienceTool(item);
         const nativeFileChange = ["fileChange", "FileChange", "file_change"].includes(item.type ?? "");
         // `codex exec --json` serializes MCP calls as snake_case
         // `mcp_tool_call` items. Their executable identity lives in
@@ -1222,6 +1218,7 @@ async function runCodexResidentTurn(input: {
   observeNativeFile: NativeFileProofObserver;
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  const observeScienceTool = bindScienceNativeToolObserver(req);
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
@@ -1243,6 +1240,8 @@ async function runCodexResidentTurn(input: {
   const poolKey = codexPoolKey({
     chatId: req.approvalChatId ?? chatId,
     fingerprint,
+    sessionOwnerId: runtimeSessionOwnerId ?? null,
+    isolateOwner: isolateRuntimeSessionOwner,
     cwd,
     bin,
     ...(req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
@@ -1259,6 +1258,7 @@ async function runCodexResidentTurn(input: {
         agentId: req.agentId ?? null,
         nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
         chatId,
+        projectId: req.workProjectId ?? null,
         runtimeKind: KIND,
         source: resolveAgentResidencySource(req.agentId),
         reaperExempt: isResidencyExemptAgent(req.agentId),
@@ -1266,6 +1266,9 @@ async function runCodexResidentTurn(input: {
       () => openCodexResidentSession({ bin, args, cwd, env, label: req.backendLabel || "codex" }),
     );
   } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+      throw err;
+    }
     // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
     if (looksLikeMissingAppServer("", err)) {
       markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
@@ -1278,6 +1281,7 @@ async function runCodexResidentTurn(input: {
   const session = lease.session;
   const reusing = !lease.fresh && Boolean(session.threadId);
   const explicitResume = Boolean(req.runtimeSessionId);
+  const modelChanged = Boolean(req.model && session.modelAcknowledgement?.requestedModel !== req.model);
   let broken = false;
   /** 이 턴에서 화면으로 나간 본문이 있는가 — 있으면 1회성 재시도는 답을 두 번 쓰는 짓이다. */
   let emitted = false;
@@ -1383,6 +1387,7 @@ async function runCodexResidentTurn(input: {
         break;
       case "item/started": {
         const item = params?.item;
+        observeScienceTool(item);
         if (item?.type === "reasoning") { openThinking(); break; }
         const tool = codexToolEventFromItem(item, false);
         if (tool) {
@@ -1412,6 +1417,7 @@ async function runCodexResidentTurn(input: {
       }
       case "item/completed": {
         const item = params?.item;
+        observeScienceTool(item);
         if (item?.type === "agentMessage") {
           closeThinking();
           const id = String(item.id ?? "");
@@ -1665,7 +1671,12 @@ async function runCodexResidentTurn(input: {
     session.active = sink;
     if (req.workforceRuntimeToolGrant) workforceObservation = new CodexWorkforceObservation(req, session.init, req.workforceRuntimeToolGrant.canonicalConfigSha256);
     /* ── 스레드: 살아 있는 세션이면 그대로, 새 프로세스면 resume 또는 start ── */
-    if (!reusing || workforceObservation || explicitResume) {
+    // Model selection belongs to the thread protocol, not the resident process
+    // identity. A live Codex thread/resume can acknowledge its previous model
+    // even when given a new one. Fork that thread in the same app-server instead:
+    // the fork inherits its history and acknowledges the requested model before
+    // any prompt is sent. A model change must not create another CLI process.
+    if (!reusing || workforceObservation || explicitResume || modelChanged) {
       const commonThreadParams: Record<string, unknown> = {
         cwd,
         approvalPolicy: policy.approvalPolicy,
@@ -1688,29 +1699,34 @@ async function runCodexResidentTurn(input: {
       // same-fingerprint pool entry is only an optimization and cannot replace
       // that explicit continuity target.
       const threadToResume = req.runtimeSessionId ?? (reusing ? session.threadId : resumeThreadId);
+      const forkHeldThreadForModel = Boolean(reusing && modelChanged && !explicitResume && threadToResume);
       if (threadToResume) {
         let releaseResume: (() => void) | undefined;
         try {
           releaseResume = await prepareCodexThreadResume(session, threadToResume, req.signal);
           const response = await session.conn.request(
-            "thread/resume",
+            forkHeldThreadForModel ? "thread/fork" : "thread/resume",
             {
               threadId: threadToResume,
               ...commonThreadParams,
-              // Every explicit model selection must survive stored-thread
-              // recovery too, including a new pool entry after a model switch.
-              // The acknowledgement below still verifies the effective model.
+              // Both resume and fork acknowledge the effective model. A fork
+              // must retain the predecessor's completed history, not seed a
+              // fresh thread from a partial UI transcript.
               ...(req.model ? { model: req.model } : {}),
             },
             { timeoutMs: 120_000, signal: req.signal },
           );
           const modelAcknowledgement = await acknowledgeCodexThreadModel({
             request: session.conn.request.bind(session.conn), response,
-            requestedModel: req.model, expectedThreadId: threadToResume,
+            requestedModel: req.model,
+            ...(forkHeldThreadForModel ? {} : { expectedThreadId: threadToResume }),
             signal: req.signal,
           });
+          if (forkHeldThreadForModel && response.thread.id === threadToResume) {
+            throw new CodexModelSelectionError("resolution_unverified", "Codex model fork returned the previous thread instead of a new one.");
+          }
           workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer, threadToResume);
-          session.threadId = threadToResume;
+          session.threadId = forkHeldThreadForModel ? response.thread.id : threadToResume;
           session.modelAcknowledgement = modelAcknowledgement;
           resumed = true;
         } catch (err) {
@@ -1930,6 +1946,7 @@ export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "codex");
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
@@ -2009,10 +2026,11 @@ export const runCodex: Runner = async (
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
       : [];
-  // Preserve Codex's own settings, plugins, and native tools while adding the
-  // Agentlas MCP bridge. The CLI/runtime owns its native tool policy; browser
-  // mode is an additional capability, not a reason to turn those tools off.
-  const isolatedConfigArgs: string[] = [];
+  // Ordinary turns preserve Codex's own settings and native tools. A
+  // Main-authored isolated MCP grant is different: its exact per-run servers
+  // must not be widened by provider-global config. This path uses one-shot
+  // exec because app-server has no equivalent isolation flag.
+  const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
   const browserOnlyConfigArgs: string[] = [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
@@ -2049,7 +2067,7 @@ export const runCodex: Runner = async (
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const existing = runReq.chatId
+  const existing = !assertScienceRecoveryRequest(runReq, "codex") && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
   const storedSessionId =

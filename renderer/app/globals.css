@@ -11450,10 +11450,12 @@ button[data-toggle-state="on"] {
   bottom: 16px;
   transform: translateX(-50%);
   z-index: 4;
-  display: inline-flex;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
   align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
   border: 1px solid var(--paper-edge);
   border-radius: 999px;
   background: var(--paper);

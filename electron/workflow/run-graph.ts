@@ -53,6 +53,10 @@ import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../stor
 import { hasAutomationGraphTerminalClose } from "../store/graph-terminal-close";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
+import { buildAutomationStrategyProposalDirective } from "../automation-strategy-proposal-envelope";
+import { inspectAutomationStrategyRevisionForRun } from "../store/automation-strategy-revisions";
+import { runAutomationStrategyCycle } from "../automation-strategy-cycle";
+import { getAutomationDefinitionDigest } from "../long-run/automation-provenance";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
 import { graphInputRequirement } from "../../shared/graph-trigger-input";
 import {
@@ -109,6 +113,12 @@ export interface RunGraphOptions {
    * 이전 실행이 외부 상태를 바꿨을 수 있으면 이 옵션도 안전 게이트에서 거절한다.
    */
   fresh?: boolean;
+  /**
+   * The scheduler already owns the full post-run cycle. Direct Graph/Terminal
+   * runs use the default `auto` path so a settled run cannot bypass strategy
+   * reflection merely because it entered through the daemon or SDK.
+   */
+  strategyCycle?: "auto" | "defer";
 }
 
 /** 노드가 바깥 세상에 무엇을 하는가. 선언하지 않으면 시뮬레이션에서 변경으로 간주한다(fail-closed). */
@@ -1524,6 +1534,7 @@ export async function runGraph(
     );
   }
   const graphDigest = graphExecutionDigest(automation, graph);
+  const definitionDigest = getAutomationDefinitionDigest(automation.id);
   const dryRun = opts.dryRun === true;
   // A workflow graph is browser-backed by default so its authenticated session
   // cookies land in the same Agentlas Browser profile that the node uses. The
@@ -2053,10 +2064,43 @@ export async function runGraph(
         edgeCount: graph.edges.length,
         occurrenceId: checkpoint.occurrenceId,
         graphDigest,
+        definitionDigest,
         resumeOfRunId: resumeOfRunId ?? null,
         simulation: dryRun,
       },
     });
+    // A strategy revision is consumed only when this exact run's graph and
+    // current definition still match the durable Main receipt.  Keep this as
+    // a run-event receipt rather than feeding raw model output into execution;
+    // a mismatch is visible and fail-closed without stopping the safe current
+    // graph run.
+    const strategyRevision = inspectAutomationStrategyRevisionForRun({
+      automationId: automation.id,
+      graphDigest,
+      dryRun,
+    });
+    if (strategyRevision.status !== "none") {
+      tryRecordRunEvent({
+        runId,
+        kind: strategyRevision.status === "consumed"
+          ? "automation_strategy_revision_consumed"
+          : "automation_strategy_revision_not_consumed",
+        automationId: automation.id,
+        sourceEventId: `automation-strategy-revision:${runId}:${strategyRevision.revision ?? "none"}`,
+        payload: {
+          status: strategyRevision.status,
+          occurrenceId: checkpoint.occurrenceId,
+          revision: strategyRevision.revision,
+          sourceRunId: strategyRevision.sourceRunId,
+          runGraphDigest: strategyRevision.runGraphDigest,
+          revisionGraphDigest: strategyRevision.revisionGraphDigest,
+          runDefinitionDigest: strategyRevision.runDefinitionDigest,
+          revisionDefinitionDigest: strategyRevision.revisionDefinitionDigest,
+          strategyDigest: strategyRevision.strategyDigest,
+          reason: strategyRevision.reason ?? null,
+        },
+      });
+    }
     if (resumeOfRunId) {
       for (const nodeId of [...completed, ...skipped]) {
         emitNodeState(nodeId, completed.has(nodeId) ? "done" : "skipped", false);
@@ -3575,8 +3619,14 @@ export async function runGraph(
             + " 이 단계는 실제로 무언가를 바꾸는 단계입니다 — 붙어 있는 도구로 직접 수행하세요."
             + " 도구를 쓸 수 없으면 수행했다고 쓰지 말고, 무엇이 없어서 못 했는지 한 줄로 적으세요."
           : "";
+        const strategyProposalDirective = node.type === "agent"
+          && (outByNode.get(node.id) ?? []).length === 0
+          ? `\n\n${buildAutomationStrategyProposalDirective()}`
+          : "";
         const executionPrompt =
-          buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective) + toolProofNudge;
+          buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective)
+          + toolProofNudge
+          + strategyProposalDirective;
         beginNode(node, executionPrompt);
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;
@@ -4456,7 +4506,41 @@ export async function runGraph(
     tokensUsed: runTokensUsed,
     ...(budgetUnmeasured ? { budgetUnmeasured: true as const } : {}),
   };
-  return ok
+  const result = ok
     ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
     : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
+  // Scheduled automation runs defer this work to the scheduler, which has
+  // the authoritative outcome/lease/reconciliation state. Direct Graph runs
+  // (including the daemon and Terminal fallback) must still enter the same
+  // generic strategy loop; otherwise a stored proposal can never be produced
+  // from that path and the next run has no revision to consume.
+  if (!dryRun && opts.strategyCycle !== "defer" && (opts.depth ?? 0) === 0) {
+    try {
+      await runAutomationStrategyCycle({
+        automationId: automation.id,
+        sourceRunId: runId,
+        status: ok ? "ok" : "error",
+        // Direct Graph runs do not perform the scheduler's semantic result
+        // judge. Keep that fact explicit instead of claiming acceptance from
+        // kernel completion alone.
+        outcome: null,
+        reasonCode: ok ? null : "graph_run_error",
+        output: Object.values(outputs).slice(-1)[0] ?? null,
+        // A node's durable failure receipt is authoritative even when the
+        // aggregate Graph error string is rewritten by an adapter. In
+        // particular, MUTATION_UNVERIFIED must block strategy revision just
+        // like the scheduler's reconciliation gate does.
+        effectsUnconfirmed: Object.values(nodeFailures).some((failure) =>
+          failure.code === "MUTATION_UNVERIFIED"),
+        runError: error,
+        runtimeSelection: automation.runtimeSelection ?? null,
+        signal: opts.signal,
+      });
+    } catch (strategyError) {
+      // Strategy evolution is advisory. A settled Graph result must remain
+      // the result even if its optional reflection handoff cannot settle.
+      console.error("[workflow] strategy cycle handoff failed:", strategyError);
+    }
+  }
+  return result;
 }

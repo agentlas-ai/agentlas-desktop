@@ -30,6 +30,16 @@ declare module "@modelcontextprotocol/sdk/client/stdio.js" {
   export function getDefaultEnvironment(): Record<string, string>;
 }
 
+declare module "@modelcontextprotocol/sdk/shared/stdio.js" {
+  import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+  export class ReadBuffer {
+    append(chunk: Buffer): void;
+    readMessage(): JSONRPCMessage | null;
+    clear(): void;
+  }
+  export function serializeMessage(message: JSONRPCMessage): string;
+}
+
 declare module "@modelcontextprotocol/sdk/client/sse.js" {
   export class SSEClientTransport {
     constructor(url: URL, opts?: {

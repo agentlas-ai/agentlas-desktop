@@ -1,4 +1,11 @@
-import { prepareMcpProxyLaunch, activateMcpProxyLaunch, revokeMcpProxyLaunch } from "./proxy-session";
+import {
+  prepareMcpProxyLaunch,
+  activateMcpProxyLaunch,
+  revokeMcpProxyLaunch,
+  deactivateMcpProxyLaunch,
+  cancelMcpProxyLaunchPreparation,
+  isPersistentMcpProxyLaunch,
+} from "./proxy-session";
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
 // - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
 // - Codex CLI: `-c mcp_servers.<name>...` config overrides (시크릿 값 없는 이름/경로만 전달)
@@ -195,6 +202,8 @@ export interface McpConfigBuildOptions {
     unattended?: boolean;
     /** 그래프 노드의 도구 중개 계획 파일(workflow/tool-broker-runtime.ts). */
     planPath?: string;
+    /** Main-owned Antigravity browser scope; never supplied by renderer JSON. */
+    residentKey?: string;
   };
 }
 
@@ -212,6 +221,7 @@ function mcpProxySpec(
   opts: McpConfigBuildOptions | undefined,
   catalogId: string | null,
   ownedHandles: string[],
+  residentHandles: string[],
   planReadAuthority?: "agentlas-browser" | "cua-driver",
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const gate = opts?.toolGate;
@@ -225,7 +235,8 @@ function mcpProxySpec(
   }
   const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
     cwd: gate.cwd === undefined ? (opts?.workingFolder ?? process.cwd()) : gate.cwd, catalogId, planReadAuthority });
-  ownedHandles.push(handle);
+  if (isPersistentMcpProxyLaunch(handle)) residentHandles.push(handle);
+  else ownedHandles.push(handle);
   return {
     command: process.execPath,
     args: [childPath],
@@ -634,6 +645,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let workspacePreviewCapabilityCleanup: (() => void) | undefined;
   const proxyHandles: string[] = [];
+  const residentProxyHandles: string[] = [];
+  const activatedResidentProxyHandles = new Set<string>();
   const browserAuthorityCleanup: Array<() => void> = [];
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
@@ -642,6 +655,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     released = true;
     const ownsFile = releasePrepared?.() === true;
     for (const handle of proxyHandles) revokeMcpProxyLaunch(handle);
+    for (const handle of residentProxyHandles) {
+      // A failed overlapping build can have prepared a resident handle but
+      // never activated it.  Only the config that committed the binding may
+      // deactivate the currently active resident owner.
+      if (activatedResidentProxyHandles.has(handle)) deactivateMcpProxyLaunch(handle);
+      else cancelMcpProxyLaunchPreparation(handle);
+    }
     for (const revoke of browserAuthorityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
       if (ownsFile) {
@@ -857,7 +877,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // the proxy observes it without introducing a mutable target wrapper.
         const needsTimeReceipt = opts?.toolGate?.runtime === "antigravity" && isAuthenticSystemTimeMcpLaunch(command, args);
         const proxied = isComputerUse || opts?.toolGate?.planMode || needsTimeReceipt
-          ? mcpProxySpec(key, opts, s.catalogId, proxyHandles, isComputerUse ? "cua-driver" : undefined) : null;
+          ? mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles, isComputerUse ? "cua-driver" : undefined) : null;
         if (isComputerUse && opts?.toolGate && !proxied) {
           throw new Error("computer-use-tool-gate-unavailable");
         }
@@ -899,7 +919,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           env: wrapperEnv,
         };
         consentTransport = actual;
-        const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
+        const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -1065,7 +1085,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   for (const binding of preparedMcpBindings(configPath)) {
     const entry = mcpServers[binding.configKey] as { env?: Record<string, string> };
     const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
-    if (handle) activateMcpProxyLaunch(handle, binding);
+    if (handle) {
+      activateMcpProxyLaunch(handle, binding);
+      if (isPersistentMcpProxyLaunch(handle)) activatedResidentProxyHandles.add(handle);
+    }
   }
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, cleanup,
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),

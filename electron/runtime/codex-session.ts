@@ -612,6 +612,8 @@ function localLaunchState(input: {
 export function codexPoolKey(input: {
   chatId: string;
   fingerprint: string;
+  sessionOwnerId?: string | null;
+  isolateOwner?: boolean;
   cwd: string;
   bin: string;
   mcpConfigPath?: string;
@@ -630,6 +632,7 @@ export function codexPoolKey(input: {
     .createHash("sha256")
     .update("codex-pool-v2\0")
     .update(input.chatId).update("\0")
+    .update(JSON.stringify([input.sessionOwnerId ?? null, input.isolateOwner ?? false])).update("\0")
     .update(input.fingerprint).update("\0")
     .update(input.cwd).update("\0")
     .update(input.bin).update("\0")

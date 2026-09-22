@@ -9,6 +9,7 @@ import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, AutomationRunRecord } from "@/lib/types";
+import { enabledScheduleWithoutNextRun } from "@/lib/automation-schedule-state";
 import { IconTrash } from "@/components/Icon";
 
 type LastRun = { ranAt: string; status: AutomationRunRecord["status"] } | null;
@@ -30,6 +31,7 @@ function lastRunLabel(run: LastRun, ko: boolean): string {
 
 function nextRunLabel(a: Automation, ko: boolean): string {
   if (!a.enabled) return ko ? "정지됨" : "paused";
+  if (enabledScheduleWithoutNextRun(a)) return ko ? "다음 예약 없음 · 실행 내역 확인" : "No next run · check history";
   if (!a.nextRunAt) return "—";
   return new Date(a.nextRunAt).toLocaleString(ko ? "ko-KR" : "en-US", {
     month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",

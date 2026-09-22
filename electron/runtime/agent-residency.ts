@@ -24,11 +24,11 @@ import type {
   AgentProcessState,
 } from "../../shared/types";
 
-/** One 은 리퍼 면제다(오너 비전: "One 제외 마지막 메시지 후 12시간 무입력이면 자동 종료"). */
+/** Stable One identity; logical ownership is independent of warm-session lifetime. */
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 export const ONE_AGENT_ID = BUILTIN_ONE_AGENT_ID;
 
-/** 마지막 활동 후 이 시간이 지나면 상주를 거둔다(One 제외). 데몬 스위퍼와 같은 값. */
+/** 마지막 활동 후 이 시간이 지나면 유휴 상주 자원을 거둔다. Goal 원장은 유지한다. */
 export const AGENT_RESIDENCY_IDLE_REAP_MS = 12 * 60 * 60_000;
 
 /** 어디서 온 에이전트인가 — 로컬 설치 / 오너 Agent Cloud / 공개 Hub. */
@@ -42,6 +42,8 @@ export interface AgentResidencyChange {
   /** Resolved firm/org node id; falls back to agentId for solo runs. */
   nodeId: string | null;
   chatId: string | null;
+  /** Main-owned Work project partition. Null means this entry is not Work-project scoped. */
+  projectId: string | null;
   runtimeKind: string;
   source: AgentResidencySource;
   holdsSession: true;
@@ -53,11 +55,13 @@ export interface AgentResidencyEntry {
   agentId: string | null;
   nodeId: string | null;
   chatId: string | null;
+  /** Main-owned Work project partition. Never used as the conversation/pool key. */
+  projectId: string | null;
   runtimeKind: string;
   source: AgentResidencySource;
   /** 마지막 활동(획득/반납/턴) 시각 — 12h 리퍼의 기준 시계. */
   lastActivityAt: number;
-  /** One 관련 상주는 리퍼 면제(process-pool.ts 의 reaperExempt 와 같은 이름·같은 의미). */
+  /** Explicit host exemption only; One identity alone never exempts idle resources. */
   reaperExempt: boolean;
   /** 지금 턴이 쓰는 중인가. 사용 중인 것은 리퍼도 LRU 도 건드리지 않는다. */
   inUse: boolean;
@@ -88,7 +92,7 @@ function ensureShutdownHook(): void {
      * 들고 있고, 첫 등록과 함께 돈다(데몬은 자기 주기에서 같은 함수를 한 번 더 부른다).
      */
     sweepTimer = setInterval(() => {
-      try { sweepIdleAgentResidency(); } catch { /* 다음 주기가 다시 시도한다 */ }
+      try { sweepIdleAgentResidency(); enforceAgentResidencyBudget(); } catch { /* 다음 주기가 다시 시도한다 */ }
     }, RESIDENCY_SWEEP_INTERVAL_MS);
     sweepTimer.unref?.();
   }
@@ -108,6 +112,7 @@ let budgetProvider: (() => number) | null = null;
 /** 테스트·데몬이 예산 출처를 갈아끼운다(기본은 스웜 슬라이더). */
 export function setAgentResidencyBudgetProvider(provider: (() => number) | null): void {
   budgetProvider = provider;
+  enforceAgentResidencyBudget();
 }
 
 /**
@@ -135,6 +140,27 @@ export function agentResidencyBudget(): number {
   return 4;
 }
 
+/** All provider pools share one resident-seat budget. Evict only the oldest
+ * idle resource; a checked-out turn is owned by the run-slot semaphore and
+ * must finish before this registry may reclaim it. `headroom` is a best-effort
+ * pre-open reservation, never authority to interrupt a busy session. */
+export function enforceAgentResidencyBudget(headroom = 0): number {
+  const needed = Math.max(0, Math.floor(headroom));
+  const limit = agentResidencyBudget();
+  let holding = [...entries.values()].filter(entry => entry.holdsSession).length;
+  let evicted = 0;
+  while (holding + needed > limit) {
+    const oldest = [...entries.values()]
+      .filter(entry => entry.holdsSession && !entry.inUse)
+      .sort((a, b) => a.lastActivityAt - b.lastActivityAt || a.key.localeCompare(b.key))[0];
+    if (!oldest) break;
+    dropAgentResidency(oldest.key, { close: true, reason: "evicted" });
+    holding -= 1;
+    evicted += 1;
+  }
+  return evicted;
+}
+
 /* ──────────────────────────── 출처 판정 ──────────────────────────── */
 
 let sourceResolver: ((agentId: string) => AgentResidencySource | null) | null = null;
@@ -158,6 +184,7 @@ function emitAgentResidencyChange(
     agentId: entry.agentId,
     nodeId: entry.nodeId,
     chatId: entry.chatId,
+    projectId: entry.projectId,
     runtimeKind: entry.runtimeKind,
     source: entry.source,
     holdsSession: true,
@@ -204,9 +231,9 @@ export function resolveAgentResidencySource(agentId: string | null | undefined):
   return source;
 }
 
-/** One 소유 세션인가 — 면제 표식의 유일한 판정식. */
-export function isResidencyExemptAgent(agentId: string | null | undefined): boolean {
-  return (agentId ?? "") === ONE_AGENT_ID;
+/** Agent identity alone does not exempt an idle provider session from the 12h reaper. */
+export function isResidencyExemptAgent(_agentId: string | null | undefined): boolean {
+  return false;
 }
 
 /* ──────────────────────────── 등록/갱신 ──────────────────────────── */
@@ -216,10 +243,12 @@ export interface RegisterAgentResidencyInput {
   agentId?: string | null;
   nodeId?: string | null;
   chatId?: string | null;
+  /** Main-owned Work project partition; omitted for One/legacy non-Work activity. */
+  projectId?: string | null;
   runtimeKind: string;
   source?: AgentResidencySource;
   holdsSession?: boolean;
-  /** 미지정이면 agentId 로 판정한다(One 이면 면제). */
+  /** Explicit exemption only; omitted means the normal 12h idle policy. */
   reaperExempt?: boolean;
   inUse?: boolean;
   close?: () => void;
@@ -237,6 +266,7 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
     agentId,
     nodeId: input.nodeId ?? agentId,
     chatId: input.chatId ?? null,
+    projectId: input.projectId ?? existing?.projectId ?? null,
     runtimeKind: input.runtimeKind,
     source: input.source ?? resolveAgentResidencySource(agentId),
     lastActivityAt: now,
@@ -249,6 +279,7 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
   if (entry.holdsSession && !existing?.holdsSession) {
     emitAgentResidencyChange(entry, "running", "spawned");
   }
+  if (entry.holdsSession) enforceAgentResidencyBudget();
   return entry;
 }
 
@@ -279,6 +310,7 @@ export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?
       entry.inUse ? "turn-started" : "turn-complete",
     );
   }
+  if (entry.holdsSession) enforceAgentResidencyBudget();
 }
 
 /** 등록을 지운다. `close: true` 면 붙든 자원도 놓는다. */
@@ -300,7 +332,7 @@ export function dropAgentResidency(
 /* ──────────────────────────── 리퍼/관측 ──────────────────────────── */
 
 /**
- * 12h 무입력 스위퍼. 사용 중(inUse)과 면제(reaperExempt=One)는 건드리지 않는다.
+ * 12h 무입력 스위퍼. 사용 중(inUse)과 명시적 면제만 건드리지 않는다.
  * 붙든 항목은 close 를 부르고, 활동 기록은 그냥 지운다(들고 있는 자원이 없으므로).
  * 반환: 이번 패스에 거둔 수.
  */
@@ -330,6 +362,7 @@ export interface AgentResidencySnapshot {
     agentId: string | null;
     nodeId: string | null;
     chatId: string | null;
+    projectId: string | null;
     runtimeKind: string;
     source: AgentResidencySource;
     holdsSession: boolean;
@@ -354,6 +387,7 @@ export function agentResidencySnapshot(now = Date.now()): AgentResidencySnapshot
         agentId: e.agentId,
         nodeId: e.nodeId,
         chatId: e.chatId,
+        projectId: e.projectId,
         runtimeKind: e.runtimeKind,
         source: e.source,
         holdsSession: e.holdsSession,

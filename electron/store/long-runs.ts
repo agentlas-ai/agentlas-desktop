@@ -4,10 +4,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mcpEffectArgumentsDigest, mcpEffectOutputDigest } from "../mcp-tools/effect-receipts";
 import {
   LONG_RUN_ACTIVE_STATUSES,
+  GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
   LONG_RUN_OPEN_TASK_STATES,
   LONG_RUN_TERMINAL_STATUSES,
   assertLongRunTransition,
   isLongRunPauseReason,
+  goalResumeRecoveryBlockerCode,
   isLongRunStatus,
   normalizeLongRunCriteria,
   type ContinuityCapsule,
@@ -358,6 +360,20 @@ export interface LongRunAttemptAcknowledgment {
   safeEpoch: LongRunAttemptSafeEpoch | null;
 }
 
+/** A read-only, exact ledger view to show before an explicit human attestation.
+ * This is not evidence that the external effects did or did not occur. */
+export interface LongRunAttemptReview {
+  runId: string;
+  version: number;
+  attemptIds: string[];
+  attemptSetDigest: string;
+  attempts: Array<{ id: string; invocationRunId: string | null; startedAt: string;
+    state: LongRunAttemptState; sideEffectState: "none" | "committed" | "uncertain" }>;
+}
+
+export type LongRunAttemptReviewConfirmation = Pick<LongRunAttemptReview, "runId" | "version" | "attemptIds" | "attemptSetDigest">;
+export const MAX_GOAL_RESUME_REVIEW_ATTEMPTS = 20;
+
 interface UnsettledLongRunAttempt {
   id: string;
   state: LongRunAttemptState;
@@ -400,11 +416,26 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
       attemptIds?: unknown;
       attemptReceipts?: unknown;
       safeEpoch?: { schemaVersion?: unknown; throughEventSeq?: unknown; attemptSetDigest?: unknown };
+      attestation?: { schemaVersion?: unknown; reviewedAttemptIds?: unknown; reviewedAttemptSetDigest?: unknown;
+        statement?: unknown; externalOutcomeProof?: unknown };
     };
     if (!Array.isArray(payload.attemptIds) || payload.attemptIds.some((id) => typeof id !== "string" || !id)) return null;
     const attemptIds = [...payload.attemptIds].sort();
     if (new Set(attemptIds).size !== attemptIds.length || JSON.stringify(attemptIds) !== JSON.stringify(payload.attemptIds)) return null;
     if (!Array.isArray(payload.attemptReceipts) || payload.attemptReceipts.length !== attemptIds.length) return null;
+    // Older Resume handlers silently wrote otherwise-valid safe epochs. Keep
+    // their audit records, but do not let those legacy events authorize new
+    // automatic work without the explicit, exact user-review attestation.
+    const attestation = payload.attestation;
+    if (attestation?.schemaVersion !== "agentlas.uncertain-attempt-user-attestation.v1"
+      || attestation.statement !== "user_says_external_outcomes_reviewed_before_new_work"
+      || attestation.externalOutcomeProof !== "not_observed_by_host"
+      || !Array.isArray(attestation.reviewedAttemptIds)
+      || attestation.reviewedAttemptIds.length === 0
+      || attestation.reviewedAttemptIds.some((id) => typeof id !== "string" || !attemptIds.includes(id))
+      || new Set(attestation.reviewedAttemptIds).size !== attestation.reviewedAttemptIds.length
+      || typeof attestation.reviewedAttemptSetDigest !== "string"
+      || !/^sha256:[a-f0-9]{64}$/.test(attestation.reviewedAttemptSetDigest)) return null;
     const receipts = payload.attemptReceipts as LongRunAcknowledgedAttemptReceipt[];
     if (receipts.some((receipt) => !receipt || typeof receipt !== "object"
       || typeof receipt.attemptId !== "string" || !attemptIds.includes(receipt.attemptId)
@@ -470,11 +501,52 @@ export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt
     }));
 }
 
-export function acknowledgeUncertainLongRunAttempts(runId: string): LongRunAttemptAcknowledgment {
+export function getLongRunAttemptReview(runId: string): LongRunAttemptReview {
+  const run = getLongRun(runId);
+  if (!run) throw new Error(`long_run_not_found:${runId}`);
+  const unresolved = unsettledLongRunAttempts(runId);
+  const receipts = unresolved.map((attempt) => getDb().prepare(
+    `SELECT id, invocation_run_id, started_at, state, side_effect_state, updated_at, completed_at
+     FROM long_run_worker_attempts WHERE run_id = ? AND id = ?`,
+  ).get(runId, attempt.id) as { id: string; invocation_run_id: string | null; started_at: string;
+    state: LongRunAttemptState; side_effect_state: "none" | "committed" | "uncertain";
+    updated_at: string; completed_at: string | null } | undefined);
+  if (receipts.some((receipt) => !receipt)) throw new Error("goal_resume_uncertain_review_changed");
+  const attempts = receipts.map((receipt) => ({
+    id: receipt!.id, invocationRunId: receipt!.invocation_run_id, startedAt: receipt!.started_at,
+    state: receipt!.state, sideEffectState: receipt!.side_effect_state,
+  }));
+  const attemptIds = attempts.map((attempt) => attempt.id);
+  const attemptSetDigest = `sha256:${createHash("sha256").update(JSON.stringify({
+    runId, version: run.version, lastEventSeq: run.lastEventSeq, attemptIds, receipts,
+  })).digest("hex")}`;
+  return { runId, version: run.version, attemptIds, attemptSetDigest, attempts };
+}
+
+/** Never infer a human review from a button press or message. An exact Main-owned
+ * confirmation is required and checked again in the same transaction that
+ * writes the attestation. The event records a user statement, not provider proof. */
+export function acknowledgeUncertainLongRunAttempts(
+  runId: string, confirmation?: LongRunAttemptReviewConfirmation,
+): LongRunAttemptAcknowledgment {
   const db = getDb();
   let result: LongRunAttemptAcknowledgment | null = null;
   let changed = false;
   db.transaction(() => {
+    const review = getLongRunAttemptReview(runId);
+    if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) throw new Error("goal_resume_uncertain_review_too_large");
+    if (review.attempts.some((attempt) => attempt.state === "running")) throw new Error("auto_goal_resume_attempt_unsettled");
+    if (review.attempts.some((attempt) => !attempt.invocationRunId)) throw new Error("goal_resume_uncertain_review_unverifiable");
+    if (review.attemptIds.length) {
+      if (!confirmation) throw new Error("goal_resume_uncertain_review_required");
+      if (confirmation.runId !== runId || confirmation.version !== review.version
+        || confirmation.attemptSetDigest !== review.attemptSetDigest
+        || JSON.stringify(confirmation.attemptIds) !== JSON.stringify(review.attemptIds)) {
+        throw new Error("goal_resume_uncertain_review_changed");
+      }
+    } else if (confirmation) {
+      throw new Error("goal_resume_uncertain_review_changed");
+    }
     const receipts = db.prepare(
       `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
          COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
@@ -499,18 +571,22 @@ export function acknowledgeUncertainLongRunAttempts(runId: string): LongRunAttem
    * 옛 판번호로 그다음 재개를 시도해 long_run_resume_version_conflict 로 두 번 다 거부됐다. 그래서 인지 뒤의
    * 판번호를 함께 돌려주고, 호출부는 그 값으로 이어간다 — 사람이 확인한 판은 위에서 이미 대조했다.
    */
-    if (attemptIds.length) {
+    if (review.attemptIds.length) {
       const run = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?").get(runId) as { last_event_seq: number } | undefined;
       if (!run) throw new Error(`long_run_not_found:${runId}`);
       safeEpoch = { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1", throughEventSeq: run.last_event_seq,
         attemptSetDigest: longRunAttemptSetDigest(runId, run.last_event_seq, attemptReceipts) };
       appendEventInDb({ runId, kind: "run.user_control", actorKind: "user",
-        payload: { action: "acknowledge_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch }, at: new Date().toISOString() });
+        payload: { action: "acknowledge_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch,
+          attestation: { schemaVersion: "agentlas.uncertain-attempt-user-attestation.v1",
+            reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
+            statement: "user_says_external_outcomes_reviewed_before_new_work",
+            externalOutcomeProof: "not_observed_by_host" } }, at: new Date().toISOString() });
       changed = true;
     }
     const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
     if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
-    result = { attemptIds, version, safeEpoch };
+    result = { attemptIds: review.attemptIds, version, safeEpoch };
   })();
   if (changed) emitDesktopStoreChange({ entity: "long-run", id: runId });
   return result!;
@@ -904,14 +980,69 @@ export function transitionLongRun(input: {
   return next;
 }
 
+/** Exceptional startup-only terminalization of a host pause after an
+ * indeterminate wait dispatch. It does not emit fictitious queued/running
+ * states or authorize any successor attempt. A user pause/Stop cannot match. */
+export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: number,
+  reason: "goal_wait_claimed_dispatch_uncertain" | "goal_wait_claimed_binding_changed"): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(runId);
+    if (!current || current.surface === "science" || current.status !== "paused"
+      || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
+      || current.version !== expectedVersion) throw new Error("goal_wait_claimed_recovery_state_changed");
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status='paused' AND version=? AND pause_reason IN ('app_closed','crash_recovery')`)
+      .run(reason, now, runId, expectedVersion);
+    if (changed.changes !== 1) throw new Error("goal_wait_claimed_recovery_state_changed");
+    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
+      payload: { from: "paused", to: "blocked", reason }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  const blocked = getLongRun(runId);
+  if (!blocked) throw new Error("goal_wait_claimed_recovery_readback_failed");
+  return blocked;
+}
+
+/** Startup-only CAS for a host pause whose prior controller/effect boundary
+ * cannot be proven. This intentionally does not use transitionLongRun: an
+ * ordinary user pause or blocked run must never be converted by this repair
+ * path, and no successor attempt is authorized by the write. */
+export function blockHostPausedForEffectBoundaryUncertainty(runId: string, expectedVersion: number): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(runId);
+    if (!current || current.surface === "science" || current.status !== "paused"
+      || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
+      || current.version !== expectedVersion) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status='paused' AND version=?
+      AND pause_reason IN ('app_closed','crash_recovery')`)
+      .run(GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, now, runId, expectedVersion);
+    if (changed.changes !== 1) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
+    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
+      payload: { from: "paused", to: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
+        reviewRequired: true, startupOnly: true }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  const blocked = getLongRun(runId);
+  if (!blocked) throw new Error("goal_resume_effect_boundary_uncertain_readback_failed");
+  return blocked;
+}
+
 export function resumeLongRunByUser(runId: string, appInstanceId: string, expectedVersion: number): LongRunRecord {
   const current = getLongRun(runId);
   if (!current) throw new Error(`long_run_not_found:${runId}`);
   if (current.surface === "science") throw new Error("science_projection_read_only");
   if (current.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+  const recoveryBlocker = goalResumeRecoveryBlockerCode(current.blockedReason);
+  if (recoveryBlocker) throw new Error(recoveryBlocker);
   if (!["paused", "blocked"].includes(current.status)) {
     throw new Error(`long_run_resume_not_allowed:${current.status}`);
   }
+  if (unsettledLongRunAttemptCount(runId)) throw new Error("auto_goal_resume_attempt_unsettled");
   return transitionLongRun({
     runId,
     to: "queued",
@@ -1838,10 +1969,10 @@ export function settleVerifiedLongRun(runId: string): "completed" | "cycle_compl
         .get(runId) as { n: number };
       appendEventInDb({ runId, kind: "run.ongoing_cycle_verified", actorKind: "host", at: new Date().toISOString(),
         payload: { receiptCursor: cursor.n, goalRevision: getLongRunGoalRevisionBinding(runId)?.revision } });
-      // Independent evidence, not different wording, proves progress. A new
-      // episode must not inherit the preceding verified episode's stall streak.
-      // Consumed cycles/cost and the guard for unverified repetition stay intact.
-      getDb().prepare("UPDATE long_runs SET last_progress_key = NULL, stall_streak = 0 WHERE id = ?").run(runId);
+      // Legacy Work episodes reset here. One records exactly once after its
+      // settled checkpoint; keep the previous fingerprint/streak until that
+      // evidence comparison occurs. Consumed cycles and cost stay intact.
+      if (run.surface !== "one") getDb().prepare("UPDATE long_runs SET last_progress_key = NULL, stall_streak = 0 WHERE id = ?").run(runId);
       transitionLongRun({ runId, to: "running", actorKind: "host", reason: "ongoing-cycle-verified" });
       return "cycle_completed";
     }
@@ -1882,6 +2013,8 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
   }
   const monetaryRefusal = longRunMonetaryRefusal(run);
   if (monetaryRefusal) return decision(false, monetaryRefusal);
+  if (run.surface === "one" && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing"
+    && run.stallStreak >= run.stallWindow) return decision(false, "stall_replan_required");
   if (openTaskCount <= 0) return decision(false, "no_open_tasks");
   return decision(true, "open_tasks_remain");
 }
@@ -1895,7 +2028,7 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
     const run = getLongRunByGoalId(goalId);
     if (!run || run.surface === "science") throw new Error("long_run_usage_scope_invalid");
     const invocation = (usage.scopeAnchorId
-      ? db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started','verifier_execution_started')")
+      ? db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started','verifier_execution_started','goal_wait_replan_started')")
         .get(usage.invocationRunId, usage.scopeAnchorId)
       : db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
         .get(usage.invocationRunId)) as { chat_id: string | null; kind: string; payload_json: string } | undefined;
@@ -1911,6 +2044,19 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
         .get(usage.attemptId,run.id,usage.invocationRunId);
       if (!verifier || identity.goalId !== goalId || identity.attemptId !== usage.attemptId) {
         throw new Error("long_run_usage_verifier_mismatch");
+      }
+    }
+    if (invocation?.kind === "goal_wait_replan_started") {
+      const identity = JSON.parse(invocation.payload_json);
+      const waitRow = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' AND json_extract(payload_json,'$.subscription.waitId')=? ORDER BY seq ASC LIMIT 1")
+        .get(run.id, identity.waitId) as { payload_json: string } | undefined;
+      const wait = waitRow ? JSON.parse(waitRow.payload_json).subscription : null;
+      if (identity.schemaVersion !== "agentlas.goal-wait-replan-accounting.v1"
+        || identity.goalId !== goalId
+        || identity.checkpointId !== wait?.checkpointId || wait?.goalId !== goalId
+        || wait?.goalRevision !== identity.goalRevision || wait?.chatId !== run.rootChatId
+        || wait?.recoveryMode !== "stall_replan" || usage.attemptId) {
+        throw new Error("long_run_usage_goal_wait_mismatch");
       }
     }
     // Several specialist attempts may share the controller invocation ID.
@@ -1944,6 +2090,10 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
 export function recordLongRunCycle(input: {
   goalId: string;
   progressKey?: string | null;
+  /** Main-owned evidence classification; absent for finite and automation callers. */
+  progressState?: "unknown" | "evidence_observed";
+  /** Exact settled checkpoint, used only by the host verifier for one episode. */
+  verifiedCheckpointId?: string;
   outcome?: string | null;
   /** Legacy callers remain unknown unless accompanied by a real billing reference. */
   costUsd?: number;
@@ -1960,20 +2110,28 @@ export function recordLongRunCycle(input: {
       throw new Error("long_run_usage_cost_invalid");
     }
     if (input.usage) recordLongRunUsage(input.goalId, input.usage);
-    const sourceEventId = usage ? `cycle:${usage.sourceId}` : undefined;
+    if (input.verifiedCheckpointId && usage) throw new Error("long_run_cycle_source_ambiguous");
+    const sourceEventId = usage ? `cycle:${usage.sourceId}`
+      : input.verifiedCheckpointId ? `cycle:checkpoint:${input.verifiedCheckpointId}` : undefined;
     if (sourceEventId) {
       const prior = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")
         .get(run.id, sourceEventId) as { payload_json: string } | undefined;
       if (prior) {
-        if (JSON.parse(prior.payload_json).usage?.digest !== usage!.digest) throw new Error("long_run_usage_source_conflict");
+        if (usage && JSON.parse(prior.payload_json).usage?.digest !== usage.digest) throw new Error("long_run_usage_source_conflict");
         return;
       }
     }
     if (LONG_RUN_TERMINAL_STATUSES.has(run.status) || !["queued", "running"].includes(run.status) || !goalRevisionIsCurrent(run)) return;
     const now = new Date().toISOString();
-    const sameProgress = Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
+    // Unknown host evidence is never a fresh observation. Keep the last
+    // observed fingerprint and charge the no-progress guard for this cycle.
+    const sameProgress = input.progressState === "unknown"
+      || Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
     const stallStreak = sameProgress ? run.stallStreak + 1 : 0;
-    const shouldBlock = stallStreak >= run.stallWindow;
+    const replanRequired = stallStreak >= run.stallWindow && run.surface === "one"
+      && Boolean(input.verifiedCheckpointId && input.progressState)
+      && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing";
+    const shouldBlock = stallStreak >= run.stallWindow && !replanRequired;
     db.prepare(
       `UPDATE long_runs
        SET cycle_count = cycle_count + 1,
@@ -1982,11 +2140,13 @@ export function recordLongRunCycle(input: {
            blocked_reason = CASE WHEN ? THEN 'stall_window_exhausted' ELSE blocked_reason END,
            updated_at = ?, version = version + 1
        WHERE id = ?`,
-    ).run(input.progressKey ?? null, stallStreak, shouldBlock ? 1 : 0, shouldBlock ? 1 : 0, now, run.id);
+    ).run(input.progressState === "unknown" ? null : input.progressKey ?? null,
+      stallStreak, shouldBlock ? 1 : 0, shouldBlock ? 1 : 0, now, run.id);
     appendEventInDb({
       runId: run.id, kind: "run.cycle_recorded", actorKind: "host", sourceEventId,
-      payload: { progressKey: input.progressKey ?? null, outcome: input.outcome?.slice(0, 240) ?? null,
-        stallStreak, blocked: shouldBlock, usage,
+      payload: { progressKey: input.progressKey ?? null, ...(input.progressState ? { progressState: input.progressState } : {}),
+        outcome: input.outcome?.slice(0, 240) ?? null,
+        stallStreak, blocked: shouldBlock, replanRequired, usage,
         ...(usage ? { invocationRunId: usage.invocationRunId, attemptId: usage.attemptId } : {}) },
       at: now,
     });

@@ -10,6 +10,7 @@ import {
   listLongRunTasks,
   longRunContinueDecision,
   recordLongRunCycle,
+  recordLongRunUsage,
   requestLongRunVerification,
   transitionLongRun,
   tryCompleteVerifiedLongRun,
@@ -215,13 +216,28 @@ export async function recordGoalLedgerCycle(input: {
   goalId: string;
   usage?: LongRunUsageInput;
   progressKey?: string | null;
+  /** Legacy finite path only; ignored when host receipts own progress. */
+  progressText?: string;
+  /** Only the direct One invocation path may request host evidence projection. */
+  progressAuthority?: "one-host-receipts";
   outcome?: string | null;
   projectDir?: string | null;
 }): Promise<GoalLedgerDecision | null> {
   try {
+    const run = getLongRunByGoalId(input.goalId);
+    const ongoingOne = input.progressAuthority === "one-host-receipts"
+      && run?.surface === "one" && getChatGoalRevision(input.goalId)?.lifecycle === "ongoing";
+    if (ongoingOne) {
+      // This executes inside an unfinished invocation, possibly once per
+      // model pass. The current episode has no settled verification receipt
+      // yet. Charge usage now, but count progress exactly once in the verifier
+      // after its checkpoint is durable.
+      if (input.usage) recordLongRunUsage(input.goalId, input.usage);
+      return decisionForGoal(input.goalId);
+    }
     const result = recordLongRunCycle({
       goalId: input.goalId,
-      progressKey: input.progressKey,
+      progressKey: input.progressKey ?? (input.progressText === undefined ? null : goalProgressKeyForText(input.progressText)),
       outcome: input.outcome,
       usage: input.usage,
     });

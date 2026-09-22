@@ -17,6 +17,7 @@ import {
   getLongRunGoalRevisionBinding,
   listLongRunTasks,
   recordLongRunVerification,
+  recordLongRunCycle,
   requestLongRunVerification,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
@@ -31,12 +32,23 @@ import {
   type GoalVerificationDisposition,
   type GoalVerificationPrerequisiteCode,
   type GoalVerificationRecoveryClass,
+  type LongRunTaskCheckpoint,
 } from "../../shared/long-run-checkpoint";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
+import { recordOngoingEpisodeStrategy } from "./plan";
+import {
+  interruptGoalStrategyReflections,
+  recordGoalStrategyReflectionOutcome,
+  dispatchGoalStrategyAutomation,
+  reflectGoalStrategyProposal,
+  requestGoalStrategyReflection,
+} from "./goal-strategy-reflection";
+import { getChatGoalRevision } from "../store/chat-goals";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
 import { registerOngoingGoalCycle } from "./wait-subscriptions";
+import { observeOngoingOneGoalProgress } from "./goal-progress";
 
 const controllers = new Map<string, AbortController>();
 let accepting = true;
@@ -48,6 +60,49 @@ export interface GoalVerificationResult {
   completed: boolean;
   disposition: GoalVerificationDisposition;
   checkpointId: string | null;
+}
+
+/** The verifier has closed every task in this episode. An ongoing Goal has no
+ * open task until its next timer wakes; that inter-episode gap is not a reason
+ * to block it. Keep the cycle receipt and wait registration atomic, while all
+ * other continue refusals (stall, budget, pause, revision) remain stops. */
+export function finishVerifiedOngoingOneCycle(input: {
+  goalId: string;
+  invocationRunId: string;
+  checkpoint: LongRunTaskCheckpoint;
+  hasTransientAttachments?: boolean;
+  now: number;
+}): { blocked: boolean; checkpointId: string } {
+  return getDb().transaction(() => {
+    const run = getLongRunByGoalId(input.goalId);
+    const revision = getChatGoalRevision(input.goalId);
+    const checkpoint = latestTaskCheckpoint(input.goalId);
+    if (!run || run.surface !== "one" || run.status !== "running"
+      || !revision || revision.lifecycle !== "ongoing"
+      || getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision
+      || checkpoint?.checkpointId !== input.checkpoint.checkpointId
+      || checkpoint.disposition !== "cycle_completed"
+      || checkpoint.goalRevision !== revision.revision
+      || checkpoint.invocationRunId !== input.invocationRunId
+      || checkpoint.sideEffects.state !== "settled") throw new Error("one_goal_episode_checkpoint_changed");
+    const observed = observeOngoingOneGoalProgress(input.goalId);
+    const decision = recordLongRunCycle({ goalId: input.goalId,
+      verifiedCheckpointId: checkpoint.checkpointId, progressKey: observed.key,
+      progressState: observed.state, outcome: "ongoing-episode-reconciled" });
+    if (!decision) throw new Error("one_goal_episode_cycle_record_failed");
+    const betweenEpisodes = !decision.continue && decision.reason === "no_open_tasks"
+      && decision.status === "running" && decision.openTaskCount === 0;
+    const needsReplan = !decision.continue && decision.reason === "stall_replan_required"
+      && decision.status === "running" && decision.openTaskCount === 0;
+    if (!decision.continue && !betweenEpisodes && !needsReplan) {
+      if (decision.status === "running") transitionLongRun({ runId: run.id, to: "blocked",
+        actorKind: "host", reason: decision.reason });
+      return { blocked: true, checkpointId: checkpoint.checkpointId };
+    }
+    const wait = registerOngoingGoalCycle({ goalId: input.goalId, invocationRunId: input.invocationRunId,
+      hasTransientAttachments: input.hasTransientAttachments, now: input.now });
+    return { blocked: false, checkpointId: wait.checkpointId };
+  })();
 }
 
 export interface DurableGoalVerificationEvidence {
@@ -758,6 +813,7 @@ export function closeLongRunVerifierAdmission(): void {
 
 export function interruptLongRunVerifiers(): void {
   accepting = false;
+  interruptGoalStrategyReflections();
   for (const controller of controllers.values()) {
     if (!controller.signal.aborted) controller.abort(new Error("app_closed"));
   }
@@ -1250,7 +1306,7 @@ export async function verifyGoalCompletionClaim(input: {
         summary: verdict.reason,
       });
     }
-    return getDb().transaction(() => {
+    const verificationResult = getDb().transaction(() => {
     const settlement = settleVerifiedLongRun(run.id);
     const completed = settlement === "completed";
     // `verifying` is transitional: typed repair and missing-evidence cases get
@@ -1302,6 +1358,31 @@ export async function verifyGoalCompletionClaim(input: {
         }
       } else disposition = "interrupted";
     }
+    // Capture the evaluated route before recordTaskCheckpoint copies the plan.
+    // A completed episode is not a new mandate: this typed summary can only
+    // describe the verifier's results and Main's settled effect boundary.
+    const nextCycleNow = Date.now();
+    if (disposition !== "interrupted" && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing"
+      && goalRevision != null && input.invocationRunId) {
+      let effectBoundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
+      try {
+        if (run.rootChatId) effectBoundary = readInvocationEffectBoundary({
+          invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId,
+        });
+      } catch { /* Unknown effects cannot authorize an adaptive strategy. */ }
+      try {
+        recordOngoingEpisodeStrategy({ runId: run.id, expectedGoalRevision: goalRevision,
+          invocationRunId: input.invocationRunId, disposition, verdicts: checkpointVerdicts,
+          evidenceReady: durableEvidence.ready, effectBoundary,
+          nextWakeAt: disposition === "cycle_completed" ? new Date(nextCycleNow + 30 * 60_000).toISOString() : null });
+      } catch (error) {
+        // This plan is descriptive. A write conflict or unavailable observation
+        // must not strand an otherwise valid cycle before checkpoint/wait.
+        // A changed Goal binding is different: never checkpoint stale authority.
+        if (error instanceof Error && error.message === "ongoing_strategy_goal_binding_changed") throw error;
+        console.warn("[long-run-verifier] episode strategy unavailable; preserving checkpoint flow:", error);
+      }
+    }
     const checkpoint = disposition === "interrupted" ? null : recordTaskCheckpoint({
       goalId: input.goalId, workerId, attempt: attempt.attempt,
       invocationRunId: input.invocationRunId, disposition, verdicts: checkpointVerdicts,
@@ -1311,13 +1392,65 @@ export async function verifyGoalCompletionClaim(input: {
     let cycleCheckpointId: string | null = null;
     if (disposition === "cycle_completed") {
       if (!input.invocationRunId) throw new Error("goal_wait_attempt_missing");
-      const wait = registerOngoingGoalCycle({ goalId: input.goalId, invocationRunId: input.invocationRunId,
-        hasTransientAttachments: input.hasTransientAttachments });
-      cycleCheckpointId = wait.checkpointId;
+      if (run.surface === "one") {
+        if (!checkpoint) throw new Error("one_goal_episode_checkpoint_changed");
+        const cycle = finishVerifiedOngoingOneCycle({ goalId: input.goalId,
+          invocationRunId: input.invocationRunId, checkpoint,
+          hasTransientAttachments: input.hasTransientAttachments, now: nextCycleNow });
+        if (cycle.blocked) return { runId: run.id, verifierWorkerId: workerId, verdicts: checkpointVerdicts,
+          completed: false, disposition: "blocked" as const, checkpointId: cycle.checkpointId };
+        cycleCheckpointId = cycle.checkpointId;
+      } else {
+        const wait = registerOngoingGoalCycle({ goalId: input.goalId, invocationRunId: input.invocationRunId,
+          hasTransientAttachments: input.hasTransientAttachments, now: nextCycleNow });
+        cycleCheckpointId = wait.checkpointId;
+      }
     }
     return { runId: run.id, verifierWorkerId: workerId, verdicts: checkpointVerdicts, completed, disposition,
       checkpointId: cycleCheckpointId ?? checkpoint?.checkpointId ?? null };
     })();
+    // The checkpoint is the producer-side settled receipt. Schedule the Goal
+    // reflection only after the verifier transaction has committed so a model
+    // cannot observe or mint a proposal for a half-written episode. The
+    // request receipt is durable, while the advisory model call is
+    // deliberately non-blocking and proposal-only: it never applies Graph or
+    // Goal changes. This is an attempt record, not a restartable scheduler
+    // job; a future startup path must explicitly decide whether to retry it.
+    if (verificationResult.disposition !== "interrupted"
+      && verificationResult.checkpointId
+      && goalRevision != null
+      && input.invocationRunId) {
+      const reflectionInput = {
+        runId: verificationResult.runId,
+        goalId: input.goalId,
+        expectedGoalRevision: goalRevision,
+        sourceInvocationRunId: input.invocationRunId,
+        checkpointId: verificationResult.checkpointId,
+        signal: controller.signal,
+      } as const;
+      const dispatch = requestGoalStrategyReflection(reflectionInput);
+      if (dispatch) void reflectGoalStrategyProposal(reflectionInput).then(async (result) => {
+        recordGoalStrategyReflectionOutcome(dispatch, result);
+        if (result.status === "proposal") {
+          // A Goal recommendation can only hand the exact, current
+          // Goal-owned terminal Graph receipt to the existing Graph strategy
+          // cycle. That cycle performs its own independent review and CAS;
+          // this background bridge never starts a Graph run or applies a
+          // Goal/Graph mutation directly.
+          await dispatchGoalStrategyAutomation(result.receipt, { signal: controller.signal });
+        }
+        if (result.status === "unavailable") {
+          console.warn("[long-run-verifier] Goal strategy reflection unavailable after durable request:", result.reason);
+        }
+      }).catch((error) => {
+        // Reflection is advisory. A model/runtime outage must not turn an
+        // already-settled verification into a failed Goal episode.
+        const unavailable = { status: "unavailable" as const, reason: "goal_strategy_failed" as const };
+        try { recordGoalStrategyReflectionOutcome(dispatch, unavailable); } catch { /* The request receipt remains durable. */ }
+        console.warn("[long-run-verifier] Goal strategy reflection failed after durable request:", error);
+      });
+    }
+    return verificationResult;
   } catch (error) {
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,

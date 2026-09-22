@@ -24,6 +24,7 @@ import { memoryOwnerAgentId } from "../../shared/memory-ownership";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
+import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
   appendChatMessage,
@@ -1149,6 +1150,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
             : controlPlaneTurn
               ? undefined
               : turn.chatId ?? undefined,
+          workProjectId: p.chat.projectId ?? null,
           // 러너의 agentId 는 능력 규칙 대상·런타임 세션 키·상주 판정에 쓰인다(기억이 아니다).
           // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
           agentId: nodeRuntimeId,
@@ -1222,6 +1224,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     && !pinnedControllerPreferred
     && !(turn.signal ?? p.signal)?.aborted
   ) {
+    if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
     if (!failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, executedRuntime))) {
       failedNodeRuntimes.push(executedRuntime);
     }
@@ -1250,6 +1253,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     result = await runNodeOn(executedRuntime, executedPicked);
   }
   if (result.failure) {
+    if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+      throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
+    }
     throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
   }
   // Keep later CEO/manager turns in the same firm run on the runtime that

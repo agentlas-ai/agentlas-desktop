@@ -670,7 +670,7 @@ const GRAPH_VERSION_KEEP = 20;
  * 되돌아갈 자리 없이 사라진다. 이력을 남기는 쪽은 저장 경로 **한 곳**이어야 한다
  * (호출자마다 챙기게 하면 어느 경로는 반드시 빠진다).
  */
-function snapshotGraphVersion(automationId: string, graph: WorkflowGraph, note?: string): void {
+export function snapshotGraphVersion(automationId: string, graph: WorkflowGraph, note?: string): void {
   const db = getDb();
   const json = JSON.stringify(graph);
   db.prepare(

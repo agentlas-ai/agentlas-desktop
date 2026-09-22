@@ -254,6 +254,27 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
 }
 
 /** Live (non-superseded) memory for a project folder, newest first. */
+export function listMemoryForContext(
+  scope: { projectId?: string | null; projectPath?: string | null; agentId?: string | null; chatId?: string | null },
+  limit = 40,
+): MemoryEntry[] {
+  // Project ids may identify a Science study without a Desktop folder. A null
+  // path is not global authority. Agent-specific portable learning remains
+  // portable, but only for its own actor; unknown actors receive shared memory.
+  const rows = getDb().prepare(`SELECT * FROM memory_entries WHERE superseded_at IS NULL AND (
+    (scope IN ('user_identity','team_memory','agent_team') AND project_path IS NULL)
+    OR (scope='agent_repo' AND agent_id=? AND (project_path IS NULL OR project_path=?))
+    OR (scope='project'
+      AND (project_id IS NOT NULL OR project_path IS NOT NULL)
+      AND (project_id IS NULL OR project_id=?)
+      AND (project_path IS NULL OR project_path=?))
+    OR (scope='session' AND chat_id=? AND (agent_id IS NULL OR agent_id=?))
+  ) ORDER BY created_at DESC LIMIT ?`).all(scope.agentId ?? null, scope.projectPath ?? null,
+    scope.projectId ?? null, scope.projectPath ?? null, scope.chatId ?? null, scope.agentId ?? null, limit) as Row[];
+  return rows.map(toEntry);
+}
+
+/** Live (non-superseded) memory for a project folder, newest first. */
 export function listMemoryByPath(projectPath: string, limit = 40): MemoryEntry[] {
   const rows = getDb()
     .prepare(

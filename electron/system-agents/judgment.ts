@@ -24,6 +24,10 @@ import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
+import {
+  inspectJudgmentCapability,
+  type JudgmentCapabilityReceipt,
+} from "./judgment-capability";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RunnerFailure, RunnerFailureKind } from "../runtime/runner";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
@@ -33,7 +37,25 @@ export interface JudgmentRuntimeReceipt {
   selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model">;
   route: "explicit_pin" | "orchestrator_pool" | "legacy";
   fingerprint: string;
-  execution: "invoked" | "cached";
+  execution: "invoked" | "cached" | "not_invoked";
+  /** Effective model controls used on the wire; these are not the worker pin. */
+  longContext?: boolean;
+  effort?: string;
+  selectionPolicy?: JudgmentSelectionPolicy;
+  capability?: JudgmentCapabilityReceipt;
+}
+
+/**
+ * Main-owned route for independent judgment. It intentionally contains no
+ * execution/runtime pin: the worker's selection must never leak into this
+ * call. The fingerprint is a CAS token for the configured orchestrator pool.
+ */
+export interface JudgmentSelectionPolicy {
+  schemaVersion: "agentlas.judgment-selection-policy.v1";
+  route: "configured_orchestrator_pool";
+  capability: "no_tools";
+  poolFingerprint: string;
+  receipt: "required";
 }
 
 /** Value-free outcome of one actual runner attempt; diagnostic text stays private. */
@@ -84,6 +106,19 @@ function readJudgmentPool(): JudgmentPool {
   }
 }
 
+/** Read the user-configured judgment pool without falling back to execution. */
+export function configuredOrchestratorJudgmentPolicy(): JudgmentSelectionPolicy | null {
+  const pool = readJudgmentPool();
+  if (pool.state !== "configured") return null;
+  return {
+    schemaVersion: "agentlas.judgment-selection-policy.v1",
+    route: "configured_orchestrator_pool",
+    capability: "no_tools",
+    poolFingerprint: pool.fingerprint,
+    receipt: "required",
+  };
+}
+
 /** A wordlist demoted to a hint: "these words *suggest* this label — verify by meaning." */
 export interface JudgeHint<V extends string> {
   label: V;
@@ -114,6 +149,8 @@ export interface JudgeSpec<V extends string> {
   locale?: RuntimeLocale;
   /** Graph callers may bind this decision to the same runtime as the work. */
   runtimeSelection?: RuntimeSelection;
+  /** Independent judgments use the configured orchestrator pool, never the work pin. */
+  selectionPolicy?: JudgmentSelectionPolicy;
 }
 
 export interface Verdict<V extends string> {
@@ -166,6 +203,10 @@ export interface RequiredJudgeSpec<V extends string> {
   locale?: RuntimeLocale;
   /** Graph evals pass their automation/node runtime so judgment cannot cross providers. */
   runtimeSelection?: RuntimeSelection;
+  /** Independent scope judgments use the configured orchestrator pool, never the work pin. */
+  selectionPolicy?: JudgmentSelectionPolicy;
+  /** Independent scope judgments must never receive tool-capable context. */
+  requireNoTools?: true;
 }
 
 // Measured on this machine: a CLI runtime answers a judgment prompt in 12–18s
@@ -306,7 +347,11 @@ function judgmentCacheKey(kind: string, input: string): string {
 }
 
 /** Share the verdict-cache scope with callers that suppress duplicate warming. */
-export function runtimeSelectionCacheScope(selection = invocationJudgmentContext()?.selection): string {
+export function runtimeSelectionCacheScope(
+  selection = invocationJudgmentContext()?.selection,
+  selectionPolicy?: JudgmentSelectionPolicy,
+): string {
+  if (selectionPolicy) return `\u0000orchestrator-pool:${selectionPolicy.poolFingerprint}`;
   if (!selection) {
     const pool = readJudgmentPool();
     return pool.state === "unconfigured" ? "" : `\u0000orchestrator-pool:${pool.fingerprint}`;
@@ -407,6 +452,8 @@ export async function callConnectedModel(opts: {
   locale?: RuntimeLocale;
   /** When supplied by a graph, judgment must use the graph's exact runtime pin. */
   runtimeSelection?: RuntimeSelection;
+  /** Main-owned configured-pool route for independent no-tools calls. */
+  selectionPolicy?: JudgmentSelectionPolicy;
   /**
    * 모델이 답을 써 내려가는 동안 부분 텍스트를 흘려준다.
    *
@@ -415,6 +462,8 @@ export async function callConnectedModel(opts: {
    * 화면에 무언가를 그릴 수 있었고, 사람은 몇 십 초를 빈 화면으로 기다렸다.
    */
   onPartial?: (text: string) => void;
+  /** Structured reflection/metadata calls must use the runner's no-tools gate. */
+  requireNoTools?: true;
 }): Promise<string | null> {
   return (await callJudgmentModelDetailed(opts)).text;
 }
@@ -431,12 +480,16 @@ export async function callConnectedModelDetailed(opts: {
   locale?: RuntimeLocale;
   /** When supplied by a graph, judgment must use the graph's exact runtime pin. */
   runtimeSelection?: RuntimeSelection;
+  /** Main-owned configured-pool route for independent no-tools calls. */
+  selectionPolicy?: JudgmentSelectionPolicy;
   onPartial?: (text: string) => void;
   /**
    * 짓는 일이면 켠다 — 조회 도구가 함께 간다. 판정에는 절대 켜지 않는다.
    * 자세한 배경은 callJudgmentModelDetailed 의 같은 이름 옵션 주석에 있다.
    */
   authoring?: boolean;
+  /** Structured reflection/metadata calls must use the runner's no-tools gate. */
+  requireNoTools?: true;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   return callJudgmentModelDetailed(opts);
 }
@@ -454,6 +507,8 @@ async function callJudgmentModelDetailed(opts: {
   locale?: RuntimeLocale;
   /** An explicit graph pin is authoritative; do not silently judge on another provider. */
   runtimeSelection?: RuntimeSelection;
+  /** Main-owned configured-pool route; mutually exclusive with runtimeSelection. */
+  selectionPolicy?: JudgmentSelectionPolicy;
   onPartial?: (text: string) => void;
   /**
    * ★출력이 **쓸 만한가**를 이 콜백이 정한다. 판정은 텍스트가 왔다고 끝이 아니라
@@ -482,9 +537,18 @@ async function callJudgmentModelDetailed(opts: {
   requireNoTools?: true;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   const inherited = invocationJudgmentContext();
+  const explicitSelection = opts.runtimeSelection;
+  if (opts.selectionPolicy && explicitSelection) return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_selection_policy_pin_conflict",
+  } };
+  // The configured policy is defined as a no-tools route. Keep that invariant
+  // even if a future caller forgets to repeat the lower-level flag.
+  const requiresNoTools = opts.requireNoTools === true || opts.selectionPolicy?.capability === "no_tools";
   opts = {
     ...opts,
-    runtimeSelection: opts.runtimeSelection ?? inherited?.selection,
+    // A configured-pool policy is an explicit boundary. Do not inherit the
+    // invocation's worker pin (which is commonly Antigravity for automation).
+    runtimeSelection: opts.selectionPolicy ? undefined : opts.runtimeSelection ?? inherited?.selection,
     signal: opts.signal && inherited?.signal && opts.signal !== inherited.signal
       ? AbortSignal.any([opts.signal, inherited.signal]) : opts.signal ?? inherited?.signal,
   };
@@ -506,24 +570,55 @@ async function callJudgmentModelDetailed(opts: {
   if (pool?.state === "unavailable") return { text: null, failure: {
     kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_unavailable",
   } };
+  if (opts.selectionPolicy && (pool?.state !== "configured"
+    || pool.fingerprint !== opts.selectionPolicy.poolFingerprint)) return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
+  } };
   const pinnedChoice = opts.runtimeSelection ? selectExactRuntime(runtimes, opts.runtimeSelection) : null;
   const active = opts.runtimeSelection ? pinnedChoice?.active ?? null
     : pool?.state === "configured" ? null : pickActive(runtimes);
   // An explicit pin overrides the pool. A configured pool is an authority
   // boundary, including exact models and priority order; failed isolation or
   // invalid output can try its next member, never another detected provider.
+  const configuredSelections = pool?.state === "configured"
+    ? pool.selections.filter((selection) => !requiresNoTools
+      || inspectJudgmentCapability(selection, "no_tools").status === "verified")
+    : [];
   const ordered = uniqueSelections(opts.runtimeSelection
     ? (active ? [active] : [])
     : pool?.state === "configured"
-      ? pool.selections.map((selection) => selectExactRuntime(runtimes, selection)?.active).filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
+      ? configuredSelections.map((selection) => selectExactRuntime(runtimes, selection)?.active).filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
       : [
       ...(active ? [active] : []),
       ...runtimes.filter((runtime) => runtime !== active),
     ]);
   const route: JudgmentRuntimeReceipt["route"] = opts.runtimeSelection ? "explicit_pin" : pool?.state === "configured" ? "orchestrator_pool" : "legacy";
   const fingerprint = opts.runtimeSelection ? routingFingerprint([opts.runtimeSelection]) : pool?.fingerprint ?? "legacy";
+  if (requiresNoTools && !opts.runtimeSelection && pool?.state === "configured" && configuredSelections.length === 0) {
+    const first = pool.selections[0];
+    const capability = first ? inspectJudgmentCapability(first, "no_tools") : undefined;
+    const noToolReceipt = first && capability ? {
+      route,
+      fingerprint,
+      execution: "not_invoked" as const,
+      ...(first.longContext !== undefined ? { longContext: first.longContext } : {}),
+      ...(first.effort ? { effort: first.effort } : {}),
+      selectionPolicy: opts.selectionPolicy,
+      selection: { kind: first.kind, backend: first.backend, source: first.source, model: first.model },
+      capability,
+    } : undefined;
+    return { text: null, failure: {
+      kind: "unsupported", runtime: "judgment", source: "marker",
+      providerCode: capability?.reason ?? "judgment_no_verified_capability_in_pool",
+      message: capability?.reason ?? "judgment_no_verified_capability_in_pool",
+    }, ...(noToolReceipt ? { runtimeReceipt: noToolReceipt } : {}) };
+  }
   if (!ordered.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
     kind: "refused", runtime: "judgment", source: "marker", message: "judgment_selected_runtime_unavailable",
+  } };
+  if (requiresNoTools && !opts.runtimeSelection && pool?.state !== "configured") return { text: null, failure: {
+    kind: "unsupported", runtime: "judgment", source: "marker", providerCode: "judgment_orchestrator_pool_required",
+    message: "judgment_orchestrator_pool_required",
   } };
   if (opts.runtimeSelection) {
     console.info(
@@ -578,23 +673,44 @@ async function callJudgmentModelDetailed(opts: {
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
   for (const [runtimeIndex, runtime] of ordered.entries()) {
-      if (!opts.runtimeSelection && readJudgmentPool().fingerprint !== fingerprint) return { text: null, failure: {
+      const livePool = !opts.runtimeSelection ? readJudgmentPool() : null;
+      if (opts.selectionPolicy
+        ? (livePool?.state !== "configured" || livePool.fingerprint !== opts.selectionPolicy.poolFingerprint)
+        : !opts.runtimeSelection && livePool?.fingerprint !== fingerprint) return { text: null, failure: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
       if (opts.signal?.aborted) break;
-      // Antigravity explicitly refuses untrustedNoTools before spawn. Skip this
-      // optional preparation rather than starting an unisolated CLI or silently
-      // changing the caller's runtime. This does NOT suppress an effect scope.
-      if (opts.requireNoTools && runtime.kind === "antigravity") return { text: null, failure: {
-        kind: "unsupported", runtime: runtime.kind, source: "marker",
-        providerCode: "judgment_preparation_isolation_unavailable",
-        message: "judgment_preparation_isolation_unavailable",
-      }, attempts };
+      const capability = requiresNoTools
+        ? inspectJudgmentCapability({ kind: runtime.kind, backend: runtime.backend }, "no_tools")
+        : undefined;
+      // Never invoke a pool member whose native no-tools capability is not
+      // release-verified. A later verified member in the same configured pool
+      // may still be tried; no provider outside that pool is eligible.
+      if (capability && capability.status !== "verified") {
+        runtimeReceipt = {
+          route,
+          fingerprint,
+          execution: "not_invoked",
+          ...(runtime.longContextEnabled !== undefined ? { longContext: runtime.longContextEnabled } : {}),
+          ...(runtime.effort ? { effort: runtime.effort } : {}),
+          selectionPolicy: opts.selectionPolicy,
+          selection: { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined },
+          capability,
+        };
+        lastFailure = {
+          kind: "unsupported", runtime: runtime.kind, source: "marker",
+          providerCode: capability.reason,
+          message: capability.reason,
+        };
+        continue;
+      }
       const picked = pickRunner(runtime);
       if (!picked) continue;
       runtimeReceipt = { route, fingerprint, execution: "invoked", selection: {
         kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
-      } };
+      }, longContext: runtime.longContextEnabled,
+      ...(runtime.effort ? { effort: runtime.effort } : {}),
+      ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
       console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       const startedAt = Date.now();
       const remainingMs = deadlineAt - Date.now();
@@ -615,13 +731,13 @@ async function callJudgmentModelDetailed(opts: {
             userPrompt: opts.input,
             backendLabel: picked.label,
             model: runtime.model ?? undefined,
-            longContext: opts.runtimeSelection ? runtime.longContextEnabled : false,
-            effort: opts.runtimeSelection ? runtime.effort ?? undefined : "low",
+            longContext: opts.runtimeSelection || opts.selectionPolicy ? runtime.longContextEnabled : false,
+            effort: opts.runtimeSelection || opts.selectionPolicy ? runtime.effort ?? undefined : "low",
             permission: "read",
             // Optional metadata selection requires the runner's enforced
             // no-tools contract. Other judgments/authoring keep their existing
             // contract; neither path is detached from the host effect ledger.
-            untrustedNoTools: opts.requireNoTools === true,
+            untrustedNoTools: requiresNoTools,
             surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
@@ -646,7 +762,7 @@ async function callJudgmentModelDetailed(opts: {
         };
         recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
         if (bounded.cancelled) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
-        if (opts.requireNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        if (requiresNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         continue;
       }
       const result = bounded.value!;
@@ -658,7 +774,7 @@ async function callJudgmentModelDetailed(opts: {
            */
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
-          if (opts.requireNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+          if (requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         const text = result.text ?? "";
@@ -680,7 +796,7 @@ async function callJudgmentModelDetailed(opts: {
     if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
-      if (opts.requireNoTools && selection?.kind === "antigravity") return { text: null, failure: {
+      if (requiresNoTools && selection?.kind === "antigravity") return { text: null, failure: {
         kind: "unsupported", runtime: selection.kind, source: "marker",
         providerCode: "judgment_preparation_isolation_unavailable",
         message: "judgment_preparation_isolation_unavailable",
@@ -702,7 +818,7 @@ async function callJudgmentModelDetailed(opts: {
               longContext: false,
               effort: "low",
               permission: "read",
-              untrustedNoTools: opts.requireNoTools === true,
+              untrustedNoTools: requiresNoTools,
               surfaceGate: "exclude",
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
@@ -769,13 +885,13 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     judgedInput = floor.redacted;
   }
 
-  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
+  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy);
   const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
   const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
-  const cached = cacheGet<V>(cacheKey);
+  const cached = spec.selectionPolicy ? undefined : cacheGet<V>(cacheKey);
   if (cached) return { ...cached, redactedInput, containedSecret };
   // 세션 캐시가 비어도(앱 재시작) 같은 뜻의 입력이면 기록된 판정을 쓴다.
-  const durable = durableGet(spec.kind, signature);
+  const durable = spec.selectionPolicy ? undefined : durableGet(spec.kind, signature);
   if (durable && (spec.labels as readonly string[]).includes(durable.verdict)) {
     cacheSet(cacheKey, durable);
     return { ...(durable as Verdict<V>), redactedInput, containedSecret };
@@ -811,6 +927,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     signal: spec.signal,
     locale: spec.locale,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
+    ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -833,7 +950,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     source: "llm",
     runtimeReceipt: detailed.runtimeReceipt,
   };
-  if (runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) {
+  if (!spec.selectionPolicy && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy)) {
     cacheSet(cacheKey, stored);
     durablePut(spec.kind, signature, stored);
   }
@@ -854,14 +971,14 @@ export async function judgeRequired<V extends string>(
     redactedInput = floor.redacted;
     containedSecret = floor.containedSecret;
   }
-  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
+  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy);
   const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
   const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
-  const cached = cacheGet<V>(cacheKey);
+  const cached = spec.selectionPolicy ? undefined : cacheGet<V>(cacheKey);
   if (cached) {
     return { ...cached, source: "llm", redactedInput, containedSecret };
   }
-  const durable = durableGet(spec.kind, signature);
+  const durable = spec.selectionPolicy ? undefined : durableGet(spec.kind, signature);
   if (durable && (spec.labels as readonly string[]).includes(durable.verdict)) {
     cacheSet(cacheKey, durable);
     return { ...(durable as RequiredVerdict<V>), source: "llm", redactedInput, containedSecret };
@@ -881,8 +998,10 @@ export async function judgeRequired<V extends string>(
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    requireNoTools: spec.requireNoTools,
     accept: (text) => parseVerdict<V>(text, spec.labels) !== null,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
+    ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -890,11 +1009,23 @@ export async function judgeRequired<V extends string>(
     const reason = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
     return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: detailed.failure?.kind };
   }
+  if (spec.selectionPolicy && !detailed.runtimeReceipt) {
+    return {
+      verdict: null,
+      confidence: 0,
+      reason: "judgment_runtime_receipt_missing",
+      source: "unavailable",
+      redactedInput,
+      containedSecret,
+      attempts: detailed.attempts,
+      failureKind: "exit",
+    };
+  }
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) {
     return { verdict: null, confidence: 0, reason: "judgment_invalid_output", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: "exit" };
   }
-  if (runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) {
+  if (!spec.selectionPolicy && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy)) {
     cacheSet(cacheKey, { ...parsed, source: "llm", runtimeReceipt: detailed.runtimeReceipt });
     durablePut(spec.kind, signature, { ...parsed, source: "llm" });
   }
@@ -958,8 +1089,10 @@ async function judgeRequiredBatchOnce<V extends string>(
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    requireNoTools: spec.requireNoTools,
     accept: (text) => parse(text) !== null,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
+    ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
   });
   const parsed = detailed.text === null ? null : parse(detailed.text);
   const byId = new Map(parsed?.map((item) => [item.id, item]));

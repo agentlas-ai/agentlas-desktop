@@ -24,7 +24,7 @@ export type PassFailureAction =
 export interface PassFailureVerdict {
   action: PassFailureAction;
   /** Machine reason. The UI maps this to words; nothing downstream parses prose. */
-  reason: "usage_limited" | "transient" | "unsupported" | "unauthorized" | "refused" | "effect_verification_required" | "unknown";
+  reason: "usage_limited" | "context_capacity" | "context_measurement" | "transient" | "unsupported" | "unauthorized" | "refused" | "effect_verification_required" | "unknown";
   /** Milliseconds to wait before the next attempt when `action` is "retry". */
   retryAfterMs: number;
   /** Verbatim runtime hint (reset time, and so on) when the runtime supplied one. */
@@ -39,6 +39,19 @@ export function transientRetryDelayMs(attempt: number): number {
 
 export const MAX_TRANSIENT_RETRIES = 3;
 
+type FailureBoundary = Pick<RunnerFailure, "kind"> & Partial<Pick<RunnerFailure, "runtime" | "source" | "providerCode">>;
+
+/** Only a managed adapter's structured refusal identifies context admission.
+ * This is not quota exhaustion, user Stop, or proof that earlier effects are
+ * settled. Never infer it from provider prose or retry an identical request. */
+export function modelContextFailureReason(failure: FailureBoundary): "context_capacity" | "context_measurement" | null {
+  if (failure.kind !== "refused" || failure.source !== "marker"
+    || !["byok", "agentlas", "agentlas-local", "ollama", "lmstudio", "mlx"].includes(failure.runtime ?? "")) return null;
+  if (failure.providerCode === "model_context_capacity_exceeded"
+    || failure.providerCode === "local_context_limit_exceeded") return "context_capacity";
+  return failure.providerCode === "local_context_measurement_unavailable" ? "context_measurement" : null;
+}
+
 /** Stop/steering must interrupt even the longest retry backoff immediately. */
 export function waitForPassRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
@@ -50,10 +63,12 @@ export function waitForPassRetry(delayMs: number, signal?: AbortSignal): Promise
 }
 
 export function passFailureVerdict(
-  failure: Pick<RunnerFailure, "kind" | "retryAfterHint"> & Partial<Pick<RunnerFailure, "runtime">>,
+  failure: FailureBoundary & Pick<RunnerFailure, "retryAfterHint">,
   transientAttemptsSoFar: number,
 ): PassFailureVerdict {
   const hint = failure.retryAfterHint ? { retryAfterHint: failure.retryAfterHint } : {};
+  const contextReason = modelContextFailureReason(failure);
+  if (contextReason) return { action: "pause", reason: contextReason, retryAfterMs: 0, ...hint };
   switch (failure.kind) {
     case "quota":
       /*

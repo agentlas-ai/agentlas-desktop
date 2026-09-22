@@ -1,5 +1,6 @@
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
 import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
+import { parseScienceToolCorrelation } from "./science-failure-settlement";
 
 export const EFFECT_METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const fail = (): never => { throw new Error("runtime-effect-metadata-invalid"); };
@@ -42,6 +43,11 @@ function admission(value: unknown, runId: string, completed: boolean): AdapterEf
     ...(completed ? { report: v.report === null ? null : report(v.report) } : {}) };
 }
 export function parseEffectMetadata(kind: string, value: unknown, runId: string): Record<string, unknown> | null {
+  if (kind === "runtime_science_tool_correlation") {
+    const binding = parseScienceToolCorrelation(value);
+    if (binding.invocationRunId !== runId) return fail();
+    return { ...binding };
+  }
   if (!["runtime_effect_boundary", "runtime_adapter_effect_started", "runtime_adapter_effect_completed"].includes(kind)) return null;
   let result: Record<string, unknown>;
   if (kind !== "runtime_effect_boundary") result = { ...admission(value, runId, kind === "runtime_adapter_effect_completed") };

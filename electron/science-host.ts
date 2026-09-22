@@ -1,4 +1,8 @@
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
+import { mintForwardSteeringRecoveryCapability } from "./science-host/recovery-mint";
+import { scienceEvidenceCollectionHost } from "./runtime/science-collection-boundary";
+import { desktopAliveRuntime } from "./alive-runtime";
+import { desktopAliveClock } from "./alive-clock";
 /*
  * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
  *
@@ -13,9 +17,10 @@ import { scienceCriterionReviewHost } from "./science-host/criterion-review";
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { scienceStore, installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
-import { reconcileScienceBoundary } from "./long-run/science-boundary";
+import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "./long-run/science-boundary";
 import { projectScienceLoopLongRun } from "./long-run/science-projection";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
@@ -35,6 +40,7 @@ import { RUNTIME_KIND_SET } from "../shared/runtime-kinds";
 import { productExtensionSignedPayload } from "../shared/product-extension";
 import type { InstalledMcpServer } from "../shared/types";
 import { registerPreparedMcpConfig } from "./mcp-tools/prepared-transport";
+import { notifyScienceResearcherQuestion } from "./extensions/view-host";
 
 /*
  * 사이언스 화면 묶음을 검증해 주는 쪽은 확장 설치기다. 사이언스가 그 판정을 되묻기
@@ -57,6 +63,29 @@ import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf"
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
 
 let installed = false;
+let registeredResearcherQuestionUiRelease: string | null = null;
+
+function boundScienceRuntimeChatId(input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">): string {
+  const store = scienceStore();
+  const turn = store.getTurnForProject(input.projectId, input.turnId);
+  const binding = store.getConversationRuntimeBinding(input.projectId, input.conversationId);
+  if (!turn || !binding || turn.conversationId !== input.conversationId
+    || turn.invocationRunId !== input.invocationRunId || turn.runtimeChatId !== binding.runtimeChatId) {
+    throw new Error("science_runtime_boundary_run_binding_mismatch");
+  }
+  return binding.runtimeChatId;
+}
+
+function currentScienceUiRelease(): string | null {
+  const release = activeScienceExtension();
+  return release ? createHash("sha256").update(productExtensionSignedPayload(release.manifest)).digest("hex") : null;
+}
+
+/** Called only by Main after the verified Science renderer registers its answer UI. */
+export function registerDesktopScienceResearcherQuestionUi(): void {
+  registeredResearcherQuestionUiRelease = currentScienceUiRelease();
+  if (!registeredResearcherQuestionUiRelease) throw new Error("science-researcher-question-ui-release-unavailable");
+}
 
 /**
  * Keep the Desktop side of this bridge structural. The pinned Science package
@@ -111,6 +140,8 @@ function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration)
 export function installDesktopScienceHost(): void {
   if (installed) return;
   const compatibility = installScienceHost({
+    aliveRuntime: desktopAliveRuntime,
+    aliveClock: desktopAliveClock,
     // 실행
     spawnCli, killCliTree, probeCliVersion, withCliPath, detachedSpawnOpts,
     resolveManagedNodeRuntime,
@@ -126,6 +157,13 @@ export function installDesktopScienceHost(): void {
     userDataPath, currentUiLocale, productExtensionSignedPayload,
     RUNTIME_BACKEND_SET, RUNTIME_KIND_SET,
     registerScienceMcpPreparedConfig,
+    researcherQuestionUi: {
+      // Registration proves that this installed renderer implements durable list + human answer.
+      // The view need not remain open: questions can be read again when it is reopened.
+      isAvailable: () => Boolean(registeredResearcherQuestionUiRelease
+        && registeredResearcherQuestionUiRelease === currentScienceUiRelease()),
+      present: (question: unknown) => { notifyScienceResearcherQuestion(question); },
+    },
     // 확장 검증
     activeScienceExtension,
     resolveVerifiedScienceRenderer,
@@ -173,18 +211,15 @@ export function installDesktopScienceHost(): void {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ mintForwardSteeringRecoveryCapability },
+      ...{ evidenceCollection: scienceEvidenceCollectionHost },
       criterionReview: scienceCriterionReviewHost,
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
       reconcileScienceBoundary: async (input) => {
-        const store = scienceStore();
-        const turn = store.getTurnForProject(input.projectId, input.turnId);
-        const binding = store.getConversationRuntimeBinding(input.projectId, input.conversationId);
-        if (!turn || !binding || turn.conversationId !== input.conversationId
-          || turn.invocationRunId !== input.invocationRunId || turn.runtimeChatId !== binding.runtimeChatId) {
-          throw new Error("science_runtime_boundary_run_binding_mismatch");
-        }
-        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: binding.runtimeChatId });
+        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) });
       },
+      ...{ inspectLegacyForwardRecoveryBoundary: async (input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">) =>
+        inspectLegacyForwardRecoveryBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) }) },
     },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },

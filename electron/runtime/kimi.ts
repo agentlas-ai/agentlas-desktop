@@ -177,10 +177,9 @@ async function resolveKimiBinary(): Promise<string | null> {
 }
 
 function systemFingerprint(req: RunnerRequest): string {
-  // The model is part of the session identity — see codex.ts for the full note.
-  // A runtime session belongs to the model that created it, so resuming it under
-  // another model is a false resume. Continuity is preserved by the fresh-session
-  // path reseeding compacted history, not by keeping a stale session id.
+  // Model choice is absent from this fingerprint. The seed preserves the
+  // conversation identity when per-turn settings change; the runtime's own
+  // resume behavior determines whether a native session can be reused.
   if (req.sessionFingerprintSeed) {
     return createHash("sha256").update("seed.v3\0").update(req.sessionFingerprintSeed).digest("hex");
   }

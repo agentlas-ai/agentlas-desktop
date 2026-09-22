@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Chat, RuntimeSelection } from "../../shared/types";
 import { emitDesktopStoreChange } from "./change-bus";
-import { createChat, getChat, setChatRuntimeSelection } from "./chats";
+import { createChat, getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection } from "./chats";
 import { getDb } from "./db";
 
 export type AutomationSessionTarget =
@@ -93,8 +93,13 @@ function syncSessionRuntimeSelection(
   selection: RuntimeSelection | null | undefined,
 ): Chat {
   if (selection === undefined) return chat;
-  const current = chat.runtimeSelection ?? null;
-  const next = selection ?? null;
+  // An automation executes as a worker, while its transcript is a runnable
+  // chat and chat pins must be orchestrator-scoped. Preserve the exact runtime
+  // identity, but translate only the role contract at this boundary.
+  const next = normalizeChatRuntimeSelection(selection === null
+    ? null
+    : { ...selection, role: "orchestrator", inherit: false });
+  const current = normalizeChatRuntimeSelection(chat.runtimeSelection ?? null);
   if (JSON.stringify(current) === JSON.stringify(next)) return chat;
   return setChatRuntimeSelection(chat.id, next);
 }

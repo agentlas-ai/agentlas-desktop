@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Pin the Science service to the evidence-excerpt correction: quotations present in a verified
+  source are located by the host even when the supplied byte offsets are wrong.
+- Science PDFs fill their pages the way a printed paper does: empty table columns
+  are not printed, a wide but short table is stacked upright as panels instead of
+  taking a landscape page, landscape tables no longer cut the running text, and
+  figures and tables are set later when that fills the page before them.
+- Science no longer defaults citations to bracketed numbers: without a journal
+  rule the convention follows the field of the manuscript's own sources.
+- Science 한글 (HWPX) documents keep Korean words whole at line ends (the break
+  setting was the wrong way round) and get the same letter-spacing line repair as
+  Word documents.
+- In Science, a sentence that reports the project's own result can stand on its
+  validated table or figure; it no longer needs a literature citation.
+- Science could refuse every model choice on some machines; fixed.
+- Science answers in the language you write in, not the language of the screen.
+- A Science project without a folder no longer stops the study: the agent makes
+  its own working folder (it never replaces a folder you chose).
+- Science studies no longer pause to ask for PDFs when fewer than five
+  comparable papers are available; they proceed and state the limitation.
+- CSV import reads numbers such as -1.2e-05 as numbers.
+- Science PDFs of Korean papers break lines between words, never inside one.
+- A Science study that chose to rest is no longer handed its next turn at once,
+  and it wakes on its own when the tools it can use (or the app build) change.
+- Science refusals say which condition failed and point to a way out that exists;
+  a rewritten sentence can name the claim it replaces; a bound table no longer
+  reads as a missing manuscript binding.
+- A Science study at rest says so ("resting by its own choice", until when and
+  why) instead of showing a paused study with a Continue button.
+- Science journal validation and submission export accept tables bound by
+  their rows.
+- Science studies run on Codex models (gpt-5.6 and others) can use every Science
+  tool, as studies on Claude models always could.
+- A Science study no longer waits for you to hand it data it can find itself: it
+  fetches public sources, records where each number came from, and keeps any
+  question open while it works.
+
 ## 1.2.32 — 2026-09-20
 
 - Mark runtime-selection notices with a closed machine code so Mobile can

@@ -36,7 +36,7 @@ import {
   resolveInstallIdentity,
   type InstallIdentity,
 } from "./install-identity";
-import { registerIpcHandlers, assertTrustedSitePublishIpcSender } from "./ipc";
+import { registerIpcHandlers, assertTrustedSitePublishIpcSender, recoverRendererPreflightSteers } from "./ipc";
 import { LocalModelHubManager } from "./local-model-hub/manager";
 import { configureLocalModelHubManager } from "./local-model-hub/runtime-adapter";
 import { createOllamaMigrationService } from "./local-model-hub/migration-runtime";
@@ -45,12 +45,13 @@ import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { registerSciencePublicationIpc } from "./science-host/publication-ipc";
-import { installDesktopScienceHost } from "./science-host";
+import { installDesktopScienceHost, registerDesktopScienceResearcherQuestionUi } from "./science-host";
 import { projectScienceLoopLongRun } from "./long-run/science-projection";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
-import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
+import { closeStore, initStore, openedStorePath, runPostContinuityStoreRepairs } from "./store/db";
+import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { clearDetectCache } from "./runtime/detect";
@@ -58,7 +59,8 @@ import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
-import { setGoalWaitHost, pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
+import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
+  interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
 import {
@@ -135,6 +137,7 @@ import { userDataDir, userDataPath } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
 import {
   initializeAppRuntimeCoordinator,
+  desktopAppInstanceId,
   registerAppRuntimeParticipant,
   shutdownAppRuntimeCoordinator,
 } from "./long-run/app-runtime-coordinator";
@@ -183,6 +186,7 @@ import {
   notifyScienceChemistryCommitted,
   notifyScienceArtifactChanged,
   sendScienceTurnEventToView,
+  notifyScienceResearcherQuestion,
   setScienceToolApprovalWatch,
 } from "./extensions/view-host";
 import {
@@ -468,10 +472,10 @@ function initializeInstallIdentity(): InstallIdentity {
     });
     configureInstallIdentity(identity);
     configureDevelopmentEffectPolicy({ packaged: app.isPackaged, identity });
-    if (developmentEffectsSuppressed() && process.argv.some((arg) => arg === "--graph-surface" || arg === "--headless-automations")) {
+    const effectsSuppressed = developmentEffectsSuppressed();
+    if (effectsSuppressed && process.argv.some((arg) => arg === "--graph-surface" || arg === "--headless-automations")) {
       throw new Error("development_effect_policy_refused: headless entry");
     }
-
     // Official releases intentionally preserve their historical values:
     // name Agentlas, Electron's default userData path, and its Keychain
     // service. Only non-official identities receive an explicit namespace.
@@ -1651,6 +1655,10 @@ app.whenReady().then(async () => {
     interrupt: interruptLongRunVerifiers,
     isSettled: longRunVerifiersSettled,
   });
+  registerAppRuntimeParticipant("goal-wait-replan", {
+    interrupt: interruptGoalWaitReplans,
+    isSettled: goalWaitReplansSettled,
+  });
   const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"), {
     // Windows app-local VC++ runtime for llama-server.exe; harmless elsewhere (never read).
     windowsRuntimeDir: path.join(process.resourcesPath, "vc-redist", "x64"),
@@ -1692,7 +1700,7 @@ app.whenReady().then(async () => {
   });
   if (longRunStartup && longRunStartup.recoveredRunIds.length > 0) {
     console.warn(
-      `[long-run] recovered ${longRunStartup.recoveredRunIds.length} interrupted local run(s) as paused; manual resume required`,
+      `[long-run] recovered ${longRunStartup.recoveredRunIds.length} interrupted local run(s) as paused; evaluating checkpoint eligibility before any automatic resume`,
     );
   }
   traceUpdaterStartup("store-ready");
@@ -3740,7 +3748,8 @@ app.whenReady().then(async () => {
       ...(pdfSelection ? { pdfEngine: pdfSelection.engine, ...(pdfSelection.engine === "pdflatex" ? { pdfProfile: pdfSelection.profile } : {}) } : {}),
       ...(input.pdfFallback === "forbid" ? { pdfFallback: "forbid" as const } : {}),
       outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html" as const],
-      style: (input.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
+      // No blanket default: Science follows a journal rule, else the field of the manuscript's own sources (a finance paper does not print [16]).
+      style: input.style as "numeric" | "apa" | "nature" | undefined,
       lineNumbers: input.lineNumbers === true, doubleSpacing: input.doubleSpacing === true,
       journalProfileId: typeof input.journalProfileId === "string" ? input.journalProfileId : undefined,
       expectedJournalProfileVersion: typeof input.expectedJournalProfileVersion === "number" ? input.expectedJournalProfileVersion : undefined,
@@ -3866,6 +3875,49 @@ app.whenReady().then(async () => {
     const statuses = Array.isArray(record.statuses) ? record.statuses.map(String) as ScienceDecisionRequest["status"][] : undefined;
     const analysisSpecId = record.analysisSpecId === undefined || record.analysisSpecId === null || record.analysisSpecId === "" ? undefined : String(record.analysisSpecId);
     return scienceStore().listDecisionRequests(String(record.projectId ?? ""), analysisSpecId, statuses);
+  });
+  // A researcher question is distinct from an analysis-plan decision. Only the verified
+  // Science renderer gets the human-answer route; the model-facing tool server gets none.
+  const researcherQuestions = () => (scienceStore() as unknown as {
+    researcherQuestions: () => {
+      list: (projectId: string, conversationId: string) => unknown;
+      answer: (input: {
+        requestId: string; projectId: string; conversationId: string; questionId: string;
+        expectedSequence: 1; source: "authenticated-user"; answer: string;
+      }) => unknown;
+    };
+  }).researcherQuestions();
+  ipcMain.handle("science:researcherQuestions:register", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    // Do not advertise model tools until both the durable store and updated renderer exist.
+    const questions = researcherQuestions();
+    if (!questions || typeof questions.list !== "function" || typeof questions.answer !== "function") {
+      throw new Error("science-researcher-question-store-unavailable");
+    }
+    registerDesktopScienceResearcherQuestionUi();
+    return { ok: true };
+  });
+  ipcMain.handle("science:researcherQuestions:list", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" ? envelope as Record<string, unknown> : {};
+    return researcherQuestions().list(String(input.projectId ?? ""), String(input.conversationId ?? ""));
+  });
+  ipcMain.handle("science:researcherQuestions:answer", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: Record<string, unknown> }).input : null;
+    if (!input || typeof input.answer !== "string") throw new Error("science-researcher-question-answer-input-invalid");
+    const answered = researcherQuestions().answer({
+      requestId: randomUUID(),
+      projectId: String(input.projectId ?? ""),
+      conversationId: String(input.conversationId ?? ""),
+      questionId: String(input.questionId ?? ""),
+      expectedSequence: 1,
+      source: "authenticated-user",
+      answer: input.answer,
+    });
+    notifyScienceResearcherQuestion(answered);
+    return answered;
   });
   ipcMain.handle("science:decisions:get", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -4124,6 +4176,8 @@ app.whenReady().then(async () => {
         appVersion: app.getVersion(),
         parentPid: process.pid,
         installIdentity,
+        appInstanceId: desktopAppInstanceId(),
+        expectedStoreIdentity: storeIdentityDigest(openedStorePath(), desktopAppInstanceId()),
       });
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
@@ -4275,8 +4329,13 @@ app.whenReady().then(async () => {
   // queued turn into a permanent failed row merely because auth/plugins had
   // not finished restoring yet.
   try {
+    const preflightSteers = recoverRendererPreflightSteers();
+    if (preflightSteers.examined || preflightSteers.parentBound || preflightSteers.orphaned
+      || preflightSteers.acknowledged || preflightSteers.uncertain) {
+      console.info("[invocation] recovered preflight steers", preflightSteers);
+    }
     const recoveredSteers = invocationService.recoverQueuedSteers();
-    if (recoveredSteers > 0) console.info(`[invocation] recovered ${recoveredSteers} queued steer(s)`);
+    if (recoveredSteers.examined > 0) console.info("[invocation] recovered queued steers", recoveredSteers);
   } catch (error) {
     console.error("[invocation] queued steer recovery failed", error);
   }
@@ -4299,10 +4358,17 @@ app.whenReady().then(async () => {
           notification.show();
         },
       });
+      const uncertainClaims = reconcileClaimedGoalWaitsAtStartup();
+      if (uncertainClaims.length) console.warn("[goal-wait] claimed dispatches require attention", uncertainClaims);
       await pollGoalWaitSubscriptions();
-      const { resumeSettledGoalCheckpoints } = await import("./long-run/startup-checkpoints");
+      const { resumeSettledGoalCheckpoints, resumeLegacyOngoingBlockedGoals } = await import("./long-run/startup-checkpoints");
       const resumed = resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
+      // A pinned-runtime classification may take time. Do not hold the UI or
+      // other startup recovery behind this narrow legacy metadata repair.
+      void resumeLegacyOngoingBlockedGoals(invocationService)
+        .then((legacy) => { if (legacy.length) console.info("[long-run] legacy ongoing startup reconciliation", legacy); })
+        .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error));
     } catch (error) {
       console.error("[long-run] checkpoint startup reconciliation failed", error);
     }

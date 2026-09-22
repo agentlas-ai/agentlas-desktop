@@ -19,6 +19,21 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
       return () => ipcRenderer.removeListener("science:askUser", listener);
     },
   }),
+  researcherQuestions: Object.freeze({
+    register: () => ipcRenderer.invoke("science:researcherQuestions:register", { extensionId }),
+    list: (projectId: string, conversationId: string) => ipcRenderer.invoke("science:researcherQuestions:list", { extensionId, projectId, conversationId }),
+    answer: (input: { projectId: string; conversationId: string; questionId: string; answer: string }) => {
+      if (!navigator.userActivation?.isActive && process.env.AGENTLAS_E2E !== "1") {
+        return Promise.reject(new Error("science-researcher-question-user-gesture-required"));
+      }
+      return ipcRenderer.invoke("science:researcherQuestions:answer", { extensionId, input });
+    },
+    onChanged: (callback: (question: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, question: unknown) => callback(question);
+      ipcRenderer.on("science:researcherQuestionChanged", listener);
+      return () => ipcRenderer.removeListener("science:researcherQuestionChanged", listener);
+    },
+  }),
   toolApprovals: Object.freeze({
     state: (projectId: string, chatId: string | null) => ipcRenderer.invoke("science:toolApprovals:state", { extensionId, projectId, chatId }),
     setAlwaysApproved: (projectId: string, chatId: string, enabled: boolean) => ipcRenderer.invoke("science:toolApprovals:setAlwaysApproved", { extensionId, projectId, chatId, enabled }),

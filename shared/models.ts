@@ -168,25 +168,36 @@ export function setContextWindowResolver(resolver: ContextWindowResolver | null)
 /** The last-resort default when no layer of the catalog knows the model. */
 export const UNKNOWN_CONTEXT_WINDOW = 128_000;
 
+/** Capacity provenance for an actual selected model. Unknown must not be
+ * misreported as a discovered 128k model; callers may use a conservative
+ * estimate but should surface that estimate explicitly. */
+export function resolveEffectiveContextWindow(
+  backend: string,
+  id: string | null | undefined,
+  longEnabled: boolean,
+): { contextWindow: number | null; source: "built-in" | "catalog" | "unknown" } {
+  const m = findByokModel(backend, id);
+  const long = activeLongContextTokens(backend, id, longEnabled);
+  if (long) return { contextWindow: long, source: "built-in" };
+  if (m?.contextWindow) return { contextWindow: m.contextWindow, source: "built-in" };
+  if (id && contextWindowResolver) {
+    try {
+      const known = contextWindowResolver(backend, id);
+      if (typeof known === "number" && Number.isFinite(known) && known > 0) {
+        return { contextWindow: Math.floor(known), source: "catalog" };
+      }
+    } catch { /* unresolved, never turn a lookup error into capacity evidence */ }
+  }
+  return { contextWindow: null, source: "unknown" };
+}
+
 /** 압축 임계값 산정용 — 긴 컨텍스트가 활성이면 그 토큰, 아니면 모델 기본 윈도우. */
 export function effectiveContextWindow(
   backend: string,
   id: string | null | undefined,
   longEnabled: boolean,
 ): number {
-  const m = findByokModel(backend, id);
-  const long = activeLongContextTokens(backend, id, longEnabled);
-  if (long) return long;
-  if (m?.contextWindow) return m.contextWindow;
-  if (id && contextWindowResolver) {
-    try {
-      const known = contextWindowResolver(backend, id);
-      if (typeof known === "number" && Number.isFinite(known) && known > 0) return known;
-    } catch {
-      /* resolver must never break a run */
-    }
-  }
-  return UNKNOWN_CONTEXT_WINDOW;
+  return resolveEffectiveContextWindow(backend, id, longEnabled).contextWindow ?? UNKNOWN_CONTEXT_WINDOW;
 }
 
 /** beta-header 토글이 의미 있는 모델인지 (UI에 1M 토글을 보여줄지 결정) */

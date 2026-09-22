@@ -5,11 +5,17 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, listLongRuns, listLongRunTasks, transitionLongRun } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, blockHostPausedClaimedGoalWait, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { prepareCheckpointContinuation } from "./continuation";
+import { ongoingCycleWakeAt } from "./ongoing-wake";
+import { latestRuntimePlan, recordOngoingStallReplan } from "./plan";
+import { longRunMonetaryRefusal } from "./budget";
+import { withGoalWaitAccounting } from "./accounting-context";
+import { reflectOngoingStall, replanModelFingerprint, type StallReplanResult } from "./stall-replan";
+import type { OngoingStallReplan } from "../../shared/runtime-plan";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 
 export interface GoalWaitSubscription {
@@ -20,6 +26,9 @@ export interface GoalWaitSubscription {
   nextCheckAt: string | null; intervalMs: number; deadline: string | null;
   state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
   wakeReason: string | null; successorInvocationId: string | null; executionAvailability: "app-running";
+  /** Main-only recovery route. Legacy waits omit these fields. */
+  recoveryMode?: "stall_replan" | "stall_backoff";
+  recoveryProgressKey?: string;
 }
 export interface GoalWaitObservation { digest: string; cursor: string | null; terminal: boolean; reason: string | null }
 export interface GoalWaitDispatch { waitId: string; goalId: string; checkpointId: string; invocationRunId: string; request: McpInvocationRequest }
@@ -30,6 +39,11 @@ export interface GoalWaitHost {
   notify?(input: GoalWaitAttention): void;
 }
 let host: GoalWaitHost | null = null;
+const replanInFlight = new Map<string, AbortController>();
+export function interruptGoalWaitReplans(): void {
+  for (const controller of replanInFlight.values()) controller.abort(new Error("app_shutdown"));
+}
+export function goalWaitReplansSettled(): boolean { return replanInFlight.size === 0; }
 /** Main installs its single invocation dispatcher after startup bindings are ready. */
 export function setGoalWaitHost(value: GoalWaitHost | null): void { host = value; }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -91,7 +105,8 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
 
 /** Actual service result producer. The request is accepted only after its own
  * host effect receipt is settled; waiting is never a model completion claim. */
-export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; projectDir?: string | null; now?: number }): GoalWaitSubscription {
+export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; projectDir?: string | null; now?: number;
+  recoveryMode?: GoalWaitSubscription["recoveryMode"]; recoveryProgressKey?: string }): GoalWaitSubscription {
   assertDesktopLongRunAdmissionOpen();
   const validated = parseGoalWaitIntent("```agentlas-goal-wait\n" + JSON.stringify(input.intent) + "\n```").request;
   if (validated?.status !== "requested") throw new Error("goal_wait_request_invalid");
@@ -108,6 +123,11 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       if (revision.lifecycle !== "ongoing") throw new Error("goal_wait_ongoing_authority_required");
       const due = Date.parse(input.intent.subject.notBefore);
       if (due < now + 60_000 || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
+    }
+    if (input.recoveryMode && (run.surface !== "one" || input.intent.subject.kind !== "timer"
+      || run.stallStreak < run.stallWindow || !input.recoveryProgressKey
+      || input.recoveryProgressKey !== (run.lastProgressKey ?? `one-host:unknown:revision:${revision.revision}`))) {
+      throw new Error("goal_wait_stall_recovery_invalid");
     }
     const prior = latestGoalWaitSubscription(run.goalId);
     if (prior?.state === "pending" || prior?.state === "claimed") throw new Error("goal_wait_already_registered");
@@ -127,6 +147,10 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       checkpointId: checkpoint.checkpointId, intent: input.intent, subjectRef: identity(input.intent), cursor: observation.cursor,
       lastObservedDigest: observation.digest, nextCheckAt: input.intent.subject.kind === "timer" ? input.intent.subject.notBefore : new Date(now + 30_000).toISOString(), intervalMs: 30_000,
       deadline: input.intent.deadline, state: "pending", wakeReason: null, successorInvocationId: null, executionAvailability: "app-running" };
+    if (input.recoveryMode) {
+      subscription.recoveryMode = input.recoveryMode;
+      subscription.recoveryProgressKey = input.recoveryProgressKey;
+    }
     persist(subscription);
     transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: `goal_wait:${subscription.waitId}` });
     return subscription;
@@ -137,11 +161,39 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
  * cycle is the fallback; it is not permission to repeat an external action. */
 export function registerOngoingGoalCycle(input: { goalId: string; invocationRunId: string; hasTransientAttachments?: boolean; now?: number }): GoalWaitSubscription {
   const now = input.now ?? Date.now();
-  return registerGoalWaitSubscription({ ...input, now, intent: {
-    schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore: new Date(now + 30 * 60_000).toISOString() },
-    condition: "due", deadline: null,
-    nextAction: "Begin the next bounded episode of this ongoing mandate. Inspect current state and prior action receipts first. Respect the original user's cadence and scope; if no action is due, register another timer wait. Never repeat a completed post, purchase or other side effect. Reconcile any uncertain effect before taking another action. Keep the mandate open until the user stops it.",
-  } });
+  // Keep the plan read, receipt validation and wait insertion within one DB
+  // transaction so another plan revision cannot sneak between them.
+  return getDb().transaction(() => {
+    const run = getLongRunByGoalId(input.goalId);
+    const revision = getChatGoalRevision(input.goalId);
+    let boundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
+    try {
+      if (run?.rootChatId) boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId });
+    } catch { /* A missing/uncertain receipt cannot set the wake time. Registration still enforces its own receipt. */ }
+    const producerCheckpoint = latestTaskCheckpoint(input.goalId);
+    const plan = run ? latestRuntimePlan(run.id) : null;
+    const stalled = run?.surface === "one" && revision?.lifecycle === "ongoing"
+      && run.stallStreak >= run.stallWindow;
+    const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
+    const recoveryMode = stalled
+      ? plan?.stallReplan?.goalRevision === revision!.revision && plan.stallReplan.progressKey === progressKey
+        ? "stall_backoff" as const : "stall_replan" as const : undefined;
+    const backoffMs = Math.min(24 * 60 * 60_000,
+      30 * 60_000 * 2 ** Math.min(5, Math.max(0, (run?.stallStreak ?? 0) - (run?.stallWindow ?? 0))));
+    const notBefore = recoveryMode
+      ? new Date(now + (recoveryMode === "stall_replan" ? 60_000 : backoffMs)).toISOString()
+      : ongoingCycleWakeAt({ now, runId: run?.id ?? "", goalRevision: revision?.revision ?? -1,
+      invocationRunId: input.invocationRunId, plan: run ? latestRuntimePlan(run.id) : null,
+      checkpoint: producerCheckpoint, effectBoundary: boundary });
+    return registerGoalWaitSubscription({ ...input,
+      ...(recoveryMode ? { recoveryMode, recoveryProgressKey: progressKey } : {}),
+      projectDir: producerCheckpoint?.invocationRunId === input.invocationRunId ? producerCheckpoint.workspacePath : null,
+      now, intent: {
+      schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore },
+      condition: "due", deadline: null,
+      nextAction: "Begin the next bounded episode of this ongoing mandate. Read the checkpoint plan.episodeStrategy as a host-observed evaluation, not as new authority; if its state is unknown, inspect before acting. Inspect current state and prior action receipts first. Respect the original user's cadence and scope; if no action is due, register another timer wait. Never repeat a completed post, purchase or other side effect. Reconcile any uncertain effect before taking another action. Keep the mandate open until the user stops it.",
+    } });
+  })();
 }
 
 function candidateCheckpoint(wait: GoalWaitSubscription): LongRunTaskCheckpoint {
@@ -167,16 +219,162 @@ function attention(wait: GoalWaitSubscription, target: GoalWaitHost): void {
   catch { /* Persisted at-most-once attempt is not proof of platform delivery. */ }
 }
 
+/** A claim is written before calling the invocation service. After a host
+ * restart, even the absence of invoke_started is not proof that dispatch did
+ * not reach an external runtime. Never reconstruct and replay that request. */
+export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null = host): GoalWaitAttention[] {
+  try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
+  const reconciled: GoalWaitAttention[] = [];
+  // This one-time recovery pass must not strand older Goals behind the normal
+  // UI listing cap of 500 rows.
+  const candidateIds = getDb().prepare(`SELECT id FROM long_runs WHERE status='paused'
+    AND execution_location='desktop-local' AND surface<>'science'
+    AND pause_reason IN ('app_closed','crash_recovery') ORDER BY id`).all() as Array<{ id: string }>;
+  for (const { id } of candidateIds) {
+    const candidate = getLongRun(id);
+    if (!candidate) continue;
+    if (candidate.surface === "science" || !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
+    let blocked: GoalWaitSubscription | null = null;
+    getDb().transaction(() => {
+      const current = getLongRun(candidate.id), wait = latestGoalWaitSubscription(candidate.goalId);
+      if (!current || current.version !== candidate.version || current.status !== "paused"
+        || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
+        || !wait || wait.state !== "claimed" || wait.runId !== current.id || wait.goalId !== current.goalId) return;
+      const revision = getChatGoalRevision(wait.goalId);
+      const checkpoint = latestTaskCheckpoint(wait.goalId);
+      const claim = wait.successorInvocationId ? getDb().prepare(`SELECT seq FROM long_run_events
+        WHERE run_id=? AND kind='run.checkpoint_continuation'
+          AND json_extract(payload_json,'$.checkpointId')=?
+          AND json_extract(payload_json,'$.invocationRunId')=? ORDER BY seq DESC LIMIT 1`)
+        .get(current.id, wait.checkpointId, wait.successorInvocationId) as { seq: number } | undefined : undefined;
+      const bindingExact = revision?.revision === wait.goalRevision
+        && current.rootChatId === wait.chatId && getChat(wait.chatId)?.goalId === wait.goalId
+        && checkpoint?.checkpointId === wait.checkpointId && Boolean(claim);
+      // These are receipts for the *exact* intended successor, not an inference
+      // from a chat's most recent invocation or a model's success claim.
+      const started = wait.successorInvocationId ? getDb().prepare(
+        "SELECT id FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1",
+      ).get(wait.successorInvocationId, wait.chatId) as { id: string } | undefined : undefined;
+      const attempt = wait.successorInvocationId ? getDb().prepare(
+        "SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE run_id=? AND invocation_run_id=? LIMIT 1",
+      ).get(current.id, wait.successorInvocationId) as { id: string; state: string; side_effect_state: string } | undefined : undefined;
+      const terminal = wait.successorInvocationId ? getDb().prepare(`SELECT id FROM run_events
+        WHERE run_id=? AND chat_id=? AND kind IN ('invoke_completed','invoke_failed','invoke_threw','invoke_cancelled','invoke_interrupted')
+        ORDER BY seq DESC LIMIT 1`).get(wait.successorInvocationId, wait.chatId) as { id: string } | undefined : undefined;
+      const effect = terminal && wait.successorInvocationId ? getDb().prepare(`SELECT id FROM run_events
+        WHERE run_id=? AND chat_id=? AND kind='runtime_effect_boundary'
+          AND json_extract(payload_json,'$.terminalEventId')=? ORDER BY seq DESC LIMIT 1`)
+        .get(wait.successorInvocationId, wait.chatId, terminal.id) as { id: string } | undefined : undefined;
+      // The old claim need not remain an obstacle if the exact successor has
+      // already been verified and produced a *new* settled retry checkpoint.
+      // Retiring the old wait never replays that successor: the ordinary
+      // startup checkpoint path may only claim a fresh invocation from the
+      // verifier's newer checkpoint. A terminal/effect receipt alone is not a
+      // verification verdict and must keep the existing fail-closed path.
+      let settledRetry = false;
+      let settledRetryReceiptId: string | null = null;
+      if (bindingExact === false && claim && checkpoint && wait.successorInvocationId
+        && checkpoint.checkpointId !== wait.checkpointId
+        && checkpoint.schemaVersion === "agentlas.task-checkpoint.v2"
+        && checkpoint.disposition === "retry_required" && checkpoint.sideEffects.state === "settled"
+        && checkpoint.invocationRunId === wait.successorInvocationId
+        && checkpoint.goalId === wait.goalId && checkpoint.capsule.runId === current.id
+        && checkpoint.goalRevision === wait.goalRevision
+        && getLongRunGoalRevisionBinding(current.id)?.revision === wait.goalRevision
+        && revision?.revision === wait.goalRevision
+        && current.rootChatId === wait.chatId && getChat(wait.chatId)?.goalId === wait.goalId) {
+        const completed = getDb().prepare(`SELECT id FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_completed' LIMIT 1`)
+          .get(wait.successorInvocationId, wait.chatId) as { id: string } | undefined;
+        const controller = getDb().prepare(`SELECT a.id FROM long_run_worker_attempts a
+          JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
+          WHERE a.run_id=? AND a.invocation_run_id=? AND w.role='controller'
+            AND a.state='completed' AND a.side_effect_state='committed' LIMIT 1`)
+          .get(current.id, wait.successorInvocationId) as { id: string } | undefined;
+        const verifier = getDb().prepare(`SELECT a.id FROM long_run_worker_attempts a
+          JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
+          WHERE a.run_id=? AND a.worker_id=? AND a.attempt=? AND w.role='verifier'
+            AND a.state='completed' AND a.side_effect_state<>'uncertain' LIMIT 1`)
+          .get(current.id, checkpoint.capsule.workerId, checkpoint.capsule.attempt) as { id: string } | undefined;
+        const nextAlreadyClaimed = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id=?
+          AND kind IN ('run.checkpoint_continuation','run.checkpoint_startup','run.checkpoint_startup_dispatched')
+          AND json_extract(payload_json,'$.checkpointId')=?
+          AND (kind<>'run.checkpoint_startup' OR json_extract(payload_json,'$.status')='claimed') LIMIT 1`)
+          .get(current.id, checkpoint.checkpointId);
+        let boundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
+        try { boundary = readInvocationEffectBoundary({ invocationRunId: wait.successorInvocationId, expectedChatId: wait.chatId }); }
+        catch { /* Missing or contradictory receipts never retire the claim. */ }
+        settledRetry = Boolean(completed && controller && verifier && !nextAlreadyClaimed
+          && boundary?.effects === "settled" && boundary.terminalEventId === completed.id
+          && boundary.receiptEventId === checkpoint.sideEffects.boundary?.receiptEventId
+          && boundary.snapshotDigest === checkpoint.sideEffects.boundary?.snapshotDigest
+          && checkpoint.sideEffects.boundary?.terminalEventId === completed.id
+          && checkpoint.sideEffects.boundary?.invocationRunId === wait.successorInvocationId);
+        if (settledRetry) settledRetryReceiptId = boundary!.receiptEventId;
+      }
+      if (settledRetry) {
+        const retired: GoalWaitSubscription = { ...wait, revision: wait.revision + 1,
+          state: "dispatched", nextCheckAt: null, wakeReason: "goal_wait_successor_verified_retry_checkpoint" };
+        persist(retired);
+        appendLongRunEvent({ runId: current.id, kind: "run.wait_claim_reconciled", actorKind: "host",
+          payload: { waitId: wait.waitId, successorInvocationId: wait.successorInvocationId,
+            checkpointId: checkpoint!.checkpointId, terminalEventId: terminal?.id ?? null,
+            effectBoundaryReceiptId: settledRetryReceiptId, outcome: "verified_retry_checkpoint_no_replay" } });
+        return;
+      }
+      const reason = bindingExact ? "goal_wait_claimed_dispatch_uncertain" : "goal_wait_claimed_binding_changed";
+      const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "blocked", nextCheckAt: null, wakeReason: reason };
+      persist(next);
+      appendLongRunEvent({ runId: current.id, kind: "run.wait_claim_reconciled", actorKind: "host",
+        payload: { waitId: wait.waitId, goalId: wait.goalId, goalRevision: wait.goalRevision,
+          checkpointId: wait.checkpointId, successorInvocationId: wait.successorInvocationId,
+          checkpointClaimEventSeq: claim?.seq ?? null, invokeStartedEventId: started?.id ?? null,
+          terminalEventId: terminal?.id ?? null, effectBoundaryReceiptId: effect?.id ?? null, attemptId: attempt?.id ?? null,
+          attemptState: attempt?.state ?? null, sideEffectState: attempt?.side_effect_state ?? null,
+          reason, outcome: "attention_required_no_replay" } });
+      // A dedicated CAS blocks this exceptional host pause without inventing
+      // queued/running states. A user Stop or pause never matches its predicate.
+      blockHostPausedClaimedGoalWait(current.id, getLongRun(current.id)!.version, reason);
+      blocked = next;
+    })();
+    if (blocked) {
+      const wait = blocked as GoalWaitSubscription;
+      reconciled.push({ waitId: wait.waitId, goalId: wait.goalId, chatId: wait.chatId,
+        reason: wait.wakeReason!, state: wait.state, executionAvailability: "app-running" });
+      if (target) attention(wait, target);
+    }
+  }
+  return reconciled;
+}
+
 /** Scheduler is only the timer. The installed Main service remains the only
  * dispatcher; compare-and-swap snapshots prevent duplicate wakes and Stop races. */
-export async function pollGoalWaitSubscriptions(options: { now?: number; clock?: () => number; host?: GoalWaitHost; observe?: (wait: GoalWaitSubscription) => GoalWaitObservation | Promise<GoalWaitObservation> } = {}): Promise<void> {
+function* goalWaitPollingCandidates(): Generator<NonNullable<ReturnType<typeof getLongRun>>> {
+  let afterId = "";
+  // The UI listing caps at 500. Stable ID paging ensures an older pending
+  // subscription cannot remain invisible on every scheduler tick.
+  while (true) {
+    const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
+      AND status IN ('waiting_tool','paused') AND execution_location='desktop-local'
+      AND surface<>'science' ORDER BY id LIMIT 500`).all(afterId) as Array<{ id: string }>;
+    if (!rows.length) return;
+    for (const { id } of rows) {
+      afterId = id;
+      const run = getLongRun(id);
+      if (run) yield run;
+    }
+  }
+}
+
+export async function pollGoalWaitSubscriptions(options: { now?: number; clock?: () => number; host?: GoalWaitHost;
+  observe?: (wait: GoalWaitSubscription) => GoalWaitObservation | Promise<GoalWaitObservation>;
+  /** Synthetic test seam; production always uses the pinned no-tools runner. */
+  reflect?: typeof reflectOngoingStall } = {}): Promise<void> {
   const target = options.host ?? host;
   if (!target) return;
   try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
   const clock = options.clock ?? (() => options.now ?? Date.now());
   const now = clock();
-  const candidates = listLongRuns({ statuses: ["waiting_tool", "paused"], executionLocation: "desktop-local", limit: 500 });
-  for (const candidate of candidates) {
+  for (const candidate of goalWaitPollingCandidates()) {
     if (candidate.surface === "science") continue;
     const wait = latestGoalWaitSubscription(candidate.goalId);
     if (!wait || wait.state !== "pending" || target.isChatBusy(wait.chatId)) continue;
@@ -186,17 +384,90 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     let observation: GoalWaitObservation | null = null, failure: string | null = null;
     try { if (due) observation = await (options.observe ? options.observe(wait) : observeGoalWaitSubject(wait, clock())); }
     catch (error) { failure = error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_source_unavailable"; }
+    let replan: StallReplanResult | null = null;
+    if (due && !failure && wait.recoveryMode === "stall_replan") {
+      // A scheduled no-tools call still spends the Goal's inference budget.
+      // Refuse it before dispatch if Main's authority, budget, settled-effect,
+      // or app-liveness boundary has changed. The transaction below repeats
+      // these checks after the await, so this read is not an execution grant.
+      try {
+        assertDesktopLongRunAdmissionOpen();
+        const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
+        const revision = getChatGoalRevision(wait.goalId);
+        if (!current || current.version !== candidate.version || !latest
+          || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
+          || !["waiting_tool", "paused"].includes(current.status)
+          || (current.status === "paused" && !["app_closed", "crash_recovery"].includes(current.pauseReason ?? ""))
+          || target.isChatBusy(wait.chatId)) {
+          // Another poll or user/app transition owns this snapshot. Do not
+          // turn a stale read into a blocked Goal.
+          continue;
+        }
+        const checkpoint = candidateCheckpoint(wait);
+        prepareCheckpointContinuation(checkpoint);
+        if (current.surface !== "one" || !revision || revision.lifecycle !== "ongoing"
+          || revision.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) {
+          failure = "goal_wait_goal_revision_changed";
+        } else if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) {
+          failure = "goal_wait_original_authority_missing";
+        } else if (checkpoint.sideEffects.state !== "settled" || unsettledLongRunAttempts(current.id).length) {
+          failure = "goal_wait_effects_uncertain";
+        } else {
+          const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
+          failure = Number.isFinite(deadline) && clock() >= deadline ? "budget_wallclock_exhausted"
+            : current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles ? "budget_cycles_exhausted"
+              : longRunMonetaryRefusal(current);
+        }
+      } catch { failure = "goal_wait_context_changed"; }
+    }
+    if (due && !failure && wait.recoveryMode === "stall_replan") {
+      if (replanInFlight.has(wait.waitId)) continue;
+      const controller = new AbortController();
+      replanInFlight.set(wait.waitId, controller);
+      try {
+        const checkpoint = latestTaskCheckpoint(wait.goalId);
+        replan = checkpoint?.checkpointId === wait.checkpointId
+          ? await withGoalWaitAccounting({ waitId: wait.waitId, goalId: wait.goalId,
+            goalRevision: wait.goalRevision, checkpointId: wait.checkpointId, chatId: wait.chatId },
+            () => (options.reflect ?? reflectOngoingStall)({ checkpoint,
+              progressKey: wait.recoveryProgressKey ?? "", stallStreak: candidate.stallStreak,
+              previousAction: checkpoint.capsule.plan?.stallReplan?.action
+                ?? checkpoint.capsule.plan?.episodeStrategy?.nextAction ?? null,
+              previousAlternative: checkpoint.capsule.plan?.stallReplan?.alternative ?? null,
+              signal: controller.signal }))
+          : { status: "unavailable", reason: "stall_replan_checkpoint_changed" };
+      } catch { replan = { status: "unavailable", reason: "stall_replan_runtime_failed" }; }
+      finally { replanInFlight.delete(wait.waitId); }
+    }
+    // Accounted inference legitimately appends Goal usage events while the
+    // model is awaited. Compare against the post-call run version, then repeat
+    // every authority/status/effect check under the transaction below.
+    const expectedVersion = getLongRun(wait.runId)?.version ?? candidate.version;
     let dispatch: GoalWaitDispatch | null = null, notice: GoalWaitSubscription | null = null;
     try { getDb().transaction(() => {
       const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
       try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
-      if (!current || !latest || current.version !== candidate.version || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
+      if (!current || !latest || current.version !== expectedVersion || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
         || target.isChatBusy(wait.chatId) || !["waiting_tool", "paused"].includes(current.status)) return;
       if (current.status === "paused" && !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")) return;
       let checkpoint: LongRunTaskCheckpoint | null = null;
       try { checkpoint = candidateCheckpoint(wait); prepareCheckpointContinuation(checkpoint); }
       catch (error) { failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed"; }
       if (getChatGoalRevision(wait.goalId)?.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) failure = "goal_wait_goal_revision_changed";
+      if (wait.recoveryMode) {
+        const revision = getChatGoalRevision(wait.goalId);
+        if (current.surface !== "one" || revision?.lifecycle !== "ongoing"
+          || !revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))
+          || current.stallStreak < current.stallWindow
+          || wait.recoveryProgressKey !== (current.lastProgressKey ?? `one-host:unknown:revision:${revision.revision}`)) {
+          failure = "goal_wait_stall_recovery_invalid";
+        }
+        const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
+        if (Number.isFinite(deadline) && clock() >= deadline) failure = "budget_wallclock_exhausted";
+        else if (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles) failure = "budget_cycles_exhausted";
+        else failure = longRunMonetaryRefusal(current) ?? failure;
+        if (checkpoint?.sideEffects.state !== "settled" || unsettledLongRunAttempts(current.id).length) failure = "goal_wait_effects_uncertain";
+      }
       const expired = wait.deadline !== null && Date.parse(wait.deadline) <= clock();
       if (current.status === "paused") {
         transitionLongRun({ runId: current.id, to: "queued", actorKind: "host", reason: "goal_wait_restored" });
@@ -209,6 +480,62 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         persist(next); transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason! }); notice = next; return;
       }
       if (!observation || !checkpoint) return;
+      if (wait.recoveryMode === "stall_replan") {
+        if (!replan || replan.status === "unavailable") {
+          next.wakeReason = replan?.reason ?? "stall_replan_unavailable";
+          next.nextCheckAt = new Date(clock() + 60 * 60_000).toISOString();
+          persist(next);
+          notice = next;
+          return;
+        }
+        const boundary = checkpoint.sideEffects.boundary;
+        if (!boundary || !wait.recoveryProgressKey) throw new Error("goal_wait_effects_uncertain");
+        const proposal = replan.proposal;
+        const replanPlan: OngoingStallReplan = {
+          schemaVersion: "agentlas.ongoing-stall-replan.v1",
+          sourceCheckpointId: checkpoint.checkpointId,
+          sourceInvocationRunId: wait.sourceInvocationId,
+          goalRevision: wait.goalRevision,
+          progressKey: wait.recoveryProgressKey,
+          effectBoundaryDigest: boundary.snapshotDigest,
+          effectReceiptEventId: boundary.receiptEventId,
+          action: proposal.action, diagnosis: proposal.diagnosis,
+          alternative: proposal.alternative,
+          modelFingerprint: replanModelFingerprint(proposal.runtimeReceipt),
+          nextWakeAt: proposal.action === "wait_backoff"
+            ? new Date(clock() + 60 * 60_000).toISOString() : null,
+        };
+        recordOngoingStallReplan(current.id, replanPlan);
+        appendLongRunEvent({ runId: current.id, kind: "run.stall_replan_judged", actorKind: "host",
+          sourceEventId: `stall-replan:${wait.waitId}`, payload: { waitId: wait.waitId,
+            checkpointId: checkpoint.checkpointId, goalRevision: wait.goalRevision,
+            progressKey: wait.recoveryProgressKey, action: proposal.action,
+            runtimeReceipt: proposal.runtimeReceipt } });
+        if (proposal.action === "needs_person") {
+          next.state = "blocked"; next.wakeReason = "stall_replan_needs_person"; next.nextCheckAt = null;
+          persist(next);
+          transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason });
+          notice = next;
+          return;
+        }
+        if (proposal.action === "wait_backoff") {
+          // A plan revision invalidates the previous checkpoint snapshot. A
+          // deferred wait must carry a new checkpoint bound to that revision,
+          // or its next timer tick would see a stale context and block.
+          const deferredCheckpoint = recordTaskCheckpoint({ goalId: wait.goalId,
+            workerId: checkpoint.capsule.workerId, attempt: checkpoint.capsule.attempt,
+            invocationRunId: wait.sourceInvocationId, disposition: "retry_required",
+            verdicts: checkpoint.nextActions, evidenceRefs: checkpoint.capsule.evidenceRefs,
+            projectDir: checkpoint.workspacePath });
+          prepareCheckpointContinuation(deferredCheckpoint);
+          next.checkpointId = deferredCheckpoint.checkpointId;
+          next.recoveryMode = "stall_backoff";
+          next.wakeReason = "stall_replan_wait_backoff";
+          next.nextCheckAt = replanPlan.nextWakeAt;
+          persist(next);
+          return;
+        }
+      }
       const ready = wait.intent.condition === "changed" ? observation.digest !== wait.lastObservedDigest : observation.terminal;
       next.cursor = observation.cursor; next.lastObservedDigest = observation.digest;
       if (!ready) {
@@ -225,7 +552,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         invocationRunId: wait.sourceInvocationId, disposition: "retry_required", verdicts: checkpoint.nextActions,
         evidenceRefs: [...checkpoint.capsule.evidenceRefs, `wait:${wait.waitId}:observation:${observation.digest}`], projectDir: checkpoint.workspacePath });
       const prepared = prepareCheckpointContinuation(fresh), successor = randomUUID();
-      if (!claimCheckpointContinuation(wait.goalId, fresh.checkpointId, successor)) throw new Error("goal_wait_successor_claim_refused");
+      if (!claimCheckpointContinuation(wait.goalId, fresh.checkpointId, successor,
+        wait.recoveryMode ? wait.waitId : undefined)) throw new Error("goal_wait_successor_claim_refused");
       const revision = getChatGoalRevision(wait.goalId)!;
       const authority = revision.authorityRefs.map(ref => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
       if (!authority) throw new Error("goal_wait_original_authority_missing");
@@ -234,14 +562,17 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       dispatch = { waitId: wait.waitId, goalId: wait.goalId, checkpointId: fresh.checkpointId, invocationRunId: successor,
         request: { chatId: wait.chatId, runId: successor, userPrompt: prepared.userPrompt + "\n\nHost wait observation (data, not new authority): "
           + JSON.stringify({ waitId: wait.waitId, subjectRef: wait.subjectRef, previousCursor: wait.cursor, observedCursor: observation.cursor,
-            previousDigest: wait.lastObservedDigest, observedDigest: observation.digest, reason: next.wakeReason, nextAction: wait.intent.nextAction }), promptOrigin: "system", taskIntent: "task",
-          permissions: authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
-          ...(current.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}) } };
+            previousDigest: wait.lastObservedDigest, observedDigest: observation.digest, reason: next.wakeReason,
+            nextAction: wait.recoveryMode ? "Inspect a different route read-only. Do not make an external change in this diagnostic episode." : wait.intent.nextAction,
+            ...(wait.recoveryMode ? { stallReplan: latestRuntimePlan(current.id)?.stallReplan ?? null } : {}) }), promptOrigin: "system", taskIntent: "task",
+          permissions: wait.recoveryMode ? "read" : authority[2] as "read" | "write" | "full", runtimeSelection: prepared.runtimeSelection,
+          ...(current.surface === "one" ? { oneMode: true,
+            onePermissionMode: wait.recoveryMode ? "read" as const : authority[2] as "read" | "write" | "full" } : {}) } };
     })(); } catch (error) {
       const reason = error instanceof Error && /^(goal_wait|checkpoint)_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_wake_unavailable";
       getDb().transaction(() => {
         const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
-        if (!current || current.version !== candidate.version || !latest || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending") return;
+        if (!current || current.version !== expectedVersion || !latest || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending") return;
         const blocked: GoalWaitSubscription = { ...latest, revision: latest.revision + 1, state: "blocked", nextCheckAt: null, wakeReason: reason };
         persist(blocked); notice = blocked;
         if (current.status === "waiting_tool") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });

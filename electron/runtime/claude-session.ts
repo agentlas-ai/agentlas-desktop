@@ -43,6 +43,13 @@ export interface ClaudeResidentSession {
   executableOwner: { chatId: string; sessionOwnerId: string | null; isolateOwner: boolean; generation: string };
   child: ChildProcess;
   active: ClaudeTurnSink | null;
+  /** Provider-owned session id last observed on this resident process. */
+  nativeSessionId: string | null;
+  /** Model selected in this process; updated only after an acknowledged set_model. */
+  model: string;
+  pendingModelSwitch: { requestId: string; resolve: (accepted: boolean) => void; timer: NodeJS.Timeout } | null;
+  /** Pool identity captured at spawn; changes in cwd/MCP/env must not reuse this process. */
+  poolKey: string | null;
   /** 우리가 놓았다(풀 축출·리퍼·호스트 종료). */
   closed: boolean;
   /** 프로세스가 죽었다. */
@@ -85,6 +92,8 @@ export function openClaudeResidentSession(opts: {
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
+  model?: string | null;
+  poolKey?: string | null;
 }): ClaudeResidentSession {
   const child = spawnCli(opts.bin, opts.args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -97,6 +106,10 @@ export function openClaudeResidentSession(opts: {
     executableOwner: { ...opts.executableOwner },
     child,
     active: null,
+    nativeSessionId: null,
+    model: opts.model?.trim() ?? "",
+    pendingModelSwitch: null,
+    poolKey: opts.poolKey ?? null,
     closed: false,
     dead: false,
     completedTurns: 0,
@@ -106,6 +119,15 @@ export function openClaudeResidentSession(opts: {
   // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
   ensureChildCloseAfterExit(child);
   const readStdout = createNdjsonLineReader((ev) => {
+    const response = ev.type === "control_response" && ev.response && typeof ev.response === "object"
+      ? ev.response as Record<string, unknown> : null;
+    const pending = session.pendingModelSwitch;
+    if (response && pending && response.request_id === pending.requestId) {
+      session.pendingModelSwitch = null;
+      clearTimeout(pending.timer);
+      pending.resolve(response.subtype === "success");
+      return;
+    }
     try {
       session.active?.onEvent(ev);
     } catch {
@@ -126,6 +148,8 @@ export function openClaudeResidentSession(opts: {
   const die = (code: number | null) => {
     if (session.dead) return;
     session.dead = true;
+    const pending = session.pendingModelSwitch;
+    if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
     const sink = session.active;
     session.active = null;
     try {
@@ -152,6 +176,8 @@ export function claudeResidentSessionAlive(session: ClaudeResidentSession): bool
 /** 세션을 놓는다(프로세스 트리 종료). */
 export function closeClaudeResidentSession(session: ClaudeResidentSession): void {
   session.closed = true;
+  const pending = session.pendingModelSwitch;
+  if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
   session.active = null;
   try {
     session.child.stdin?.end();
@@ -163,6 +189,34 @@ export function closeClaudeResidentSession(session: ClaudeResidentSession): void
   } catch {
     /* 이미 죽었을 수 있다 */
   }
+}
+
+/** Installed Claude Code 2.1.278: control_request(set_model) is acknowledged on stdout before the next user turn. */
+export async function setClaudeResidentModel(session: ClaudeResidentSession, model: string | null | undefined, signal?: AbortSignal): Promise<boolean> {
+  const target = model?.trim() ?? "";
+  if (session.model === target) return true;
+  if (!claudeResidentSessionAlive(session) || session.active || session.pendingModelSwitch || signal?.aborted) return false;
+  const requestId = crypto.randomUUID();
+  const accepted = await new Promise<boolean>((resolve) => {
+    const finish = (ok: boolean) => {
+      const pending = session.pendingModelSwitch;
+      if (!pending || pending.requestId !== requestId) return;
+      session.pendingModelSwitch = null;
+      clearTimeout(pending.timer);
+      signal?.removeEventListener("abort", abort);
+      resolve(ok);
+    };
+    const abort = () => finish(false);
+    const timer = setTimeout(() => finish(false), 15_000);
+    session.pendingModelSwitch = { requestId, resolve: (ok) => { signal?.removeEventListener("abort", abort); resolve(ok); }, timer };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      session.child.stdin!.write(`${JSON.stringify({ type: "control_request", request_id: requestId,
+        request: { subtype: "set_model", model: target || "default" } })}\n`);
+    } catch { finish(false); }
+  });
+  if (accepted) session.model = target;
+  return accepted;
 }
 
 /**
@@ -217,6 +271,39 @@ export function retireSupersededClaudeSessions(
     && session.executableOwner.sessionOwnerId === owner.sessionOwnerId
     && session.executableOwner.isolateOwner === owner.isolateOwner
     && session.executableOwner.generation !== owner.generation);
+}
+
+/**
+ * A Claude native session is provider state, not a per-process transcript. If a model switch
+ * resumes that native id in a new resident process, a cwd/MCP/env pool key changes, or a one-shot
+ * turn updates it out of process, an older process with the same id can keep a stale local
+ * transcript. Retire those siblings before the new turn is admitted so a later resident turn
+ * cannot silently reuse stale state.
+ * Checked-out siblings are marked for retirement when the current turn releases them; the pool
+ * never interrupts an active turn here.
+ */
+export function retireClaudeModelSiblings(
+  pool: AcpSessionPool<ClaudeResidentSession>,
+  input: {
+    owner: ClaudeResidentSession["executableOwner"];
+    nativeSessionId: string;
+    model?: string | null;
+    poolKey?: string | null;
+    /** A matching resident can change model in-process before receiving the next turn. */
+    allowModelSwitch?: boolean;
+    /** One-shot turns must retire even same-model siblings because they update native state out-of-process. */
+    retireSameModel?: boolean;
+  },
+): { retired: number; pending: number } {
+  const targetModel = input.model?.trim() ?? "";
+  return pool.retireMatching((session) => (
+    session.executableOwner.chatId === input.owner.chatId &&
+    session.executableOwner.sessionOwnerId === input.owner.sessionOwnerId &&
+    session.executableOwner.isolateOwner === input.owner.isolateOwner &&
+    session.nativeSessionId === input.nativeSessionId &&
+    (input.retireSameModel === true || session.poolKey !== (input.poolKey ?? null)
+      || (!input.allowModelSwitch && session.model !== targetModel))
+  ));
 }
 
 export function claudeSessionPool(): AcpSessionPool<ClaudeResidentSession> {
@@ -277,7 +364,7 @@ export function residencyDisabledFor(kind: string, env: NodeJS.ProcessEnv = proc
 }
 
 /**
- * 재사용 키. ACP 와 **같은 축**이다: 세션 지문(모델·시스템프롬프트·권한 — 기존 계약
+ * 재사용 키. ACP 와 **같은 축**이다: 세션 지문(시스템프롬프트·권한 — 기존 계약
  * 그대로) 위에 프로세스 정체성(cwd · MCP 설정 경로 · 실행 파일 · 도구 관문 · argv)을
  * 더하고, 마지막에 env 다이제스트를 얹는다.
  *
@@ -296,7 +383,7 @@ export function claudePoolKey(input: {
   bin: string;
   mcpConfigPath?: string;
   toolBrokerSettingsPath?: string;
-  /** 스폰 argv. `--resume <id>` 쌍은 빼고 정렬해서 넣는다(같은 프로세스 형상 = 같은 키). */
+  /** 스폰 argv. `--resume <id>` 와 `--model <name>` 쌍은 빼고 정렬한다(모델은 제어 요청으로 바뀐다). */
   args: string[];
   env?: NodeJS.ProcessEnv;
 }): string {
@@ -323,14 +410,15 @@ export function claudePoolKey(input: {
 }
 
 /**
- * 키에 쓸 argv 정규화. `--resume <id>` 는 뺀다 — 같은 대화의 세션이 리퍼에 거둬진 뒤
+ * 키에 쓸 argv 정규화. `--resume <id>` 와 `--model <name>` 은 뺀다 — 세션은 모델을
+ * set_model 로 바꿀 수 있고, 리퍼에 거둬진 뒤 재개할 때는 새 argv 로 시작한다.
  * 다시 열릴 때 그 한 쌍 때문에 키가 갈리면, 재사용이 아니라 매번 새 항목이 쌓인다.
  * 순서는 정렬로 지운다(새 세션 형상과 재개 형상은 같은 플래그를 다른 순서로 싣는다).
  */
 export function stableSpawnArgs(args: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--resume" || args[i] === "-r") {
+    if (args[i] === "--resume" || args[i] === "-r" || args[i] === "--model") {
       i += 1; // 세션 id 도 함께 건너뛴다
       continue;
     }

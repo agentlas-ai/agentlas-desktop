@@ -25,6 +25,7 @@ import {
 } from "../runtime/workload-routing";
 import { pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
 import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
+import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
   isMobileReadRuntimeAllowed,
@@ -521,6 +522,7 @@ export async function runSwarmInvocation(
             history: [],
             userPrompt: task.brief || task.title,
             backendLabel: targetRunner.label,
+            workProjectId: p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null,
             model: target.model ?? undefined,
             longContext: target.longContextEnabled ?? false,
             effort: target.effort ?? undefined,
@@ -566,6 +568,7 @@ export async function runSwarmInvocation(
     const failedWorkerRuntimes: typeof candidateRuntimes = [];
     result = await runWorkerOn(executedRuntime, executedRunner);
     while (result.failure && !directUserRuntimePinHonored && !(signal ?? p.signal)?.aborted) {
+      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
         failedWorkerRuntimes.push(executedRuntime);
@@ -588,6 +591,9 @@ export async function runSwarmInvocation(
       result = await runWorkerOn(executedRuntime, executedRunner);
     }
     if (result.failure) {
+      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+        throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
+      }
       throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
     }
     const effectiveResolution = resolution && workerFellBack
@@ -714,6 +720,7 @@ export async function runSwarmInvocation(
             history: [],
             userPrompt: pieces || "(no completed results)",
             backendLabel: targetRunner.label,
+            workProjectId: p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null,
             model: targetRuntime.model ?? undefined,
             longContext: targetRuntime.longContextEnabled ?? false,
             effort: targetRuntime.effort ?? undefined,
@@ -751,6 +758,7 @@ export async function runSwarmInvocation(
       && !directUserRuntimePinHonored
       && !(signal ?? p.signal)?.aborted
     ) {
+      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedSynthesisRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
         failedSynthesisRuntimes.push(executedRuntime);
@@ -778,6 +786,9 @@ export async function runSwarmInvocation(
       result = await runSynthesisOn(executedRuntime, executedRunner);
     }
     if (result.failure) {
+      if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+        throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
+      }
       throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
     }
     const executedResolution = reconcileWorkloadRunnerResult(

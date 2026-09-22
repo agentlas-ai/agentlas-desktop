@@ -65,6 +65,7 @@ import type {
   OneTeamPreflightProposal,
   OneTeamPreflightRef,
   PrepareOneTeamPreflightInput,
+  PrepareOneTeamPreflightIpcResult,
   PrepareOneTeamPreflightResult,
   ResolveOneTeamPreflightInput,
   ResolveOneTeamPreflightResult,
@@ -323,6 +324,7 @@ export type {
   OneTeamPreflightRole,
   OneTeamPreflightStatus,
   PrepareOneTeamPreflightInput,
+  PrepareOneTeamPreflightIpcResult,
   PrepareOneTeamPreflightResult,
   ResolveOneTeamPreflightInput,
   ResolveOneTeamPreflightResult,
@@ -757,6 +759,79 @@ export interface RuntimeSelection {
   longContext?: boolean;
   /** 작업량(reasoning effort) — Claude Code `--effort` 전용. "" 또는 미설정이면 기본. */
   effort?: string;
+}
+
+/** An explicit ongoing-Goal model request, distinct from the chat's next-message pin. */
+export interface GoalRuntimeSelectionReceipt {
+  chat: Chat;
+  goalId: string;
+  goalRevision: number;
+  selectionRevision: number;
+  state: "pending" | "claimed" | "applied";
+  requested: RuntimeSelection;
+  /** Null until a matching successor completes with settled effects. */
+  effective: RuntimeSelection | null;
+}
+
+/** Bounded, read-only Main projection. A missing/stale event is not a stopped run. */
+export interface ChatContinuitySnapshot {
+  schemaVersion: "agentlas.continuity-snapshot.v1";
+  chatId: string;
+  observedAt: string;
+  source: "main-store";
+  /** Main's current in-memory registry; independent of durable event recency. */
+  hostActiveChat: boolean;
+  freshness: { lastDurableEventAt: string | null; elapsedMs: number | null };
+  goal: null | {
+    goalId: string;
+    lifecycle: "finite" | "ongoing" | null;
+    goalRevision: number | null;
+    contractStatus: "active" | "blocked" | "completed" | "cancelled" | null;
+    runId: string | null;
+    runStatus: string | null;
+    runVersion: number | null;
+    blockedReason: string | null;
+    eventSeq: number | null;
+    /** Host-verified descriptive strategy for the exact current Goal revision. */
+    episodeStrategy: null | { planRevision: number; state: "changed" | "unchanged" | "unknown";
+      nextAction: "wait_observe" | "repair_verified_failure" | "gather_missing_evidence" | "hold_for_user" | "inspect_before_action";
+      reasonCode: "action_changed" | "action_unchanged" | "first_observation" | "evidence_unavailable";
+      metrics: { passed: number; repairableFailed: number; prerequisiteFailed: number;
+        otherFailed: number; inconclusive: number }; nextWakeAt: string | null };
+    wait: null | { waitId: string; state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
+      subjectKind: "invocation" | "artifact" | "timer"; nextCheckAt: string | null;
+      executionAvailability: "app-running" };
+  };
+  invocation: null | {
+    runId: string;
+    /** Exact Goal worker-attempt binding only; same chat does not imply ownership. */
+    relationship: "goal-bound" | "unverified";
+    /** Active requires both a durable start and Main's live registry. */
+    state: "active" | "terminal" | "unconfirmed";
+    phase: "started" | "runtime_selected" | "model_activity" | "tool_activity" | "other_activity" | "terminal";
+    startedAt: string;
+    phaseAt: string;
+    lastEventSeq: number;
+    model: null | { kind: string; backend: string | null; model: string | null };
+  };
+  automations: Array<{
+    automationId: string;
+    /** Goal ID alone is a declaration, not a revision-bound provenance receipt. */
+    relationship: "goal-bound" | "unverified" | "independent";
+    goalId: string | null;
+    enabled: boolean;
+    liveState: "queued" | "running" | null;
+    /** Recent persisted run is not proof the process is currently alive. */
+    liveStateEvidence: "recent-durable-run" | "scheduler-lease" | null;
+    runId: string | null;
+    startedAt: string | null;
+    lastActivityAt: string | null;
+    nextRunAt: string | null;
+    lastRunStatus: "running" | "ok" | "error" | null;
+  }>;
+  modelHandoff: null | { selectionRevision: number; state: "pending" | "claimed" | "applied";
+    requested: { kind: string; backend: string | null; model: string | null; effort: string | null };
+    effective: { kind: string; backend: string | null; model: string | null; effort: string | null } | null };
 }
 
 export type AgentRuntimeOverrideScope = "agent" | "firm" | "division";
@@ -4383,6 +4458,8 @@ export interface McpInvocationRequest {
   /** 렌더러가 미리 생성한 실행 id — invoke.run 왕복 전에 이벤트 채널을 구독하기 위함
    *  (subscribe-before-trigger). 없으면 main이 randomUUID로 생성한다(하위호환). */
   runId?: string;
+  /** Renderer-to-Main One preflight queue binding; Main strips before runtime dispatch. */
+  preflightSubmissionId?: string;
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
@@ -4809,6 +4886,8 @@ export interface McpInvocationEvent {
   keyRequest?: McpRunKeyRequest;
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
   tokens?: number;
+  /** Runner-observed input+output for this exact turn; absent means unknown, never zero. */
+  observedUsage?: { inputTokens: number; outputTokens: number };
   /** reasoning(thinking) 구간 신호(kind:"reasoning") — 상태줄 "생각 중…" 회전과
    *  종료 후 "N초 동안 생각함" 표시의 근거. durationMs는 end에만 동봉.
    *
@@ -6325,6 +6404,30 @@ export type InvocationRunStatus =
   | "cancelled"
   | "interrupted";
 
+/** Main-owned receipt for a direction held after restart because an external
+ * effect cannot be ruled out. It is informational, never replay permission. */
+export interface InvocationSteerRecovery {
+  id: string;
+  chatId: string;
+  originalRunId: string;
+  promptText: string;
+  promptHash: string;
+  queuedAt: string;
+  reason:
+    | "original-run-start-uncertain"
+    | "original-run-effect-boundary-unconfirmed"
+    | "drained-run-start-uncertain"
+    | "drained-run-receipt-missing"
+    | "draining-run-id-missing";
+}
+
+export interface InvocationSteerRecoveryReport {
+  examined: number;
+  resumed: number;
+  settled: number;
+  held: number;
+}
+
 /**
  * Durable execution receipt. Renderer busy state is deliberately not part of
  * this contract: main's live registry owns running/cancelling, while the DB
@@ -6357,7 +6460,28 @@ export interface InvocationRunReceipt {
    * run has no idempotency key to collapse a duplicate onto.
    */
   executionPermission?: "read" | "write" | "full";
+  /** Held directions require explicit review; Main never auto-replays them. */
+  steeringRecovery?: InvocationSteerRecovery[];
+  /** A deliberate direction change interrupted this run; it is not a failed run. */
+  interruptionCause?: "steering";
 }
+
+/** Content-free Main admission status; absent is not proof that an in-flight IPC request never started. */
+export type InvocationAdmissionReceipt =
+  | { runId: string; status: "absent" }
+  | {
+      runId: string;
+      chatId: string;
+      status: "pending" | "admitted" | "rejected";
+      pendingAt: string;
+      updatedAt: string;
+      rejectionReasonCode: string | null;
+      /** Present on a rejected no-start receipt when the Goal-owned
+       * preflight marker captured the exact direction identity. */
+      goalId?: string;
+      /** Main-bound chat row for a proven start rejection. */
+      promptMessageId?: string;
+    };
 
 /** Result of Main's recovery judgment for one unfinished run. */
 export interface OneAutoRecoveryJudgement {
@@ -7633,6 +7757,16 @@ export interface AgentlasIpc {
       id: string,
       selection: RuntimeSelection | null,
     ) => Promise<Chat>;
+    /** Save a model for the next safe episode of this exact ongoing Goal. */
+    requestGoalRuntimeSelection: (id: string, input: {
+      expectedGoalId: string;
+      expectedGoalRevision: number;
+      selection: RuntimeSelection;
+    }) => Promise<GoalRuntimeSelectionReceipt>;
+    /** Latest durable Goal model handoff, if one was requested. */
+    getGoalRuntimeSelection: (id: string) => Promise<GoalRuntimeSelectionReceipt | null>;
+    /** Consistent Goal/invocation/automation view with no prompt or provider path. */
+    getContinuitySnapshot: (id: string) => Promise<ChatContinuitySnapshot | null>;
     /** 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null). */
     recap: (id: string) => Promise<{ summary: string; count: number; sinceIso: string } | null>;
     /** 이 채팅을 방금 봤다고 기록(recap 기준점 갱신). */
@@ -7818,7 +7952,7 @@ export interface AgentlasIpc {
   };
   /** Read-only adaptive-team proposal plus explicit, exact resolution. */
   oneTeamPreflight: {
-    prepare: (input: PrepareOneTeamPreflightInput) => Promise<PrepareOneTeamPreflightResult>;
+    prepare: (input: PrepareOneTeamPreflightInput) => Promise<PrepareOneTeamPreflightIpcResult>;
     getForChat: (chatId: string) => Promise<OneTeamPreflightProposal | null>;
     autoResolve: (input: AutoResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
     resolve: (input: ResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
@@ -7836,6 +7970,19 @@ export interface AgentlasIpc {
   automations: {
     list: () => Promise<Automation[]>;
     get: (id: string) => Promise<Automation | null>;
+    listStrategyProposals: (id: string, limit?: number) => Promise<import("./automation-strategy-review").AutomationStrategyProposalView[]>;
+    reviewStrategyProposal: (input: {
+      automationId: string;
+      proposalId: string;
+      decision: "apply" | "reject";
+      goalAmendment?: {
+        text: string;
+        objective: string;
+        acceptanceCriteria: Array<{ id: string; text: string }>;
+        expectedGoalRevision: number;
+        expectedRunVersion: number;
+      };
+    }) => Promise<import("./automation-strategy-review").AutomationStrategyReviewResult>;
     create: (input: AutomationCreateInput) => Promise<Automation>;
     toggle: (id: string, enabled: boolean) => Promise<Automation>;
     remove: (id: string) => Promise<void>;
@@ -8183,6 +8330,11 @@ export interface AgentlasIpc {
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
     /** Queue a follow-up, cancel the current turn, then resume this chat after terminal settlement. */
     steer: (req: McpInvocationRequest) => Promise<InvocationSteerResult>;
+    preflightSubmissionBegin: (input: import("./one-preflight-steers").OnePreflightSubmissionInput) => Promise<import("./one-preflight-steers").OnePreflightSubmissionReceipt>;
+    preflightSteerEnqueue: (input: import("./one-preflight-steers").OnePreflightSteerInput) => Promise<import("./one-preflight-steers").OnePreflightSteerReceipt>;
+    preflightSteers: (chatId: string) => Promise<import("./one-preflight-steers").OnePreflightSteerReceipt[]>;
+    preflightSteerReceipt: (input: import("./one-preflight-steers").OnePreflightSteerLookupInput) => Promise<import("./one-preflight-steers").OnePreflightSteerReceipt | null>;
+    preflightSubmissionHold: (submissionId: string) => Promise<import("./one-preflight-steers").OnePreflightSubmissionReceipt | null>;
     eventChannel: (runId: string) => string;
     /** 진행 중인 실행을 취소 — CLI 자식 프로세스 kill / API fetch abort. 병렬 세션 각각 독립 취소. */
     cancel: (runId: string) => Promise<InvocationCancelReceipt>;
@@ -8197,12 +8349,23 @@ export interface AgentlasIpc {
       runId: string;
       events: McpInvocationEvent[];
       startedAt?: string;
-      queuedSteers?: Array<{ text: string; queuedAt: string; position: number }>;
+      queuedSteers?: Array<{
+        id: string;
+        text: string;
+        queuedAt: string;
+        position: number;
+        recoveryState?: "ready" | "held";
+        recoveryReason?: InvocationSteerRecovery["reason"];
+      }>;
     } | null>;
     /** 실행 ID의 live+durable 상태. 앱 재시작 뒤 미종결 started receipt는 interrupted로 판정한다. */
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
+    /** Durable Main admission state. Pending/absent are not permission to resend. */
+    admission: (runId: string) => Promise<InvocationAdmissionReceipt>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */
     latestReceipt: (chatId: string) => Promise<InvocationRunReceipt | null>;
+    /** Restart-held steering directions; informational only, never replay permission. */
+    steeringRecovery: (chatId: string) => Promise<InvocationSteerRecovery[]>;
     workerReport: (scope: import("./worker-report").WorkerReportScope) => Promise<import("./worker-report").WorkerReport | null>;
     /** Exact Main-projected surface for one canonical Task/run binding. */
     latestOneSurface: (input: {

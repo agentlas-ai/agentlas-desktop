@@ -11,6 +11,30 @@ import type { InstructionSnapshot } from "./runtime-instructions";
 export const LONG_RUN_SCHEMA_VERSION = "agentlas.long-run.v1" as const;
 export const RUNTIME_ADAPTER_SCHEMA_VERSION = "agentlas.runtime-adapter.v1" as const;
 
+/** A durable wait claim may have reached the runtime before the host died.
+ * Ordinary Resume's blanket uncertain-attempt acknowledgment is not enough
+ * to authorize replaying that successor. Stop remains available. */
+export function isClaimedWaitRecoveryBlocker(reason: string | null | undefined): boolean {
+  return reason === "goal_wait_claimed_dispatch_uncertain" || reason === "goal_wait_claimed_binding_changed";
+}
+
+/** A host-startup replay was not proven to be between settled turns. The
+ * durable blocker is deliberately distinct from a claimed wait: a completed
+ * controller row alone cannot prove that its external effects were sealed. */
+export const GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN = "goal_resume_effect_boundary_uncertain" as const;
+
+export function isGoalResumeEffectBoundaryUncertainBlocker(reason: string | null | undefined): boolean {
+  return reason === GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN;
+}
+
+/** Shared admission guard for every user resume/reactivation surface. */
+export function goalResumeRecoveryBlockerCode(reason: string | null | undefined):
+  "goal_wait_claimed_reconciliation_required" | typeof GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN | null {
+  if (isClaimedWaitRecoveryBlocker(reason)) return "goal_wait_claimed_reconciliation_required";
+  if (isGoalResumeEffectBoundaryUncertainBlocker(reason)) return GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN;
+  return null;
+}
+
 export const LONG_RUN_SURFACES = ["one", "work", "science"] as const;
 export type LongRunSurface = (typeof LONG_RUN_SURFACES)[number];
 

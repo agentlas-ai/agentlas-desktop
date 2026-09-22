@@ -72,7 +72,8 @@ function boundedOptionalText(
   return trimmed || undefined;
 }
 
-function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null {
+/** Canonical chat pin contract; automation transcripts adapt their worker pin here. */
+export function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null {
   if (value === null || value === undefined) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("Invalid chat runtime selection");
@@ -440,7 +441,12 @@ export function createChat(input: {
         .get(input.parentChatId) as { seatId: string | null } | undefined;
       seatId = parent?.seatId ?? null;
     }
-    if (!seatId) seatId = ensureSoloSeatForAgent(resolvedAgentId);
+    if (!seatId) {
+      seatId = ensureSoloSeatForAgent(
+        resolvedAgentId,
+        originSurface === "work" ? input.projectId ?? null : null,
+      );
+    }
   } catch {
     // 좌석 확보 실패가 대화 생성을 막아서는 안 된다 — seat_id NULL 은 유효한 세션이고
     // v103 재시딩이 다음 기동에서 흡수한다(I2: NULL 허용이 계약).

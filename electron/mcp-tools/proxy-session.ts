@@ -13,28 +13,101 @@ import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type Run
 import { beginMainMcpEffect } from "./effect-receipts";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 
-type Gate = {
+export type McpProxyGate = {
   serverKey: string; runtime: string; sessionKey: string; permission?: "read" | "write" | "full";
   cwd?: string; chatId?: string; unattended?: boolean; simulation?: boolean; planMode?: boolean;
   catalogId: string | null; planReadAuthority?: "agentlas-browser" | "cua-driver"; planPath?: string;
+  /** Stable Main-owned identity for an Antigravity browser resident scope. */
+  residentKey?: string;
 };
-type Registration = { cwd: Readonly<{ path: string; dev: number; ino: number }>; gate: Readonly<Gate>; binding?: PreparedMcpBinding; timer?: NodeJS.Timeout; connections: Set<() => void> };
+type Registration = {
+  cwd: Readonly<{ path: string; dev: number; ino: number }>;
+  gate: Readonly<McpProxyGate>;
+  binding?: PreparedMcpBinding;
+  /** New gate/binding held until activateMcpProxyLaunch commits the rebind. */
+  pendingGate?: Readonly<McpProxyGate>;
+  pendingGeneration?: string;
+  /** Active generation is sent to proxy-child in the bridge response header. */
+  generation?: string;
+  /** A promoted launch survives per-turn cleanup until its resident owner closes. */
+  resident?: { key: string; owner: string };
+  timer?: NodeJS.Timeout;
+  connections: Set<(cause?: unknown) => void>;
+};
 type Frame = Record<string, any>;
 type Policy = {
   mutating: (input: { catalogId?: string | null; toolName: string }) => boolean;
   planMutating: (input: { authority?: unknown; toolName: string; args?: unknown }) => boolean;
 };
 const launches = new Map<string, Registration>();
+const residentLaunches = new Map<string, string>();
+/**
+ * A stale native wire can keep reconnecting after Main has revoked its handle.
+ * Refusing that wire is correct, but logging every poll made a broken client
+ * amplify both the log and Main's work indefinitely. Keep the refusal path
+ * bounded as well as the live registry.
+ */
+const refusedHandleLogAt = new Map<string, number>();
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const UNUSED_LAUNCH_MS = 5 * 60_000;
+const MAX_ACTIVE_LAUNCHES = 256;
+const MAX_CONNECTIONS_PER_LAUNCH = 8;
+const REFUSED_LOG_COOLDOWN_MS = 30_000;
+const MAX_REFUSED_LOGS_PER_WINDOW = 32;
+let refusedLogWindowStartedAt = 0;
+let refusedLogsInWindow = 0;
+
+function logRefusedHandle(handle: string, reason: string): void {
+  // Request URLs are untrusted input. Keep only the bounded handle prefix in
+  // the diagnostic cache so a caller cannot allocate one new long string per
+  // refusal while still preserving the useful opaque-id correlation.
+  const key = handle.slice(0, 64);
+  const now = Date.now();
+  if (now - refusedLogWindowStartedAt >= REFUSED_LOG_COOLDOWN_MS) {
+    refusedLogWindowStartedAt = now;
+    refusedLogsInWindow = 0;
+  }
+  // Per-handle cooldown alone cannot bound a stream of distinct invalid URLs.
+  if (refusedLogsInWindow >= MAX_REFUSED_LOGS_PER_WINDOW) return;
+  const previous = refusedHandleLogAt.get(key) ?? 0;
+  if (now - previous < REFUSED_LOG_COOLDOWN_MS) return;
+  // Delete before insertion: the previous expiry-only pass could retain every
+  // fresh unique key and grow without limit under a burst of refused wires.
+  if (refusedHandleLogAt.size >= MAX_ACTIVE_LAUNCHES) {
+    for (const [cachedKey, at] of refusedHandleLogAt) {
+      if (now - at >= REFUSED_LOG_COOLDOWN_MS) refusedHandleLogAt.delete(cachedKey);
+    }
+    if (refusedHandleLogAt.size >= MAX_ACTIVE_LAUNCHES) {
+      refusedHandleLogAt.delete(refusedHandleLogAt.keys().next().value!);
+    }
+  }
+  refusedHandleLogAt.set(key, now);
+  refusedLogsInWindow++;
+  console.warn(`[mcp-proxy] bridge refused handle=${key.slice(0, 8)} reason=${reason}`);
+}
+
+function evictIdleLaunches(): void {
+  if (launches.size < MAX_ACTIVE_LAUNCHES) return;
+  for (const [handle, entry] of launches) {
+    if (entry.connections.size || entry.resident || entry.binding) continue;
+    launches.delete(handle);
+    if (entry.timer) clearTimeout(entry.timer);
+    if (launches.size < MAX_ACTIVE_LAUNCHES) return;
+  }
+}
 function expireUnused(handle: string, entry: Registration): void {
   if (launches.get(handle) !== entry) return;
   if (entry.timer) clearTimeout(entry.timer);
-  entry.timer = setTimeout(() => { if (!entry.connections.size) launches.delete(handle); }, UNUSED_LAUNCH_MS);
+  entry.timer = setTimeout(() => {
+    // A promoted handle is owned by the resident CLI, not by the last HTTP
+    // wire.  Its child may be idle for hours between turns; expiring the map
+    // here would make that child hit terminal 403 and strand the session.
+    if (!entry.connections.size && !entry.resident) launches.delete(handle);
+  }, UNUSED_LAUNCH_MS);
   entry.timer.unref?.();
 }
 /** Main builder only. Serialized policy fields cannot register or upgrade a launch. */
-export function prepareMcpProxyLaunch(gate: Gate): string {
+export function prepareMcpProxyLaunch(gate: McpProxyGate): string {
   if (typeof gate.cwd !== "string" || !path.isAbsolute(gate.cwd)) throw new Error("mcp_proxy_cwd_invalid");
   let cwd: Registration["cwd"];
   try {
@@ -43,23 +116,131 @@ export function prepareMcpProxyLaunch(gate: Gate): string {
     fs.accessSync(real, fs.constants.R_OK | fs.constants.X_OK);
     cwd = Object.freeze({ path: real, dev: stat.dev, ino: stat.ino });
   } catch { throw new Error("mcp_proxy_cwd_unavailable"); }
+  const normalizedGate = Object.freeze({ ...gate, cwd: cwd.path });
+  if (gate.residentKey) {
+    const existingHandle = residentLaunches.get(gate.residentKey);
+    if (existingHandle) {
+      const existing = launches.get(existingHandle);
+      if (!existing?.resident || existing.resident.key !== gate.residentKey) {
+        residentLaunches.delete(gate.residentKey);
+      } else if (existing.gate.serverKey !== gate.serverKey || existing.gate.catalogId !== gate.catalogId
+        || existing.cwd.path !== cwd.path || existing.cwd.dev !== cwd.dev || existing.cwd.ino !== cwd.ino) {
+        throw new Error("mcp_proxy_resident_scope_conflict");
+      } else {
+        // Config materialization happens before the Antigravity pool lease is
+        // acquired.  Never let a concurrent turn rebind an active resident
+        // owner; that would interrupt its live browser call before the pool
+        // has had a chance to serialize the turns.
+        if (existing.binding) throw new Error("mcp_proxy_resident_scope_active");
+        // A resident handle has one prepare -> activate transaction at a
+        // time.  Without this fail-closed gate, two overlapping config builds
+        // could overwrite pendingGate and activate turn B's policy with turn
+        // A's prepared binding.  The caller may retry after the first build
+        // either activates or cleans up the transaction.
+        if (existing.pendingGate) throw new Error("mcp_proxy_resident_scope_busy");
+        existing.pendingGate = normalizedGate;
+        existing.pendingGeneration = randomUUID();
+        return existingHandle;
+      }
+    }
+  }
+  evictIdleLaunches();
+  if (launches.size >= MAX_ACTIVE_LAUNCHES) throw new Error("mcp_proxy_launch_capacity_exceeded");
   const handle = randomUUID();
-  const entry: Registration = { cwd, gate: Object.freeze({ ...gate, cwd: cwd.path }), connections: new Set() };
+  const entry: Registration = { cwd, gate: normalizedGate, connections: new Set(),
+    ...(gate.residentKey ? { pendingGeneration: randomUUID() } : {}) };
   launches.set(handle, entry); expireUnused(handle, entry); return handle;
 }
 export function activateMcpProxyLaunch(handle: string, binding: PreparedMcpBinding): void {
   const entry = launches.get(handle);
-  if (!entry || entry.binding || entry.gate.serverKey !== binding.configKey) throw new Error("mcp_proxy_launch_unapproved");
+  if (!entry || entry.gate.serverKey !== binding.configKey) throw new Error("mcp_proxy_launch_unapproved");
   if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
+  if (entry.resident) {
+    if (entry.binding) throw new Error("mcp_proxy_resident_scope_active");
+    const nextGate = entry.pendingGate ?? entry.gate;
+    const nextGeneration = entry.pendingGeneration ?? randomUUID();
+    if (nextGate.serverKey !== binding.configKey || nextGate.residentKey !== entry.resident.key) {
+      throw new Error("mcp_proxy_resident_scope_conflict");
+    }
+    // Rebinding is terminal for the old wire. Its child reconnects to the same
+    // opaque handle and receives the new generation in the HTTP response.
+    for (const close of [...entry.connections]) close("mcp_proxy_scope_rebound");
+    entry.gate = nextGate;
+    entry.binding = binding;
+    entry.generation = nextGeneration;
+    entry.pendingGate = undefined;
+    entry.pendingGeneration = undefined;
+    return;
+  }
   entry.binding = binding;
+  entry.generation = entry.pendingGeneration ?? randomUUID();
+  entry.pendingGeneration = undefined;
 }
 /** Revoke only this Main-minted launch, including its attached wires. */
 export function revokeMcpProxyLaunch(handle: string): void {
   const entry = launches.get(handle);
   if (!entry) return;
+  if (entry.resident) {
+    deactivateMcpProxyLaunch(handle);
+    return;
+  }
   launches.delete(handle);
   if (entry.timer) clearTimeout(entry.timer);
   for (const close of [...entry.connections]) close();
+}
+/**
+ * Promote one already-prepared browser launch to a resident scope. This is
+ * called only after the AGY resident process has produced a result; before
+ * that point ordinary cleanup remains a hard revoke.
+ */
+export function promoteMcpProxyLaunch(handle: string): { key: string; owner: string } {
+  const entry = launches.get(handle);
+  const key = entry?.gate.residentKey;
+  if (!entry || !key || !entry.binding) throw new Error("mcp_proxy_resident_promotion_unapproved");
+  const currentHandle = residentLaunches.get(key);
+  if (currentHandle && currentHandle !== handle) throw new Error("mcp_proxy_resident_scope_conflict");
+  const owner = randomUUID();
+  entry.resident = { key, owner };
+  residentLaunches.set(key, handle);
+  if (!entry.generation) entry.generation = entry.pendingGeneration ?? randomUUID();
+  entry.pendingGeneration = undefined;
+  return { key, owner };
+}
+/** A resident launch is inactive between turns but remains addressable. */
+export function deactivateMcpProxyLaunch(handle: string): void {
+  const entry = launches.get(handle);
+  if (!entry) return;
+  for (const close of [...entry.connections]) close("mcp_proxy_scope_revoked");
+  entry.binding = undefined;
+  entry.pendingGate = undefined;
+  entry.pendingGeneration = undefined;
+  entry.generation = undefined;
+}
+/** Drop an uncommitted resident prepare without touching its active owner. */
+export function cancelMcpProxyLaunchPreparation(handle: string): void {
+  const entry = launches.get(handle);
+  if (!entry?.resident) return;
+  entry.pendingGate = undefined;
+  entry.pendingGeneration = undefined;
+}
+/** Close the stable handle only if this exact resident owner still owns it. */
+export function revokeMcpProxyResidentKey(key: string, owner: string): boolean {
+  const handle = residentLaunches.get(key);
+  const entry = handle ? launches.get(handle) : undefined;
+  if (!entry?.resident || entry.resident.key !== key || entry.resident.owner !== owner) return false;
+  residentLaunches.delete(key);
+  entry.resident = undefined;
+  launches.delete(handle!);
+  if (entry.timer) clearTimeout(entry.timer);
+  for (const close of [...entry.connections]) close("mcp_proxy_scope_revoked");
+  return true;
+}
+export function isPersistentMcpProxyLaunch(handle: string): boolean {
+  return Boolean(launches.get(handle)?.resident);
+}
+export function mcpProxyLaunchResidentKey(handle: string): string | null {
+  const entry = launches.get(handle);
+  return entry?.gate.residentKey ?? entry?.resident?.key ?? null;
 }
 class McpProxyCwdChangedError extends Error {
   readonly code = "mcp_proxy_cwd_changed";
@@ -75,12 +256,16 @@ function validateLaunchCwd(cwd: { path: string; dev: number; ino: number }): voi
 }
 export function stopMcpProxySessions(): void {
   const entries = [...launches.values()]; launches.clear();
+  residentLaunches.clear();
+  refusedHandleLogAt.clear();
+  refusedLogWindowStartedAt = 0;
+  refusedLogsInWindow = 0;
   for (const entry of entries) {
     if (entry.timer) clearTimeout(entry.timer);
     for (const close of [...entry.connections]) close();
   }
 }
-function graphAllows(gate: Readonly<Gate>, tool: string): boolean {
+function graphAllows(gate: Readonly<McpProxyGate>, tool: string): boolean {
   if (!gate.planPath) return true;
   const stat = fs.statSync(gate.planPath);
   if (!stat.isFile() || stat.size > 1024 * 1024) return false;
@@ -95,10 +280,21 @@ function graphAllows(gate: Readonly<Gate>, tool: string): boolean {
 export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.ServerResponse, policy: Policy): void {
   const handle = (req.url ?? "").slice("/bridge/".length);
   const registration = launches.get(handle), candidate = registration?.binding;
+  if (registration?.resident && !candidate && /^[a-f0-9-]{36}$/.test(handle)) {
+    // A resident child remains alive between turns. Inactive is retryable;
+    // only deletion/revocation is terminal 403. The next rebind supplies a
+    // generation header and the child discards frames queued in this gap.
+    logRefusedHandle(handle, "launch_scope_inactive");
+    res.writeHead(409).end("mcp_proxy_scope_inactive"); return;
+  }
   if (!registration || !candidate || !/^[a-f0-9-]{36}$/.test(handle)) {
     // 실측(2026-09-14): 컴퓨터 유즈가 한 앱 세션 안에서 35번 "not connected" 였는데 앱 로그엔 프록시 줄이 0건이었다.
-    console.warn(`[mcp-proxy] bridge refused handle=${handle.slice(0, 8)} reason=${!registration ? "launch_unknown_or_expired" : !candidate ? "launch_not_activated" : "handle_invalid"}`);
+    logRefusedHandle(handle, !registration ? "launch_unknown_or_expired" : !candidate ? "launch_not_activated" : "handle_invalid");
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
+  }
+  if (registration.connections.size >= MAX_CONNECTIONS_PER_LAUNCH) {
+    logRefusedHandle(handle, "launch_connection_capacity_exceeded");
+    res.writeHead(429).end("mcp_proxy_connection_capacity_exceeded"); return;
   }
   // A revoked seal cannot recover on the same handle. Reject before opening
   // a wire so proxy-child receives terminal 403, not a retryable socket reset.
@@ -108,6 +304,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
   }
   const entry = registration, binding: PreparedMcpBinding = candidate, gate = entry.gate, lifetime = new AbortController();
+  const generation = entry.generation;
+  if (!generation) {
+    console.warn(`[mcp-proxy] bridge refused handle=${handle.slice(0, 8)} reason=launch_generation_missing`);
+    res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
+  }
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
@@ -119,6 +320,9 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const idKey = (id: unknown) => JSON.stringify(id);
   const validate = () => {
     if (closed || lifetime.signal.aborted) throw new Error("mcp_proxy_closed");
+    // Rebinding is a turn boundary.  An async approval/inventory continuation
+    // from the old wire must never validate against the new binding or grant.
+    if (entry.binding !== binding || entry.generation !== generation) throw new Error("mcp_proxy_scope_rebound");
     preparedMcpTargetTransport(binding, binding.server);
     validateLaunchCwd(entry.cwd);
   };
@@ -151,7 +355,10 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) { close(); return; }
     res.write(line);
   };
-  const up = async (frame: Frame) => { validate(); if (!transport) throw new Error("mcp_proxy_not_ready"); await transport.send(frame as JSONRPCMessage); };
+  const up = async (frame: Frame) => {
+    validate(); if (!transport) throw new Error("mcp_proxy_not_ready");
+    await transport.send(frame as JSONRPCMessage);
+  };
   const finish = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending) return;
     pending.effect?.finish(frame);
@@ -286,7 +493,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       finish(String(frame.id), frame);
     };
     await transport.start(); validate();
-    res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" }); res.flushHeaders();
+    res.writeHead(200, {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-store",
+      // The native proxy child compares this before replaying frames queued
+      // during a closed/rebound wire. A new generation never inherits them.
+      "x-agentlas-mcp-proxy-generation": generation,
+    }); res.flushHeaders();
     req.setEncoding("utf8");
     req.on("data", (chunk: string) => {
       buffer += chunk;

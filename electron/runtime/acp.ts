@@ -1,4 +1,5 @@
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Generic ACP runner — one client for every runtime that speaks the Agent Client
 // Protocol (PRD 2026-08-15 D-5). Replaces the weak hand-coded drivers of the
 // "B" grade runtimes (cursor: no tool display; grok: tool kind guessed from
@@ -52,6 +53,7 @@ import { resolveAgentResidencySource, isResidencyExemptAgent } from "./agent-res
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
+import { waitForRetiredCliExit } from "./retired-cli-exit";
 
 /** How to spawn an ACP agent. Adding a runtime = one row (mirrors contracts/runtime-registry.json). */
 export interface AcpAgentSpec {
@@ -73,7 +75,7 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // 우리가 BYOK로 직접 부르는 것과 결과가 같으면서 러너 계약(캐시·세션·usage)만 하나
   // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
   // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
-  "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"], registryId: "github-copilot-cli" },
+  "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.86", "--acp"], registryId: "github-copilot-cli" },
   // gemini는 레지스트리에 `gemini --acp`로 선언돼 있지만 **아직 내장하지 않는다 —
   // 보류이지 기각이 아니고, 판단은 오너 몫이다.** 위 기준("구독 인증 자산이 있는가")에
   // 해당하는지가 열린 질문이기 때문이다:
@@ -355,6 +357,11 @@ interface Session {
   executableOwner?: AcpExecutableOwner;
   /** 이 세션이 들고 있는 ACP sessionId — 다음 턴이 그대로 이어 쓴다. */
   acpSessionId?: string;
+  /** Latest acknowledged selection contract; used to change models without another CLI. */
+  modelSelectionResponse?: unknown;
+  requestedModel?: string;
+  defaultModel?: string;
+  poolKey?: string;
   /** 생존 신호 정지 — 세션을 놓을 때 부른다. */
   stopHeartbeat: () => void;
 }
@@ -500,13 +507,16 @@ function captureAcpExecutableOwner(owner: AcpExecutableOwner): () => boolean {
   return () => token.current;
 }
 
-/** Retire only the replaced executable for the same ACP runtime and logical chat owner. */
-function retireSupersededAcpSessions(pool: AcpSessionPool<Session>, owner: AcpExecutableOwner): void {
-  pool.retireMatching((session) => session.executableOwner?.specId === owner.specId
+/** Retire obsolete process configurations for the same ACP runtime and logical chat owner. */
+async function retireSupersededAcpSessions(pool: AcpSessionPool<Session>, owner: AcpExecutableOwner, poolKey: string): Promise<void> {
+  const retired = pool.retireIdleMatching((session) => session.executableOwner?.specId === owner.specId
     && session.executableOwner.chatId === owner.chatId
     && session.executableOwner.sessionOwnerId === owner.sessionOwnerId
     && session.executableOwner.isolateOwner === owner.isolateOwner
-    && session.executableOwner.generation !== owner.generation);
+    && (session.executableOwner.generation !== owner.generation || session.poolKey !== poolKey
+      || session.state.active !== null));
+  if (retired.busy) throw new Error("runtime_session_owner_busy");
+  await Promise.all(retired.retired.map(session => waitForRetiredCliExit(session.child)));
 }
 
 export function acpSessionPool(): AcpSessionPool<Session> {
@@ -780,16 +790,16 @@ export async function configureAcpSessionModel(
   sessionId: string,
   response: unknown,
   requestedModel: string | undefined,
-): Promise<void> {
+): Promise<unknown> {
   const model = typeof requestedModel === "string" && requestedModel.trim() ? requestedModel : undefined;
-  if (!model) return;
+  if (!model) return response;
 
   const config = modelConfigOptionFromSession(response);
   if (config) {
     if (!config.values.includes(model)) {
       throw new Error(`ACP model ${model} is not advertised by ${spec.id}`);
     }
-    if (config.currentValue === model) return;
+    if (config.currentValue === model) return response;
     const acknowledged = await conn.request(
       "session/set_config_option",
       { sessionId, configId: config.configId, value: model },
@@ -799,7 +809,7 @@ export async function configureAcpSessionModel(
     if (!confirmed || confirmed.currentValue !== model) {
       throw new Error(`ACP model selection for ${model} was not acknowledged by ${spec.id}`);
     }
-    return;
+    return acknowledged;
   }
 
   const legacy = legacyModelSelectionFromSession(response);
@@ -807,19 +817,19 @@ export async function configureAcpSessionModel(
     if (!legacy.modelIds.includes(model)) {
       throw new Error(`ACP model ${model} is not advertised by ${spec.id}`);
     }
-    if (legacy.currentModelId === model) return;
+    if (legacy.currentModelId === model) return response;
     await conn.request(
       "session/set_model",
       { sessionId, modelId: model },
       { timeoutMs: 10_000 },
     );
-    return;
+    return { models: { currentModelId: model, availableModels: legacy.modelIds.map(modelId => ({ modelId })) } };
   }
 
   // Cursor's source-owned `auto` row delegates only when no ACP selection
   // contract was advertised. If an agent did advertise one, apply it above so
   // `auto` cannot silently leave an advertised current model unchanged.
-  if (isCursorAutomaticModel(spec, model)) return;
+  if (isCursorAutomaticModel(spec, model)) return response;
 
   throw new Error(`ACP runtime ${spec.id} did not advertise a model selection contract for ${model}`);
 }
@@ -833,6 +843,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
    * 무한 재시도가 원천적으로 불가능하다.
    */
   const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
+    assertScienceRecoveryRequest(req, "acp");
     const locale = pickLocale(req);
     const nativeMcp = prepareNativeAcpMcpBinding(req);
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
@@ -861,16 +872,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       generation: executableIdentity.generation,
     } : null;
     const retainExecutableOwner = executableOwner ? captureAcpExecutableOwner(executableOwner) : () => true;
-    // 세션 정체성 — 모델/시스템 프롬프트가 바뀌면 이어갈 세션도 달라진다(형제 러너와 동일 규칙).
+    // Model selection is a session operation; prompt and permission still bind session identity.
     const fingerprint = req.chatId
       ? createHash("sha256")
-        .update("acp-session-v2\0")
+        .update("acp-session-v3\0")
         .update(spec.id)
         .update("\0")
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
         .update("\0")
-        .update(req.model ?? "")
-        .update("\0")
+        // Model is selected and acknowledged on the held ACP session before every changed-model turn.
         // 권한은 세션 모드로 굳는다(session/set_mode 는 새 세션에서만 고를 수 있다).
         // 권한이 바뀌면 지문이 달라져 그 권한에 맞는 새 세션이 열린다.
         .update(req.permission ?? "")
@@ -880,7 +890,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .update(executableIdentity.fingerprint)
         .digest("hex")
       : null;
-    const savedSession = req.chatId
+    const savedSession = !assertScienceRecoveryRequest(req, "acp") && req.chatId
       ? getRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
       : null;
     const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
@@ -894,7 +904,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
      * 실행) 예전 그대로 열고 닫는다 — 이어 쓸 다음 턴이 정의상 없기 때문이다.
      */
     const pool = acpSessionPool();
-    const poolKey = req.chatId && fingerprint
+    const poolKey = !req.singleUse && req.chatId && fingerprint
       ? acpPoolKey({
         specId: spec.id,
         chatId: req.chatId,
@@ -941,16 +951,18 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         if (!retainExecutableOwner() || current?.generation !== executableIdentity.generation) {
           throw new Error("cli_executable_identity_changed_during_preparation");
         }
-        retireSupersededAcpSessions(pool, executableOwner);
+        await retireSupersededAcpSessions(pool, executableOwner, poolKey);
         lease = await pool.acquire(poolKey, {
           agentId: req.agentId ?? null,
           nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
           chatId: req.chatId ?? null,
+          projectId: req.workProjectId ?? null,
           runtimeKind: spec.id,
           source: resolveAgentResidencySource(req.agentId),
           reaperExempt: isResidencyExemptAgent(req.agentId),
         }, openSession, retainExecutableOwner);
         session = lease.session;
+        session.poolKey = poolKey;
       } else {
         session = await openSession();
       }
@@ -1048,9 +1060,20 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       // 새 세션과 session/load 응답은 둘 다 현재 모델 계약을 광고할 수 있다. 응답을
       // 버리면 load 뒤에는 선택 실패를 감지할 방법이 없어 provider 기본 모델로 흘렀다.
-      // 풀에서 이미 살아 있는 세션은 지문에 모델이 들어 있어 다시 선택하지 않는다.
-      if (!reusing && req.model) {
-        await configureAcpSessionModel(spec, session.conn, sessionId, created ?? loaded, req.model);
+      // Keep the latest acknowledgement, including its current model, so A -> B -> A cannot
+      // mistake the initial session/new default for the model still running in the process.
+      if (!reusing) {
+        session.modelSelectionResponse = created ?? loaded;
+        session.defaultModel = modelConfigOptionFromSession(session.modelSelectionResponse)?.currentValue
+          ?? legacyModelSelectionFromSession(session.modelSelectionResponse)?.currentModelId ?? undefined;
+      }
+      const requestedModel = req.model?.trim() ?? "";
+      if (!reusing || session.requestedModel !== requestedModel) {
+        const targetModel = requestedModel || (reusing ? session.defaultModel : undefined);
+        if (reusing && !targetModel) throw new Error("acp_model_default_requires_fresh_session");
+        session.modelSelectionResponse = await configureAcpSessionModel(spec, session.conn, sessionId,
+          session.modelSelectionResponse, targetModel);
+        session.requestedModel = requestedModel;
       }
       // 모델 선택을 확인한 세션만 다음 턴에 재사용할 수 있게 붙인다.
       session.acpSessionId = sessionId;
@@ -1228,7 +1251,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (session) session.state.active = null;
       if (lease) {
         // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
-        if (broken || req.signal?.aborted) pool.discard(lease);
+        if (broken || req.signal?.aborted) {
+          pool.discard(lease);
+          if (session) await waitForRetiredCliExit(session.child);
+        }
         else pool.release(lease);
       } else if (session) {
         // 풀에 들어가지 않는 일회성 실행 — 예전 그대로 닫는다.

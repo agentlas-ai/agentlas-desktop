@@ -202,33 +202,69 @@ export function applySeatSnapshotToChats(seatId: string): void {
 
 /**
  * 봇의 solo 좌석 확보 — 새 세션(createChat)이 좌석을 참조하게 하는 유일한 관문.
- * 1) 그 봇이 지금 앉아 있는 solo 좌석이 있으면 재사용(점유 이력이 좌석의 정체다).
- * 2) 없으면 'seat_<agentId>' 를 만들고 착석시킨다. 그 id 의 좌석에 다른 봇이 앉아
- *    있으면(교체 이력) 새 좌석 id 를 만들어 준다 — I7 제약을 우회하지 않는다.
+ * Work 호출은 project_id가 같은 좌석만 재사용한다. 기존 global 좌석이 그 프로젝트의
+ * Work 채팅만 담고 있으면 한 번만 project-bound로 승격하고, One/다른 프로젝트와
+ * 섞였으면 deterministic project seat를 새로 만든다. 따라서 좌석 표시와 provider
+ * residency의 프로젝트 경계가 서로 다른 사실을 가리키지 않는다.
  */
-export function ensureSoloSeatForAgent(agentId: string): string {
+export function ensureSoloSeatForAgent(agentId: string, projectId?: string | null): string {
   const db = getDb();
-  const seated = db
-    .prepare(
-      `SELECT o.seat_id AS seatId FROM one_seat_occupants o
-        JOIN one_seats s ON s.id = o.seat_id
-       WHERE o.agent_id = ? AND o.until IS NULL AND s.kind = 'solo' AND s.dissolved_at IS NULL
-       ORDER BY o.since DESC LIMIT 1`,
-    )
-    .get(agentId) as { seatId: string } | undefined;
+  const workProjectId = typeof projectId === "string" ? projectId.trim() || null : null;
+  const seated = workProjectId
+    ? db
+      .prepare(
+        `SELECT o.seat_id AS seatId FROM one_seat_occupants o
+          JOIN one_seats s ON s.id = o.seat_id
+         WHERE o.agent_id = ? AND o.until IS NULL AND s.kind = 'solo' AND s.dissolved_at IS NULL
+           AND s.project_id = ?
+         ORDER BY o.since DESC LIMIT 1`,
+      )
+      .get(agentId, workProjectId) as { seatId: string } | undefined
+    : db
+      .prepare(
+        `SELECT o.seat_id AS seatId FROM one_seat_occupants o
+          JOIN one_seats s ON s.id = o.seat_id
+         WHERE o.agent_id = ? AND o.until IS NULL AND s.kind = 'solo' AND s.dissolved_at IS NULL
+           AND s.project_id IS NULL
+         ORDER BY o.since DESC LIMIT 1`,
+      )
+      .get(agentId) as { seatId: string } | undefined;
   if (seated) return seated.seatId;
 
   const now = new Date().toISOString();
   let seatId = `seat_${agentId}`;
-  const existing = db.prepare("SELECT id FROM one_seats WHERE id = ?").get(seatId) as { id: string } | undefined;
+  const existing = db.prepare("SELECT id, project_id AS projectId, dissolved_at AS dissolvedAt FROM one_seats WHERE id = ?")
+    .get(seatId) as { id: string; projectId: string | null; dissolvedAt: string | null } | undefined;
   if (existing) {
     const occupied = openOccupants(seatId).some((row) => row.agent_id !== agentId);
-    const dissolved = (db.prepare("SELECT dissolved_at AS d FROM one_seats WHERE id = ?").get(seatId) as { d: string | null }).d;
-    if (occupied || dissolved) seatId = `seat_${agentId}_${Date.now().toString(36)}`;
+    const chatRows = db.prepare("SELECT project_id AS projectId, origin_surface AS originSurface FROM chats WHERE seat_id = ?")
+      .all(seatId) as Array<{ projectId: string | null; originSurface: string | null }>;
+    const canBindExistingGlobalSeat = !occupied && !existing.dissolvedAt && existing.projectId === null
+      && chatRows.every((row) => row.projectId === workProjectId && row.originSurface === "work");
+    const canReuseExistingProjectSeat = !occupied && !existing.dissolvedAt && existing.projectId === workProjectId;
+    if (workProjectId && canBindExistingGlobalSeat) {
+      db.prepare("UPDATE one_seats SET project_id = ?, updated_at = ? WHERE id = ?")
+        .run(workProjectId, now, seatId);
+    } else if (workProjectId && canReuseExistingProjectSeat) {
+      // The deterministic project seat already belongs to this Work project.
+    } else if (!workProjectId && !occupied && !existing.dissolvedAt && existing.projectId === null
+      && chatRows.every((row) => row.originSurface !== "work")) {
+      // Preserve the legacy global solo-seat path for One/Telegram callers.
+    } else {
+      seatId = workProjectId
+        ? `seat_${agentId}_${workProjectId}`
+        : `seat_${agentId}_${Date.now().toString(36)}`;
+      const projectSeat = db.prepare("SELECT project_id AS projectId, dissolved_at AS dissolvedAt FROM one_seats WHERE id = ?")
+        .get(seatId) as { projectId: string | null; dissolvedAt: string | null } | undefined;
+      const projectSeatOccupied = openOccupants(seatId).some((row) => row.agent_id !== agentId);
+      if (projectSeat && (projectSeatOccupied || projectSeat.dissolvedAt || (workProjectId && projectSeat.projectId !== workProjectId))) {
+        seatId = `${seatId}_${Date.now().toString(36)}`;
+      }
+    }
   }
   db.prepare(
-    "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'solo', '', NULL, ?, ?)",
-  ).run(seatId, now, now);
+    "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'solo', '', ?, ?, ?)",
+  ).run(seatId, workProjectId, now, now);
   db.prepare(
     "INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, 0, ?, ?, ?, NULL)",
   ).run(seatId, agentId, agentDisplayName(agentId), nextOccupancySince(seatId, 0, now));

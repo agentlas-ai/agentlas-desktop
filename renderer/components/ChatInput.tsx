@@ -319,6 +319,7 @@ function ChatInputComponent({
   goalRunStatus,
   goalPauseReason,
   goalBlockedReason,
+  goalStatusStale = false,
   onResumeGoal,
   onPauseGoal,
   onEditGoal,
@@ -376,6 +377,8 @@ function ChatInputComponent({
   goalRunStatus?: string;
   goalPauseReason?: string | null;
   goalBlockedReason?: string | null;
+  /** Main Goal observation failed; do not expose actions from the old snapshot. */
+  goalStatusStale?: boolean;
   onResumeGoal?: () => void;
   onPauseGoal?: () => void;
   /** Replace the stopped Goal contract with a user-authored revision. */
@@ -1502,6 +1505,7 @@ function ChatInputComponent({
           runStatus={goalRunStatus}
           pauseReason={goalPauseReason}
           blockedReason={goalBlockedReason}
+          goalStatusStale={goalStatusStale}
           onResume={onResumeGoal}
           onPause={onPauseGoal}
           onEdit={onEditGoal}
@@ -2064,10 +2068,10 @@ function ChatInputComponent({
                     /* 아무것도 안 썼을 때 회색인 것은 사유를 적을 필요가 없다(보면 안다). */
                     data-disabled-reason={submitDisabled && nothingToSend ? "empty-input" : undefined}
                     aria-label={busy
-                      ? (locale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                      ? (locale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
                       : t("chatinput.send")}
                     title={submitDisabledReason ?? (busy
-                      ? (locale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
+                      ? (locale === "ko" ? "현재 실행을 정리한 뒤 다음 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the next instruction")
                       : undefined)}
                     style={{
                       width: 38,
@@ -2102,6 +2106,7 @@ function ComposerGoalBar({
   runStatus,
   pauseReason,
   blockedReason,
+  goalStatusStale = false,
   onResume,
   onPause,
   onEdit,
@@ -2113,6 +2118,8 @@ function ComposerGoalBar({
   pauseReason?: string | null;
   /** 막힌 이유 — 저장소에는 있는데 화면까지 오지 않던 값이다. */
   blockedReason?: string | null;
+  /** Main Goal observation failed; do not expose actions from the old snapshot. */
+  goalStatusStale?: boolean;
   onResume?: () => void;
   onPause?: () => void;
   onEdit?: (objective: string) => Promise<boolean>;
@@ -2136,9 +2143,10 @@ function ComposerGoalBar({
    *   Known reasons have concise product copy. Diagnostic codes stay in the
    *   tooltip instead of taking over the input bar.
    */
-  const paused = runStatus === "paused";
-  const pausing = runStatus === "pausing";
-  const blocked = runStatus === "blocked" || runStatus === "failed";
+  const observed = !goalStatusStale;
+  const paused = observed && runStatus === "paused";
+  const pausing = observed && runStatus === "pausing";
+  const blocked = observed && (runStatus === "blocked" || runStatus === "failed");
   const knownReason = (reason: string | null | undefined): string | null => {
     if (!reason) return null;
     if (reason === "app_closed") return locale === "ko" ? "앱이 종료되어 멈춤" : "Stopped when the app closed";
@@ -2147,6 +2155,18 @@ function ComposerGoalBar({
     // 원장이 실제로 적는 정지 사유(2026-09-14 실측: 셋 다 "작업이 멈췄습니다"로만 보였다).
     if (reason === "stall_window_exhausted") return locale === "ko" ? "같은 결과가 세 번 반복돼 멈춤 — 무엇이 막혔는지 알려 주면 이어갑니다" : "Stopped after the same result three times — tell me what is blocking and I will continue";
     if (reason === "goal_wait_deadline") return locale === "ko" ? "기다리던 조건이 기한 안에 오지 않아 멈춤 — 다시 보내면 이어갑니다" : "Stopped because the awaited condition did not arrive in time — send again to continue";
+    if (reason === "goal_wait_ongoing_authority_required") return locale === "ko"
+      ? "이 Goal의 다음 판단 주기는 확인 대기 중입니다 · 별도 예약 실행 상태는 자동화에서 확인하세요"
+      : "This Goal's next decision cycle awaits confirmation · check Automations for separately scheduled runs";
+    if (reason === "goal_wait_claimed_dispatch_uncertain") return locale === "ko"
+      ? "이전 호출의 전달·실행 결과가 불확실합니다 — 자동 재실행을 막고 기록을 보존했습니다"
+      : "The previous dispatch outcome is uncertain — automatic replay stopped and history preserved";
+    if (reason === "goal_wait_claimed_binding_changed") return locale === "ko"
+      ? "Goal 연결이 바뀌었습니다 — 자동 재실행을 막고 기록을 보존했습니다"
+      : "The Goal binding changed — automatic replay stopped and history preserved";
+    if (reason === "goal_resume_effect_boundary_uncertain") return locale === "ko"
+      ? "이전 호출의 효과 경계를 확인할 수 없습니다 — 자동 재실행을 막고 기록을 보존했습니다"
+      : "The previous effect boundary could not be verified — automatic replay stopped and history preserved";
     if (reason.startsWith("goal_wait_")) return locale === "ko" ? "기다리던 실행·파일을 더 지켜볼 수 없어 멈춤 — 다시 보내면 이어갑니다" : "Stopped because the awaited run or file could no longer be watched — send again to continue";
     if (reason === "runtime_unavailable") return locale === "ko" ? "실행할 엔진이 없어 멈춤" : "Stopped because no runtime was available";
     if (reason === "approval_required") return locale === "ko" ? "승인이 필요해 멈춤" : "Stopped waiting for approval";
@@ -2190,7 +2210,7 @@ function ComposerGoalBar({
       ? "다음 요청으로 목표와 성공 기준을 확정합니다"
       : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
-  const editable = Boolean(onEdit && label && ["paused", "blocked", "queued", "waiting_user", "draft"].includes(runStatus ?? ""));
+  const editable = observed && Boolean(onEdit && label && ["paused", "blocked", "queued", "waiting_user", "draft"].includes(runStatus ?? ""));
   return (
     <div className="chat-composer-goal-stack" data-chat-goal-bar="true">
     <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite">
@@ -2202,26 +2222,32 @@ function ComposerGoalBar({
           {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
         </span>
       )}
-      {onPause && runStatus && !["paused", "pausing", "blocked", "failed", "completed", "cancelled", "cancelling"].includes(runStatus) && (
+      {observed && onPause && runStatus && !["paused", "pausing", "blocked", "failed", "completed", "cancelled", "cancelling"].includes(runStatus) && (
         <button type="button" onClick={onPause} data-chat-goal-pause="true"
           aria-label={locale === "ko" ? "목표 일시정지" : "Pause goal"}
           title={locale === "ko" ? "실행과 자동 이어가기를 멈추고 목표를 보존합니다" : "Stop execution and automatic continuation; keep the goal"}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
         </button>
       )}
-      {paused && onResume && (
+      {observed && (paused || (blocked && blockedReason === "goal_wait_ongoing_authority_required")) && onResume && (
         <button
           type="button"
           onClick={onResume}
           data-chat-goal-resume="true"
-          aria-label={locale === "ko" ? "목표 수동 재개" : "Resume goal manually"}
-          title={locale === "ko" ? "이 앱에서 목표를 다시 실행합니다" : "Resume this goal in the app"}
+          aria-label={blockedReason === "goal_wait_ongoing_authority_required"
+            ? (locale === "ko" ? "지속 목표 확인" : "Confirm ongoing goal")
+            : (locale === "ko" ? "목표 수동 재개" : "Resume goal manually")}
+          title={blockedReason === "goal_wait_ongoing_authority_required"
+            ? (locale === "ko" ? "저장된 목표 범위와 권한을 Main에서 확인한 뒤 지속 실행을 요청합니다" : "Ask Main to verify the saved scope and authority before ongoing execution")
+            : (locale === "ko" ? "이 앱에서 목표를 다시 실행합니다" : "Resume this goal in the app")}
         >
-          {locale === "ko" ? "재개" : "Resume"}
+          {blockedReason === "goal_wait_ongoing_authority_required"
+            ? (locale === "ko" ? "지속 목표 확인" : "Confirm ongoing goal")
+            : (locale === "ko" ? "재개" : "Resume")}
         </button>
       )}
       {onEdit && label && (
-        <button type="button" onClick={() => { setDraft(label); setEditing(true); }}
+        <button type="button" disabled={!editable} onClick={() => { setDraft(label); setEditing(true); }}
           aria-label={locale === "ko" ? "목표 편집" : "Edit goal"}
           title={!editable ? (locale === "ko" ? "실행을 먼저 일시정지하면 편집할 수 있습니다" : "Pause the run before editing") : undefined}>
           <IconEdit size={12} />
@@ -2258,7 +2284,7 @@ function SteeringQueueBar({ queuedCount, locale }: { queuedCount: number; locale
       <span className="chat-input-steering-pulse" aria-hidden />
       <strong>{locale === "ko" ? `다음 지시 ${queuedCount}개` : `${queuedCount} queued`}</strong>
       <span className="chat-composer-progress-label">
-        {locale === "ko" ? "현재 모델을 멈추지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}
+        {locale === "ko" ? "현재 실행을 정리한 뒤 새 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the new instruction"}
       </span>
     </div>
   );
@@ -2292,7 +2318,7 @@ function SteeringDraftBar({
         className="chat-steering-draft-send"
         onClick={onSend}
         title={busy
-          ? (locale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+          ? (locale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
           : (locale === "ko" ? "새 작업으로 보내기" : "Send as a new turn")}
         data-chat-steering-send="true"
       >

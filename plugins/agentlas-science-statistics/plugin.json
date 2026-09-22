@@ -414,8 +414,8 @@
       },
       {
         "path": "runtime/contracts.cjs",
-        "sha256": "da991257dbdb338d98a44adcd9af337cadc2027501ef631c4055e88cc0da5456",
-        "bytes": 16034
+        "sha256": "f1765744a4dc0a0e0660cae6eea26eb6f33710c5841d52c485882287725cc025",
+        "bytes": 16131
       },
       {
         "path": "runtime/core-data-schemas.cjs",

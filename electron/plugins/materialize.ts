@@ -348,11 +348,31 @@ function computeVerifiedInstalledPluginRelease(destination: string): VerifiedIns
     const root = path.resolve(installedPluginsRoot());
     const directory = path.resolve(destination);
     if (path.dirname(directory) !== root) return null;
-    const identity = readManifestIdentity(directory);
-    if (path.basename(directory) !== identity.slug) return null;
-    const digest = releaseDigest(directory);
-    if (!exactInstalledMetadata(directory, identity.slug, identity.version, digest)) return null;
-    return { ...identity, digest, directory };
+    return verifyReleaseTree(directory);
+  } catch {
+    return null;
+  }
+}
+
+function verifyReleaseTree(directory: string): VerifiedInstalledPluginRelease | null {
+  const identity = readManifestIdentity(directory);
+  if (path.basename(directory) !== identity.slug) return null;
+  const digest = releaseDigest(directory);
+  if (!exactInstalledMetadata(directory, identity.slug, identity.version, digest)) return null;
+  return { ...identity, digest, directory };
+}
+
+/** Revalidate the exact root/digest admitted by the host's tool-provider.
+ * The launcher runs with ELECTRON_RUN_AS_NODE and has no Electron app (nor
+ * access to its profile). Root membership is checked when the host creates
+ * the launch contract; the child checks its pinned tree again before execution.
+ * Never use this in place of host-side installed-root admission.
+ */
+export function verifiedPinnedPluginRelease(destination: string, expectedDigest: string): VerifiedInstalledPluginRelease | null {
+  try {
+    if (!path.isAbsolute(destination) || !/^sha256:[a-f0-9]{64}$/u.test(expectedDigest)) return null;
+    const release = verifyReleaseTree(path.resolve(destination));
+    return release?.digest === expectedDigest ? release : null;
   } catch {
     return null;
   }

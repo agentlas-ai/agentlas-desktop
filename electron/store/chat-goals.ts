@@ -206,6 +206,9 @@ export function migrateLegacyGoalLifecycle(input: {
   goalId: string;
   expectedPayloadJson: string;
   source: GoalSourceMessage;
+  /** Native Resume supplies no new prose. In that path the exact stored source
+   * is re-judged and only the missing metadata bit is CAS-backfilled. */
+  preserveRevision?: boolean;
 }): GoalRevision {
   const db = getDb();
   if (!db.inTransaction) throw new Error("goal_legacy_lifecycle_transaction_required");
@@ -215,9 +218,20 @@ export function migrateLegacyGoalLifecycle(input: {
   const current = snapshot.revision;
   const contract = readRow(input.goalId);
   const binding = db.prepare("SELECT goal_id FROM chats WHERE id = ?").get(input.source.chatId) as { goal_id: string | null } | undefined;
+  const prior = previouslyAppliedRevision(input.goalId, input.source);
   if (current.chatId !== input.source.chatId || contract?.chat_id !== current.chatId
     || !["active", "blocked"].includes(contract.status) || binding?.goal_id !== current.goalId
-    || previouslyAppliedRevision(input.goalId, input.source)) throw new Error("goal_legacy_lifecycle_source_conflict");
+    || (input.preserveRevision
+      ? current.sourceMessage.messageId !== input.source.messageId || current.sourceMessage.text !== input.source.text
+      : Boolean(prior))) throw new Error("goal_legacy_lifecycle_source_conflict");
+  if (input.preserveRevision) {
+    const next: GoalRevision = { ...current, lifecycle: "ongoing" };
+    const changed = db.prepare(`UPDATE chat_goal_revisions SET payload_json = ?
+      WHERE goal_id = ? AND revision = ? AND payload_json = ?`)
+      .run(JSON.stringify(next), current.goalId, current.revision, input.expectedPayloadJson);
+    if (changed.changes !== 1) throw new Error("goal_legacy_lifecycle_conflict");
+    return parseGoalRevision(JSON.stringify(next));
+  }
   const next: GoalRevision = {
     ...current,
     revision: current.revision + 1,
@@ -281,6 +295,37 @@ function assertStoredUserSource(source: GoalSourceMessage): void {
   if (!message || message.chat_id !== source.chatId || message.role !== "user" || message.text !== source.text) {
     throw new Error("goal_source_message_mismatch");
   }
+}
+
+/**
+ * Persist an explicit user source while the caller owns the surrounding Goal
+ * transaction.  Keeping this write in the Goal store means an amendment can
+ * never create a revision whose source message was only held in renderer
+ * memory.  The caller emits the chat change after its outer transaction
+ * commits; this helper intentionally has no independent commit or emission.
+ */
+export function appendStoredUserSourceMessage(input: {
+  chatId: string;
+  text: string;
+  createdAt?: string;
+}): GoalSourceMessage {
+  const chatId = input.chatId.trim();
+  const text = input.text;
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  if (!getDb().inTransaction) throw new Error("goal_source_message_transaction_required");
+  if (!chatId || !text.trim() || text.includes("\0") || !Number.isFinite(Date.parse(createdAt))) {
+    throw new Error("goal_source_message_invalid");
+  }
+  const messageId = randomUUID();
+  const inserted = getDb().prepare(
+    "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json) VALUES (?, ?, 'user', ?, ?, NULL)",
+  ).run(messageId, chatId, text, createdAt);
+  if (inserted.changes !== 1) throw new Error("goal_source_message_not_saved");
+  const touched = getDb().prepare(
+    "UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?",
+  ).run(createdAt, createdAt, chatId);
+  if (touched.changes !== 1) throw new Error("goal_chat_missing");
+  return { chatId, messageId, role: "user", text };
 }
 
 function previouslyAppliedRevision(goalId: string, source: GoalSourceMessage): GoalRevision | null {

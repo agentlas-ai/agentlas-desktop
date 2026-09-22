@@ -9,7 +9,7 @@
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { compactHistory } from "./compact";
+import { resolveEffectiveContextWindow } from "../../shared/models";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 
 /** 기본 로컬 호스트. env OLLAMA_HOST로 재정의 가능(원격 Ollama도 지원). */
@@ -69,26 +69,9 @@ export const runOllama: Runner = async (
 
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
-  // 로컬 모델은 컨텍스트 윈도우가 천차만별 — 보수적 기본값으로 무한 성장/거부 방지.
-  const { recent, digest, droppedCount } = compactHistory(req.history, {
-    contextWindow: 32_000,
-    locale: req.locale,
-  });
-  if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
-  if (digest) {
-    // 압축은 지나가는 상태가 아니라 대화에 남아야 하는 사실이다.
-    events.onNotice?.({
-      level: "info",
-      message: tStatus(req.locale, "compacted", { n: droppedCount }),
-      i18n: {
-        ko: tStatus("ko", "compacted", { n: droppedCount }),
-        en: tStatus("en", "compacted", { n: droppedCount }),
-      },
-      code: "history-compacted",
-      display: "divider",
-    });
-  }
-  const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
+  const capacity = resolveEffectiveContextWindow("ollama", model, false);
+  const recent = req.history;
+  const systemText = req.systemPrompt;
 
   const messages: ChatMessage[] = [{
     role: "system",
@@ -131,6 +114,9 @@ export const runOllama: Runner = async (
       runtimeKind: "ollama",
       host,
       model,
+      estimatedContextWindow: capacity.contextWindow ?? 16_000,
+      estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor((capacity.contextWindow ?? 16_000) / 4)),
+      capacitySource: capacity.source,
       keepAlive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "10m",
       unreachableMessage: tStatus(req.locale, "errOllamaUnreachable", { host }),
     },

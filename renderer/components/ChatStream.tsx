@@ -29,7 +29,7 @@ import {
 import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
-import { IconAlertTriangle, IconClose } from "./Icon";
+import { IconAlertTriangle, IconChevronDown, IconClose } from "./Icon";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
@@ -349,6 +349,7 @@ export function ChatStream({
    */
   const pinnedUserMessageRef = useRef<string | null>(null);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
   const [hasNewContent, setHasNewContent] = useState(false);
   const last = messages[messages.length - 1];
   const scrollSignal = last
@@ -436,6 +437,8 @@ export function ChatStream({
     const el = scrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const overflow = el.scrollHeight - el.clientHeight > 96;
+    setHasOverflow(overflow);
     const atBottom = distanceFromBottom < 96;
     if (scrollingToBottomRef.current && !atBottom) return;
     scrollingToBottomRef.current = false;
@@ -484,6 +487,32 @@ export function ChatStream({
     }
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const sync = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const overflow = el.scrollHeight - el.clientHeight > 96;
+      setHasOverflow((current) => current === overflow ? current : overflow);
+      if (!overflow) {
+        setAwayFromBottom((current) => current ? false : current);
+        setHasNewContent((current) => current ? false : current);
+        return;
+      }
+      const away = distanceFromBottom >= 96;
+      setAwayFromBottom((current) => current === away ? current : away);
+    };
+    sync();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
+    observer?.observe(el);
+    if (el.firstElementChild) observer?.observe(el.firstElementChild);
+    return () => observer?.disconnect();
+  // The observer itself sees message-height changes. Recreating it for every
+  // streamed token retained a burst of callbacks and caused avoidable renderer
+  // churn during long answers; only a row-count change can replace the first
+  // observed child.
+  }, [messages.length]);
 
   return (
     <WorkspaceRootContext.Provider value={workspaceRoot}>
@@ -555,15 +584,15 @@ export function ChatStream({
         ))}
       </div>
 
-      {messages.length > 0 && awayFromBottom && (
+      {messages.length > 0 && hasOverflow && awayFromBottom && (
         <button
           type="button"
           className="agentlas-chat-latest-button"
           onClick={scrollToLatest}
           aria-label={hasNewContent ? t("chatstream.new_messages") : t("chatstream.scroll_to_bottom")}
+          title={hasNewContent ? t("chatstream.new_messages") : t("chatstream.scroll_to_bottom")}
         >
-          <span aria-hidden>↓</span>
-          <span>{hasNewContent ? t("chatstream.new_messages") : t("chatstream.scroll_to_bottom")}</span>
+          <IconChevronDown size={16} aria-hidden="true" />
         </button>
       )}
       <span className="sr-only" aria-live="polite">
@@ -678,17 +707,17 @@ export function ChatStream({
           left: 50%;
           bottom: 14px;
           transform: translateX(-50%);
-          display: inline-flex;
+          display: grid;
+          place-items: center;
           align-items: center;
-          gap: 7px;
-          min-height: 34px;
-          padding: 7px 12px;
+          width: 38px;
+          height: 38px;
+          padding: 0;
           border: 1px solid var(--paper-edge);
-          border-radius: 999px;
+          border-radius: 50%;
           background: var(--paper-raised, var(--paper));
           box-shadow: var(--shadow-2);
           color: var(--ink);
-          font: 650 11.5px/1 var(--font-body);
           cursor: pointer;
         }
         .agentlas-chat-latest-button:hover {
@@ -794,7 +823,6 @@ export function ChatStream({
           }
           .agentlas-chat-latest-button {
             bottom: 10px;
-            max-width: calc(100% - 32px);
           }
         }
         @media (prefers-reduced-motion: reduce) {

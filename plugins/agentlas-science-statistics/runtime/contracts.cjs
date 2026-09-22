@@ -249,6 +249,8 @@ const proportionConfidenceVariant = variant("confidence_interval", data({ succes
 proportionConfidenceVariant.properties.options.properties.estimator = { const: "proportion-wilson" };
 
 const REQUEST_INPUT_SCHEMA = Object.freeze({
+  // MCP tool input schemas require an explicit object root, including unions.
+  type: "object",
   oneOf: [
     variant("descriptive", data({ values: numberVector(2), label }, ["values"]), ["confidenceLevel", "timeoutMs"]),
     variant("distribution_fit", data({

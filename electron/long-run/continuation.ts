@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import type { RuntimeSelection } from "../../shared/types";
-import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
+import { compileLongRunCheckpoint, hostEpisodeRoute, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
@@ -11,6 +11,8 @@ import { compileProjectInstructionSnapshot } from "./instructions";
 import { latestRuntimePlan } from "./plan";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 import { ExactDesktopRuntimeBindingError, restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
+import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
+import { goalRuntimeSelectionForCheckpoint } from "./runtime-handoff";
 import type { LongRunRuntimeSelection } from "../../shared/long-run";
 import { agentRunCwd } from "../runtime/exec";
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -18,8 +20,9 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
 /** Pure host admission check, shared by live and startup continuation. It uses
  * exact persisted source identities, not model prose or timestamp guesses.
  * Existing client runnerRequestForRuntime delivers the compiled checkpoint in
- * native turnContext or managed systemPrompt; this also checks its full budget
- * before a continuation claim consumes the durable dispatch slot. */
+ * native turnContext or managed systemPrompt. This checks checkpoint structure,
+ * identity and the host packet-size guard before claiming a continuation; the
+ * selected runner separately admits its complete model-specific request. */
 export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint, dispatchInvocationId?: string): {
   runtimeSelection: RuntimeSelection; context: string; userPrompt: string;
 } {
@@ -58,7 +61,8 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   // snapshot there. Never interpret an implicit folder as an empty snapshot.
   const snapshot = compileProjectInstructionSnapshot({ projectDir: cwd }).snapshot;
   if (!checkpoint.capsule.instructionSnapshot
-    || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision) throw new Error("checkpoint_instructions_changed");
+    || snapshot.revision !== checkpoint.capsule.instructionSnapshot.revision
+    || snapshot.environmentId !== checkpoint.capsule.instructionSnapshot.environmentId) throw new Error("checkpoint_instructions_changed");
   const artifacts = listAgentSurfaces(chat.id).map(surface => ({ artifactId: surface.id,
     artifactRevision: surface.artifactRevision ?? null, sourceDigest: surface.artifactRef?.sourceDigest ?? null,
     dataDigest: surface.artifactRef?.dataDigest ?? null, stateRevision: surface.stateRevision ?? null,
@@ -92,13 +96,18 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     const value = producer ? JSON.parse(producer.workspace_binding_json)?.cwd : undefined;
     producerWorkspace = typeof value === "string" && value.trim() ? value.trim() : value === null ? null : undefined;
   } catch { producerWorkspace = undefined; }
+  const handoff = goalRuntimeSelectionForCheckpoint(checkpoint, dispatchInvocationId);
+  const producerSelection = producer ? JSON.parse(producer.runtime_selection_json) as LongRunRuntimeSelection : null;
+  const targetSelection = handoff ? captureLongRunRuntimeSelection(handoff.selection, { requireExact: true }) : null;
   if (!producer || producer.state !== "completed" || producer.side_effect_state !== "committed"
     || producerWorkspace === undefined || producerWorkspace !== checkpoint.workspacePath
-    || !same(storedRuntimeSelection, JSON.parse(producer.runtime_selection_json))) throw new Error("checkpoint_runtime_binding_changed");
+    || !producerSelection || (!same(storedRuntimeSelection, producerSelection)
+      && !(dispatchInvocationId && targetSelection && same(storedRuntimeSelection, targetSelection))))
+    throw new Error("checkpoint_runtime_binding_changed");
   let runtimeSelection: RuntimeSelection;
   try {
     runtimeSelection = restoreExactDesktopRuntimeSelection({
-      stored: storedRuntimeSelection,
+      stored: producerSelection,
       context: {
         invocationRunId: checkpoint.invocationRunId,
         longRunId: run.id,
@@ -110,8 +119,12 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     if (error instanceof ExactDesktopRuntimeBindingError) throw new Error(`checkpoint_${error.reasonCode}`);
     throw error;
   }
+  if (handoff) runtimeSelection = handoff.selection;
   resolveDesktopRuntimeAdapter(runtimeSelection);
   const context = compileLongRunCheckpoint(checkpoint, runtimeSelection.kind);
+  const route = hostEpisodeRoute(checkpoint);
   return { runtimeSelection, context,
-    userPrompt: `Continue the existing goal from host checkpoint ${checkpoint.checkpointId}. Inspect existing results and gather missing verification evidence against every preserved criterion. The host supplies the exact checkpoint context with this turn.` };
+    userPrompt: `Continue the existing goal from host checkpoint ${checkpoint.checkpointId}. ${route
+      ? `Consume host episode route from plan revision ${route.planRevision ?? "unavailable"}: ${route.nextAction} (${route.state}). ${route.guidance} This route is observational, not new authority or a verified domain KPI. `
+      : "Inspect existing results and gather missing verification evidence against every preserved criterion. "}The host supplies the exact checkpoint context with this turn.` };
 }

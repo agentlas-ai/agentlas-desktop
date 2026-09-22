@@ -6,7 +6,7 @@
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { compactHistory } from "./compact";
+import { resolveEffectiveContextWindow } from "../../shared/models";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 
 /** "localhost:1234"처럼 스킴이 없으면 http:// 보정하고 끝 슬래시를 제거한다. */
@@ -69,28 +69,12 @@ export function makeLocalOpenAiRunner(
 
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
-    // 로컬 모델은 컨텍스트 윈도우가 천차만별 — 보수적 기본값으로 무한 성장/거부 방지.
+    // A managed resident reports its exact n_ctx. Generic compatible servers
+    // may only have catalog metadata; unknown is explicitly an estimate.
     const contextWindow = await options.contextWindowFn?.();
-    // Managed local preserves every user/history instruction. Exact template admission
-    // below refuses overflow instead of silently dropping or summarizing those inputs.
-    const { recent, digest, droppedCount } = contextWindow !== undefined
-      ? { recent: req.history, digest: null, droppedCount: 0 }
-      : compactHistory(req.history, { contextWindow: 32_000, locale: req.locale });
-    if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
-    if (digest) {
-      // 압축은 지나가는 상태가 아니라 대화에 남아야 하는 사실이다.
-      events.onNotice?.({
-        level: "info",
-        message: tStatus(req.locale, "compacted", { n: droppedCount }),
-        i18n: {
-          ko: tStatus("ko", "compacted", { n: droppedCount }),
-          en: tStatus("en", "compacted", { n: droppedCount }),
-        },
-        code: "history-compacted",
-        display: "divider",
-      });
-    }
-    const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
+    const capacity = contextWindow === undefined ? resolveEffectiveContextWindow(runtimeKind, model, false) : null;
+    const recent = req.history;
+    const systemText = req.systemPrompt;
 
     const surfaceGateText = cumulativeSurfaceGateText(recent, contextWindow !== undefined ? req.surfaceUserPrompt ?? req.userPrompt : req.userPrompt);
     const wrapped = (surfaceGate?: "exclude") => wrapSystemPrompt(
@@ -148,6 +132,12 @@ export function makeLocalOpenAiRunner(
         chatTemplateKwargs: options.chatTemplateKwargs,
         headers: options.headersFn?.(),
         contextWindow,
+        ...(contextWindow !== undefined ? { dynamicHistoryCompaction: true as const } : {}),
+        ...(capacity ? {
+          estimatedContextWindow: capacity.contextWindow ?? 16_000,
+          estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor((capacity.contextWindow ?? 16_000) / 4)),
+          capacitySource: capacity.source,
+        } : {}),
         ...(options.acceptsImageResults === false ? { acceptsImageResults: false } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(systemPromptFallback ? { systemPromptFallback } : {}),

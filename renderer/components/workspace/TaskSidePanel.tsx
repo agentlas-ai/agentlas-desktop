@@ -65,6 +65,7 @@ import { McpResultPreview } from "../McpResultPreview";
 import { ChatFileTabs, nextFileTabSelection } from "../ChatFileExperience";
 import { CHAT_FILE_OPEN_EVENT, chatFilesBridge, formatChatFileSize, isChatFileItem, type ChatFileItem } from "@/lib/chat-files";
 import { OneWorkerPanel } from "../one/OneWorkerPanel";
+import { ContinuityStatus } from "../ContinuityStatus";
 import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worker-panel";
 import styles from "./TaskSidePanel.module.css";
 
@@ -448,7 +449,9 @@ export function OneActivityTimeline({
   // This is an execution summary, not a second composer. Permission, token
   // usage, and workspace identity stay at their point of control so an old
   // Activity row cannot look like it is changing the next prompt's settings.
-  const summary = elapsed ? `${liveStatus} · ${elapsed}` : liveStatus;
+  const summary = elapsed
+    ? `${liveStatus} · ${locale === "ko" ? "이번 실행" : "This run"} ${elapsed}`
+    : liveStatus;
 
   return (
     <section
@@ -1548,6 +1551,7 @@ function TaskSidePanelContent({
           {!activeChatFile && !openedArtifact && <><BoundImageArtifacts items={boundImages} chatId={screenChatId} locale={locale} />{result}</>}
         </div>}
         {railView === "activity" && <>
+          <ContinuityStatus chatId={screenChatId} locale={locale} detail />
           <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={fileArtifacts.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
             {fileArtifacts.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
             {fileArtifacts.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}

@@ -92,6 +92,14 @@ export async function judgeOneAutoRecovery(
   input: OneAutoRecoveryInput,
 ): Promise<OneAutoRecoveryResult> {
   const fingerprint = oneRunFailureFingerprint(input.receipt);
+  if (input.receipt.interruptionCause === "steering") {
+    return {
+      decision: { retry: false, reason: "settled" },
+      fingerprint,
+      diagnosis: "",
+      decidedBy: "form",
+    };
+  }
   const gated = oneAutoRecoveryFormGate({
     receipt: input.receipt,
     attemptsSpent: input.attemptsSpent,

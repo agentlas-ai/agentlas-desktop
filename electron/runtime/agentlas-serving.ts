@@ -21,7 +21,7 @@ import {
   agentlasServingModel,
   isAgentlasServingModel,
 } from "../../shared/agentlas-serving";
-import { compactHistory } from "./compact";
+import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
@@ -54,38 +54,12 @@ function signInRequired(locale: RunnerRequest["locale"]): Error {
 
 type ServingTurn = { role: "user" | "assistant"; text: string };
 
-function turnsFor(req: RunnerRequest, events: RunnerEvents): { turns: ServingTurn[]; system: string } {
-  const { recent, digest, droppedCount } = compactHistory(req.history, {
-    contextWindow: AGENTLAS_SERVING_CONTEXT_WINDOW,
-    locale: req.locale,
-  });
-  if (digest) {
-    events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
-    events.onNotice?.({
-      level: "info",
-      message: tStatus(req.locale, "compacted", { n: droppedCount }),
-      i18n: {
-        ko: tStatus("ko", "compacted", { n: droppedCount }),
-        en: tStatus("en", "compacted", { n: droppedCount }),
-      },
-      code: "history-compacted",
-      display: "divider",
-    });
-  }
-  const turns: ServingTurn[] = [];
-  for (const entry of recent) {
-    if (entry.role === "user" || entry.role === "assistant") turns.push({ role: entry.role, text: entry.text });
-  }
-  turns.push({ role: "user", text: req.userPrompt });
-
-  const baseSystem = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
-  return {
-    turns,
-    system: wrapSystemPrompt(
-      baseSystem,
+function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number): { turns: ServingTurn[]; system: string } | null {
+  const system = wrapSystemPrompt(
+      req.systemPrompt,
       req.locale,
       req.permission,
-      cumulativeSurfaceGateText(recent, req.userPrompt),
+      cumulativeSurfaceGateText(req.history, req.userPrompt),
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
@@ -93,9 +67,38 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents): { turns: ServingTur
       undefined,
       undefined,
       req.surfaceGate,
-    ),
-  };
+    );
+  let budget = AGENTLAS_SERVING_CONTEXT_WINDOW
+    - estimateTransportTokens(JSON.stringify({ system, current: req.userPrompt, images: req.images ?? [] }))
+    - outputReserve - 256;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const compacted = compactHistoryToBudget(req.history, { historyBudgetTokens: budget, locale: req.locale });
+    if (!compacted.fits) return null;
+    const turns: ServingTurn[] = compacted.recent
+      .filter((entry) => entry.role === "user" || entry.role === "assistant")
+      .map((entry) => ({ role: entry.role as ServingTurn["role"], text: entry.text }));
+    if (compacted.digest) {
+      if (turns[0]?.role === "user") turns[0].text = `${compacted.digest}\n\n${turns[0].text}`;
+      else turns.unshift({ role: "user", text: compacted.digest });
+    }
+    turns.push({ role: "user", text: req.userPrompt });
+    const estimated = estimateTransportTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }));
+    if (estimated + outputReserve <= AGENTLAS_SERVING_CONTEXT_WINDOW) {
+      if (compacted.digest) {
+        events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
+          message: req.locale === "ko"
+            ? `이전 대화 ${compacted.droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
+            : `Sent untrusted excerpts of ${compacted.droppedCount} earlier messages. Current request and instructions are unchanged.` });
+      }
+      return { turns, system };
+    }
+    budget = Math.max(0, budget - (estimated + outputReserve - AGENTLAS_SERVING_CONTEXT_WINDOW) - 256);
+  }
+  return null;
 }
+
+/** Local scratch contract only; does not contact the serving endpoint. */
+export const __testTurnsFor = turnsFor;
 
 /** SSE 프레임(`event:` + `data:`)을 한 개씩 돌려준다. */
 async function* iterServingEvents(response: Response): AsyncGenerator<{ event: string; data: unknown }> {
@@ -133,8 +136,19 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
 
   const model = servingModelId(req);
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+  events.onNotice?.({ level: "info", code: "model-context-capacity-estimated",
+    message: req.locale === "ko"
+      ? "서버의 실제 모델 용량은 공개되지 않아 보수적 문맥 예산으로 전송합니다."
+      : "The server's exact model capacity is undisclosed; using a conservative transport budget." });
 
-  const { turns, system } = turnsFor(req, events);
+  const outputReserve = Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY);
+  const context = turnsFor(req, events, outputReserve);
+  if (!context) return { text: "", failure: { kind: "refused", runtime: "agentlas", source: "marker",
+    providerCode: "model_context_capacity_exceeded",
+    message: req.locale === "ko"
+      ? "Agentlas 모델의 보수적 문맥 예산을 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."
+      : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } };
+  const { turns, system } = context;
   const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
     method: "POST",
     headers: {
@@ -149,7 +163,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       model,
       system,
       messages: turns,
-      maxTokens: Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY),
+      maxTokens: outputReserve,
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   });

@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { runHostShutdownHooks } from "../host-lifecycle";
 import { setUserDataDir, userDataDir } from "../runtime-paths";
 import { withRunPriority } from "../runtime/run-priority";
@@ -28,6 +29,7 @@ import {
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { startControlSocket, type ControlSocketHandle } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
+import { storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
 
 /**
  * 데몬이 쓸 사용자 데이터 경로. **추측하지 않는다** — 잘못 고르면 사용자의 실제 DB 가
@@ -77,6 +79,22 @@ function daemonVersion(): string {
 let controlSocket: ControlSocketHandle | null = null;
 let desktopParentPid: number | null = null;
 let desktopParentWatch: NodeJS.Timeout | null = null;
+const bootId = randomUUID();
+const startedAtMs = Date.now();
+let lastHeartbeatAtMs = startedAtMs;
+const appInstanceId = validAppInstanceId(process.env.AGENTLAS_APP_INSTANCE_ID)
+  ? process.env.AGENTLAS_APP_INSTANCE_ID : null;
+
+function restartMetadata(): { restartCount: number; lastExitReason: string } {
+  const count = Number(process.env.AGENTLAS_DAEMON_RESTART_COUNT);
+  const reason = process.env.AGENTLAS_DAEMON_LAST_EXIT_REASON;
+  return {
+    restartCount: Number.isSafeInteger(count) && count >= 0 ? count : 0,
+    lastExitReason: reason === "initial" || reason === "version_skew" || reason === "owner_mismatch" ||
+      reason === "timeout" || reason === "exited" || reason === "signal" ||
+      reason === "error" ? reason : "unknown",
+  };
+}
 
 /*
  * ★웜 프로세스 풀 (Phase 5). 데몬이 CLI 프로세스를 붙들었다가 다음 턴에 재사용하는
@@ -175,11 +193,24 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       version: daemonVersion(),
       pid: process.pid,
       parentPid: desktopParentPid,
+      appInstanceId,
+      bootId,
+      processRole: "desktop-daemon",
+      startedAt: new Date(startedAtMs).toISOString(),
+      lastHeartbeatAt: new Date(lastHeartbeatAtMs).toISOString(),
+      uptimeMs: Math.max(0, Date.now() - startedAtMs),
+      ...restartMetadata(),
+      restartCountScope: "desktop-process",
+      controlSocketReady: controlSocket !== null,
+      // The daemon's liveness is not evidence that Main-owned chat/Goal
+      // invocations have advanced. Consumers must query Main's run ledger.
+      invocationProgressOwner: "desktop-main",
       // ★어느 DB 를 열었는지 말한다. 터미널은 `AGENTLAS_STORE_PATH` 로 사본을 열 수 있는데
       //   그 값은 이 프로세스까지 오지 않는다 — 서로 다른 DB 를 보면서 일을 주고받으면
       //   한쪽은 사본에, 다른 쪽은 라이브에 쓰는 상태가 조용히 성립한다. 넘기기 전에
       //   비교할 수 있게 이 값을 실어 보낸다(경로는 비밀이 아니다).
       storePath: openedStorePath(),
+      storeIdentity: storeIdentityDigest(openedStorePath(), appInstanceId),
       // 풀 관측 — 붙든 프로세스 수/유휴 수. "재사용이 실제로 되고 있나"의 유일한 창.
       warmProcesses: processPool.size(),
       warmIdle: processPool.idleCount(),
@@ -192,6 +223,19 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
         endpoint: mobileBridge?.endpoint ?? null,
       },
     };
+  }
+  if (method === "daemon.diagnostics") {
+    const { openedStorePath } = await import("../store/db");
+    const expected = process.env.AGENTLAS_EXPECTED_STORE_IDENTITY;
+    const actual = storeIdentityDigest(openedStorePath(), appInstanceId);
+    if (!expected || !/^[0-9a-f]{64}$/.test(expected) || !actual || expected !== actual) {
+      throw new Error("daemon_diagnostics_store_identity_mismatch");
+    }
+    const { goalContinuityDiagnostics } = await import("./continuity-diagnostics");
+    return goalContinuityDiagnostics((params as { goalId?: unknown } | null)?.goalId, {
+      appInstanceId: appInstanceId!, bootId, pid: process.pid,
+      storeIdentity: actual,
+    });
   }
   if (method === "mobileBridge.claim") return serializeMobileBridgeLease(async () => {
     const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
@@ -405,6 +449,7 @@ export async function startDaemon(): Promise<void> {
   console.log(`[agentlasd] identity ready: ${installIdentity.channel}`);
   console.log(`[agentlasd] user data: ${userDataDir()}`);
   desktopParentWatch = setInterval(() => {
+    lastHeartbeatAtMs = Date.now();
     const ownerPid = desktopParentPid;
     if (ownerPid !== null && !processIsAlive(ownerPid)) {
       performShutdown("Desktop parent exited");
@@ -417,6 +462,13 @@ export async function startDaemon(): Promise<void> {
   // 돌리면 앱이 자기 DB 를 못 알아본다.
   const { initStore } = await import("../store/db");
   initStore();
+  if (process.env.AGENTLAS_EXPECTED_STORE_IDENTITY) {
+    const { openedStorePath } = await import("../store/db");
+    const actualStoreIdentity = storeIdentityDigest(openedStorePath(), appInstanceId);
+    if (!actualStoreIdentity || actualStoreIdentity !== process.env.AGENTLAS_EXPECTED_STORE_IDENTITY) {
+      throw new Error("agentlasd_store_identity_mismatch");
+    }
+  }
   console.log("[agentlasd] store ready");
 
   /*
@@ -455,7 +507,9 @@ export async function startDaemon(): Promise<void> {
 
   try {
     await startDaemonMobileBridge();
-    console.log("[agentlasd] mobile bridge ready");
+    console.log(mobileBridgeRuntime?.mobileBridgeRuntimeStatus().running
+      ? "[agentlasd] mobile bridge ready"
+      : "[agentlasd] mobile bridge delegated to Desktop");
   } catch (error) {
     console.error("[agentlasd] mobile bridge failed to start:", error);
   }

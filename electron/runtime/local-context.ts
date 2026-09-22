@@ -10,7 +10,7 @@ export function boundedLocalOutputTokens(available: number, requested?: number):
 export function localContextFailure(code: LocalContextCode, runtime: string, locale: string): RunnerFailure {
   return { kind: "refused", runtime, source: "marker", providerCode: code,
     message: code === "local_context_limit_exceeded"
-      ? locale === "ko" ? "현재 모델의 대화 용량을 넘었습니다. 새 대화를 시작하거나 모델 용량을 늘려 주세요." : "This request exceeds the model context. Start a new conversation or increase its context capacity."
+      ? locale === "ko" ? "보존해야 할 지시와 도구 정보를 포함한 요청이 현재 모델의 문맥 한도를 넘습니다. 원문을 삭제하지 말고, 더 큰 문맥을 지원하는 모델이나 용량 설정을 선택해 주세요." : "The request, including preserved instructions and tool information, exceeds this model's context capacity. Keep the original conversation and choose a larger context setting or model."
       : code === "local_output_limit_exceeded"
         ? locale === "ko" ? "로컬 모델이 계획 응답 한도 안에 결과를 끝내지 못했습니다." : "The local model did not finish its planning response within the admitted output budget."
       : locale === "ko" ? "현재 모델의 대화 용량을 확인하지 못했습니다. 모델 상태를 확인해 주세요." : "The model context could not be verified. Check the model status." };

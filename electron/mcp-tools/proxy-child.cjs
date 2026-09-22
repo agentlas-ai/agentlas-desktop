@@ -13,6 +13,9 @@ const handle = process.env.AGENTLAS_MCP_PROXY_LAUNCH || "";
 const file = process.env.AGENTLAS_MCP_PROXY_CONTROL || "";
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const RECONNECT_BASE_MS = 250, RECONNECT_MAX_MS = 8_000, RECONNECT_GIVE_UP_MS = 5 * 60_000;
+// An unbound leftover launch is not an established session recovering from a
+// dropped bridge. Bound startup independently so CLI tool discovery can finish.
+const INITIAL_CONNECT_TIMEOUT_MS = 10_000, INITIALIZE_TIMEOUT_MS = 15_000;
 let info;
 try {
   info = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -23,6 +26,9 @@ try {
 }
 const idKey = (id) => JSON.stringify(id);
 let closed = false, stdinEnded = false, request = null, response = null, connected = false, connectedOnce = false;
+let connectionGeneration = null;
+let initialConnectTimer = null, initializeTimer = null, initializeId = null;
+let handshakeReplayPending = false;
 let downBuffer = "", upBuffer = "", outbox = [], outboxBytes = 0, attempt = 0, firstDropAt = 0, reconnectTimer = null;
 const handshake = { initialize: null, initialized: null };
 const pending = new Map();      // 상류 응답을 기다리는 CLI 요청 id → true
@@ -31,6 +37,8 @@ function log(reason) { process.stderr.write(`[agentlas-mcp-proxy] ${reason}\n`);
 function close(code, reason) {
   if (closed) return; closed = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (initialConnectTimer) clearTimeout(initialConnectTimer);
+  if (initializeTimer) clearTimeout(initializeTimer);
   if (reason) log(reason);
   try { request?.destroy(); } catch {}
   try { response?.destroy(); } catch {}
@@ -40,6 +48,10 @@ function toStdout(line) { if (!process.stdout.write(line)) response?.pause(); }
 function trackUp(line) {
   let frame; try { frame = JSON.parse(line); } catch { return; }
   if (!frame || typeof frame !== "object") return;
+  if (frame.method === "initialize" && frame.id !== undefined && !initializeTimer) {
+    initializeId = idKey(frame.id);
+    initializeTimer = setTimeout(() => close(3, "mcp_proxy_initialize_timeout"), INITIALIZE_TIMEOUT_MS);
+  }
   if (frame.id !== undefined && typeof frame.method === "string") pending.set(idKey(frame.id), true);
 }
 function trackSentHandshake(line) {
@@ -49,7 +61,7 @@ function trackSentHandshake(line) {
   else if (frame.method === "notifications/initialized") handshake.initialized = line;
 }
 function sendUp(line) {
-  if (connected && request) { trackSentHandshake(line); if (!request.write(line)) process.stdin.pause(); return; }
+  if (connected && request && !handshakeReplayPending) { trackSentHandshake(line); if (!request.write(line)) process.stdin.pause(); return; }
   outboxBytes += Buffer.byteLength(line);
   if (outboxBytes > MAX_FRAME_BYTES) { close(3, "mcp_proxy_frame_limit"); return; }
   outbox.push(line);
@@ -61,9 +73,32 @@ function failPending(reason) {
   }
   pending.clear();
 }
+function rejectQueued(reason) {
+  const queued = outbox;
+  outbox = []; outboxBytes = 0;
+  // A rebind closes the old bridge before the next turn. Frames queued while
+  // reconnecting are deliberately not replayed under the new grant. Requests
+  // already failed by failPending() are no longer in `pending`; any later
+  // frame received during the gap is still pending and gets one terminal,
+  // retryable error here.
+  for (const line of queued) {
+    let frame = null;
+    try { frame = JSON.parse(line); } catch { continue; }
+    if (!frame || frame.id === undefined || typeof frame.method !== "string") continue;
+    const key = idKey(frame.id);
+    if (!pending.has(key)) continue;
+    pending.delete(key);
+    toStdout(JSON.stringify({ jsonrpc: "2.0", id: frame.id,
+      error: { code: -32001, message: `agentlas proxy scope changed (${reason}): call was not executed — call the tool again` } }) + "\n");
+  }
+}
 function dropped(reason) {
   if (closed) return;
   const wasConnected = connected; connected = false; request = null; response = null; downBuffer = "";
+  // A full old HTTP request can pause stdin.  Reconnect must drain frames
+  // into the new outbox, otherwise the first call of the next turn can remain
+  // stranded while the child appears alive.
+  process.stdin.resume();
   if (stdinEnded) { close(0); return; }
   if (wasConnected) { attempt = 0; firstDropAt = Date.now(); failPending(reason); }
   if (!firstDropAt) firstDropAt = Date.now();
@@ -82,17 +117,31 @@ function connect() {
     if (req !== request) { res.destroy(); return; }
     if (res.statusCode === 403) { close(3, "mcp_proxy_bridge_refused"); return; }
     if (res.statusCode !== 200) { res.destroy(); dropped(`bridge_status_${res.statusCode}`); return; }
+    if (initialConnectTimer) { clearTimeout(initialConnectTimer); initialConnectTimer = null; }
     const replay = connectedOnce;
+    const nextGeneration = typeof res.headers["x-agentlas-mcp-proxy-generation"] === "string"
+      ? res.headers["x-agentlas-mcp-proxy-generation"] : null;
+    const generationChanged = connectionGeneration !== null && nextGeneration !== null
+      && connectionGeneration !== nextGeneration;
+    if (generationChanged) rejectQueued("generation-rebound");
+    if (nextGeneration !== null) connectionGeneration = nextGeneration;
     response = res; connected = true; connectedOnce = true;
+    const flushOutbox = () => {
+      if (!connected || !request || handshakeReplayPending) return;
+      // Queued initialization has never reached a prior wire. Record it only
+      // as it is sent, so reconnect cannot both replay it and drain it from
+      // outbox.
+      for (const line of outbox) { trackSentHandshake(line); req.write(line); }
+      outbox = []; outboxBytes = 0; process.stdin.resume();
+    };
     if (replay && handshake.initialize) {
       try { swallow.add(idKey(JSON.parse(handshake.initialize).id)); } catch {}
+      handshakeReplayPending = true;
       req.write(handshake.initialize);
       if (handshake.initialized) req.write(handshake.initialized);
     }
-    // Queued initialization has never reached a prior wire. Record it only as
-    // it is sent, so reconnect cannot both replay it and drain it from outbox.
-    for (const line of outbox) { trackSentHandshake(line); req.write(line); }
-    outbox = []; outboxBytes = 0; process.stdin.resume();
+    if (!(replay && handshake.initialize)) handshakeReplayPending = false;
+    flushOutbox();
     res.setEncoding("utf8");
     res.on("data", chunk => {
       if (res !== response) return;
@@ -104,13 +153,23 @@ function connect() {
         let frame = null; try { frame = JSON.parse(line); } catch {}
         if (frame && typeof frame === "object" && frame.id !== undefined && typeof frame.method !== "string") {
           const key = idKey(frame.id);
-          if (swallow.has(key)) { swallow.delete(key); continue; }
+          if (key === initializeId) {
+            if (initializeTimer) clearTimeout(initializeTimer);
+            initializeTimer = null; initializeId = null;
+          }
+          if (swallow.has(key)) {
+            swallow.delete(key);
+            handshakeReplayPending = false;
+            flushOutbox();
+            continue;
+          }
           pending.delete(key);
         }
         toStdout(line);
       }
     });
     res.on("error", () => { if (res === response) dropped("bridge_response_error"); });
+    res.on("close", () => { if (res === response && connected) dropped("bridge_response_closed"); });
     res.on("end", () => { if (res === response) dropped("bridge_response_ended"); });
   });
   req.on("error", () => { if (req === request) dropped("bridge_request_error"); });
@@ -133,4 +192,5 @@ process.stdin.on("end", () => { stdinEnded = true; if (connected && request) { r
 process.stdin.on("error", () => close(0));
 process.on("SIGTERM", () => close(0));
 process.on("SIGINT", () => close(0));
+initialConnectTimer = setTimeout(() => close(3, "mcp_proxy_initial_connection_timeout"), INITIAL_CONNECT_TIMEOUT_MS);
 connect();

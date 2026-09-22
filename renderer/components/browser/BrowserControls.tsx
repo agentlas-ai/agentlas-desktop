@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { BrowserAutofill } from "./BrowserAutofill";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconArrowLeft, IconCheck, IconChevronRight, IconClose, IconFileUp, IconMoreHorizontal, IconRefresh } from "@/components/Icon";
+import { IconArrowLeft, IconChevronRight, IconClose, IconFileUp, IconMoreHorizontal, IconRefresh } from "@/components/Icon";
 import type { BrowserDevicePreset, BrowserDownloadSummary, BrowserDurableHistoryEntry, BrowserUiAPI, BrowserUiTarget } from "@shared/browser-ui";
 import menu from "@/components/PanelPopover.module.css";
 import styles from "./TaskBrowser.module.css";
 
-type Panel = "menu" | "find" | "downloads" | "history" | "clear" | "autofill" | "device" | "notice" | null;
+type Panel = "menu" | "find" | "downloads" | "history" | "clear" | "autofill-menu" | "autofill" | "notice" | null;
 function size(n: number) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
@@ -51,7 +51,7 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     if (epoch.current === currentEpoch) setPanel(next);
   };
   useEffect(() => {
-    close(); setZoom(null); setMatches(null);
+    close(); setZoom(null); setDevicePreset(null); setMatches(null);
     return () => { epoch.current++; findEpoch.current++; };
   }, [target?.viewId, target?.taskScopeId, close]);
   useEffect(() => {
@@ -72,6 +72,9 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     let disposed = false;
     void window.agentlas?.browserUi.zoom({ ...target, action: "get" }).then(result => {
       if (!disposed && result.ok) setZoom(result.percent ?? null);
+    }).catch(() => {});
+    void window.agentlas?.browserUi.deviceEmulation({ ...target, preset: "get" }).then(result => {
+      if (!disposed && result.ok) setDevicePreset(result.preset);
     }).catch(() => {});
     return () => { disposed = true; };
   }, [panel, target?.viewId, target?.taskScopeId]);
@@ -126,16 +129,8 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     if (currentEpoch === findEpoch.current && result?.ok) setMatches({ current: result.activeMatch ?? 0, total: result.matches ?? 0 });
   }, [query]);
   useEffect(() => { if (panel !== "find") return; const timer = window.setTimeout(() => void find().catch(() => {}), 180); return () => { window.clearTimeout(timer); findEpoch.current++; }; }, [panel, find]);
-  useEffect(() => {
-    if (panel !== "device" || !target) return;
-    let active = true;
-    setDevicePreset(null);
-    void window.agentlas.browserUi.deviceEmulation({ ...target, preset: "get" }).then(result => {
-      if (active && result.ok) setDevicePreset(result.preset);
-    }).catch(() => {});
-    return () => { active = false; };
-  }, [panel, target?.viewId, target?.taskScopeId]);
-  const changeDevice = (preset: BrowserDevicePreset) => void run(async (api, target) => {
+  const toggleDevice = () => void run(async (api, target) => {
+    const preset: BrowserDevicePreset = devicePreset && devicePreset !== "off" ? "off" : "phone";
     const result = await api.deviceEmulation({ ...target, preset });
     if (result.ok) setDevicePreset(result.preset);
     return result;
@@ -144,28 +139,29 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
 
   return <span ref={root} className={styles.controls}>
     <button type="button" title={ko ? "다운로드" : "Downloads"} aria-label={ko ? "다운로드" : "Downloads"} onClick={event => void open(panel === "downloads" ? null : "downloads", event.currentTarget)}><IconFileUp size={16} style={{ transform: "rotate(180deg)" }} /></button>
-    <button type="button" title={ko ? "브라우저 메뉴" : "Browser menu"} aria-label={ko ? "브라우저 메뉴" : "Browser menu"} aria-haspopup="menu" aria-expanded={panel === "menu"} onClick={event => panel === "menu" ? close() : void open("menu", event.currentTarget)}><IconMoreHorizontal size={17} /></button>
-    {panel === "menu" && <div className={`${menu.panelPopover} ${styles.controlPopover}`} role="menu" aria-label={ko ? "브라우저 메뉴" : "Browser menu"}>
+    <button className={styles.menuTrigger} type="button" title={ko ? "브라우저 메뉴" : "Browser menu"} aria-label={ko ? "브라우저 메뉴" : "Browser menu"} aria-haspopup="menu" aria-expanded={panel === "menu"} onClick={event => panel === "menu" ? close() : void open("menu", event.currentTarget)}><IconMoreHorizontal size={17} /></button>
+    {panel === "menu" && <div className={`${menu.panelPopover} ${styles.controlPopover} ${styles.browserMenu}`} role="menu" aria-label={ko ? "브라우저 메뉴" : "Browser menu"}>
       <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => setPanel("find")}>{ko ? "페이지에서 찾기" : "Find in page"}</button>
       <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => void run((api, target) => api.print(target))}>{ko ? "인쇄" : "Print"}</button>
       <hr className={menu.panelMenuSeparator} />
       <div className={menu.panelMenuRow}><span>{ko ? "확대/축소" : "Zoom"}</span><div className={styles.zoomControls}><button type="button" aria-label={ko ? "축소" : "Zoom out"} disabled={!target} onClick={() => zoomBy("out")}>−</button><span>{zoom === null ? "—" : `${zoom}%`}</span><button type="button" aria-label={ko ? "확대" : "Zoom in"} disabled={!target} onClick={() => zoomBy("in")}>+</button><button type="button" aria-label={ko ? "확대 배율 초기화" : "Reset zoom"} disabled={!target} onClick={() => zoomBy("reset")}><IconRefresh size={12} /></button></div></div>
       <hr className={menu.panelMenuSeparator} />
-      <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => setPanel("device")}>{ko ? "기기 화면" : "Device view"}<IconChevronRight size={13}/></button>
-      <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => void run((api, target) => api.devTools({ ...target, open: true }))}>{ko ? "개발자 도구" : "Developer tools"}</button>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={toggleDevice}>{devicePreset && devicePreset !== "off" ? (ko ? "기기 도구 모음 숨기기" : "Hide device toolbar") : (ko ? "기기 도구 모음 표시" : "Show device toolbar")}</button>
       <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => void run((api, target) => api.saveScreenshot(target))}>{ko ? "스크린샷 찍기" : "Take screenshot"}</button>
       <hr className={menu.panelMenuSeparator} />
-      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { close(); onImport(); }}>{ko ? "쿠키 가져오기…" : "Import cookies…"}</button>
-      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { setAutofillMode("passwords"); setPanel("autofill"); }}>{ko ? "비밀번호 관리자" : "Password manager"}<IconChevronRight size={13}/></button>
-      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { setAutofillMode("contacts"); setPanel("autofill"); }}>{ko ? "연락처 및 자동 완성" : "Contacts and autofill"}<IconChevronRight size={13}/></button>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { close(); onImport(); }}>{ko ? "쿠키 및 비밀번호 가져오기…" : "Import cookies and passwords…"}</button>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => setPanel("autofill-menu")}>{ko ? "비밀번호 및 자동 완성" : "Passwords and autofill"}<IconChevronRight size={13}/></button>
       <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => setPanel("downloads")}>{ko ? "다운로드" : "Downloads"}</button>
       <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => setPanel("history")}>{ko ? "방문 기록" : "History"}</button>
       <button className={menu.panelMenuRow} role="menuitem" type="button" disabled={!target} onClick={() => setPanel("clear")}>{ko ? "인터넷 사용 기록 삭제" : "Clear browsing data"}</button>
       <hr className={menu.panelMenuSeparator} />
       <Link className={menu.panelMenuRow} role="menuitem" href="/browser" onClick={close}>{ko ? "브라우저 설정" : "Browser settings"}</Link>
     </div>}
-    {panel === "device" && <div className={`${menu.panelPopover} ${styles.controlPopover}`} role="menu" aria-label={ko ? "기기 화면" : "Device view"}>
-      {(["off", "phone", "tablet"] as const).map(preset => <button key={preset} type="button" role="menuitemradio" aria-checked={devicePreset === preset} className={menu.panelMenuRow} onClick={() => changeDevice(preset)}><span>{ko ? ({ off: "현재 창", phone: "휴대전화", tablet: "태블릿" }[preset]) : ({ off: "Current window", phone: "Phone", tablet: "Tablet" }[preset])}</span>{devicePreset === preset && <IconCheck size={14}/>}</button>)}
+    {panel === "autofill-menu" && <div className={`${menu.panelPopover} ${styles.controlPopover} ${styles.browserMenu}`} role="menu" aria-label={ko ? "비밀번호 및 자동 완성" : "Passwords and autofill"}>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => setPanel("menu")}><IconArrowLeft size={13}/>{ko ? "브라우저 메뉴" : "Browser menu"}</button>
+      <hr className={menu.panelMenuSeparator}/>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { setAutofillMode("passwords"); setPanel("autofill"); }}>{ko ? "비밀번호 관리자" : "Password manager"}</button>
+      <button className={menu.panelMenuRow} role="menuitem" type="button" onClick={() => { setAutofillMode("contacts"); setPanel("autofill"); }}>{ko ? "연락처 및 자동 완성" : "Contacts and autofill"}</button>
     </div>}
     {panel === "find" && <div className={`${menu.panelPopover} ${styles.controlPopover} ${styles.findPopover}`} role="dialog" aria-label={ko ? "페이지에서 찾기" : "Find in page"} data-browser-find><input value={query} onChange={event => setQuery(event.target.value)} aria-label={ko ? "찾을 텍스트" : "Find text"} placeholder={ko ? "페이지에서 찾기" : "Find in page"} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void find(!event.shiftKey, true); } }} /><span className={menu.panelMenuMeta}>{matches ? `${matches.current}/${matches.total}` : ""}</span><button type="button" aria-label={ko ? "이전 결과" : "Previous match"} onClick={() => void find(false, true)}><IconArrowLeft size={13}/></button><button type="button" aria-label={ko ? "다음 결과" : "Next match"} onClick={() => void find(true, true)}><IconChevronRight size={13}/></button><button type="button" aria-label={ko ? "찾기 닫기" : "Close find"} onClick={() => { if (target) void window.agentlas?.browserUi.stopFind(target); close(); }}><IconClose size={13}/></button></div>}
     {(panel === "downloads" || panel === "history") && <div className={`${menu.panelPopover} ${styles.controlPopover} ${styles.listPopover}`} role="dialog" aria-label={ko ? (panel === "downloads" ? "다운로드" : "방문 기록") : panel}>

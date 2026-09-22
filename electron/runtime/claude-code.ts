@@ -1,4 +1,6 @@
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { waitForRetiredCliExit } from "./retired-cli-exit";
 // Claude Code CLI — 감지 + 실호출.
 // 사용자의 Claude Pro/Max 구독으로 돌아간다 (PRD §3.1 6-A).
 //
@@ -10,6 +12,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import {
   ensureChildCloseAfterExit,
   startCliHeartbeat,
@@ -32,8 +35,10 @@ import {
   createNdjsonLineReader,
   openClaudeResidentSession,
   residencyDisabledFor,
+  retireClaudeModelSiblings,
   retireSupersededClaudeSessions,
   captureClaudeExecutableOwner,
+  setClaudeResidentModel,
   writeClaudeResidentTurn,
   type AcpSessionLease,
   type ClaudeResidentSession,
@@ -223,17 +228,18 @@ export function claudeBuiltinPreAllowedTools(
  * 제품은 막히는 상태가 만들어진다. 프로브는 이 함수를 그대로 부른다.
  */
 /**
- * 이번 실행이 **실제로 쓴 모델 id** 를 result 이벤트에서 읽는다 — 순수 함수.
+ * result.modelUsage 의 세션 누적 집계를 읽는 진단용 순수 함수.
  *
  * ★왜 (오너 2026-09-07: "버전 바뀌어도 알아서 읽게 해라"). claude-code 에는 모델 목록
  *   명령이 없어(detect.ts `no-list-concept:cli-aliases`) 우리가 보낼 수 있는 것은 벤더
  *   별칭 `opus|sonnet|haiku|fable` 뿐이고, 화면에도 그것만 보였다. 버전을 코드에 적어
  *   두면 벤더가 세대를 올리는 순간 거짓이 된다.
  *
- *   그런데 CLI 는 이미 답을 주고 있었다. 실측(2.1.263)한 result 이벤트:
+ *   실측(2.1.263)한 result 이벤트:
  *     "modelUsage": { "claude-opus-5[1m]": { …토큰… } }
- *   대괄호 뒤는 컨텍스트 창 표식(1m)이라 잘라낸다. 여러 모델이 섞이면(서브에이전트 등)
- *   토큰을 가장 많이 쓴 쪽이 이 턴의 주 모델이다.
+ *   대괄호 뒤는 컨텍스트 창 표식(1m)이라 잘라낸다. --resume 뒤 모델을 바꾸면
+ *   이전 모델의 캐시 토큰이 더 커서 이번 턴 모델로 잘못 선택될 수 있다.
+ *   이 집계는 실행 모델 영수증에 쓰지 않는다.
  *
  * @returns 모델 id, 못 읽으면 null(짐작하지 않는다)
  */
@@ -249,6 +255,32 @@ export function observedClaudeModelId(modelUsage: unknown): string | null {
     if (!best || tokens > best.tokens) best = { id, tokens };
   }
   return best ? best.id : null;
+}
+
+/** Only root assistant messages emitted in this turn identify its actual model. */
+export class ClaudeTurnModelTracker {
+  private readonly models = new Set<string>();
+
+  observe(event: unknown): void {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return;
+    const value = event as {
+      type?: unknown;
+      parent_tool_use_id?: unknown;
+      isSidechain?: unknown;
+      message?: { model?: unknown; content?: unknown };
+    };
+    if (value.type !== "assistant" || value.parent_tool_use_id != null || value.isSidechain === true) return;
+    if (!Array.isArray(value.message?.content) || typeof value.message?.model !== "string") return;
+    const model = value.message.model.replace(/\[[^\]]*\]\s*$/, "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(model)) return;
+    this.models.add(model);
+  }
+
+  get observedModel(): string | null {
+    // A mixed-model root turn has no single truthful label. Never choose the
+    // largest result.modelUsage entry: it can include earlier resumed turns.
+    return this.models.size === 1 ? this.models.values().next().value ?? null : null;
+  }
 }
 
 /** 헤드리스 쓰기 실행에 허용하는 임시 폴더 — OS 임시 폴더와 Claude CLI 자체 스크래치(/tmp). */
@@ -650,19 +682,9 @@ function flattenHistory(req: RunnerRequest): string {
  * is a different conversation.
  */
 function systemFingerprint(req: RunnerRequest, executableFingerprint: string): string {
-  // The model is part of the session identity. A runtime session belongs to the
-  // model that created it, so resuming it under a different model is a false
-  // resume, not continuity. Leaving the model out made every BYOK model switch
-  // reuse the previous model's session id.
-  //
-  // This does NOT reintroduce the 2026-07-16 세션유지 사고. That incident came
-  // from hashing the whole system prompt and settings, so any unrelated setting
-  // change severed the conversation; the seed exists to keep those out. The
-  // model is different in kind — it genuinely cannot inherit another model's
-  // session — and the user does not experience a cut, because the fresh-session
-  // path reseeds the compacted conversation history with continuity framing
-  // (renderConversationContext). The thread the user sees lives in Agentlas's
-  // own store, not in the runtime session.
+  // Model selection is per turn. The native conversation survives an in-process
+  // set_model (verified against the installed stream-json CLI), and a dead
+  // resident still resumes by session id with the next requested model.
   if (req.sessionFingerprintSeed) {
     return crypto
       .createHash("sha256")
@@ -745,6 +767,7 @@ const runClaudeTurn = async (
   allowResidency: boolean,
   observeNativeFile: NativeFileProofObserver,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "claude-code");
   if (req.restrictedReadBoundary) {
     throw new Error(
       "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
@@ -826,7 +849,7 @@ const runClaudeTurn = async (
     runReq.surfaceGate,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
-  const savedSession = !runReq.untrustedNoTools && runReq.chatId
+  const savedSession = !assertScienceRecoveryRequest(runReq, "claude-code") && !runReq.untrustedNoTools && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
   const storedSessionId =
@@ -1133,6 +1156,10 @@ const runClaudeTurn = async (
     executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
     !runReq.untrustedNoTools &&
+    // Browser and isolated MCP grants are per-turn authority. A resident
+    // process must never retain one after this turn has completed.
+    !runReq.browserOnly &&
+    !runReq.isolatedMcpConfig &&
     // A per-run tool grant dies with its turn; a process that carries it cannot serve the next one.
     !runReq.ephemeralToolGrant &&
     !runReq.singleUse &&
@@ -1159,8 +1186,20 @@ const runClaudeTurn = async (
       : null;
   const pool = claudeSessionPool();
   let lease: AcpSessionLease<ClaudeResidentSession> | null = null;
+  let modelHandoff: { retired: number; pending: number } | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
   let broken = false;
+  if (resumeSessionId && executableOwner) {
+    const handoff = retireClaudeModelSiblings(pool, {
+      owner: executableOwner,
+      nativeSessionId: resumeSessionId,
+      model: runReq.model,
+      poolKey,
+      allowModelSwitch: Boolean(poolKey),
+      retireSameModel: !poolKey,
+    });
+    if (handoff.retired > 0 || handoff.pending > 0) modelHandoff = handoff;
+  }
   if (poolKey && executableOwner) {
     try {
       const current = getExecutable(req.runtimeSource, runCwd, runEnv);
@@ -1180,6 +1219,7 @@ const runClaudeTurn = async (
           agentId: runReq.agentId ?? null,
           nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
           chatId: runReq.chatId ?? null,
+          projectId: runReq.workProjectId ?? null,
           runtimeKind: KIND,
           source: resolveAgentResidencySource(runReq.agentId),
           reaperExempt: isResidencyExemptAgent(runReq.agentId),
@@ -1195,13 +1235,55 @@ const runClaudeTurn = async (
             // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
             cwd: runCwd,
             env: runEnv,
+            model: runReq.model,
+            poolKey,
           }),
         retainExecutableOwner,
       );
-    } catch {
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+        throw error;
+      }
       // 상주 세션을 못 열었으면 조용히 1회성 경로로 — 사용자에게 차이가 없어야 한다.
       lease = null;
+      if (resumeSessionId && executableOwner) {
+        // A one-shot fallback can still mutate the provider's native session. Do not leave an
+        // idle resident with the same native id behind to replay stale local transcript state.
+        const fallbackHandoff = retireClaudeModelSiblings(pool, {
+          owner: executableOwner,
+          nativeSessionId: resumeSessionId,
+          model: runReq.model,
+          poolKey,
+          retireSameModel: true,
+        });
+        if (fallbackHandoff.retired > 0 || fallbackHandoff.pending > 0) {
+          modelHandoff = {
+            retired: (modelHandoff?.retired ?? 0) + fallbackHandoff.retired,
+            pending: (modelHandoff?.pending ?? 0) + fallbackHandoff.pending,
+          };
+        }
+      }
     }
+  }
+  if (lease && !lease.fresh && lease.session.model !== (runReq.model?.trim() ?? "")) {
+    // The installed CLI accepts an idle stream-json control_request(set_model).
+    // Only an acknowledged switch may receive the user turn; an old CLI or a
+    // failed hook falls back to a fresh one-shot --resume with the requested model.
+    const switched = await setClaudeResidentModel(lease.session, runReq.model, req.signal);
+    if (switched) modelHandoff = { retired: 0, pending: 0 };
+    else {
+      const retiredChild = lease.session.child;
+      pool.discard(lease);
+      lease = null;
+      try { await waitForRetiredCliExit(retiredChild); }
+      catch (error) { cleanupSysFile(); cleanupAgentAppMcpConfig(); throw error; }
+    }
+  }
+  if (req.signal?.aborted) {
+    if (lease) { pool.discard(lease); lease = null; }
+    cleanupSysFile();
+    cleanupAgentAppMcpConfig();
+    throw abortReasonError(req);
   }
   const session = lease?.session ?? null;
 
@@ -1264,8 +1346,8 @@ const runClaudeTurn = async (
     let finalText = "";
     let tokens: number | undefined;
     let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
-    /** 이번 턴이 실제로 쓴 모델 id — 별칭(opus)이 어느 세대로 풀렸는지. */
-    let observedModel: string | undefined;
+    /** Root assistant messages only; result.modelUsage may include resumed turns. */
+    const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
     /** 스트림 표식이 말한 실패 — 있으면 종료코드와 무관하게 이 턴은 답이 아니다. */
@@ -1556,6 +1638,7 @@ const runClaudeTurn = async (
       mcp_servers?: Array<{ name?: string; status?: string }>;
       tools?: string[];
       message?: {
+        model?: string;
         content?: Array<{
           type?: string;
           text?: string;
@@ -1567,6 +1650,8 @@ const runClaudeTurn = async (
           is_error?: boolean;
         }>;
       };
+      parent_tool_use_id?: string | null;
+      isSidechain?: boolean;
       result?: unknown;
       // `result` 이벤트는 입력·출력·캐시 토큰을 **전부** 싣는다(실측 확인 2026-07-28).
       // 예전에는 output 만 읽고 나머지를 버려서, 할당 영수증의 `usage` 를 채울 수
@@ -1577,11 +1662,7 @@ const runClaudeTurn = async (
         cache_read_input_tokens?: number;
         cache_creation_input_tokens?: number;
       };
-      /*
-       * ★어느 모델이 실제로 돌았는지 — 벤더가 result 이벤트에 직접 싣는다.
-       * 실측(claude 2.1.263): {"modelUsage":{"claude-opus-5[1m]":{…}}}.
-       * 우리가 보낸 것은 별칭 `opus` 뿐이므로, 세대를 아는 유일한 길이 이 칸이다.
-       */
+      /** Session-cumulative usage, never a per-turn model receipt after --resume. */
       modelUsage?: Record<string, unknown>;
       error?: unknown;
       is_error?: boolean;
@@ -1622,6 +1703,7 @@ const runClaudeTurn = async (
       }
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
+        if (session) session.nativeSessionId = ev.session_id;
       }
       if (ev.error === "authentication_failed") {
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
@@ -1714,6 +1796,7 @@ const runClaudeTurn = async (
         return;
       }
       if (ev.type === "assistant" && ev.message?.content) {
+        turnModel.observe(ev);
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
             if (!accCapped) {
@@ -1795,8 +1878,6 @@ const runClaudeTurn = async (
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
       } else if (ev.type === "result") {
         if (typeof ev.result === "string") finalText = ev.result;
-        // 별칭이 어느 세대로 풀렸는지는 이 이벤트만 안다(위 observedClaudeModelId 주석).
-        observedModel = observedClaudeModelId(ev.modelUsage) ?? observedModel;
         if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
         if (ev.usage) {
           // `inputTokens` 는 **모델에 실제로 들어간 토큰 전부**로 센다:
@@ -1927,6 +2008,7 @@ const runClaudeTurn = async (
         return;
       }
       if (code === 0) {
+        const observedModel = turnModel.observedModel;
         let observedHostEnforcement: RunnerResult["workforcePermissionEnforcement"];
         if (hostObservation && !runnerFailure && !structuredRuntimeError) {
           try {
@@ -1948,6 +2030,7 @@ const runClaudeTurn = async (
             events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
           }
         }
+        if (modelHandoff) events.onStatus(`[runtime-session] model_handoff kind=${KIND}`);
         events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
         resolve({
           text: display.trim(),
@@ -1978,6 +2061,7 @@ const runClaudeTurn = async (
         // move to a different live provider without scraping a localized
         // error sentence or retrying the same signed-out account.
         if (runnerFailure) {
+          const observedModel = turnModel.observedModel;
           resolve({
             text: (combined() || finalText || runnerFailure.message).trim(),
             failure: runnerFailure,

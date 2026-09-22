@@ -13,7 +13,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { OwnedStdioClientTransport } from "./owned-stdio-transport";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readEnvVar } from "../secrets/vault";
@@ -523,7 +524,7 @@ async function createTransport(
       signal?.throwIfAborted();
       preparedMcpTransport(prepared, server);
       Object.assign(resolved, launch.env);
-      return { transport: new StdioClientTransport({ command: launch.command, args: launch.args,
+      return { transport: new OwnedStdioClientTransport({ command: launch.command, args: launch.args,
         ...(actualTarget ? { cwd: targetCwd } : {}),
         env: stdioEnvironmentForCommand(launch.command, {
           ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
@@ -587,7 +588,7 @@ async function createTransport(
       }
     }
     signal?.throwIfAborted();
-    const transport = new StdioClientTransport({
+    const transport = new OwnedStdioClientTransport({
       command,
       args,
       // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
@@ -677,6 +678,16 @@ async function closeMcpProbeBounded(client: Client, transport: Transport | null)
     // inherits an unbounded cleanup wait.
     void transport?.close().catch(() => {});
   }
+}
+
+/** Closing the SDK client alone is not proof that its stdio child closed: an
+ * SDK close failure must still release the transport owned by Main. */
+export async function closeMcpClientAndTransport(
+  client: Pick<Client, "close">,
+  transport: Pick<Transport, "close"> | null,
+): Promise<void> {
+  try { await client.close(); } catch { /* close the owned transport below */ }
+  try { await transport?.close(); } catch { /* cleanup remains best effort */ }
 }
 
 export async function listCompleteToolInventory(client: Pick<Client, "listTools">, signal: AbortSignal): Promise<Awaited<ReturnType<Client["listTools"]>>> {
@@ -780,8 +791,16 @@ async function callServerToolContentInternal(
 ): Promise<McpToolContentResult | null> {
   let resolved: Record<string, string> = {};
   let client: Client | null = null;
+  // Keep the concrete transport separately from the SDK client. A failed
+  // initialize/connect can reject before the SDK owns its stdio child; the
+  // timeout/abort boundary must still be able to close that child explicitly.
+  let transport: Transport | null = null;
   const preparation = new AbortController();
-  const stop = () => { preparation.abort(); void client?.close().catch(() => {}); };
+  const stop = () => {
+    preparation.abort();
+    void client?.close().catch(() => {});
+    void transport?.close().catch(() => {});
+  };
   const boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
   try {
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
@@ -824,7 +843,7 @@ async function callServerToolContentInternal(
           client = activeClient;
           const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal, options?.prepared);
           preparation.signal.throwIfAborted();
-          const transport = created.transport;
+          transport = created.transport;
           instrumentMcpToolCallTransport(transport, boundaryState);
           await activeClient.connect(transport);
           preparation.signal.throwIfAborted();
@@ -892,6 +911,7 @@ async function callServerToolContentInternal(
             if (missing.length > 0 || contractIssues.length > 0) {
               await closeMcpProbeBounded(activeClient, transport);
               client = null;
+              transport = null;
               if (attempt + 1 < maxRuntimeAttempts && created.runtimeRoot) {
                 // No tools/call request has been sent, so changing the official
                 // runtime and retrying is not an ambiguous replay. Reject the
@@ -945,8 +965,9 @@ async function callServerToolContentInternal(
             }
             images.push({ mediaType: item.mimeType, data: item.data });
           }
-          await activeClient.close().catch(() => {});
+          await closeMcpClientAndTransport(activeClient, transport);
           client = null;
+          transport = null;
           return { text, images, isError: res.isError === true };
         }
         throw new Error(`Agentlas OS runtime could not provide MCP tool: ${toolName}`);
@@ -958,7 +979,9 @@ async function callServerToolContentInternal(
     return result;
   } catch (err) {
     stop();
-    if (client) await closeMcpProbeBounded(client, null);
+    if (client) await closeMcpProbeBounded(client, transport);
+    client = null;
+    transport = null;
     const rawMessage = err instanceof Error ? err.message : String(err);
     const mcpCode = err instanceof McpError ? err.code : null;
     const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);

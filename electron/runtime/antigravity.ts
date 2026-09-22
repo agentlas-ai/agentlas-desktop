@@ -1,4 +1,5 @@
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
 import { attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
 import { observeMainMcpEffects, mcpEffectArgumentsDigest, mainMcpExecutionCompletion, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
@@ -29,6 +30,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { announceToolDenied } from "./tool-approval";
@@ -41,19 +43,40 @@ import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
 import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { resolveEffectiveContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { settleDiscovery } from "./model-discovery-store";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { createHash } from "node:crypto";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
+  MCP_PROXY_LAUNCH_ENV,
   MCP_PROXY_SERVER_KEY_ENV,
   MCP_PROXY_SESSION_ENV,
   MCP_PROXY_TARGET_ENV,
 } from "../mcp-tools/proxy-channel";
+import {
+  mcpProxyLaunchResidentKey,
+  promoteMcpProxyLaunch,
+  revokeMcpProxyResidentKey,
+} from "../mcp-tools/proxy-session";
 import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { currentUiLocale } from "../ui-locale";
 import { userDataPath } from "../runtime-paths";
+import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
+import { residencyDisabledFor } from "./claude-session";
+import {
+  antigravityPoolKey,
+  antigravitySessionPool,
+  antigravityResidentSessionAlive,
+  bindAntigravityPersistentMcpScope,
+  openAntigravityResidentSession,
+  retireSupersededAntigravitySessions,
+  writeAntigravityResidentTurn,
+  type AntigravityResidentOwner,
+  type AntigravityResidentSession,
+  type AcpSessionLease,
+} from "./antigravity-session";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -194,27 +217,14 @@ async function getBin(opts?: { source?: string }): Promise<string | null> {
   return firstExisting(AGY_CANDIDATES);
 }
 
-/**
- * A browser-only run must not replay an entire long-lived automation chat.
- * Antigravity receives this prompt directly in argv, and the browser-only
- * policy intentionally cannot use a private prompt file to bypass argv
- * limits. Keep enough recent context to make the current browser task
- * coherent, but bound the replay independently from the normal CLI budget.
- */
-export const AGY_BROWSER_HISTORY_CONTEXT_TOKENS = 8_000;
+/** Browser-only prompts cannot use the private prompt-file bootstrap. The
+ * actual argv byte boundary, selected model capacity, and protected current
+ * instructions jointly determine how much historical context can be replayed.
+ * An unknown model uses the conservative shared fallback, never a claimed
+ * discovered capacity. */
 export const AGY_ARGV_PROMPT_LIMIT = 100_000;
-const AGY_BROWSER_HISTORY_CHAR_LIMIT = 32_000;
 
-function capBrowserHistoryBlock(block: string): string {
-  if (block.length <= AGY_BROWSER_HISTORY_CHAR_LIMIT) return block;
-  // Keep the section header and the newest tail. A giant single recent
-  // message must not be able to recreate the argv overflow after compaction.
-  const head = block.slice(0, 1_000);
-  const tail = block.slice(-(AGY_BROWSER_HISTORY_CHAR_LIMIT - head.length - 80));
-  return `${head}\n[… browser history shortened by Agentlas …]\n${tail}`;
-}
-
-export function buildAntigravityPrompt(req: RunnerRequest): string {
+export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_ARGV_PROMPT_LIMIT): string {
   const sys = wrapSystemPrompt(
     req.systemPrompt,
     req.locale,
@@ -230,14 +240,44 @@ export function buildAntigravityPrompt(req: RunnerRequest): string {
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
-  const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
-  if (req.history.length > 0) {
-    const historyBudget = req.browserOnly ? AGY_BROWSER_HISTORY_CONTEXT_TOKENS : CLI_HISTORY_CONTEXT_TOKENS;
-    const { block } = renderConversationContext(req.history, req.locale, historyBudget);
-    parts.push(req.browserOnly ? capBrowserHistoryBlock(block) : block, "");
+  const systemSection = `[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`;
+  const currentSection = `${tStatus(req.locale, "histThisSection")}\n${req.userPrompt}`;
+  const compose = (historyBlock?: string): string =>
+    [systemSection, "", ...(historyBlock ? [historyBlock, ""] : []), currentSection].join("\n");
+  if (!req.browserOnly) {
+    return req.history.length === 0
+      ? compose()
+      : compose(renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS).block);
   }
-  parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
-  return parts.join("\n");
+
+  // The system/current turn and session rules are never clipped to make room
+  // for history. A long current request fails explicitly at the argv boundary.
+  const capacity = resolveEffectiveContextWindow("antigravity", req.model, false);
+  const modelWindow = capacity.contextWindow ?? UNKNOWN_CONTEXT_WINDOW;
+  // Reserve 20% of the model window for output and provider/tool framing. A
+  // UTF-8 byte is a conservative text-token upper bound, not an exact tokenizer.
+  const effectiveMaxBytes = Math.min(maxPromptBytes, Math.floor(modelWindow * 0.8));
+  const protectedBytes = Buffer.byteLength(compose(), "utf8");
+  if (!Number.isSafeInteger(maxPromptBytes) || protectedBytes > effectiveMaxBytes) {
+    throw new Error(`BROWSER_ONLY_PROMPT_TOO_LARGE: protected prompt requires ${protectedBytes} UTF-8 bytes; effective model/argv budget is ${effectiveMaxBytes}`);
+  }
+  if (req.history.length === 0) return compose();
+  const historyBytes = effectiveMaxBytes - protectedBytes - 2; // two separating newlines
+  if (historyBytes <= 0) {
+    throw new Error(`BROWSER_ONLY_PROMPT_TOO_LARGE: protected prompt requires ${protectedBytes} UTF-8 bytes; effective model/argv budget is ${effectiveMaxBytes}`);
+  }
+  // renderConversationContext reserves 40% of its supplied window for the
+  // current/system turn. UTF-8 bytes conservatively bound text-token cost.
+  let contextWindow = Math.min(modelWindow, Math.floor(historyBytes / 0.6));
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const block = renderConversationContext(req.history, req.locale, contextWindow).block;
+    const prompt = compose(block);
+    const bytes = Buffer.byteLength(prompt, "utf8");
+    if (bytes <= effectiveMaxBytes) return prompt;
+    const excess = bytes - effectiveMaxBytes;
+    contextWindow = Math.max(0, contextWindow - Math.ceil((excess + 256) / 0.6));
+  }
+  throw new Error(`BROWSER_ONLY_PROMPT_TOO_LARGE: history cannot fit within the ${effectiveMaxBytes}-byte model/argv boundary`);
 }
 
 // Kept as a local alias for callers that are not concerned with the prompt's
@@ -356,7 +396,7 @@ export async function ensureAntigravityBrowserProjectPolicy(
   return { projectId: AGY_BROWSER_PROJECT_ID, workspace, configPath };
 }
 
-/** Antigravity의 헤드리스 실행 인자. 세션/stdin 계약은 사용하지 않는다. */
+/** Antigravity headless args: one-shot prompt argv or resident stream-json stdin. */
 export function buildAntigravitySpawnArgs(
   model: string | undefined,
   prompt = "",
@@ -370,6 +410,7 @@ export function buildAntigravitySpawnArgs(
    */
   resumeConversationId?: string,
   browserProjectId?: string,
+  inputFormat?: "stream-json",
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
@@ -389,9 +430,10 @@ export function buildAntigravitySpawnArgs(
     ...antigravityPermissionArgs(permission, Boolean(browserProjectId)),
     "--output-format", "stream-json",
     "--print-timeout", "30m",
+    ...(inputFormat ? ["--input-format", inputFormat] : []),
     ...(outputSchema ? ["--json-schema", JSON.stringify(outputSchema)] : []),
     ...(resumeConversationId ? ["--conversation", resumeConversationId] : []),
-    "--prompt", prompt,
+    ...(inputFormat ? [] : ["--prompt", prompt]),
   ];
 }
 
@@ -1696,8 +1738,9 @@ async function reconcileAgyMcpServersUnderLease(
 }
 
 /**
- * A persisted Antigravity conversation belongs to the exact filesystem-observed
- * executable that produced it. This is not a semantic version claim.
+ * A persisted Antigravity conversation belongs to the exact selected model
+ * and filesystem-observed executable that produced it. This is not a semantic
+ * version claim or a substitute for Agentlas-owned cross-model context.
  */
 export function antigravitySessionFingerprint(
   req: Pick<RunnerRequest, "chatId" | "sessionFingerprintSeed" | "systemPrompt" | "model">,
@@ -1705,12 +1748,45 @@ export function antigravitySessionFingerprint(
 ): string | null {
   if (!req.chatId) return null;
   return createHash("sha256")
-    .update("agy-session-v2\0")
+    .update("agy-session-v3\0")
     .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
     .update("\0")
+    // A provider conversation is model-owned. Agentlas may bridge a model
+    // switch with its durable transcript, but must not pass the old model's
+    // native --conversation id to the new resident process.
+    .update("\0model\0")
+    .update(req.model?.trim() ?? "")
     .update("\0executable\0")
     .update(executableFingerprint)
     .digest("hex");
+}
+
+type AntigravityBrowserResidentScope = { key: string; handles: string[] };
+
+/**
+ * Browser residency is admitted only for one Main-owned canonical browser
+ * binding. The per-turn config may be a new sealed file, but its proxy handle
+ * must belong to the stable resident scope before AGY is allowed to reuse its
+ * PID. Any extra server, copied handle, or missing resident key downgrades to
+ * the existing one-shot path.
+ */
+function antigravityBrowserResidentScope(configPath: string | undefined): AntigravityBrowserResidentScope | null {
+  if (!configPath) return null;
+  let bindings: ReturnType<typeof preparedMcpBindings>;
+  try { bindings = preparedMcpBindings(configPath); } catch { return null; }
+  if (bindings.length !== 1 || bindings[0]?.server.catalogId !== "agentlas-browser") return null;
+  const handles: string[] = [];
+  for (const binding of bindings) {
+    let transport: ReturnType<typeof preparedMcpTransport>;
+    try { transport = preparedMcpTransport(binding, binding.server); } catch { return null; }
+    const handle = transport.kind === "stdio" ? transport.env[MCP_PROXY_LAUNCH_ENV] : undefined;
+    if (typeof handle !== "string" || !/^[a-f0-9-]{36}$/.test(handle)) return null;
+    const key = mcpProxyLaunchResidentKey(handle);
+    if (!key) return null;
+    handles.push(handle);
+  }
+  const key = mcpProxyLaunchResidentKey(handles[0]!);
+  return key ? { key, handles } : null;
 }
 
 async function runPreparedAntigravity(
@@ -1718,6 +1794,7 @@ async function runPreparedAntigravity(
   events: RunnerEvents,
   bin: string,
   executableFingerprint: string,
+  executableGeneration: string,
   agyAdditionalDirs: string[] = [],
 ): Promise<RunnerResult> {
   // 매 호출 full prompt를 Antigravity에 전달한다. 대화 연속성은 Agentlas가
@@ -1735,12 +1812,12 @@ async function runPreparedAntigravity(
    * 것은 히스토리를 다시 보내는 비용보다 나쁘다.
    */
   const agyFingerprint = antigravitySessionFingerprint(runReq, executableFingerprint);
-  const agySaved = runReq.chatId
+  const agySaved = !assertScienceRecoveryRequest(runReq, "antigravity") && runReq.chatId
     ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
   const agyResumeId =
     agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
-  const prompt = agyResumeId
+  let prompt = agyResumeId
     ? [runReq.turnContext?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n")
     : buildPrompt(runReq);
 
@@ -1757,11 +1834,11 @@ async function runPreparedAntigravity(
     ? await ensureAntigravityBrowserProjectPolicy()
     : null;
 
-  // agy에는 stdin/prompt-file 입력이 없다. 전체 시스템·히스토리를 argv에 넣으면 로컬
-  // process listing에 노출되고 Windows 길이 제한도 넘는다. 0600 파일에는 본문을,
-  // argv에는 그 파일을 읽으라는 짧은 bootstrap만 전달한다.
+  // One-shot agy has no stdin prompt input. Its oversized prompt needs a
+  // private file, whereas a resident stream-json process receives the full
+  // prompt on stdin. Do not stage a one-shot file before residency admission:
+  // that ephemeral directory would make long Goal turns ineligible for reuse.
   let agyPromptDirectory: string | null = null;
-  let agyPromptFile: string | null = null;
   let spawnPrompt = prompt;
   /*
    * ★작업 폴더를 워크스페이스로 **등록**한다 — cwd로 스폰하는 것만으로는 부족하다.
@@ -1810,7 +1887,7 @@ async function runPreparedAntigravity(
    * 실패로 보인다 — 정작 결과물은 이미 떠 있는데도. 도구를 열어 주는 것과
    * **되돌아오게 하는 것**은 다른 일이다.
    */
-  spawnPrompt = [
+  const sessionRules = [
     "Non-interactive session rules:",
     ...(runReq.browserOnly
       ? [
@@ -1839,16 +1916,25 @@ async function runPreparedAntigravity(
         "  contents (HTML, code, a document), put the COMPLETE contents in your response.",
       ]),
     "",
-    spawnPrompt,
   ].join("\n");
-  if (runReq.browserOnly && spawnPrompt.length > AGY_ARGV_PROMPT_LIMIT) {
+  const browserPromptBudget = runReq.browserOnly
+    ? Math.min(
+        AGY_ARGV_PROMPT_LIMIT,
+        Math.floor((resolveEffectiveContextWindow("antigravity", runReq.model, false).contextWindow ?? UNKNOWN_CONTEXT_WINDOW) * 0.8),
+      )
+    : AGY_ARGV_PROMPT_LIMIT;
+  if (runReq.browserOnly && !agyResumeId) {
+    prompt = buildPrompt(runReq, browserPromptBudget - Buffer.byteLength(sessionRules, "utf8") - 1);
+  }
+  spawnPrompt = `${sessionRules}\n${prompt}`;
+  const spawnPromptBytes = Buffer.byteLength(spawnPrompt, "utf8");
+  if (runReq.browserOnly && spawnPromptBytes > browserPromptBudget) {
     throw new Error(
-      `BROWSER_ONLY_PROMPT_TOO_LARGE: ${spawnPrompt.length} characters exceed the ${AGY_ARGV_PROMPT_LIMIT}-character private argv boundary`,
+      `BROWSER_ONLY_PROMPT_TOO_LARGE: ${spawnPromptBytes} UTF-8 bytes exceed the ${browserPromptBudget}-byte model/argv boundary`,
     );
   }
-  if (spawnPrompt.length <= AGY_ARGV_PROMPT_LIMIT) {
-    // 직접 전달 — 부트스트랩 없음.
-  } else {
+  const prepareOneShotPrompt = async (): Promise<void> => {
+    if (spawnPromptBytes <= AGY_ARGV_PROMPT_LIMIT || agyPromptDirectory) return;
     agyPromptDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-antigravity-prompt-"));
     try {
       try {
@@ -1856,7 +1942,7 @@ async function runPreparedAntigravity(
       } catch {
         // Windows 등 chmod 미지원 환경
       }
-      agyPromptFile = path.join(agyPromptDirectory, "request.txt");
+      const agyPromptFile = path.join(agyPromptDirectory, "request.txt");
       await fs.writeFile(agyPromptFile, prompt, { encoding: "utf8", mode: 0o600 });
       spawnPrompt = buildAgyPromptBootstrap(agyPromptFile);
       /*
@@ -1867,15 +1953,15 @@ async function runPreparedAntigravity(
        * (~/.gemini/antigravity-cli/scratch)로 돌린다 — 모델은 "만들었다"고 답하는데
        * 사용자가 연 폴더에는 아무것도 없다. 실측으로 정확히 그 모습을 봤다.
        *
-       * 그리고 이 갈래는 예외가 아니라 평소다. 짧은 질문이라도 시스템 프롬프트와 세션
-       * 규칙이 붙으면 argv 한도를 넘으므로, 실사용은 대부분 이 경로로 온다.
+       * This is only the one-shot fallback. Resident stream-json turns send
+       * the same full prompt over stdin without adding an ephemeral directory.
        */
       agyReadDirs = [agyPromptDirectory, agyWorkDir, ...agyAdditionalDirs];
     } catch (error) {
       await fs.rm(agyPromptDirectory, { recursive: true, force: true });
       throw error;
     }
-  }
+  };
   const cleanupAgyPrompt = (): void => {
     if (!agyPromptDirectory) return;
     try {
@@ -1891,6 +1977,7 @@ async function runPreparedAntigravity(
    * 호출을 자동 거부하므로, 서버를 붙여 봐야 "가진 척"만 된다(거짓 표시 금지).
    */
   let mcpReconcile: Awaited<ReturnType<typeof reconcileAgyMcpServers>> = { cleanup: async () => {} };
+  let residentProtocolFallback = false;
   try {
     req.signal?.throwIfAborted();
     if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal);
@@ -1908,12 +1995,147 @@ async function runPreparedAntigravity(
         providerCode: "agy_mcp_configuration_drift", message: "Antigravity MCP scope changed before model execution." } }; }
     }
     req.signal?.throwIfAborted();
-    return await runAgyProcess();
+    const browserResidentScope = runReq.browserOnly
+      ? antigravityBrowserResidentScope(runReq.mcpConfigPath)
+      : null;
+    let residentLease: AcpSessionLease<AntigravityResidentSession> | null = null;
+    const residentBaseOwner: AntigravityResidentOwner = {
+      chatId: runReq.chatId ?? "",
+      sessionOwnerId: runtimeSessionOwnerId ?? null,
+      isolateOwner: isolateRuntimeSessionOwner,
+      generation: executableGeneration,
+      model: runReq.model?.trim() || null,
+    };
+    const residentArgs = buildAntigravitySpawnArgs(
+      runReq.model,
+      "",
+      agyReadDirs,
+      agyToolsAllowed ? runReq.permission : undefined,
+      runReq.outputSchema?.schema,
+      agyResumeId ?? undefined,
+      browserProject?.projectId,
+      "stream-json",
+    );
+    const residencyEligible = Boolean(
+      runReq.chatId
+      && agyFingerprint
+      && !residencyDisabledFor(ANTIGRAVITY_KIND, runReq.env ?? process.env)
+      && !runReq.untrustedNoTools
+      && (!runReq.browserOnly || Boolean(browserResidentScope))
+      && (!runReq.isolatedMcpConfig || Boolean(browserResidentScope))
+      && !runReq.ephemeralToolGrant
+      && !runReq.singleUse
+      && !runReq.workforceRuntimeToolGrant
+      // Attachment staging and a resident process have different workspace
+      // authority. Let the existing one-shot path handle those turns.
+      && agyAdditionalDirs.length === 0
+    );
+    if (residencyEligible && runReq.chatId && agyFingerprint) {
+      const pool = antigravitySessionPool();
+      const key = antigravityPoolKey({
+        chatId: runReq.chatId,
+        fingerprint: agyFingerprint,
+        sessionOwnerId: runtimeSessionOwnerId ?? null,
+        isolateOwner: isolateRuntimeSessionOwner,
+        executableGeneration,
+        cwd: agyWorkDir,
+        bin,
+        model: runReq.model?.trim() || null,
+        ...(browserResidentScope
+          ? { mcpConfigPath: `resident-browser:${browserResidentScope.key}` }
+          : runReq.mcpConfigPath ? { mcpConfigPath: runReq.mcpConfigPath } : {}),
+        ...(runReq.toolBrokerSettingsPath ? { toolBrokerSettingsPath: runReq.toolBrokerSettingsPath } : {}),
+        args: residentArgs,
+        env: runReq.env ?? process.env,
+      });
+      // The full key is part of the owner boundary.  A changed MCP/broker,
+      // cwd, environment, or argv scope must retire the previous idle seat;
+      // otherwise it can occupy the global 12h budget while never being
+      // eligible for this turn again.
+      const residentOwner: AntigravityResidentOwner = { ...residentBaseOwner, scopeKey: key };
+      await retireSupersededAntigravitySessions(pool, residentOwner);
+      try {
+        residentLease = await pool.acquire(
+          key,
+          {
+            agentId: runReq.agentId ?? null,
+            nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
+            chatId: runReq.chatId ?? null,
+            projectId: runReq.workProjectId ?? null,
+            runtimeKind: ANTIGRAVITY_KIND,
+            source: resolveAgentResidencySource(runReq.agentId),
+            reaperExempt: isResidencyExemptAgent(runReq.agentId),
+          },
+          async () => openAntigravityResidentSession({
+            executableOwner: residentOwner,
+            bin,
+            args: residentArgs,
+            cwd: agyWorkDir,
+            env: { ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" },
+            onPersistentMcpScopeClose: (key, owner) => { revokeMcpProxyResidentKey(key, owner); },
+          }),
+        );
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+          throw error;
+        }
+        // An unavailable stream-input protocol is a capability downgrade, not
+        // a reason to fail a valid one-shot run.
+        events.onStatus("[residency] disabled kind=" + ANTIGRAVITY_KIND + " reason=spawn-failed");
+        console.warn("[residency] antigravity degraded to one-shot:", error instanceof Error ? error.message : String(error));
+        residentLease = null;
+      }
+    }
+    try {
+      if (!residentLease) await prepareOneShotPrompt();
+      const result = await runAgyProcess(residentLease);
+      let browserResidentPromoted = false;
+      if (residentLease && browserResidentScope && !result.failure && !residentProtocolFallback) {
+        try {
+          for (const handle of browserResidentScope.handles) {
+            const owner = promoteMcpProxyLaunch(handle);
+            bindAntigravityPersistentMcpScope(residentLease.session, owner.key, owner.owner);
+          }
+          browserResidentPromoted = true;
+        } catch (error) {
+          // A browser scope that cannot be promoted must not leave a live AGY
+          // process attached to a one-shot proxy. Discarding below is the safe
+          // downgrade; the completed turn itself remains a valid result.
+          console.warn("[residency] browser MCP promotion refused:", error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (residentLease) {
+        // A completed provider result keeps a live resident reusable. Abort or
+        // a dead process is discarded by the pool's alive check, so no broken
+        // or per-run authority crosses the next turn.
+        if (req.signal?.aborted || (browserResidentScope && !browserResidentPromoted)) antigravitySessionPool().discard(residentLease);
+        else antigravitySessionPool().release(residentLease);
+        residentLease = null;
+      }
+      if (residentProtocolFallback) {
+        // The resident process died or rejected the write before emitting any
+        // text/tool activity. Its effect scope is already closed above, so a
+        // one-shot retry cannot duplicate an accepted provider action.
+        residentProtocolFallback = false;
+        await prepareOneShotPrompt();
+        return await runAgyProcess(null);
+      }
+      return result;
+    } catch (error) {
+      if (residentLease) {
+        antigravitySessionPool().discard(residentLease);
+        residentLease = null;
+      }
+      throw error;
+    }
   } finally {
     try { await mcpReconcile.cleanup(); } finally { cleanupAgyPrompt(); }
   }
 
-  function runAgyProcess(): Promise<RunnerResult> {
+  function runAgyProcess(
+    residentLease: AcpSessionLease<AntigravityResidentSession> | null = null,
+  ): Promise<RunnerResult> {
+  const residentSession = residentLease?.session ?? null;
   const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
   const hostEffects = new Map<string, MainMcpEffectReceipt>(), claimedEffects = new Set<string>();
@@ -1944,32 +2166,37 @@ async function runPreparedAntigravity(
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
 
     let child: ReturnType<typeof spawnCli>;
-    try {
-      child = spawnCli(
-        bin,
-        buildAntigravitySpawnArgs(
-          req.model,
-          spawnPrompt,
-          agyReadDirs,
-          agyToolsAllowed ? req.permission : undefined,
-          req.outputSchema?.schema,
-          agyResumeId ?? undefined,
-          browserProject?.projectId,
-        ),
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-          env,
-          // 등록 폴더와 반드시 같은 값 — 위 agyWorkDir 주석 참고.
-          cwd: agyWorkDir,
-          ...detachedSpawnOpts(),
-        },
-      );
-    } catch (error) {
-      cleanupAgyPrompt();
-      reject(error instanceof Error ? error : new Error(String(error)));
-      return;
+    if (residentSession) {
+      child = residentSession.child;
+    } else {
+      try {
+        child = spawnCli(
+          bin,
+          buildAntigravitySpawnArgs(
+            req.model,
+            spawnPrompt,
+            agyReadDirs,
+            agyToolsAllowed ? req.permission : undefined,
+            req.outputSchema?.schema,
+            agyResumeId ?? undefined,
+            browserProject?.projectId,
+          ),
+          {
+            stdio: ["ignore", "pipe", "pipe"],
+            env,
+            // 등록 폴더와 반드시 같은 값 — 위 agyWorkDir 주석 참고.
+            cwd: agyWorkDir,
+            ...detachedSpawnOpts(),
+          },
+        );
+      } catch (error) {
+        cleanupAgyPrompt();
+        if (residentLease) antigravitySessionPool().discard(residentLease);
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      trackRunChild(child);
     }
-    trackRunChild(child);
     // 취소 — Stop 누르면 자식 프로세스 트리 종료.
     const onAbort = () => killCliTree(child);
     if (req.signal) {
@@ -1997,15 +2224,26 @@ async function runPreparedAntigravity(
     const reportedAgyTools = new Set<string>();
     const stagedAgyGeneratedImageSources = new Set<string>();
     let agyLineBuf = "";
+    let settled = false;
+    let resultSeen = false;
+    // Assigned before either child listener is attached. Resident turns call
+    // this on the provider result event; one-shot turns call it on close.
+    let settle: (code: number | null) => void = () => {};
 
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     const clearAgyHeartbeat = startCliHeartbeat(child, events.onStatus, "agy");
     // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
-    ensureChildCloseAfterExit(child, () => {
-      events.onStatus("agy: process exited without closing its output — settling the run");
-    });
+    if (!residentSession) {
+      ensureChildCloseAfterExit(child, () => {
+        events.onStatus("agy: process exited without closing its output — settling the run");
+      });
+    }
     const consumeAgyLine = (line: string): void => {
+      // A resident process can emit a trailing/duplicate line after its
+      // result. The result is the per-turn boundary; never route late data to
+      // the next turn's sink.
+      if (residentSession && resultSeen) return;
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
       const normalizedLine = effectCoverage.normalizeLine(trimmedLine);
@@ -2098,6 +2336,13 @@ async function runPreparedAntigravity(
         events.onStatus(`agy: ${step.activity}`);
         lastEmit = now;
       }
+      if (residentSession && step.activity === "result") {
+        resultSeen = true;
+        // Let the current line finish all reductions/emissions before closing
+        // this sink. This also isolates duplicate result lines in the same
+        // stdout chunk.
+        queueMicrotask(() => settle(0));
+      }
     };
     const consumeAgyText = (text: string): void => {
       // stream-json 라인 파싱 — 델타가 생존 신호이자 본문이다.
@@ -2110,33 +2355,48 @@ async function runPreparedAntigravity(
         nl = agyLineBuf.indexOf("\n");
       }
     };
-    child.stdout?.on("data", (chunk: Buffer) => consumeAgyText(stdoutDecoder.write(chunk)));
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += stderrDecoder.write(chunk);
-    });
+    if (!residentSession) {
+      child.stdout?.on("data", (chunk: Buffer) => consumeAgyText(stdoutDecoder.write(chunk)));
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += stderrDecoder.write(chunk);
+      });
+    }
 
-    child.on("error", (err) => {
-      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지(일관성+안전).
-      clearAgyHeartbeat();
-      child.stdout?.removeAllListeners("data");
-      child.stderr?.removeAllListeners("data");
-      cleanupAgyPrompt();
-      reject(err);
-    });
-    child.on("close", (code) => {
-      effectExitCode = code; effectStdoutEnded = child.stdout?.readableEnded === true;
+    settle = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      effectExitCode = code;
+      // A resident process intentionally keeps stdout open. For coverage,
+      // the accepted provider `result` is the per-turn terminal boundary;
+      // physical EOF is only the terminal proof for one-shot runs.
+      effectStdoutEnded = residentSession
+        ? code === 0 && resultSeen
+        : child.stdout?.readableEnded === true;
+      if (residentSession && !resultSeen && !req.signal?.aborted
+        && !agyState.text && reportedAgyTools.size === 0) {
+        // Safe downgrade: no model text or tool frame was accepted, so the
+        // failed resident transport has no effect to replay.
+        residentProtocolFallback = true;
+      }
       // A child may end on a UTF-8 code-point boundary or without a trailing
       // newline. Flush both decoder tails before deciding which result arrived.
-      consumeAgyText(stdoutDecoder.end());
-      stderr += stderrDecoder.end();
-      if (agyLineBuf.trim()) {
-        consumeAgyLine(agyLineBuf);
-        agyLineBuf = "";
+      if (!residentSession) {
+        consumeAgyText(stdoutDecoder.end());
+        stderr += stderrDecoder.end();
+        if (agyLineBuf.trim()) {
+          consumeAgyLine(agyLineBuf);
+          agyLineBuf = "";
+        }
       }
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지(일관성+안전).
       clearAgyHeartbeat();
-      child.stdout?.removeAllListeners("data");
-      child.stderr?.removeAllListeners("data");
+      if (!residentSession) {
+        child.stdout?.removeAllListeners("data");
+        child.stderr?.removeAllListeners("data");
+      } else if (residentSession.active) {
+        residentSession.active = null;
+        residentSession.completedTurns += 1;
+      }
       cleanupAgyPrompt();
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
@@ -2309,7 +2569,39 @@ async function runPreparedAntigravity(
           },
         });
       }
-    });
+    };
+
+    if (!residentSession) {
+      child.once("close", (code) => settle(typeof code === "number" ? code : null));
+    }
+    if (!residentSession) {
+      child.once("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearAgyHeartbeat();
+        child.stdout?.removeAllListeners("data");
+        child.stderr?.removeAllListeners("data");
+        cleanupAgyPrompt();
+        req.signal?.removeEventListener("abort", onAbort);
+        reject(err);
+      });
+    } else {
+      residentSession.active = {
+        onLine: consumeAgyLine,
+        onStderr: (chunk) => { stderr += chunk; },
+        onDeath: (code) => settle(code),
+      };
+      if (!antigravityResidentSessionAlive(residentSession)
+        || !writeAntigravityResidentTurn(
+          residentSession,
+          residentLease?.fresh && !agyResumeId
+            ? spawnPrompt
+            : [runReq.turnContext?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n"),
+        )) {
+        residentSession.active = null;
+        settle(null);
+      }
+    }
   }).then(result => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
     if (effectRun && !result.failure) recordMainExecutionProofs({scopeId:effectRun.scopeId,bindings:effectBindings,signal:req.signal,claims:executionClaims});
@@ -2338,6 +2630,7 @@ export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => withAgyDispatchAncestry(async () => {
+  assertScienceRecoveryRequest(req, "antigravity");
   // Propagate root lifetime through preparation, final pre-spawn checks and
   // the child itself; an inherited detached callback cannot outlive its grant.
   const scheduledSignal = scheduledRootAgySignal(req.signal);
@@ -2386,6 +2679,7 @@ export const runAntigravity: Runner = async (
     events,
     executableIdentity.executable,
     executableIdentity.fingerprint,
+    executableIdentity.generation,
     stagedImages.directory ? [stagedImages.directory] : [],
   );
 });

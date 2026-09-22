@@ -5,6 +5,7 @@ import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
+import { ContinuityStatus } from "../ContinuityStatus";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
@@ -37,6 +38,7 @@ import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
+import { AutomationStrategyApprovalSheet } from "@/components/automation/AutomationStrategyApprovalSheet";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import {
@@ -128,6 +130,7 @@ import { stripAgentControlBlocks, stripAgentIdentityBadges } from "@shared/agent
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
+import { OneSubmitPreflightError, prepareOneTeamPreflightForSubmit, type OneSubmitTaskBinding } from "@/lib/one-submit-binding";
 import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
@@ -562,6 +565,7 @@ type ArmedOneMemoryUseOnce = {
 
 type PendingTeamPrompt = {
   proposalId: string;
+  preflightSubmissionId?: string;
   text: string;
   attachments: PreparedOneAttachments | null;
   recurrence: OneRecurrenceSelectionV1 | null;
@@ -607,6 +611,81 @@ const BRIEFING_DISMISS_KEY = "agentlas.one.briefingDismissals.v1";
 const BRIEFING_DISMISS_MS = 24 * 60 * 60 * 1_000;
 const ONE_SEARCH_CONTRACT_VERSION = "1.0.0" as const;
 const ONE_COMPOSER_DRAFT_STORAGE_PREFIX = "agentlas.one-composer-draft.v1:";
+const ONE_UNCERTAIN_ADMISSION_PREFIX = "agentlas.one-uncertain-admission.v1:";
+const ONE_UNCERTAIN_PREFLIGHT_STEER_PREFIX = "agentlas.one-uncertain-preflight-steer.v1:";
+
+type OneUncertainPreflightSteer = { chatId: string; submissionId: string; steerId: string; textDigest: string };
+type OnePreflightFenceStatus = {
+  chatId: string;
+  reason: "checking" | "absent" | "unavailable" | "claimed" | "mismatch";
+};
+const ONE_PREFLIGHT_FENCE_COPY: Record<OnePreflightFenceStatus["reason"], { ko: string; en: string }> = {
+  checking: { ko: "추가 지시 영수증을 확인하고 있습니다. 작성한 글은 그대로입니다.", en: "Checking the follow-up receipt. Your draft remains." },
+  absent: { ko: "아직 정확한 영수증을 찾지 못했습니다. 접수되지 않았다고 단정할 수 없어 이 대화의 새 제출을 보류합니다.", en: "No exact receipt is visible yet. The earlier send may still be settling, so new submissions in this chat are held." },
+  unavailable: { ko: "영수증을 읽지 못했습니다. 작성한 글을 보관하고 이 대화의 새 제출을 보류합니다.", en: "The receipt could not be read. Your draft is preserved and new submissions in this chat are held." },
+  claimed: { ko: "추가 지시의 전달 여부를 확인 중입니다. 중복 전송하지 않도록 이 대화의 새 제출을 보류합니다.", en: "The follow-up handoff is still being reconciled. New submissions in this chat are held to avoid duplication." },
+  mismatch: { ko: "영수증의 요청 신원이 일치하지 않습니다. 작성한 글을 보관하고 이 대화의 새 제출을 보류합니다.", en: "The receipt does not match this request. Your draft is preserved and new submissions in this chat are held." },
+};
+async function onePreflightTextDigest(text: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error("one_preflight_digest_unavailable");
+  const bytes = new TextEncoder().encode(text);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function readOneUncertainPreflightSteer(chatId: string): OneUncertainPreflightSteer | null {
+  try {
+    const raw = window.localStorage.getItem(`${ONE_UNCERTAIN_PREFLIGHT_STEER_PREFIX}${chatId}`);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<OneUncertainPreflightSteer>;
+    return value.chatId === chatId && typeof value.submissionId === "string"
+      && typeof value.steerId === "string" && typeof value.textDigest === "string"
+      ? value as OneUncertainPreflightSteer : null;
+  } catch { return null; }
+}
+function writeOneUncertainPreflightSteer(value: OneUncertainPreflightSteer): boolean {
+  try {
+    window.localStorage.setItem(`${ONE_UNCERTAIN_PREFLIGHT_STEER_PREFIX}${value.chatId}`, JSON.stringify(value));
+    return true;
+  } catch { return false; }
+}
+function clearOneUncertainPreflightSteer(value: OneUncertainPreflightSteer): void {
+  try {
+    if (readOneUncertainPreflightSteer(value.chatId)?.steerId === value.steerId) {
+      window.localStorage.removeItem(`${ONE_UNCERTAIN_PREFLIGHT_STEER_PREFIX}${value.chatId}`);
+    }
+  } catch { /* Main receipt remains authoritative. */ }
+}
+
+type OneUncertainAdmission = { chatId: string; runId: string };
+
+function readOneUncertainAdmission(chatId: string): OneUncertainAdmission | null {
+  try {
+    const raw = window.localStorage.getItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${chatId}`)
+      ?? window.sessionStorage.getItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<OneUncertainAdmission>;
+    return value.chatId === chatId && typeof value.runId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.runId)
+      ? { chatId, runId: value.runId }
+      : null;
+  } catch { return null; }
+}
+
+function writeOneUncertainAdmission(value: OneUncertainAdmission): boolean {
+  try {
+    window.localStorage.setItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${value.chatId}`, JSON.stringify(value));
+    return true;
+  } catch { return false; }
+}
+
+function clearOneUncertainAdmission(chatId: string, runId: string): void {
+  try {
+    if (readOneUncertainAdmission(chatId)?.runId === runId) {
+      window.localStorage.removeItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+      window.sessionStorage.removeItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+    }
+  } catch { /* No storage mutation is needed if it is unavailable. */ }
+}
 
 type OneComposerDraftCache = {
   composer: string;
@@ -1235,6 +1314,9 @@ export function OneShell() {
   const [teamPreflightBusy, setTeamPreflightBusy] = useState(false);
   const [pendingTeamPrompt, setPendingTeamPrompt] = useState<PendingTeamPrompt | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  const [rejectedGoalDirection, setRejectedGoalDirection] = useState<{
+    chatId: string; goalId: string; messageId: string; runId: string;
+  } | null>(null);
   const oneChatFileGroupsRef = useRef(new Map<string, ChatFileItem[]>());
   const [surface, setSurface] = useState<OneSurfaceManifestV1 | null>(null);
   // One and Work share the same main-owned generated-app preview. One keeps
@@ -1281,6 +1363,11 @@ export function OneShell() {
   // look like duplicates of the previous run.
   const activityEventRunIdRef = useRef<string | null>(null);
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
+  const [preflightSteerReceipts, setPreflightSteerReceipts] = useState<import("@shared/one-preflight-steers").OnePreflightSteerReceipt[]>([]);
+  const [preflightFenceStatus, setPreflightFenceStatus] = useState<OnePreflightFenceStatus | null>(null);
+  const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string } | null>(null);
+  const preflightSubmissionGenerationRef = useRef(0);
+  const preflightSteerEnqueueInFlightRef = useRef(false);
   // Instructions typed while the run is still being prepared (no runId yet).
   // They join the queue strip at once and reach Main as steers the moment the
   // run exists — Codex queues a message typed during the model's first
@@ -1318,6 +1405,10 @@ export function OneShell() {
   // An accepted user turn or a verified newer run (including manual Goal resume)
   // releases the fence. It never blocks an explicit user action.
   const admissionRecoveryFenceRef = useRef(new Map<string, { runId: string; accepted: boolean; notice: string; rejectedAt: number }>());
+  // An IPC rejection is not proof that Main rejected admission. Keep the
+  // original identity until its exact receipt is observed; a fresh send must
+  // never silently turn the same instruction into a second provider run.
+  const uncertainAdmissionRef = useRef(new Map<string, string>());
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [composer, setComposerState] = useState(initialComposerDraftRef.current.composer);
   function setComposer(next: string | ((current: string) => string)) {
@@ -1344,6 +1435,61 @@ export function OneShell() {
      안내로 구분하기 위한 세션 신호 — 조회 실패는 사실로 승격하지 않고
      "모름(null)"으로 남겨 기존 빈 상태 문구를 유지한다. */
   const [accountSignedIn, setAccountSignedIn] = useState<boolean | null>(null);
+  const reconcileUncertainPreflightSteer = useCallback(async (
+    chatId: string, bridge = ipc(),
+  ): Promise<void> => {
+    const fence = readOneUncertainPreflightSteer(chatId);
+    if (!fence) {
+      if (activeThreadChatIdRef.current === chatId) setPreflightFenceStatus(null);
+      return;
+    }
+    if (activeThreadChatIdRef.current === chatId) setPreflightFenceStatus({ chatId, reason: "checking" });
+    if (!bridge) {
+      if (activeThreadChatIdRef.current === chatId) setPreflightFenceStatus({ chatId, reason: "unavailable" });
+      return;
+    }
+    try {
+      const receipt = await bridge.invoke.preflightSteerReceipt({
+        steerId: fence.steerId, submissionId: fence.submissionId, chatId,
+      });
+      if (activeThreadChatIdRef.current !== chatId
+        || readOneUncertainPreflightSteer(chatId)?.steerId !== fence.steerId) return;
+      if (!receipt) {
+        // Null cannot exclude a delayed acceptance from an earlier IPC.
+        setPreflightFenceStatus({ chatId, reason: "absent" });
+        return;
+      }
+      if (receipt.steerId !== fence.steerId || receipt.submissionId !== fence.submissionId
+        || receipt.chatId !== chatId
+        || await onePreflightTextDigest(receipt.userPrompt) !== fence.textDigest) {
+        setPreflightFenceStatus({ chatId, reason: "mismatch" });
+        return;
+      }
+      setPreflightSteerReceipts((current) => [
+        ...current.filter((item) => item.steerId !== receipt.steerId), receipt,
+      ]);
+      if (receipt.status === "queued" || receipt.status === "attached") {
+        clearOneUncertainPreflightSteer(fence);
+        setComposer((current) => current === receipt.userPrompt ? "" : current);
+        setPreflightFenceStatus(null);
+      } else if (receipt.status === "held" || receipt.status === "cancelled") {
+        // The row is terminal and cannot auto-dispatch. The person keeps the
+        // draft and may explicitly decide on a fresh instruction.
+        clearOneUncertainPreflightSteer(fence);
+        setPreflightFenceStatus(null);
+        setActionNotice(receipt.status === "held"
+          ? (appLocale === "ko" ? "추가 지시가 보류되었습니다. 작성한 글은 그대로이며 자동 재전송하지 않습니다."
+            : "The follow-up is held. Your draft remains and will not be resent automatically.")
+          : (appLocale === "ko" ? "추가 지시가 취소되었습니다. 작성한 글은 그대로입니다."
+            : "The follow-up was cancelled. Your draft remains."));
+      } else {
+        setPreflightFenceStatus({ chatId, reason: "claimed" });
+      }
+    } catch {
+      if (activeThreadChatIdRef.current === chatId) setPreflightFenceStatus({ chatId, reason: "unavailable" });
+    }
+  }, [appLocale]);
+
   useEffect(() => {
     const api = ipc();
     if (!api?.auth) return;
@@ -1771,6 +1917,7 @@ export function OneShell() {
   }, [railOpen]);
   const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const resultTopRef = useRef<HTMLDivElement>(null);
   const attachmentDragDepthRef = useRef(0);
   const attachmentDraftsRef = useRef<OneAttachmentDraft[]>([]);
@@ -1943,8 +2090,28 @@ export function OneShell() {
       const scroller = scrollRef.current;
       if (!scroller) return;
       scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+      setShowScrollToLatest(false);
     });
   }, []);
+
+  const syncScrollToLatestButton = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    const hasOverflow = scroller.scrollHeight - scroller.clientHeight > 96;
+    setShowScrollToLatest(hasOverflow && distanceFromBottom >= 96);
+  }, []);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const sync = () => syncScrollToLatestButton();
+    sync();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
+    observer?.observe(scroller);
+    if (scroller.firstElementChild) observer?.observe(scroller.firstElementChild);
+    return () => observer?.disconnect();
+  }, [conversation?.id, messages.length, receipt?.runId, selected?.taskId, syncScrollToLatestButton, threadRuns.length]);
 
   /**
    * 대화를 처음 그릴 때 맨 아래에 **붙여 둔다**.
@@ -2700,6 +2867,8 @@ export function OneShell() {
     }
     if (event.kind === "final") {
       const settledRunId = eventRunId;
+      if (uncertainAdmissionRef.current.get(chatId) === settledRunId) uncertainAdmissionRef.current.delete(chatId);
+      if (settledRunId) clearOneUncertainAdmission(chatId, settledRunId);
       if (cancelNoticeRunIdRef.current === settledRunId) {
         const notice = cancelNoticeTextRef.current;
         cancelNoticeRunIdRef.current = null;
@@ -2733,6 +2902,8 @@ export function OneShell() {
     }
     if (event.kind === "error") {
       const settledRunId = eventRunId;
+      if (uncertainAdmissionRef.current.get(chatId) === settledRunId) uncertainAdmissionRef.current.delete(chatId);
+      if (settledRunId) clearOneUncertainAdmission(chatId, settledRunId);
       if (cancelNoticeRunIdRef.current === settledRunId) {
         const notice = cancelNoticeTextRef.current;
         cancelNoticeRunIdRef.current = null;
@@ -2789,6 +2960,8 @@ export function OneShell() {
       recover: async snapshot => {
         if (!owns() || !snapshot.receipt) return;
         if (snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling") {
+          if (uncertainAdmissionRef.current.get(chatId) === runId) uncertainAdmissionRef.current.delete(chatId);
+          clearOneUncertainAdmission(chatId, runId);
           runIdRef.current = null; streamTextRef.current = "";
           unsubscribeRunRef.current?.(); unsubscribeRunRef.current = null;
           setBusy(false); setKeyRequestSheet(null);
@@ -2916,6 +3089,10 @@ export function OneShell() {
     }
     freshChatSubmissionPendingRef.current = false;
     const api = ipc();
+    // Fence recovery must not depend on the unrelated history/list read.
+    // In particular, a failed history request must still expose an exact
+    // receipt lookup failure and a way to check again.
+    void reconcileUncertainPreflightSteer(activeThreadChatId, api);
     if (!api) {
       requestOneOperationalRecovery("one-thread-load", new Error("Desktop bridge unavailable"));
       return;
@@ -2946,10 +3123,18 @@ export function OneShell() {
       api.invoke.attach(chatId).catch(() => null),
       api.confirm.committedAnswers(chatId).catch(() => []),
       api.invoke.latestReceipt(chatId).catch(() => null),
+      api.invoke.steeringRecovery(chatId).catch(() => []),
       api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
-    ]).then(async ([history, attachment, answers, latestReceipt, chatTimeline]) => {
+      api.invoke.preflightSteers(chatId).catch(() => []),
+    ]).then(async ([history, attachment, answers, latestReceipt, steeringRecovery, chatTimeline, preflightSteers]) => {
+      if (activeThreadChatIdRef.current === chatId) {
+        setPreflightSteerReceipts(preflightSteers);
+      }
       const taskReceipt = taskId ? selected?.latestReceipt ?? null : null;
       const durableReceipt = latestReceipt ?? taskReceipt;
+      const receiptWithSteeringRecovery = durableReceipt && steeringRecovery.length > 0
+        ? { ...durableReceipt, steeringRecovery }
+        : durableReceipt;
       const ledgerEvents = !attachment && durableReceipt
         ? await api.runLedger.events(durableReceipt.runId, 500).catch(() => [])
         : [];
@@ -3017,8 +3202,13 @@ export function OneShell() {
       }
       setCommittedAnswers(answers);
       if (!liveRunOwnsThread) {
-        setReceipt(taskReceipt);
+        setReceipt(receiptWithSteeringRecovery);
         setSurface(durableSurface?.manifest ?? null);
+        if (steeringRecovery.length > 0) {
+          setActionNotice(appLocale === "ko"
+            ? `재시작 뒤 외부 효과가 불확실한 추가 지시 ${steeringRecovery.length}개를 보류했습니다. 중복 실행하지 않았습니다.`
+            : `${steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed.`);
+        }
       }
       void api.chats.markViewed(chatId).catch(() => undefined);
       if (attachment) {
@@ -3067,6 +3257,7 @@ export function OneShell() {
     selected?.latestReceipt?.runId,
     selected?.latestReceipt?.status,
     selected?.taskId,
+    reconcileUncertainPreflightSteer,
     subscribeRun,
   ]);
 
@@ -3088,6 +3279,12 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  const visibleUncertainAdmission = activeThreadChatId
+    ? readOneUncertainAdmission(activeThreadChatId)
+      ?? (uncertainAdmissionRef.current.get(activeThreadChatId)
+        ? { chatId: activeThreadChatId, runId: uncertainAdmissionRef.current.get(activeThreadChatId)! }
+        : null)
+    : null;
   // Route identity changes before the selected chat finishes loading. Keep a
   // Goal-only render fence; the existing selection refs also own handoffs.
   const goalControlViewKey = `${selectedTaskId ?? ""}:${selectedConversationId ?? ""}:${activeThreadChatId ?? ""}`;
@@ -3920,6 +4117,7 @@ export function OneShell() {
     return {
       kind: oneRuntime.kind,
       backend: oneRuntime.backend,
+      acpAgentId: oneRuntime.acpAgentId,
       model: oneRuntime.model ?? undefined,
       effort: oneRuntime.effort ?? undefined,
       longContext: oneRuntime.kind === "byok" ? oneRuntime.longContextEnabled ?? false : undefined,
@@ -3941,6 +4139,7 @@ export function OneShell() {
     const selection: RuntimeSelection = {
       kind: nextRuntime.kind,
       backend: nextRuntime.backend,
+      acpAgentId: nextRuntime.acpAgentId,
       model: nextRuntime.model ?? undefined,
       effort: nextRuntime.effort ?? undefined,
       longContext: nextRuntime.kind === "byok" ? nextRuntime.longContextEnabled ?? false : undefined,
@@ -3958,36 +4157,71 @@ export function OneShell() {
         return;
       }
       try {
-        const updated = await api.chats.setRuntimeSelection(activeThreadChatId, selection);
+        const goalContext = await api.chats.getGoalContext(activeThreadChatId);
+        if (goalContext?.lifecycle === "ongoing" && !goalContext.goalRevision) {
+          throw new Error("goal_runtime_selection_revision_changed");
+        }
+        const goalHandoff = goalContext?.lifecycle === "ongoing" && goalContext.goalRevision
+          ? await api.chats.requestGoalRuntimeSelection(activeThreadChatId, {
+            expectedGoalId: goalContext.goalId,
+            expectedGoalRevision: goalContext.goalRevision,
+            selection,
+          })
+          : null;
+        const updated = goalHandoff?.chat ?? await api.chats.setRuntimeSelection(activeThreadChatId, selection);
         const receipt = updated?.runtimeSelection;
         if (
           !updated
           || updated.id !== activeThreadChatId
           || !runtimeSelectionReceiptMatches(selection, receipt)
+          || (goalHandoff && (goalHandoff.chat.id !== updated.id || goalHandoff.goalId !== goalContext?.goalId
+            || goalHandoff.goalRevision !== goalContext.goalRevision || goalHandoff.state !== "pending"))
         ) {
           throw new Error("Desktop did not acknowledge the exact chat runtime selection");
         }
         const receiptRuntime = oneRuntimeInventory.find((runtime) => (
           runtime.kind === receipt.kind
           && (!receipt.backend || runtime.backend === receipt.backend)
+          && (!receipt.source || runtime.source === receipt.source)
         ));
         if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
         acknowledgedSelection = receipt;
-        if (busy) {
-          setActionNotice(appLocale === "ko"
-            ? "모델 변경을 저장했습니다. 지금 도는 실행은 시작할 때 고른 모델로 끝나고, 다음 메시지부터 새 모델을 씁니다. 바로 바꾸려면 중지한 뒤 다시 보내 주세요."
-            : "Model change saved. The current run finishes with the model it started with; the next message uses the new one. To switch now, stop the run and send again.");
-        }
+        setActionNotice(goalHandoff
+          ? (appLocale === "ko"
+            ? "이 지속 목표의 다음 안전한 실행에 모델 변경을 예약했습니다. 현재 실행과 별도 자동화 모델은 바뀌지 않습니다. 실제 적용 여부는 목표 상태에서 확인할 수 있습니다."
+            : "Model change is queued for this ongoing Goal's next safe run. The current run and separate automations are unchanged. Check the Goal status for actual application.")
+          : (appLocale === "ko"
+            ? "이 대화의 다음 새 메시지 모델만 변경했습니다. 기존 Goal의 자동 재개 모델과 별도 자동화는 바뀌지 않습니다."
+            : "Only this conversation's next new-message model changed. The existing Goal continuation and separate automations are unchanged."));
         acknowledgedRuntime = withOneRuntimeSelection(
           { ...receiptRuntime, active: true },
           receipt.model ?? receiptRuntime.model ?? null,
           receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
         );
         setActiveThreadChat(updated);
-      } catch {
+        const runtimeChanged = !goalHandoff
+          && !runtimeSelectionReceiptMatches(acknowledgedSelection, oneRuntimeSelection);
+        if (runtimeChanged) preflightSubmissionGenerationRef.current += 1;
+        const preparing = preflightSubmissionRef.current;
+        if (runtimeChanged && preparing?.chatId === activeThreadChatId) {
+          // The old submission may no longer attach a follow-up after this
+          // model change. Main's runtime pin check also fails closed if this
+          // best-effort UI reconciliation is interrupted.
+          await api.invoke.preflightSubmissionHold(preparing.submissionId).catch(() => null);
+          if (preflightSubmissionRef.current?.submissionId === preparing.submissionId) {
+            preflightSubmissionRef.current = null;
+          }
+          setPreflightSteerReceipts(await api.invoke.preflightSteers(activeThreadChatId).catch(() => []));
+        }
+      } catch (cause) {
+        const unavailable = /goal_runtime_(?:selection_unavailable|model_unverified)/.test(failureMessage(cause));
         setActionNotice(appLocale === "ko"
-          ? "이 대화의 모델 선택을 저장하지 못했습니다. 기존 선택을 유지한 채 다시 시도해 주세요."
-          : "The model selection was not saved for this conversation. The previous selection is unchanged; try again.");
+          ? unavailable
+            ? "선택한 모델의 사용 가능 여부를 확인하지 못해 변경하지 않았습니다. 기존 모델을 유지합니다."
+            : "모델 변경을 저장하지 못했습니다. 기존 선택을 유지한 채 목표 상태를 새로고침하고 다시 시도해 주세요."
+          : unavailable
+            ? "The selected model could not be verified as available. The previous model remains in use."
+            : "The model change was not saved. The previous selection remains; refresh the Goal status and try again.");
         return;
       }
     }
@@ -3995,8 +4229,7 @@ export function OneShell() {
     setOneRuntimePinned(true);
     writeStoredOneRuntimeSelection(acknowledgedSelection);
     setComposerMenu(null);
-    setActionNotice(null);
-  }, [activeThreadChatId, appLocale, oneRuntime, oneRuntimeInventory]);
+  }, [activeThreadChatId, appLocale, busy, oneRuntime, oneRuntimeInventory, oneRuntimeSelection]);
 
   // 실행 타깃 결정: 좌석(설치행)이 call-only Hub 자산이면 로컬 프롬프트 실행이 아니라
   // Hub borrow 경로로 보낸다({source:"hub", slug}) — 로컬 프롬프트가 없으므로 local 타깃은
@@ -4035,13 +4268,126 @@ export function OneShell() {
       permissionMode?: OnePermissionMode;
       /** Exact chat pin receipt for a freshly-created conversation. */
       runtimeSelection?: RuntimeSelection;
+      /** Main-owned queued directions belong to this immutable submit. */
+      preflightSubmissionId?: string;
     },
   ) => {
     const api = ipc();
     const events = ipcEvents();
     const runLocale = normalizedLocale;
     const effectiveRuntimeSelection = options?.runtimeSelection ?? oneRuntimeSelection;
-    if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
+    if (!api || !events) {
+      if (uncertainAdmissionRef.current.has(chatId) || readOneUncertainAdmission(chatId)) {
+        setActionNotice(runLocale === "ko"
+          ? "이전 요청의 접수 여부를 확인할 연결이 없습니다. 새 요청은 보내지 않았습니다."
+          : "The previous request cannot be checked while Desktop is unavailable. No new request was sent.");
+        return;
+      }
+      throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
+    }
+    let observedAdmissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
+    let optimisticUserMessageId: string | null = null;
+    const reconcileAcceptedAdmission = async (candidateRunId: string): Promise<boolean> => {
+      const admission = await api.invoke.admission(candidateRunId);
+      observedAdmissionStatus = admission.status;
+      if (admission.status !== "absent" && admission.chatId !== chatId) return false;
+      if (admission.status === "pending") return false;
+      if (admission.status === "rejected") {
+        uncertainAdmissionRef.current.delete(chatId);
+        clearOneUncertainAdmission(chatId, candidateRunId);
+        if (runIdRef.current === candidateRunId) {
+          runIdRef.current = null;
+          unsubscribeRunRef.current?.();
+          unsubscribeRunRef.current = null;
+          setBusy(false);
+          setLiveRunPrompt((current) => current?.runId === candidateRunId ? null : current);
+          setDispatchRunPrompt((current) => current?.runId === candidateRunId ? null : current);
+          if (dispatchRunPromptRef.current?.runId === candidateRunId) dispatchRunPromptRef.current = null;
+          setMessages((current) => current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"));
+          if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
+        }
+        const goalDirection = Boolean(admission.goalId && admission.promptMessageId);
+        // A proven no-start can still have a Main-persisted user direction.
+        // Replace the optimistic bubble with that exact row, not a second
+        // submission. Absence or an unreadable history is not permission to
+        // manufacture a message or replay an external effect.
+        let directionVisible = false;
+        if (goalDirection && admission.promptMessageId) {
+          try {
+            const history = await api.invoke.history(chatId);
+            const durable = toUiMessages(history);
+            const exactSavedDirection = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
+            if (exactSavedDirection && activeThreadChatIdRef.current === chatId && !runIdRef.current) {
+              directionVisible = true;
+              oneTranscriptRevisionRef.current += 1;
+              setMessages((current) => activeThreadChatIdRef.current === chatId && !runIdRef.current
+                ? mergeDurableChatCatchup(current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"), durable)
+                : current);
+              setRejectedGoalDirection({ chatId, goalId: admission.goalId!, messageId: admission.promptMessageId, runId: candidateRunId });
+              // A preceding unresolved run is reconciled before this new
+              // submit starts. In that case `text` is the *new* draft and
+              // must never be cleared on the old run's receipt.
+              if (optimisticUserMessageId && !options?.promptOrigin) {
+                setComposer((current) => current === text ? "" : current);
+              }
+            }
+          } catch { /* Keep the draft and report the missing read below. */ }
+        }
+        if (activeThreadChatIdRef.current !== chatId) return true;
+        setActionNotice(runLocale === "ko"
+          ? goalDirection
+            ? directionVisible
+              ? "새 지시는 대화에 기록됐지만 실행되지 않았습니다. Goal 상태를 확인한 뒤 목표 수정 또는 재개를 직접 선택해 주세요. 자동 재전송은 하지 않습니다."
+              : "새 지시는 저장됐지만 대화 기록을 아직 확인하지 못했습니다. 작성창의 글을 다시 보내지 말고 Goal 상태와 기록을 확인해 주세요."
+            : "이전 요청은 실행되지 않은 것으로 확인됐습니다. 내용을 확인한 뒤 새로 보내세요."
+          : goalDirection
+            ? directionVisible
+              ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
+              : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
+            : "The previous request was confirmed not to have started. Review it before sending a new request.");
+        return true;
+      }
+      const observed = await api.invoke.receipt(candidateRunId);
+      if (!observed || observed.runId !== candidateRunId || observed.chatId !== chatId) return false;
+      uncertainAdmissionRef.current.delete(chatId);
+      clearOneUncertainAdmission(chatId, candidateRunId);
+      if (observed.status === "running" || observed.status === "cancelling") {
+        runIdRef.current = candidateRunId;
+        runChatIdRef.current = chatId;
+        activityRunIdRef.current = candidateRunId;
+        setBusy(true);
+        subscribeRun(candidateRunId);
+      } else {
+        if (runIdRef.current === candidateRunId) runIdRef.current = null;
+        setBusy(false);
+        setLiveRunPrompt((current) => current?.runId === candidateRunId ? null : current);
+        setDispatchRunPrompt((current) => current?.runId === candidateRunId ? null : current);
+        if (dispatchRunPromptRef.current?.runId === candidateRunId) dispatchRunPromptRef.current = null;
+        setMessages((current) => current.filter((message) => message.id !== "one-live-response" || message.text.trim()));
+        void settleOrderedRunRef.current(chatId, taskId, candidateRunId).catch(() => {
+          setActionNotice(runLocale === "ko"
+            ? "원래 작업은 종료됐지만 기록 화면을 아직 복원하지 못했습니다. 새 요청을 보내지 말고 기록을 확인해 주세요."
+            : "The original run ended, but its history could not be restored yet. Check the record before sending anything new.");
+        });
+      }
+      setActionNotice(runLocale === "ko"
+        ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않고 기록을 복원합니다."
+        : "A run with this request ID was found. Its record is being restored without resending the instruction.");
+      return true;
+    };
+    const unresolvedRunId = uncertainAdmissionRef.current.get(chatId) ?? readOneUncertainAdmission(chatId)?.runId;
+    if (unresolvedRunId) {
+      try { if (await reconcileAcceptedAdmission(unresolvedRunId)) return; }
+      catch { /* Unavailable receipt is not permission for a new run ID. */ }
+      setActionNotice(runLocale === "ko"
+        ? observedAdmissionStatus === "pending"
+          ? "이전 요청이 접수 대기 중입니다. 실행 여부가 확정될 때까지 새 요청을 보내지 않았습니다."
+          : "이전 요청의 접수 여부를 아직 확인할 수 없습니다. 중복 실행을 막기 위해 새 요청을 보내지 않았습니다. 연결이 복구되면 이 대화에서 다시 확인해 주세요."
+        : observedAdmissionStatus === "pending"
+          ? "The previous request is pending admission. No new request was sent until its execution is resolved."
+          : "The previous request's admission is still unknown. No new request was sent; check this conversation again when the connection returns.");
+      return;
+    }
     if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return;
     if (runIdRef.current && runChatIdRef.current === chatId) {
       if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
@@ -4102,6 +4448,7 @@ export function OneShell() {
       ? taskIntent === "task" ? "write" : "read"
       : runPermissionMode;
     const optimisticStartedAt = Date.now();
+    optimisticUserMessageId = uid();
     activeRunStartedAtRef.current = optimisticStartedAt;
     // 새 실행이 시작되면 활동 표시는 그 실행 하나만 말한다. 지난 실행의 결과 영수증과
     // 런타임 피드백(생성 파일·이미지 레일 포함)을 남겨 두면, One의 활동 화면이 "지금
@@ -4135,7 +4482,7 @@ export function OneShell() {
           ...withoutLive,
           ...(userAlreadyVisible || options?.displayUserMessage === false
             ? []
-            : [{ id: uid(), role: "user" as const, text, createdAt: new Date().toISOString() }]),
+            : [{ id: optimisticUserMessageId!, role: "user" as const, text, createdAt: new Date().toISOString() }]),
           { id: "one-live-response", role: "assistant" as const, text: "", streaming: true },
         ];
       });
@@ -4150,11 +4497,30 @@ export function OneShell() {
     const attachedOneMemoryUseOnce = !options?.teamRef && armedOneMemoryUseOnce?.targetKey === targetKey
       ? armedOneMemoryUseOnce.receipt
       : null;
+    // Persist only the opaque ID and its chat binding, never text or
+    // capabilities. A renderer reload while Main preflight is still awaiting
+    // its judges must not silently allocate a second run ID for this chat.
+    if (!writeOneUncertainAdmission({ chatId, runId })) {
+      if (runIdRef.current === runId) runIdRef.current = null;
+      unsubscribeRunRef.current?.();
+      unsubscribeRunRef.current = null;
+      setBusy(false);
+      setLiveRunPrompt(null);
+      setDispatchRunPrompt(null);
+      dispatchRunPromptRef.current = null;
+      setMessages((current) => current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"));
+      if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
+      setActionNotice(runLocale === "ko"
+        ? "요청 ID를 재시작 후에도 보존할 수 없어 실행을 보내지 않았습니다. 저장 공간을 확인해 주세요."
+        : "The request ID could not be preserved across a restart, so the run was not sent. Check Desktop storage.");
+      return;
+    }
     try {
       await api.invoke.run({
         runId,
         chatId,
         userPrompt: text,
+        ...(options?.preflightSubmissionId ? { preflightSubmissionId: options.preflightSubmissionId } : {}),
         ...(options?.promptOrigin ? { promptOrigin: options.promptOrigin } : {}),
         taskIntent,
         oneMode: true,
@@ -4177,6 +4543,10 @@ export function OneShell() {
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
       });
+      clearOneUncertainAdmission(chatId, runId);
+      if (options?.preflightSubmissionId && activeThreadChatIdRef.current === chatId) {
+        setPreflightSteerReceipts(await api.invoke.preflightSteers(chatId).catch(() => []));
+      }
       const admissionFence = admissionRecoveryFenceRef.current.get(chatId);
       if (!options?.automaticRecovery && admissionFence) {
         admissionRecoveryFenceRef.current.set(chatId, { ...admissionFence, runId, accepted: true });
@@ -4210,9 +4580,37 @@ export function OneShell() {
           requestOneOperationalRecovery("one-steer", cause);
         }
       }
-      await refreshAll();
+      // Refresh is post-admission presentation work. Its failure cannot turn
+      // an accepted provider run into a start failure or invite a new run ID.
+      try { await refreshAll(); }
+      catch {
+        setActionNotice(runLocale === "ko"
+          ? "작업은 접수됐습니다. 화면 갱신이 지연돼도 같은 요청을 다시 보내지 마세요."
+          : "The run was accepted. The view could not refresh yet; do not resend the request.");
+      }
     } catch (cause) {
+      try { if (await reconcileAcceptedAdmission(runId)) return; }
+      catch { /* An unavailable receipt remains ambiguous, never rejected. */ }
       const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");
+      const chatBusyFailure = isChatBusyFailure(cause);
+      if (!controlFailure && !chatBusyFailure) {
+        uncertainAdmissionRef.current.set(chatId, runId);
+        if (runIdRef.current === runId) runIdRef.current = null;
+        unsubscribeRunRef.current?.();
+        unsubscribeRunRef.current = null;
+        if (activityRunIdRef.current === runId) activityRunIdRef.current = null;
+        setLiveRunPrompt((current) => current?.runId === runId ? null : current);
+        setDispatchRunPrompt((current) => current?.runId === runId ? null : current);
+        if (dispatchRunPromptRef.current?.runId === runId) dispatchRunPromptRef.current = null;
+        setBusy(false);
+        setActivity(initialOneActivityState());
+        setMessages((current) => current.filter((message) => message.id !== "one-live-response" || message.text.trim()));
+        setActionNotice(runLocale === "ko"
+          ? "요청을 보냈지만 접수 여부를 확인하지 못했습니다. 중복 실행을 막기 위해 다시 보내지 않았습니다. 연결이 복구되면 이 대화에서 확인해 주세요."
+          : "The request was sent, but admission could not be confirmed. Do not resend it; check this conversation when the connection returns.");
+        return;
+      }
+      clearOneUncertainAdmission(chatId, runId);
       if (controlFailure) {
         admissionRecoveryFenceRef.current.set(chatId, { runId, accepted: false, notice: controlFailure.message, rejectedAt: Date.now() });
       }
@@ -4364,6 +4762,7 @@ export function OneShell() {
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
           runtimeSelection: prompt.runtimeSelection,
+          ...(prompt.preflightSubmissionId ? { preflightSubmissionId: prompt.preflightSubmissionId } : {}),
           userAlreadyShown,
           displayUserMessage: userAlreadyShown,
         },
@@ -4462,6 +4861,7 @@ export function OneShell() {
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
           runtimeSelection: prompt.runtimeSelection,
+          ...(prompt.preflightSubmissionId ? { preflightSubmissionId: prompt.preflightSubmissionId } : {}),
           userAlreadyShown: true,
           displayUserMessage: true,
         },
@@ -4547,6 +4947,14 @@ export function OneShell() {
     const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
     const explicitValue = text.trim();
     if (!explicitValue && attachmentSnapshot.length === 0) return;
+    const currentSubmitChatId = selected?.chatId ?? conversation?.id;
+    if (!teamPreflightBusy && currentSubmitChatId && readOneUncertainPreflightSteer(currentSubmitChatId)) {
+      void reconcileUncertainPreflightSteer(currentSubmitChatId);
+      setActionNotice(appLocale === "ko"
+        ? "이전 추가 지시의 접수 상태가 아직 불확실합니다. 기록을 확인할 때까지 새 요청을 보내지 않았습니다."
+        : "A previous follow-up receipt is still uncertain. No new request was sent; review its record first.");
+      return;
+    }
     const graphRequest = oneGraphRequest(explicitValue);
     if (graphRequest !== null && !graphRequest) {
       setComposer("@graph ");
@@ -4562,17 +4970,68 @@ export function OneShell() {
     // engine. It must not become a steer for an unrelated running model turn.
     if (graphRequest !== null && (teamPreflightBusy || busy)) return;
     if (teamPreflightBusy) {
-      // The previous submit is still preparing its run. Queue this one behind
-      // it (flushed in startRun once the runId exists); attachments cannot be
-      // steered in v1, so they stay in the composer.
+      // There is no parent run yet. Main must durably acknowledge the exact
+      // submission/steer pair before the person's next instruction leaves the
+      // composer; an in-memory queue disappears on reload or quit.
       if (!explicitValue || attachmentSnapshot.length > 0) return;
-      const optimisticId = `one-steer:${uid()}`;
-      pendingSteersRef.current = [...pendingSteersRef.current, { id: optimisticId, text: explicitValue }];
-      setQueuedSteers((current) => [...current, { id: optimisticId, text: explicitValue }]);
-      setComposer("");
+      if (preflightSteerEnqueueInFlightRef.current) return;
+      const submission = preflightSubmissionRef.current;
+      const bridge = ipc();
+      if (!submission || submission.chatId !== activeThreadChatIdRef.current || !bridge) {
+        setActionNotice(appLocale === "ko"
+          ? "첫 요청의 접수 준비가 끝날 때까지 추가 지시를 작성창에 보관합니다."
+          : "Keep the follow-up in the composer until the first request has a durable submission receipt.");
+        return;
+      }
+      const submissionGeneration = preflightSubmissionGenerationRef.current;
+      preflightSteerEnqueueInFlightRef.current = true;
+      try {
+        const textDigest = await onePreflightTextDigest(explicitValue);
+        const uncertain = readOneUncertainPreflightSteer(submission.chatId);
+        if (uncertain && (uncertain.submissionId !== submission.submissionId
+          || uncertain.textDigest !== textDigest)) {
+          throw new Error("one_preflight_previous_steer_unresolved");
+        }
+        const intent: OneUncertainPreflightSteer = uncertain ?? {
+          steerId: uid(), submissionId: submission.submissionId,
+          chatId: submission.chatId, textDigest,
+        };
+        if (!writeOneUncertainPreflightSteer(intent)) {
+          throw new Error("one_preflight_steer_identity_not_durable");
+        }
+        const receipt = await bridge.invoke.preflightSteerEnqueue({
+          steerId: intent.steerId, submissionId: submission.submissionId,
+          chatId: submission.chatId, userPrompt: explicitValue,
+        });
+        if (receipt.steerId !== intent.steerId || receipt.submissionId !== submission.submissionId
+          || receipt.chatId !== submission.chatId
+          || (receipt.status !== "queued" && receipt.status !== "attached")) {
+          throw new Error("one_preflight_steer_receipt_uncertain");
+        }
+        clearOneUncertainPreflightSteer(intent);
+        setPreflightSteerReceipts((current) => [...current.filter((item) => item.steerId !== intent.steerId), receipt]);
+        const currentSubmission = preflightSubmissionRef.current;
+        if (preflightSubmissionGenerationRef.current === submissionGeneration
+          && (!currentSubmission || currentSubmission.submissionId === submission.submissionId)
+          && activeThreadChatIdRef.current === submission.chatId) {
+          setComposer((current) => current === explicitValue ? "" : current);
+        }
+      } catch (cause) {
+        setActionNotice(appLocale === "ko"
+          ? "추가 지시 접수 여부를 확인하지 못했습니다. 중복 실행을 막기 위해 작성창에 그대로 두었습니다."
+          : "The follow-up receipt is uncertain. It remains in the composer; review before sending again.");
+        requestOneOperationalRecovery("one-preflight-steer", cause);
+        // The enqueue may have committed before its acknowledgement failed.
+        // Re-read the exact Main row; absence is still not no-start proof.
+        await reconcileUncertainPreflightSteer(submission.chatId, bridge);
+      } finally {
+        preflightSteerEnqueueInFlightRef.current = false;
+      }
       scrollToLatest();
       return;
     }
+    preflightSubmissionGenerationRef.current += 1;
+    const preflightSubmissionId = uid();
     const submissionNavigationEpoch = navigationEpochRef.current;
     const setSubmissionBusy = (value: boolean) => {
       if (navigationEpochRef.current === submissionNavigationEpoch) {
@@ -4635,7 +5094,7 @@ export function OneShell() {
       setQueuedSteers((current) => [...current, { id: optimisticId, text: value }]);
       scrollToLatest();
       try {
-        await api.invoke.steer({
+        const steerReceipt = await api.invoke.steer({
           chatId,
           userPrompt: value,
           steeringMode: "interrupt",
@@ -4647,6 +5106,20 @@ export function OneShell() {
           ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
           sessionRouting: false,
         });
+        if (!steerReceipt.accepted || steerReceipt.chatId !== chatId) {
+          throw new Error("Desktop did not acknowledge steering for the active conversation");
+        }
+        setActionNotice(steerReceipt.queued
+          ? steerReceipt.interruptsCurrent
+            ? (appLocale === "ko"
+              ? "새 지시를 저장했습니다. 현재 실행을 정리한 뒤 이어서 실행합니다."
+              : "The new instruction is saved. The current execution is being settled, then the new instruction will continue.")
+            : (appLocale === "ko"
+              ? "새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 실행합니다."
+              : "The new instruction is saved and will continue after the current execution settles.")
+          : (appLocale === "ko"
+            ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
+            : "The previous execution had already settled, so the new instruction started as a new run."));
       } catch (cause) {
         setQueuedSteers((current) => current.filter((item) => item.id !== optimisticId));
         setComposer(value);
@@ -4690,6 +5163,7 @@ export function OneShell() {
       setError(null);
       let preparedAttachments: PreparedOneAttachments | null = null;
       let runPrompt = value;
+      let awaitingProposal = false;
       // Resolve new-chat intent in Main before team preflight. A cold model can
       // miss the fast judgment budget, in which case the explicitly labeled
       // undecided result keeps the safe conversational default.
@@ -4724,6 +5198,15 @@ export function OneShell() {
           }));
           preparedAttachments = await api.oneAttachments.prepare({ chatId, userPrompt: runPrompt, attachments });
         }
+        const submissionReceipt = await api.invoke.preflightSubmissionBegin({
+          submissionId: preflightSubmissionId, chatId, userPrompt: runPrompt,
+          ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
+        });
+        if (submissionReceipt.submissionId !== preflightSubmissionId
+          || submissionReceipt.chatId !== chatId || submissionReceipt.state !== "open") {
+          throw new Error("one_preflight_submission_receipt_mismatch");
+        }
+        preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId };
         const mainIntent = await requestIntentPromise;
         const resolvedIntent = preparedAttachments
           || taskIntent === "task"
@@ -4767,16 +5250,21 @@ export function OneShell() {
               overrides: overrideSnapshot,
               taskForceTargets: taskForceTargetSnapshot,
               runtimeSelection: submissionRuntimeSelection,
+              preflightSubmissionId,
               userAlreadyShown: true,
             },
           );
           return;
         }
-        const prepared = await api.oneTeamPreflight.prepare({
-          chatId,
+        // Taskforce conversations intentionally keep /one?chat=... so the
+        // room remains stable. Execution identity is separate: the shared
+        // admission helper reads the canonical Task once immediately before
+        // Main preflight and carries that exact id/version into the run. If a
+        // second drift occurs, Main's strict CAS guard rejects it and the
+        // outer recovery restores this exact draft and attachments.
+        const admissionBinding: OneSubmitTaskBinding = { chatId, taskId, taskVersion, taskIntent: resolvedIntent };
+        const { binding: preparedBinding, prepared } = await prepareOneTeamPreflightForSubmit(api, admissionBinding, {
           userPrompt: runPrompt,
-          expectedTaskId: taskId,
-          expectedTaskVersion: taskVersion,
           permission: onePermission === "read" ? "read" : "write",
           ...(preparedAttachments ? { attachmentRef: preparedAttachments.ref } : {}),
           ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
@@ -4808,16 +5296,17 @@ export function OneShell() {
         if (prepared.kind === "not_required") {
           await startRun(
             chatId,
-            taskId,
-            taskVersion,
+            preparedBinding.taskId,
+            preparedBinding.taskVersion,
             runPrompt,
-            resolvedIntent,
+            preparedBinding.taskIntent,
             {
               attachments: preparedAttachments,
               recurrence: recurrenceSnapshot,
               overrides: overrideSnapshot,
               taskForceTargets: taskForceTargetSnapshot,
               runtimeSelection: submissionRuntimeSelection,
+              preflightSubmissionId,
               userAlreadyShown: true,
             },
           );
@@ -4833,6 +5322,7 @@ export function OneShell() {
         setTeamPreflight(prepared.proposal);
         const pendingPrompt: PendingTeamPrompt = {
           proposalId: prepared.proposal.proposalId,
+          preflightSubmissionId,
           text: runPrompt,
           attachments: preparedAttachments,
           recurrence: recurrenceSnapshot,
@@ -4841,6 +5331,7 @@ export function OneShell() {
           runtimeSelection: submissionRuntimeSelection,
         };
         setPendingTeamPrompt(pendingPrompt);
+        awaitingProposal = true;
         oneTranscriptRevisionRef.current += 1;
         setMessages((current) => [
           ...current.filter((item) => item.id !== "one-live-response"),
@@ -4849,12 +5340,21 @@ export function OneShell() {
         scrollToLatest();
         await autoStartTeamPreflight(prepared.proposal, pendingPrompt, true);
       } catch (cause) {
+        if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) {
+          await api.invoke.preflightSubmissionHold(preflightSubmissionId).catch(() => null);
+        }
         if (preparedAttachments) {
           await api.oneAttachments.discard({ ref: preparedAttachments.ref }).catch(() => ({ discarded: false }));
         }
         throw cause;
       } finally {
         setSubmissionBusy(false);
+        if (!awaitingProposal && !runIdRef.current) {
+          await api.invoke.preflightSubmissionHold(preflightSubmissionId).catch(() => null);
+        }
+        if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) {
+          preflightSubmissionRef.current = null;
+        }
         // Preparation ended without a run (refused, failed, or waiting on a
         // team decision): instructions queued behind it go back to the composer
         // instead of lingering as a "next" that has nothing to follow.
@@ -5083,6 +5583,13 @@ export function OneShell() {
         setActionNotice(unsupportedInputMessage);
         return;
       }
+      if (cause instanceof OneSubmitPreflightError && cause.code === "stale_binding") {
+        setActionNotice(appLocale === "ko"
+          ? "작업 연결 정보를 갱신하지 못해 실행하지 않았습니다. 입력과 첨부는 작성창에 보존했습니다. 작업을 확인한 뒤 다시 보내 주세요."
+          : "The task connection could not be refreshed, so nothing started. Your text and attachments are preserved in the composer. Check the task, then send again.");
+        setError(null);
+        return;
+      }
       setActionNotice(
         controlFailure?.message ?? (isChatBusyFailure(cause)
           // 엔진이 이미 "무엇을 하면 되는지"까지 담아 보낸 문장이다. 덮어쓰지 않는다.
@@ -5094,7 +5601,7 @@ export function OneShell() {
       if (!controlFailure) requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -5159,6 +5666,19 @@ export function OneShell() {
       setActionNotice((current) => current === admissionFence.notice ? null : current);
     }
     if (busy) return;
+    if (receipt.interruptionCause === "steering") {
+      // A direction change is a user-authored continuation boundary, not a
+      // failed run. Clear any stale recovery card/state before the replacement
+      // turn is projected; do not ask the recovery judge to reinterpret it.
+      const state = autoRecoveryRef.current;
+      if (autoRecovery) setAutoRecovery(null);
+      state.goal = "";
+      state.originalRunId = null;
+      state.recoveryRunId = null;
+      state.attemptsSpent = 0;
+      state.previousFingerprint = null;
+      return;
+    }
     if (receipt.status === "completed") {
       const state = autoRecoveryRef.current;
       if (receipt.runId !== state.recoveryRunId || !state.originalRunId) {
@@ -7001,7 +7521,7 @@ export function OneShell() {
             data-panes={splitPanes.length > 0 ? String(splitPanes.length + 1) : undefined}
             style={splitPanes.length > 0 ? { ["--split-col" as string]: `${splitRatio.col}%`, ["--split-row" as string]: `${splitRatio.row}%` } : undefined}
           >
-          <div ref={scrollRef} className={styles.scroll}>
+          <div ref={scrollRef} className={styles.scroll} onScroll={syncScrollToLatestButton}>
             {!selected && !conversation ? (
               <div className={styles.homeContent}>
                 <header className={styles.homeChatHeader}>
@@ -7178,6 +7698,15 @@ export function OneShell() {
                               </GoalResultReport>
                             </div>
                             )}
+                            {message.role === "user" && rejectedGoalDirection?.chatId === activeThreadChatId
+                              && rejectedGoalDirection.messageId === message.id && (
+                              <p className={styles.rejectedGoalDirection} role="status" data-one-goal-direction="held"
+                                data-goal-id={rejectedGoalDirection.goalId} data-run-id={rejectedGoalDirection.runId}>
+                                {appLocale === "ko"
+                                  ? "Goal 관련 지시 · 대화에 저장됨 · 실행되지 않음 · 목표 수정/재개는 위 Goal 상태에서 직접 선택"
+                                  : "Goal direction saved in chat · not run · choose revision or resume in the Goal controls above"}
+                              </p>
+                            )}
                             </div>
                           </article>
                           ))}
@@ -7273,7 +7802,7 @@ export function OneShell() {
                   이제 순서가 반대다: 런타임이 말한 사유가 있으면 **그것을 보여 준다.**
                   사유가 정말 없을 때만 일반 문구로 떨어진다.
                 */}
-                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && receipt?.status !== "completed" && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && (
+                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && receipt?.status !== "completed" && receipt?.interruptionCause !== "steering" && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && (
                   <p className={styles.teamPreflightRecovery} role="status">
                     {receipt?.errorMessage?.trim()
                       ? receipt.errorMessage.trim().slice(0, 300)
@@ -7434,6 +7963,17 @@ export function OneShell() {
               </div>
             )}
           </div>
+          {showScrollToLatest && (
+            <button
+              type="button"
+              className={styles.scrollToLatestButton}
+              aria-label={appLocale === "ko" ? "대화 맨 아래로 이동" : "Jump to latest message"}
+              title={appLocale === "ko" ? "대화 맨 아래로 이동" : "Jump to latest message"}
+              onClick={() => scrollToLatest()}
+            >
+              <IconChevronDown size={17} aria-hidden="true" />
+            </button>
+          )}
           {splitPanes.map((pane) => (
             <OneSplitPane
               key={pane.id}
@@ -7535,6 +8075,7 @@ export function OneShell() {
               key={`${selectedTaskId ?? selectedConversationId}:${activeThreadChatId}`}
               chatId={activeThreadChatId}
               locale={appLocale === "ko" ? "ko" : "en"}
+              lastConfirmedModel={receipt?.chatId === activeThreadChatId ? receipt.model : null}
               isCurrent={() => !homeTransitionPendingRef.current
                 && goalControlViewKeyRef.current === goalControlViewKey
                 && activeThreadChatIdRef.current === activeThreadChatId
@@ -7573,7 +8114,104 @@ export function OneShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
+            {receipt?.steeringRecovery && receipt.steeringRecovery.length > 0 && (
+              <p className={styles.attachmentError} role="status" aria-live="polite" data-one-steering-recovery="held">
+                {appLocale === "ko"
+                  ? `재시작 뒤 외부 효과가 불확실한 추가 지시 ${receipt.steeringRecovery.length}개를 보류했습니다. 중복 실행하지 않았습니다. 기록을 확인한 뒤 새 지시로 다시 결정해 주세요.`
+                  : `${receipt.steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed; review the record before deciding on a new instruction.`}
+              </p>
+            )}
             {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true">{actionNotice}</p>}
+            {visibleUncertainAdmission && <div className={styles.steeringQueue} role="status" data-one-uncertain-admission="true">
+              <strong>{appLocale === "ko" ? "이전 요청의 접수 여부를 확인 중입니다. 같은 요청을 다시 보내지 마세요." : "Admission of the previous request is unknown. Do not resend it."}</strong>
+              <button type="button" onClick={() => {
+                const pending = visibleUncertainAdmission;
+                const api = ipc();
+                if (!api) {
+                  setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 아직 확인할 수 없습니다." : "Desktop is unavailable; admission cannot be checked yet.");
+                  return;
+                }
+                void api.invoke.admission(pending.runId).then(async (admission) => {
+                  if (admission.status !== "absent" && admission.chatId !== pending.chatId) {
+                    setActionNotice(appLocale === "ko" ? "요청 ID가 다른 대화에 묶여 있습니다. 재전송하지 않았습니다." : "This request ID belongs to another conversation. Nothing was resent.");
+                    return;
+                  }
+                  if (admission.status === "pending") {
+                    setActionNotice(appLocale === "ko" ? "원래 요청이 접수 대기 중입니다. 실행 여부가 확정될 때까지 재전송하지 않습니다." : "The original request is pending admission. It will not be resent while execution is unresolved.");
+                    return;
+                  }
+                  if (admission.status === "rejected") {
+                    uncertainAdmissionRef.current.delete(pending.chatId);
+                    clearOneUncertainAdmission(pending.chatId, pending.runId);
+                    // A verified no-start can still have a Main-saved Goal
+                    // direction. The manual receipt check must recover the
+                    // same exact user row as automatic admission recovery;
+                    // otherwise reopening One hides the direction behind a
+                    // generic "not started" notice and invites a duplicate.
+                    let directionVisible = false;
+                    if (admission.goalId && admission.promptMessageId) {
+                      try {
+                        const history = await api.invoke.history(pending.chatId);
+                        const durable = toUiMessages(history);
+                        directionVisible = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
+                        if (directionVisible && activeThreadChatIdRef.current === pending.chatId && !runIdRef.current) {
+                          oneTranscriptRevisionRef.current += 1;
+                          setMessages((current) => activeThreadChatIdRef.current === pending.chatId && !runIdRef.current
+                            ? mergeDurableChatCatchup(current, durable) : current);
+                          setRejectedGoalDirection({ chatId: pending.chatId, goalId: admission.goalId,
+                            messageId: admission.promptMessageId, runId: pending.runId });
+                        } else directionVisible = false;
+                      } catch { /* Keep the composer and do not infer a missing message. */ }
+                    }
+                    setActionNotice(appLocale === "ko"
+                      ? admission.goalId && admission.promptMessageId
+                        ? directionVisible
+                          ? "추가 지시는 대화에 저장됐지만 실행되지 않았습니다. Goal 상태를 확인하고 목표 수정 또는 재개를 직접 선택해 주세요. 자동 재전송은 하지 않습니다."
+                          : "추가 지시는 저장됐지만 기록을 아직 확인하지 못했습니다. 재전송하지 말고 Goal 상태를 확인해 주세요."
+                        : "원래 요청이 실행되지 않은 것으로 확인됐습니다. 내용을 확인한 뒤 새로 보내세요."
+                      : admission.goalId && admission.promptMessageId
+                        ? directionVisible
+                          ? "Your direction was saved but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
+                          : "Your direction was saved, but its record could not be checked. Do not resend it; review the Goal first."
+                        : "The original request was confirmed not to have started. Review it before sending again.");
+                    return;
+                  }
+                  const observed = await api.invoke.receipt(pending.runId);
+                  if (!observed || observed.runId !== pending.runId || observed.chatId !== pending.chatId) {
+                    setActionNotice(appLocale === "ko" ? "실행 영수증을 아직 확인할 수 없습니다. 새 요청은 보내지 않았습니다." : "The run receipt is still unavailable. No new request was sent.");
+                    return;
+                  }
+                  uncertainAdmissionRef.current.delete(pending.chatId);
+                  clearOneUncertainAdmission(pending.chatId, pending.runId);
+                  if (observed.status === "running" || observed.status === "cancelling") {
+                    runIdRef.current = pending.runId;
+                    runChatIdRef.current = pending.chatId;
+                    activityRunIdRef.current = pending.runId;
+                    setBusy(true);
+                    subscribeRun(pending.runId);
+                  } else {
+                    if (runIdRef.current === pending.runId) runIdRef.current = null;
+                    setBusy(false);
+                    void settleOrderedRunRef.current(pending.chatId, runTaskIdRef.current, pending.runId).catch(() => {
+                      setActionNotice(appLocale === "ko" ? "종료 기록을 아직 복원하지 못했습니다. 기록을 확인해 주세요." : "The terminal history could not be restored yet. Check the record.");
+                    });
+                  }
+                  setActionNotice(appLocale === "ko" ? "원래 요청의 실행 기록을 확인했습니다. 재전송하지 않았습니다." : "The original run was found. Nothing was resent.");
+                }).catch(() => setActionNotice(appLocale === "ko" ? "접수 여부를 아직 확인할 수 없습니다. 재전송하지 않았습니다." : "Admission cannot be checked yet. Nothing was resent."));
+              }}>{appLocale === "ko" ? "접수 확인" : "Check admission"}</button>
+              <button type="button" onClick={() => {
+                const api = ipc();
+                if (!api) {
+                  setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 중지를 요청하지 못했습니다." : "Desktop is unavailable; Stop could not be requested.");
+                  return;
+                }
+                void api.invoke.cancel(visibleUncertainAdmission.runId).then((receipt) => {
+                  setActionNotice(receipt?.status === "requested" || receipt?.status === "already-requested"
+                    ? appLocale === "ko" ? "원래 실행에 중지를 요청했습니다. 종료 영수증을 기다립니다." : "Stop was requested for the original run. Waiting for its terminal receipt."
+                    : appLocale === "ko" ? "아직 실행 중인 호출을 찾지 못했습니다. 접수 여부는 계속 불확실하며 새 요청은 보내지 않았습니다." : "No active run was found yet. Admission remains uncertain; no new request was sent.");
+                }).catch(() => setActionNotice(appLocale === "ko" ? "중지 요청을 확인하지 못했습니다. 접수 여부를 다시 확인해 주세요." : "Stop could not be confirmed. Check admission again."));
+              }}>{appLocale === "ko" ? "원래 요청 중지" : "Stop original run"}</button>
+            </div>}
             {turnAgentIds.length > 0 && (
               <div className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
                 <span>{appLocale === "ko" ? "이번 턴" : "This turn"}</span>
@@ -7776,7 +8414,7 @@ export function OneShell() {
                     void submit(value);
                   }}
                   title={busy
-                    ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                    ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
                     : undefined}
                 >
                   {busy ? (appLocale === "ko" ? "현재 작업 조정" : "Adjust current work") : (appLocale === "ko" ? "보내기" : "Send")}
@@ -7800,7 +8438,7 @@ export function OneShell() {
               <div key={queued.id} className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
                 <strong>{queued.text}</strong>
-                <small>{appLocale === "ko" ? "현재 모델을 중단하지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}</small>
+                <small>{appLocale === "ko" ? "현재 실행을 정리한 뒤 새 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the new instruction"}</small>
                 <button
                   type="button"
                   className={styles.steeringQueueRemove}
@@ -7813,6 +8451,33 @@ export function OneShell() {
                 </button>
               </div>
             ))}
+            {preflightSteerReceipts
+              .filter((item) => item.chatId === activeThreadChatId
+                && (item.status === "queued" || item.status === "held" || item.status === "cancelled"))
+              .slice(-10)
+              .map((item) => (
+                <div key={item.steerId} className={styles.steeringQueue} role="status" data-one-preflight-steer={item.status}>
+                  <span>{item.status === "held"
+                    ? (appLocale === "ko" ? "추가 지시 보류" : "Follow-up held")
+                    : item.status === "cancelled"
+                      ? (appLocale === "ko" ? "추가 지시 취소" : "Follow-up cancelled")
+                      : (appLocale === "ko" ? "추가 지시 접수" : "Follow-up received")}</span>
+                  <strong>{item.userPrompt}</strong>
+                  <small>{item.status === "held" || item.status === "cancelled"
+                    ? (appLocale === "ko" ? "자동 재전송하지 않습니다. 작성한 글을 검토한 뒤 새 지시로 결정하세요." : "Not replayed automatically. Review your draft before deciding on a new instruction.")
+                    : (appLocale === "ko" ? "첫 요청에 묶여 대기 중입니다." : "Waiting for the exact parent run.")}</small>
+                </div>
+              ))}
+            {preflightFenceStatus?.chatId === activeThreadChatId && (
+              <div className={styles.steeringQueue} role="status" data-one-preflight-fence={preflightFenceStatus.reason}>
+                <span>{appLocale === "ko" ? "추가 지시 접수 확인" : "Follow-up receipt check"}</span>
+                <small>{ONE_PREFLIGHT_FENCE_COPY[preflightFenceStatus.reason][appLocale === "ko" ? "ko" : "en"]}</small>
+                <button type="button" disabled={preflightFenceStatus.reason === "checking"}
+                  onClick={() => { if (activeThreadChatId) void reconcileUncertainPreflightSteer(activeThreadChatId); }}>
+                  {appLocale === "ko" ? "다시 확인" : "Check again"}
+                </button>
+              </div>
+            )}
             {activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-session-unavailable-banner="true">
               <IconAlertTriangle size={17} strokeWidth={2} />
               <strong>{appLocale === "ko"
@@ -7833,6 +8498,7 @@ export function OneShell() {
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
             <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId || null} locale={appLocale} />
+            <ContinuityStatus chatId={activeThreadChatId || null} locale={appLocale} />
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;
@@ -8031,11 +8697,11 @@ export function OneShell() {
                       disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked)}
                       aria-label={busy
                         ? composer.trim()
-                          ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                          ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
                           : tFor(appLocale, "one.shell.composer.stop_run_aria")
                         : tFor(appLocale, "one.shell.composer.send_aria")}
                       title={busy && composer.trim()
-                        ? (appLocale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
+                        ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 다음 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the next instruction")
                         : undefined}
                     >
                       {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
@@ -8300,6 +8966,7 @@ export function OneShell() {
           checkpoint in this route explicitly; otherwise browser actions can
           wait behind an invisible sheet. */}
       <BrowserActionApprovalSheet permission={onePermission} chatId={activeThreadChatId} />
+      <AutomationStrategyApprovalSheet chatId={activeThreadChatId} />
 
       <OneSettingsSheet
         open={settingsSheet}

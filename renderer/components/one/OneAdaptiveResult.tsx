@@ -51,11 +51,13 @@ import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
+import { enabledScheduleWithoutNextRun } from "@/lib/automation-schedule-state";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
 import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
 import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 import { OneLiveMap } from "./OneLiveMap";
 import { IconClose } from "@/components/Icon";
+import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 import styles from "./OneAdaptiveResult.module.css";
 
 export type OneAgentDraftSeed = {
@@ -1050,9 +1052,11 @@ function AutomationCardFrame({
   actionMessage,
   onRunNow,
   onEditInChat,
+  onReview,
+  reviewOpen,
 }: {
   locale: "ko" | "en";
-  statusState: "completed" | "working" | "failed";
+  statusState: "completed" | "working" | "failed" | "attention";
   statusLabel: string;
   scheduleLine: string;
   nodes: Array<{ nodeRef: string; label: string }>;
@@ -1061,6 +1065,8 @@ function AutomationCardFrame({
   actionMessage: string;
   onRunNow: (automationId: string) => void;
   onEditInChat: (automationId: string) => void;
+  onReview?: () => void;
+  reviewOpen?: boolean;
 }) {
   const ko = locale === "ko";
   return (
@@ -1081,14 +1087,16 @@ function AutomationCardFrame({
       )}
       {lastRunLine && <p>{displayValue(lastRunLine)}</p>}
       <div className={styles.actions} aria-label={ko ? "자동화 동작" : "Automation actions"}>
-        <button
+        {onReview ? <button type="button" className={styles.actionPrimary} onClick={onReview}>
+          {reviewOpen ? (ko ? "실행 내역 접기" : "Hide run history") : (ko ? "실행 내역 확인" : "Check run history")}
+        </button> : <button
           type="button"
           className={styles.actionPrimary}
           disabled={!automationId}
           onClick={() => automationId && onRunNow(automationId)}
         >
           <span>{ko ? "지금 실행" : "Run now"}</span>
-        </button>
+        </button>}
         <button
           type="button"
           className={styles.action}
@@ -1156,10 +1164,12 @@ export function OneAutomationRegistrationCard({
   const { message, runNow, editInChat } = useAutomationActions(locale, name);
   const [record, setRecord] = useState<Automation | null>(null);
   const [recordRead, setRecordRead] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   useEffect(() => {
     const api = ipc();
     setRecord(null);
     setRecordRead(false);
+    setReviewOpen(false);
     if (!api || !automationId) { setRecordRead(true); return; }
     let active = true;
     const read = () => api.automations.get(automationId).then((row) => {
@@ -1172,7 +1182,10 @@ export function OneAutomationRegistrationCard({
     return () => { active = false; off?.(); };
   }, [automationId]);
   const scheduleLine = record?.scheduleHuman || schedule || "";
-  const lastRunLine = record?.enabled && record.nextRunAt
+  const scheduleNeedsReview = record ? enabledScheduleWithoutNextRun(record) : false;
+  const lastRunLine = scheduleNeedsReview
+    ? (ko ? "다음 예약 없음 · 실행 내역 확인" : "No next run · check history")
+    : record?.enabled && record.nextRunAt
     ? `${ko ? "다음 실행" : "Next run"} · ${formatTimelineAt(record.nextRunAt, locale)}`
     : "";
   return (
@@ -1182,7 +1195,9 @@ export function OneAutomationRegistrationCard({
           <section className={styles.block} data-block-kind="Automation">
             <h4>{displayValue(name)}</h4>
             <p className={styles.summary}>
-              {action === "created"
+              {scheduleNeedsReview
+                ? (ko ? "자동화는 켜져 있지만 다음 실행이 예약되지 않았어요. 실행 내역에서 이유를 확인하세요." : "This automation is on, but no next run is scheduled. Check its run history for the reason.")
+                : action === "created"
                 ? (ko ? "자동화를 등록했어요." : "This automation is registered.")
                 : action === "paused"
                 ? (ko ? "자동화를 중지했어요." : "This automation is paused.")
@@ -1192,11 +1207,13 @@ export function OneAutomationRegistrationCard({
             </p>
             <AutomationCardFrame
               locale={locale}
-              statusState={!record || !record.enabled ? "working" : "completed"}
+              statusState={scheduleNeedsReview ? "attention" : !record || !record.enabled ? "working" : "completed"}
               statusLabel={!record
                 ? (recordRead ? (ko ? "현재 상태 확인 불가" : "Current state unavailable") : (ko ? "현재 상태 확인 중" : "Checking current state"))
                 : !record.enabled
                 ? (ko ? "꺼짐" : "Off")
+                : scheduleNeedsReview
+                ? (ko ? "확인 필요" : "Needs attention")
                 : automationStatusLabel("registered", locale)}
               scheduleLine={scheduleLine}
               nodes={[]}
@@ -1205,7 +1222,10 @@ export function OneAutomationRegistrationCard({
               actionMessage={message}
               onRunNow={runNow}
               onEditInChat={editInChat}
+              onReview={scheduleNeedsReview && record ? () => setReviewOpen((open) => !open) : undefined}
+              reviewOpen={reviewOpen}
             />
+            {scheduleNeedsReview && reviewOpen && record && <RunHistoryPanel automation={record} locale={locale} compact />}
           </section>
         </div>
       </article>

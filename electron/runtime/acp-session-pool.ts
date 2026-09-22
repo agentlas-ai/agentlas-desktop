@@ -10,28 +10,36 @@
 //      cwd × MCP 설정 × 실행 파일)이라, 남의 대화 세션을 물려받는 일이 원천적으로 없다.
 //      지문(모델·시스템프롬프트·권한) 계산식은 기존 계약 그대로다 — 바뀌면 재사용 금지.
 //   2. 좀비 — 모든 세션이 상주 등록소를 통해 host-lifecycle 종료 훅에 걸린다.
-//   3. 유휴 누수 — 12시간 무입력이면 리퍼가 닫는다(One 소유 세션만 reaperExempt 로 면제).
+//   3. 유휴 누수 — 12시간 무입력이면 리퍼가 닫는다(One 포함, 사용 중인 세션 제외).
 //   4. 예산 — 붙든 총량은 스웜 예산(getAgentConcurrency)을 넘지 않는다. 넘으면 가장 오래
 //      유휴인 세션부터 LRU 로 닫는다.
 //   5. 죽은 세션 — alive() 가 거짓이면 재사용 후보로 세지 않고 조용히 버리고 새로 연다.
 //      사용자에게는 아무 차이가 없어야 한다(문구도 새로 만들지 않는다).
 import {
   agentResidencyBudget,
+  enforceAgentResidencyBudget,
   dropAgentResidency,
   isResidencyExemptAgent,
   registerAgentResidency,
   touchAgentResidency,
   type AgentResidencySource,
 } from "./agent-residency";
+import {
+  beginProjectResidencyAdmission,
+  enforceProjectResidencyIdle,
+  finishProjectResidencyAdmission,
+} from "./project-residency";
 import type { AgentProcessLifecycleReason } from "../../shared/types";
 
 export interface AcpPoolMeta {
   agentId?: string | null;
   nodeId?: string | null;
   chatId?: string | null;
+  /** Main-owned Work project partition; never used as the conversation key. */
+  projectId?: string | null;
   runtimeKind: string;
   source?: AgentResidencySource;
-  /** 미지정이면 agentId 로 판정(One 이면 면제). */
+  /** 명시적 면제만 허용; 미지정이면 One도 12h 유휴 회수 대상. */
   reaperExempt?: boolean;
 }
 
@@ -41,6 +49,7 @@ interface PoolEntry<S> {
   /** 등록소 키 — 같은 키의 동시 세션을 구분한다(체크아웃 배타성). */
   residencyKey: string;
   session: S;
+  projectId: string | null;
   inUse: boolean;
   lastActivityAt: number;
   reaperExempt: boolean;
@@ -112,6 +121,9 @@ export class AcpSessionPool<S> {
 
   /** 예산을 넘겼으면 가장 오래 유휴인 것부터 닫는다. 사용 중인 것은 절대 건드리지 않는다. */
   private enforceBudget(headroom = 1): void {
+    // Production pools share the registry's global LRU. Keep an explicit
+    // per-pool override only for isolated callers that requested one.
+    if (!this.opts.budget) return;
     const limit = this.budget();
     while (this.entries.length + headroom > limit) {
       let victim: PoolEntry<S> | null = null;
@@ -132,50 +144,68 @@ export class AcpSessionPool<S> {
    */
   async acquire(key: string, meta: AcpPoolMeta, open: () => Promise<S>, retain?: () => boolean): Promise<AcpSessionLease<S>> {
     this.reapDead();
-    const reusable = this.entries.find((e) => e.key === key && !e.inUse && !e.retireOnRelease);
-    if (reusable) {
-      reusable.inUse = true;
-      reusable.lastActivityAt = this.now();
-      // 유휴 동안 풀어 둔 참조를 되돌린다 — 턴이 도는 동안 호스트가 나가면 안 된다.
-      try { this.opts.ref?.(reusable.session); } catch { /* 이미 죽었을 수 있다 */ }
-      touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt });
-      const lease: AcpSessionLease<S> = { key, session: reusable.session, fresh: false };
-      this.leases.set(lease, reusable);
-      return lease;
-    }
+    const projectId = typeof meta.projectId === "string" ? meta.projectId.trim() || null : null;
+    const reusable = this.entries.find((e) => e.key === key && e.projectId === projectId && !e.inUse && !e.retireOnRelease);
+    let projectAdmission: string | null = null;
+    try {
+      projectAdmission = beginProjectResidencyAdmission({
+        projectId,
+        keepResidencyKey: reusable?.residencyKey ?? null,
+      });
+      if (reusable) {
+        reusable.inUse = true;
+        reusable.lastActivityAt = this.now();
+        // 유휴 동안 풀어 둔 참조를 되돌린다 — 턴이 도는 동안 호스트가 나가면 안 된다.
+        try { this.opts.ref?.(reusable.session); } catch { /* 이미 죽었을 수 있다 */ }
+        touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt });
+        finishProjectResidencyAdmission(projectId, projectAdmission);
+        projectAdmission = null;
+        const lease: AcpSessionLease<S> = { key, session: reusable.session, fresh: false };
+        this.leases.set(lease, reusable);
+        return lease;
+      }
 
-    // 자리를 먼저 만든다 — 열고 나서 넘치면 방금 연 것을 닫게 된다.
-    this.enforceBudget();
-    const session = await open();
-    const entry: PoolEntry<S> = {
-      key,
-      residencyKey: `acp-session:${key}#${++leaseSeq}`,
-      session,
-      inUse: true,
-      lastActivityAt: this.now(),
-      reaperExempt: meta.reaperExempt ?? isResidencyExemptAgent(meta.agentId),
-      retain,
-      retireOnRelease: retain ? !retain() : false,
-    };
-    this.entries.push(entry);
-    registerAgentResidency({
-      key: entry.residencyKey,
-      agentId: meta.agentId ?? null,
-      nodeId: meta.nodeId ?? meta.agentId ?? null,
-      chatId: meta.chatId ?? null,
-      runtimeKind: meta.runtimeKind,
-      ...(meta.source ? { source: meta.source } : {}),
-      holdsSession: true,
-      reaperExempt: entry.reaperExempt,
-      inUse: true,
-      // 리퍼(12h)와 호스트 종료가 이 세션을 놓는 방법 — 등록소는 이것만 안다.
-      // 풀 목록에서도 함께 빠진다(등록소만 지우면 죽은 항목이 재사용 후보로 남는다).
-      close: () => this.remove(entry, { close: true, reason: "shutdown" }),
-      now: entry.lastActivityAt,
-    });
-    const lease: AcpSessionLease<S> = { key, session, fresh: true };
-    this.leases.set(lease, entry);
-    return lease;
+      // 자리를 먼저 만든다 — 열고 나서 넘치면 방금 연 것을 닫게 된다.
+      this.enforceBudget();
+      enforceAgentResidencyBudget(1);
+      const session = await open();
+      const entry: PoolEntry<S> = {
+        key,
+        residencyKey: `acp-session:${key}#${++leaseSeq}`,
+        session,
+        projectId,
+        inUse: true,
+        lastActivityAt: this.now(),
+        reaperExempt: meta.reaperExempt ?? isResidencyExemptAgent(meta.agentId),
+        retain,
+        retireOnRelease: retain ? !retain() : false,
+      };
+      this.entries.push(entry);
+      registerAgentResidency({
+        key: entry.residencyKey,
+        agentId: meta.agentId ?? null,
+        nodeId: meta.nodeId ?? meta.agentId ?? null,
+        chatId: meta.chatId ?? null,
+        projectId: entry.projectId,
+        runtimeKind: meta.runtimeKind,
+        ...(meta.source ? { source: meta.source } : {}),
+        holdsSession: true,
+        reaperExempt: entry.reaperExempt,
+        inUse: true,
+        // 리퍼(12h)와 호스트 종료가 이 세션을 놓는 방법 — 등록소는 이것만 안다.
+        // 풀 목록에서도 함께 빠진다(등록소만 지우면 죽은 항목이 재사용 후보로 남는다).
+        close: () => this.remove(entry, { close: true, reason: "shutdown" }),
+        now: entry.lastActivityAt,
+      });
+      finishProjectResidencyAdmission(projectId, projectAdmission);
+      projectAdmission = null;
+      const lease: AcpSessionLease<S> = { key, session, fresh: true };
+      this.leases.set(lease, entry);
+      return lease;
+    } catch (error) {
+      finishProjectResidencyAdmission(projectId, projectAdmission);
+      throw error;
+    }
   }
 
   /** 세션을 유휴 상태로 돌려준다 — 다음 턴이 같은 키로 이어 쓴다. */
@@ -198,6 +228,7 @@ export class AcpSessionPool<S> {
     // 유휴 세션은 호스트를 살려 두지 않는다(터미널·게이트가 종료 못 하던 자리).
     try { this.opts.unref?.(entry.session); } catch { /* 이미 죽었을 수 있다 */ }
     touchAgentResidency(entry.residencyKey, { inUse: false, now: entry.lastActivityAt });
+    enforceProjectResidencyIdle(entry.projectId, entry.residencyKey);
     // 반납한 김에 예산을 다시 본다(사용자가 슬라이더를 내렸을 수 있다).
     this.enforceBudget(0);
   }

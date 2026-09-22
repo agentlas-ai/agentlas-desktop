@@ -19,6 +19,7 @@ import {
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
+import { isOneSteeringInterruption } from "../../shared/one-auto-recovery";
 import { classifyToolFailure } from "../../shared/tool-failure";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -1363,6 +1364,10 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     noticeLevel: ev.notice?.level,
     textLen: ev.textLen ?? ev.text?.length,
     tokens: ev.tokens,
+    // Keep exact runner usage as numeric ledger fields. Generic object payloads
+    // are stringified by safePayload, which would make budget settlement unknown.
+    observedInputTokens: ev.kind === "final" ? ev.observedUsage?.inputTokens : undefined,
+    observedOutputTokens: ev.kind === "final" ? ev.observedUsage?.outputTokens : undefined,
     lifecyclePhase: ev.lifecycle?.phase,
     // A lifecycle event may carry the host's absolute workspace path. The
     // ledger is renderer-visible and durable, so persist only the same
@@ -1893,6 +1898,24 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   }
 
   const latest = rows[rows.length - 1] ?? start;
+  const receiptChatId = start.chat_id ?? stringPayload(startPayload, "chatId") ?? "";
+  // Only the three closed-form steering markers can establish this cause.
+  // Projecting every payload through runRowToUi here made each receipt read
+  // replay large tool/output runs just to classify one interruption.
+  const steeringEvidence = rows
+    .filter((row) => row.kind === "user_steering"
+      || row.kind === "invoke_cancel_requested"
+      || row.kind === "invoke_interrupted")
+    .map((row) => ({
+      runId: row.run_id,
+      chatId: row.chat_id ?? undefined,
+      kind: row.kind,
+      payload: parsePayload(row.payload_json),
+    }));
+  const interruptionCause = isOneSteeringInterruption(
+    { runId, chatId: receiptChatId, status },
+    steeringEvidence,
+  ) ? "steering" as const : undefined;
   const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
   // 원래는 reverse().map(parse)가 결과를 찾은 뒤에도 **모든** payload를 eager하게
   // 파싱했다. 뒤에서부터 찾고 발견 즉시 멈춘다.
@@ -1954,7 +1977,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
 
   return {
     runId,
-    chatId: start.chat_id ?? stringPayload(startPayload, "chatId") ?? "",
+    chatId: receiptChatId,
     status,
     startedAt: start.ts,
     updatedAt: latest.ts,
@@ -1978,6 +2001,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       : status !== "completed" && stringPayload(terminalPayload, "errorMessage")
         ? { errorMessage: stringPayload(terminalPayload, "errorMessage") }
         : {}),
+    ...(interruptionCause ? { interruptionCause } : {}),
   };
 }
 

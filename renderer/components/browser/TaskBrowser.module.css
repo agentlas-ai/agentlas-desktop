@@ -34,12 +34,18 @@
 
 .browser[data-inline-header=false] .menu { top:78px; }
 .controls { display:flex; align-items:center; position:relative; flex:none; }
-.controlPopover { position:absolute; z-index:30; right:0; top:calc(100% + 8px); }
+.controlPopover { position:absolute; z-index:30; right:0; top:calc(100% + 4px); }
+.menuTrigger svg { transform:rotate(90deg); }
+.browserMenu { --panel-menu-width:240px; --panel-menu-padding:6px; --panel-menu-radius:14px; --panel-menu-row-height:29px; --panel-menu-font-size:12px; --panel-menu-row-padding:6px 9px; }
+.browserMenu :global(hr) { margin:4px 6px; }
 .controlPopover button { display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; width:auto; height:auto; }
 .controlPopover button[role=menuitem] { display:flex; justify-content:space-between; width:100%; min-height:var(--panel-menu-row-height); padding:var(--panel-menu-row-padding); font-size:var(--panel-menu-font-size); font-weight:400; }
-.zoomControls { display:flex; align-items:center; gap:2px; font-size:11px; }
-.zoomControls button { min-width:22px; min-height:22px; padding:2px; }
-.zoomControls span { min-width:36px; text-align:center; }
+.zoomControls { display:flex; align-items:center; gap:0; font-size:11px; }
+.zoomControls button { min-width:23px; min-height:23px; padding:2px; border:1px solid var(--paper-edge,#e6e6e8); border-radius:0; }
+.zoomControls button:first-child { border-radius:8px 0 0 8px; }
+.zoomControls button:last-child { margin-left:5px; border-color:transparent; border-radius:7px; }
+.zoomControls span { display:grid; place-items:center; min-width:42px; min-height:23px; border-top:1px solid var(--paper-edge,#e6e6e8); border-bottom:1px solid var(--paper-edge,#e6e6e8); text-align:center; }
+.zoomControls button:nth-of-type(2) { border-radius:0 8px 8px 0; }
 .findPopover { display:flex; align-items:center; gap:5px; width:330px; }
 .findPopover input { min-width:0; flex:1; width:120px; padding:5px; height:26px; }
 .findPopover button { padding:4px; }

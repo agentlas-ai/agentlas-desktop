@@ -63,6 +63,7 @@ import {
 } from "../runtime/untrusted-error";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
 import {
@@ -734,6 +735,7 @@ function taskForceRecoveryRuntime(
   role: RuntimeRole = "worker",
   attempted: RuntimeStatus[] = [],
 ): RuntimeStatus | null {
+  if (failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
   // Exact prepared Workforce, benchmarks, and Agent Apps are fail-closed
   // contracts. Ordinary One Team model choices are preferences with an
   // explicit product fallback chain (selected model -> worker -> connected),
@@ -761,6 +763,7 @@ export function taskForcePlannerRecoveryRuntime(
   failure: RunnerFailure,
   attempted: RuntimeStatus[],
 ): RuntimeStatus | null {
+  if (failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
   if (p.signal?.aborted || p.benchmarkMode || p.req.agentAppMode || oneControllerRuntimePreferred(p)) return null;
   if (p.workforceSelectionReceipt) {
     if (failure.kind !== "refused" || failure.source !== "marker"
@@ -1373,6 +1376,8 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
   const context = !request.untrustedNoTools && request.cwd ? mainWorkAttachmentContext(p.req, request.cwd) : "";
   if (context) request = { ...request, systemPrompt: [request.systemPrompt, context].filter(Boolean).join("\n\n") };
+  const workProjectId = p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null;
+  if (request.workProjectId !== workProjectId) request = { ...request, workProjectId };
   return p.req.planMode === true
     ? { ...request, permission: "read", planMode: true }
     : request;
@@ -1387,6 +1392,7 @@ function taskForceRunnerBase(
   | "permission"
   | "planMode"
   | "approvalChatId"
+  | "workProjectId"
   | "approvalsReviewer"
   | "restrictedReadBoundary"
   | "mcpConfigPath"
@@ -1410,6 +1416,7 @@ function taskForceRunnerBase(
     ...(p.req.planMode === true ? { planMode: true as const } : {}),
     permission,
     approvalChatId: p.chat.id,
+    workProjectId: p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null,
     // Keep Codex in `on-request`: `never` means "decline anything that would
     // ask", not "approve without another prompt". The automatic reviewer plus
     // Agentlas' write-boundary arbiter accepts in-scope browser/tool calls while

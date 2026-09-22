@@ -1,7 +1,8 @@
 import { prepareCheckpointContinuation } from "./continuation";
+import { claimGoalRuntimeSelection } from "./runtime-handoff";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { listAgentSurfaces } from "../store/agent-surfaces";
-import { latestInvocationInstructionSnapshot } from "./instructions";
+import { compileProjectInstructionSnapshot } from "./instructions";
 import { latestRuntimePlan, recordRuntimePlan } from "./plan";
 import { createHash } from "node:crypto";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -9,7 +10,22 @@ import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch,
   listLongRunTasks, longRunContinueDecision, unsettledLongRunAttempts } from "../store/long-runs";
-import { agentRunCwd } from "../runtime/exec";
+import type { InstructionSnapshot } from "../../shared/runtime-instructions";
+
+/** Bind a checkpoint to its own Main invocation, never another turn in the chat. */
+function producerInstructionSnapshot(invocationRunId: string | null | undefined, chatId: string | null): InstructionSnapshot | null {
+  if (!invocationRunId || !chatId) return null;
+  const row = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND chat_id = ? AND kind = 'instruction_snapshot' ORDER BY seq DESC LIMIT 1")
+    .get(invocationRunId, chatId) as { payload_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const snapshot = JSON.parse(row.payload_json).instructionSnapshot as InstructionSnapshot | undefined;
+    return snapshot?.schemaVersion === "agentlas.instruction-snapshot.v1" && typeof snapshot.revision === "string"
+      && typeof snapshot.environmentId === "string" && Array.isArray(snapshot.sources)
+      && snapshot.sources.every(source => typeof source.sourceRef === "string" && typeof source.contentHash === "string")
+      ? snapshot : null;
+  } catch { return null; }
+}
 
 /** The existing append-only event ledger is the checkpoint store. No second
  * mutable goal record or provider transcript is introduced. */
@@ -37,7 +53,7 @@ export function recordTaskCheckpoint(input: {
       catch { /* Missing or foreign producer evidence stays uncertain. */ }
     }
     const requestedWorkspacePath = input.projectDir?.trim() || null;
-    const instructionSnapshot = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
+    const instructionSnapshot = producerInstructionSnapshot(input.invocationRunId, run.rootChatId);
     const currentPlan = latestRuntimePlan(run.id);
     const plan = !currentPlan || currentPlan.goalRevision !== (getLongRunGoalRevisionBinding(run.id)?.revision ?? null)
       || JSON.stringify(currentPlan.steps) !== JSON.stringify(tasks.map((task) => ({ taskId: task.id, title: task.title, state: task.state })))
@@ -70,10 +86,14 @@ export function recordTaskCheckpoint(input: {
       producerWorkspace = typeof value === "string" && value.trim() ? value.trim() : value === null ? null : undefined;
     } catch { producerWorkspace = undefined; }
     const workspacePath = requestedWorkspacePath ?? producerWorkspace ?? null;
-    const defaultWorkspace = requestedWorkspacePath === null && workspacePath === agentRunCwd();
-    const instructionBindingExact = requestedWorkspacePath !== null
-      ? instructionSnapshot !== null
-      : defaultWorkspace && instructionSnapshot === null;
+    let instructionBindingExact = false;
+    if (workspacePath && instructionSnapshot) {
+      try {
+        const current = compileProjectInstructionSnapshot({ projectDir: workspacePath }).snapshot;
+        instructionBindingExact = current.environmentId === instructionSnapshot.environmentId
+          && current.revision === instructionSnapshot.revision;
+      } catch { /* Changed or unavailable instructions cannot mint settled authority. */ }
+    }
     // A checkpoint may describe uncertainty, but only the newest completed Main
     // controller run with an exact workspace and complete effect receipt can mint
     // settled replay authority.
@@ -150,8 +170,9 @@ export function latestTaskCheckpoint(goalId: string): LongRunTaskCheckpoint | nu
   // above makes the current ledger the exact contract that reference names.
   if (checkpoint.schemaVersion === "agentlas.task-checkpoint.v2") {
     if (checkpoint.capsule.plan?.revision !== latestRuntimePlan(run.id)?.revision) return null;
-    const instructions = run.rootChatId ? latestInvocationInstructionSnapshot(run.rootChatId) : null;
-    if ((checkpoint.capsule.instructionSnapshot?.revision ?? null) !== (instructions?.revision ?? null)) return null;
+    const instructions = producerInstructionSnapshot(checkpoint.invocationRunId, run.rootChatId);
+    if (!instructions || checkpoint.capsule.instructionSnapshot?.revision !== instructions.revision
+      || checkpoint.capsule.instructionSnapshot.environmentId !== instructions.environmentId) return null;
     return checkpoint;
   }
   return { ...checkpoint, acceptanceCriteria: checkpoint.acceptanceCriteria ?? run.acceptanceCriteria };
@@ -159,11 +180,46 @@ export function latestTaskCheckpoint(goalId: string): LongRunTaskCheckpoint | nu
 
 /** Claim a successor once, before dispatch. A crash after claiming is never
  * blindly replayed; startup reconciliation sees the durable attempt/receipt. */
-export function claimCheckpointContinuation(goalId: string, checkpointId: string, invocationRunId: string): boolean {
+export function claimCheckpointContinuation(goalId: string, checkpointId: string, invocationRunId: string,
+  recoveryWaitId?: string): boolean {
   return getDb().transaction(() => {
     const checkpoint = latestTaskCheckpoint(goalId);
+    const decision = longRunContinueDecision(goalId);
+    let diagnosticClaim = false;
+    if (checkpoint && recoveryWaitId && decision?.reason === "stall_replan_required"
+      && decision.status === "running" && decision.openTaskCount > 0) {
+      const run = getLongRunByGoalId(goalId);
+      const revision = getChatGoalRevision(goalId);
+      const row = run ? getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
+        .get(run.id) as { payload_json: string } | undefined : undefined;
+      let wait: Record<string, unknown> | null = null;
+      try { wait = row ? JSON.parse(row.payload_json).subscription : null; } catch { /* Refuse malformed host state. */ }
+      const prior = run && wait?.checkpointId ? getDb().prepare(`SELECT payload_json FROM long_run_events
+        WHERE run_id=? AND kind='run.task_checkpoint' AND json_extract(payload_json,'$.checkpoint.checkpointId')=? ORDER BY seq DESC LIMIT 1`)
+        .get(run.id, wait.checkpointId) as { payload_json: string } | undefined : undefined;
+      const priorCheckpoint = prior ? JSON.parse(prior.payload_json).checkpoint as LongRunTaskCheckpoint : null;
+      const plan = checkpoint.capsule.plan;
+      diagnosticClaim = Boolean(run?.surface === "one" && revision?.lifecycle === "ongoing"
+        && revision.revision === checkpoint.goalRevision
+        && wait?.waitId === recoveryWaitId && wait?.state === "pending"
+        && wait?.runId === run.id && wait?.goalId === goalId && wait?.goalRevision === revision.revision
+        && wait?.sourceInvocationId === checkpoint.invocationRunId
+        && (wait?.recoveryMode === "stall_replan" || wait?.recoveryMode === "stall_backoff")
+        && typeof wait?.recoveryProgressKey === "string"
+        && plan?.stallReplan?.progressKey === wait.recoveryProgressKey
+        && plan.stallReplan.action !== "needs_person"
+        && (wait.recoveryMode !== "stall_replan"
+          || (plan.stallReplan.sourceCheckpointId === wait.checkpointId
+            && plan.stallReplan.action === "inspect_read_only"))
+        && priorCheckpoint && priorCheckpoint.checkpointId === wait.checkpointId
+        && priorCheckpoint.goalRevision === revision.revision
+        && priorCheckpoint.invocationRunId === checkpoint.invocationRunId
+        && priorCheckpoint.sideEffects.state === "settled"
+        && checkpoint.sideEffects.boundary?.snapshotDigest === priorCheckpoint.sideEffects.boundary?.snapshotDigest
+        && checkpoint.sideEffects.boundary?.receiptEventId === priorCheckpoint.sideEffects.boundary?.receiptEventId);
+    }
     if (!checkpoint || checkpoint.checkpointId !== checkpointId || checkpoint.disposition !== "retry_required"
-      || checkpoint.sideEffects.state !== "settled" || !longRunContinueDecision(goalId)?.continue) return false;
+      || checkpoint.sideEffects.state !== "settled" || !(decision?.continue || diagnosticClaim)) return false;
     try { prepareCheckpointContinuation(checkpoint); } catch { return false; }
     const db = getDb();
     if (db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain') LIMIT 1")
@@ -171,6 +227,7 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
     if (db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_continuation' AND json_extract(payload_json, '$.checkpointId') = ?")
       .get(checkpoint.capsule.runId, checkpointId)) return false;
     appendLongRunEvent({ runId: checkpoint.capsule.runId, kind: "run.checkpoint_continuation", actorKind: "host", payload: { checkpointId, invocationRunId } });
+    claimGoalRuntimeSelection(checkpoint, invocationRunId);
     return true;
   })();
 }

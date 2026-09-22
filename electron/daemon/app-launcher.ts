@@ -35,6 +35,7 @@ import {
   serializeInstallIdentity,
   type InstallIdentity,
 } from "../install-identity";
+import { DaemonDiagnosticLog, type DaemonDiagnosticFields, validAppInstanceId } from "./diagnostic-log";
 
 export interface EnsureDaemonOptions {
   /** 앱과 데몬이 같은 DB 를 보게 하는 단일 진실 — 앱의 userData 디렉터리. */
@@ -52,6 +53,10 @@ export interface EnsureDaemonOptions {
   installIdentity?: InstallIdentity;
   /** Upper bound for the spawned helper to establish its control socket. */
   startupTimeoutMs?: number;
+  /** Main-owned process instance, never a Goal progress indicator. */
+  appInstanceId?: string;
+  /** Digest of Main's actually opened store, salted with appInstanceId. */
+  expectedStoreIdentity?: string | null;
 }
 
 export type EnsureDaemonStatus =
@@ -67,6 +72,40 @@ interface DaemonPing {
   pid?: number;
   storePath?: string;
   parentPid?: number | null;
+  lastHeartbeatAt?: string;
+  bootId?: string;
+  appInstanceId?: string | null;
+  storeIdentity?: string | null;
+}
+
+function logDaemonIdentity(log: (line: string) => void, ping: DaemonPing): void {
+  const appId = validAppInstanceId(ping.appInstanceId) ? ping.appInstanceId : "unbound";
+  const bootId = typeof ping.bootId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ping.bootId)
+    ? ping.bootId : "unavailable";
+  const pid = Number.isSafeInteger(ping.pid) && Number(ping.pid) > 1 ? ping.pid : "unknown";
+  log(`[daemon] control ready processRole=desktop-daemon appInstanceId=${appId} bootId=${bootId} pid=${pid}`);
+}
+
+let spawnCount = 0;
+let lastExitReason: DaemonDiagnosticFields["reason"] = "unknown";
+
+function diagnosticLog(userDataDir: string): DaemonDiagnosticLog | null {
+  try { return new DaemonDiagnosticLog(userDataDir); }
+  catch {
+    // Diagnostics are supplementary; do not stop Desktop or echo the private path.
+    console.warn("[daemon] private diagnostics unavailable");
+    return null;
+  }
+}
+
+function recordDiagnostic(
+  log: DaemonDiagnosticLog | null,
+  event: Parameters<DaemonDiagnosticLog["record"]>[0],
+  fields?: DaemonDiagnosticFields,
+): void {
+  try { log?.record(event, fields); }
+  catch { /* A log failure must not prevent daemon control. */ }
 }
 
 interface MobileBridgeLeaseReply {
@@ -151,14 +190,23 @@ interface SpawnedDaemon {
   pid: number | null;
 }
 
-function spawnDaemonForDesktop(opts: EnsureDaemonOptions): SpawnedDaemon {
+function spawnDaemonForDesktop(
+  opts: EnsureDaemonOptions,
+  diagnostics: DaemonDiagnosticLog | null,
+  reason: "initial" | "version_skew" | "owner_mismatch",
+): SpawnedDaemon {
   const entry = opts.daemonEntry ?? defaultDaemonEntry();
   if (!fs.existsSync(entry)) {
-    throw new Error(`daemon entry not found: ${entry}`);
+    throw new Error("daemon_entry_not_found");
   }
+  const restartCount = spawnCount++;
+  recordDiagnostic(diagnostics, "spawn_requested", {
+    parentPid: opts.parentPid ?? process.pid, restartCount, reason,
+    appInstanceId: opts.appInstanceId,
+  });
   const child = spawn(opts.execPath ?? process.execPath, [entry], {
     detached: false,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
@@ -172,12 +220,37 @@ function spawnDaemonForDesktop(opts: EnsureDaemonOptions): SpawnedDaemon {
       // 사다리는 앱이 이미 돌렸다. 데몬은 절대 두 번째 마이그레이션 주인이 되지 않는다.
       AGENTLAS_STORE_MIGRATION_ROLE: "follower",
       AGENTLAS_DESKTOP_PARENT_PID: String(opts.parentPid ?? process.pid),
+      AGENTLAS_DAEMON_RESTART_COUNT: String(restartCount),
+      AGENTLAS_DAEMON_LAST_EXIT_REASON: lastExitReason ?? "unknown",
+      ...(validAppInstanceId(opts.appInstanceId) ? { AGENTLAS_APP_INSTANCE_ID: opts.appInstanceId } : {}),
+      ...(opts.expectedStoreIdentity ? { AGENTLAS_EXPECTED_STORE_IDENTITY: opts.expectedStoreIdentity } : {}),
     },
+  });
+  const pid = child.pid ?? null;
+  (opts.log ?? console.log)(`[daemon] spawn requested pid=${pid ?? "?"} parent=${opts.parentPid ?? process.pid}`);
+  if (diagnostics) {
+    diagnostics.capture(child.stdout, "stdout", pid, opts.appInstanceId);
+    diagnostics.capture(child.stderr, "stderr", pid, opts.appInstanceId);
+  } else {
+    // Always drain pipes even if the private log cannot be opened. Otherwise
+    // a verbose child can block on a full stdout/stderr pipe during boot.
+    child.stdout?.resume();
+    child.stderr?.resume();
+  }
+  child.once("exit", (exitCode, signal) => {
+    lastExitReason = signal ? "signal" : exitCode === 0 ? "exited" : "error";
+    recordDiagnostic(diagnostics, "spawn_exit", { pid, exitCode, signal, reason: lastExitReason,
+      appInstanceId: opts.appInstanceId });
+    (opts.log ?? console.log)(`[daemon] child exited pid=${pid ?? "?"} reason=${lastExitReason}`);
+  });
+  child.once("error", () => {
+    lastExitReason = "error";
+    recordDiagnostic(diagnostics, "spawn_error", { pid, reason: "error", appInstanceId: opts.appInstanceId });
   });
   // The control socket is the graceful owner channel. unref keeps startup from
   // blocking, while the helper's parent watchdog enforces the crash path.
   child.unref();
-  return { child, pid: child.pid ?? null };
+  return { child, pid };
 }
 
 /**
@@ -192,8 +265,12 @@ function spawnDaemonForDesktop(opts: EnsureDaemonOptions): SpawnedDaemon {
 async function waitForSpawnedDaemonReadiness(
   spawned: SpawnedDaemon,
   socketPath: string,
+  diagnostics: DaemonDiagnosticLog | null,
   timeoutMs = 30_000,
-): Promise<"ready" | "exited" | "timeout"> {
+  expectedStoreIdentity?: string | null,
+  appInstanceId?: string,
+  lifecycleLog?: (line: string) => void,
+): Promise<"ready" | "exited" | "timeout" | "store_mismatch"> {
   let exited = spawned.child.exitCode !== null || spawned.child.signalCode !== null;
   const markExited = () => { exited = true; };
   spawned.child.once("exit", markExited);
@@ -205,7 +282,16 @@ async function waitForSpawnedDaemonReadiness(
         return "exited";
       }
       const ping = await pingDaemon(socketPath, Math.min(800, Math.max(250, deadline - Date.now())));
-      if (ping?.ok && ping.pid === spawned.pid) return "ready";
+      if (ping?.ok && ping.pid === spawned.pid) {
+        if (expectedStoreIdentity && (ping.storeIdentity !== expectedStoreIdentity
+          || ping.appInstanceId !== appInstanceId)) return "store_mismatch";
+        const heartbeatAgeMs = ping.lastHeartbeatAt
+          ? Math.max(0, Date.now() - Date.parse(ping.lastHeartbeatAt)) : undefined;
+        recordDiagnostic(diagnostics, "spawn_ready", { pid: spawned.pid, heartbeatAgeMs,
+          bootId: ping.bootId, appInstanceId: ping.appInstanceId });
+        if (lifecycleLog) logDaemonIdentity(lifecycleLog, ping);
+        return "ready";
+      }
       if (exited || spawned.child.exitCode !== null || spawned.child.signalCode !== null) {
         return "exited";
       }
@@ -257,7 +343,9 @@ async function stopUnreadyDaemon(spawned: SpawnedDaemon): Promise<boolean> {
 export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
   const log = opts.log ?? ((line: string) => console.log(line));
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
+  if (opts.expectedStoreIdentity === null) return { status: "failed", reason: "daemon_store_identity_unavailable" };
   const socketPath = defaultControlSocketPath(opts.userDataDir);
+  const diagnostics = diagnosticLog(opts.userDataDir);
 
   try {
     const ping = await pingDaemon(socketPath);
@@ -265,12 +353,25 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       const daemonVersion = ping.version ?? "0.0.0";
       const expectedParentPid = opts.parentPid ?? process.pid;
       if (daemonVersion === opts.appVersion && ping.parentPid === expectedParentPid) {
+        if (opts.expectedStoreIdentity && (ping.storeIdentity !== opts.expectedStoreIdentity
+          || ping.appInstanceId !== opts.appInstanceId)) {
+          return { status: "failed", reason: "daemon_store_identity_mismatch" };
+        }
+        recordDiagnostic(diagnostics, "already_running", {
+          pid: ping.pid, parentPid: ping.parentPid,
+          appInstanceId: ping.appInstanceId, bootId: ping.bootId,
+          heartbeatAgeMs: ping.lastHeartbeatAt
+            ? Math.max(0, Date.now() - Date.parse(ping.lastHeartbeatAt)) : undefined,
+        });
+        logDaemonIdentity(log, ping);
         return { status: "already-running", pid: ping.pid ?? -1, version: daemonVersion };
       }
       // 버전 스큐 — 옛 데몬을 정중히 내려보내고 재스폰한다. 강제 kill 은 마지막 수단도
       // 아니다: PID 를 모르는 채 소켓만 아는 상태라, 부탁이 안 통하면 그냥 두고 보고한다
       // (다음 앱 실행이 다시 시도한다. 옛 데몬이 계속 돌더라도 스키마는 follower 라 안전).
-      log(`[daemon] version skew (daemon ${daemonVersion} vs app ${opts.appVersion}) — asking it to shut down`);
+      const replacementReason = daemonVersion === opts.appVersion ? "owner_mismatch" : "version_skew";
+      log(`[daemon] ${replacementReason} — requesting controlled shutdown`);
+      recordDiagnostic(diagnostics, replacementReason, { pid: ping.pid, parentPid: ping.parentPid });
       try {
         // The daemon is owner-bound. Reuse the parent pid reported by the
         // ping so its shutdown authorization is explicit; an unparameterized
@@ -290,11 +391,17 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
         if (!(await pingDaemon(socketPath, 800))) { gone = true; break; }
       }
       if (!gone) {
-        return { status: "failed", reason: `old daemon (v${daemonVersion}) did not shut down` };
+        recordDiagnostic(diagnostics, "shutdown_timeout", { pid: ping.pid, reason: "timeout" });
+        return { status: "failed", reason: "old_daemon_shutdown_timeout" };
       }
-      const spawned = spawnDaemonForDesktop(opts);
-      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, opts.startupTimeoutMs);
+      lastExitReason = replacementReason;
+      const spawned = spawnDaemonForDesktop(opts, diagnostics, replacementReason);
+      const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, diagnostics,
+        opts.startupTimeoutMs, opts.expectedStoreIdentity, opts.appInstanceId, log);
       if (readiness !== "ready") {
+        recordDiagnostic(diagnostics, "spawn_unready", { pid: spawned.pid,
+          reason: readiness === "store_mismatch" ? "error" : readiness,
+          appInstanceId: opts.appInstanceId });
         const stopped = await stopUnreadyDaemon(spawned);
         return {
           status: "failed",
@@ -306,14 +413,21 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       return { status: "respawned", pid: spawned.pid, previousVersion: daemonVersion };
     }
 
-    const spawned = spawnDaemonForDesktop(opts);
+    const spawned = spawnDaemonForDesktop(opts, diagnostics, "initial");
     const pid = spawned.pid;
     const readiness = await waitForSpawnedDaemonReadiness(
       spawned,
       socketPath,
+      diagnostics,
       opts.startupTimeoutMs,
+      opts.expectedStoreIdentity,
+      opts.appInstanceId,
+      log,
     );
     if (readiness !== "ready") {
+      recordDiagnostic(diagnostics, "spawn_unready", { pid,
+        reason: readiness === "store_mismatch" ? "error" : readiness,
+        appInstanceId: opts.appInstanceId });
       const stopped = await stopUnreadyDaemon(spawned);
       return {
         status: "failed",
@@ -323,8 +437,9 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
     }
     log(`[daemon] spawned v${opts.appVersion} (pid ${pid ?? "?"})`);
     return { status: "spawned", pid, version: opts.appVersion };
-  } catch (error) {
-    return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+  } catch {
+    recordDiagnostic(diagnostics, "spawn_error", { reason: "error" });
+    return { status: "failed", reason: "daemon_launcher_failed" };
   }
 }
 
@@ -358,12 +473,14 @@ export async function shutdownDaemon(
 ): Promise<{ stopped: boolean; pid: number | null }> {
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { stopped: true, pid: null };
   const socketPath = defaultControlSocketPath(userDataDir);
+  const diagnostics = diagnosticLog(userDataDir);
   const ping = await pingDaemon(socketPath, Math.min(timeoutMs, 2_000));
   if (!ping?.ok) return { stopped: true, pid: null };
   if (ping.parentPid !== expectedParentPid) {
     throw new Error(`daemon_owner_mismatch:${ping.parentPid ?? "none"}`);
   }
   const pid = Number.isSafeInteger(ping.pid) && Number(ping.pid) > 1 ? Number(ping.pid) : null;
+  recordDiagnostic(diagnostics, "shutdown_requested", { pid, parentPid: expectedParentPid });
   try {
     await callControlSocket(socketPath, "daemon.shutdown", { parentPid: expectedParentPid }, 3_000);
   } catch {
@@ -375,6 +492,7 @@ export async function shutdownDaemon(
     if (!current?.ok) return { stopped: true, pid };
     await sleep(100);
   }
+  recordDiagnostic(diagnostics, "shutdown_timeout", { pid, reason: "timeout" });
   return { stopped: false, pid };
 }
 

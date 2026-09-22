@@ -11,8 +11,13 @@ import { selectModules, tokenize } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isJudgmentRefusal } from "./judgment-refusal";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 
 export interface RunnerRequest {
+  /** Main-minted exact-run recovery authority; never accepted from renderer JSON. */
+  scienceRecoveryCapability?: object;
+  /** Main-minted object identity; JSON/renderer input cannot authorize collection. */
+  scienceCollectionCapability?: object;
   /** Main-authored Plan ceiling; mutation cannot be approved within this run. */
   planMode?: true;
   systemPrompt: string;
@@ -118,6 +123,8 @@ export interface RunnerRequest {
    * invocation, revoked when the turn settles). Such a process can never serve the next turn, so it is never pooled.
    * Measured 2026-09-20: a Science loop left one resident CLI (~0.5 GB with its MCP child) per turn, each holding a dead token.
    * Continuity is unaffected: it comes from --resume / history, not from residency.
+   * Since 2026-09-21 only plan-mode, criterion-review and pre-session Science grants are per-run; a normal Science turn
+   * carries a session grant (same token/config across turns) and is pooled like any chat.
    */
   ephemeralToolGrant?: true;
   /**
@@ -178,6 +185,8 @@ export interface RunnerRequest {
    * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
    */
   chatId?: string;
+  /** Main-authored Work project residency partition; never replaces chatId as a session key. */
+  workProjectId?: string | null;
   /**
    * Live tool-approval cards belong to the visible parent conversation, which
    * may differ from an internal child session's `chatId`. Main alone authors
@@ -676,6 +685,15 @@ export interface RunnerResult {
  */
 export function runnerFailureFromError(error: unknown, runtime: string): RunnerFailure {
   const message = (error instanceof Error ? error.message : String(error)).trim() || "runtime execution failed";
+  if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+    return {
+      kind: "refused",
+      message: message.slice(0, 2_000),
+      runtime,
+      source: "marker",
+      providerCode: WORK_PROJECT_RESIDENCY_BUSY_CODE,
+    };
+  }
   if (isJudgmentRefusal(error)) {
     return {
       kind: "refused",

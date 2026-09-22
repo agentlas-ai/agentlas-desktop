@@ -19,6 +19,7 @@ import { tryRecordOneDomainEvent } from "./domain-events";
 import { oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight } from "./taskforces";
 import { inspectOneAttachmentInput } from "./attachments";
+import { isGoalOwnedOneChat } from "./preflight-admission";
 import type {
   CanonicalTask,
   Chat,
@@ -111,6 +112,8 @@ export interface OneTeamPreflightDependencies {
   findTaskForChat?: typeof findCanonicalTaskForChat;
   ensureTaskForChat?: typeof ensureCanonicalTaskForChat;
   getTask?: typeof getCanonicalTask;
+  /** Read-only Goal status used to distinguish active ownership from stale terminal bindings. */
+  getGoalStatus?: (goalId: string) => string | null | undefined;
   setTaskStatus?: typeof setCanonicalTaskStatus;
   hasRunReceipt?: typeof hasInvocationRunReceipt;
   /** Test-only crash seam after the durable reservation CAS. */
@@ -146,10 +149,22 @@ export class OneTeamPreflightError extends Error {
       | "already_resolved"
       | "recovery_required",
     message: string,
+    readonly diagnostic?: OneTeamPreflightBindingDiagnostic,
   ) {
     super(message);
     this.name = "OneTeamPreflightError";
   }
+}
+
+/** Content-free evidence for diagnosing a stale admission binding. Never
+ * include the user prompt or runtime source/path in this diagnostic. */
+export interface OneTeamPreflightBindingDiagnostic {
+  chatId: string;
+  expectedTaskId: string | null;
+  expectedTaskVersion: number | null;
+  currentTaskId: string | null;
+  currentTaskVersion: number | null;
+  currentTaskStatus: CanonicalTask["status"] | null;
 }
 
 function nowFor(deps: OneTeamPreflightDependencies): Date {
@@ -977,19 +992,54 @@ async function liveRuntime(
 }
 
 function validateTaskInput(input: PrepareOneTeamPreflightInput, task: CanonicalTask | null): void {
+  const stale = (message: string): never => {
+    const diagnostic: OneTeamPreflightBindingDiagnostic = {
+      chatId: input.chatId,
+      expectedTaskId: input.expectedTaskId,
+      expectedTaskVersion: input.expectedTaskVersion,
+      currentTaskId: task?.id ?? null,
+      currentTaskVersion: task?.version ?? null,
+      currentTaskStatus: task?.status ?? null,
+    };
+    // Keep the renderer contract content-free while leaving structured
+    // evidence in Main logs for a future reproduction. In particular, do
+    // not stringify the prompt or a runtime source path here.
+    console.warn("[one-team-preflight] stale_binding", JSON.stringify(diagnostic));
+    throw new OneTeamPreflightError("stale_binding", message, diagnostic);
+  };
   if (input.expectedTaskId === null) {
-    if (input.expectedTaskVersion !== null || task) throw new OneTeamPreflightError("stale_binding", "The conversation became a Task before preflight");
+    if (input.expectedTaskVersion !== null || task) stale("The conversation became a Task before preflight");
     return;
   }
   if (
     !task
     || task.id !== input.expectedTaskId
     || input.expectedTaskVersion !== task.version
-  ) throw new OneTeamPreflightError("stale_binding", "The Task changed before team preflight");
+  ) stale("The Task changed before team preflight");
 }
 
 function taskVisibility(task: CanonicalTask): "personal" | "project" {
   return task.projectId ? "project" : "personal";
+}
+
+function goalStatusForPreflight(goalId: string): string | null | undefined {
+  try {
+    const row = getDb().prepare("SELECT status FROM long_runs WHERE goal_id = ? LIMIT 1").get(goalId) as { status?: string } | undefined;
+    return row?.status ?? null;
+  } catch {
+    // A store read failure is not proof that Goal authority is absent. The
+    // caller will fail closed and leave the Task untouched.
+    return undefined;
+  }
+}
+
+function goalOwnsChat(
+  chat: Pick<Chat, "goalId">,
+  getGoalStatus: OneTeamPreflightDependencies["getGoalStatus"],
+): boolean {
+  const goalId = chat.goalId;
+  if (typeof goalId !== "string" || !goalId.trim() || goalId.trim() === "pending") return false;
+  return isGoalOwnedOneChat(goalId, (getGoalStatus ?? goalStatusForPreflight)(goalId));
 }
 
 export async function prepareOneTeamPreflight(
@@ -1027,6 +1077,23 @@ export async function prepareOneTeamPreflight(
   if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
     return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
   }
+  const readChat = deps.getChat ?? getChat;
+  const initialChat = readChat(input.chatId);
+  if (!initialChat) throw new OneTeamPreflightError("stale_binding", "The One conversation no longer exists");
+  // Goal-owned chats have a separate Main admission path. Do not let a slow
+  // staffing judgement turn the Goal's canonical Task into a team decision;
+  // the normal invocation admission below will perform the Goal CAS/steer
+  // transition exactly once.
+  if (goalOwnsChat(initialChat, deps.getGoalStatus)) {
+    const goalStatus = (deps.getGoalStatus ?? goalStatusForPreflight)(initialChat.goalId as string);
+    console.warn("[one-team-preflight] goal_owned_bypass", JSON.stringify({
+      chatId: initialChat.id,
+      goalId: initialChat.goalId,
+      goalStatus: goalStatus ?? "unavailable",
+      reason: "goal_admission_owns_task_routing",
+    }));
+    return { kind: "not_required" };
+  }
   const teamNeed = await resolveOneTeamNeed(
     input.userPrompt,
     deps,
@@ -1037,11 +1104,27 @@ export async function prepareOneTeamPreflight(
   if (!teamNeed.needed) return { kind: "not_required" };
   const reasons = teamNeed.reasons;
   recoverReservations(deps);
-  const readChat = deps.getChat ?? getChat;
   const chat = readChat(input.chatId);
   if (!chat) throw new OneTeamPreflightError("stale_binding", "The One conversation no longer exists");
+  // The Goal may have been attached while the model was judging staffing.
+  // Re-read at the mutation boundary and preserve the Goal-owned route.
+  if (goalOwnsChat(chat, deps.getGoalStatus)) {
+    const goalStatus = (deps.getGoalStatus ?? goalStatusForPreflight)(chat.goalId as string);
+    console.warn("[one-team-preflight] goal_owned_bypass", JSON.stringify({
+      chatId: chat.id,
+      goalId: chat.goalId,
+      goalStatus: goalStatus ?? "unavailable",
+      reason: "goal_attached_during_staffing_judgement",
+    }));
+    return { kind: "not_required" };
+  }
   const findTask = deps.findTaskForChat ?? findCanonicalTaskForChat;
   const existingTask = findTask(chat.id);
+  // Keep Main's stale-binding guard strict. The renderer may rebind once from
+  // a fresh Task projection, but Main must not turn an old null binding into a
+  // new waiting-decision mutation while a Goal or another invocation owns the
+  // same Task. The diagnostic below makes that boundary observable without
+  // weakening it.
   validateTaskInput(input, existingTask);
   const promptDigest = sha256(input.userPrompt);
   const existing = readStore().state.proposals.find((record) =>
@@ -1083,6 +1166,13 @@ export async function prepareOneTeamPreflight(
   const db = getDb();
   const persist = db.transaction(() => {
     const { state, raw } = readStore(db);
+    // The chat binding and the proposal/task mutation share this SQLite
+    // transaction. If Goal ownership arrived after the async judgement but
+    // before this write, abort the team path without touching the Task.
+    const currentChat = readChat(chat.id);
+    if (currentChat && goalOwnsChat(currentChat, deps.getGoalStatus)) {
+      return { skipForGoal: true as const };
+    }
     const duplicate = state.proposals.find((item) =>
       item.proposal.binding.chatId === chat.id
       && item.proposal.binding.promptDigest === promptDigest
@@ -1172,6 +1262,7 @@ export async function prepareOneTeamPreflight(
     return { proposal, waitingTask, created: true as const };
   });
   const persisted = persist.immediate();
+  if (persisted.skipForGoal) return { kind: "not_required" };
   const { proposal, waitingTask } = persisted;
   if (!persisted.created) return { kind: "proposal", proposal };
   const standingStaffGuidance = oneOrgExecutionGuidance(requestedAgentIds);

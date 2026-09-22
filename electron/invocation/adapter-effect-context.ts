@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { captureScienceToolCorrelation, type ScienceToolCorrelation } from "./science-failure-settlement";
 
 export interface AdapterEffectReport {
   schemaVersion: "agentlas.adapter-effect-coverage.v1";
@@ -20,11 +21,25 @@ export interface AdapterEffectAdmission {
 }
 interface Scope {
   runId: string; chatId: string; rootAgentId: string | null;
+  source?: string;
+  nativeScienceTool?: (binding: ScienceToolCorrelation) => void;
   purpose?: "preparation";
   begin: (admission: AdapterEffectAdmission) => void;
   finish: (scopeId: string, report: AdapterEffectReport) => void;
 }
 const context = new AsyncLocalStorage<Scope>();
+
+/** Capture at dispatch; resident callbacks must not borrow another ALS turn.
+ * Nested/preparation/non-Science adapters cannot supply root correlation. */
+export function bindScienceNativeToolObserver(input: { chatId?: string; agentId?: string }): (item: unknown) => void {
+  const scope = context.getStore();
+  if (!scope || scope.source !== "science" || scope.purpose === "preparation" || !scope.rootAgentId
+    || input.chatId !== scope.chatId || input.agentId !== scope.rootAgentId) return () => {};
+  return item => {
+    const binding = captureScienceToolCorrelation(scope.runId, scope.chatId, item);
+    if (binding) scope.nativeScienceTool?.(binding);
+  };
+}
 
 /** Only Main enters this scope. Providers cannot select a run or borrow another run's receipt. */
 export function withAdapterEffectContext<T>(scope: Scope, action: () => T): T { return context.run(scope, action); }

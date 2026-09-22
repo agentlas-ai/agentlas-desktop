@@ -6,6 +6,7 @@ import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
+import { ContinuityStatus } from "./ContinuityStatus";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
@@ -73,6 +74,35 @@ import { ToolApprovalInline } from "@/components/ToolApprovalInline";
  */
 const WORK_COMPOSER_WIDTH_PX = 740;
 const WORK_COMPOSER_INSET_PX = 0;
+const WORK_UNCERTAIN_ADMISSION_PREFIX = "agentlas.work-uncertain-admission.v1:";
+const workUncertainAdmissions = new Map<string, string>();
+
+function readWorkUncertainAdmission(chatId: string): string | null {
+  const live = workUncertainAdmissions.get(chatId);
+  if (live) return live;
+  try {
+    const runId = window.localStorage.getItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+    return runId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runId)
+      ? runId : null;
+  } catch { return null; }
+}
+
+function writeWorkUncertainAdmission(chatId: string, runId: string): boolean {
+  try {
+    window.localStorage.setItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`, runId);
+    workUncertainAdmissions.set(chatId, runId);
+    return true;
+  } catch { return false; }
+}
+
+function clearWorkUncertainAdmission(chatId: string, runId: string): void {
+  if (workUncertainAdmissions.get(chatId) === runId) workUncertainAdmissions.delete(chatId);
+  try {
+    if (window.localStorage.getItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`) === runId) {
+      window.localStorage.removeItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+    }
+  } catch { /* The in-memory fence remains authoritative for this renderer. */ }
+}
 import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-detail";
 import { shellWrittenPaths } from "@shared/shell-written-paths";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
@@ -2046,6 +2076,7 @@ function ChatPage() {
   const { t, locale } = useT();
   const [chat, setChat] = useState<Chat | null>(null);
   const [goalContext, setGoalContext] = useState<ChatGoalContext | null>(null);
+  const [goalContextStale, setGoalContextStale] = useState(false);
   const [agent, setAgent] = useState<InstalledAgent | null>(null);
   const [allAgents, setAllAgents] = useState<InstalledAgent[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
@@ -2135,6 +2166,7 @@ function ChatPage() {
     const chatId = chat?.id;
     const goalId = chat?.goalId;
     setGoalContext(null);
+    setGoalContextStale(false);
     if (!api || !chatId || !goalId || goalId === "pending") return;
     let cancelled = false;
     let readVersion = 0;
@@ -2146,6 +2178,7 @@ function ChatPage() {
         if (cancelled || version !== readVersion) return;
         observedRunId = context?.runId;
         setGoalContext(context);
+        setGoalContextStale(false);
       })
       .catch((cause) => {
         if (cancelled || version !== readVersion) return;
@@ -2157,6 +2190,7 @@ function ChatPage() {
          *   값은 그대로 비우되(모르는 것을 지어내지 않는다), 못 읽었다는 사실은 말한다.
          */
         setGoalContext(null);
+        setGoalContextStale(true);
         const raw = detailForUser(cause);
         setSessionNotice(locale === "ko"
           ? `목표 상태를 읽지 못했습니다${raw ? `: ${raw}` : ""}. 목표는 그대로 있을 수 있습니다 — 잠시 뒤 다시 열어 확인해 주세요.`
@@ -4386,6 +4420,44 @@ function ChatPage() {
         busy ||
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
+      const unresolvedRunId = !opts?.decisionContinuation ? readWorkUncertainAdmission(chat.id) : null;
+      if (unresolvedRunId) {
+        // A response-loss retry may have started external work. Reconcile the
+        // original Main identity; never turn the same composer text into a new
+        // run ID in this send call, including after an app restart.
+        try {
+          const admission = await api.invoke.admission(unresolvedRunId);
+          if (admission.status === "rejected" && admission.chatId === chat.id) {
+            clearWorkUncertainAdmission(chat.id, unresolvedRunId);
+            setSessionNotice(locale === "ko"
+              ? "이전 요청은 실행되지 않은 것으로 확인됐습니다. 내용을 확인하고 다시 보내세요."
+              : "The previous request was confirmed not to have started. Review it before sending again.");
+            return false;
+          }
+          if (admission.status === "admitted" && admission.chatId === chat.id) {
+            const receipt = await api.invoke.receipt(unresolvedRunId);
+            if (receipt?.runId === unresolvedRunId && receipt.chatId === chat.id) {
+              clearWorkUncertainAdmission(chat.id, unresolvedRunId);
+              setSessionNotice(locale === "ko"
+                ? "이전 요청의 실행 기록을 찾았습니다. 기록을 확인하세요. 이번 전송은 실행하지 않았습니다."
+                : "The previous run was found. Review its record; this send was not executed.");
+              return false;
+            }
+          }
+          setSessionNotice(locale === "ko"
+            ? admission.status === "pending"
+              ? "이전 요청이 접수 대기 중입니다. 중복 실행을 막기 위해 새 요청을 보내지 않았습니다."
+              : "이전 요청의 실행 여부가 불확실합니다. 새 요청을 보내지 않았습니다."
+            : admission.status === "pending"
+              ? "The previous request is pending admission. No new request was sent."
+              : "The previous run is unresolved. No new request was sent.");
+        } catch {
+          setSessionNotice(locale === "ko"
+            ? "이전 요청의 실행 여부를 확인할 수 없습니다. 새 요청을 보내지 않았습니다."
+            : "The previous run could not be checked. No new request was sent.");
+        }
+        return false;
+      }
       setCancelPending(false);
       if (opts?.goalMode && chat.goalId && !goalContext?.objective) {
         // Define exactly once, before the run. `defineGoal` returns the
@@ -4569,6 +4641,7 @@ function ChatPage() {
       runServerUrlsRef.current = [];
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
       subscribeRun(runId, placeholderId);
+      let requestDispatched = false;
       try {
         if (opts?.decisionContinuation) {
           const continuationInput = {
@@ -4614,6 +4687,10 @@ function ChatPage() {
           }
         } else {
           // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
+          if (!writeWorkUncertainAdmission(chat.id, runId)) {
+            throw new Error("work_admission_fence_unavailable");
+          }
+          requestDispatched = true;
           await api.invoke.run({
             runId,
             chatId: chat.id,
@@ -4634,6 +4711,7 @@ function ChatPage() {
             stormbreakerMode: opts?.stormbreakerMode,
             runtimeSelection: chat.runtimeSelection ?? undefined,
           });
+          clearWorkUncertainAdmission(chat.id, runId);
         }
         if (!isCurrentChat()) return false;
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
@@ -4641,6 +4719,26 @@ function ChatPage() {
         return true;
       } catch (cause) {
         if (!isCurrentChat()) return false;
+        let admissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
+        if (!opts?.decisionContinuation && requestDispatched) {
+          try {
+            const admission = await api.invoke.admission(runId);
+            admissionStatus = admission.status;
+            if (admission.status === "admitted" && admission.chatId === chat.id) {
+              const receipt = await api.invoke.receipt(runId);
+              if (receipt?.runId === runId && receipt.chatId === chat.id) {
+                clearWorkUncertainAdmission(chat.id, runId);
+                setSessionNotice(locale === "ko"
+                  ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않았습니다."
+                  : "This request ID has a run record. The instruction was not resent.");
+                return true;
+              }
+            }
+            if (admission.status === "rejected" && admission.chatId === chat.id) {
+              clearWorkUncertainAdmission(chat.id, runId);
+            }
+          } catch { /* Unavailable status is uncertainty, never no-start proof. */ }
+        }
         // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
         subRef.current?.();
         subRef.current = null;
@@ -4681,7 +4779,11 @@ function ChatPage() {
               ? {
                   id: msg.id,
                   role: "system",
-                  text: startFailureText(cause, locale, hadImages),
+                  text: admissionStatus === "rejected" || !requestDispatched
+                    ? startFailureText(cause, locale, hadImages)
+                    : locale === "ko"
+                      ? "요청의 실행 여부를 아직 확인할 수 없습니다. 중복 실행을 막기 위해 재전송하지 않았습니다."
+                      : "The request's execution is unresolved. It was not resent to avoid a duplicate run.",
                 }
               : msg,
           ),
@@ -4773,7 +4875,7 @@ function ChatPage() {
             imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
             chatFiles: attachedChatFiles,
           }]);
-          await api.invoke.steer({
+          const steerReceipt = await api.invoke.steer({
             chatId: chat.id,
             userPrompt: boundText,
             steeringMode: "interrupt",
@@ -4788,6 +4890,20 @@ function ChatPage() {
             stormbreakerMode: opts?.stormbreakerMode,
             runtimeSelection: chat.runtimeSelection ?? undefined,
           });
+          if (!steerReceipt.accepted || steerReceipt.chatId !== chat.id) {
+            throw new Error("Desktop did not acknowledge steering for the active task");
+          }
+          setSessionNotice(steerReceipt.queued
+            ? steerReceipt.interruptsCurrent
+              ? (locale === "ko"
+                ? "새 지시를 저장했습니다. 현재 실행을 정리한 뒤 이어서 실행합니다."
+                : "The new instruction is saved. The current execution is being settled, then the new instruction will continue.")
+              : (locale === "ko"
+                ? "새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 실행합니다."
+                : "The new instruction is saved and will continue after the current execution settles.")
+            : (locale === "ko"
+              ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
+              : "The previous execution had already settled, so the new instruction started as a new run."));
         })().catch((cause) => {
           steerQueueRef.current = steerQueueRef.current.filter((item) => item.optimisticMessageId !== optimisticMessageId);
           setQueuedSteers(steerQueueRef.current.map((item) => item.text));
@@ -4846,8 +4962,8 @@ function ChatPage() {
       // 실행 중 변경은 지금 도는 실행(연속 패스 포함)엔 안 붙고 다음 실행부터다 — 언제 적용되는지, 바로 바꾸려면 무엇을 하는지 말한다(오너 원칙 2026-09-14).
       setSessionNotice(busy
         ? (locale === "ko"
-          ? "모델 변경을 저장했습니다. 지금 도는 실행은 시작할 때 고른 모델로 끝나고, 다음 메시지·재개부터 새 모델을 씁니다. 바로 바꾸려면 중지한 뒤 다시 보내 주세요."
-          : "Model change saved. The current run finishes with the model it started with; the next message or resume uses the new one. To switch now, stop the run and send again.")
+          ? "모델 변경을 저장했습니다. 현재 실행의 모델은 바뀌지 않습니다. 저장한 선택은 다음 새 실행부터 사용하며, Goal의 자동 재개 모델까지 바뀌었다는 뜻은 아닙니다."
+          : "Model change saved. The current run's model is unchanged. The saved selection applies to the next new run; it does not claim to change the model of an automatic Goal continuation.")
         : null);
     } catch (cause) {
       /*
@@ -5869,6 +5985,26 @@ function ChatPage() {
         const ko = locale === "ko";
         const explained = /auto_goal_resume_attempt_unsettled/.test(raw)
           ? (ko ? "중단된 작업의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The interrupted action's outcome needs confirmation first. Your goal and work history are preserved.")
+          : /goal_resume_uncertain_review_cancelled/.test(raw)
+            ? (ko ? "결과 확인을 취소했습니다. 목표는 중단 상태이며 기록은 보존됩니다." : "Outcome review was cancelled. The goal remains paused and its history is preserved.")
+          : /goal_resume_uncertain_review_changed/.test(raw)
+            ? (ko ? "확인 중 이전 실행 기록이 바뀌었습니다. 최신 Activity를 확인한 뒤 다시 시도해 주세요." : "The interrupted attempts changed during review. Inspect the latest Activity and try again.")
+          : /goal_resume_uncertain_review_required/.test(raw)
+            ? (ko ? "이전 실행의 외부 결과를 직접 확인해야 합니다. 목표는 중단 상태입니다." : "Review the interrupted attempts' external outcomes first. The goal remains paused.")
+          : /goal_resume_uncertain_review_unverifiable/.test(raw)
+            ? (ko ? "일부 시도의 Activity 호출 ID가 없어 결과 대조가 불가능할 수 있습니다. 목표와 기록은 보존되며 자동 재개하지 않습니다." : "Some attempts lack an Activity invocation ID, so their outcomes may be impossible to verify. The goal and history remain preserved without automatic resume.")
+          : /goal_resume_uncertain_review_too_large/.test(raw)
+            ? (ko ? "이 창에 개별 시도를 모두 표시할 수 없어 재개하지 않았습니다. Activity에서 확인해 주세요." : "Too many interrupted attempts to display reliably here. The goal remains paused; inspect Activity.")
+          : /goal_resume_uncertain_automation_reconciliation_required/.test(raw)
+            ? (ko ? "자동화의 외부 결과가 불확실해 재개하지 않았습니다. Activity와 실제 외부 결과를 대조해야 합니다." : "The automation was not resumed because prior external outcomes are unknown. Compare Activity with the actual external result.")
+          : /goal_legacy_lifecycle_confirmation_unavailable/.test(raw)
+            ? (ko
+              ? "저장된 요청의 지속 목표 여부를 현재 모델로 확인하지 못해 재개하지 않았습니다. 모델 연결 상태를 확인한 뒤 다시 시도해 주세요."
+              : "The current model could not confirm whether the saved request is ongoing, so the goal was not resumed. Check the model connection and try again.")
+          : /goal_legacy_lifecycle_not_ongoing/.test(raw)
+            ? (ko
+              ? "저장된 요청에서 ‘중단 지시 전까지 계속’이라는 명시적 권한을 확인하지 못했습니다. 계속하려면 대화에 지속 기간을 명시해 새 지시를 보내 주세요."
+              : "The saved request does not explicitly authorize continuing until you stop it. Send a new instruction that states the intended duration.")
           : /auto_goal_resume_chat_busy/.test(raw)
           ? (ko
             ? "이 대화가 아직 앞 요청을 돌리는 중입니다. 그 실행이 끝난 뒤 다시 이어가 주세요."
@@ -6627,6 +6763,7 @@ function ChatPage() {
         />
       </div>}
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
+      <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
           <p>{locale === "ko" ? "화면이 바뀌어 입력을 저장하지 못했습니다. 내 입력을 다시 적용하거나 최신 저장 상태를 불러오세요." : "This surface changed. Reapply your edit or load the latest saved state."}</p>
@@ -6678,6 +6815,7 @@ function ChatPage() {
           goalRunStatus={goalContext?.runStatus}
           goalPauseReason={goalContext?.pauseReason}
           goalBlockedReason={goalContext?.blockedReason}
+          goalStatusStale={goalContextStale}
           onResumeGoal={handleResumeGoal}
           onPauseGoal={handlePauseGoal}
           onEditGoal={handleEditGoal}

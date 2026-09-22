@@ -4,7 +4,7 @@ import { longRunMonetaryRefusal } from "./budget";
  */
 import type { GoalIntakeDecision, GoalCriterion, GoalSourceMessage } from "../../shared/auto-goal";
 import { admitsAutomaticGoal } from "../../shared/auto-goal";
-import { LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
+import { goalResumeRecoveryBlockerCode, LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
 import { getDb } from "../store/db";
 import { createStoredAutomaticGoal, completeChatGoalContract } from "../store/chat-goals";
 import { getChat, setChatGoalBinding } from "../store/chats";
@@ -104,6 +104,8 @@ export function controlAutomaticGoal(input: {
     if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) return run;
     if (input.command === "resume") {
       if (input.expectedVersion === undefined) throw new Error("auto_goal_resume_version_required");
+      const recoveryBlocker = goalResumeRecoveryBlockerCode(run.blockedReason);
+      if (recoveryBlocker) throw new Error(recoveryBlocker);
       finiteBudget(run.budget);
       /*
        * ★null 은 "무제한"이지 0 이 아니다. `run.cycleCount >= null` 은 자바스크립트에서

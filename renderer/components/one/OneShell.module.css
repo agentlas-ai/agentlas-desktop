@@ -873,6 +873,36 @@
   background: var(--paper);
 }
 
+.scrollToLatestButton {
+  position: absolute;
+  z-index: 28;
+  left: 50%;
+  bottom: 178px;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid var(--paper-edge);
+  border-radius: 50%;
+  background: var(--paper-raised, var(--paper));
+  box-shadow: var(--shadow-2, 0 6px 18px rgba(15, 18, 20, .16));
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.scrollToLatestButton:hover,
+.scrollToLatestButton:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--paper-edge));
+  color: var(--accent-strong, var(--accent));
+}
+
+.scrollToLatestButton:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .homeContent,
 .threadContent {
   width: min(920px, calc(100% - 48px));
@@ -1338,6 +1368,15 @@
 
 .message[data-role="user"] .messageContent {
   justify-items: end;
+}
+
+.rejectedGoalDirection {
+  max-width: min(790px, 88%);
+  margin: -2px 0 0;
+  color: var(--muted-deep);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: right;
 }
 
 .messageBody {

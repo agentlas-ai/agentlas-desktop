@@ -1,4 +1,5 @@
 import type { InvocationRunReceipt, RunEventUi } from "@shared/types";
+import { isOneSteeringInterruption } from "@shared/one-auto-recovery";
 import { projectOneActivityFromLedger, type OneActivityState } from "./one-activity";
 
 /**
@@ -32,16 +33,8 @@ export function oneRunInterruptionCause(
   receipt: InvocationRunReceipt,
   events: RunEventUi[],
 ): OneThreadRunBlock["interruptionCause"] {
-  if (receipt.status !== "interrupted") return undefined;
-  if (events.some((event) => event.runId !== receipt.runId || (event.chatId && event.chatId !== receipt.chatId))) {
-    return undefined;
-  }
-  const hasSteeringSignal = events.some((event) => event.kind === "user_steering");
-  const hasSteeringCancel = events.some((event) => (
-    event.kind === "invoke_cancel_requested" && event.payload?.reason === "steering"
-  ));
-  const hasInterruptedTerminal = events.some((event) => event.kind === "invoke_interrupted");
-  return hasSteeringSignal && hasSteeringCancel && hasInterruptedTerminal ? "steering" : undefined;
+  if (receipt.interruptionCause === "steering") return "steering";
+  return isOneSteeringInterruption(receipt, events) ? "steering" : undefined;
 }
 
 export function projectThreadRuns(

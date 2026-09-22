@@ -1,7 +1,7 @@
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
-import { getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId, getLongRunGoalRevisionBinding, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
+import { getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
+import { appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, unsettledLongRunAttemptCount, type LongRunAttemptReviewConfirmation } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -11,9 +11,12 @@ import {
   type AutomaticGoalIntentResolution,
 } from "../long-run/judged-auto-goal-intent";
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
+import type { RuntimeSelection } from "../../shared/types";
 import { resolveGoalLifecycle } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
+import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
+import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -219,6 +222,8 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (!run || run.surface === "science" || run.rootChatId !== chatId || revision.chatId !== chatId) throw new Error("auto_goal_resume_surface_mismatch");
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
+  const recoveryBlocker = goalResumeRecoveryBlockerCode(run.blockedReason);
+  if (recoveryBlocker) throw new Error(recoveryBlocker);
   if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
   if (actor === "user" ? liveLongRunAttemptCount(run.id) : unsettledLongRunAttemptCount(run.id)) {
     throw new Error("auto_goal_resume_attempt_unsettled");
@@ -242,22 +247,91 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal within its remaining budget and original permissions. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.\n\n${revision.objective}` };
+    userPrompt: `Resume the existing goal within its remaining budget and original permissions. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
+      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. First inspect Activity and the external state read-only; do not repeat previous side effects or make a new external change until the prior outcomes are reconciled. If evidence is absent, report them as unknown."
+      : ""}\n\n${revision.objective}` };
 }
 
 /** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */
-export function queueAutomaticGoalResume(chatId: string, expectedVersion: number) {
+export async function queueAutomaticGoalResume(
+  chatId: string, expectedVersion: number, confirmation?: LongRunAttemptReviewConfirmation,
+) {
+  const initialChat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
+  const initialRun = initialChat?.goal_id ? getLongRunByGoalId(initialChat.goal_id) : null;
+  if (!initialRun) throw new Error("long_run_resume_dispatch_unavailable");
+  if (initialRun.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+  if (initialRun.status !== "paused" && initialRun.status !== "blocked") {
+    throw new Error("long_run_resume_dispatch_unavailable");
+  }
+  const initialRecoveryBlocker = goalResumeRecoveryBlockerCode(initialRun.blockedReason);
+  if (initialRecoveryBlocker) throw new Error(initialRecoveryBlocker);
+  let preparedLegacy: LegacyGoalLifecyclePreparation | null = null;
+  let preparedLegacyRuntime: RuntimeSelection | null = null;
+  // Only the timer-wait refusal needs missing lifetime metadata resolved.
+  // Ordinary legacy pause/block resumes keep their prior finite semantics and
+  // must not acquire a new model/runtime dependency from the Resume button.
+  const legacy = initialRun.blockedReason === "goal_wait_ongoing_authority_required"
+    ? getLegacyGoalLifecycleSnapshot(initialRun.goalId)
+    : null;
+  if (legacy) {
+    const runtimeSelection = exactLegacyGoalLifecycleRuntimeSelection({ longRunId: initialRun.id, chatId });
+    if (!runtimeSelection) throw new Error("goal_legacy_lifecycle_confirmation_unavailable");
+    preparedLegacyRuntime = runtimeSelection;
+    preparedLegacy = await prepareLegacyGoalLifecycle({
+      goalId: initialRun.goalId,
+      longRunId: initialRun.id,
+      expectedVersion,
+      expectedStatus: initialRun.status,
+      source: { ...legacy.revision.sourceMessage },
+      runtimeSelection,
+      signal: new AbortController().signal,
+      nativeUserResume: true,
+    });
+    if (!preparedLegacy || preparedLegacy.verdict === "unavailable") {
+      throw new Error("goal_legacy_lifecycle_confirmation_unavailable");
+    }
+    if (preparedLegacy.verdict !== "ongoing") {
+      throw new Error("goal_legacy_lifecycle_not_ongoing");
+    }
+  }
   return getDb().transaction(() => {
     const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
     const before = chat?.goal_id ? getLongRunByGoalId(chat.goal_id) : null;
     if (!before) throw new Error("long_run_resume_dispatch_unavailable");
     if (before.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    // 끊긴 시도의 불확실성은 인지된 것으로 원장에 적는다 — 그 이벤트가 판번호를 올리므로 이후는 새 판번호로.
-    const { version } = acknowledgeUncertainLongRunAttempts(before.id);
+    const recoveryBlocker = goalResumeRecoveryBlockerCode(before.blockedReason);
+    if (recoveryBlocker) throw new Error(recoveryBlocker);
+    // A separate Main-owned user attestation is required for the exact
+    // unsettled attempt set. A plain Resume never implies external proof.
+    const acknowledged = acknowledgeUncertainLongRunAttempts(before.id, confirmation);
+    if (preparedLegacy) {
+      const current = getLongRun(before.id);
+      const currentSnapshot = getLegacyGoalLifecycleSnapshot(before.goalId);
+      const currentRuntime = exactLegacyGoalLifecycleRuntimeSelection({ longRunId: before.id, chatId });
+      if (!current || !currentSnapshot || currentSnapshot.payloadJson !== preparedLegacy.snapshot.payloadJson
+        || current.status !== before.status || getLongRunGoalRevisionBinding(current.id)?.revision !== currentSnapshot.revision.revision
+        || !preparedLegacyRuntime || JSON.stringify(currentRuntime) !== JSON.stringify(preparedLegacyRuntime)) {
+        throw new Error("goal_legacy_lifecycle_conflict");
+      }
+      if (preparedLegacy.verdict === "ongoing") {
+        migrateLegacyGoalLifecycle({ goalId: before.goalId,
+          expectedPayloadJson: preparedLegacy.snapshot.payloadJson, source: preparedLegacy.source, preserveRevision: true });
+      }
+      appendLongRunEvent({ runId: before.id, kind: "run.legacy_lifecycle_classified", actorKind: "host",
+        payload: { schemaVersion: "agentlas.legacy-goal-lifecycle.v1", sourceMessageId: preparedLegacy.source.messageId,
+          previousRevision: preparedLegacy.snapshot.revision.revision, revision: preparedLegacy.snapshot.revision.revision,
+          lifecycle: preparedLegacy.verdict === "ongoing" ? "ongoing" : "unchanged",
+          previousPayloadDigest: preparedLegacy.snapshotDigest, runtimeReceipt: preparedLegacy.runtimeReceipt,
+          verdict: preparedLegacy.verdict, reasonCode: preparedLegacy.reasonCode, trigger: "native-user-resume",
+          acknowledgedAttemptIds: acknowledged.attemptIds } });
+    }
+    const version = getLongRun(before.id)?.version;
+    if (!version) throw new Error("long_run_resume_dispatch_unavailable");
     const request = automaticGoalResumeRequest(chatId, version, "user");
     if (!request) throw new Error("long_run_resume_dispatch_unavailable");
     getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
       .run(new Date().toISOString(), before.goalId);
-    return { request, queued: resumeDesktopLongRunManually(before.id, version) };
+    return { request: preparedLegacyRuntime ? { ...request, runtimeSelection: preparedLegacyRuntime } : request,
+      queued: resumeDesktopLongRunManually(before.id, version) };
   })();
 }

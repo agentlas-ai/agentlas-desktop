@@ -44,7 +44,7 @@ export interface PooledProcessHandle {
 export interface AcquireOptions {
   /** true 면 idle TTL 로 죽이지 않는 상주 프로세스로 붙든다(스위퍼가 수명 관리). */
   resident?: boolean;
-  /** true 면 장기 유휴 스위퍼(sweepIdle)에서 면제한다 — One 관련 프로세스용 계약 칸. */
+  /** true 면 장기 유휴 스위퍼(sweepIdle)에서 명시적으로 면제한다. */
   reaperExempt?: boolean;
 }
 
@@ -158,7 +158,7 @@ export class WarmProcessPool {
    * ★12h 유휴 리퍼 (데몬 keepAlive 스위퍼가 주기 호출).
    *
    * 마지막 활동(반납) 후 maxIdleMs 가 지난 **유휴** 프로세스를 죽인다 — 상주(resident)로
-   * 붙든 것도 여기서는 예외가 아니다. 예외는 단 하나, reaperExempt(One 관련 상주)뿐이고,
+   * 붙든 것도 여기서는 예외가 아니다. 예외는 명시적 reaperExempt뿐이고,
    * 그마저 dispose(데몬 종료)에는 함께 죽는다. 사용 중(inUse)인 것은 절대 건드리지 않는다.
    *
    * 반환: 이번 패스에 죽인 수.

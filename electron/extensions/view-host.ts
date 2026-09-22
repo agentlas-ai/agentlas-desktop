@@ -242,6 +242,20 @@ export function sendScienceTurnEventToView(senderId: number, event: unknown): bo
   return true;
 }
 
+/** The question itself is durable in Science; this event only refreshes an open view. */
+export function notifyScienceResearcherQuestion(question: unknown): void {
+  const receipt = question && typeof question === "object" && "receipt" in question
+    ? (question as { receipt?: { projectId?: unknown; conversationId?: unknown } }).receipt : null;
+  if (typeof receipt?.projectId !== "string" || typeof receipt.conversationId !== "string") return;
+  // Other Science windows only need an invalidation signal, never the answer text.
+  const changed = { receipt: { projectId: receipt.projectId, conversationId: receipt.conversationId } };
+  for (const active of activeViews.values()) {
+    if (active.view.webContents.isDestroyed()) continue;
+    try { active.view.webContents.send("science:researcherQuestionChanged", changed); }
+    catch { /* A closing view cannot undo the durable question or answer. */ }
+  }
+}
+
 export function setScienceToolApprovalWatch(senderId: number, chatId: string | null): { ok: true } {
   const active = activeViewForSender(senderId);
   if (!active) throw new Error("science-extension-sender-not-authorized");

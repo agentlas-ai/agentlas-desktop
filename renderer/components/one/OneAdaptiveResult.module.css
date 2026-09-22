@@ -626,6 +626,7 @@
   font-weight: 680;
   cursor: pointer;
   text-align: left;
+  text-decoration: none;
 }
 
 .action small,
@@ -992,6 +993,7 @@
 .root .workflowSteps li > b,
 .root .statusPill[data-task-state="completed"],
 .root .budgetTrack span { background: var(--result-accent-soft); color: var(--result-accent); }
+.root .statusPill[data-task-state="attention"] { background: var(--warn-soft); color: var(--warn); }
 .root .artifactCard button,
 .root .documentPreview button,
 .root .action { border-color: var(--result-line); background: var(--result-panel); color: var(--result-ink); }

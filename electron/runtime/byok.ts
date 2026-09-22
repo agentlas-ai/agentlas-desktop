@@ -21,14 +21,14 @@ import {
   type LocalChatContent,
 } from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
-import { compactHistory } from "./compact";
+import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import {
   ANTHROPIC_1M_BETA,
   anthropicCompatProvider,
   type ByokBackend,
   defaultByokModel,
-  effectiveContextWindow,
+  resolveEffectiveContextWindow,
   needsLongContextToggle,
 } from "../../shared/models";
 
@@ -47,19 +47,25 @@ function byokFailure(
   return { kind, message: message.slice(0, 400), runtime: "byok", source: "marker" };
 }
 
+function byokContextFailure(req: RunnerRequest): RunnerFailure {
+  return { kind: "refused", runtime: "byok", source: "marker", providerCode: "model_context_capacity_exceeded",
+    message: req.locale === "ko"
+      ? "현재 모델의 추정 문맥 용량을 넘었습니다. 요청·지시·도구 내용은 잘라내지 않았습니다."
+      : "The request exceeds this model's estimated context capacity. Current request, instructions, and tools were not clipped." };
+}
+
 function resolveModel(backend: ByokBackend, req: RunnerRequest): string {
   return req.model?.trim() || defaultByokModel(backend) || "";
 }
 
 /**
- * 모델 결정 + 히스토리 압축을 한 번에. 압축이 일어나면 사용자에게 status를 emit하고
- * 다이제스트를 system 프롬프트에 주입한다.
- * @returns model(API id), recent(보낼 최근 메시지), system(이미 wrap된 시스템 프롬프트)
+ * Resolve the model and preserve the complete authoritative prompt. Historical
+ * excerpts are selected only after each provider has built its actual tools.
  */
 function prepareContext(
   backend: ByokBackend,
   req: RunnerRequest,
-  events: RunnerEvents,
+  _events: RunnerEvents,
 ): { model: string; recent: RunnerRequest["history"]; system: string } {
   const model = resolveModel(backend, req);
   if (!model) {
@@ -69,31 +75,14 @@ function prepareContext(
         : "No model ID is selected. Choose a live model or enter a model ID in Settings.",
     );
   }
-  const { recent, digest, droppedCount } = compactHistory(req.history, {
-    contextWindow: effectiveContextWindow(backend, model, !!req.longContext),
-    locale: req.locale,
-  });
-  if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
-  if (digest) {
-    events.onNotice?.({
-      level: "info",
-      message: tStatus(req.locale, "compacted", { n: droppedCount }),
-      i18n: {
-        ko: tStatus("ko", "compacted", { n: droppedCount }),
-        en: tStatus("en", "compacted", { n: droppedCount }),
-      },
-      code: "history-compacted",
-      display: "divider",
-    });
-  }
-  const baseSystem = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
+  const recent = req.history;
   // 서피스 게이트는 러너 공통 규칙(runner.ts cumulativeSurfaceGateText)을 따른다.
   const surfaceGateText = cumulativeSurfaceGateText(recent, req.userPrompt);
   return {
     model,
     recent,
     system: wrapSystemPrompt(
-      baseSystem,
+      req.systemPrompt,
       req.locale,
       req.permission,
       surfaceGateText,
@@ -106,6 +95,48 @@ function prepareContext(
       req.surfaceGate,
     ),
   };
+}
+
+function byokContextCapacity(backend: ByokBackend, model: string, req: RunnerRequest, events: RunnerEvents) {
+  const resolved = resolveEffectiveContextWindow(backend, model, !!req.longContext);
+  if (resolved.source === "unknown") {
+    events.onNotice?.({ level: "warning", code: "model-context-capacity-estimated",
+      message: req.locale === "ko"
+        ? "이 모델의 실제 문맥 용량을 확인하지 못해 보수적 추정치를 적용합니다."
+        : "This model's actual context capacity is unknown; using a conservative estimate." });
+  }
+  return { window: resolved.contextWindow ?? 16_000, source: resolved.source };
+}
+
+/** Re-evaluate the complete outgoing provider body on every tool turn. The
+ * callback replaces only the initial chat-history segment; later tool
+ * call/result pairs, current request, system and schemas remain untouched. */
+function byokHistoryAdmission(input: {
+  req: RunnerRequest;
+  events: RunnerEvents;
+  window: number;
+  outputReserve: number;
+  budgetState: { value: number };
+  outgoingBody: () => unknown;
+  replaceHistory: (recent: RunnerRequest["history"], digest: string) => void;
+}): boolean {
+  let estimate = estimateTransportTokens(JSON.stringify(input.outgoingBody()));
+  let historyBudget = input.budgetState.value;
+  for (let attempt = 0; attempt < 8 && estimate + input.outputReserve > input.window && input.req.history.length > 0; attempt += 1) {
+    historyBudget = Math.max(0, historyBudget - (estimate + input.outputReserve - input.window) - Math.ceil(input.window * 0.02));
+    input.budgetState.value = historyBudget;
+    const compacted = compactHistoryToBudget(input.req.history, { historyBudgetTokens: historyBudget, locale: input.req.locale });
+    if (!compacted.fits || !compacted.digest) break;
+    input.replaceHistory(compacted.recent, compacted.digest);
+    estimate = estimateTransportTokens(JSON.stringify(input.outgoingBody()));
+    if (estimate + input.outputReserve <= input.window) {
+      input.events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
+        message: input.req.locale === "ko"
+          ? `이 모델의 추정 용량에 맞춰 이전 대화 ${compacted.droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
+          : `Sent untrusted excerpts of ${compacted.droppedCount} earlier messages to fit this model's estimated context. Current request and instructions are unchanged.` });
+    }
+  }
+  return estimate + input.outputReserve <= input.window;
 }
 
 // ── SSE 라인 파서 (3개 API 공통) ──────────────────────────
@@ -252,6 +283,10 @@ async function runAnthropicMessages(
     ...(tool.function.description ? { description: tool.function.description } : {}),
     input_schema: tool.function.parameters,
   }));
+  const capacity = byokContextCapacity(backend, model, req, events);
+  const outputLimit = req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4));
+  let transmittedHistoryCount = req.history.filter((row) => row.role === "user" || row.role === "assistant").length;
+  const historyBudgetState = { value: req.history.reduce((sum, row) => sum + estimateTransportTokens(row.text) + 12, 0) };
 
   let acc = "";
   let lastEmit = 0;
@@ -269,18 +304,29 @@ async function runAnthropicMessages(
   let toolTurnsTaken = 0;
   let toolProgress = { signature: "", identicalTurns: 0 };
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
+    const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
+      messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
+      ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) });
+    if (!byokHistoryAdmission({ req, events, window: capacity.window, outputReserve: outputLimit,
+      budgetState: historyBudgetState,
+      outgoingBody,
+      replaceHistory: (recent, digest) => {
+        const next = recent.filter((row) => row.role === "user" || row.role === "assistant")
+          .map((row) => ({ role: row.role, content: row.text } as AnthropicMessage));
+        if (next[0]?.role === "user" && typeof next[0].content === "string") {
+          next[0] = { role: "user", content: `${digest}\n\n${next[0].content}` };
+        } else {
+          next.unshift({ role: "user", content: digest });
+        }
+        messages.splice(0, transmittedHistoryCount, ...next);
+        transmittedHistoryCount = next.length;
+      },
+    })) return { text: "", failure: byokContextFailure(req) };
     const resp = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers,
       signal: req.signal,
-      body: JSON.stringify({
-        model,
-        max_tokens: 8192,
-        stream: true,
-        system: systemField,
-        messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
-        ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
-      }),
+      body: JSON.stringify(outgoingBody()),
     });
 
     if (!resp.ok) {
@@ -521,6 +567,7 @@ async function runOpenAiCompletionWithMainToolLoop(
 ): Promise<RunnerResult> {
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   const { model, recent, system } = prepareContext(backend, req, events);
+  const capacity = byokContextCapacity(backend, model, req, events);
   const endpoint = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
   return runLocalOpenAiChat(
     {
@@ -532,6 +579,8 @@ async function runOpenAiCompletionWithMainToolLoop(
       headers: { authorization: `Bearer ${key}` },
       providerLabel,
       model,
+      estimatedContextWindow: capacity.window,
+      estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4)),
       unreachableMessage: `${providerLabel} API unreachable`,
     },
     openAiMessages(recent, system, req),
@@ -686,6 +735,10 @@ export const runGoogleByok: Runner = async (
     // outside its narrowed Schema representation.
     parametersJsonSchema: tool.function.parameters,
   }));
+  const capacity = byokContextCapacity("google", model, req, events);
+  const outputLimit = req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4));
+  let transmittedHistoryCount = req.history.filter((row) => row.role === "user" || row.role === "assistant").length;
+  const historyBudgetState = { value: req.history.reduce((sum, row) => sum + estimateTransportTokens(row.text) + 12, 0) };
   let acc = "";
   let lastEmit = 0;
   let reachedAnswer = false;
@@ -694,11 +747,26 @@ export const runGoogleByok: Runner = async (
   let responseIndex = 0;
 
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
-    const requestBody = {
+    const outgoingBody = () => ({
       systemInstruction: { parts: [{ text: system }] },
       contents,
+      generationConfig: { maxOutputTokens: outputLimit },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
-    };
+    });
+    if (!byokHistoryAdmission({ req, events, window: capacity.window, outputReserve: outputLimit,
+      budgetState: historyBudgetState,
+      outgoingBody,
+      replaceHistory: (recent, digest) => {
+        const next = recent.filter((row) => row.role === "user" || row.role === "assistant")
+          .map((row) => ({ role: row.role === "user" ? "user" as const : "model" as const,
+            parts: [{ text: row.text }] }));
+        if (next[0]?.role === "user") next[0].parts[0].text = `${digest}\n\n${next[0].parts[0].text}`;
+        else next.unshift({ role: "user", parts: [{ text: digest }] });
+        contents.splice(0, transmittedHistoryCount, ...next);
+        transmittedHistoryCount = next.length;
+      },
+    })) return { text: "", failure: byokContextFailure(req) };
+    const requestBody = outgoingBody();
     let resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -715,7 +783,7 @@ export const runGoogleByok: Runner = async (
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
-        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents }),
+        body: JSON.stringify(outgoingBody()),
       });
     }
     if (!resp.ok) {

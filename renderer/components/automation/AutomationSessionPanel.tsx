@@ -11,6 +11,7 @@ import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc
 import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
+import { AutomationStrategyPanel } from "./AutomationStrategyPanel";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
 import type {
   AutomationExecutionPermission,
@@ -617,6 +618,7 @@ export function AutomationSessionPanel({
       </header>
       ) : null}
 
+      <AutomationStrategyPanel automationId={automationId} locale={locale} />
       <div className="automation-session-stream" ref={scrollRef}>
         {messages.map((message) => {
           // ★내부 질문 프로토콜(<<agentlas-ask>> JSON)이 원문 그대로 보였다(실측 항목 17).

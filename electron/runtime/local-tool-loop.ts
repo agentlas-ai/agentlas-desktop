@@ -1,6 +1,8 @@
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
+import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof } from "../long-run/file-proof";
+import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE_COLLECTION_TOOLS } from "./science-collection-boundary";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
 //
 // claude-code/codex는 CLI 서브프로세스가 자체 tool-calling 루프를 갖고 있어서 우리는
@@ -172,7 +174,9 @@ export async function loadMainToolInventory(
   signal?: AbortSignal,
   browserOnly = false,
   canBrowserDownload = false,
+  scienceCollectionCapability?: object,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
+  const collectionBinding = scienceCollectionCapability ? assertScienceCollectionCapability(scienceCollectionCapability, mcpConfigPath) : undefined;
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
   // These imports deliberately live inside the tool-admission path. An
@@ -185,7 +189,7 @@ export async function loadMainToolInventory(
 
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
-  if ((workspaceRoot && !browserOnly) || canBrowserDownload) {
+  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload)) {
     for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload })) {
       if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download") continue;
       tools.push(def);
@@ -200,6 +204,7 @@ export async function loadMainToolInventory(
   if (!mcpConfigPath) return { tools, byName };
   const admitted = preparedMcpBindings(mcpConfigPath);
   for (const prepared of admitted) {
+    if (collectionBinding && prepared !== collectionBinding) throw new Error("science_collection_server_identity_changed");
     signal?.throwIfAborted();
     const key = prepared.configKey;
     const server = prepared.server;
@@ -219,6 +224,7 @@ export async function loadMainToolInventory(
     if (!status.connected) continue;
     if (new Set(status.tools.map(tool => tool.name)).size !== status.tools.length) throw new Error("mcp_tool_inventory_duplicate_name");
     for (const tool of status.tools) {
+      if (collectionBinding && !SCIENCE_COLLECTION_TOOLS.includes(tool.name)) continue;
       const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
       const safeTool = tool.name.replace(/[^a-zA-Z0-9_-]/g, "_");
       let name = `mcp__${safeKey}__${safeTool}`.slice(0, 128);
@@ -294,6 +300,7 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
+  scienceCollectionCapability?: object;
   planMode?: true;
   runtimeKind: string;
   sessionKey: string;
@@ -325,8 +332,17 @@ export async function prepareMainToolLoop(
   req: RunnerRequest,
   runtimeKind: string,
 ): Promise<MainToolLoopContext> {
+  const collection = req.scienceCollectionCapability;
+  if (collection) {
+    assertScienceCollectionCapability(collection, req.mcpConfigPath);
+    if (runtimeKind !== "byok") throw new Error("science_collection_transport_unsupported");
+    if (req.history.length || req.planMode || req.workforceRuntimeToolGrant || req.untrustedNoTools) {
+      throw new Error("science_collection_isolated_request_required");
+    }
+  }
   const { tools: eagerTools, byName } = req.untrustedNoTools
     ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
+    : collection ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false, collection)
     : await (async () => {
         // Tool-surface discovery lives inside this branch so the Main-authored
         // untrusted boundary cannot initialize tool implementations or MCP.
@@ -347,7 +363,7 @@ export async function prepareMainToolLoop(
   //   (list→prepare→call 세 홉)는 큰 모델용 간접층인데, 격리 앱 실측(Qwen3-4B, 2026-09-13)에서 모델이
   //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
   //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
-  const indirectToolSurface = !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local";
+  const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local";
   const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, indirectToolSurface);
   return {
     tools,
@@ -356,6 +372,7 @@ export async function prepareMainToolLoop(
       ? { broker: new MainWorkforceBroker(req, runtimeKind, mainToolBrokerInventory(tools, byName)) }
       : {}),
     approval: {
+      ...(collection ? { scienceCollectionCapability: collection } : {}),
       ...(req.planMode ? { planMode: true as const } : {}),
       runtimeKind,
       sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
@@ -437,6 +454,7 @@ export async function runMainToolDispatch(
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
   try {
+    if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, byName.get(call.toolName));
     if (call.toolName === CODE_MODE_TOOL) {
       if (broker) throw new Error("code_mode_broker_not_supported");
       const result = await runMainCodeMode(byName, call.arguments, events, approval, runMainToolDispatch);
@@ -540,7 +558,11 @@ export async function runMainToolDispatch(
     ? { tool: call.toolName, target: preparedMcpConsentResource(resolved.prepared, resolved.server),
         schema: resolved.schemaDigest, arguments: args }
     : { tool: call.toolName, builtin: resolved.builtinName, arguments: args };
-  if ((await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin)) === "deny") {
+  // The Main-issued collection grant is already exact, unattended consent for
+  // these three Science actions, including the bounded source-record write.
+  const collectionDecision = approval.scienceCollectionCapability ? "allow_once" as const : null;
+  if (collectionDecision) actionApproval.onApprovalDecision?.(collectionDecision);
+  if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
     events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);
@@ -551,6 +573,7 @@ export async function runMainToolDispatch(
     };
   }
   approval.signal?.throwIfAborted();
+  if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, resolved);
   if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
@@ -630,7 +653,7 @@ export async function runMainToolDispatch(
     });
     if (!result) throw new Error("mcp_tool_result_unavailable");
     const text = result?.text ?? "";
-    const images = result.isError ? [] : result.images;
+    const images = result.isError || approval.scienceCollectionCapability ? [] : result.images;
     // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
     // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
     // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
@@ -836,6 +859,14 @@ export interface RunLocalOpenAiChatOptions {
   chatTemplateKwargs?: Record<string, boolean | number | string>;
   /** Main resident receipt, present only for managed llama.cpp. */
   contextWindow?: number;
+  /** Non-tokenizer API estimate from the selected model catalog (or a labelled
+   * conservative fallback). Exact managed-local measurement uses contextWindow. */
+  estimatedContextWindow?: number;
+  estimatedOutputReserve?: number;
+  capacitySource?: "built-in" | "catalog" | "unknown";
+  /** Managed local only: exact-tokenizer overflow may excerpt historical turns
+   * and retry. The current request, instructions, tools and results stay intact. */
+  dynamicHistoryCompaction?: true;
   /**
    * Same system prompt without the optional keyword-gated Surface protocol. Used once,
    * only when the measured request does not fit; the swap is reported as a notice.
@@ -921,6 +952,42 @@ export async function runLocalOpenAiChat(
       });
     }
   }
+  const historicalEntries = req.history.filter((entry) => entry.role === "user" || entry.role === "assistant");
+  const historyStartIndex = 1 + (tools.length > 0 && req.cwd ? 1 : 0);
+  // Only splice the slice we can prove came from req.history. A future
+  // adapter may insert another protected message here; fail closed instead
+  // of treating that message (or the current turn) as disposable history.
+  const canCompactInitialHistory = historicalEntries.every((entry, index) => {
+    const row = messages[historyStartIndex + index];
+    return row?.role === entry.role && row.content === entry.text;
+  });
+  let transmittedHistoryCount = historicalEntries.length;
+  let historyBudgetTokens = historicalEntries.reduce((sum, entry) => sum + estimateTransportTokens(entry.text) + 12, 0);
+  let historyCompactionReported = false;
+  const applyHistoricalBudget = (budget: number): number | null => {
+    if (!canCompactInitialHistory) return null;
+    const compacted = compactHistoryToBudget(historicalEntries, { historyBudgetTokens: budget, locale: req.locale });
+    if (!compacted.fits || !compacted.digest) return null;
+    messages.splice(historyStartIndex, transmittedHistoryCount,
+      { role: "user", content: compacted.digest },
+      ...compacted.recent.map((entry) => ({ role: entry.role, content: entry.text } as ChatMessage)));
+    transmittedHistoryCount = compacted.recent.length + 1;
+    return compacted.droppedCount;
+  };
+  const reportHistoryCompaction = (droppedCount: number): void => {
+    if (historyCompactionReported) return;
+    historyCompactionReported = true;
+    events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
+      message: req.locale === "ko"
+        ? `이 모델의 용량에 맞춰 이전 대화 ${droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
+        : `Sent untrusted excerpts of ${droppedCount} earlier messages to fit this model's context. Current request and instructions are unchanged.` });
+  };
+  if (opts.capacitySource === "unknown") {
+    events.onNotice?.({ level: "warning", code: "model-context-capacity-estimated",
+      message: req.locale === "ko"
+        ? "이 모델의 실제 문맥 용량을 확인하지 못해 보수적 추정치를 적용합니다."
+        : "This model's actual context capacity is unknown; using a conservative estimate." });
+  }
   let finalText = "";
   let sawAnyToolCall = false;
   let summaryTurnRequested = false;
@@ -942,6 +1009,9 @@ export async function runLocalOpenAiChat(
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+            ...(opts.estimatedContextWindow !== undefined
+              ? { max_tokens: opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4)) }
+              : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
              * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
@@ -965,6 +1035,26 @@ export async function runLocalOpenAiChat(
                 }
               : {}),
         };
+    if (opts.estimatedContextWindow !== undefined) {
+      const window = opts.estimatedContextWindow;
+      const reserve = opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(window / 4));
+      let inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
+      for (let attempt = 0; attempt < 8 && inputEstimate + reserve > window
+        && historicalEntries.length > 0; attempt += 1) {
+        historyBudgetTokens = Math.max(0, historyBudgetTokens - (inputEstimate + reserve - window) - Math.ceil(window * 0.02));
+        const droppedCount = applyHistoricalBudget(historyBudgetTokens);
+        if (droppedCount === null) break;
+        inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
+        if (inputEstimate + reserve <= window) reportHistoryCompaction(droppedCount);
+      }
+      if (inputEstimate + reserve > window) {
+        return { text: "", failure: { kind: "refused", runtime: runtimeKind, source: "marker",
+          providerCode: "model_context_capacity_exceeded",
+          message: req.locale === "ko"
+            ? "현재 모델의 추정 문맥 용량을 넘었습니다. 요청·지시·도구 내용은 잘라내지 않았습니다."
+            : "The request exceeds this model's estimated context capacity. Current request, instructions, and tools were not clipped." } };
+      }
+    }
     if (opts.contextWindow !== undefined) {
       try {
         let measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
@@ -987,6 +1077,25 @@ export async function runLocalOpenAiChat(
                 en: "The Surface builder guide was left out of this turn to fit the model context. Your request, history and instructions are unchanged.",
               },
             });
+          }
+        }
+        // The actual template includes this turn's tool schemas, response schema,
+        // prior tool-call/result pairs and protected prompt. Shrink only the
+        // original historical slice, then measure the entire body again.
+        for (let attempt = 0; attempt < 16 && opts.dynamicHistoryCompaction
+          && historicalEntries.length > 0
+          && ( !measured.fits || (req.maxOutputTokens ?? 0) > measured.maxOutputTokens ); attempt += 1) {
+          const requiredOutput = Math.max(measured.reserveTokens, req.maxOutputTokens ?? 0);
+          const overage = Math.max(1, requiredOutput - measured.maxOutputTokens);
+          // A token may span several UTF-8 bytes. Shrink the byte envelope
+          // aggressively, then let the exact tokenizer decide; never loop
+          // indefinitely on a small positive token overage.
+          historyBudgetTokens = Math.max(0, historyBudgetTokens - overage * 8 - Math.ceil(opts.contextWindow * 0.02));
+          const droppedCount = applyHistoricalBudget(historyBudgetTokens);
+          if (droppedCount === null) break;
+          measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+          if (!historyCompactionReported && measured.fits && (req.maxOutputTokens ?? 0) <= measured.maxOutputTokens) {
+            reportHistoryCompaction(droppedCount);
           }
         }
         if (!measured.fits) return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};

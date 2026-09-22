@@ -1,4 +1,22 @@
-import type { InvocationRunReceipt } from "./types";
+import type { InvocationRunReceipt, RunEventUi } from "./types";
+
+/**
+ * Exact durable evidence that an interrupted run was replaced by a person's
+ * new direction. This remains closed-form: an unexplained interruption is
+ * still eligible for the normal recovery judgment.
+ */
+export function isOneSteeringInterruption(
+  receipt: Pick<InvocationRunReceipt, "runId" | "chatId" | "status">,
+  events: ReadonlyArray<Pick<RunEventUi, "runId" | "chatId" | "kind" | "payload">>,
+): boolean {
+  if (receipt.status !== "interrupted") return false;
+  if (events.some((event) => event.runId !== receipt.runId || (event.chatId && event.chatId !== receipt.chatId))) {
+    return false;
+  }
+  return events.some((event) => event.kind === "user_steering")
+    && events.some((event) => event.kind === "invoke_cancel_requested" && event.payload?.reason === "steering")
+    && events.some((event) => event.kind === "invoke_interrupted");
+}
 
 /**
  * One finishes what the user asked for. A run that stops short is One's own
@@ -107,13 +125,18 @@ export function oneRunFailureFingerprint(
  * `null` means "nothing decidable from form alone — ask the judge".
  */
 export function oneAutoRecoveryFormGate(input: {
-  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission">;
+  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission" | "interruptionCause">;
   attemptsSpent: number;
   previousFingerprint?: OneRunFailureFingerprint | null;
   currentFingerprint: OneRunFailureFingerprint;
   maxAttempts?: number;
 }): OneAutoRecoveryDecision | null {
   const status = input.receipt.status;
+  // Steering is a deliberate replacement, not a failed attempt to route
+  // around. The receipt is set only from the exact ledger sequence above.
+  if (input.receipt.interruptionCause === "steering") {
+    return { retry: false, reason: "settled" };
+  }
   // An explicit stop is an instruction, not a failure to route around.
   if (status === "cancelled") return { retry: false, reason: "stopped-by-user" };
   if (status !== "failed" && status !== "interrupted") {
