@@ -14,7 +14,6 @@ import { desktopAliveClock } from "./alive-clock";
  *
  * 부팅 때 한 번 installScienceHost() 를 부르면 그 뒤로는 사이언스가 알아서 쓴다.
  */
-import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -25,7 +24,7 @@ import { projectScienceLoopLongRun } from "./long-run/science-projection";
 
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "./runtime/exec";
 import { resolveManagedNodeRuntime } from "./runtime/managed-node";
-import { userDataPath } from "./runtime-paths";
+import { isPackagedRuntime, runtimeResourcesPath, userDataPath } from "./runtime-paths";
 import { currentUiLocale } from "./ui-locale";
 import { ensureScienceRuntimeChat, latestDurableAssistantMessage, setChatRuntimeSelection } from "./store/chats";
 import { getMeta, setMeta } from "./store/meta";
@@ -172,7 +171,7 @@ export function installDesktopScienceHost(): void {
     resolveExactVerifiedScienceRendererExecutor,
     resolveExactVerifiedScienceRendererExecutorBinding,
     // OS 권한이 필요한 넷
-    isPackagedHost: () => app.isPackaged,
+    isPackagedHost: isPackagedRuntime,
     renderManuscriptPdf, resolveTectonic,
     readPersistedScienceWorkbook, persistedWorkbookReadback,
     /*
@@ -189,8 +188,9 @@ export function installDesktopScienceHost(): void {
      *   **안에** 있는지까지 확인한다.
      */
     sciencePluginRoot: () => {
-      const packaged = process.resourcesPath
-        ? path.join(process.resourcesPath, "app.asar.unpacked", "dist", "plugins")
+      const resources = runtimeResourcesPath();
+      const packaged = resources
+        ? path.join(resources, "app.asar.unpacked", "dist", "plugins")
         : null;
       const compiled = path.resolve(__dirname, "plugins");
       const source = path.resolve(__dirname, "..", "..", "plugins");

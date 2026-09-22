@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
-import { app, net } from "electron";
-import { userDataPath } from "../runtime-paths";
+import { net } from "electron";
+import { electronAppVersion, isPackagedRuntime, optionalElectronAppPath, runtimeResourcesPath, userDataPath } from "../runtime-paths";
 import type {
   ProductExtensionInstallReceipt,
   ProductExtensionStatus,
@@ -89,7 +89,7 @@ class SciencePackageError extends Error {
 }
 
 function qaRemoteSourceEnabled(): boolean {
-  return !app.isPackaged && process.env[SCIENCE_QA_REMOTE_SOURCE_FLAG] === "1";
+  return !isPackagedRuntime() && process.env[SCIENCE_QA_REMOTE_SOURCE_FLAG] === "1";
 }
 
 function usesRemotePackageSource(): boolean {
@@ -156,7 +156,7 @@ async function downloadArchive(
   timer.unref?.();
   let fd: number | null = null;
   try {
-    const response = await net.fetch(url.toString(), {
+    const response = await (net?.fetch ? net.fetch.bind(net) : globalThis.fetch)(url.toString(), {
       cache: "no-store",
       redirect: "error",
       signal: controller.signal,
@@ -361,7 +361,7 @@ interface ScienceSuiteActivation {
 }
 
 function remoteCatalogInstallEnabled(): boolean {
-  if (app.isPackaged) return true;
+  if (isPackagedRuntime()) return true;
   const override = process.env.AGENTLAS_SCIENCE_REMOTE_INSTALL_QA;
   if (override === "1") return true;
   if (override === "0") return false;
@@ -376,7 +376,7 @@ async function catalogSuite(): Promise<{
   suiteVersion: string;
   specs: ReadonlyArray<CatalogScienceSuiteSpec>;
 }> {
-  const catalog = await fetchScienceReleaseCatalog(app.isPackaged);
+  const catalog = await fetchScienceReleaseCatalog(isPackagedRuntime());
   const specs = SCIENCE_SUITE_SPECS.map((fallback) => {
     const component = catalog.components.find((candidate) => candidate.id === fallback.id);
     if (!component) throw new Error("science-catalog-component-missing");
@@ -389,7 +389,7 @@ async function catalogSuite(): Promise<{
 }
 
 function scienceExtensionRootDir(): string {
-  const qaRoot = !app.isPackaged ? process.env.AGENTLAS_PRODUCT_EXTENSION_ROOT_DIR?.trim() : "";
+  const qaRoot = !isPackagedRuntime() ? process.env.AGENTLAS_PRODUCT_EXTENSION_ROOT_DIR?.trim() : "";
   if (qaRoot && !path.isAbsolute(qaRoot)) throw new Error("product-extension-qa-root-must-be-absolute");
   return qaRoot || path.join(os.homedir(), ".agentlas", "extensions");
 }
@@ -505,9 +505,11 @@ function catalogFailure(error: unknown, suite: boolean): ProductExtensionInstall
 }
 
 function policyCandidates(): string[] {
-  return app.isPackaged
-    ? [path.join(process.resourcesPath, "product-extension-signing-policy.json")]
-    : [path.join(process.cwd(), "build-resources", "product-extension-signing-policy.json")];
+  if (isPackagedRuntime()) {
+    const resources = runtimeResourcesPath();
+    return resources ? [path.join(resources, "product-extension-signing-policy.json")] : [];
+  }
+  return [path.join(optionalElectronAppPath() || process.cwd(), "build-resources", "product-extension-signing-policy.json")];
 }
 
 const PRODUCT_EXTENSION_SIGNING_POLICY_SCHEMA = "agentlas.product-extension-signing-policy.v1";
@@ -554,7 +556,7 @@ function validatedTrustedPublicKeys(value: unknown, allowBare: boolean): Record<
 }
 
 function trustedPublicKeys(): Record<string, string> {
-  if (!app.isPackaged && process.env.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON) {
+  if (!isPackagedRuntime() && process.env.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON) {
     try {
       const value = JSON.parse(process.env.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON);
       return validatedTrustedPublicKeys(value, true);
@@ -582,7 +584,7 @@ function installer(): ProductExtensionInstaller {
   cachedInstaller = new ProductExtensionInstaller({
     rootDir: scienceExtensionRootDir(),
     dataRootDir: userDataPath("extensions"),
-    desktopVersion: app.getVersion(),
+    desktopVersion: electronAppVersion(),
     trustedPublicKeys: trustedPublicKeys(),
   });
   return cachedInstaller;
@@ -651,27 +653,27 @@ export function activeScienceExtension() {
 }
 
 export function scienceRendererPackStatuses() {
-  return new ScienceRendererRegistry(installer(), app.getVersion()).listStatuses();
+  return new ScienceRendererRegistry(installer(), electronAppVersion()).listStatuses();
 }
 
 export function resolveVerifiedScienceRenderer(rendererId: string, artifactKind: string) {
   if (!remoteSuiteActivationMatches()) return null;
-  return new ScienceRendererRegistry(installer(), app.getVersion()).resolveVerifiedPackage(rendererId, artifactKind);
+  return new ScienceRendererRegistry(installer(), electronAppVersion()).resolveVerifiedPackage(rendererId, artifactKind);
 }
 
 export function resolveExactVerifiedScienceRenderer(binding: ScienceRendererBinding, artifactKind: string) {
   if (!remoteSuiteActivationMatches()) return null;
-  return new ScienceRendererRegistry(installer(), app.getVersion()).resolveExactVerifiedPackage(binding, artifactKind);
+  return new ScienceRendererRegistry(installer(), electronAppVersion()).resolveExactVerifiedPackage(binding, artifactKind);
 }
 
 export function resolveVerifiedScienceRendererExecutor(rendererId: string, artifactKind: string, executorId: string) {
   if (!remoteSuiteActivationMatches()) return null;
-  return new ScienceRendererRegistry(installer(), app.getVersion()).resolveVerifiedExecutor(rendererId, artifactKind, executorId);
+  return new ScienceRendererRegistry(installer(), electronAppVersion()).resolveVerifiedExecutor(rendererId, artifactKind, executorId);
 }
 
 export function resolveExactVerifiedScienceRendererExecutor(binding: ScienceRendererBinding, artifactKind: string, executorId: string) {
   if (!remoteSuiteActivationMatches()) return null;
-  return new ScienceRendererRegistry(installer(), app.getVersion()).resolveExactVerifiedExecutor(binding, artifactKind, executorId);
+  return new ScienceRendererRegistry(installer(), electronAppVersion()).resolveExactVerifiedExecutor(binding, artifactKind, executorId);
 }
 
 export function resolveExactVerifiedScienceRendererExecutorBinding(
@@ -680,7 +682,7 @@ export function resolveExactVerifiedScienceRendererExecutorBinding(
   artifactKind: string,
 ) {
   if (!remoteSuiteActivationMatches()) return null;
-  return new ScienceRendererRegistry(installer(), app.getVersion())
+  return new ScienceRendererRegistry(installer(), electronAppVersion())
     .resolveExactVerifiedExecutorBinding(rendererBinding, executorBinding, artifactKind);
 }
 
@@ -935,7 +937,7 @@ async function installScienceSuiteOnce(
   let sources: Array<{ spec: typeof SCIENCE_SUITE_SPECS[number]; source: string }> = [];
   try {
     if (usesRemotePackageSource()) {
-      remoteRoot = fs.mkdtempSync(path.join(app.getPath("temp"), "agentlas-science-suite-"));
+      remoteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-science-suite-"));
       for (let index = 0; index < SCIENCE_SUITE_SPECS.length; index += 1) {
         const spec = SCIENCE_SUITE_SPECS[index];
         const componentRoot = path.join(remoteRoot, `${index}-${spec.id}`);
@@ -1168,7 +1170,7 @@ export function uninstallScienceExtension(): ProductExtensionUninstallReceipt {
 }
 
 export function resetScienceExtensionInstallerForTests(): void {
-  if (app.isPackaged) return;
+  if (isPackagedRuntime()) return;
   cachedInstaller = null;
   activeScienceSuiteInstall = null;
 }

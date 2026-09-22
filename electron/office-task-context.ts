@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { app } from "electron";
+import { userDataDir } from "./runtime-paths";
 import type { OfficeTaskContextRequest, OfficeTaskContextReceipt } from "../shared/office-task-context";
 import type { OfficeTaskSelection } from "../shared/office-document";
 import { getDb } from "./store/db";
@@ -127,7 +127,7 @@ export function officeTaskContextForInvocation(chatId: string): string | null {
   let sourcePath: string;
   try {
     const file = verifiedSelectionFile(chatId, context.selection);
-    let directory = fs.realpathSync.native(app.getPath("userData"));
+    let directory = fs.realpathSync.native(userDataDir());
     for (const part of ["generated-assets", "office-selected", createHash("sha256").update(chatId).digest("hex"), file.sha256]) {
       directory = path.join(directory, part);
       try { fs.mkdirSync(directory, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }

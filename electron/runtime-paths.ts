@@ -17,6 +17,36 @@ import path from "node:path";
 
 let injectedUserDataDir: string | null = null;
 
+interface RuntimeAppMetadata {
+  version: string;
+  isPackaged: boolean;
+  appPath: string | null;
+  resourcesPath: string | null;
+}
+
+/** Desktop passes its app metadata to Node-mode hosts, which have no Electron app. */
+function headlessAppMetadata(): RuntimeAppMetadata | null {
+  const raw = process.env.AGENTLAS_RUNTIME_APP_METADATA;
+  if (!raw) return null;
+  let value: RuntimeAppMetadata;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error("runtime_app_metadata_invalid"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "appPath,isPackaged,resourcesPath,version"
+    || typeof value.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(value.version)
+    || typeof value.isPackaged !== "boolean"
+    || ![value.appPath, value.resourcesPath].every(candidate => candidate === null
+      || (typeof candidate === "string" && path.isAbsolute(candidate)))) {
+    throw new Error("runtime_app_metadata_invalid");
+  }
+  return value;
+}
+
+export function serializeRuntimeAppMetadata(version: string): string {
+  return JSON.stringify({ version, isPackaged: isPackagedRuntime(),
+    appPath: optionalElectronAppPath(), resourcesPath: runtimeResourcesPath() } satisfies RuntimeAppMetadata);
+}
+
 /**
  * Electron 밖에서 도는 호스트(데몬·터미널·테스트)가 부팅 시 한 번 부른다.
  * Electron 안에서는 부를 필요가 없다 — `app.getPath` 가 이미 정답이다.
@@ -47,20 +77,19 @@ export function hasInjectedUserDataDir(): boolean {
  * Whether this host must follow packaged-app storage rules.
  *
  * The packaged daemon runs with `ELECTRON_RUN_AS_NODE=1`, so requiring Electron
- * there throws even though the process belongs to an installed app. An injected
- * app user-data directory is the daemon's explicit ownership proof and therefore
- * implies packaged semantics. Regular Electron development still reads the real
- * `app.isPackaged` value.
+ * there has no app object even though the process belongs to an installed app.
+ * The launcher forwards the actual packaging metadata; an injected data path
+ * alone cannot distinguish a packaged install from an isolated development host.
+ * Hosts without metadata retain the packaged default. The GUI's own app value
+ * always wins over inherited metadata.
  */
 export function isPackagedRuntime(): boolean {
-  if (injectedUserDataDir) return true;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const electron = require("electron") as { app?: { isPackaged?: boolean } };
-    return electron?.app?.isPackaged ?? true;
-  } catch {
-    return true;
-  }
+    if (typeof electron?.app?.isPackaged === "boolean") return electron.app.isPackaged;
+  } catch { /* Node-mode host */ }
+  return headlessAppMetadata()?.isPackaged ?? true;
 }
 
 /** Optional GUI app root. Headless helpers use resourcesPath/injected paths. */
@@ -68,10 +97,20 @@ export function optionalElectronAppPath(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const electron = require("electron") as { app?: { getAppPath?: () => string } };
-    return electron?.app?.getAppPath?.() ?? null;
-  } catch {
-    return null;
-  }
+    const appPath = electron?.app?.getAppPath?.();
+    if (appPath) return appPath;
+  } catch { /* Node-mode host */ }
+  return headlessAppMetadata()?.appPath ?? null;
+}
+
+export function runtimeResourcesPath(): string | null {
+  try {
+    // Node-mode Electron also has process.resourcesPath, but it may point to
+    // the helper binary's resources rather than the owning installed product.
+    const electron = require("electron") as { app?: unknown };
+    if (electron?.app) return process.resourcesPath || null;
+  } catch { /* Node-mode host */ }
+  return headlessAppMetadata()?.resourcesPath || process.resourcesPath || null;
 }
 
 /** Version metadata for headless protocol clients; GUI Electron remains authoritative. */
@@ -79,10 +118,10 @@ export function electronAppVersion(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const electron = require("electron") as { app?: { getVersion?: () => string } };
-    return electron?.app?.getVersion?.() || process.env.npm_package_version || "0.0.0";
-  } catch {
-    return process.env.npm_package_version || "0.0.0";
-  }
+    const version = electron?.app?.getVersion?.();
+    if (version) return version;
+  } catch { /* Node-mode host */ }
+  return headlessAppMetadata()?.version || process.env.npm_package_version || "0.0.0";
 }
 
 /**

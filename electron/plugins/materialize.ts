@@ -8,10 +8,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pluginTreeSignature } from "./tree-signature";
 import Database from "better-sqlite3";
-import { app } from "electron";
+import { isPackagedRuntime, optionalElectronAppPath, userDataPath } from "../runtime-paths";
 
 function bundledPluginsRoot(): string {
-  const appPath = app.getAppPath();
+  const appPath = optionalElectronAppPath();
+  if (!appPath) throw new Error("bundled_plugins_app_path_unavailable");
   // Electron's ASAR shim synthesizes fs.Stats for lstat/stat calls. Apart from
   // emitting DEP0180 on every packaged launch, those virtual stats are the
   // wrong trust boundary for materialization: this module deliberately checks
@@ -45,8 +46,8 @@ const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
  * bundling 1.24.5, 2026-09-14). Science reads the same root through its env override.
  */
 export function installedPluginsRoot(): string {
-  if (!app.isPackaged || process.env.AGENTLAS_QA_USER_DATA_DIR) {
-    const root = path.join(app.getPath("userData"), "plugins");
+  if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR) {
+    const root = userDataPath("plugins");
     if (!process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
       process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT = path.join(root, RESEARCH_DIRECTOR_PLUGIN_SLUG);
     }

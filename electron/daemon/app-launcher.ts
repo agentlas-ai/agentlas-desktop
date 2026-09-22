@@ -36,6 +36,7 @@ import {
   type InstallIdentity,
 } from "../install-identity";
 import { DaemonDiagnosticLog, type DaemonDiagnosticFields, validAppInstanceId } from "./diagnostic-log";
+import { serializeRuntimeAppMetadata } from "../runtime-paths";
 
 export interface EnsureDaemonOptions {
   /** 앱과 데몬이 같은 DB 를 보게 하는 단일 진실 — 앱의 userData 디렉터리. */
@@ -211,6 +212,7 @@ function spawnDaemonForDesktop(
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       AGENTLAS_USER_DATA: opts.userDataDir,
+      AGENTLAS_RUNTIME_APP_METADATA: serializeRuntimeAppMetadata(opts.appVersion),
       // The headless child cannot read the packaged app marker itself. Pass
       // the identity resolved by Desktop so it can configure protected storage
       // before opening the shared store.
