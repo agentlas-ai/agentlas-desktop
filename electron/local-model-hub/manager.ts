@@ -373,6 +373,19 @@ export class LocalModelHubManager {
     if (this.unavailableReason) throw new Error(this.unavailableReason);
   }
 
+  /** Host-service fence after initialization. initialize() retains a readable
+   * unavailable snapshot on failure; callers must not mistake that for owner
+   * acquisition. This returns no lease, token or process handle to the caller. */
+  async assertOwnership(): Promise<void> {
+    await this.readyForMutation();
+    let lease: OwnerLease;
+    try { lease = JSON.parse(await readFile(this.ownerLeasePath, "utf8")) as OwnerLease; }
+    catch { throw new Error("local_model_hub_owner_lease_lost"); }
+    if (!lease || lease.schemaVersion !== 1 || lease.instanceId !== this.instanceId || lease.pid !== process.pid) {
+      throw new Error("local_model_hub_owner_lease_lost");
+    }
+  }
+
   private modelCatalog(): LocalModelPackageIdentity[] {
     return [...localModelCatalog(), ...(this.state.registeredModels ?? [])].map(value => ({ ...value }));
   }

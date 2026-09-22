@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Runner } from "../runtime/runner";
 import { makeLocalOpenAiRunner } from "../runtime/local-openai";
-import { LocalModelHubManager } from "./manager";
+import type { LocalModelHubOwnerPort } from "./ports";
 
 /**
  * The runtime selector remains the single authority. It may select this runner
  * only after detect exposes the resident receipt as an available runtime.
  */
-export function createManagedLocalModelRunner(manager: LocalModelHubManager): Runner {
+export function createManagedLocalModelRunner(manager: LocalModelHubOwnerPort): Runner {
   const makeRunner = (acceptsImageResults: boolean) => makeLocalOpenAiRunner(() => manager.endpoint(), "agentlas-local", {
     chatTemplateKwargs: { enable_thinking: false },
     headersFn: () => manager.authorizationHeaders(),
