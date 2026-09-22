@@ -50,7 +50,7 @@ import { projectScienceLoopLongRun } from "./long-run/science-projection";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
-import { closeStore, initStore, openedStorePath, runPostContinuityStoreRepairs } from "./store/db";
+import { closeStore, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
@@ -212,6 +212,7 @@ import type {
 } from "agentlas-science/dist/contracts/science-evidence-graph";
 import { scienceLabDecisionProjectionsForProject } from "agentlas-science";
 import { registerScienceWorkbookIntakeHandlers } from "./science-host/workbook-intake-ipc";
+import { registerScienceMathHandlers } from "./science-host/math-ipc";
 import { registerScienceProjectDataHandlers } from "./science-host/project-data-ipc";
 import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "agentlas-science";
 import { commitScienceVegaEdit, parseScienceVegaEditInput } from "agentlas-science";
@@ -503,6 +504,20 @@ function initializeInstallIdentity(): InstallIdentity {
 
 const installIdentity = initializeInstallIdentity();
 traceUpdaterStartup("install-identity-ready");
+
+/** A reopening GUI cannot migrate or boot-repair a store still owned by an
+ * older service. A compatible live daemon keeps its execution and the GUI
+ * attaches as an ordinary writer without replaying owner boot repairs. */
+async function initializeDesktopStore(options: Parameters<typeof initStore>[0] = {}): Promise<void> {
+  if (developmentEffectsSuppressed()) { initStore(options); return; }
+  const { quiesceDaemonBeforeStoreMigration } = await import("./daemon/app-launcher");
+  const daemon = await quiesceDaemonBeforeStoreMigration({
+    userDataDir: userDataDir(), storePath: resolveStorePath(), installIdentity,
+    appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION,
+  });
+  if (daemon.status === "failed") throw new Error(daemon.reason);
+  initStore({ ...options, ...(daemon.status === "compatible" ? { migrationRole: "follower" as const } : {}) });
+}
 
 /**
  * macOS dock 아이콘 — dev에서는 Electron 기본(원자 모양) 대신 우리 paw squircle.
@@ -1244,13 +1259,13 @@ function stopQuitServices(): Promise<void> {
     import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
     import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
     import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
-    stopDesktopOwnedMobileBridge(),
-    import("./daemon/app-launcher")
-      .then((module) => module.shutdownDaemon(userDataDir(), process.pid))
-      .then((result) => {
-        if (!result.stopped) console.error(`[daemon] helper pid ${result.pid ?? "?"} did not stop`);
+    stopDesktopOwnedMobileBridge()
+      .then(() => import("./daemon/app-launcher"))
+      .then((module) => module.detachDaemonDesktop(userDataDir(), process.pid))
+      .then((detached) => {
+        if (!detached) console.error("[daemon] Desktop attachment was not released");
       })
-      .catch((error) => console.error("[daemon] helper shutdown failed", error)),
+      .catch((error) => console.error("[daemon] Desktop detach failed", error)),
   ]).then(() => undefined).finally(() => memoryCleanupStopped);
   return quitServicesStopPromise;
 }
@@ -1263,6 +1278,9 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
   if (scienceShutdown.timedOut) {
     throw new Error("science-runtime-update-shutdown-timed-out");
   }
+  const { stopDaemonService } = await import("./daemon/app-launcher");
+  const daemonStopped = await stopDaemonService({ userDataDir: userDataDir(), storePath: openedStorePath(), installIdentity });
+  if (!daemonStopped.stopped) throw new Error("daemon-runtime-update-shutdown-timed-out");
   const report = await shutdownAppRuntimeCoordinator(15_000);
   if (report.failedParticipantNames.length > 0) {
     throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
@@ -1573,7 +1591,7 @@ app.whenReady().then(async () => {
   // 창을 만들지 않고, 스케줄러도 켜지 않는다 — 요청을 대기열에 적을 뿐이다.
   if (process.argv.includes("--graph-surface")) {
     try {
-      initStore();
+      await initializeDesktopStore();
       const { serveGraphSurfaceOverStdio } = await import("./graph-surface/server");
       serveGraphSurfaceOverStdio();
     } catch (err) {
@@ -1626,7 +1644,7 @@ app.whenReady().then(async () => {
   traceUpdaterStartup("startup-window-visible");
   traceStartup("startup-window-visible");
   startupStage = "store-opening";
-  initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall || developmentEffectsSuppressed() });
+  await initializeDesktopStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall || developmentEffectsSuppressed() });
   if (!developmentEffectsSuppressed()) {
     const { initializeVideoJobs } = await import("./multimodal/video");
     initializeVideoJobs();
@@ -2123,6 +2141,7 @@ app.whenReady().then(async () => {
     return `${event.senderFrame.processId}:${event.senderFrame.routingId}:${scienceFolderDocuments.get(event.sender.id)}:${actualUrl.href}`;
   };
   registerScienceWorkbookIntakeHandlers({ ipcMain, assertScienceSender, assertScienceProjectDocument, scienceStore });
+  registerScienceMathHandlers({ ipcMain, assertScienceSender });
   registerScienceProjectDataHandlers({
     ipcMain,
     assertScienceSender,
@@ -4173,6 +4192,7 @@ app.whenReady().then(async () => {
     .then(async (module) => {
       const outcome = await module.ensureDaemonRunning({
         userDataDir: userDataDir(),
+        storePath: openedStorePath(),
         appVersion: app.getVersion(),
         parentPid: process.pid,
         installIdentity,
@@ -4481,7 +4501,7 @@ app.whenReady().then(async () => {
       locale: resolveMenuLocale(),
       present: presentStartupRecovery,
       retry: async () => {
-        initStore();
+        await initializeDesktopStore();
         app.relaunch();
         app.exit(0);
       },

@@ -7,6 +7,7 @@ import {
 import { getDb } from "../store/db";
 import {
   applyScienceLongRunProjectionStatus,
+  appendLongRunEvent,
   createLongRun,
   getLongRun,
   listLongRunTasks,
@@ -17,6 +18,56 @@ import {
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+
+export interface ScienceDaemonProjectionOwner {
+  hostOwnerKind: "daemon";
+  appInstanceId: string;
+  /** The service's exclusive lease, not a Desktop window or process identity. */
+  assertOwner(): void;
+}
+
+function assertDaemonOwner(owner: ScienceDaemonProjectionOwner): void {
+  if (owner.hostOwnerKind !== "daemon" || typeof owner.appInstanceId !== "string"
+    || !owner.appInstanceId.trim() || owner.appInstanceId.length > 200
+    || typeof owner.assertOwner !== "function") throw new Error("science_projection_owner_invalid");
+  owner.assertOwner();
+}
+
+/** Called after the previous Science execution host has relinquished its lease.
+ * Only canonical Science projections move; task, attempt and result states do not. */
+export function adoptScienceLongRunOwnership(input: {
+  appInstanceId: string;
+  assertOwner(): void;
+}): string[] {
+  const owner: ScienceDaemonProjectionOwner = { ...input, hostOwnerKind: "daemon" };
+  assertDaemonOwner(owner);
+  const db = getDb();
+  return db.transaction(() => {
+    assertDaemonOwner(owner);
+    const rows = db.prepare(`SELECT r.id, r.goal_id, r.science_job_id, r.host_owner_kind, r.app_instance_id
+      FROM long_runs r JOIN long_run_domain_bindings b ON b.long_run_id = r.id
+      WHERE r.surface = 'science' AND r.execution_location = 'desktop-local'
+        AND r.host_owner_kind IN ('desktop', 'daemon') AND b.domain = 'science'
+        AND b.object_type = 'loop_session' AND b.object_id = r.science_job_id`).all() as Array<{
+      id: string; goal_id: string; science_job_id: string; host_owner_kind: string; app_instance_id: string | null;
+    }>;
+    const adopted: string[] = [];
+    for (const row of rows) {
+      if (row.id !== scienceLongRunId(row.science_job_id) || row.goal_id !== scienceLongRunGoalId(row.science_job_id)) continue;
+      if (row.host_owner_kind === "daemon" && row.app_instance_id === owner.appInstanceId) continue;
+      const changed = db.prepare(`UPDATE long_runs SET host_owner_kind = 'daemon', app_instance_id = ?
+        WHERE id = ? AND host_owner_kind = ? AND app_instance_id IS ?`)
+        .run(owner.appInstanceId, row.id, row.host_owner_kind, row.app_instance_id);
+      if (changed.changes !== 1) throw new Error("science_projection_owner_changed");
+      appendLongRunEvent({ runId: row.id, kind: "run.host_owner_changed", actorKind: "host", actorId: owner.appInstanceId,
+        payload: { previousHostOwnerKind: row.host_owner_kind, previousOwnerEpoch: row.app_instance_id,
+          hostOwnerKind: "daemon", ownerEpoch: owner.appInstanceId } });
+      adopted.push(row.id);
+    }
+    assertDaemonOwner(owner);
+    return adopted;
+  }).immediate();
+}
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -43,7 +94,8 @@ function existingMainChatId(runtimeChatId: string | null): string | null {
  * Idempotently projects a canonical Science loop snapshot into the common
  * Desktop ledger. This function never commands Science execution.
  */
-function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProjection): LongRunRecord {
+function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProjection, owner?: ScienceDaemonProjectionOwner): LongRunRecord {
+  if (owner) assertDaemonOwner(owner);
   const schema = String((input as { schema?: unknown }).schema ?? "");
   if (schema !== "agentlas.science-long-run-projection.v1"
     && schema !== "agentlas.science-long-run-projection.v2") throw new Error("science_projection_schema_unsupported");
@@ -57,6 +109,7 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
     idempotencyKey: scienceLongRunGoalId(input.loopSessionId),
     surface: "science",
     executionLocation: "desktop-local",
+    ...(owner ? { hostOwnerKind: owner.hostOwnerKind, appInstanceId: owner.appInstanceId } : {}),
     rootChatId: existingMainChatId(input.runtimeChatId),
     projectId: null,
     scienceJobId: input.loopSessionId,
@@ -69,6 +122,13 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
       wallclockDeadline: input.deadlineAt,
     },
   });
+
+  if (run.id !== runId || run.surface !== "science" || run.scienceJobId !== input.loopSessionId) {
+    throw new Error("science_projection_binding_scope_invalid");
+  }
+  if (owner ? run.hostOwnerKind !== "daemon" || run.appInstanceId !== owner.appInstanceId : run.hostOwnerKind !== "desktop") {
+    throw new Error("science_projection_host_owner_mismatch");
+  }
 
   const binding = upsertLongRunDomainBinding({
     longRunId: run.id,
@@ -220,8 +280,12 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
   });
 }
 
-export function projectScienceLoopLongRun(input: ScienceLoopLongRunProjection): LongRunRecord {
+export function projectScienceLoopLongRun(input: ScienceLoopLongRunProjection, owner?: ScienceDaemonProjectionOwner): LongRunRecord {
   // Nested store helpers use savepoints; this outer transaction makes the
   // binding cursor, projection state, receipts, and event history one commit.
-  return getDb().transaction(() => projectScienceLoopLongRunInTransaction(input))();
+  return getDb().transaction(() => {
+    const result = projectScienceLoopLongRunInTransaction(input, owner);
+    if (owner) assertDaemonOwner(owner);
+    return result;
+  }).immediate();
 }

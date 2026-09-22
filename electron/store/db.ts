@@ -1299,7 +1299,7 @@ export function runPostContinuityStoreRepairs(): void {
  * 라이브 복제본으로 QA하려면 `AGENTLAS_STORE_PATH`를 별도 복사본에 명시해야 한다 —
  * 실수로 되는 일과 적어서 되는 일은 달라야 한다.
  */
-function resolveStorePath(): string {
+export function resolveStorePath(): string {
   const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
   if (explicit) return explicit;
 

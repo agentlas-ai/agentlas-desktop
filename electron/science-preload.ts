@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   shell: Object.freeze({
     backToWork: () => ipcRenderer.invoke("science:shell:backToWork", { extensionId }),
   }),
+  math: Object.freeze({
+    command: (input: unknown) => ipcRenderer.invoke("science:math:command", { extensionId, input }),
+    cancel: (input: unknown) => ipcRenderer.invoke("science:math:cancel", { extensionId, input }),
+  }),
   questions: Object.freeze({
     list: () => ipcRenderer.invoke("science:askUser:list", { extensionId }),
     answer: (requestId: string, answer: string | null) => ipcRenderer.invoke("science:askUser:answer", { extensionId, requestId, answer }),
