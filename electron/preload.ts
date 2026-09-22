@@ -726,8 +726,10 @@ const api: AgentlasIpc = {
     reauthorizeGoal: (id, input) => ipcRenderer.invoke("chats:reauthorizeGoal", id, input),
     pauseGoal: (id: string, goalId: string) => ipcRenderer.invoke("chats:pauseGoal", id, goalId),
     deleteGoal: (id: string, goalId: string) => ipcRenderer.invoke("chats:deleteGoal", id, goalId),
-    resumeGoal: (id: string, expectedVersion: number, expectedGoalId: string) =>
-      ipcRenderer.invoke("chats:resumeGoal", id, expectedVersion, expectedGoalId),
+    resumeGoal: (id: string, expectedVersion: number, expectedGoalId: string, confirmation?: import("../shared/types").GoalResumeConfirmation) =>
+      ipcRenderer.invoke("chats:resumeGoal", id, expectedVersion, expectedGoalId, confirmation),
+    getGoalResumeReview: (id: string, expectedVersion: number, expectedGoalId: string) =>
+      ipcRenderer.invoke("chats:getGoalResumeReview", id, expectedVersion, expectedGoalId),
     setSwarmMode: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
     setRuntimeSelection: (id: string, selection: RuntimeSelection | null) =>
