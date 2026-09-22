@@ -313,7 +313,7 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
   }
   if (method === "science.status") {
     assertServiceControl(params);
-    return scienceService?.status() ?? { state: "idle", ownerEpoch: bootId, settled: true };
+    return (await getScienceService()).status();
   }
   if (method === "science.command") {
     assertServiceControl(params);
