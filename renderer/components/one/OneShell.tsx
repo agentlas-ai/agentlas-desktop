@@ -1917,6 +1917,7 @@ export function OneShell() {
   }, [railOpen]);
   const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerDockRef = useRef<HTMLDivElement>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const resultTopRef = useRef<HTMLDivElement>(null);
   const attachmentDragDepthRef = useRef(0);
@@ -2112,6 +2113,19 @@ export function OneShell() {
     if (scroller.firstElementChild) observer?.observe(scroller.firstElementChild);
     return () => observer?.disconnect();
   }, [conversation?.id, messages.length, receipt?.runId, selected?.taskId, syncScrollToLatestButton, threadRuns.length]);
+
+  useEffect(() => {
+    const dock = composerDockRef.current;
+    if (!dock) return;
+    const update = () => dock.parentElement?.style.setProperty("--one-composer-dock-height", `${Math.ceil(dock.getBoundingClientRect().height)}px`);
+    update();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    observer?.observe(dock);
+    return () => {
+      observer?.disconnect();
+      dock.parentElement?.style.removeProperty("--one-composer-dock-height");
+    };
+  }, []);
 
   /**
    * 대화를 처음 그릴 때 맨 아래에 **붙여 둔다**.
@@ -8020,6 +8034,7 @@ export function OneShell() {
           </div>
 
           <div
+            ref={composerDockRef}
             className={styles.composerDock}
             data-drag-active={attachmentDragActive ? "true" : "false"}
             onDragEnter={(event) => {
@@ -8076,6 +8091,10 @@ export function OneShell() {
               chatId={activeThreadChatId}
               locale={appLocale === "ko" ? "ko" : "en"}
               lastConfirmedModel={receipt?.chatId === activeThreadChatId ? receipt.model : null}
+              helpContent={<>
+                <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId} locale={appLocale} />
+                <ContinuityStatus chatId={activeThreadChatId} locale={appLocale} />
+              </>}
               isCurrent={() => !homeTransitionPendingRef.current
                 && goalControlViewKeyRef.current === goalControlViewKey
                 && activeThreadChatIdRef.current === activeThreadChatId
@@ -8213,8 +8232,9 @@ export function OneShell() {
               }}>{appLocale === "ko" ? "원래 요청 중지" : "Stop original run"}</button>
             </div>}
             {turnAgentIds.length > 0 && (
-              <div className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
-                <span>{appLocale === "ko" ? "이번 턴" : "This turn"}</span>
+              <details className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
+                <summary>{appLocale === "ko" ? `이번 턴 지정 ${turnAgentIds.length}명` : `${turnAgentIds.length} agents this turn`}</summary>
+                <div className={styles.oneTurnAgentChoices}>
                 {turnAgentIds.map((agentId) => {
                   const candidate = availableAgents.find((item) => item.id === agentId);
                   if (!candidate) return null;
@@ -8226,7 +8246,8 @@ export function OneShell() {
                     aria-label={appLocale === "ko" ? `${localized.name} 호출 취소` : `Remove ${localized.name}`}
                   >@{localized.name}<span aria-hidden><IconClose size={10} /></span></button>;
                 })}
-              </div>
+                </div>
+              </details>
             )}
             {composerMenu && (
               <OneComposerControls
@@ -8497,8 +8518,6 @@ export function OneShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
-            <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId || null} locale={appLocale} />
-            <ContinuityStatus chatId={activeThreadChatId || null} locale={appLocale} />
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;
