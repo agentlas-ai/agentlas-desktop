@@ -16,10 +16,15 @@ import {
 } from "./control-socket";
 import {
   isAutostartInstalled,
+  autostartLoaded,
   planAutostart,
-  removeAutostart,
+  reconcileAutostart,
+  suspendAutostart,
   type AutostartCommand,
+  type AutostartRuntime,
+  type AutostartReconciliation,
 } from "./autostart";
+import { entryDigest, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 import {
   OFFICIAL_INSTALL_IDENTITY,
   serializeInstallIdentity,
@@ -538,24 +543,55 @@ export async function shutdownDaemon(
 /**
  * 자동 시작(로그인 시 데몬 기동) 설정을 파일시스템과 정합시킨다.
  *
- * 기본은 **off** — 사용자 머신의 부팅 동작은 명시적 선택 없이는 바꾸지 않는다.
- * store 의 daemon_autostart(electron/store/daemon-autostart.ts)가 켜져 있을 때만
- * 설치하고, 꺼져 있는데 우리 파일이 남아 있으면 걷는다(설정과 부팅 동작이 어긋난 채
- * 남는 것이 최악이다). 설정 UI 토글은 아직 없다 — store 함수가 그 자리다.
+ * Main supplies the resolved owner/recoverable-work policy after its seed
+ * barrier. Only a fully bound manifest can install a persistent service.
  */
-export function reconcileDaemonAutostart(
-  _enabled: boolean,
-  command: AutostartCommand,
-  runtime?: { platform?: NodeJS.Platform; home?: string },
-): { installed: boolean; changed: boolean } {
+export function reconcileDaemonAutostart(enabled: boolean, command: AutostartCommand, runtime?: AutostartRuntime): AutostartReconciliation {
+  return reconcileAutostart(enabled, command, runtime);
+}
+
+/** Call only after GUI migration + built-in/plugin seed have completed. */
+export function buildDaemonAutostartCommand(options: EnsureDaemonOptions & {
+  storePath: string; installIdentity: InstallIdentity; requiredSchemaVersion: number; storeBootstrapToken: string;
+}): AutostartCommand {
+  const identity = resolveDaemonServiceIdentity(options);
+  const entry = canonicalDaemonPath(options.daemonEntry ?? defaultDaemonEntry());
+  const metadata = JSON.parse(serializeRuntimeAppMetadata(options.appVersion));
+  const manifest: DaemonAutostartManifest = {
+    schema: "agentlas.daemon-autostart.v1", executable: canonicalDaemonPath(options.execPath ?? process.execPath),
+    entry, entrySha256: entryDigest(entry), ...identity, appVersion: options.appVersion,
+    requiredSchemaVersion: options.requiredSchemaVersion, storeBootstrapToken: options.storeBootstrapToken, appMetadata: metadata,
+  };
+  validateDaemonAutostartManifest(manifest);
+  const bootstrapEntry = path.join(path.dirname(entry), "autostart-entry.js");
+  if (!fs.statSync(bootstrapEntry).isFile()) throw new Error("daemon_autostart_bootstrap_entry_unavailable");
+  return { executable: manifest.executable, entry: bootstrapEntry, manifest,
+    manifestPath: path.join(identity.userDataDir, "daemon", "autostart-manifest.json") };
+}
+
+export function inspectDaemonAutostart(command: AutostartCommand, runtime?: AutostartRuntime): Omit<AutostartReconciliation, "changed"> {
   const plan = planAutostart(command, runtime?.platform, runtime?.home);
-  const already = isAutostartInstalled(plan);
-  // These legacy login definitions omit the installation/store identity needed
-  // by a persistent service. Supervised autostart uses a separate integration;
-  // never reactivate a stale definition against a guessed production store.
-  if (already) {
-    removeAutostart(plan);
-    return { installed: false, changed: true };
+  return { installed: isAutostartInstalled(plan), loaded: autostartLoaded(plan, runtime), filePath: plan.filePath, label: plan.label };
+}
+
+/** Update must suspend the supervisor BEFORE daemon drain/store backup. If the
+ * update fails while GUI stays alive, reconcile the same enabled definition.
+ * On success, the new GUI re-publishes only after migrations/seeding finish. */
+export function suspendDaemonAutostart(command: AutostartCommand, runtime?: AutostartRuntime): { suspended: true; wasInstalled: boolean; wasLoaded: boolean } {
+  const plan = planAutostart(command, runtime?.platform, runtime?.home);
+  const wasInstalled = isAutostartInstalled(plan);
+  const wasLoaded = autostartLoaded(plan, runtime);
+  if (wasInstalled || wasLoaded) {
+    try { suspendAutostart(plan, runtime); }
+    catch (error) {
+      // disable may have succeeded before bootout failed. Restore the exact
+      // existing definition here because the caller has no suspension receipt.
+      if (wasInstalled) {
+        try { reconcileAutostart(true, command, runtime); }
+        catch (restoreError) { throw new AggregateError([error, restoreError], "daemon_autostart_suspend_restore_failed"); }
+      }
+      throw error;
+    }
   }
-  return { installed: false, changed: false };
+  return { suspended: true, wasInstalled, wasLoaded };
 }

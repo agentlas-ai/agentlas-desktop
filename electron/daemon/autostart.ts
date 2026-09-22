@@ -1,144 +1,163 @@
-// Legacy daemon autostart planning/removal compatibility.
-// Desktop local execution is now app-scoped. The plan functions remain so a
-// current build can locate files older builds may have installed on each OS:
-//   · macOS  — launchd LaunchAgent plist (~/Library/LaunchAgents)
-//   · Windows — 시작프로그램 폴더의 .cmd
-//   · Linux  — systemd --user 유닛
-//
-// New product code must not call installAutostart; app-launcher reconciliation
-// always removes these files.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { daemonAutostartLabel, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 
+/** Pre-identity definitions are never adopted as this service. */
 export const DAEMON_LABEL = "cloud.agentlas.daemon";
-
-export interface AutostartPlan {
-  /** 이 플랫폼에서 쓰는 방식. */
-  mechanism: "launchd" | "windows-startup" | "systemd-user";
-  /** 실제로 만들어질 파일. */
-  filePath: string;
-  /** 그 파일의 내용. 사용자가 설치 전에 그대로 읽을 수 있다. */
-  contents: string;
-}
-
 export interface AutostartCommand {
-  /** 데몬을 띄우는 실행 파일 — Electron 의 node(ABI 때문에, daemon/main.ts 주석 참조). */
-  executable: string;
-  /** 데몬 진입점 js 의 절대 경로. */
-  entry: string;
+  executable: string; entry: string;
+  manifest?: DaemonAutostartManifest;
+  manifestPath?: string;
 }
-
-function plistEscape(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+export interface AutostartPlan {
+  mechanism: "launchd" | "windows-startup" | "systemd-user";
+  filePath: string; contents: string; label: string;
+  manifestPath?: string; manifestContents?: string;
 }
+export interface AutostartRuntime {
+  platform?: NodeJS.Platform; home?: string; uid?: number;
+  /** Private tests inject this; never redirect the real user's HOME. */
+  run?: (executable: string, args: string[]) => { code: number; stdout: string; stderr: string };
+}
+export interface AutostartReconciliation { installed: boolean; loaded: boolean; changed: boolean; filePath: string; label: string }
+function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
+const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const quote = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
+function safePath(value: string) { if (!path.isAbsolute(value) || /[\r\n\0]/.test(value)) fail("daemon_autostart_path_invalid"); }
 
-/**
- * 이 플랫폼에서 무엇을 설치할지 **계산만** 한다. 파일은 만들지 않는다.
- * 설치 화면은 이 값을 그대로 보여 주고, 사용자가 승낙하면 `installAutostart` 를 부른다.
- */
-export function planAutostart(
-  command: AutostartCommand,
-  platform: NodeJS.Platform = process.platform,
-  home: string = os.homedir(),
-): AutostartPlan {
-  if (platform === "darwin") {
-    return {
-      mechanism: "launchd",
-      filePath: path.join(home, "Library", "LaunchAgents", `${DAEMON_LABEL}.plist`),
-      contents: [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-        '<plist version="1.0">',
-        "<dict>",
-        "  <key>Label</key>",
-        `  <string>${DAEMON_LABEL}</string>`,
-        "  <key>ProgramArguments</key>",
-        "  <array>",
-        `    <string>${plistEscape(command.executable)}</string>`,
-        `    <string>${plistEscape(command.entry)}</string>`,
-        "  </array>",
-        "  <key>EnvironmentVariables</key>",
-        "  <dict>",
-        // ELECTRON_RUN_AS_NODE 가 없으면 창을 띄우려 한다 — 자동 시작에서 그건 결함이다.
-        "    <key>ELECTRON_RUN_AS_NODE</key>",
-        "    <string>1</string>",
-        // 부팅 데몬은 절대 마이그레이션 주인이 아니다 — 스키마 승급은 앱(GUI)이 한다.
-        // 업데이트 직후 앱보다 먼저 뜬 데몬이 낡은/새 사다리를 돌리는 조합을 막는다.
-        "    <key>AGENTLAS_STORE_MIGRATION_ROLE</key>",
-        "    <string>follower</string>",
-        "  </dict>",
-        "  <key>RunAtLoad</key>",
-        "  <true/>",
-        // 죽으면 다시 띄운다. 데몬이 조용히 사라지면 자동화도 조용히 멈춘다.
-        "  <key>KeepAlive</key>",
-        "  <true/>",
-        "</dict>",
-        "</plist>",
-        "",
-      ].join("\n"),
-    };
-  }
+/** Complete login plan, isolated by installation. Explicit home never falls
+ * through to ambient APPDATA/XDG paths outside the private test fixture. */
+export function planAutostart(command: AutostartCommand, platform: NodeJS.Platform = process.platform, home = os.homedir()): AutostartPlan {
+  safePath(home); safePath(command.executable); safePath(command.entry);
+  const manifest = command.manifest;
+  if (manifest) { if (!command.manifestPath) fail("daemon_autostart_manifest_required"); safePath(command.manifestPath); }
+  const label = manifest ? daemonAutostartLabel(manifest) : DAEMON_LABEL;
+  const args = [command.executable, command.entry, ...(command.manifestPath ? ["--manifest", command.manifestPath] : [])];
+  const common = { label, ...(manifest ? { manifestPath: command.manifestPath, manifestContents: `${JSON.stringify(manifest)}\n` } : {}) };
+  if (platform === "darwin") return { ...common, mechanism: "launchd", filePath: path.join(home, "Library", "LaunchAgents", `${label}.plist`), contents: [
+    '<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0"><dict>', `<key>Label</key><string>${label}</string>`,
+    `<key>ProgramArguments</key><array>${args.map(arg => `<string>${xml(arg)}</string>`).join("")}</array>`,
+    '<key>EnvironmentVariables</key><dict><key>ELECTRON_RUN_AS_NODE</key><string>1</string></dict>',
+    '<key>RunAtLoad</key><true/>', '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>',
+    '<key>ThrottleInterval</key><integer>60</integer>', '<key>ExitTimeOut</key><integer>45</integer>', '</dict></plist>', '',
+  ].join("\n") };
   if (platform === "win32") {
-    const startup = path.join(
-      process.env.APPDATA?.trim() || path.join(home, "AppData", "Roaming"),
-      "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
-    );
-    return {
-      mechanism: "windows-startup",
-      filePath: path.join(startup, "agentlas-daemon.cmd"),
-      contents: [
-        "@echo off",
-        "set ELECTRON_RUN_AS_NODE=1",
-        "set AGENTLAS_STORE_MIGRATION_ROLE=follower",
-        `start "" /b "${command.executable}" "${command.entry}"`,
-        "",
-      ].join("\r\n"),
-    };
+    // cmd expands % even inside quotes; reject unsupported paths explicitly.
+    if (args.some(arg => /[%!"^&|<>]/.test(arg))) fail("daemon_autostart_windows_path_unsupported");
+    return { ...common, mechanism: "windows-startup", filePath: path.join(home, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup", `${label}.cmd`),
+      contents: `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\nstart "" /b ${args.map(arg => `"${arg}"`).join(" ")}\r\n` };
   }
-  return {
-    mechanism: "systemd-user",
-    filePath: path.join(
-      process.env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"),
-      "systemd", "user", "agentlas-daemon.service",
-    ),
-    contents: [
-      "[Unit]",
-      "Description=Agentlas daemon",
-      "",
-      "[Service]",
-      "Environment=ELECTRON_RUN_AS_NODE=1",
-      "Environment=AGENTLAS_STORE_MIGRATION_ROLE=follower",
-      `ExecStart=${command.executable} ${command.entry}`,
-      "Restart=always",
-      "RestartSec=5",
-      "",
-      "[Install]",
-      "WantedBy=default.target",
-      "",
-    ].join("\n"),
-  };
+  if (platform !== "linux") fail("daemon_autostart_platform_unsupported");
+  return { ...common, mechanism: "systemd-user", filePath: path.join(home, ".config", "systemd", "user", `${label}.service`),
+    contents: `[Unit]\nDescription=Agentlas daemon\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nEnvironment=ELECTRON_RUN_AS_NODE=1\nExecStart=${args.map(quote).join(" ")}\nRestart=on-failure\nRestartSec=60\nTimeoutStopSec=45\n\n[Install]\nWantedBy=default.target\n` };
 }
-
-/** 계획대로 파일을 만든다. 이미 있으면 덮어쓴다(경로가 바뀌었을 수 있다). */
-export function installAutostart(plan: AutostartPlan): void {
-  fs.mkdirSync(path.dirname(plan.filePath), { recursive: true });
-  fs.writeFileSync(plan.filePath, plan.contents, { encoding: "utf8", mode: 0o644 });
-}
-
-/** 되돌린다. 파일이 없으면 조용히 성공한다 — 이미 원하는 상태다. */
-export function removeAutostart(plan: AutostartPlan): void {
+function readOwned(file: string): string | null {
   try {
-    fs.rmSync(plan.filePath, { force: true });
-  } catch (error) {
-    throw new Error(`could not remove ${plan.filePath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128 * 1024
+      || (process.platform !== "win32" && stat.uid !== process.getuid?.())) fail("daemon_autostart_file_owner_invalid");
+    return fs.readFileSync(file, "utf8");
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
 }
-
-/** 지금 설치돼 있는가 — 파일 실재로 판정한다(우리 기억이 아니라). */
+function writeAtomic(file: string, contents: string) {
+  readOwned(file); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try { fs.writeFileSync(temporary, contents, { mode: 0o600, flag: "wx" }); fs.renameSync(temporary, file); }
+  finally { try { fs.unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+}
 export function isAutostartInstalled(plan: AutostartPlan): boolean {
-  return fs.existsSync(plan.filePath);
+  return readOwned(plan.filePath) === plan.contents && (!plan.manifestPath || readOwned(plan.manifestPath) === plan.manifestContents);
+}
+export function installAutostart(plan: AutostartPlan): void {
+  if (!plan.manifestPath || !plan.manifestContents) fail("daemon_autostart_manifest_required");
+  validateDaemonAutostartManifest(JSON.parse(plan.manifestContents));
+  writeAtomic(plan.manifestPath, plan.manifestContents); writeAtomic(plan.filePath, plan.contents);
+}
+export function removeAutostart(plan: AutostartPlan): void {
+  const current = readOwned(plan.filePath);
+  if (current === null) return;
+  if (current !== plan.contents) fail("daemon_autostart_definition_changed");
+  fs.unlinkSync(plan.filePath);
+}
+function command(runtime: AutostartRuntime, executable: string, args: string[]) {
+  if (runtime.run) return runtime.run(executable, args);
+  const result = spawnSync(executable, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+function launchTarget(plan: AutostartPlan, runtime: AutostartRuntime) {
+  const uid = runtime.uid ?? process.getuid?.();
+  if (!Number.isSafeInteger(uid) || Number(uid) < 0) fail("daemon_autostart_uid_unavailable");
+  return { domain: `gui/${uid}`, target: `gui/${uid}/${plan.label}` };
+}
+export function autostartLoaded(plan: AutostartPlan, runtime: AutostartRuntime = {}): boolean {
+  if (plan.mechanism === "windows-startup") return false;
+  const result = plan.mechanism === "launchd"
+    ? command(runtime, "/bin/launchctl", ["print", launchTarget(plan, runtime).target])
+    : command(runtime, "systemctl", ["--user", "is-active", `${plan.label}.service`]);
+  if (result.code === 0) return true;
+  if (plan.mechanism === "launchd" ? result.code === 113 : [3, 4].includes(result.code)) return false;
+  fail("daemon_autostart_supervisor_status_unknown");
+}
+export function suspendAutostart(plan: AutostartPlan, runtime: AutostartRuntime = {}): void {
+  if (plan.mechanism === "windows-startup") {
+    const current = readOwned(plan.filePath);
+    if (current === null) return;
+    if (current !== plan.contents) fail("daemon_autostart_definition_changed");
+    fs.renameSync(plan.filePath, `${plan.filePath}.suspended`);
+    return;
+  }
+  const loaded = autostartLoaded(plan, runtime);
+  if (plan.mechanism === "launchd") {
+    const { target } = launchTarget(plan, runtime);
+    if (command(runtime, "/bin/launchctl", ["disable", target]).code !== 0) fail("daemon_autostart_suspend_failed");
+    if (loaded && command(runtime, "/bin/launchctl", ["bootout", target]).code !== 0) fail("daemon_autostart_bootout_failed");
+  } else if (command(runtime, "systemctl", ["--user", "disable", "--now", `${plan.label}.service`]).code !== 0) fail("daemon_autostart_suspend_failed");
+  if (autostartLoaded(plan, runtime)) fail("daemon_autostart_still_loaded");
+}
+function isPreviousOwnedDefinition(plan: AutostartPlan, runtime: AutostartRuntime): boolean {
+  if (!plan.manifestPath) return false;
+  try {
+    const previous = JSON.parse(readOwned(plan.manifestPath) ?? "null") as DaemonAutostartManifest;
+    if (previous?.schema !== "agentlas.daemon-autostart.v1" || daemonAutostartLabel(previous) !== plan.label) return false;
+    // Stale artifacts are namespace evidence only. Never validate by launching
+    // the old binary, opening its DB, or trusting file existence alone.
+    const oldPlan = planAutostart({ executable: previous.executable,
+      entry: path.join(path.dirname(previous.entry), "autostart-entry.js"),
+      manifest: previous, manifestPath: plan.manifestPath }, runtime.platform, runtime.home);
+    return oldPlan.filePath === plan.filePath && readOwned(plan.filePath) === oldPlan.contents;
+  } catch { return false; }
+}
+export function reconcileAutostart(enabled: boolean, input: AutostartCommand, runtime: AutostartRuntime = {}): AutostartReconciliation {
+  const plan = planAutostart(input, runtime.platform, runtime.home);
+  if (!input.manifest) fail("daemon_autostart_manifest_required");
+  const exact = isAutostartInstalled(plan);
+  let loaded = autostartLoaded(plan, runtime);
+  if (!enabled) {
+    if (!exact && !loaded && !fs.existsSync(plan.filePath)) return { installed: false, loaded: false, changed: false, filePath: plan.filePath, label: plan.label };
+    suspendAutostart(plan, runtime); removeAutostart(plan);
+    return { installed: false, loaded: false, changed: exact || loaded, filePath: plan.filePath, label: plan.label };
+  }
+  validateDaemonAutostartManifest(input.manifest);
+  // The new GUI has passed its store-migration quiescence barrier. Retire only
+  // an exact old definition proven to belong to this same installation/store.
+  if (loaded && !exact) {
+    if (!isPreviousOwnedDefinition(plan, runtime)) fail("daemon_autostart_requires_quiescence");
+    suspendAutostart(plan, runtime); loaded = false;
+  }
+  if (!exact) installAutostart(plan);
+  if (plan.mechanism === "launchd") {
+    const { target, domain } = launchTarget(plan, runtime);
+    if (command(runtime, "/bin/launchctl", ["enable", target]).code !== 0) fail("daemon_autostart_enable_failed");
+    if (!loaded && command(runtime, "/bin/launchctl", ["bootstrap", domain, plan.filePath]).code !== 0) fail("daemon_autostart_bootstrap_failed");
+  } else if (plan.mechanism === "systemd-user") {
+    if (command(runtime, "systemctl", ["--user", "daemon-reload"]).code !== 0
+      || command(runtime, "systemctl", ["--user", "enable", "--now", `${plan.label}.service`]).code !== 0) fail("daemon_autostart_enable_failed");
+  }
+  const nowLoaded = autostartLoaded(plan, runtime);
+  if (plan.mechanism !== "windows-startup" && !nowLoaded) fail("daemon_autostart_not_loaded");
+  return { installed: isAutostartInstalled(plan), loaded: nowLoaded, changed: !exact || !loaded, filePath: plan.filePath, label: plan.label };
 }
