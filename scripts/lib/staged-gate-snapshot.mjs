@@ -432,7 +432,12 @@ export function runIndexGates(root) {
       externalTargets.add(target);
     }
   }
-  const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-index-gates-")));
+  // Sibling roots (../docs, ../agentlas_terminal, ../mobile) resolve next to the snapshot root. Give every
+  // run its own private parent so a crashed run's leftovers can never collide with the next one
+  // (a shared os.tmpdir()/docs made every commit fail with PRIVATE_EXTERNAL_TARGET_EXISTS).
+  const snapshotParent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-index-gates-")));
+  const temp = path.join(snapshotParent, "agentlas_desktop");
+  fs.mkdirSync(temp, { mode: 0o700 });
   const externalRoots = new Set();
   try {
     const archive = git(root, ["archive", "--format=tar", tree], { encoding: null });
@@ -524,6 +529,6 @@ export function runIndexGates(root) {
     // Only the exact directory created above; unlinking node_modules never follows it.
     // External roots are sibling directories created exclusively for this snapshot.
     for (const externalRoot of externalRoots || []) fs.rmSync(externalRoot, { recursive: true, force: true });
-    fs.rmSync(temp, { recursive: true, force: true });
+    fs.rmSync(snapshotParent, { recursive: true, force: true });
   }
 }
