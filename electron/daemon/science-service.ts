@@ -42,6 +42,7 @@ export type DaemonScienceCommand =
   | { op: "events.replay"; input: TurnScope & { afterSequence?: number; limit?: number } }
   | { op: "loops.events"; input: { projectId: string; loopSessionId: string; afterSequence?: number; limit?: number } }
   | { op: "projects.list" }
+  | { op: "autostart.hasRecoverableScienceWork" }
   | { op: "conversations.list"; input: { projectId: string } };
 
 export interface DaemonScienceStatus {
@@ -249,6 +250,40 @@ export function createDaemonScienceService(options: {
   };
   async function runCommand(command: DaemonScienceCommand): Promise<unknown> {
     if (!command || typeof command !== "object" || Array.isArray(command) || typeof command.op !== "string") throw new Error("science_daemon_command_invalid");
+    if (command.op === "autostart.hasRecoverableScienceWork") {
+      options.assertOwner();
+      if (state !== "ready" || !science || !runtimeOpened) throw new Error("science_daemon_not_ready");
+      // listProjects() is capped at 500. Use the published databasePath with a
+      // separate read-only connection: this existence check covers every project
+      // without loading a conversation service, migrating, or recovering work.
+      const databasePath = science.scienceStore().databasePath;
+      const { default: Database } = await import("better-sqlite3");
+      assertExecution();
+      const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+      try {
+        const row = db.prepare(`SELECT (
+          EXISTS (SELECT 1 FROM science_turns WHERE status IN ('queued','running','cancelling'))
+          OR EXISTS (SELECT 1 FROM loop_sessions WHERE status IN ('running','queued','pausing'))
+          OR EXISTS (
+            SELECT 1 FROM loop_sessions s
+            JOIN conversation_runtime_bindings b ON b.runtime_chat_id=s.runtime_chat_id AND b.project_id=s.project_id
+            JOIN loop_events e ON e.loop_session_id=s.id
+            WHERE s.status='paused' AND json_extract(e.payload_json,'$.version')=s.version
+              AND e.sequence=(SELECT MAX(later.sequence) FROM loop_events later
+                WHERE later.loop_session_id=s.id
+                  AND json_extract(later.payload_json,'$.version')=s.version
+                  AND (later.code IN ('loop.retry_scheduled','loop.retry_withheld','loop.controller_settled_paused','loop.resume_failed','loop.pause')
+                    OR later.code LIKE 'loop.paused.%'))
+              AND (e.code='loop.retry_scheduled'
+                OR (e.code IN ('loop.paused.app_closed','loop.paused.crash_recovery')
+                  AND json_extract(e.payload_json,'$.stateSha256')=s.state_sha256))
+          )
+        ) AS has_work`).get() as { has_work: number };
+        // A paused quota/auth failure is not a retry intent. In particular, an
+        // older host-boundary event cannot override a later/current-version pause.
+        return row.has_work === 1;
+      } finally { db.close(); }
+    }
     const { api, store, conversations, host: activeHost } = ready();
     switch (command.op) {
       case "runtime.inspect": return api.inspectScienceRuntime(store, command.input);
