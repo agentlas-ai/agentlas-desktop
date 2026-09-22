@@ -58,6 +58,9 @@ export function ensureDreamingDefault(): void {
 
 export function setDreamingEnabled(enabled: boolean): void {
   setMeta(ENABLED_KEY, enabled ? "1" : "0");
+  // Provenance for later migrations: without it a stored "0" could not be told
+  // apart from an automatic write, and an explicit user OFF must never be revived.
+  setMeta(ENABLED_SET_BY_KEY, "user");
 }
 
 export interface DreamingStatus {
