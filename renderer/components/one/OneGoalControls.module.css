@@ -16,26 +16,18 @@
 .editor textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 .editor p { margin: 0; color: var(--muted-deep); font-size: 11px; }
 .editor > div { display: flex; justify-content: flex-end; gap: 6px; }
-.helpButton { width: 27px; height: 27px; border: 1px solid var(--paper-edge); border-radius: 50% !important; font-weight: 700 !important; }
-.help { position: absolute; z-index: 20; bottom: calc(100% + 6px); right: 0; box-sizing: border-box; width: min(360px, 100%); max-height: min(52vh, 440px); overflow: auto; padding: 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); font-size: 11px; line-height: 1.5; }
-.help p { margin: 0 0 7px; overflow-wrap: anywhere; }
-.review { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; box-sizing: border-box; max-height: min(34vh, 280px); margin: 6px 0 4px; padding: 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); font-size: 12px; line-height: 1.5; }
-.reviewHeading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.reviewHeading strong { font-size: 13px; }
-.reviewIntro, .reviewNote, .reviewBlocker { margin: 7px 0; color: var(--muted-deep); }
-.reviewBlocker { color: var(--ink); font-weight: 600; }
-.reviewList { display: grid; gap: 7px; min-height: 0; overflow: auto; padding: 2px; }
-.reviewItem { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid var(--paper-edge); border-radius: 8px; cursor: pointer; }
-.reviewItem:has(input:disabled) { cursor: default; }
-.reviewItem input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--ink); }
-.reviewItem > span { display: grid; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
-.reviewItem strong { font-size: 12px; }
-.reviewItem small { color: var(--muted-deep); }
-.reviewObjective { white-space: pre-wrap; }
-.reviewActivity { display: grid; gap: 2px; margin: 3px 0; padding: 5px 7px; border-radius: 6px; background: var(--paper-edge); font-size: 11px; }
-.reviewActivity b { font-size: 10px; }
-.reviewUncertain { color: var(--muted-deep); }
-.reviewActions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.helpButton { width: 20px; min-height: 20px !important; height: 20px; padding: 0 !important; border: 1px solid var(--paper-edge); border-radius: 50% !important; color: var(--muted-deep) !important; font-size: 10px; font-weight: 700 !important; }
+.help { position: absolute; z-index: 20; bottom: calc(100% + 4px); right: 4px; box-sizing: border-box; width: min(300px, calc(100% - 8px)); max-height: min(50vh, 360px); overflow: auto; padding: 10px 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); box-shadow: 0 6px 20px rgb(0 0 0 / 12%); font-size: 11px; line-height: 1.5; }
+.help p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.helpCriteria { margin: 0 0 6px; padding-left: 16px; color: var(--muted-deep); }
+.helpMore > summary { cursor: pointer; color: var(--muted-deep); font-size: 10px; list-style: none; }
+.helpMore > summary::-webkit-details-marker { display: none; }
+.helpMore > summary::after { content: " ⌄"; }
+.helpMore[open] > summary { margin-bottom: 6px; }
+.errorCode { margin-left: 4px; color: var(--muted-deep); cursor: help; }
+.review { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--paper-edge); border-radius: 9px; background: var(--paper); font-size: 12px; line-height: 1.45; }
+.reviewText { flex: 1 1 260px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.reviewActions { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 6px; margin-left: auto; }
 .reviewActions .reviewPrimary { background: var(--ink); color: var(--paper); }
 .reviewActions .reviewPrimary:hover { opacity: 0.85; background: var(--ink); }
 @media (max-width: 480px) { .criteria { display: none; } .bar { gap: 4px; } }

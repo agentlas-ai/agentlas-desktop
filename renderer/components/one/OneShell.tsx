@@ -1917,7 +1917,9 @@ export function OneShell() {
   }, [railOpen]);
   const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const composerDockRef = useRef<HTMLDivElement>(null);
+  // State, not a ref: the dock mounts after the first render, and an effect keyed
+  // on a ref never re-ran, so the dock height was never observed.
+  const [composerDockEl, setComposerDockEl] = useState<HTMLDivElement | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const resultTopRef = useRef<HTMLDivElement>(null);
   const attachmentDragDepthRef = useRef(0);
@@ -2115,9 +2117,23 @@ export function OneShell() {
   }, [conversation?.id, messages.length, receipt?.runId, selected?.taskId, syncScrollToLatestButton, threadRuns.length]);
 
   useEffect(() => {
-    const dock = composerDockRef.current;
+    const dock = composerDockEl;
     if (!dock) return;
-    const update = () => dock.parentElement?.style.setProperty("--one-composer-dock-height", `${Math.ceil(dock.getBoundingClientRect().height)}px`);
+    let previousHeight = Math.ceil(dock.getBoundingClientRect().height);
+    const update = () => {
+      const height = Math.ceil(dock.getBoundingClientRect().height);
+      dock.parentElement?.style.setProperty("--one-composer-dock-height", `${height}px`);
+      // The dock is a flex sibling of the conversation, so growing it (a Goal
+      // prompt, queued instruction) shrinks the scroller from the bottom. If the
+      // reader was at the latest message, keep it in view instead of pushing it
+      // under the fold.
+      const grew = height - previousHeight;
+      previousHeight = height;
+      const scroller = scrollRef.current;
+      if (grew > 0 && scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= grew + 24) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+    };
     update();
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
     observer?.observe(dock);
@@ -2125,7 +2141,7 @@ export function OneShell() {
       observer?.disconnect();
       dock.parentElement?.style.removeProperty("--one-composer-dock-height");
     };
-  }, []);
+  }, [composerDockEl]);
 
   /**
    * 대화를 처음 그릴 때 맨 아래에 **붙여 둔다**.
@@ -8034,7 +8050,7 @@ export function OneShell() {
           </div>
 
           <div
-            ref={composerDockRef}
+            ref={setComposerDockEl}
             className={styles.composerDock}
             data-drag-active={attachmentDragActive ? "true" : "false"}
             onDragEnter={(event) => {

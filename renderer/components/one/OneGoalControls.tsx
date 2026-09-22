@@ -9,7 +9,6 @@ import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-su
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import styles from "./OneGoalControls.module.css";
 
-const MAX_INLINE_REVIEW_ATTEMPTS = 20;
 type GoalAction = "pause" | "delete" | "resume" | "edit";
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; continuity: ChatContinuitySnapshot | null; handoff: GoalRuntimeSelectionReceipt | null;
   observedAt: string | null; pending: GoalAction | null; error: string | null;
@@ -168,8 +167,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   helpContent?: ReactNode;
 }) {
   const [view, setView] = useState<GoalView>({ goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false, review: null });
-  const [reviewedAttemptIds, setReviewedAttemptIds] = useState<string[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
+  const rootRef = useRef<HTMLElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const callbacks = useRef({ isCurrent, onDeleted });
@@ -212,9 +211,19 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     return () => { disposed = true; owner.dispose(); unsubscribe?.(); clearTimeout(timer); clearInterval(poll); session.current = null; };
   }, [chatId]);
   useEffect(() => {
-    setReviewedAttemptIds([]);
     if (view.review) setHelpOpen(false);
   }, [view.review?.attemptSetDigest]);
+  // The (?) bubble is a transient explanation: any outside press or Escape closes it.
+  useEffect(() => {
+    if (!helpOpen) return;
+    const onPointer = (event: PointerEvent) => {
+      if (rootRef.current && event.target instanceof Node && !rootRef.current.contains(event.target)) setHelpOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setHelpOpen(false); };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onPointer); document.removeEventListener("keydown", onKey); };
+  }, [helpOpen]);
   if (!view.goalId && !view.error) return null;
   const ko = locale === "ko";
   // Electron serializes IPC failures into an error message. This exact code
@@ -262,8 +271,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : !observationFresh ? (ko ? "Goal 상태 재확인 중 · 실행 여부 미확인" : "Rechecking Goal state · run status unconfirmed")
     : status === "pausing" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
     : status === "blocked" && verificationUnavailable
-      ? (ko ? "앱의 결과 검증이 실패해 다음 자율작업이 멈췄습니다. 작업 자체가 실패한 것으로 확인된 것은 아닙니다. 실제 결과를 확인한 뒤 재개 여부를 결정하세요."
-        : "The app could not verify the result, so further autonomous work stopped. This does not confirm that the task itself failed. Check the actual outcome before deciding whether to resume.")
+      ? (ko ? "앱이 결과를 확인하지 못해 다음 작업을 멈췄어요. 작업이 실패했다는 뜻은 아니에요."
+        : "The app could not check the result, so it paused further work. This does not mean the task failed.")
     : observationFresh && surface.state !== "unknown"
       ? goalSurfaceStatusLabel(surface.state, locale)
     : status === "paused" ? (ko ? "일시정지됨" : "Paused")
@@ -280,7 +289,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : timedWait ? (ko ? `다음 확인 ${nextCheck ?? "대기 중"} · 앱 실행 중 자동 재개` : `Next check ${nextCheck ?? "pending"} · resumes while app is running`)
     : status === "waiting_tool" ? (ko ? "이 Goal의 도구 결과 대기 중" : "Waiting for this Goal's tool result")
     : status === "queued" ? (ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run")
-    : status === "running" ? (ko ? "이 Goal의 실행 중 · Activity에서 단계 확인" : "This Goal is running · check Activity for phase")
+    : status === "running" ? (ko ? "이 Goal을 실행하고 있습니다" : "This Goal is running")
     : view.context?.objective || (ko ? "다음 요청으로 목표를 확정합니다" : "Your next request will define the goal");
   const shortStatus = view.pending ? (ko ? "처리 중" : "Working")
     : !observationFresh ? (ko ? "확인 중" : "Checking")
@@ -300,8 +309,29 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : surface.state === "cancelled" ? (ko ? "종료" : "Stopped")
     : (ko ? "상태 확인 중" : "Checking status");
   const review = view.review;
-  const allReviewed = Boolean(review && review.attemptIds.every((id) => reviewedAttemptIds.includes(id)));
-  return <section className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true"
+  const closeReview = () => { session.current?.closeReview(); };
+  // One sentence per state. Attempt IDs, timestamps and tool previews stay in
+  // the ledger; the person only needs to know what happens if they continue.
+  const reviewSentence = !review ? null
+    : review.blocker === "running"
+      ? (ko ? "아직 끝나지 않은 작업이 있어요. 끝나면 다시 눌러 주세요." : "A task is still finishing. Try again once it is done.")
+    : review.blocker === "automation"
+      ? (ko ? "예약 자동화가 붙은 목표라, 같은 게시가 두 번 나가지 않도록 여기서는 이어가지 않았어요."
+        : "This goal has a scheduled automation, so it was not continued here to avoid posting the same thing twice.")
+    : review.blocker === "too_many"
+      ? (ko ? `멈춘 작업이 ${review.attempts.length}건이라 한 번에 이어갈 수 없어요. 목표는 멈춘 채로 둡니다.`
+        : `${review.attempts.length} tasks were interrupted — too many to continue at once. The goal stays paused.`)
+    : review.blocker === "missing_activity"
+      ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다."
+        : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
+    : (ko ? `멈추기 전 작업 ${review.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
+      : `The ${review.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`);
+  const plainAutomationNote = surface.automation.reconciliationHold > 0
+    ? (ko ? "예약 자동화 하나가 오류 뒤 멈춰 다음 실행이 잡혀 있지 않아요." : "A scheduled automation stopped after an error and has no next run.")
+    : surface.automation.held > 0
+      ? (ko ? "꺼 둔 예약에 남은 실행은 다시 돌리지 않아요." : "Runs left on a switched-off schedule are not replayed.")
+      : null;
+  return <section ref={rootRef} className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true"
     data-goal-observation={view.error || view.refreshing ? "stale" : observationFresh ? "confirmed" : "pending"}>
     {view.goalId && <div className={styles.bar}>
       <IconTarget size={13} />
@@ -326,68 +356,34 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>
       <button type="button" className={styles.helpButton} aria-label={ko ? "목표 상태 도움말" : "Goal status help"}
-        aria-expanded={helpOpen} onClick={() => setHelpOpen((open) => !open)}>?</button>
+        aria-haspopup="dialog" aria-expanded={helpOpen} onClick={() => setHelpOpen((open) => !open)}>?</button>
     </div>}
-    {helpOpen && <div className={styles.help} role="region" aria-label={ko ? "목표 상태 자세히" : "Goal status details"}>
+    {helpOpen && <div className={styles.help} role="dialog" data-goal-help="true" aria-label={ko ? "목표 상태 설명" : "Goal status explained"}>
       <p>{label}</p>
-      {view.context?.acceptanceCriteria.length ? <p>{ko ? "성공 기준" : "Success criteria"}: {view.context.acceptanceCriteria.join(" · ")}</p> : null}
-      {surface.automation.recentRunning > 0 && <p>{ko ? `자동화 원장 최근 실행 ${surface.automation.recentRunning}개` : `${surface.automation.recentRunning} recent automation record(s)`}</p>}
-      {surface.automation.held > 0 && <p>{ko ? `보류된 자동화 ${surface.automation.held}개` : `${surface.automation.held} held automation(s)`}</p>}
-      {surface.automation.reconciliationHold > 0 && <p>{ko ? `자동화 조정 보류 ${surface.automation.reconciliationHold}개` : `${surface.automation.reconciliationHold} automation reconciliation hold(s)`}</p>}
-      {view.handoff && <p>{ko ? "다음 실행 모델" : "Next-run model"}: {view.handoff.effective?.model ?? view.handoff.requested.model ?? view.handoff.requested.kind} ({view.handoff.state})</p>}
-      {view.continuity && <GoalStrategyStatus continuity={view.continuity} surface={surface} locale={locale} />}
-      {helpContent}
-      {lastConfirmedModel && <p>{ko ? "최근 완료 실행 모델" : "Last completed run model"}: {lastConfirmedModel}</p>}
-      {view.observedAt && <p>{ko ? "목표 상태 확인" : "Goal status checked"} <time dateTime={view.observedAt}>{new Date(view.observedAt).toLocaleTimeString(ko ? "ko-KR" : "en-US")}</time></p>}
+      {view.context?.acceptanceCriteria.length ? <ul className={styles.helpCriteria} aria-label={ko ? "성공 기준" : "Success criteria"}>
+        {view.context.acceptanceCriteria.map((item, index) => <li key={index}>{item}</li>)}
+      </ul> : null}
+      {plainAutomationNote && <p>{plainAutomationNote}</p>}
+      <details className={styles.helpMore}>
+        <summary>{ko ? "자세히" : "More"}</summary>
+        {view.continuity && <GoalStrategyStatus continuity={view.continuity} surface={surface} locale={locale} />}
+        {helpContent}
+        {view.handoff && <p>{ko ? "다음 실행 모델" : "Next-run model"}: {view.handoff.effective?.model ?? view.handoff.requested.model ?? view.handoff.requested.kind}</p>}
+        {lastConfirmedModel && <p>{ko ? "최근 실행 모델" : "Last run model"}: {lastConfirmedModel}</p>}
+      </details>
     </div>}
-    {review && <div className={styles.review} role="region" aria-label={ko ? "중단된 작업 결과 확인" : "Review interrupted work"}>
-      <div className={styles.reviewHeading}>
-        <strong>{ko ? `중단된 작업 ${review.attempts.length}건` : `${review.attempts.length} interrupted task(s)`}</strong>
-        <button type="button" onClick={() => { session.current?.closeReview(); setReviewedAttemptIds([]); }}>
-          {ko ? "닫기" : "Close"}
-        </button>
-      </div>
-      <p className={styles.reviewIntro}>{ko
-        ? "앱이 중단 전 작업의 외부 결과를 확인하지 못했습니다. 아래 작업 내용을 보고 실제 결과를 확인해 주세요. 이전 요청은 자동 재실행하지 않습니다."
-        : "The app could not confirm these tasks' external results. Review each task and its actual result below. Previous requests will not be replayed automatically."}</p>
-      <div className={styles.reviewList}>
-        {review.attempts.slice(0, MAX_INLINE_REVIEW_ATTEMPTS).map((attempt, index) => <label className={styles.reviewItem} key={attempt.id}>
-          <input type="checkbox" disabled={Boolean(review.blocker) || view.pending !== null}
-            checked={reviewedAttemptIds.includes(attempt.id)}
-            onChange={(event) => setReviewedAttemptIds((ids) => event.target.checked
-              ? [...ids, attempt.id] : ids.filter((id) => id !== attempt.id))} />
-          <span>
-            <strong>{index + 1}. {attempt.taskTitle}</strong>
-            <small>{new Date(attempt.startedAt).toLocaleString(ko ? "ko-KR" : "en-US")}</small>
-            {attempt.taskObjective !== attempt.taskTitle && <span className={styles.reviewObjective}>{attempt.taskObjective}</span>}
-            {attempt.recordedActivity.length > 0 && <span className={styles.reviewActivity}>
-              <b>{ko ? "앱에 남은 작업 기록" : "Activity recorded in the app"}</b>
-              {attempt.recordedActivity.map((line, activityIndex) => <span key={`${attempt.id}:${activityIndex}`}>{line}</span>)}
-            </span>}
-            <span className={styles.reviewUncertain}>{ko
-              ? "외부 결과 미확인 · 이 작업의 실제 결과를 확인한 경우에만 체크"
-              : "External result unknown · check only after verifying this task's actual result"}</span>
-          </span>
-        </label>)}
-      </div>
-      {review.blocker && <p className={styles.reviewBlocker} role="status">{review.blocker === "running"
-        ? (ko ? "아직 실행 중인 작업이 있어 재개할 수 없습니다. 완료되거나 중단된 뒤 다시 확인해 주세요." : "A task is still running. Review again once it finishes or stops.")
-        : review.blocker === "too_many"
-          ? (ko ? "확인해야 할 작업이 한 번에 표시할 수 있는 수를 넘었습니다. 목표는 일시정지 상태로 유지됩니다." : "There are too many tasks to review safely at once. The goal stays paused.")
-        : review.blocker === "automation"
-          ? (ko ? "연결된 자동화는 다음 동작 전 결과를 안전하게 대조할 수 없어 이 화면에서 재개할 수 없습니다. 목표와 기록은 보존됩니다." : "This automation cannot safely reconcile results before its next action, so it cannot resume here. The goal and history are preserved.")
-          : (ko ? "일부 작업의 실행 기록 연결이 없어 안전한 재개를 확인할 수 없습니다. 목표와 기록은 보존됩니다." : "Some tasks lack a linked run record, so safe resume cannot be confirmed. The goal and history are preserved.")}</p>}
-      {!review.blocker && <p className={styles.reviewNote}>{ko
-        ? "체크는 실제 결과를 확인했다는 사용자 진술로 기록됩니다. 성공 증거로 취급하지 않습니다."
-        : "Checks record your statement that you inspected the actual results. They are not proof of success."}</p>}
+    {review && <div className={styles.review} role="region" data-goal-review={review.blocker ?? "ready"}
+      aria-label={ko ? "멈춘 작업 이어가기" : "Continue interrupted work"}>
+      <p className={styles.reviewText}>{reviewSentence}</p>
       <div className={styles.reviewActions}>
-        <button type="button" onClick={() => { session.current?.closeReview(); setReviewedAttemptIds([]); }}>{ko ? "일시정지 유지" : "Keep paused"}</button>
-        {!review.blocker && <button type="button" className={styles.reviewPrimary} disabled={!allReviewed || view.pending !== null}
+        <button type="button" onClick={closeReview}>{review.blocker ? (ko ? "닫기" : "Close") : (ko ? "나중에" : "Not now")}</button>
+        {!review.blocker && <button type="button" className={styles.reviewPrimary} data-goal-review-primary="true"
+          disabled={view.pending !== null}
           onClick={() => { void session.current?.act("resume", {
             runId: review.runId, version: review.version, attemptIds: review.attemptIds,
             attemptSetDigest: review.attemptSetDigest, reviewedAttemptIds: review.attemptIds,
           }); }}>
-          {view.pending === "resume" ? (ko ? "재개 중" : "Resuming") : ko ? "확인 완료 · 새 작업 재개" : "Reviewed · resume new work"}
+          {view.pending === "resume" ? (ko ? "이어가는 중" : "Continuing") : ko ? "이어가기" : "Continue"}
         </button>}
       </div>
     </div>}
@@ -407,15 +403,15 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       : reviewCancelled
         ? (ko ? "확인을 취소했습니다. 목표는 중단 상태이며 기록은 보존됩니다." : "Review cancelled. The goal remains paused and its history is preserved.")
       : reviewChanged
-        ? (ko ? "확인 중 이전 실행 기록이 바뀌었습니다. 최신 기록을 확인하고 다시 시도해 주세요." : "The interrupted attempts changed during review. Inspect the latest record and try again.")
+        ? (ko ? "그사이 작업 상태가 바뀌었어요. 다시 눌러 주세요." : "The work changed in the meantime. Press it again.")
       : reviewRequired
-        ? (ko ? "이전 실행의 외부 결과 확인이 필요합니다. 목표는 중단 상태입니다." : "Review the interrupted attempts' external outcomes first. The goal remains paused.")
+        ? (ko ? "멈춘 작업을 먼저 정리해야 해요. 재개를 다시 눌러 주세요." : "The interrupted work needs settling first. Press Resume again.")
       : reviewUnverifiable
-        ? (ko ? "일부 시도에 Activity 호출 ID가 없어 결과 대조가 불가능할 수 있습니다. 자동 재개 없이 목표와 기록을 보존합니다." : "Some attempts lack an Activity invocation ID, so their outcome may be impossible to verify. The goal and history remain preserved without automatic resume.")
+        ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
       : reviewTooLarge
-        ? (ko ? "개별 결과를 이 창에서 빠짐없이 표시할 수 없어 재개하지 않았습니다. Activity에서 확인해 주세요." : "Too many interrupted attempts to display reliably here. The goal remains paused; inspect Activity.")
+        ? (ko ? "멈춘 작업이 너무 많아 한 번에 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "Too many tasks were interrupted to continue at once. The goal stays paused.")
       : automationReviewRequired
-        ? (ko ? "자동화의 외부 결과가 불확실해 재개하지 않았습니다. Activity와 실제 외부 결과를 대조해야 합니다." : "The automation was not resumed because prior external outcomes are unknown. Compare Activity with the actual external result.")
+        ? (ko ? "예약 자동화가 붙은 목표라, 같은 게시가 두 번 나가지 않도록 여기서는 이어가지 않았어요." : "This goal has a scheduled automation, so it was not continued here to avoid posting the same thing twice.")
       : uncertainResume
       ? (ko ? "이전 실행의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The previous action's outcome needs confirmation first. Your goal and work history are preserved.")
       : lifecycleConfirmationUnavailable
@@ -423,6 +419,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       : lifecycleNotOngoing
         ? (ko ? "저장된 요청에서 ‘중단 지시 전까지 계속’이라는 명시적 권한을 확인하지 못해 자동 다음 주기를 시작하지 않았습니다. 계속하려면 대화에 지속 기간을 명시해 새 지시를 보내 주세요." : "The saved request does not explicitly authorize continuing until you stop it, so no automatic next cycle was started. Send a new instruction that states the intended duration if you want ongoing work.")
       : (ko ? "목표 상태를 확인하거나 변경하지 못했습니다. 상태를 새로고침한 뒤 다시 시도해 주세요." : "The goal could not be checked or changed. Refresh its status, then try again.")}
-      {!reviewCancelled && !reviewChanged && !reviewRequired && !reviewUnverifiable && !reviewTooLarge && !automationReviewRequired && <span>{view.error}</span>}<button type="button" onClick={() => { void session.current?.refresh(true); }}>{ko ? "상태 새로고침" : "Refresh status"}</button></p>}
+      {/* The raw machine code stays reachable on hover for support, never as body text. */}
+      {view.error && <span className={styles.errorCode} title={view.error} aria-hidden="true">ⓘ</span>}<button type="button" onClick={() => { void session.current?.refresh(true); }}>{ko ? "상태 새로고침" : "Refresh status"}</button></p>}
   </section>;
 }

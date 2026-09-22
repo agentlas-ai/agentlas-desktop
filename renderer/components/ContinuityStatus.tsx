@@ -193,8 +193,9 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
       {latestProgress && <p>{ko ? "마지막 원장 활동" : "Last durable activity"} · {latestProgress}</p>}
     </div>}
     {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
-    <small className={styles.observation}>{error ? (ko ? "상태 재확인 중 · 마지막 확인 " : "Rechecking status · last confirmed ")
-      : (ko ? "Main 상태 확인 " : "Main state checked ")}{observedAt ?? lastConfirmedAt ?? "—"}</small>
+    {/* A "checked at" timestamp is noise in One's compact bubble; keep it only when stale or in the detail view. */}
+    {(detail || error) && <small className={styles.observation}>{error ? (ko ? "상태 재확인 중 · 마지막 확인 " : "Rechecking status · last confirmed ")
+      : (ko ? "Main 상태 확인 " : "Main state checked ")}{observedAt ?? lastConfirmedAt ?? "—"}</small>}
     </div>
   </details>;
 }
