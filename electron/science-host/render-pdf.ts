@@ -15,6 +15,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { printHtmlInChromiumHelper } from "./chromium-print-client";
+import { chromiumPrintFailureReason, type ChromiumPdfOptions, type ChromiumPrintReceipt } from "./chromium-print-protocol";
 
 export type ManuscriptPdfEngine = "tectonic" | "chromium" | "pdflatex";
 
@@ -45,14 +47,12 @@ export interface ManuscriptPdfResult {
   diagnostics?: LatexCompileDiagnostics;
   toolchain?: TectonicToolchainReceipt | PdfLatexReceipt;
   typesetFiles?: Array<{ name: string; bytes: Uint8Array }>;
+  chromium?: ChromiumPrintReceipt;
 }
 
 /** Chromium navigation errors can echo the whole base64 manuscript data URL. */
 export function chromiumPdfFailureReason(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error))
-    .replace(/data:[^\s'"<>]+/gu, "[redacted data URL]");
-  const navigationCode = message.match(/\b(ERR_[A-Z_]+ \(-?\d+\))/);
-  return navigationCode ? `chromium navigation failed: ${navigationCode[1]}` : message.slice(0, 500);
+  return chromiumPrintFailureReason(error);
 }
 
 /** Platform-native executable candidates; no shell or inferred engine fallback. */
@@ -160,22 +160,9 @@ export async function renderPdfWithTectonic(input: LatexPdfInput): Promise<Manus
   }
 }
 
-/** Prints the HTML rendering with Electron's Chromium. Only callable from the main process after `app` is ready. */
-export async function renderPdfWithChromium(html: string): Promise<ManuscriptPdfResult> {
-  let electron: typeof import("electron");
-  try { electron = await import("electron"); } catch (error) { return { ok: false, reason: `electron unavailable: ${error instanceof Error ? error.message : String(error)}` }; }
-  const { BrowserWindow, app } = electron;
-  if (!app?.isReady?.()) return { ok: false, reason: "electron app is not ready" };
-  const win = new BrowserWindow({ show: false, webPreferences: { offscreen: true, javascript: false, sandbox: true, contextIsolation: true, images: true } });
-  try {
-    await win.loadURL(`data:text/html;charset=utf-8;base64,${Buffer.from(html, "utf8").toString("base64")}`);
-    const bytes = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4", margins: { top: 0.87, bottom: 0.87, left: 0.79, right: 0.79 }, preferCSSPageSize: true });
-    return { ok: true, engine: "chromium", bytes };
-  } catch (error) {
-    return { ok: false, engine: "chromium", reason: chromiumPdfFailureReason(error) };
-  } finally {
-    if (!win.isDestroyed()) win.destroy();
-  }
+/** Owns a one-shot Chromium process tree, including when the caller is a Node-mode daemon. */
+export function renderPdfWithChromium(html: string, options: ChromiumPdfOptions = {}): Promise<ManuscriptPdfResult> {
+  return printHtmlInChromiumHelper(html, options);
 }
 
 export interface ManuscriptPdfInput {
@@ -185,6 +172,8 @@ export interface ManuscriptPdfInput {
   /** Required typesetting must fail before invoking a different renderer. */
   allowFallback?: boolean;
   pdfProfile?: PdfLatexProfileRef;
+  /** Cancellation/deadline for Chromium only; no implicit cross-engine fallback. */
+  chromium?: ChromiumPdfOptions;
 }
 
 /** Produces a PDF with the requested engine, respecting required-engine failures. */
@@ -205,10 +194,10 @@ export async function renderManuscriptPdf(input: ManuscriptPdfInput): Promise<Ma
     if (input.allowFallback === false) {
       return latex ?? { ok: false, engine: "tectonic", reason: "toolchain-missing" };
     }
-    const fallback = await renderPdfWithChromium(input.html);
+    const fallback = await renderPdfWithChromium(input.html, input.chromium);
     if (!fallback.ok) return { ok: false, reason: [latex?.reason, fallback.reason].filter(Boolean).join(" / ") || "pdf export failed" };
     return { ...fallback, degraded: latex === null ? "toolchain-missing" : "typeset-failed", ...(latex?.reason ? { degradedReason: latex.reason } : {}), log: latex?.log, diagnostics: latex?.diagnostics, toolchain: latex?.toolchain };
   }
-  if (input.prefer === "chromium") return renderPdfWithChromium(input.html);
+  if (input.prefer === "chromium") return renderPdfWithChromium(input.html, input.chromium);
   return { ok: false, reason: "publication_pdf_engine_unavailable" };
 }
