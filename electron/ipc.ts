@@ -3,6 +3,7 @@ import { getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToL
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
+import { matchesGoalResumeReview } from "../shared/goal-resume-review";
 import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
 import { getChatContinuitySnapshot } from "./long-run/continuity-snapshot";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
@@ -44,7 +45,7 @@ import {
   pickModelRoleFromPool,
   setModelRoleMembers as setModelRoleMembersStore,
 } from "./store/model-roles";
-import type { ImageAttachment, RuntimeRole, RuntimeRolePoolState } from "../shared/types";
+import type { GoalResumeConfirmation, GoalResumeReview, ImageAttachment, RuntimeRole, RuntimeRolePoolState } from "../shared/types";
 import { requiredExecutionPermission } from "../shared/graph-node-protocol";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
@@ -4485,8 +4486,43 @@ export function registerIpcHandlers(): void {
     }
     return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
-  ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string) => {
-    const win = assertTrustedSitePublishIpcSender(_e);
+  ipcMain.handle("chats:getGoalResumeReview", (_e, id: string, expectedVersion: number, expectedGoalId: string): GoalResumeReview | null => {
+    assertTrustedSitePublishIpcSender(_e);
+    const chat = getChat(id);
+    if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
+      throw new Error("goal_control_binding_changed");
+    }
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
+      throw new TypeError("A current long-run version is required to review");
+    }
+    const run = getLongRunByGoalId(expectedGoalId);
+    if (!run || run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+    const review = getLongRunAttemptReview(run.id);
+    if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
+    if (!review.attempts.length) return null;
+    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running"
+      : review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS ? "too_many"
+      : findAutomationByGoalId(expectedGoalId) ? "automation"
+      : review.attempts.some((attempt) => !attempt.invocationRunId) ? "missing_activity" : null;
+    const attempts = review.attempts.map((attempt) => {
+      const recordedActivity = attempt.invocationRunId
+        ? listRunEvents(attempt.invocationRunId, 200)
+          .filter((event) => event.kind === "mcp_tool-use")
+          .slice(-3)
+          .map((event) => {
+            const tool = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
+            const result = typeof event.payload.toolResultPreview === "string"
+              ? event.payload.toolResultPreview.replace(/\s+/g, " ").trim().slice(0, 180) : "";
+            return [tool, result].filter(Boolean).join(" · ");
+          }).filter(Boolean)
+        : [];
+      return { ...attempt, recordedActivity };
+    });
+    return { ...review, attempts, blocker };
+  });
+  ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string,
+    submittedConfirmation?: GoalResumeConfirmation) => {
+    assertTrustedSitePublishIpcSender(_e);
     const chat = getChat(id);
     if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
       throw new Error("goal_control_binding_changed");
@@ -4514,67 +4550,24 @@ export function registerIpcHandlers(): void {
     const continuation = findAutomationByGoalId(chat.goalId);
     let confirmation: LongRunAttemptReviewConfirmation | undefined;
     if (review.attempts.length) {
-      const ko = currentUiLocale() === "ko";
       if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) {
-        await dialog.showMessageBox(win, {
-          type: "warning", buttons: [ko ? "중단 유지" : "Keep paused"], defaultId: 0, cancelId: 0, noLink: true,
-          title: ko ? "개별 확인이 필요한 실행이 너무 많습니다" : "Too many interrupted attempts to review here",
-          message: ko
-            ? `${review.attempts.length}건의 결과를 이 창에서 빠짐없이 표시할 수 없어 재개하지 않습니다.`
-            : `This dialog cannot reliably display all ${review.attempts.length} attempts, so the goal was not resumed.`,
-          detail: ko
-            ? "목표와 기록은 보존됩니다. Activity에서 개별 시도와 외부 결과를 확인해 주세요. 이 창은 결과 인지를 기록하지 않습니다."
-            : "The goal and history are preserved. Inspect individual attempts in Activity and their external results. No acknowledgement was recorded.",
-        });
         throw new Error("goal_resume_uncertain_review_too_large");
       }
       if (continuation) {
-        await dialog.showMessageBox(win, {
-          type: "warning", buttons: [ko ? "중단 유지" : "Keep paused"], defaultId: 0, cancelId: 0, noLink: true,
-          title: ko ? "자동화 결과를 먼저 확인해야 합니다" : "Review the automation's external result",
-          message: ko
-            ? `이 Goal에는 외부 결과가 불확실한 실행 ${review.attempts.length}건이 있으며 자동화를 바로 재개할 수 없습니다.`
-            : `${review.attempts.length} interrupted attempt(s) have unknown external outcomes; the automation cannot resume yet.`,
-          detail: ko
-            ? "Activity와 외부 시스템에서 결과를 대조해 주세요. 자동화에는 다음 실행 전에 읽기 전용 대조를 보장하는 게이트가 없어 이 창에서 인지·재개하지 않습니다. 목표와 기록은 보존됩니다."
-            : "Inspect Activity and the external system. This automation has no guaranteed read-only reconciliation gate before its next action, so this dialog cannot acknowledge or resume it. The goal and history are preserved.",
-        });
         throw new Error("goal_resume_uncertain_automation_reconciliation_required");
       }
-      const missingCorrelation = review.attempts.some((attempt) => !attempt.invocationRunId);
-      const decision = await dialog.showMessageBox(win, {
-        type: "warning",
-        buttons: missingCorrelation
-          ? [ko ? "중단 유지" : "Keep paused"]
-          : ko
-            ? ["중단 유지", "결과를 직접 대조했으며 새 단계 재개"]
-            : ["Keep paused", "I checked the outcomes; resume new work"],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true,
-        title: ko ? "이전 실행 결과 확인 필요" : "Review interrupted attempts before resuming",
-        message: ko
-          ? `이전 실행 ${review.attempts.length}건의 외부 결과를 Agentlas가 확인하지 못했습니다.`
-          : `Agentlas cannot verify the external outcomes of ${review.attempts.length} interrupted attempt(s).`,
-        detail: [
-          ...(ko ? [
-            "Activity 기록과 실제 외부 시스템에서 아래 각 시도의 결과를 직접 대조한 경우에만 재개하세요.",
-            "이 확인은 사용자의 진술만 기록합니다. 외부 결과의 증거 또는 성공 판정이 아니며, 이전 요청을 자동으로 재실행하지 않습니다.",
-            ...(missingCorrelation ? ["일부 시도에 Activity 호출 ID가 없어 결과 대조가 불가능할 수 있습니다. 이 창에서는 재개할 수 없습니다."] : []),
-          ] : [
-            "Resume only after checking each attempt in Activity and the actual external system.",
-            "This records your statement, not proof or success of any external outcome. It does not replay the old request.",
-            ...(missingCorrelation ? ["Some attempts have no Activity invocation ID. Their outcome may be impossible to verify, so resume is unavailable here."] : []),
-          ]),
-          "",
-          ...review.attempts.map((attempt) => `${attempt.startedAt} · Activity: ${attempt.invocationRunId ?? "unavailable"}\n  Attempt: ${attempt.id} · ${attempt.state} · effects: ${attempt.sideEffectState}`),
-        ].join("\n"),
-      });
-      if (missingCorrelation) throw new Error("goal_resume_uncertain_review_unverifiable");
-      if (decision.response !== 1) throw new Error("goal_resume_uncertain_review_cancelled");
+      if (review.attempts.some((attempt) => !attempt.invocationRunId)) {
+        throw new Error("goal_resume_uncertain_review_unverifiable");
+      }
+      if (!submittedConfirmation) throw new Error("goal_resume_uncertain_review_required");
+      if (!matchesGoalResumeReview(review, submittedConfirmation)) {
+        throw new Error("goal_resume_uncertain_review_changed");
+      }
       assertTrustedSitePublishIpcSender(_e);
       confirmation = { runId: review.runId, version: review.version,
         attemptIds: review.attemptIds, attemptSetDigest: review.attemptSetDigest };
+    } else if (submittedConfirmation) {
+      throw new Error("goal_resume_uncertain_review_changed");
     }
     if (!continuation) {
       // 사람이 누른 재개다: 인지 이벤트·판번호 갱신·재개를 한 트랜잭션으로(queueAutomaticGoalResume).

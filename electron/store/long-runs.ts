@@ -368,7 +368,8 @@ export interface LongRunAttemptReview {
   attemptIds: string[];
   attemptSetDigest: string;
   attempts: Array<{ id: string; invocationRunId: string | null; startedAt: string;
-    state: LongRunAttemptState; sideEffectState: "none" | "committed" | "uncertain" }>;
+    state: LongRunAttemptState; sideEffectState: "none" | "committed" | "uncertain";
+    taskTitle: string; taskObjective: string }>;
 }
 
 export type LongRunAttemptReviewConfirmation = Pick<LongRunAttemptReview, "runId" | "version" | "attemptIds" | "attemptSetDigest">;
@@ -506,15 +507,23 @@ export function getLongRunAttemptReview(runId: string): LongRunAttemptReview {
   if (!run) throw new Error(`long_run_not_found:${runId}`);
   const unresolved = unsettledLongRunAttempts(runId);
   const receipts = unresolved.map((attempt) => getDb().prepare(
-    `SELECT id, invocation_run_id, started_at, state, side_effect_state, updated_at, completed_at
-     FROM long_run_worker_attempts WHERE run_id = ? AND id = ?`,
+    `SELECT a.id, a.invocation_run_id, a.started_at, a.state, a.side_effect_state,
+            a.updated_at, a.completed_at, t.title AS task_title, t.objective AS task_objective
+     FROM long_run_worker_attempts AS a
+     LEFT JOIN long_run_workers AS w ON w.id = a.worker_id
+     LEFT JOIN long_run_tasks AS t ON t.run_id = a.run_id
+       AND t.id = COALESCE(a.task_id, w.task_id)
+     WHERE a.run_id = ? AND a.id = ?`,
   ).get(runId, attempt.id) as { id: string; invocation_run_id: string | null; started_at: string;
     state: LongRunAttemptState; side_effect_state: "none" | "committed" | "uncertain";
-    updated_at: string; completed_at: string | null } | undefined);
+    updated_at: string; completed_at: string | null;
+    task_title: string | null; task_objective: string | null } | undefined);
   if (receipts.some((receipt) => !receipt)) throw new Error("goal_resume_uncertain_review_changed");
   const attempts = receipts.map((receipt) => ({
     id: receipt!.id, invocationRunId: receipt!.invocation_run_id, startedAt: receipt!.started_at,
     state: receipt!.state, sideEffectState: receipt!.side_effect_state,
+    taskTitle: (receipt!.task_title || run.objective).slice(0, 240),
+    taskObjective: (receipt!.task_objective || run.objective).slice(0, 1_200),
   }));
   const attemptIds = attempts.map((attempt) => attempt.id);
   const attemptSetDigest = `sha256:${createHash("sha256").update(JSON.stringify({

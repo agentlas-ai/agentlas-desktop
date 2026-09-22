@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalRuntimeSelectionReceipt } from "../../../shared/types";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalResumeConfirmation, GoalResumeReview, GoalRuntimeSelectionReceipt } from "../../../shared/types";
 import { IconEdit, IconTarget, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { failureMessage } from "@/lib/invocation-failure";
@@ -9,11 +9,12 @@ import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-su
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import styles from "./OneGoalControls.module.css";
 
+const MAX_INLINE_REVIEW_ATTEMPTS = 20;
 type GoalAction = "pause" | "delete" | "resume" | "edit";
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; continuity: ChatContinuitySnapshot | null; handoff: GoalRuntimeSelectionReceipt | null;
   observedAt: string | null; pending: GoalAction | null; error: string | null;
-  errorKind: "observation" | "action" | null; refreshing: boolean };
-type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "getGoalRuntimeSelection" | "pauseGoal" | "deleteGoal" | "resumeGoal" | "reviseGoal">
+  errorKind: "observation" | "action" | null; refreshing: boolean; review: GoalResumeReview | null };
+type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "getGoalRuntimeSelection" | "pauseGoal" | "deleteGoal" | "resumeGoal" | "getGoalResumeReview" | "reviseGoal">
   & { getContinuitySnapshot?: AgentlasIpc["chats"]["getContinuitySnapshot"] };
 
 /** A mounted view owns observations, never Goal authority. Old reads/actions
@@ -25,7 +26,7 @@ export function createOneGoalControlSession(input: {
   let live = true;
   let readGeneration = 0;
   let actionGeneration = 0;
-  let view: GoalView = { goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false };
+  let view: GoalView = { goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false, review: null };
   const current = () => live && input.isCurrent();
   const publish = (patch: Partial<GoalView>) => {
     if (!current()) return;
@@ -40,11 +41,11 @@ export function createOneGoalControlSession(input: {
       const chat = await input.api.get(input.chatId);
       if (!fresh()) return;
       if (!chat || chat.id !== input.chatId || chat.originSurface !== "one") {
-        publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null });
+        publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null, review: null });
         return;
       }
       const goalId = chat.goalId ?? null;
-      if (!goalId) { publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null }); return; }
+      if (!goalId) { publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null, review: null }); return; }
       // Keep deletion reachable even when the Goal has not been defined yet.
       publish({ goalId, ...(view.goalId !== goalId ? { context: null, continuity: null, handoff: null } : {}) });
       const context = await input.api.getGoalContext(input.chatId);
@@ -65,11 +66,12 @@ export function createOneGoalControlSession(input: {
       const latest = await input.api.get(input.chatId);
       if (!fresh()) return;
       if (latest?.goalId !== goalId || (context && context.goalId !== goalId)) {
-        publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null });
+        publish({ goalId: null, context: null, continuity: null, handoff: null, refreshing: false, error: null, errorKind: null, review: null });
         return;
       }
       const stateChanged = view.goalId !== goalId || view.context?.version !== context?.version;
       publish({ context, continuity, handoff: handoff?.goalId === goalId ? handoff : null,
+        ...(stateChanged ? { review: null } : {}),
         observedAt: new Date().toISOString(), refreshing: false,
         ...(clearError || stateChanged || view.errorKind === "observation"
           ? { error: null, errorKind: null } : {}) });
@@ -77,7 +79,7 @@ export function createOneGoalControlSession(input: {
       if (fresh()) publish({ refreshing: false, error: failureMessage(cause).slice(0, 240), errorKind: "observation" });
     }
   };
-  const act = async (action: GoalAction) => {
+  const act = async (action: GoalAction, confirmation?: GoalResumeConfirmation) => {
     if (!current() || !view.goalId || view.pending === action || view.pending === "delete") return;
     const goalId = view.goalId;
     const generation = ++actionGeneration;
@@ -93,7 +95,7 @@ export function createOneGoalControlSession(input: {
         const updated = await input.api.deleteGoal(input.chatId, goalId);
         if (!fresh()) return;
         if (updated.id !== input.chatId || updated.goalId) throw new Error("goal_control_binding_changed");
-        publish({ goalId: null, context: null, continuity: null, handoff: null });
+        publish({ goalId: null, context: null, continuity: null, handoff: null, review: null });
         input.onDeleted();
       } else if (action === "pause") {
         await input.api.pauseGoal(input.chatId, goalId);
@@ -111,8 +113,14 @@ export function createOneGoalControlSession(input: {
             throw new Error("goal_control_binding_changed");
           }
           try {
-            await input.api.resumeGoal(input.chatId, latest.version, goalId);
+            if (!confirmation) {
+              const review = await input.api.getGoalResumeReview(input.chatId, latest.version, goalId);
+              if (!fresh()) return;
+              if (review) { publish({ review }); return; }
+            }
+            await input.api.resumeGoal(input.chatId, latest.version, goalId, confirmation);
             resumed = true;
+            if (fresh()) publish({ review: null });
           } catch (cause) {
             if (attempt === 0 && /(?:^|:\s*)long_run_resume_version_conflict$/.test(failureMessage(cause))) continue;
             throw cause;
@@ -121,7 +129,7 @@ export function createOneGoalControlSession(input: {
         if (!resumed) throw new Error("long_run_resume_version_conflict");
       }
     } catch (cause) {
-      if (fresh()) publish({ error: failureMessage(cause).slice(0, 240), errorKind: "action" });
+      if (fresh()) publish({ error: failureMessage(cause).slice(0, 240), errorKind: "action", review: null });
     } finally {
       if (fresh()) {
         publish({ pending: null });
@@ -149,16 +157,19 @@ export function createOneGoalControlSession(input: {
       if (fresh()) { publish({ pending: null }); await refresh(); }
     }
   };
-  return { refresh, act, revise, observedRunId: () => view.context?.runId,
+  return { refresh, act, revise, closeReview: () => publish({ review: null }), observedRunId: () => view.context?.runId,
     dispose: () => { live = false; ++readGeneration; ++actionGeneration; } };
 }
 
-export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConfirmedModel }: {
+export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConfirmedModel, helpContent }: {
   chatId: string; locale: "ko" | "en"; isCurrent: () => boolean; onDeleted: () => void;
   /** From the latest durable invocation final, never the composer default. */
   lastConfirmedModel?: string | null;
+  helpContent?: ReactNode;
 }) {
-  const [view, setView] = useState<GoalView>({ goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false });
+  const [view, setView] = useState<GoalView>({ goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false, review: null });
+  const [reviewedAttemptIds, setReviewedAttemptIds] = useState<string[]>([]);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const callbacks = useRef({ isCurrent, onDeleted });
@@ -200,6 +211,10 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     refresh();
     return () => { disposed = true; owner.dispose(); unsubscribe?.(); clearTimeout(timer); clearInterval(poll); session.current = null; };
   }, [chatId]);
+  useEffect(() => {
+    setReviewedAttemptIds([]);
+    if (view.review) setHelpOpen(false);
+  }, [view.review?.attemptSetDigest]);
   if (!view.goalId && !view.error) return null;
   const ko = locale === "ko";
   // Electron serializes IPC failures into an error message. This exact code
@@ -263,26 +278,30 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : status === "queued" ? (ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run")
     : status === "running" ? (ko ? "이 Goal의 실행 중 · Activity에서 단계 확인" : "This Goal is running · check Activity for phase")
     : view.context?.objective || (ko ? "다음 요청으로 목표를 확정합니다" : "Your next request will define the goal");
+  const shortStatus = view.pending ? (ko ? "처리 중" : "Working")
+    : !observationFresh ? (ko ? "확인 중" : "Checking")
+    : surface.state === "active_run" ? (ko ? "실행 중" : "Running")
+    : surface.state === "active_unconfirmed" ? (ko ? "실행 확인 중" : "Checking run")
+    : surface.state === "queued" ? (ko ? "준비 중" : "Queued")
+    : surface.state === "scheduled_wait" ? (ko ? "예약됨" : "Scheduled")
+    : surface.state === "waiting_confirmation" ? (ko ? "확인 필요" : "Confirm")
+    : surface.state === "waiting" ? (ko ? "대기 중" : "Waiting")
+    : surface.state === "blocked_uncertain" ? (ko ? "결과 확인 필요" : "Review outcome")
+    : surface.state === "blocked" ? (ko ? "조치 필요" : "Needs action")
+    : surface.state.startsWith("paused") ? (ko ? "일시정지" : "Paused")
+    : surface.state === "verifying" ? (ko ? "검증 중" : "Verifying")
+    : surface.state === "completed" ? (ko ? "완료" : "Completed")
+    : surface.state === "failed" ? (ko ? "실패" : "Failed")
+    : surface.state === "cancelled" ? (ko ? "종료" : "Stopped")
+    : (ko ? "상태 확인 중" : "Checking status");
+  const review = view.review;
+  const allReviewed = Boolean(review && review.attemptIds.every((id) => reviewedAttemptIds.includes(id)));
   return <section className={styles.root} aria-label={ko ? "목표" : "Goal"} data-one-goal-controls="true"
     data-goal-observation={view.error || view.refreshing ? "stale" : observationFresh ? "confirmed" : "pending"}>
     {view.goalId && <div className={styles.bar}>
       <IconTarget size={13} />
       <strong>{ongoing ? (ko ? "지속 목표" : "Ongoing goal") : (ko ? "목표" : "Goal")}</strong>
-      <span className={styles.label} title={label} role="status">{label}</span>
-      {Boolean(view.context?.acceptanceCriteria.length) && <span className={styles.criteria}
-        title={view.context!.acceptanceCriteria.join("\n")}>{ko ? `기준 ${view.context!.acceptanceCriteria.length}개` : `${view.context!.acceptanceCriteria.length} criteria`}</span>}
-      {surface.automation.recentRunning > 0 && surface.state !== "active_run" && <span className={styles.criteria} role="status"
-        title={ko ? "자동화의 최근 원장 기록은 이 Goal의 실행 증거가 아닙니다." : "A recent automation ledger row is not proof that this Goal is running."}>
-        {ko ? `자동화 원장 최근 실행 ${surface.automation.recentRunning}개` : `${surface.automation.recentRunning} automation run(s) recently recorded`}
-      </span>}
-      {surface.automation.held > 0 && <span className={styles.criteria} role="status"
-        title={ko ? "꺼진 예약에 남은 실행 기록은 자동 재실행하지 않습니다." : "A disabled schedule with a remaining run row is not replayed automatically."}>
-        {ko ? `보류된 자동화 ${surface.automation.held}개` : `${surface.automation.held} automation(s) held`}
-      </span>}
-      {surface.automation.reconciliationHold > 0 && <span className={styles.criteria} role="status"
-        title={ko ? "자동화 오류 뒤 다음 실행 시각이 없어 실행 내역 확인이 필요합니다." : "The automation errored without a next run time; review its run history before acting."}>
-        {ko ? `자동화 조정 보류 ${surface.automation.reconciliationHold}개` : `${surface.automation.reconciliationHold} automation reconciliation hold(s)`}
-      </span>}
+      <span className={styles.label} title={label} role="status">{shortStatus}</span>
       {pausable && <button type="button" aria-label={ko ? "목표 일시정지" : "Pause goal"}
         onClick={() => { void session.current?.act("pause"); }}>{ko ? "일시정지" : "Pause"}</button>}
       {resumable && <button type="button" disabled={view.pending === "resume" || !view.context?.version}
@@ -301,24 +320,72 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       <button type="button" aria-label={ko ? "목표 삭제" : "Delete goal"}
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>
+      <button type="button" className={styles.helpButton} aria-label={ko ? "목표 상태 도움말" : "Goal status help"}
+        aria-expanded={helpOpen} onClick={() => setHelpOpen((open) => !open)}>?</button>
     </div>}
-    {view.handoff && <div className={styles.handoff} data-goal-model-state={view.handoff.state} role="status">
-      {view.handoff.state === "applied"
-        ? (ko ? `다음 실행 모델 적용 확인 · ${view.handoff.effective?.model ?? view.handoff.requested.model ?? view.handoff.requested.kind}`
-          : `Next-run model applied · ${view.handoff.effective?.model ?? view.handoff.requested.model ?? view.handoff.requested.kind}`)
-        : view.handoff.state === "claimed"
-          ? (ko ? `다음 실행 모델 인계 중 · ${view.handoff.requested.model ?? view.handoff.requested.kind}`
-            : `Next-run model handoff in progress · ${view.handoff.requested.model ?? view.handoff.requested.kind}`)
-          : (ko ? `다음 안전한 실행에 모델 변경 대기 · ${view.handoff.requested.model ?? view.handoff.requested.kind}`
-            : `Model change pending at the next safe run · ${view.handoff.requested.model ?? view.handoff.requested.kind}`)}
+    {helpOpen && <div className={styles.help} role="region" aria-label={ko ? "목표 상태 자세히" : "Goal status details"}>
+      <p>{label}</p>
+      {view.context?.acceptanceCriteria.length ? <p>{ko ? "성공 기준" : "Success criteria"}: {view.context.acceptanceCriteria.join(" · ")}</p> : null}
+      {surface.automation.recentRunning > 0 && <p>{ko ? `자동화 원장 최근 실행 ${surface.automation.recentRunning}개` : `${surface.automation.recentRunning} recent automation record(s)`}</p>}
+      {surface.automation.held > 0 && <p>{ko ? `보류된 자동화 ${surface.automation.held}개` : `${surface.automation.held} held automation(s)`}</p>}
+      {surface.automation.reconciliationHold > 0 && <p>{ko ? `자동화 조정 보류 ${surface.automation.reconciliationHold}개` : `${surface.automation.reconciliationHold} automation reconciliation hold(s)`}</p>}
+      {view.handoff && <p>{ko ? "다음 실행 모델" : "Next-run model"}: {view.handoff.effective?.model ?? view.handoff.requested.model ?? view.handoff.requested.kind} ({view.handoff.state})</p>}
+      {view.continuity && <GoalStrategyStatus continuity={view.continuity} surface={surface} locale={locale} />}
+      {helpContent}
+      {lastConfirmedModel && <p>{ko ? "최근 완료 실행 모델" : "Last completed run model"}: {lastConfirmedModel}</p>}
+      {view.observedAt && <p>{ko ? "목표 상태 확인" : "Goal status checked"} <time dateTime={view.observedAt}>{new Date(view.observedAt).toLocaleTimeString(ko ? "ko-KR" : "en-US")}</time></p>}
     </div>}
-    {view.continuity && <GoalStrategyStatus continuity={view.continuity} surface={surface} locale={locale} />}
-    {lastConfirmedModel && <p className={styles.stale}>{ko ? "최근 완료 실행에서 확인한 모델 · " : "Model confirmed in last finished run · "}{lastConfirmedModel}</p>}
-    {view.observedAt && <p className={styles.stale} data-observation={view.error || view.refreshing ? "stale" : "confirmed"}>
-      {view.error || view.refreshing ? (ko ? "목표 상태 재확인 중 · 마지막 확인 " : "Rechecking Goal status · last confirmed ")
-        : (ko ? "목표 상태 확인 " : "Goal status checked ")}
-      <time dateTime={view.observedAt}>{new Date(view.observedAt).toLocaleTimeString(ko ? "ko-KR" : "en-US")}</time>
-    </p>}
+    {review && <div className={styles.review} role="region" aria-label={ko ? "중단된 작업 결과 확인" : "Review interrupted work"}>
+      <div className={styles.reviewHeading}>
+        <strong>{ko ? `중단된 작업 ${review.attempts.length}건` : `${review.attempts.length} interrupted task(s)`}</strong>
+        <button type="button" onClick={() => { session.current?.closeReview(); setReviewedAttemptIds([]); }}>
+          {ko ? "닫기" : "Close"}
+        </button>
+      </div>
+      <p className={styles.reviewIntro}>{ko
+        ? "앱이 중단 전 작업의 외부 결과를 확인하지 못했습니다. 아래 작업 내용을 보고 실제 결과를 확인해 주세요. 이전 요청은 자동 재실행하지 않습니다."
+        : "The app could not confirm these tasks' external results. Review each task and its actual result below. Previous requests will not be replayed automatically."}</p>
+      <div className={styles.reviewList}>
+        {review.attempts.slice(0, MAX_INLINE_REVIEW_ATTEMPTS).map((attempt, index) => <label className={styles.reviewItem} key={attempt.id}>
+          <input type="checkbox" disabled={Boolean(review.blocker) || view.pending !== null}
+            checked={reviewedAttemptIds.includes(attempt.id)}
+            onChange={(event) => setReviewedAttemptIds((ids) => event.target.checked
+              ? [...ids, attempt.id] : ids.filter((id) => id !== attempt.id))} />
+          <span>
+            <strong>{index + 1}. {attempt.taskTitle}</strong>
+            <small>{new Date(attempt.startedAt).toLocaleString(ko ? "ko-KR" : "en-US")}</small>
+            {attempt.taskObjective !== attempt.taskTitle && <span className={styles.reviewObjective}>{attempt.taskObjective}</span>}
+            {attempt.recordedActivity.length > 0 && <span className={styles.reviewActivity}>
+              <b>{ko ? "앱에 남은 작업 기록" : "Activity recorded in the app"}</b>
+              {attempt.recordedActivity.map((line, activityIndex) => <span key={`${attempt.id}:${activityIndex}`}>{line}</span>)}
+            </span>}
+            <span className={styles.reviewUncertain}>{ko
+              ? "외부 결과 미확인 · 이 작업의 실제 결과를 확인한 경우에만 체크"
+              : "External result unknown · check only after verifying this task's actual result"}</span>
+          </span>
+        </label>)}
+      </div>
+      {review.blocker && <p className={styles.reviewBlocker} role="status">{review.blocker === "running"
+        ? (ko ? "아직 실행 중인 작업이 있어 재개할 수 없습니다. 완료되거나 중단된 뒤 다시 확인해 주세요." : "A task is still running. Review again once it finishes or stops.")
+        : review.blocker === "too_many"
+          ? (ko ? "확인해야 할 작업이 한 번에 표시할 수 있는 수를 넘었습니다. 목표는 일시정지 상태로 유지됩니다." : "There are too many tasks to review safely at once. The goal stays paused.")
+        : review.blocker === "automation"
+          ? (ko ? "연결된 자동화는 다음 동작 전 결과를 안전하게 대조할 수 없어 이 화면에서 재개할 수 없습니다. 목표와 기록은 보존됩니다." : "This automation cannot safely reconcile results before its next action, so it cannot resume here. The goal and history are preserved.")
+          : (ko ? "일부 작업의 실행 기록 연결이 없어 안전한 재개를 확인할 수 없습니다. 목표와 기록은 보존됩니다." : "Some tasks lack a linked run record, so safe resume cannot be confirmed. The goal and history are preserved.")}</p>}
+      {!review.blocker && <p className={styles.reviewNote}>{ko
+        ? "체크는 실제 결과를 확인했다는 사용자 진술로 기록됩니다. 성공 증거로 취급하지 않습니다."
+        : "Checks record your statement that you inspected the actual results. They are not proof of success."}</p>}
+      <div className={styles.reviewActions}>
+        <button type="button" onClick={() => { session.current?.closeReview(); setReviewedAttemptIds([]); }}>{ko ? "일시정지 유지" : "Keep paused"}</button>
+        {!review.blocker && <button type="button" className={styles.reviewPrimary} disabled={!allReviewed || view.pending !== null}
+          onClick={() => { void session.current?.act("resume", {
+            runId: review.runId, version: review.version, attemptIds: review.attemptIds,
+            attemptSetDigest: review.attemptSetDigest, reviewedAttemptIds: review.attemptIds,
+          }); }}>
+          {view.pending === "resume" ? (ko ? "재개 중" : "Resuming") : ko ? "확인 완료 · 새 작업 재개" : "Reviewed · resume new work"}
+        </button>}
+      </div>
+    </div>}
     {editing && <form className={styles.editor} onSubmit={(event) => {
       event.preventDefault();
       if (!editable || !draft.trim()) return;
