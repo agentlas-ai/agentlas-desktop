@@ -86,9 +86,9 @@ import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { rolePriorityRuntimes } from "./runtime/selection";
 import { withRunPriority } from "./runtime/run-priority";
-import { withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
+import { admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
-import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
+import { recoverReadOnlySuspendedGraphs, suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
 import {
   buildStrategyDirective,
@@ -1777,6 +1777,15 @@ function tick(): void {
     recoverStaleAutomationRuns();
   } catch (err) {
     console.error("[automation] stale run recovery failed:", err);
+  }
+  try {
+    for (const recovered of recoverReadOnlySuspendedGraphs()) {
+      if (!recovered.resumeRequired || recovered.eventStatus !== null) continue;
+      void runAutomationNow(recovered.automationId, undefined, admitMainAutomation(recovered.automationId))
+        .catch((error) => console.error(`[automation] read-only graph resume failed (${recovered.automationId}):`, error));
+    }
+  } catch (err) {
+    console.error("[automation] read-only graph recovery failed:", err);
   }
   void runDueAutomations(new Date(), withMainScheduledRoot)
     .catch(error => console.error("[automation] scheduled dispatch failed:", error));

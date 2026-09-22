@@ -6,6 +6,7 @@
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
 import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
+import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
 import { getDb } from "../store/db";
 import type {
@@ -576,7 +577,8 @@ function failedRunHasCommittedEffect(
     return events.some((event) => {
       if (event.kind !== "mcp_tool-use") return false;
       const name = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
-      return Boolean(name) && event.payload.toolIsError !== true && !isReadOnlyCheckpointTool(name);
+      return Boolean(name) && event.payload.toolIsError !== true &&
+        !isReadOnlyCheckpointTool(name, event.payload.toolArgs);
     });
   }
   // Historical/corrupt rows did not seal the old graph's node types. Once a
@@ -815,7 +817,14 @@ export function machineReadableValue(rawText: string, readAsData: boolean): stri
   return firstBalancedJson(trimmed) ?? unfenced;
 }
 
-function isReadOnlyCheckpointTool(name: string): boolean {
+export function isReadOnlyCheckpointTool(name: string, rawArgs?: unknown): boolean {
+  // The bundled browser exposes both observation and mutation under some of
+  // the same tool names (notably browser_tabs). A name-only receipt cannot
+  // authorize replay. Admit only closed argument shapes whose host behavior is
+  // known, and only navigations to Threads profile/activity observation pages.
+  if (name.startsWith("mcp__agentlas-browser__browser_")) {
+    return isReadOnlyGraphBrowserObservation(name, rawArgs);
+  }
   // search/validate are digest-bound transaction operations. Preparation may
   // fetch a metered runtime bundle, so it is never considered replay-safe
   // without a provider idempotency receipt.
@@ -3756,7 +3765,7 @@ export async function runGraph(
                  *   읽기만 하고 "저장했다"고 적은 답을 관측이 보증해 준 셈이다.
                  *   모르는 이름은 여전히 "바꿨을 수 있음"으로 센다(정본: shared/tool-activity).
                  */
-                if (couldHaveChangedTheOutsideWorld(ev.tool.name)) {
+                if (!isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args)) {
                   externalToolCallsByNode.set(
                     node.id,
                     (externalToolCallsByNode.get(node.id) ?? 0) + 1,
@@ -3801,7 +3810,7 @@ export async function runGraph(
                 const receipt: GraphToolReceipt = {
                   name: ev.tool.name.slice(0, 240),
                   resultDigest: sha256Value(ev.tool.result ?? null),
-                  readOnly: isReadOnlyCheckpointTool(ev.tool.name),
+                  readOnly: isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args),
                   succeeded: ev.tool.isError !== true,
                 };
                 const rows = checkpoint!.toolReceipts[node.id] ?? [];

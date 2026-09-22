@@ -1,4 +1,5 @@
 import { nodeCouldHaveActedOutside } from "../../shared/graph-node-protocol";
+import { isHostPreflightTool } from "../../shared/tool-activity";
 import {
   canonicalJsonValue,
   graphExecutionDigest,
@@ -16,13 +17,14 @@ import type {
   WorkflowNodeRunState,
 } from "../../shared/types";
 import {
+  isReadOnlyCheckpointTool,
   parseGraphCheckpoint,
   type GraphCheckpoint,
 } from "../workflow/run-graph";
 import { emitDesktopStoreChange } from "./change-bus";
 import { computeNextRun, getAutomation } from "./automations";
 import { getDb } from "./db";
-import { recordRunEvent } from "./run-events";
+import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -726,4 +728,100 @@ export function reconcileAutomationGraph(
   if (!result) throw new Error("automation_graph_reconciliation_missing_result");
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });
   return result;
+}
+
+/**
+ * Repair historical Graph suspensions only when the terminal run's durable
+ * host events and receipts agree that every unresolved call was observation. Older v3
+ * checkpoints marked all browser calls as mutations from their names alone.
+ * Use the existing exact-coordinate reconciliation transaction so the schedule
+ * and the same occurrence resume together; never edit next_run_at by itself.
+ */
+export function recoverReadOnlySuspendedGraphs(): AutomationGraphReconcileResult[] {
+  const db = getDb();
+  const candidates = db.prepare(
+    `SELECT id FROM automations
+     WHERE enabled = 1 AND next_run_at IS NULL
+       AND COALESCE(trigger_type, 'schedule') = 'schedule'`,
+  ).all() as Array<{ id: string }>;
+  const recovered: AutomationGraphReconcileResult[] = [];
+  for (const candidate of candidates) {
+    try {
+      if (!getAutomation(candidate.id)?.graph) continue;
+      const loaded = loadReconciliation(candidate.id);
+      if (!loaded || loaded.run.dry_run === 1 || loaded.boundEvent ||
+          loaded.checkpoint.schemaVersion !== GRAPH_CHECKPOINT_SCHEMA ||
+          loaded.checkpoint.inFlightNodeIds.length > 0 ||
+          loaded.checkpoint.ambiguousNodeIds.length === 0 ||
+          loaded.view.nodes.some((node) => node.uncertainty !== "ambiguous")) continue;
+      const unresolved = new Set(loaded.checkpoint.ambiguousNodeIds);
+      const failureRow = db.prepare(
+        "SELECT node_failures_json FROM automation_runs WHERE id = ? AND automation_id = ? AND status = 'error'",
+      ).get(loaded.run.id, candidate.id) as { node_failures_json: string | null } | undefined;
+      if (!failureRow?.node_failures_json) continue;
+      const failures = JSON.parse(failureRow.node_failures_json) as Record<string, { code?: unknown }>;
+      if ([...unresolved].some((nodeId) => failures[nodeId]?.code !== "MUTATION_UNVERIFIED" ||
+          (loaded.checkpoint.prepareReceipts[nodeId]?.length ?? 0) > 0)) continue;
+
+      // 501 is a refusal threshold, not a truncated evidence window. A large
+      // ledger cannot establish that every call was checked.
+      const rows = db.prepare(
+        `SELECT node_id, payload_json FROM run_events
+         WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 501`,
+      ).all(loaded.run.id) as Array<{ node_id: string | null; payload_json: string }>;
+      if (rows.length === 0 || rows.length >= 501) continue;
+      const namesByNode = new Map<string, Set<string>>();
+      let allObservedCallsReadOnly = true;
+      for (const row of rows) {
+        if (!row.node_id) {
+          allObservedCallsReadOnly = false;
+          break;
+        }
+        if (!unresolved.has(row.node_id)) continue;
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        const name = payload.toolName;
+        const args = payload.toolArgs;
+        if (typeof name !== "string" || !name || !isReadOnlyCheckpointTool(name, args) ||
+            (!isHostPreflightTool(name) &&
+              (typeof payload.toolId !== "string" || !payload.toolId))) {
+          allObservedCallsReadOnly = false;
+          break;
+        }
+        const names = namesByNode.get(row.node_id) ?? new Set<string>();
+        names.add(name);
+        namesByNode.set(row.node_id, names);
+      }
+      if (!allObservedCallsReadOnly) continue;
+      if ([...unresolved].some((nodeId) => {
+        const receipts = loaded.checkpoint.toolReceipts[nodeId] ?? [];
+        const names = namesByNode.get(nodeId);
+        return !names || receipts.length === 0 ||
+          receipts.some((receipt) => !names.has(receipt.name));
+      })) continue;
+
+      const view = loaded.view;
+      const result = reconcileAutomationGraph({
+        automationId: candidate.id,
+        runId: view.runId,
+        occurrenceId: view.occurrenceId,
+        graphDigest: view.graphDigest,
+        checkpointDigest: view.checkpointDigest,
+        expectedUpdatedAt: view.updatedAt,
+        decisions: view.nodes.map((node) => ({ nodeId: node.nodeId, resolution: "retry" as const })),
+      });
+      tryRecordRunEvent({
+        runId: result.runId,
+        kind: "workflow_readonly_auto_reconciled",
+        automationId: candidate.id,
+        payload: { retryNodeIds: result.retryNodeIds, priorCheckpointDigest: view.checkpointDigest },
+      });
+      recovered.push(result);
+    } catch (error) {
+      // A malformed or concurrently changed run stays suspended. The exact
+      // reconciliation UI remains available; one candidate cannot starve the
+      // other schedules.
+      console.warn(`[automation] read-only graph recovery skipped (${candidate.id}):`, error);
+    }
+  }
+  return recovered;
 }
