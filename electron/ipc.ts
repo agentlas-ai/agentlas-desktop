@@ -3846,34 +3846,53 @@ export function registerIpcHandlers(): void {
    * 데몬 자동 시작 토글. 설정과 부팅 동작이 어긋난 채 남지 않도록, 값을 바꾼 **직후**
    * 파일시스템(launchd/시작프로그램/systemd)을 같은 턴에 정합시킨다.
    */
+  const daemonAutostartCommand = async () => {
+    const { openedStorePath, STORE_SCHEMA_VERSION } = await import("./store/db");
+    const { readDaemonAutostartStoreReady } = await import("./store/daemon-autostart");
+    const { buildDaemonAutostartCommand } = await import("./daemon/app-launcher");
+    const storePath = openedStorePath();
+    const installIdentity = configuredIdentity();
+    const appVersion = app.getVersion();
+    const storeBootstrapToken = readDaemonAutostartStoreReady({ appVersion, requiredSchemaVersion: STORE_SCHEMA_VERSION });
+    if (!storePath || !installIdentity || !storeBootstrapToken) throw new Error("daemon_autostart_store_not_bootstrapped");
+    return buildDaemonAutostartCommand({
+      userDataDir: userDataDir(), storePath, installIdentity, appVersion,
+      parentPid: process.pid, requiredSchemaVersion: STORE_SCHEMA_VERSION,
+      execPath: process.execPath, daemonEntry: path.join(__dirname, "daemon", "main.js"), storeBootstrapToken,
+    });
+  };
   ipcMain.handle("daemon:getAutostart", async () => {
     const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
-    return { enabled: getDaemonAutostartEnabled() };
+    try {
+      const { inspectDaemonAutostart } = await import("./daemon/app-launcher");
+      const actual = inspectDaemonAutostart(await daemonAutostartCommand());
+      return { enabled: getDaemonAutostartEnabled(), installed: actual.installed, loaded: actual.loaded,
+        reconciled: actual.installed === getDaemonAutostartEnabled()
+          && (process.platform === "win32" || actual.loaded === getDaemonAutostartEnabled()) };
+    } catch (error) {
+      return { enabled: getDaemonAutostartEnabled(), reconciled: false,
+        reason: error instanceof Error ? error.message : String(error) };
+    }
   });
   ipcMain.handle("daemon:setAutostart", async (_e, enabled: boolean) => {
     const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
-    setDaemonAutostartEnabled(false);
+    if (typeof enabled !== "boolean") throw new TypeError("daemon_autostart_preference_invalid");
     try {
       const { reconcileDaemonAutostart } = await import("./daemon/app-launcher");
       // main.ts 부팅 경로와 **같은** 커맨드로 정합시킨다(경로가 갈리면 부팅 항목이 둘이 된다).
-      reconcileDaemonAutostart(false, {
-        executable: process.execPath,
-        entry: path.join(__dirname, "daemon", "main.js"),
-      });
+      const actual = reconcileDaemonAutostart(enabled, await daemonAutostartCommand());
+      setDaemonAutostartEnabled(enabled);
+      return { enabled: getDaemonAutostartEnabled(), reconciled: actual.installed === enabled
+          && (process.platform === "win32" || actual.loaded === enabled),
+        installed: actual.installed, loaded: actual.loaded };
     } catch (error) {
-      // 값은 저장됐지만 부팅 항목을 못 고쳤다 — 조용히 성공이라고 말하지 않는다.
+      // OS 등록이나 preference 저장이 실패했다. 성공으로 포장하지 않는다.
       return {
         enabled: getDaemonAutostartEnabled(),
         reconciled: false,
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    return {
-      enabled: getDaemonAutostartEnabled(),
-      reconciled: true,
-      requested: enabled === true,
-      reason: enabled === true ? "desktop_runtime_is_app_scoped" : null,
-    };
   });
   ipcMain.handle("capability:listGrants", (_e, scope?: string) => listCapabilityGrants(scope));
   ipcMain.handle("capability:revokeGrant", (_e, id: number) => revokeCapabilityGrant(Number(id)));

@@ -6817,8 +6817,8 @@ export interface AgentlasIpc {
   getToolApprovalResolution: (id: string) => Promise<ToolApprovalResolutionReceipt>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
   /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
-  getDaemonAutostart: () => Promise<{ enabled: boolean }>;
-  setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; reconciled?: boolean; reason?: string }>;
+  getDaemonAutostart: () => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
+  setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
   /** 능력 규칙(capability_grants) — "항상 허용"의 영구 원장(오너 결정 2026-08-20). */
   listCapabilityGrants: (scope?: string) => Promise<Array<{
     id: number; capability: string; pattern: string | null;

@@ -12,6 +12,9 @@ export interface AutomaticQuitInstallDependencies {
    * the user's original normal quit without attempting an update.
    */
   prepare?: () => Promise<void>;
+  /** Restore an external supervisor when preparation succeeded but the native
+   * handoff was refused or failed. Runs before resuming the original quit. */
+  onAbandoned?: () => Promise<void>;
   /** Bounds only the reversible pre-install cleanup. Once the native updater is
    * called, its platform handoff owns process lifetime and must not be cut off. */
   prepareTimeoutMs?: number;
@@ -60,6 +63,7 @@ export function createAutomaticQuitInstaller(
   let quitDeferred = false;
   let allowNextQuitWithoutUpdate = false;
   let nativeQuitAuthorized = false;
+  let preparedForUpdate = false;
   const requestedPrepareTimeoutMs = deps.prepareTimeoutMs ?? 45_000;
   const prepareTimeoutMs = Number.isFinite(requestedPrepareTimeoutMs)
     ? Math.max(1, Math.trunc(requestedPrepareTimeoutMs))
@@ -88,7 +92,11 @@ export function createAutomaticQuitInstaller(
     quitDeferred = false;
     installHandoffAccepted = false;
     allowNextQuitWithoutUpdate = true;
-    deps.quit();
+    const restore = preparedForUpdate ? deps.onAbandoned : undefined;
+    preparedForUpdate = false;
+    void Promise.resolve().then(() => restore?.()).catch((error) => {
+      logger.warn("[updater] abandoned update supervisor restore failed", error);
+    }).finally(() => deps.quit());
   };
 
   const observeInstallState = (state: UpdaterState) => {
@@ -136,6 +144,7 @@ export function createAutomaticQuitInstaller(
         nativeQuitAuthorized = false;
         quitDeferred = false;
         installHandoffAccepted = false;
+        preparedForUpdate = false;
         return false;
       }
       if (allowNextQuitWithoutUpdate) {
@@ -157,6 +166,7 @@ export function createAutomaticQuitInstaller(
 
       void Promise.resolve()
         .then(prepareWithinDeadline)
+        .then(() => { preparedForUpdate = true; })
         .then(() => deps.install())
         .then((result) => {
           if (result.accepted) {

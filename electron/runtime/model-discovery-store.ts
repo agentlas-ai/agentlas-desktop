@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { classifyDiscovery, type DiscoveryOutcome, type DiscoverySource } from "../../shared/model-discovery";
+import { isPackagedRuntime, userDataPath } from "../runtime-paths";
 
 interface StoredRun {
   count: number;
@@ -50,13 +51,10 @@ export function modelDiscoveryStorePath(): string {
   const override = process.env.AGENTLAS_MODEL_DISCOVERY_PATH?.trim();
   if (override) return (cachedPath = override);
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const electron = require("electron") as { app?: { getPath?: (name: string) => string; isPackaged?: boolean } };
-    // Same isolation rule as store/db.ts: a dev/QA instance never writes into
-    // the live product's userData (2026-08-11 incident: 51 gates opened the
-    // live DB). Packaged app → userData; anything else → tmpdir.
-    const userData = electron?.app?.isPackaged ? electron.app.getPath?.("userData") : undefined;
-    if (userData) return (cachedPath = path.join(userData, "model-discovery.json"));
+    // The packaged GUI and Node-mode daemon share the same discovered inventory.
+    // Development hosts retain their isolated temporary path; QA metadata points
+    // only at the explicitly isolated user-data, never the installed product.
+    if (isPackagedRuntime()) return (cachedPath = userDataPath("model-discovery.json"));
   } catch {
     /* not inside Electron */
   }

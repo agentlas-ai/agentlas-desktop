@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { runHostShutdownHooks } from "../host-lifecycle";
-import { setUserDataDir, userDataDir } from "../runtime-paths";
+import { setUserDataDir, userDataDir, runtimeResourcesPath } from "../runtime-paths";
 import { withRunPriority } from "../runtime/run-priority";
 import {
   AGENT_RESIDENCY_IDLE_REAP_MS,
@@ -95,7 +95,11 @@ let serviceIdentity: string | null = null;
 let socketFence: (() => void) | null = null;
 let selfDiagnostics: DaemonDiagnosticLog | null = null;
 let scienceService: ReturnType<typeof import("./science-service")["createDaemonScienceService"]> | null = null;
-const scienceSubscribers = new Set<ControlSocketPeer>();
+type ScienceAskScope = { projectId: string; conversationId: string };
+const scienceSubscribers = new Map<ControlSocketPeer, readonly ScienceAskScope[]>();
+let localModelService: import("./local-model-service").DaemonLocalModelService | null = null;
+let localModelRpc: ReturnType<typeof import("./local-model-rpc")["createDaemonLocalModelRpc"]> | null = null;
+let localModelServicePromise: Promise<import("./local-model-service").DaemonLocalModelService> | null = null;
 
 function recordServicePhase(phase: string): void {
   try { selfDiagnostics?.record("child_report", { phase, pid: process.pid, bootId, appInstanceId }); }
@@ -116,6 +120,32 @@ function assertServiceControl(params: unknown): void {
   }
 }
 
+function getLocalModelService(): Promise<import("./local-model-service").DaemonLocalModelService> {
+  if (closing) return Promise.reject(new Error("daemon_shutting_down"));
+  assertServiceOwner();
+  if (localModelServicePromise) return localModelServicePromise;
+  localModelServicePromise = (async () => {
+    const [{ createDaemonLocalModelService }, { createDaemonLocalModelRpc }, { configureLocalModelRuntime }, { clearDetectCache }] = await Promise.all([
+      import("./local-model-service"), import("./local-model-rpc"),
+      import("../local-model-hub/runtime-adapter"), import("../runtime/detect"),
+    ]);
+    if (closing) throw new Error("daemon_shutting_down");
+    assertServiceOwner();
+    const resources = runtimeResourcesPath();
+    const service = createDaemonLocalModelService({
+      rootPath: path.join(userDataDir(), "local-model-hub"), ownerEpoch: bootId,
+      assertOwner: assertServiceOwner,
+      windowsRuntimeDir: resources ? path.join(resources, "vc-redist", "x64") : undefined,
+      onResidentChanged: clearDetectCache,
+    });
+    localModelService = service;
+    localModelRpc = createDaemonLocalModelRpc({ service, ownerEpoch: bootId, assertOwner: assertServiceOwner });
+    configureLocalModelRuntime(service.runtime);
+    return service;
+  })().catch(error => { localModelServicePromise = null; throw error; });
+  return localModelServicePromise;
+}
+
 async function getScienceService() {
   if (closing) throw new Error("daemon_shutting_down");
   assertServiceOwner();
@@ -126,9 +156,17 @@ async function getScienceService() {
     scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000,
       onEvent: event => {
         assertServiceOwner();
-        for (const subscriber of scienceSubscribers) {
-          if (!subscriber.notify("science.event", event)) scienceSubscribers.delete(subscriber);
+        let delivered = false;
+        for (const [subscriber, askUserScopes] of scienceSubscribers) {
+          if (event.kind === "ask-user") {
+            const payload = event.payload as Partial<ScienceAskScope> | null;
+            if (!payload || !askUserScopes.some(scope => scope.projectId === payload.projectId
+              && scope.conversationId === payload.conversationId)) continue;
+          }
+          if (subscriber.notify("science.event", event)) delivered = true;
+          else scienceSubscribers.delete(subscriber);
         }
+        return delivered;
       },
     });
   }
@@ -255,6 +293,7 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       lifetime: "service",
       storeSchemaVersion: getDb().pragma("user_version", { simple: true }),
       science: scienceService?.status() ?? null,
+      localModel: localModelService?.status() ?? null,
       processRole: "desktop-daemon",
       startedAt: new Date(startedAtMs).toISOString(),
       lastHeartbeatAt: new Date(lastHeartbeatAtMs).toISOString(),
@@ -317,16 +356,41 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
   }
   if (method === "science.start") {
     assertServiceControl(params);
+    // Configure the in-process port before discovery. Construction is lazy:
+    // a broken/missing local engine cannot block CLI or API research runtimes.
+    await getLocalModelService();
     return (await getScienceService()).start();
+  }
+  if (method === "localModel.start") {
+    assertServiceControl(params);
+    return (await getLocalModelService()).start();
+  }
+  if (method === "localModel.status") {
+    assertServiceControl(params);
+    return (await getLocalModelService()).status();
+  }
+  if (method === "localModel.command") {
+    assertServiceControl(params);
+    await getLocalModelService();
+    return localModelRpc!.dispatch((params as { command: Parameters<NonNullable<typeof localModelRpc>["dispatch"]>[0] }).command);
   }
   if (method === "science.subscribe") {
     assertServiceControl(params);
     assertServiceOwner();
     if (closing) throw new Error("daemon_shutting_down");
+    const request = params as { askUserScopes?: unknown } | null;
+    const scopes = request?.askUserScopes ?? [];
+    if (!Array.isArray(scopes) || scopes.length > 128 || scopes.some(scope =>
+      !scope || typeof scope !== "object" || Array.isArray(scope)
+      || Object.keys(scope).sort().join(",") !== "conversationId,projectId"
+      || typeof scope.projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(scope.projectId)
+      || typeof scope.conversationId !== "string" || !/^[0-9a-f-]{36}$/i.test(scope.conversationId))) {
+      throw new Error("science_ask_user_scope_invalid");
+    }
     if (!scienceSubscribers.has(peer)) {
-      scienceSubscribers.add(peer);
       peer.onClose(() => { scienceSubscribers.delete(peer); });
     }
+    scienceSubscribers.set(peer, scopes as ScienceAskScope[]);
     return { subscribed: true, ownerEpoch: bootId };
   }
   if (method === "science.status") {
@@ -503,6 +567,7 @@ function performShutdown(reason: string): Promise<void> {
   }
   shutdownPromise = (async () => {
     let timeout: NodeJS.Timeout | null = null;
+    localModelRpc?.closeAdmission();
     // Science closes while it still holds the fence, so it can persist final
     // receipts. A non-settling service must not make explicit stop permanent.
     if (scienceService) {
@@ -513,6 +578,18 @@ function performShutdown(reason: string): Promise<void> {
         })]);
       } catch (error) { console.error("[agentlasd] science shutdown failed:", error); }
       finally { if (serviceTimeout) clearTimeout(serviceTimeout); }
+    }
+    // Science has persisted its receipts before the shared local engine stops.
+    // Only explicit service shutdown reaches this path; GUI detach never does.
+    await localModelServicePromise?.catch(() => {});
+    if (localModelService || localModelRpc) {
+      let localTimeout: NodeJS.Timeout | null = null;
+      try {
+        await Promise.race([Promise.all([localModelRpc?.close(), localModelService?.close()]), new Promise<never>((_resolve, reject) => {
+          localTimeout = setTimeout(() => reject(new Error("local_model_shutdown_unsettled")), 17_000);
+        })]);
+      } catch (error) { console.error("[agentlasd] local model shutdown failed:", error); }
+      finally { if (localTimeout) clearTimeout(localTimeout); }
     }
     const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
     try { runHostShutdownHooks(); }
@@ -580,6 +657,9 @@ export async function startDaemon(): Promise<void> {
     throw new Error("agentlasd QA identity does not match its user-data directory");
   }
   configureInstallIdentity(installIdentity);
+  const { installModelCatalogResolver, refreshRemoteCatalog } = await import("../runtime/model-catalog");
+  installModelCatalogResolver();
+  void refreshRemoteCatalog().catch(error => console.warn("[agentlasd] model catalog refresh failed", error));
   const identity = resolveDaemonServiceIdentity({ userDataDir: dir, installIdentity });
   serviceIdentity = identity.serviceIdentity;
   if (process.env.AGENTLAS_DAEMON_SERVICE_IDENTITY && process.env.AGENTLAS_DAEMON_SERVICE_IDENTITY !== serviceIdentity) {

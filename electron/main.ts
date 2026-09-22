@@ -38,19 +38,21 @@ import {
 } from "./install-identity";
 import { registerIpcHandlers, assertTrustedSitePublishIpcSender, recoverRendererPreflightSteers } from "./ipc";
 import { LocalModelHubManager } from "./local-model-hub/manager";
-import { configureLocalModelHubManager } from "./local-model-hub/runtime-adapter";
+import { configureLocalModelHubManager, configureLocalModelRuntime } from "./local-model-hub/runtime-adapter";
+import { createLocalModelDaemonClient } from "./local-model-hub/daemon-client";
 import { createOllamaMigrationService } from "./local-model-hub/migration-runtime";
 import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
-import { registerSciencePublicationIpc } from "./science-host/publication-ipc";
-import { installDesktopScienceHost, registerDesktopScienceResearcherQuestionUi } from "./science-host";
-import { projectScienceLoopLongRun } from "./long-run/science-projection";
+import { installDesktopScienceHost } from "./science-host";
+import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
+import { registerScienceDaemonExecutionIpc } from "./science-host/daemon-ipc";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
+import { markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
@@ -191,16 +193,12 @@ import {
 } from "./extensions/view-host";
 import {
   closeScienceStore,
-  createScienceDesktopLongRunAdapter,
+  configureScienceRuntimeRole,
   resolveScienceWorkspaceBinding,
   scienceArtifactPublicationValidator,
   scienceChemistryValidator,
-  scienceConversationService,
   scienceEvidenceGraphService,
-  scienceJournalPublicationService, scienceManuscriptRenderService,
   scienceStore,
-  scienceToolGateway,
-  shutdownScienceRuntimeForAppClose,
   configureScienceServiceAvailability, retryFailedScienceServiceLoad,
   scienceStatisticsMethodCatalogue, createScienceDatasetIngestionService, scienceSchemaVersion,
 } from "agentlas-science";
@@ -212,7 +210,6 @@ import type {
 } from "agentlas-science/dist/contracts/science-evidence-graph";
 import { scienceLabDecisionProjectionsForProject } from "agentlas-science";
 import { registerScienceWorkbookIntakeHandlers } from "./science-host/workbook-intake-ipc";
-import { registerScienceMathHandlers } from "./science-host/math-ipc";
 import { registerScienceProjectDataHandlers } from "./science-host/project-data-ipc";
 import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "agentlas-science";
 import { commitScienceVegaEdit, parseScienceVegaEditInput } from "agentlas-science";
@@ -320,6 +317,11 @@ if (app.isPackaged && process.argv.slice(1).some((arg) =>
 const isDev = process.env.NODE_ENV === "development";
 const ipcMain = developmentIpcBoundary(electronIpcMain);
 let localModelHubControl: ReturnType<typeof registerLocalModelHubIpc> | null = null;
+let localModelDaemonClient: ReturnType<typeof createLocalModelDaemonClient> | null = null;
+let localModelOwnerCleanup: (() => Promise<void>) | null = null;
+let scienceDaemonClient: ReturnType<typeof createScienceDaemonClient> | null = null;
+let scienceExecutionIpc: ReturnType<typeof registerScienceDaemonExecutionIpc> | null = null;
+let scienceDaemonStartupPromise: ReturnType<ReturnType<typeof createScienceDaemonClient>["ensureStarted"]> | null = null;
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeAuthSessionRestoration: (() => void) | null = null;
@@ -517,6 +519,19 @@ async function initializeDesktopStore(options: Parameters<typeof initStore>[0] =
   });
   if (daemon.status === "failed") throw new Error(daemon.reason);
   initStore({ ...options, ...(daemon.status === "compatible" ? { migrationRole: "follower" as const } : {}) });
+}
+
+/** All native clients address the exact opened store and installation. */
+function desktopDaemonClientOptions(): ScienceDaemonClientOptions {
+  const storePath = openedStorePath();
+  if (!storePath) throw new Error("daemon-client-store-not-open");
+  return {
+    userDataDir: userDataDir(), storePath, installIdentity,
+    appVersion: app.getVersion(), parentPid: process.pid,
+    appInstanceId: desktopAppInstanceId(),
+    expectedStoreIdentity: storeIdentityDigest(storePath, desktopAppInstanceId()),
+    requiredSchemaVersion: STORE_SCHEMA_VERSION,
+  };
 }
 
 /**
@@ -1255,6 +1270,7 @@ function stopQuitServices(): Promise<void> {
   const memoryCleanupStopped = stopMemoryRevocationCleanup();
   quitServicesStopPromise = Promise.all([
     localModelHubControl?.shutdown(),
+    localModelOwnerCleanup?.(),
     legacyLearningJob?.catch(() => {}),
     import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
     import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
@@ -1266,33 +1282,55 @@ function stopQuitServices(): Promise<void> {
         if (!detached) console.error("[daemon] Desktop attachment was not released");
       })
       .catch((error) => console.error("[daemon] Desktop detach failed", error)),
-  ]).then(() => undefined).finally(() => memoryCleanupStopped);
+  ]).then(() => undefined).finally(() => {
+    scienceExecutionIpc?.close();
+    scienceDaemonClient?.close();
+    localModelDaemonClient?.close();
+    return memoryCleanupStopped;
+  });
   return quitServicesStopPromise;
 }
 
+let restoreDaemonAutostartAfterFailedUpdate: (() => void) | null = null;
 async function prepareAutomaticUpdateQuit(): Promise<void> {
-  // The native updater must not capture its install journal while Science can
-  // still accept or persist work. This is a no-op for users who never opened
-  // Science because the runtime has no active store in that case.
-  const scienceShutdown = await shutdownScienceRuntimeForAppClose();
-  if (scienceShutdown.timedOut) {
-    throw new Error("science-runtime-update-shutdown-timed-out");
+  // An update explicitly stops the execution service before replacing files.
+  // Close observers first so no UI reconnect can respawn it during the handoff.
+  const { buildDaemonAutostartCommand, reconcileDaemonAutostart, suspendDaemonAutostart, stopDaemonService } = await import("./daemon/app-launcher");
+  const storeBootstrapToken = readDaemonAutostartStoreReady({ appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION });
+  const autostartCommand = storeBootstrapToken ? buildDaemonAutostartCommand({
+    ...desktopDaemonClientOptions(), storeBootstrapToken,
+  }) : null;
+  const suspended = autostartCommand ? suspendDaemonAutostart(autostartCommand) : null;
+  restoreDaemonAutostartAfterFailedUpdate = autostartCommand && suspended && (suspended.wasInstalled || suspended.wasLoaded)
+    ? () => { reconcileDaemonAutostart(true, autostartCommand); }
+    : null;
+  try {
+    scienceExecutionIpc?.close();
+    scienceDaemonClient?.close();
+    await localModelDaemonClient?.detach();
+    const daemonStopped = await stopDaemonService({ userDataDir: userDataDir(), storePath: openedStorePath(), installIdentity }, 40_000);
+    if (!daemonStopped.stopped) throw new Error("daemon-runtime-update-shutdown-timed-out");
+    const report = await shutdownAppRuntimeCoordinator(15_000);
+    if (report.failedParticipantNames.length > 0) {
+      throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
+    }
+    if (report.timedOut) {
+      throw new Error(`App runtime did not settle: ${report.unsettledParticipantNames.join(", ")}`);
+    }
+    await stopQuitServices();
+    // Complete the same child/browser/store shutdown as an ordinary Quit before
+    // the controller captures continuity and calls the native installer. Keep
+    // only the updater controller alive until quitAndInstall performs its handoff.
+    await finishQuitCleanup({ preserveUpdater: true });
+  } catch (error) {
+    const restore = restoreDaemonAutostartAfterFailedUpdate;
+    restoreDaemonAutostartAfterFailedUpdate = null;
+    if (restore) {
+      try { restore(); }
+      catch (restoreError) { console.error("[daemon] update autostart restore failed", restoreError); }
+    }
+    throw error;
   }
-  const { stopDaemonService } = await import("./daemon/app-launcher");
-  const daemonStopped = await stopDaemonService({ userDataDir: userDataDir(), storePath: openedStorePath(), installIdentity });
-  if (!daemonStopped.stopped) throw new Error("daemon-runtime-update-shutdown-timed-out");
-  const report = await shutdownAppRuntimeCoordinator(15_000);
-  if (report.failedParticipantNames.length > 0) {
-    throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
-  }
-  if (report.timedOut) {
-    throw new Error(`App runtime did not settle: ${report.unsettledParticipantNames.join(", ")}`);
-  }
-  await stopQuitServices();
-  // Complete the same child/browser/store shutdown as an ordinary Quit before
-  // the controller captures continuity and calls the native installer. Keep
-  // only the updater controller alive until quitAndInstall performs its handoff.
-  await finishQuitCleanup({ preserveUpdater: true });
 }
 
 function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise<void> {
@@ -1308,6 +1346,11 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     return quitCleanupPromise;
   }
   quitCleanupPromise = (async () => {
+    // Detach before the GUI invocation coordinator aborts its local waits.
+    // Neither that signal nor a window close is authority to stop daemon work.
+    scienceExecutionIpc?.close();
+    scienceDaemonClient?.close();
+    await localModelDaemonClient?.detach().catch(error => console.error("[local-model] client detach failed", error));
     try {
       const report = await shutdownAppRuntimeCoordinator(15_000);
       if (report.pausedRunIds.length > 0) {
@@ -1324,15 +1367,6 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
       }
     } catch (error) {
       console.error("[long-run] app runtime shutdown failed", error);
-    }
-    try {
-      const scienceShutdown = await shutdownScienceRuntimeForAppClose();
-      if (scienceShutdown.pausedLoops || scienceShutdown.interruptedTurns || scienceShutdown.cancellationRequests
-        || scienceShutdown.interruptedToolRequests || scienceShutdown.timedOut) {
-        console.info(`[science-runtime] app-close pausedLoops=${scienceShutdown.pausedLoops} interruptedTurns=${scienceShutdown.interruptedTurns} cancellationRequests=${scienceShutdown.cancellationRequests} interruptedTools=${scienceShutdown.interruptedToolRequests} timedOut=${scienceShutdown.timedOut}`);
-      }
-    } catch (error) {
-      console.error("[science-runtime] app-close shutdown failed", error);
     }
     // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
     //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
@@ -1363,6 +1397,12 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
 const automaticQuitInstaller = createAutomaticQuitInstaller({
   getState: getUpdaterState,
   prepare: prepareAutomaticUpdateQuit,
+  prepareTimeoutMs: 90_000,
+  onAbandoned: async () => {
+    const restore = restoreDaemonAutostartAfterFailedUpdate;
+    restoreDaemonAutostartAfterFailedUpdate = null;
+    restore?.();
+  },
   install: installDownloadedUpdate,
   relaunch: () => app.relaunch(),
   quit: () => app.quit(),
@@ -1605,8 +1645,8 @@ app.whenReady().then(async () => {
 
   if (process.argv.includes("--headless-automations")) {
     try {
-      const { disableLaunchd } = await import("./launchd/agent");
-      const status = disableLaunchd();
+      const { disableLegacyAutomationLaunchd } = await import("./launchd/agent");
+      const status = disableLegacyAutomationLaunchd();
       if (status.error) console.error("[headless-automations] legacy launcher cleanup failed:", status.error);
     } catch (err) {
       console.error("[headless-automations] legacy launcher cleanup failed:", err);
@@ -1679,17 +1719,22 @@ app.whenReady().then(async () => {
     interrupt: interruptGoalWaitReplans,
     isSettled: goalWaitReplansSettled,
   });
-  const localModelHubManager = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"), {
-    // Windows app-local VC++ runtime for llama-server.exe; harmless elsewhere (never read).
-    windowsRuntimeDir: path.join(process.resourcesPath, "vc-redist", "x64"),
-    onResidentChanged: () => {
-      clearDetectCache();
-      emitDesktopStoreChange({ entity: "runtime" });
-    },
-  });
-  await localModelHubManager.initialize();
-  configureLocalModelHubManager(localModelHubManager);
-  const localModelMigration = createOllamaMigrationService(localModelHubManager);
+  let localModelControl: import("./local-model-hub/ports").LocalModelHubControlPort;
+  if (developmentEffectsSuppressed()) {
+    // Explicitly isolated, effect-suppressed QA never starts an external daemon.
+    const owner = new LocalModelHubManager(path.join(userDataDir(), "local-model-hub"));
+    await owner.initialize();
+    configureLocalModelHubManager(owner);
+    localModelControl = owner;
+    localModelOwnerCleanup = () => owner.shutdown();
+  } else {
+    localModelDaemonClient = createLocalModelDaemonClient(desktopDaemonClientOptions());
+    configureLocalModelRuntime(localModelDaemonClient.runtime);
+    localModelControl = localModelDaemonClient.control;
+    // The control facade starts the service lazily; a failed local engine must
+    // not prevent users of CLI/API models from opening the application.
+  }
+  const localModelMigration = createOllamaMigrationService(localModelControl);
   try {
     await localModelMigration.reconcile();
   } catch (error) {
@@ -1702,7 +1747,7 @@ app.whenReady().then(async () => {
   });
   localModelHubControl = registerLocalModelHubIpc({
     ipc: ipcMain,
-    manager: localModelHubManager,
+    manager: localModelControl,
     assertTrustedSender: assertTrustedSitePublishIpcSender,
     selectModelFile: async (window) => {
       const result = await dialog.showOpenDialog(window, {
@@ -1752,7 +1797,9 @@ app.whenReady().then(async () => {
    * 요구한다. 저장소가 열린 직후 한 벌 넣어 준다 — 그 뒤 사이언스를 처음 부르는 자리가
    * 어디든 이미 준비돼 있다.
    */
+  configureScienceRuntimeRole("data-client");
   installDesktopScienceHost();
+  if (!developmentEffectsSuppressed()) scienceDaemonClient = createScienceDaemonClient(desktopDaemonClientOptions());
   // A native update target must reconcile its durable install journal before
   // optional keychain/session restoration. On a locked or headless machine
   // that restoration can be slow, while the update handoff is already
@@ -1966,109 +2013,19 @@ app.whenReady().then(async () => {
     assertScienceExtensionViewPermission(event.sender.id, permission);
     return status;
   };
-  const scienceToolApprovalChatId = (value: unknown): string => {
-    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-chat-invalid");
-    return value;
-  };
-  const scienceToolApprovalProjectId = (value: unknown): string => {
-    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-project-invalid");
-    return value;
-  };
-  const scienceToolApprovalRequestId = (value: unknown): string => {
-    if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error("science-tool-approval-request-invalid");
-    return value;
-  };
-  const scienceToolApprovalDecision = (value: unknown): ToolApprovalDecision => {
-    if (value === "allow_once" || value === "allow_session" || value === "allow_always" || value === "deny") return value;
-    throw new Error("science-tool-approval-decision-invalid");
-  };
-  const scienceToolApprovalState = (event: Electron.IpcMainInvokeEvent, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown; chatId?: unknown } : {};
-    const projectId = scienceToolApprovalProjectId(input.projectId);
-    const chatId = scienceToolApprovalChatId(input.chatId);
-    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
-    setScienceToolApprovalWatch(event.sender.id, chatId);
-    return {
-      projectId,
-      chatId,
-      alwaysApproved: isChatAlwaysApproved(chatId),
-      pending: listPendingToolApprovals().filter((request) => request.chatId === chatId),
-    };
-  };
-  ipcMain.handle("science:toolApprovals:state", scienceToolApprovalState);
-  ipcMain.handle("science:toolApprovals:setAlwaysApproved", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown; chatId?: unknown; enabled?: unknown } : {};
-    const projectId = scienceToolApprovalProjectId(input.projectId);
-    const chatId = scienceToolApprovalChatId(input.chatId);
-    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
-    const enabled = input.enabled === true;
-    if (enabled) {
-      grantChatAlwaysApproval(chatId, "science-dropdown");
-      // A dropdown change can happen while a live chip is already waiting. Resolve those
-      // exact requests after the durable chat grant is stored so the running tool is not left
-      // hanging behind a control that now says "always approve".
-      for (const request of listPendingToolApprovals()) {
-        if (request.chatId !== chatId) continue;
-        resolveToolApproval(request.id, "allow_session", toolApprovalActionId(request.id, "allow_session"));
-      }
-    } else {
-      revokeChatAlwaysApproval(chatId);
-    }
-    setScienceToolApprovalWatch(event.sender.id, chatId);
-    return {
-      projectId,
-      chatId,
-      alwaysApproved: isChatAlwaysApproved(chatId),
-      pending: listPendingToolApprovals().filter((request) => request.chatId === chatId),
-    };
-  });
-  ipcMain.handle("science:toolApprovals:resolve", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const wrapped = envelope && typeof envelope === "object" ? envelope as { input?: unknown } : {};
-    const input = wrapped.input && typeof wrapped.input === "object" ? wrapped.input as { projectId?: unknown; chatId?: unknown; requestId?: unknown; decision?: unknown } : {};
-    const projectId = scienceToolApprovalProjectId(input.projectId);
-    const chatId = scienceToolApprovalChatId(input.chatId);
-    if (!scienceStore().listConversations(projectId).some((conversation) => conversation.id === chatId)) throw new Error("science-tool-approval-chat-not-found");
-    const requestId = scienceToolApprovalRequestId(input.requestId);
-    const decision = scienceToolApprovalDecision(input.decision);
-    const pending = listPendingToolApprovals().find((request) => request.id === requestId);
-    if (pending && pending.chatId !== chatId) throw new Error("science-tool-approval-chat-mismatch");
-    return pending
-      ? resolveToolApproval(requestId, decision, toolApprovalActionId(requestId, decision))
-      : getToolApprovalResolution(requestId);
-  });
-  ipcMain.handle("science:askUser:list", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    return listPendingAskUserRequests().filter((request) => request.askedBy === "agentlas-science");
-  });
-  ipcMain.handle("science:askUser:answer", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" ? envelope as { requestId?: unknown; answer?: unknown } : {};
-    const requestId = typeof input.requestId === "string" ? input.requestId : "";
-    const pending = listPendingAskUserRequests().find((request) => request.requestId === requestId && request.askedBy === "agentlas-science");
-    if (!pending) return false;
-    return submitAskUserAnswer(requestId, typeof input.answer === "string" ? input.answer : null);
-  });
-  const scienceTurnSubscribers = new Map<number, { projectId: string; conversationId: string }>();
-  const scienceLifecycleSubscribers = new Map<number, string>();
-  let scienceLifecycleProjectionStarted = false;
-  const ensureScienceLifecycleProjection = () => {
-    if (scienceLifecycleProjectionStarted) return;
-    scienceStore().onResearchLifecycleChanged((change) => {
-      for (const [senderId, projectId] of scienceLifecycleSubscribers) {
-        if (projectId !== change.projectId) continue;
-        const sender = webContents.fromId(senderId);
-        if (!sender || sender.isDestroyed()) {
-          scienceLifecycleSubscribers.delete(senderId);
-          continue;
-        }
-        sender.send("science:researchLifecycleChanged", change);
-      }
+  if (scienceDaemonClient) {
+    scienceExecutionIpc = registerScienceDaemonExecutionIpc({
+      ipcMain: {
+        handle: (channel, listener) => ipcMain.handle(channel, listener),
+        removeHandler: channel => electronIpcMain.removeHandler(channel),
+      },
+      assertScienceSender, client: scienceDaemonClient,
+      assertScienceViewPermission: assertScienceExtensionViewPermission,
+      onConnectionState: state => {
+        if (state.errorCode) console.warn("[science-runtime] observation disconnected", state);
+      },
     });
-    scienceLifecycleProjectionStarted = true;
-  };
+  }
   ipcMain.handle("science:shell:backToWork", (event, input: unknown) => {
     assertScienceSender(event, input);
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
@@ -2077,21 +2034,12 @@ app.whenReady().then(async () => {
     mainWindow.focus();
     return { ok: true, route: "/dashboard" };
   });
-  let scienceTurnProjectionStarted = false;
-  const ensureScienceTurnProjection = () => {
-    if (scienceTurnProjectionStarted) return;
-    ensureScienceLifecycleProjection();
-    scienceConversationService().onEvent((turnEvent) => {
-      for (const [senderId, subscription] of scienceTurnSubscribers) {
-        if (subscription.projectId !== turnEvent.projectId || subscription.conversationId !== turnEvent.conversationId) continue;
-        if (!sendScienceTurnEventToView(senderId, turnEvent)) scienceTurnSubscribers.delete(senderId);
-      }
-    });
-    scienceTurnProjectionStarted = true;
-  };
-  ipcMain.handle("science:bootstrap", (event, input: unknown) => {
+  ipcMain.handle("science:bootstrap", async (event, input: unknown) => {
     const status = assertScienceSender(event, input);
-    ensureScienceLifecycleProjection();
+    // On a fresh install the execution owner creates/migrates Science before
+    // this data-only GUI opens it. Reopening an existing owner is idempotent.
+    if (scienceDaemonClient) await (scienceDaemonStartupPromise ?? scienceDaemonClient.ensureStarted());
+    assertScienceSender(event, input);
     return {
       extensionId: status.id,
       extensionVersion: status.version ?? "0.0.0",
@@ -2143,7 +2091,6 @@ app.whenReady().then(async () => {
     return `${event.senderFrame.processId}:${event.senderFrame.routingId}:${scienceFolderDocuments.get(event.sender.id)}:${actualUrl.href}`;
   };
   registerScienceWorkbookIntakeHandlers({ ipcMain, assertScienceSender, assertScienceProjectDocument, scienceStore });
-  registerScienceMathHandlers({ ipcMain, assertScienceSender });
   registerScienceProjectDataHandlers({
     ipcMain,
     assertScienceSender,
@@ -2306,23 +2253,6 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     return scienceStore().replaceProjectWorkspaceTabs(input as ReplaceScienceProjectWorkspaceTabsInput);
   });
-  ipcMain.handle("science:researchLifecycle:get", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const lifecycle = scienceStore().getResearchLifecycleForProject(projectId);
-    if (!lifecycle) throw new Error("science-research-lifecycle-canonical-missing");
-    scienceLifecycleSubscribers.set(event.sender.id, projectId);
-    return lifecycle;
-  });
-  ipcMain.handle("science:researchLifecycle:revisions", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const studyId = input && typeof input === "object" && "studyId" in input ? String((input as { studyId?: unknown }).studyId ?? "") : "";
-    const lifecycle = scienceStore().getResearchLifecycleForProject(projectId);
-    if (!lifecycle || lifecycle.studyId !== studyId) throw new Error("science-research-lifecycle-noncanonical-study");
-    scienceLifecycleSubscribers.set(event.sender.id, projectId);
-    return scienceStore().listResearchLifecycleRevisions(projectId, studyId);
-  });
   ipcMain.handle("science:researchContracts:get", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
@@ -2345,105 +2275,6 @@ app.whenReady().then(async () => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     return scienceStore().setApprovalPolicy(input as SetScienceApprovalPolicyInput);
   });
-  ipcMain.handle("science:researchLoops:inspect", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const sessions = scienceStore().listLoopSessions(projectId);
-    const session = scienceStore().getActiveLoopSession(projectId) ?? sessions[0] ?? null;
-    return {
-      schema: "agentlas.science.research-loop-inspection/v1",
-      active: session !== null && ["queued", "running", "pausing", "paused"].includes(session.status),
-      session,
-      episodes: session ? scienceStore().listResearchEpisodes(projectId, session.id) : [],
-      events: session ? scienceStore().listLoopEvents(session.id, 0, 1_000) : [],
-    };
-  });
-  ipcMain.handle("science:researchLoops:start", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-loop-input-invalid");
-    const record = input as StartScienceLoopSessionInput;
-    const { resolveScienceRuntimeSelection } = await import("agentlas-science");
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const runtimeSelection = await resolveScienceRuntimeSelection(scienceStore(), record);
-    if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
-    return scienceStore().startLoopSession({ ...record, runtimeSelection });
-  });
-  ipcMain.handle("science:researchLoops:transition", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-loop-input-invalid");
-    const record = input as TransitionScienceLoopSessionInput;
-    const store = scienceStore();
-    const prior = store.getLoopSessionForProject(record.projectId, record.loopSessionId);
-    const result = store.transitionLoopSession(record);
-
-    // A pause/cancel is durable before adapter cancellation is requested. Use
-    // the exact active run captured before the transition because terminal
-    // cancel clears activeRunId, and keep this cleanup unconditional for the
-    // cancel action so a stale stop cannot deadlock on provider state.
-    if ((record.action === "pause" || record.action === "cancel") && prior?.activeRunId) {
-      const turn = store.getTurnByInvocationRunId(prior.activeRunId);
-      if (turn && turn.projectId === record.projectId) {
-        try {
-          scienceConversationService().cancel({
-            projectId: turn.projectId,
-            conversationId: turn.conversationId,
-            turnId: turn.id,
-          });
-        } catch (error) {
-          console.error("[science-runtime] loop transition cancellation failed", error);
-        }
-      }
-    }
-
-    if (record.action === "resume" && result.session.status === "queued") {
-      try {
-        if (!result.session.runtimeSelection?.model) throw new Error("science-runtime-selection-required");
-        const conversation = store.listConversations(record.projectId)
-          .find((candidate) => store.getConversationRuntimeBinding(record.projectId, candidate.id)?.runtimeChatId === result.session.runtimeChatId);
-        if (!conversation) throw new Error("science-loop-resume-conversation-missing");
-        scienceConversationService().resumeLoop({
-          requestId: record.requestId,
-          projectId: record.projectId,
-          conversationId: conversation.id,
-          loopSessionId: result.session.id,
-          expectedLoopVersion: result.session.version,
-          expectedLoopStateSha256: result.session.stateSha256,
-          locale: record.locale,
-        });
-        const current = store.getLoopSessionForProject(record.projectId, result.session.id);
-        return { ...result, session: current ?? result.session };
-      } catch (error) {
-        const current = store.getLoopSessionForProject(record.projectId, result.session.id);
-        if (current && current.status === "queued"
-          && current.version === result.session.version && current.stateSha256 === result.session.stateSha256) {
-          try {
-            store.failLoopResumeDispatch({
-              projectId: current.projectId,
-              loopSessionId: current.id,
-              expectedLoopVersion: current.version,
-              expectedLoopStateSha256: current.stateSha256,
-              errorCode: (error instanceof Error ? error.message : String(error)).slice(0, 240) || "science-loop-resume-failed",
-            });
-          } catch { /* a concurrent canonical transition wins */ }
-        }
-        throw error;
-      }
-    }
-    return result;
-  });
-  ipcMain.handle("science:conversations:list", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    return scienceStore().listConversations(projectId);
-  });
-  ipcMain.handle("science:messages:list", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const conversationId = input && typeof input === "object" && "conversationId" in input ? String((input as { conversationId?: unknown }).conversationId ?? "") : "";
-    return scienceStore().listMessagesForProject(projectId, conversationId);
-  });
   const scienceRuntimeInput = (envelope: unknown) => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-runtime-input-invalid");
@@ -2451,93 +2282,6 @@ app.whenReady().then(async () => {
     if (typeof record.projectId !== "string" || typeof record.conversationId !== "string") throw new Error("science-runtime-input-invalid");
     return { projectId: record.projectId, conversationId: record.conversationId, selection: record.selection, requestId: typeof record.requestId === "string" ? record.requestId : undefined };
   };
-  ipcMain.handle("science:runtime:inspect", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = scienceRuntimeInput(envelope);
-    const { inspectScienceRuntime } = await import("agentlas-science");
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    return inspectScienceRuntime(scienceStore(), input);
-  });
-  ipcMain.handle("science:runtime:select", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = scienceRuntimeInput(envelope);
-    const { selectScienceRuntime } = await import("agentlas-science");
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const result = await selectScienceRuntime(scienceStore(), input);
-    if (result.pending && result.steering) {
-      await scienceConversationService().reconcileSteering({ ...input, turnId: result.steering.targetTurnId });
-    }
-    return result;
-  });
-  ipcMain.handle("science:composer:start", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    const record = input as Record<string, unknown>;
-    const projectId = String(record.projectId ?? "");
-    const conversationId = String(record.conversationId ?? "");
-    const { normalizeScienceRuntimeSelection } = await import("agentlas-science");
-    const { resolveScienceRuntimeSelection } = await import("agentlas-science");
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const runtimeSelection = normalizeScienceRuntimeSelection(record.runtimeSelection ?? await resolveScienceRuntimeSelection(scienceStore(), { projectId, conversationId }));
-    if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
-    ensureScienceTurnProjection();
-    scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
-    return scienceConversationService().start({ ...input, runtimeSelection } as ScienceComposerStartInput);
-  });
-  ipcMain.handle("science:composer:steer", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    return scienceConversationService().steer(input as ScienceSteerInput);
-  });
-  ipcMain.handle("science:composer:reconcileSteering", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceConversationService().reconcileSteering({
-      projectId: String(record.projectId ?? ""), conversationId: String(record.conversationId ?? ""), turnId: String(record.turnId ?? ""),
-    });
-  });
-  ipcMain.handle("science:composer:steering", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = scienceRuntimeInput(envelope);
-    return scienceStore().listSteering(input.projectId, input.conversationId);
-  });
-  ipcMain.handle("science:composer:cancel", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceConversationService().cancel({
-      projectId: String(record.projectId ?? ""),
-      conversationId: String(record.conversationId ?? ""),
-      turnId: String(record.turnId ?? ""),
-    });
-  });
-  ipcMain.handle("science:composer:attach", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    const record = input as Record<string, unknown>;
-    const projectId = String(record.projectId ?? "");
-    const conversationId = String(record.conversationId ?? "");
-    ensureScienceTurnProjection();
-    scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
-    return scienceConversationService().attach({ projectId, conversationId });
-  });
-  ipcMain.handle("science:composer:receipt", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceConversationService().receipt({
-      projectId: String(record.projectId ?? ""),
-      conversationId: String(record.conversationId ?? ""),
-      turnId: String(record.turnId ?? ""),
-    });
-  });
   ipcMain.handle("science:messageBlocks:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
@@ -3598,7 +3342,6 @@ app.whenReady().then(async () => {
       artifactVersion: Number(record.artifactVersion),
     });
   });
-  registerSciencePublicationIpc({ ipc: ipcMain, assertScienceSender });
   ipcMain.handle("science:manuscripts:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
@@ -3754,112 +3497,7 @@ app.whenReady().then(async () => {
     if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
     return scienceStore().rejectManuscriptEditProposal(input as RejectScienceManuscriptEditProposalInput);
   });
-  ipcMain.handle("science:manuscripts:render", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope
-      ? (envelope as { input?: Record<string, unknown> }).input
-      : null;
-    if (!input || typeof input !== "object" || typeof input.projectId !== "string") throw new Error("science-manuscript-render-input-invalid");
-    const service = scienceManuscriptRenderService();
-    const { validateSciencePdfSelection } = await import("agentlas-science/dist/contracts/science-typeset-profile");
-    const pdfSelection = input.pdfEngine === undefined && input.pdfProfile === undefined ? null
-      : validateSciencePdfSelection({ engine: input.pdfEngine, ...(input.pdfProfile === undefined ? {} : { profile: input.pdfProfile }) });
-    if ((pdfSelection && input.pdfFallback !== "forbid") || (input.pdfFallback !== undefined && input.pdfFallback !== "forbid")) throw new Error("publication_pdf_fallback_forbidden");
-    const options = {
-      ...(pdfSelection ? { pdfEngine: pdfSelection.engine, ...(pdfSelection.engine === "pdflatex" ? { pdfProfile: pdfSelection.profile } : {}) } : {}),
-      ...(input.pdfFallback === "forbid" ? { pdfFallback: "forbid" as const } : {}),
-      outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html" as const],
-      // No blanket default: Science follows a journal rule, else the field of the manuscript's own sources (a finance paper does not print [16]).
-      style: input.style as "numeric" | "apa" | "nature" | undefined,
-      lineNumbers: input.lineNumbers === true, doubleSpacing: input.doubleSpacing === true,
-      journalProfileId: typeof input.journalProfileId === "string" ? input.journalProfileId : undefined,
-      expectedJournalProfileVersion: typeof input.expectedJournalProfileVersion === "number" ? input.expectedJournalProfileVersion : undefined,
-      expectedJournalProfileContentSha256: typeof input.expectedJournalProfileContentSha256 === "string" ? input.expectedJournalProfileContentSha256 : undefined,
-      // 원고별 단 수(오너 2026-09-14): 저널 프로파일 조판 위에 덮는다. 1·2 외의 값은 무시.
-      ...(input.columnCount === 1 || input.columnCount === 2 ? { columnCount: input.columnCount as 1 | 2 } : {}),
-      metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as ScienceSubmissionMetadata : null,
-    };
-    if (typeof input.manuscriptId === "string") return service.renderStored(input.projectId, input.manuscriptId, options);
-    const draft = input.draft as { title?: unknown; markdown?: unknown; bindings?: unknown } | undefined;
-    if (!draft || typeof draft.markdown !== "string" || !Array.isArray(draft.bindings)) throw new Error("science-manuscript-render-input-invalid");
-    return service.render(draftManuscript(input.projectId, typeof draft.title === "string" ? draft.title : "", draft.markdown, draft.bindings as ScienceManuscriptBinding[]), options);
-  });
-  ipcMain.handle("science:journals:list", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    return scienceJournalPublicationService().listJournalProfiles(projectId);
-  });
-  ipcMain.handle("science:journals:inspectOfficialGuidelines", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:network");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceJournalPublicationService().inspectOfficialGuidelines({ projectId: String(record.projectId ?? ""), sourceUrl: String(record.sourceUrl ?? "") });
-  });
   // 공식 사이트가 죽었을 때의 화면 경로(2026-09-14): 규정 본문 붙여넣기 / 거울 페이지.
-  ipcMain.handle("science:journals:recordGuidelineText", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceJournalPublicationService().recordManualGuidelineText({
-      projectId: String(record.projectId ?? ""), officialHost: String(record.officialHost ?? ""), pageTitle: String(record.pageTitle ?? ""), text: String(record.text ?? ""),
-    });
-  });
-  ipcMain.handle("science:journals:useNeutralProfile", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-neutral-profile-input-invalid");
-    const record = input as Record<string, unknown>;
-    const service = scienceJournalPublicationService() as unknown as { ensureNeutralJournalProfile?: (value: { projectId: string; variant: string; articleType?: string }) => unknown };
-    if (typeof service.ensureNeutralJournalProfile !== "function") throw new Error("science-journal-neutral-profile-unavailable");
-    return service.ensureNeutralJournalProfile({
-      projectId: String(record.projectId ?? ""), variant: String(record.variant ?? ""),
-      articleType: typeof record.articleType === "string" ? record.articleType : undefined,
-    });
-  });
-  ipcMain.handle("science:journals:inspectGuidelinesMirror", async (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:network");
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
-    const record = input as Record<string, unknown>;
-    return scienceJournalPublicationService().inspectGuidelineMirror({ projectId: String(record.projectId ?? ""), sourceUrl: String(record.sourceUrl ?? ""), officialHost: String(record.officialHost ?? "") });
-  });
-  ipcMain.handle("science:journals:createProfile", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-profile-input-invalid");
-    return scienceJournalPublicationService().createJournalProfile(input as CreateScienceJournalProfileInput);
-  });
-  ipcMain.handle("science:journals:confirmIdentity", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-identity-input-invalid");
-    return scienceJournalPublicationService().confirmJournalIdentity(input as ConfirmScienceJournalIdentityInput);
-  });
-  ipcMain.handle("science:journals:confirmHumanAttestation", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-attestation-input-invalid");
-    return scienceJournalPublicationService().confirmHumanAttestation(input as ConfirmScienceJournalHumanAttestationInput);
-  });
-  ipcMain.handle("science:journals:validate", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-journal-validation-input-invalid");
-    const record = input as Record<string, unknown>;
-    const manuscript = scienceStore().getManuscriptForProject(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
-    const profile = scienceStore().getJournalProfileForProject(String(record.projectId ?? ""), String(record.journalProfileId ?? ""));
-    if (!manuscript || !profile) throw new Error("science-journal-validation-target-not-found");
-    return scienceJournalPublicationService().validate(manuscript, profile, record.metadata as CreateScienceSubmissionExportInput["metadata"] | undefined,
-      Array.isArray(record.humanAttestationReceiptIds) ? record.humanAttestationReceiptIds.map(String) : []);
-  });
-  ipcMain.handle("science:submissions:createExport", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    if (!input || typeof input !== "object") throw new Error("science-submission-export-input-invalid");
-    return scienceJournalPublicationService().createSubmissionExport(input as CreateScienceSubmissionExportInput);
-  });
   ipcMain.handle("science:submissions:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -3908,38 +3546,6 @@ app.whenReady().then(async () => {
       }) => unknown;
     };
   }).researcherQuestions();
-  ipcMain.handle("science:researcherQuestions:register", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    // Do not advertise model tools until both the durable store and updated renderer exist.
-    const questions = researcherQuestions();
-    if (!questions || typeof questions.list !== "function" || typeof questions.answer !== "function") {
-      throw new Error("science-researcher-question-store-unavailable");
-    }
-    registerDesktopScienceResearcherQuestionUi();
-    return { ok: true };
-  });
-  ipcMain.handle("science:researcherQuestions:list", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" ? envelope as Record<string, unknown> : {};
-    return researcherQuestions().list(String(input.projectId ?? ""), String(input.conversationId ?? ""));
-  });
-  ipcMain.handle("science:researcherQuestions:answer", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope, "science:agent-runtime");
-    const input = envelope && typeof envelope === "object" && "input" in envelope
-      ? (envelope as { input?: Record<string, unknown> }).input : null;
-    if (!input || typeof input.answer !== "string") throw new Error("science-researcher-question-answer-input-invalid");
-    const answered = researcherQuestions().answer({
-      requestId: randomUUID(),
-      projectId: String(input.projectId ?? ""),
-      conversationId: String(input.conversationId ?? ""),
-      questionId: String(input.questionId ?? ""),
-      expectedSequence: 1,
-      source: "authenticated-user",
-      answer: input.answer,
-    });
-    notifyScienceResearcherQuestion(answered);
-    return answered;
-  });
   ipcMain.handle("science:decisions:get", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -4062,8 +3668,10 @@ app.whenReady().then(async () => {
   traceStartup("hub-cache-closed");
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
+  let builtinsSeeded = false;
   try {
     seedBuiltinAgents();
+    builtinsSeeded = true;
   } catch (err) {
     console.error("[architecture] seedBuiltinAgents failed:", err);
   }
@@ -4153,6 +3761,11 @@ app.whenReady().then(async () => {
   startBrowserOrphanSweep();
   materializeBuiltinPlugins();
   ensureDefaultMcpPluginsInstalled();
+  // A login service may reuse this store only after the GUI completed the
+  // migration and built-in/plugin seed barrier for this exact app generation.
+  const daemonStoreBootstrapToken = builtinsSeeded && !developmentEffectsSuppressed()
+    ? markDaemonAutostartStoreReady({ appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION })
+    : null;
   // 승인된 브라우저 로그인은 앱이 뜰 때 한 번 스스로 최신이 된다(주기 미도래면 즉시 반환).
   // 창을 띄우기 전에 붙들지 않는다 — 자격증명 갱신 때문에 앱이 늦게 뜨면 안 된다.
   void import("./browser/credential-sync")
@@ -4192,35 +3805,9 @@ app.whenReady().then(async () => {
    */
   const ensureDesktopDaemon = () => import("./daemon/app-launcher")
     .then(async (module) => {
-      const outcome = await module.ensureDaemonRunning({
-        userDataDir: userDataDir(),
-        storePath: openedStorePath(),
-        appVersion: app.getVersion(),
-        parentPid: process.pid,
-        installIdentity,
-        appInstanceId: desktopAppInstanceId(),
-        expectedStoreIdentity: storeIdentityDigest(openedStorePath(), desktopAppInstanceId()),
-      });
+      const outcome = await module.ensureDaemonRunning(desktopDaemonClientOptions());
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
-      try {
-        const { setDaemonAutostartEnabled } = await import("./store/daemon-autostart");
-        setDaemonAutostartEnabled(false);
-        const reconciled = module.reconcileDaemonAutostart(false, {
-          executable: process.execPath,
-          entry: path.join(__dirname, "daemon", "main.js"),
-        });
-        if (reconciled.changed) {
-          console.info(`[daemon] autostart ${reconciled.installed ? "installed" : "removed"}`);
-        }
-        const { disableLaunchd } = await import("./launchd/agent");
-        const legacyAutomationLauncher = disableLaunchd();
-        if (legacyAutomationLauncher.error) {
-          console.error("[automation] legacy background launcher cleanup failed:", legacyAutomationLauncher.error);
-        }
-      } catch (err) {
-        console.error("[daemon] autostart reconcile failed:", err);
-      }
       return { module, outcome };
     })
     .catch((error) => {
@@ -4228,6 +3815,46 @@ app.whenReady().then(async () => {
       return null;
     });
   let daemonStartupPromise = ensureDesktopDaemon();
+  // The daemon has one bootstrap owner. Science recovery waits for that owner
+  // and for the built-in agents/plugins materialized above, then runs beside
+  // the first window paint. The renderer bootstrap awaits the same promise.
+  if (scienceDaemonClient) {
+    scienceDaemonStartupPromise = daemonStartupPromise.then(daemon => {
+      if (!daemon || daemon.outcome.status === "failed" || daemon.outcome.status === "disabled") {
+        throw new Error("science_daemon_bootstrap_unavailable");
+      }
+      return scienceDaemonClient!.ensureStarted();
+    }).catch(error => {
+      // A transient launcher failure cannot pin every later renderer attach
+      // to a permanently rejected startup promise.
+      scienceDaemonStartupPromise = null;
+      throw error;
+    });
+    void scienceDaemonStartupPromise.then(status => {
+      console.info("[science-runtime] daemon service", { state: status.state, ownerEpoch: status.ownerEpoch });
+    }).catch(error => console.error("[science-runtime] daemon startup failed", error));
+  }
+  // The OS supervisor is an owner continuity mechanism, not a Codex task.
+  // Ask the live Science owner whether recoverable work exists; the GUI never
+  // runs Science recovery merely to decide whether to install a login entry.
+  if (daemonStoreBootstrapToken) {
+    void (scienceDaemonStartupPromise ?? Promise.resolve(null)).catch(error => {
+      console.error("[daemon] Science recovery observation unavailable", error);
+      return null;
+    }).then(async (status) => {
+      let hasRecoverableScienceWork = false;
+      if (status?.state === "ready" && scienceDaemonClient) {
+        try { hasRecoverableScienceWork = await scienceDaemonClient.commandObserved({ op: "autostart.hasRecoverableScienceWork" }) === true; }
+        catch (error) { console.error("[daemon] recoverable Science work observation failed", error); }
+      }
+      const policy = resolveDaemonAutostartPolicy({ hasRecoverableScienceWork });
+      const daemon = await daemonStartupPromise;
+      if (!daemon || daemon.outcome.status === "failed" || daemon.outcome.status === "disabled") return;
+      const command = daemon.module.buildDaemonAutostartCommand({ ...desktopDaemonClientOptions(), storeBootstrapToken: daemonStoreBootstrapToken });
+      const result = daemon.module.reconcileDaemonAutostart(policy.enabled, command);
+      console.info("[daemon] login continuity", { enabled: policy.enabled, reason: policy.reason, installed: result.installed, loaded: result.loaded });
+    }).catch(error => console.error("[daemon] login continuity reconcile failed", error));
+  }
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
@@ -4397,25 +4024,6 @@ app.whenReady().then(async () => {
     } catch (error) {
       console.error("[long-run] checkpoint startup reconciliation failed", error);
     }
-  }
-  try {
-    const scienceStatus = scienceExtensionStatus();
-    if (scienceStatus.phase === "installed" && scienceStatus.enabled) {
-      ensureScienceTurnProjection();
-      const adapter = createScienceDesktopLongRunAdapter({ project: (snapshot) => { projectScienceLoopLongRun(snapshot); } });
-      const recovered = await adapter.recoverAndProjectAtStartup();
-      const recoveredTools = recovered.tools;
-      if (recoveredTools.interrupted || recoveredTools.finalized || recoveredTools.alreadyCommitted || recoveredTools.quarantined) {
-        console.info(`[science-tools] recovered interrupted=${recoveredTools.interrupted} finalized=${recoveredTools.finalized} committed=${recoveredTools.alreadyCommitted} quarantined=${recoveredTools.quarantined}`);
-      }
-      const recoveredScience = recovered.conversations;
-      if (recovered.pausedLoops > 0) console.info(`[science-runtime] paused ${recovered.pausedLoops} loop(s) for explicit crash recovery`);
-      if (recoveredScience.delivered || recoveredScience.dispatched || recoveredScience.settled || recoveredScience.interrupted) {
-        console.info(`[science-runtime] recovered delivered=${recoveredScience.delivered} dispatched=${recoveredScience.dispatched} settled=${recoveredScience.settled} interrupted=${recoveredScience.interrupted}`);
-      }
-    }
-  } catch (error) {
-    console.error("[science-runtime] recovery failed", error);
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   void import("./telegram/connect")
