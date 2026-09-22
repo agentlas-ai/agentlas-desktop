@@ -1,7 +1,7 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
 import { validLocalPackageId } from "../shared/local-model-hub";
 import type { LocalModelOperationView } from "../shared/local-model-hub";
-import type { LocalModelHubManager } from "./local-model-hub/manager";
+import type { LocalModelHubControlPort } from "./local-model-hub/ports";
 
 type Operation = {
   ownerId: number;
@@ -32,7 +32,7 @@ function packageId(value: unknown): string {
 /** The app window owns requests; the shared manager owns all package and process state. */
 export function registerLocalModelHubIpc(deps: {
   ipc: Pick<IpcMain, "handle">;
-  manager: LocalModelHubManager;
+  manager: LocalModelHubControlPort;
   assertTrustedSender: (event: IpcMainInvokeEvent) => BrowserWindow;
   selectModelFile: (window: BrowserWindow) => Promise<string | null>;
 }): { closeAdmission: () => void; shutdown: () => Promise<void>; isSettled: () => boolean } {
@@ -113,9 +113,9 @@ export function registerLocalModelHubIpc(deps: {
     return entry.promise as Promise<T>;
   }
 
-  handle("searchModels", (_event, input) => deps.manager.searchModels(input as unknown as Parameters<LocalModelHubManager["searchModels"]>[0]), { read: true });
-  handle("inspectRepository", (_event, input) => deps.manager.inspectRepository(input as unknown as Parameters<LocalModelHubManager["inspectRepository"]>[0]), { read: true });
-  handle("addModel", (_event, input) => deps.manager.addModel(input as unknown as Parameters<LocalModelHubManager["addModel"]>[0]));
+  handle("searchModels", (_event, input) => deps.manager.searchModels(input as unknown as Parameters<LocalModelHubControlPort["searchModels"]>[0]), { read: true });
+  handle("inspectRepository", (_event, input) => deps.manager.inspectRepository(input as unknown as Parameters<LocalModelHubControlPort["inspectRepository"]>[0]), { read: true });
+  handle("addModel", (_event, input) => deps.manager.addModel(input as unknown as Parameters<LocalModelHubControlPort["addModel"]>[0]));
   handle("snapshot", () => deps.manager.snapshot(), { read: true });
   handle("operations", event => [...operations.values()].filter(operation => operation.ownerId === event.sender.id)
     .map(operation => ({ ...operation.view, ...(operation.pending && operation.controller.signal.aborted ? { state: "cancelling" as const } : {}) })), { read: true });
@@ -202,8 +202,8 @@ export function registerLocalModelHubIpc(deps: {
       admissionOpen = false;
       for (const operation of operations.values()) if (operation.pending) operation.controller.abort(new Error("local_model_app_shutdown"));
       shutdownPromise = (async () => {
-        // Stop the native server first so outstanding inference calls can settle.
-        await deps.manager.shutdown();
+        // Only this GUI's package/probe requests belong to the window. The
+        // daemon retains the loaded engine and inference across GUI shutdown.
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -215,7 +215,6 @@ export function registerLocalModelHubIpc(deps: {
         } finally {
           if (timeout) clearTimeout(timeout);
         }
-        await deps.manager.shutdown();
         settled = true;
       })();
       return shutdownPromise;
