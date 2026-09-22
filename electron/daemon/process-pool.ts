@@ -14,6 +14,7 @@
 //      풀이 아니라 누수다.
 import type { ChildProcess } from "node:child_process";
 import { onHostShutdown } from "../host-lifecycle";
+import { killCliTree } from "../runtime/exec";
 
 export interface PooledProcessHandle {
   child: ChildProcess;
@@ -202,7 +203,7 @@ export class WarmProcessPool {
       handle.idleTimer = null;
     }
     if (!handle.exited) {
-      try { handle.child.kill("SIGTERM"); } catch { /* already gone */ }
+      try { killCliTree(handle.child, 500); } catch { /* already gone */ }
     }
   }
 
@@ -212,6 +213,12 @@ export class WarmProcessPool {
     this.disposed = true;
     this.detachShutdown();
     for (const handle of [...this.handles]) this.remove(handle);
+  }
+
+  /** Capture before dispose removes the handles so daemon shutdown can await
+   * the actual owned trees, including stubborn grandchildren. */
+  shutdownChildren(): ChildProcess[] {
+    return this.handles.map((handle) => handle.child);
   }
 
   /** 진단용 — 붙들고 있는 프로세스 수(사용 중 + 유휴). */

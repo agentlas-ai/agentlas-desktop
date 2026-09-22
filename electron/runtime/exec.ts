@@ -374,6 +374,24 @@ export function detachedSpawnOpts(): { detached?: boolean } {
  * Windows는 taskkill /T 로 트리 전체에 정상 종료를 요청하고 grace 뒤 /F 로 승격한다.
  * 그룹킬/taskkill 실행 실패 시에만 단일 child.kill()로 폴백한다. detachedSpawnOpts()와 짝으로 사용.
  */
+// Keep shutdown aware of escalations scheduled before a leader's close event.
+// A closed leader can still have an MCP grandchild in its owned process group.
+const pendingCliTreeEscalations = new Set<symbol>();
+
+function scheduleCliTreeEscalation(action: () => void, graceMs: number): () => void {
+  const token = Symbol("cli-tree-escalation");
+  pendingCliTreeEscalations.add(token);
+  const timer = setTimeout(() => {
+    try { action(); }
+    finally { pendingCliTreeEscalations.delete(token); }
+  }, Math.max(0, graceMs));
+  timer.unref?.();
+  return () => {
+    clearTimeout(timer);
+    pendingCliTreeEscalations.delete(token);
+  };
+}
+
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
   if (process.platform === "win32" && child.pid) {
     const pid = child.pid;
@@ -392,22 +410,21 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
     };
 
     runTaskkill(false);
-    const force = setTimeout(() => {
+    scheduleCliTreeEscalation(() => {
       // Never target a numeric PID after Node has observed the owned leader exit:
       // Windows can reuse that PID for an unrelated process during the grace period.
       // taskkill /T already enumerated the descendants in the first pass; /F is safe
       // only while the original leader handle still proves ownership of this PID.
       if (child.exitCode !== null || child.signalCode !== null) return;
       runTaskkill(true);
-    }, Math.max(0, graceMs));
-    force.unref?.();
+    }, graceMs);
     return;
   }
   if (process.platform !== "win32" && child.pid) {
     try {
       const processGroupId = child.pid;
       process.kill(-processGroupId, "SIGTERM");
-      const sigkill = setTimeout(() => {
+      const cancelEscalation = scheduleCliTreeEscalation(() => {
         try {
           process.kill(-processGroupId, "SIGKILL");
         } catch {
@@ -421,19 +438,24 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
         try {
           process.kill(-processGroupId, 0);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ESRCH") clearTimeout(sigkill);
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") cancelEscalation();
         }
       };
       child.once("close", clearIfGroupGone);
       child.once("error", clearIfGroupGone);
-      sigkill.unref?.();
       return;
     } catch {
       // fall through to direct child kill
     }
   }
   try {
-    child.kill();
+    if (!child.kill()) return;
+    scheduleCliTreeEscalation(() => {
+      // Retain the original ChildProcess handle; never signal a reused bare PID.
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      }
+    }, graceMs);
   } catch {
     // already exited
   }
@@ -442,6 +464,43 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
 // 살아있는 LLM 실행 자식 추적 — 앱 종료 시 전부 트리킬해 고아 CLI/MCP 프로세스를 남기지 않는다.
 const liveRunChildren = new Set<ChildProcess>();
 let quitHookInstalled = false;
+
+/** Snapshot before shutdown hooks clear registrations, then drain only owned
+ * children/groups. A referenced poll keeps TERM -> KILL timers alive, while the
+ * deadline prevents an unresponsive child from permanently blocking shutdown. */
+export async function drainRunChildrenForHostShutdown(
+  additionalChildren: readonly ChildProcess[] = [],
+  timeoutMs = 6_000,
+): Promise<{ timedOut: boolean; remaining: number; pendingEscalations: number }> {
+  const children = [...new Set([...liveRunChildren, ...additionalChildren])].map((child) => {
+    let groupId: number | null = null;
+    if (process.platform !== "win32" && child.pid) {
+      try { process.kill(-child.pid, 0); groupId = child.pid; } catch { /* no owned group */ }
+    }
+    return { child, groupId, settled: false };
+  });
+  for (const { child } of children) killCliTree(child, 500);
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  for (;;) {
+    let remaining = 0;
+    for (const target of children) {
+      if (target.settled) continue;
+      if (target.groupId !== null) {
+        try { process.kill(-target.groupId, 0); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") target.settled = true;
+        }
+      } else {
+        target.settled = target.child.exitCode !== null || target.child.signalCode !== null;
+      }
+      if (!target.settled) remaining += 1;
+    }
+    const pendingEscalations = pendingCliTreeEscalations.size;
+    if (remaining === 0 && pendingEscalations === 0) return { timedOut: false, remaining, pendingEscalations };
+    if (Date.now() >= deadline) return { timedOut: true, remaining, pendingEscalations };
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+  }
+}
 
 /**
  * LLM 실행 자식 등록: 종료 시 자동 해제 + 앱 will-quit 일괄 트리킬 + 차등 nice.

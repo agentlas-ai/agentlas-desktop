@@ -27,6 +27,7 @@ import {
   sweepIdleAgentResidency,
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
+import { drainRunChildrenForHostShutdown } from "../runtime/exec";
 import { startControlSocket, type ControlSocketHandle } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
 import { storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
@@ -138,6 +139,7 @@ function processIsAlive(pid: number): boolean {
 }
 
 function startDaemonMobileBridge(): Promise<void> {
+  if (closing) return Promise.resolve();
   if (mobileBridgeLeaseOwnerPid !== null) return Promise.resolve();
   if (mobileBridgeStartPromise) return mobileBridgeStartPromise;
   mobileBridgeStartPromise = (async () => {
@@ -182,6 +184,9 @@ function ensureMobileBridgeLeaseWatch(): void {
  * 쓰이지 않을 메서드를 미리 만드는 것은 배선이 아니라 선언이다.
  */
 async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
+  if (closing && method !== "daemon.ping" && method !== "daemon.shutdown") {
+    throw new Error("daemon_shutting_down");
+  }
   if (method === "daemon.ping") {
     const { openedStorePath } = await import("../store/db");
     // Control-plane health cannot depend on optional GUI-backed services.
@@ -368,25 +373,25 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
 let keepAlive: NodeJS.Timeout | null = null;
 
 let closing = false;
+let shutdownPromise: Promise<void> | null = null;
 
 /**
  * 단일 종료 경로 — 신호(SIGTERM/SIGINT/SIGHUP)든 RPC(daemon.shutdown)든 같은 정리를
  * 정확히 한 번 돈다. 두 경로가 각자 정리를 들고 있으면 언젠가 한쪽만 고쳐진다.
  */
-function performShutdown(reason: string): void {
-  if (closing) return;
+function performShutdown(reason: string): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
   closing = true;
   console.log(`[agentlasd] ${reason} — running shutdown hooks`);
+  // Capture process handles before synchronous hooks clear their registries.
+  const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
   try {
     runHostShutdownHooks();
   } catch (error) {
     console.error("[agentlasd] shutdown hooks failed:", error);
   }
-  if (controlSocket) {
-    // 유닉스 소켓 파일을 남기면 다음 데몬이 EADDRINUSE 로 못 뜬다.
-    void controlSocket.close();
-    controlSocket = null;
-  }
+  const socket = controlSocket;
+  controlSocket = null;
   // 붙든 프로세스를 전부 죽인다(host-lifecycle 도 부르지만, 순서와 무관하게 멱등).
   processPool.dispose();
   if (keepAlive) {
@@ -401,8 +406,30 @@ function performShutdown(reason: string): void {
     clearInterval(desktopParentWatch);
     desktopParentWatch = null;
   }
-  // 정리가 끝난 뒤에만 나간다. 여기서 즉시 exit 하면 자식 트리 킬이 잘린다.
-  process.exit(0);
+  shutdownPromise = (async () => {
+    let timeout: NodeJS.Timeout | null = null;
+    try {
+      const drained = await Promise.race([
+        Promise.all([
+          childrenDrained.then((result) => {
+            if (result.timedOut) console.warn("[agentlasd] child shutdown drain reached deadline", result);
+          }),
+          socket?.close(),
+          mobileBridgeStartPromise?.catch(() => {}),
+        ]).then(async () => { await mobileBridgeRuntime?.stopAgentlasMobileBridge(); return true; }),
+        new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 8_000); }),
+      ]);
+      if (!drained) console.warn("[agentlasd] shutdown drain reached deadline");
+    } catch (error) {
+      console.error("[agentlasd] shutdown drain failed:", error);
+      // Service cleanup failure must not cut off owned child escalation.
+      await childrenDrained;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      process.exit(0);
+    }
+  })();
+  return shutdownPromise;
 }
 
 /** 종료 신호 한 벌 — 어느 신호로 죽든 자식 CLI 가 함께 정리돼야 한다. */
@@ -501,7 +528,7 @@ export async function startDaemon(): Promise<void> {
     // A duplicate helper must not continue and compete for the bridge or
     // shared lifecycle state after losing the control-socket ownership race.
     console.error("[agentlasd] control socket failed to start:", error);
-    performShutdown("control socket unavailable");
+    await performShutdown("control socket unavailable");
     throw error;
   }
 
