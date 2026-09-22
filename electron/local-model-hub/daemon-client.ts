@@ -17,6 +17,9 @@ export interface LocalModelDaemonClientOptions extends EnsureDaemonOptions {
   installIdentity: InstallIdentity;
   requiredSchemaVersion: number;
   connectTimeoutMs?: number;
+  /** GUI startup barrier: seeding and the shared daemon launch must finish
+   * before a renderer snapshot or legacy migration can ask for this service. */
+  startupReady?: Promise<void>;
 }
 export class LocalModelDaemonClientError extends Error {
   readonly code: string;
@@ -139,7 +142,12 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     if (ready) return Promise.resolve(ready);
     if (starting) return starting;
     starting = (async () => {
-      const result = await ensureDaemonRunning({ ...options, expectedStoreIdentity: identity.serviceIdentity });
+      await options.startupReady;
+      if (detaching || closed) throw failure("local_model_daemon_client_detached", "not-dispatched");
+      // The launcher receives the GUI's diagnostic store digest in options.
+      // Service identity is a separate stable value that it resolves itself;
+      // replacing the digest with that value makes daemon.attach reject us.
+      const result = await ensureDaemonRunning(options);
       if (result.status === "disabled" || result.status === "failed") throw failure("local_model_daemon_unavailable", "not-dispatched");
       const current = await inspect();
       const value = record(await rpc("localModel.start", current));

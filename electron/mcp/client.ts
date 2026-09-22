@@ -3021,7 +3021,11 @@ ${effectiveUserPrompt}`;
    */
   // ★Site 도 같은 자동 선택을 지난다(오너 결정 2026-08-20). 예전에는 agentAppMode 가
   // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
-  if (runtimeCanUseMcp && !isAliveControllerRun && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
+  // Science has one signed, turn-scoped tool catalog supplied by its execution
+  // owner below. A second generic One/Work MCP config is both redundant and
+  // can fail before the Science grant is even attempted in a headless daemon.
+  if (runtimeCanUseMcp && executionContext?.source !== "science" && !isAliveControllerRun
+    && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
     try {
       if (req.forceBrowserCredentialRefresh) {
         const report = await refreshBrowserCredentialsIfDue({ force: true });
@@ -3475,14 +3479,14 @@ ${effectiveUserPrompt}`;
     }
   }
 
-  // Science computation is a Main-owned, turn-scoped capability. It is not a
+  // Science computation is a daemon-owned, turn-scoped capability. It is not a
   // globally installed MCP row and is never selected from prompt text. The
   // short-lived bridge carries only a loopback endpoint and an opaque grant;
-  // project/turn authority remains in Main and is revalidated by ScienceStore.
+  // project/turn authority remains in the Science owner and is revalidated by ScienceStore.
   if (executionContext?.source === "science") {
     if (!executionContext.science && !scienceReview) throw new Error("science-execution-context-missing");
     const { materializeScienceMcpGrant, materializeScienceReviewMcpGrant } = await import("agentlas-science");
-    // Science turns use the Main-owned catalog as their single tool boundary.
+    // Science turns use the daemon-owned catalog as their single tool boundary.
     // Keeping the auto-selected standalone domain servers in the same config
     // creates duplicate tools (for example PBDB's low-level occurrence call
     // beside the host's receipt-producing search_paleontology_occurrences),

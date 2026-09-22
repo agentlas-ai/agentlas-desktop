@@ -1719,6 +1719,8 @@ app.whenReady().then(async () => {
     interrupt: interruptGoalWaitReplans,
     isSettled: goalWaitReplansSettled,
   });
+  let releaseLocalModelDaemonStartup!: () => void;
+  const localModelDaemonStartupReady = new Promise<void>((resolve) => { releaseLocalModelDaemonStartup = resolve; });
   let localModelControl: import("./local-model-hub/ports").LocalModelHubControlPort;
   if (developmentEffectsSuppressed()) {
     // Explicitly isolated, effect-suppressed QA never starts an external daemon.
@@ -1728,17 +1730,16 @@ app.whenReady().then(async () => {
     localModelControl = owner;
     localModelOwnerCleanup = () => owner.shutdown();
   } else {
-    localModelDaemonClient = createLocalModelDaemonClient(desktopDaemonClientOptions());
+    localModelDaemonClient = createLocalModelDaemonClient({ ...desktopDaemonClientOptions(), startupReady: localModelDaemonStartupReady });
     configureLocalModelRuntime(localModelDaemonClient.runtime);
     localModelControl = localModelDaemonClient.control;
     // The control facade starts the service lazily; a failed local engine must
     // not prevent users of CLI/API models from opening the application.
   }
   const localModelMigration = createOllamaMigrationService(localModelControl);
-  try {
-    await localModelMigration.reconcile();
-  } catch (error) {
-    console.error("[local-model-migration] startup_reconcile_failed", error);
+  if (developmentEffectsSuppressed()) {
+    try { await localModelMigration.reconcile(); }
+    catch (error) { console.error("[local-model-migration] startup_reconcile_failed", error); }
   }
   registerOllamaMigrationIpc({
     ipc: ipcMain,
@@ -3815,6 +3816,13 @@ app.whenReady().then(async () => {
       return null;
     });
   let daemonStartupPromise = ensureDesktopDaemon();
+  // Startup IPC can ask for a local-model snapshot before built-ins finish.
+  // Release those requests only after the one shared daemon launch settles.
+  void daemonStartupPromise.then(releaseLocalModelDaemonStartup, releaseLocalModelDaemonStartup);
+  if (!developmentEffectsSuppressed()) {
+    void daemonStartupPromise.then(() => localModelMigration.reconcile())
+      .catch(error => console.error("[local-model-migration] startup_reconcile_failed", error));
+  }
   // The daemon has one bootstrap owner. Science recovery waits for that owner
   // and for the built-in agents/plugins materialized above, then runs beside
   // the first window paint. The renderer bootstrap awaits the same promise.
