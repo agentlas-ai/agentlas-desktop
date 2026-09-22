@@ -387,6 +387,14 @@ function resumePermissionArgs(
  * is a different conversation.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  // Science grants use a private CODEX_HOME whose rollout files are removed
+  // when that host ends. A persisted thread id from the previous host cannot
+  // be resumed in the new home even when the conversation seed is unchanged.
+  // Bind only this isolated Science session to its home; ordinary Codex chats
+  // keep their existing continuity fingerprint across model/config changes.
+  const scienceHome = req.env?.AGENTLAS_SCIENCE_MCP_TOKEN && req.env.CODEX_HOME
+    ? path.resolve(req.cwd ?? agentRunCwd(), req.env.CODEX_HOME)
+    : null;
   // Model choice is deliberately absent from this fingerprint. A resident Codex
   // process can fork the held thread for a new model, retaining its history
   // without treating the old thread as if it had changed models. The seed keeps
@@ -398,6 +406,7 @@ function systemFingerprint(req: RunnerRequest): string {
       .update(req.sessionFingerprintSeed)
       .update("\0image-tool\0")
       .update(codexImageToolCapability(req))
+      .update(scienceHome ? `\0science-codex-home.v1\0${scienceHome}` : "")
       .digest("hex");
   }
   return crypto
@@ -417,6 +426,7 @@ function systemFingerprint(req: RunnerRequest): string {
     .update(req.isolatedMcpConfig ? "isolated-mcp" : "provider-defaults")
     .update("\0")
     .update(JSON.stringify(req.mcpCodexConfigArgs ?? []))
+    .update(scienceHome ? `\0science-codex-home.v1\0${scienceHome}` : "")
     .digest("hex");
 }
 
