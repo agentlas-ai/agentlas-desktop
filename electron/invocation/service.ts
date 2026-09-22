@@ -3142,7 +3142,40 @@ export class InvocationService {
             const reason = error instanceof Error && /^(?:goal_wait|checkpoint)_[a-z_]+$/.test(error.message)
               ? error.message : "goal_wait_registration_failed";
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
-            if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
+            const revision = current ? getChatGoalRevision(current.goalId) : null;
+            if (current?.status === "running" && revision?.lifecycle === "ongoing"
+              && !controller.signal.aborted && !record.hasTransientAttachments) {
+              let fallbackRegistered = false;
+              try {
+                const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
+                if (boundary.effects !== "settled") throw new Error("goal_wait_effects_uncertain");
+                const wait = getDb().transaction(() => {
+                  recordLongRunCycle({ goalId: current.goalId, sourceInvocationId: runId,
+                    progressState: "unknown", outcome: "ongoing-episode-unverified" });
+                  const registered = registerOngoingGoalCycle({ goalId: current.goalId, invocationRunId: runId });
+                  appendLongRunEvent({ runId: current.id, kind: "run.ongoing_cycle_unverified", actorKind: "host",
+                    payload: { invocationRunId: runId, waitId: registered.waitId,
+                      nextCheckAt: registered.nextCheckAt, originalWaitRefusal: reason } });
+                  return registered;
+                }).immediate();
+                fallbackRegistered = true;
+                const message = pickLocale(runReq) === "ko"
+                  ? "요청한 대기를 등록하지 못해 현재 상태를 다시 확인하도록 예약했습니다. 이전 작업은 반복하지 않습니다."
+                  : "The requested wait could not be registered. A current-state check is scheduled without repeating prior work.";
+                appendChatMessage(chat.id, "assistant", message);
+                this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
+                  notice: { code: "goal-wait-observation-scheduled", level: "info", message } } });
+                tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: {
+                  waitId: wait.waitId, goalId: current.goalId, nextCheckAt: wait.nextCheckAt,
+                  lifecycle: "ongoing", observationOnly: true } });
+                return;
+              } catch (fallbackError) {
+                console.warn("[long-run] ongoing wait fallback unavailable:", fallbackError);
+                if (fallbackRegistered) return;
+              }
+            }
+            const latest = current ? getLongRun(current.id) : null;
+            if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
             tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
             const message = pickLocale(runReq) === "ko" ? "대기를 등록하지 못했어요. 대기할 대상이나 실행 상태를 확인해 주세요."
               : "The wait was not registered. Review the requested subject and the execution state.";
