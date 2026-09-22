@@ -24,6 +24,7 @@ import {
   unseenHistoryGap, dedupeStableTurnContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { nativeCliCandidates } from "./native-cli";
 import { stageCliImageAttachments } from "./image-attachments";
 import { inferInlineImageMime, parseMcpResult } from "../../shared/mcp-result-rendering";
 import { saveBrowserCaptureArtifact } from "../media/capture-artifacts";
@@ -188,7 +189,7 @@ export interface CodexProbe {
 }
 
 export async function probeCodex(): Promise<CodexProbe | null> {
-  const found = await firstExistingCli(CANDIDATES);
+  const found = await firstExistingCli([...nativeCliCandidates("codex"), ...CANDIDATES]);
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
   return { path: found, version };

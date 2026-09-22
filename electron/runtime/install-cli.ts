@@ -12,6 +12,13 @@ import path from "node:path";
 import { spawnCli } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 import { cliSelfUpdateEnv } from "./cli-update-prefix";
+import {
+  installNativeCli,
+  isNativeCliPath,
+  nativeCliBinDirs,
+  nativeCliExecutable,
+  nativeCliSupported,
+} from "./native-cli";
 
 export type InstallableCli = "claude-code" | "codex" | "kimi" | "grok";
 export type ManageableCli = InstallableCli | "antigravity";
@@ -72,7 +79,8 @@ function searchDirs(): string[] {
   // Once Agentlas owns a verified install, always prefer it over stale user or
   // system shims. Otherwise installation can succeed and login immediately
   // reopen an older broken binary from PATH.
-  return Array.from(new Set([managedBinDir(), ...fromPath, ...EXTRA_BIN_DIRS]));
+  // 네이티브 설치본이 맨 앞 — 같은 이름의 옛 npm 심이 남아 있어도 검증된 exe 를 먼저 쓴다.
+  return Array.from(new Set([...nativeCliBinDirs(), managedBinDir(), ...fromPath, ...EXTRA_BIN_DIRS]));
 }
 
 /** 실행 가능한 바이너리의 절대경로를 보강된 PATH에서 찾는다(없으면 null). */
@@ -147,6 +155,7 @@ function augmentedEnv(): NodeJS.ProcessEnv {
   // 같은 순서다. 두 곳이 어긋나면 "검증은 통과했는데 실행은 죽는" 상태가 만들어진다.
   const bundledNode = managedNodeBinDir();
   const merged = Array.from(new Set([
+    ...nativeCliBinDirs(),
     managedBinDir(),
     ...(process.env.PATH || "").split(path.delimiter),
     ...(bundledNode ? [bundledNode] : []),
@@ -243,14 +252,51 @@ function prependPath(env: NodeJS.ProcessEnv, dir: string): NodeJS.ProcessEnv {
   return { ...env, [pathKey]: [dir, ...current.filter((entry) => entry !== dir)].join(path.delimiter) };
 }
 
+/**
+ * .cmd 안에 쓸 경로 표기.
+ *
+ * ★ cmd.exe 는 배치 파일을 UTF-8 이 아니라 콘솔 OEM 코드페이지(한국어 윈도우 CP949)로 읽는다.
+ *   절대경로를 UTF-8 로 그대로 쓰면 사용자 이름이 한글(C:\Users\홍길동)인 기계에서 경로가
+ *   깨져 "지정된 경로를 찾을 수 없습니다"로 **매번** 죽는다 — npm postinstall 이 이 심을 거치므로
+ *   설치 자체가 실패한다. 경로를 %USERPROFILE% 같은 환경변수 기준의 ASCII 로 쓰면 cmd 가
+ *   실행 시점에 올바른 유니코드 경로로 펼친다. 그렇게 못 쓰는 경로만 UTF-8 코드페이지로 읽게 한다.
+ */
+export function windowsCmdPath(
+  absolute: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { literal: string; needsUtf8: boolean } {
+  const escape = (value: string) => value.replace(/%/g, "%%");
+  const ascii = (value: string) => /^[\x20-\x7e]*$/.test(value);
+  if (ascii(absolute)) return { literal: `"${escape(absolute)}"`, needsUtf8: false };
+  const bases: Array<[string, string | undefined]> = [
+    ["USERPROFILE", env.USERPROFILE || os.homedir()],
+    ["LOCALAPPDATA", env.LOCALAPPDATA],
+    ["APPDATA", env.APPDATA],
+  ];
+  for (const [name, base] of bases) {
+    if (!base) continue;
+    const relative = path.win32.relative(base, absolute);
+    if (relative && !relative.startsWith("..") && !path.win32.isAbsolute(relative) && ascii(relative)) {
+      return { literal: `"%${name}%\\${escape(relative)}"`, needsUtf8: false };
+    }
+  }
+  return { literal: `"${escape(absolute)}"`, needsUtf8: true };
+}
+
+/** NODE_OPTIONS 를 비우고 명령 한 줄을 실행하는 .cmd 본문. 비ASCII 경로가 남으면 UTF-8 로 읽게 한다. */
+export function windowsCmdScript(invocation: string, needsUtf8: boolean): string {
+  return `@echo off\r\n${needsUtf8 ? "chcp 65001 >nul\r\n" : ""}setlocal\r\nset "NODE_OPTIONS="\r\n${invocation}\r\n`;
+}
+
 function writeNpmBootstrapNodeShim(runtime: ManagedNodeRuntime): void {
   const binDir = AGENTLAS_NPM_BOOTSTRAP_BIN;
   fs.mkdirSync(binDir, { recursive: true, mode: 0o700 });
   const shim = process.platform === "win32"
     ? path.join(binDir, "node.cmd")
     : path.join(binDir, "node");
-  const content = process.platform === "win32"
-    ? `@echo off\r\nsetlocal\r\nset "NODE_OPTIONS="\r\n"${runtime.node.replace(/%/g, "%%")}" %*\r\n`
+  const nodePath = process.platform === "win32" ? windowsCmdPath(runtime.node) : null;
+  const content = nodePath
+    ? windowsCmdScript(`${nodePath.literal} %*`, nodePath.needsUtf8)
     : `#!/bin/sh\nunset NODE_OPTIONS\nexec '${runtime.node.replace(/'/g, "'\\''")}' "$@"\n`;
   let current = "";
   try {
@@ -376,14 +422,15 @@ function writeManagedWindowsCliLauncher(
     if (!nativeWindowsBinary && !launcherHead.toString("utf8").startsWith("#!/usr/bin/env node")) {
       return { ok: false, reason: "managed CLI launcher is neither a Windows binary nor a Node entrypoint" };
     }
-    const escapeCmdPath = (value: string) => value.replace(/%/g, "%%");
+    const targetPath = windowsCmdPath(targetReal);
+    const nodePath = windowsCmdPath(runtime.node);
     const invocation = nativeWindowsBinary
-      ? `"${escapeCmdPath(targetReal)}" %*`
-      : `"${escapeCmdPath(runtime.node)}" "${escapeCmdPath(targetReal)}" %*`;
+      ? `${targetPath.literal} %*`
+      : `${nodePath.literal} ${targetPath.literal} %*`;
     const launcher = path.join(AGENTLAS_NPM_PREFIX, `${plan.bin}.cmd`);
     fs.writeFileSync(
       launcher,
-      `@echo off\r\nsetlocal\r\nset "NODE_OPTIONS="\r\n${invocation}\r\n`,
+      windowsCmdScript(invocation, targetPath.needsUtf8 || (!nativeWindowsBinary && nodePath.needsUtf8)),
       { encoding: "utf8", mode: 0o700 },
     );
     return { ok: true, launcher };
@@ -430,6 +477,9 @@ function resolveNpmRunner(): { ok: true; runner: NpmRunner } | { ok: false; reas
 }
 
 function managedBinary(name: string): string | null {
+  const nativeKind = (Object.keys(CLI_PLAN) as InstallableCli[]).find((kind) => CLI_PLAN[kind].bin === name);
+  const native = nativeKind && nativeCliSupported(nativeKind) ? nativeCliExecutable(nativeKind) : null;
+  if (native) return native;
   const candidates = process.platform === "win32"
     ? [path.join(AGENTLAS_NPM_PREFIX, `${name}.cmd`), path.join(AGENTLAS_NPM_PREFIX, `${name}.exe`)]
     : [path.join(AGENTLAS_NPM_PREFIX, "bin", name)];
@@ -463,8 +513,27 @@ async function installCliUnlocked(
     if (verified.ok) return { ok: true, message: `already installed: ${existing}` };
   }
 
+  // ① 공식 네이티브 실행파일(윈도우) — npm·Node·.cmd·postinstall 이 전혀 끼지 않는 길.
+  //    실패해도 끝이 아니다. 사유만 남기고 ② npm 경로로 넘어간다.
+  const trail: string[] = [];
+  if (nativeCliSupported(kind)) {
+    const native = await installNativeCli(kind, plan.version);
+    trail.push(native.ok ? "native:installed" : `native:${native.reason}`, ...native.notes);
+    if (native.ok) {
+      if (await verifyInstalledBinary(native.executable)) {
+        retireManagedNpmShims(plan.bin);
+        recordInstallTrail(kind, [...trail, "native:verified"]);
+        return { ok: true, message: `installed and verified: ${native.executable}` };
+      }
+      trail.push("native:verify-failed");
+    }
+  }
+
   const npm = resolveNpmRunner();
-  if (!npm.ok) return { ok: false, message: npm.reason, command: fallbackCommand };
+  if (!npm.ok) {
+    recordInstallTrail(kind, [...trail, "npm:runner-unavailable"]);
+    return { ok: false, message: npm.reason, command: fallbackCommand };
+  }
   const env = managedNpmEnv(npm.runner.managedRuntime);
   fs.mkdirSync(AGENTLAS_NPM_PREFIX, { recursive: true, mode: 0o700 });
   const args = [
@@ -538,22 +607,77 @@ async function installCliUnlocked(
     await new Promise((resolve) => setTimeout(resolve, NPM_INSTALL_RETRY_DELAY_MS * attempt));
     installed = await runNpmInstall();
   }
-  if (!installed.ok) return installed;
+  if (!installed.ok) {
+    recordInstallTrail(kind, [...trail, `npm:${installed.message}`]);
+    return installed;
+  }
 
   let binary = managedBinary(plan.bin);
   if (process.platform === "win32" && npm.runner.managedRuntime) {
     const stabilized = writeManagedWindowsCliLauncher(kind, npm.runner.managedRuntime);
     if (!stabilized.ok) {
+      recordInstallTrail(kind, [...trail, `npm:${stabilized.reason}`]);
       return { ok: false, message: stabilized.reason, command: fallbackCommand };
     }
     binary = stabilized.launcher;
   }
-  if (!binary) return { ok: false, message: "CLI installation finished but its launcher is missing", command: fallbackCommand };
+  if (!binary) {
+    recordInstallTrail(kind, [...trail, "npm:launcher-missing"]);
+    return { ok: false, message: "CLI installation finished but its launcher is missing", command: fallbackCommand };
+  }
   const verified = await runBinary(binary, ["--version"], 20_000, env);
   if (!verified.ok) {
+    recordInstallTrail(kind, [...trail, "npm:verify-failed"]);
     return { ok: false, message: "CLI launcher failed post-install verification", command: fallbackCommand };
   }
+  recordInstallTrail(kind, [...trail, "npm:verified"]);
   return { ok: true, message: `installed and verified: ${binary}` };
+}
+
+/**
+ * 갓 받은 exe 의 첫 실행은 백신 검사로 수십 초 걸리기도 한다. 짧은 타임아웃으로 멀쩡한 설치를
+ * 실패로 판정하지 않도록 넉넉히 기다리고, 한 번 더 해 본다.
+ */
+async function verifyInstalledBinary(binary: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const verified = await runBinary(binary, ["--version"], 90_000);
+    if (verified.ok) return true;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+  return false;
+}
+
+/**
+ * 네이티브 설치가 검증되면, 우리 prefix 에 남은 같은 이름의 npm 심을 치운다.
+ * 감지 후보는 `.cmd` 를 `.exe` 보다 먼저 보므로, 옛 심이 남아 있으면 검증된 exe 대신
+ * 그 심(한글 경로에서 깨지던 바로 그것)이 다시 선택된다. 우리 prefix 안의 것만 지운다.
+ */
+function retireManagedNpmShims(bin: string): void {
+  if (process.platform !== "win32") return;
+  for (const name of [`${bin}.cmd`, `${bin}.ps1`, bin]) {
+    try { fs.rmSync(path.join(AGENTLAS_NPM_PREFIX, name), { force: true }); } catch { /* 다음 설치 때 */ }
+  }
+}
+
+/**
+ * 설치가 어느 칸에서 무엇 때문에 넘어갔는지를 로컬에 남긴다(오류 코드·단계 이름만, 경로·출력 없음).
+ * 사용자에게 에러 문구를 읽어 달라고 하지 않기 위해서다.
+ */
+function recordInstallTrail(kind: InstallableCli, trail: string[]): void {
+  try {
+    const file = path.join(os.homedir(), ".agentlas", "runtime", "cli-install-trail.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    let previous: Record<string, unknown> = {};
+    try { previous = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>; } catch { /* 처음 */ }
+    previous[kind] = {
+      at: new Date().toISOString(),
+      platform: `${process.platform}-${process.arch}`,
+      trail: trail.slice(0, 64).map((step) => step.slice(0, 160)),
+    };
+    fs.writeFileSync(file, JSON.stringify(previous, null, 2));
+  } catch {
+    // 기록 실패가 설치를 막으면 안 된다.
+  }
 }
 
 /** Single-flight, no-admin install into Agentlas's private user prefix. */
@@ -636,6 +760,7 @@ function isPathWithin(candidate: string, root: string): boolean {
 
 /** 심의 위치와 실제 대상을 함께 확인해 Agentlas가 소유한 npm 설치만 자동 변경한다. */
 function isAgentlasManagedNpmBinary(binary: string): boolean {
+  if (isNativeCliPath(binary)) return true;
   if (isPathWithin(binary, AGENTLAS_NPM_PREFIX)) return true;
   try {
     return isPathWithin(fs.realpathSync(binary), AGENTLAS_NPM_PREFIX);
@@ -820,6 +945,7 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
   if (
     process.platform === "win32" &&
     kind !== "antigravity" &&
+    !isNativeCliPath(abs) &&
     isAgentlasManagedNpmBinary(abs) &&
     selectedBase === plan.bin.toLowerCase()
   ) {
@@ -867,20 +993,38 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
       );
       const powershell = resolveBinary("pwsh") ?? resolveBinary("powershell")
         ?? (fs.existsSync(systemPowerShell) ? systemPowerShell : null);
-      if (!powershell) {
-        return { ok: false, message: "Windows PowerShell was not found", command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
-      }
+      const loginEnv = prependPath(augmentedEnv(), managedBinDir());
       const psQuote = (value: string) => `'${value.replace(/'/g, "''")}'`;
       const psCommand = [
         `Write-Host ${psQuote(guide)}`,
         `& ${psQuote(abs)} ${loginArgs.map(psQuote).join(" ")}`.trim(),
       ].join("; ");
-      const started = await spawnTerminalVerified(powershell, ["-NoLogo", "-NoProfile", "-NoExit", "-Command", psCommand], {
-        detached: true,
-        env: prependPath(augmentedEnv(), managedBinDir()),
-        stdio: "ignore",
-        windowsHide: false,
-      });
+      let started: Awaited<ReturnType<typeof spawnTerminalVerified>> = { ok: false, reason: "Windows PowerShell was not found" };
+      if (powershell) {
+        started = await spawnTerminalVerified(powershell, ["-NoLogo", "-NoProfile", "-NoExit", "-Command", psCommand], {
+          detached: true,
+          env: loginEnv,
+          stdio: "ignore",
+          windowsHide: false,
+        });
+      }
+      if (!started.ok) {
+        // PowerShell 이 없거나 회사 정책으로 막힌 기계. 막다른 길로 끝내지 않는다 — 콘솔 프로그램을
+        // detached 로 띄우면 윈도우가 그 프로그램에 **자기 콘솔 창**을 붙여 준다. 네이티브 exe 는
+        // 그대로, .cmd 는 cmd.exe 가 읽게 한다(인자 배열로 넘겨 셸 문자열을 조합하지 않는다).
+        const direct = /\.exe$/i.test(abs)
+          ? { command: abs, args: [...loginArgs] }
+          : {
+            command: path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe"),
+            args: ["/d", "/k", abs, ...loginArgs],
+          };
+        started = await spawnTerminalVerified(direct.command, direct.args, {
+          detached: true,
+          env: loginEnv,
+          stdio: "ignore",
+          windowsHide: false,
+        });
+      }
       if (!started.ok) {
         return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
       }

@@ -48,6 +48,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [experience, setExperience] = useState<Experience | null>(null);
   const [provider, setProvider] = useState<Provider | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectPhase, setConnectPhase] = useState<"installing" | "loggingIn" | "checking">("checking");
   const [connected, setConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
@@ -89,7 +90,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     label: "처음 사용 안내", next: "다음", back: "뒤로", close: "나중에 보기", finish: "이제 시작할게요",
     s1: "AI를 얼마나 활용해 보셨나요?", s1sub: "당신에게 맞는 시작 경로를 준비해 드릴게요.",
     beginner: "초보자", beginnerSub: "무료 GPT만 써봤어요", intermediate: "중급자", intermediateSub: "유료로 AI를 쓰고 있어요", expert: "익스퍼트", expertSub: "Claude Code·Codex를 쓸 줄 알아요",
-    s2: "AI로 작업하고 에이전트를 사용하려면 계정을 연결해야 해요.", s2sub: "사용할 AI를 하나 선택하면 공식 로그인 화면을 열어드릴게요.", connect: "로그인하고 연결하기", checking: "연결 상태 확인 중…", connected: "연결됐어요", continue: "연결하지 않고 계속",
+    s2: "AI로 작업하고 에이전트를 사용하려면 계정을 연결해야 해요.", s2sub: "사용할 AI를 하나 선택하면 공식 로그인 화면을 열어드릴게요.", connect: "로그인하고 연결하기", checking: "연결 상태 확인 중…", installing: "준비하는 중… 처음 한 번만 1~2분 걸려요", loggingIn: "열린 창에서 로그인해 주세요", connected: "연결됐어요", continue: "연결하지 않고 계속",
     s3: "Agentlas는 에이전트를 만들고, 작업을 자동화하고, 팀과 공유하는 플랫폼이에요.", s3sub: "복잡한 기술을 직접 조립하지 않아도 결과 중심으로 시작할 수 있어요.",
     build: "에이전트 빌드", buildSub: "필요한 역할을 직접 만들어요.", automation: "자동화", automationSub: "자연어로 반복 작업을 맡겨요.", hub: "Agent Hub", hubSub: "검증된 에이전트를 팀에 데려와요.",
     s4: "바이브코딩 에이전트가 무료로 제공돼요.", s4sub: "필요한 역할이 위에서부터 연결되고, 하나의 팀으로 일을 시작합니다.",
@@ -102,7 +103,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     label: "Getting started", next: "Next", back: "Back", close: "Later", finish: "Let's get started",
     s1: "How familiar are you with AI?", s1sub: "We will prepare the right starting path for you.",
     beginner: "Beginner", beginnerSub: "I have only used free GPT", intermediate: "Intermediate", intermediateSub: "I already pay for an AI", expert: "Expert", expertSub: "I use Claude Code or Codex",
-    s2: "To work with AI and agents, you need to connect an account.", s2sub: "Choose one AI and we will open its official login flow.", connect: "Log in and connect", checking: "Checking connection…", connected: "Connected", continue: "Continue without connecting",
+    s2: "To work with AI and agents, you need to connect an account.", s2sub: "Choose one AI and we will open its official login flow.", connect: "Log in and connect", checking: "Checking connection…", installing: "Getting ready… first time only, 1–2 minutes", loggingIn: "Log in in the window that opened", connected: "Connected", continue: "Continue without connecting",
     s3: "Agentlas is a platform for building agents, automating work, and sharing teams.", s3sub: "Start with the outcome instead of assembling complex technical pieces.",
     build: "Agent Build", buildSub: "Create the role you need.", automation: "Automation", automationSub: "Delegate repeatable work in natural language.", hub: "Agent Hub", hubSub: "Bring proven agents into your team.",
     s4: "Vibe-coding agents are included for free.", s4sub: "Roles connect from the top down and become a team ready to work.",
@@ -166,9 +167,11 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     try {
       const api = ipc();
       if (selected.cli !== "antigravity") {
+        setConnectPhase("installing");
         const installed = await api?.runtime.installCli(selected.cli);
         if (!installed?.ok) throw new Error(installed?.message || "installation failed");
       }
+      setConnectPhase("loggingIn");
       const result = await api?.runtime.openCliLogin(selected.cli);
       if (!result?.ok) throw new Error(result?.message || "connection failed");
       let detected = false;
@@ -181,7 +184,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       if (!detected) setConnectionError(ko ? "로그인은 끝났지만 아직 연결 상태를 확인하지 못했어요. 설정에서 다시 확인할 수 있어요." : "Login finished, but the connection has not been verified yet. You can check again in Settings.");
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "connection failed");
-    } finally { setConnecting(false); }
+    } finally { setConnecting(false); setConnectPhase("checking"); }
   };
 
   const toolMatches = useMemo(() => {
@@ -292,7 +295,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         </header>
         <main className={styles.content}>
           {step === 1 && <><h1 id="work-onboarding-title">{copy.s1}</h1><p>{copy.s1sub}</p><div className={styles.choiceGrid}>{(["beginner", "intermediate", "expert"] as Experience[]).map((item) => <button key={item} className={`${styles.choice} ${experience === item ? styles.selected : ""}`} onClick={() => chooseExperience(item)}><div className={styles.choiceIllustration}>{item === "beginner" ? "01" : item === "intermediate" ? "02" : "03"}</div><strong>{copy[item]}</strong><small>{copy[`${item}Sub` as "beginnerSub" | "intermediateSub" | "expertSub"]}</small></button>)}</div></>}
-          {step === 2 && <><h1>{copy.s2}</h1><p>{copy.s2sub}</p><div className={styles.providerGrid}>{PROVIDERS.map((item) => <button key={item.id} className={`${styles.provider} ${provider === item.id ? styles.selected : ""}`} onClick={() => void connectProvider(item.id)} disabled={connecting}><img src={item.logo} alt="" /><strong>{item.label}</strong><span>{provider === item.id && connecting ? copy.checking : copy.connect}</span></button>)}</div>{connectionError && <p className={styles.error}>{connectionError}</p>}<button className={styles.textButton} onClick={() => setStep(3)}>{copy.continue}</button></>}
+          {step === 2 && <><h1>{copy.s2}</h1><p>{copy.s2sub}</p><div className={styles.providerGrid}>{PROVIDERS.map((item) => <button key={item.id} className={`${styles.provider} ${provider === item.id ? styles.selected : ""}`} onClick={() => void connectProvider(item.id)} disabled={connecting}><img src={item.logo} alt="" /><strong>{item.label}</strong><span>{provider === item.id && connecting ? copy[connectPhase] : copy.connect}</span></button>)}</div>{connectionError && <p className={styles.error}>{connectionError}</p>}<button className={styles.textButton} onClick={() => setStep(3)}>{copy.continue}</button></>}
           {step === 3 && <><h1>{copy.s3}</h1><p>{copy.s3sub}</p>{connected && <div className={styles.success}>{copy.connected}</div>}<div className={styles.featureGrid}><Feature title={copy.build} body={copy.buildSub} image="/brand/agentlas-mark.png" /><Feature title={copy.automation} body={copy.automationSub} image="/apps/document-studio.png" /><Feature title={copy.hub} body={copy.hubSub} image="/brand/agentlas-mark.png" /></div></>}
           {step === 4 && <><h1>{copy.s4}</h1><p>{copy.s4sub}</p><div className={styles.orgAnimation}><div className={styles.orgNode}>Agentlas Orchestrator</div><i /><div className={styles.orgRow}><span>Frontend</span><span>Backend</span><span>QA</span><span>Copy</span></div></div></>}
           {step === 5 && <><h1>{copy.s5}</h1><div className={styles.menuTour}><div className={styles.menuMock}>{menuItems.map(([title]) => <div key={title} className={styles.menuMockItem}>{title}</div>)}</div><div className={styles.menuDescriptions}>{menuItems.map(([title, body], index) => <div key={title} className={styles.menuDescription} style={{ animationDelay: `${index * 180}ms` }}><b>{title}</b><span>{body}</span></div>)}</div></div></>}

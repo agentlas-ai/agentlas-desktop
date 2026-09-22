@@ -18,6 +18,7 @@ import {
   rememberSpawnedRunChildCommand,
 } from "./spawn-registry";
 import { resolveManagedNodeRuntime } from "./managed-node";
+import { nativeCliBinDirs } from "./native-cli";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -100,6 +101,8 @@ export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const managed = preferredManagedCliDir();
   const bundledNode = bundledNodeBinDir();
   const merged = Array.from(new Set([
+    // 검증된 공식 네이티브 exe(윈도우)가 맨 앞 — install-cli searchDirs()와 같은 순서.
+    ...nativeCliBinDirs(),
     ...(managed ? [managed] : []),
     ...existing.filter((entry) => entry !== managed),
     ...(bundledNode ? [bundledNode] : []),

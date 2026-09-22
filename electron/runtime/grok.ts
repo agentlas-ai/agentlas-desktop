@@ -14,6 +14,7 @@ import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversation
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
+import { nativeCliCandidates } from "./native-cli";
 import { readEnvVar } from "../secrets/vault";
 import { clearProviderHealth, recordProviderHealth } from "../usage/provider-health";
 import { invalidateUsage } from "../usage";
@@ -51,7 +52,8 @@ const CANDIDATES = [
 
 function grokCandidates(): string[] {
   const override = process.env.AGENTLAS_GROK_BIN?.trim();
-  return override ? [override, ...CANDIDATES] : CANDIDATES;
+  const native = nativeCliCandidates("grok");
+  return override ? [override, ...native, ...CANDIDATES] : [...native, ...CANDIDATES];
 }
 
 /**
