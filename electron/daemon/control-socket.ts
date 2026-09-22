@@ -65,33 +65,86 @@ function jsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
+type SocketFileIdentity = { dev: number; ino: number };
+
+function socketFileIdentity(address: string): SocketFileIdentity | null {
+  try {
+    const stat = fs.lstatSync(address);
+    if (!stat.isSocket()) throw new Error("daemon_control_path_is_not_a_socket");
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function sameSocketFile(a: SocketFileIdentity | null, b: SocketFileIdentity): boolean {
+  return a !== null && a.dev === b.dev && a.ino === b.ino;
+}
+
+async function probeSocketOwner(address: string): Promise<"live" | "stale" | "unknown"> {
+  return new Promise((resolve) => {
+    const probe = net.connect(address);
+    let settled = false;
+    const done = (result: "live" | "stale" | "unknown") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      probe.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => done("unknown"), 500);
+    probe.once("connect", () => done("live"));
+    probe.once("error", (error: NodeJS.ErrnoException) =>
+      done(error.code === "ECONNREFUSED" || error.code === "ENOENT" ? "stale" : "unknown"));
+  });
+}
+
 /**
  * 제어 소켓을 연다.
  *
  * 유닉스에서는 남아 있는 옛 소켓 파일을 지운다 — 데몬이 비정상 종료하면 파일만 남고,
  * 그 상태로는 bind 가 EADDRINUSE 로 죽어 **데몬이 영영 못 뜬다**(사용자에게는 "아무
  * 이유 없이 안 됨"으로 보인다). 살아 있는 데몬의 소켓을 지우지 않도록, 먼저 붙어 보고
- * 응답이 없을 때만 지운다.
+ * 연결 거절/파일 부재로 죽은 소켓임이 확인되고 inode도 같을 때만 지운다.
+ * 관측 시간 초과나 일시 오류는 소유권 부재의 증거가 아니다.
  */
 export async function startControlSocket(
   userDataDir: string,
   opts: ControlSocketOptions,
 ): Promise<ControlSocketHandle> {
   const address = opts.socketPath ?? defaultControlSocketPath(userDataDir);
+  const unix = process.platform !== "win32";
 
-  if (process.platform !== "win32" && fs.existsSync(address)) {
-    const alive = await new Promise<boolean>((resolve) => {
-      const probe = net.connect(address);
-      const done = (value: boolean) => {
-        probe.destroy();
-        resolve(value);
-      };
-      probe.once("connect", () => done(true));
-      probe.once("error", () => done(false));
-      setTimeout(() => done(false), 500).unref?.();
-    });
-    if (alive) throw new Error(`another Agentlas daemon is already listening on ${address}`);
-    fs.rmSync(address, { force: true });
+  const existingSocket = unix ? socketFileIdentity(address) : null;
+  if (existingSocket) {
+    const owner = await probeSocketOwner(address);
+    if (owner === "live") throw new Error(`another Agentlas daemon is already listening on ${address}`);
+    if (owner === "unknown") throw new Error("daemon_control_socket_owner_unconfirmed");
+    const current = socketFileIdentity(address);
+    if (current && !sameSocketFile(current, existingSocket)) {
+      throw new Error("daemon_control_socket_owner_changed");
+    }
+    if (current) {
+      try { fs.unlinkSync(address); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  }
+
+  // libuv automatically unlinks its bind path on close, even if a successor
+  // replaced that inode. Bind privately, then publish with an exclusive hard
+  // link: libuv can only remove our private name, never a successor's address.
+  // ".d-XXXXXX/s" is the same length as "daemon.sock" and stays within the
+  // existing UNIX socket path budget for both normal and hashed addresses.
+  let privateDir: string | null = null;
+  let bindAddress = address;
+  if (unix) {
+    if (Buffer.byteLength(path.join(path.dirname(address), ".d-XXXXXX", "s"), "utf8") > 100) {
+      throw new Error("daemon_control_socket_bind_path_too_long");
+    }
+    privateDir = fs.mkdtempSync(path.join(path.dirname(address), ".d-"));
+    fs.chmodSync(privateDir, 0o700);
+    bindAddress = path.join(privateDir, "s");
   }
 
   const server = net.createServer((socket) => {
@@ -133,27 +186,49 @@ export async function startControlSocket(
     socket.on("error", () => socket.destroy());
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(address, () => resolve());
-  });
-
-  if (process.platform !== "win32") {
-    // 같은 사용자만 붙는다. 이것이 이 소켓의 인증 전부다.
-    try { fs.chmodSync(address, 0o600); } catch { /* best-effort */ }
+  let publishedIdentity: SocketFileIdentity | null = null;
+  const removePrivateDir = () => {
+    if (privateDir) {
+      try { fs.rmdirSync(privateDir); } catch { /* never recursively remove unexpected contents */ }
+    }
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(bindAddress, () => resolve());
+    });
+    if (unix) {
+      fs.chmodSync(bindAddress, 0o600);
+      const identity = socketFileIdentity(bindAddress);
+      if (!identity) throw new Error("daemon_control_socket_bind_identity_missing");
+      // link is exclusive: a concurrent winner is never overwritten.
+      fs.linkSync(bindAddress, address);
+      publishedIdentity = identity;
+    }
+  } catch (error) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    removePrivateDir();
+    throw error;
   }
 
+  let closePromise: Promise<void> | null = null;
   return {
     address,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = new Promise<void>((resolve) => {
         server.close(() => {
-          if (process.platform !== "win32") {
-            try { fs.rmSync(address, { force: true }); } catch { /* best-effort */ }
+          if (publishedIdentity) {
+            try {
+              if (sameSocketFile(socketFileIdentity(address), publishedIdentity)) fs.unlinkSync(address);
+            } catch { /* a changed or missing successor path does not belong to us */ }
           }
+          removePrivateDir();
           resolve();
         });
-      }),
+      });
+      return closePromise;
+    },
   };
 }
 
