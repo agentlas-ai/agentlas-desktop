@@ -16,6 +16,7 @@ import {
   type LongRunAttemptState,
   type LongRunBudget,
   type LongRunExecutionLocation,
+  type LongRunHostOwnerKind,
   type LongRunMessageKind,
   type LongRunPauseReason,
   type LongRunRuntimeSelection,
@@ -39,6 +40,7 @@ export interface LongRunRecord {
   idempotencyKey: string;
   surface: LongRunSurface;
   executionLocation: LongRunExecutionLocation;
+  hostOwnerKind: LongRunHostOwnerKind;
   rootChatId: string | null;
   projectId: string | null;
   scienceJobId: string | null;
@@ -122,6 +124,7 @@ type LongRunRow = {
   idempotency_key: string;
   surface: LongRunSurface;
   execution_location: LongRunExecutionLocation;
+  host_owner_kind: LongRunHostOwnerKind;
   root_chat_id: string | null;
   project_id: string | null;
   science_job_id: string | null;
@@ -221,6 +224,7 @@ function rowToLongRun(row: LongRunRow | undefined): LongRunRecord | null {
     stallWindow: row.stall_window,
     blockedReason: row.blocked_reason,
     appInstanceId: row.app_instance_id,
+    hostOwnerKind: row.host_owner_kind,
     lastEventSeq: row.last_event_seq,
     version: row.version,
     createdAt: row.created_at,
@@ -626,6 +630,7 @@ export function createLongRun(input: {
   idempotencyKey?: string;
   surface: LongRunSurface;
   executionLocation?: LongRunExecutionLocation;
+  hostOwnerKind?: LongRunHostOwnerKind;
   rootChatId?: string | null;
   projectId?: string | null;
   scienceJobId?: string | null;
@@ -642,6 +647,15 @@ export function createLongRun(input: {
   const criteria = normalizeLongRunCriteria(input.acceptanceCriteria);
   if (criteria.length === 0) throw new TypeError("long_run_acceptance_criteria_required");
   const idempotencyKey = requiredText(input.idempotencyKey ?? `goal:${goalId}`, "long_run_idempotency_required", 300);
+  const executionLocation = input.executionLocation ?? "desktop-local";
+  const hostOwnerKind = input.hostOwnerKind ?? (executionLocation === "web-hosted" ? "hosted" : "desktop");
+  if (!["desktop", "daemon", "hosted"].includes(hostOwnerKind)
+    || (hostOwnerKind === "hosted") !== (executionLocation === "web-hosted")) {
+    throw new TypeError("long_run_host_owner_kind_invalid");
+  }
+  if (hostOwnerKind === "daemon" && !input.appInstanceId?.trim()) {
+    throw new TypeError("long_run_daemon_owner_epoch_required");
+  }
   const existing = getDb().prepare(
     "SELECT * FROM long_runs WHERE goal_id = ? OR idempotency_key = ? LIMIT 1",
   ).get(goalId, idempotencyKey) as LongRunRow | undefined;
@@ -662,14 +676,14 @@ export function createLongRun(input: {
         root_chat_id, project_id, science_job_id, objective, acceptance_criteria_json,
         status, runtime_fallback_policy, max_cycles, max_cost_usd,
         wallclock_deadline, max_workers, stall_window, app_instance_id,
-        created_at, updated_at, started_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        created_at, updated_at, started_at, host_owner_kind
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       goalId,
       idempotencyKey,
       input.surface,
-      input.executionLocation ?? "desktop-local",
+      executionLocation,
       input.rootChatId ?? null,
       input.projectId ?? null,
       input.scienceJobId ?? null,
@@ -686,6 +700,7 @@ export function createLongRun(input: {
       now,
       now,
       status === "running" ? now : null,
+      hostOwnerKind,
     );
 
     db.prepare(
@@ -707,7 +722,7 @@ export function createLongRun(input: {
       runId: id,
       kind: "run.created",
       actorKind: "host",
-      payload: { status, surface: input.surface, executionLocation: input.executionLocation ?? "desktop-local" },
+      payload: { status, surface: input.surface, executionLocation, hostOwnerKind },
       at: now,
     });
   })();
@@ -2189,14 +2204,19 @@ export function requestLongRunVerification(goalId: string, evidence?: string | n
 function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string): string[] {
   const db = getDb();
   const placeholders = [...LONG_RUN_ACTIVE_STATUSES].map(() => "?").join(",");
-  const rows = db.prepare(
-    `SELECT id, status FROM long_runs
-     WHERE execution_location = 'desktop-local' AND surface <> 'science' AND status IN (${placeholders})`,
-  ).all(...LONG_RUN_ACTIVE_STATUSES) as Array<{ id: string; status: LongRunStatus }>;
-  if (rows.length === 0) return [];
   const now = new Date().toISOString();
-  db.transaction(() => {
-    for (const row of rows) {
+  const rows = db.transaction(() => {
+    // Desktop's single-instance startup recovers its previous GUI epoch. A
+    // daemon has a separate lifetime even on this same machine and database;
+    // neither app quit nor restart is evidence that its process has ended.
+    // Hold the write lock from selection through settlement so a concurrent
+    // owner change cannot slip between the filter and worker/event updates.
+    const ownedRows = db.prepare(
+      `SELECT id, status FROM long_runs
+       WHERE execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
+         AND surface <> 'science' AND status IN (${placeholders})`,
+    ).all(...LONG_RUN_ACTIVE_STATUSES) as Array<{ id: string; status: LongRunStatus }>;
+    for (const row of ownedRows) {
       // A durable user stop is never converted into an automatic host resume.
       const userControl = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user' ORDER BY seq DESC LIMIT 1")
         .get(row.id) as { payload_json: string } | undefined;
@@ -2245,7 +2265,8 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
         at: now,
       });
     }
-  })();
+    return ownedRows;
+  }).immediate();
   for (const row of rows) emitDesktopStoreChange({ entity: "long-run", id: row.id });
   return rows.map((row) => row.id);
 }

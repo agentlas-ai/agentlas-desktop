@@ -22,7 +22,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 124;
+const SCHEMA_VERSION = 125;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6739,6 +6739,20 @@ export function initStore(options: StoreInitOptions = {}): void {
         CREATE INDEX IF NOT EXISTS idx_one_preflight_steers_chat_status
           ON one_preflight_steers(chat_id, status, created_at);
       `);
+    })();
+  }
+
+  // v125: a local daemon and the GUI may use the same execution location, but
+  // only GUI-owned runs belong to Desktop shutdown/startup recovery. Adding
+  // the discriminator never infers process death or transfers a live owner.
+  if (userVersion < 125) {
+    _db.transaction(() => {
+      const columns = new Set(schemaColumns(_db!, "long_runs").map((column) => column.name));
+      if (!columns.has("host_owner_kind")) {
+        _db!.exec(`ALTER TABLE long_runs ADD COLUMN host_owner_kind TEXT NOT NULL DEFAULT 'desktop'
+          CHECK(host_owner_kind IN ('desktop','daemon','hosted'))`);
+        _db!.exec("UPDATE long_runs SET host_owner_kind = 'hosted' WHERE execution_location = 'web-hosted'");
+      }
     })();
   }
 

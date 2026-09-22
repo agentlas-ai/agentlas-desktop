@@ -41,6 +41,9 @@ export type LongRunSurface = (typeof LONG_RUN_SURFACES)[number];
 export const LONG_RUN_EXECUTION_LOCATIONS = ["desktop-local", "web-hosted"] as const;
 export type LongRunExecutionLocation = (typeof LONG_RUN_EXECUTION_LOCATIONS)[number];
 
+/** Execution lifetime authority, distinct from the machine's execution location. */
+export type LongRunHostOwnerKind = "desktop" | "daemon" | "hosted";
+
 export const LONG_RUN_STATUSES = [
   "draft",
   "queued",
