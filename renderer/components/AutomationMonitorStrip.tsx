@@ -103,7 +103,8 @@ function AutomationMonitorRows({ chatId, locale }: { chatId: string | null; loca
   return <details className={styles.root} data-automation-monitor="true" data-no-next-run={noNextRun}>
     <summary><span className={styles.dot} data-active={active > 0} />
       {error ? (ko ? "예약 상태 다시 확인 중" : "Rechecking schedule")
-        : ko ? `${independent ? "목표와 별도 예약" : "예약 자동화"} ${active}개` : `${active} ${independent ? "separate schedules" : "scheduled automations"}`}
+        : ko ? `${independent ? "목표와 별도 예약" : "예약 자동화"} ${scoped.length}개`
+          : `${scoped.length} ${independent ? "separate" : "scheduled"} ${scoped.length === 1 ? "schedule" : "schedules"}`}
       {noNextRun > 0 && !error && <span className={styles.nextTime}>{ko ? `다음 예약 없음 ${noNextRun}개` : `${noNextRun} without a next run`}</span>}
       {upcoming && !error && <span className={styles.nextTime}>{ko ? "다음 예정 " : "Next expected "}{new Date(upcoming.nextRunAt!).toLocaleString(ko ? "ko-KR" : "en-US", { timeZone: upcoming.timezone || undefined, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>}
     </summary>

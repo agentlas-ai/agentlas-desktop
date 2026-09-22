@@ -637,6 +637,8 @@
 
 .workspace {
   position: relative;
+  display: flex;
+  flex-direction: column;
   grid-column: 2;
   min-width: 0;
   min-height: 0;
@@ -865,7 +867,9 @@
 
 .scroll {
   width: 100%;
-  height: 100%;
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-padding: 56px 0 180px;
@@ -877,7 +881,7 @@
   position: absolute;
   z-index: 28;
   left: 50%;
-  bottom: 178px;
+  bottom: calc(var(--one-composer-dock-height, 166px) + 12px);
   width: 38px;
   height: 38px;
   display: grid;
@@ -908,7 +912,7 @@
   width: min(920px, calc(100% - 48px));
   min-height: 100%;
   margin: 0 auto;
-  padding: 62px 0 224px;
+  padding: 62px 0 28px;
   background: var(--paper);
 }
 
@@ -1489,11 +1493,11 @@
 
 @media (min-width: 1181px) {
   .workspace[data-runtime-artifacts="true"] .scroll { width: calc(100% - 300px); }
-  .workspace[data-runtime-artifacts="true"] .composerDock { right: 300px; }
+  .workspace[data-runtime-artifacts="true"] .composerDock { width: calc(100% - 300px); }
   /* The context rail already occupies the third grid column. Subtracting it a
      second time collapsed the conversation into one-character lines. */
   .workspace[data-context-rail="true"] .scroll { width: 100%; }
-  .workspace[data-context-rail="true"] .composerDock { right: 0; }
+  .workspace[data-context-rail="true"] .composerDock { width: 100%; }
 }
 
 .decisionCard {
@@ -1838,14 +1842,15 @@
 
 .composerDock {
   --one-composer-width: 720px;
-  position: absolute;
+  box-sizing: border-box;
+  position: relative;
   z-index: 30;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 18px 24px 12px;
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 10px 24px 12px;
   pointer-events: none;
-  background: linear-gradient(to bottom, rgba(255,255,255,0), var(--paper) 34%, var(--paper));
+  background: var(--paper);
+  border-top: 1px solid var(--paper-edge);
 }
 
 .steeringQueue {
@@ -2227,15 +2232,25 @@
 
 .oneTurnAgentChips {
   width: min(var(--one-composer-width, 720px), 100%);
-  display: flex;
-  align-items: center;
-  gap: 6px;
   margin: 0 auto 7px;
-  overflow-x: auto;
   pointer-events: auto;
 }
-.oneTurnAgentChips > span { flex: 0 0 auto; color: var(--one-muted); font-size: 10px; font-weight: 700; }
-.oneTurnAgentChips > button {
+.oneTurnAgentChips > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted-deep);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+.oneTurnAgentChips > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.oneTurnAgentChoices { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 0; }
+.oneTurnAgentChoices > button {
   flex: 0 0 auto;
   min-height: 30px;
   display: inline-flex;
@@ -2250,7 +2265,7 @@
   font-weight: 700;
   cursor: pointer;
 }
-.oneTurnAgentChips > button span { font-size: 13px; }
+.oneTurnAgentChoices > button span { font-size: 13px; }
 
 .attachmentInput {
   position: absolute;
@@ -2767,7 +2782,7 @@
   }
   .taskSidebarRevealButton { display: grid !important; }
   .taskToolbarDivider { display: block; }
-  .homeContent, .threadContent { width: calc(100% - 28px); padding-top: 38px; padding-bottom: 208px; }
+  .homeContent, .threadContent { width: calc(100% - 28px); padding-top: 38px; padding-bottom: 24px; }
   .newUser h1 { font-size: clamp(24px, 7.4vw, 30px); }
   .briefing h1 { font-size: 34px; }
   .briefingBody { font-size: 14px; }
@@ -3026,7 +3041,7 @@
   width: 100%;
   min-height: 100%;
   margin: 0;
-  padding: 0 0 204px;
+  padding: 0 0 28px;
 }
 
 .homeChatHeader {
@@ -3607,7 +3622,8 @@
   /* 높이·폭을 스스로 정해야 한다. auto 로 두면 칸이 내용 길이만큼
      (실측 32,242px) 늘어나 스크롤이 사라지고, 칸 넷이 오른쪽 산출물 레일
      밑으로 밀려 들어가 겹친다(실측 x=975 칸 vs x=761 레일). */
-  height: 100%;
+  height: auto;
+  flex: 1 1 0;
   width: 100%;
   min-height: 0;
   min-width: 0;
@@ -4110,6 +4126,11 @@
   right: calc(100% - var(--split-col, 50%));
 }
 
+.workspace[data-split-active="true"] .composerDock {
+  right: auto;
+  width: var(--split-col, 50%);
+}
+
 /* ===========================================================================
  * 모션 시스템 — 한 벌의 토큰 (오너 지적 2026-08-25
  *   "클로드 브라우저 봐봐, 저렇게 스무스하게. 사이드바 보여주는 곳들이 전부
@@ -4212,7 +4233,8 @@
    분할선만 미끄러지고 헤더는 뚝 끊기는 어긋남이 안 생긴다. */
 .workspace[data-split-active="true"] .windowBar,
 .workspace[data-split-active="true"] .composerDock {
-  transition: right var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+  transition: right var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    width var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
 }
 
 /* --- 모바일 서랍 (≤760px) --------------------------------------------------

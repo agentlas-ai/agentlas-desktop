@@ -139,11 +139,14 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
     automations: snapshot.automations,
     observationFresh: !error,
   }) : null;
-  return <section className={detail ? styles.detail : styles.compact} data-continuity-status={detail ? "detail" : "compact"}
+  return <details className={detail ? styles.detail : styles.compact} open={detail || undefined} data-continuity-status={detail ? "detail" : "compact"}
     data-observation={error ? "stale" : "confirmed"} aria-label={ko ? "작업 연속성 상태" : "Work continuity status"}>
-    <div className={styles.line} aria-live="polite">
+    <summary className={styles.summary}>
       <strong>{goalHeading}</strong>
       <span>{goalStatus(snapshot, ko, error)}</span>
+    </summary>
+    <div className={styles.content}>
+    <div className={styles.line} aria-live="polite">
       {invocationStatus(snapshot, ko, error) && <span>{invocationStatus(snapshot, ko, error)}</span>}
     </div>
     <div className={styles.line} aria-live="polite">
@@ -192,5 +195,6 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
     {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
     <small className={styles.observation}>{error ? (ko ? "상태 재확인 중 · 마지막 확인 " : "Rechecking status · last confirmed ")
       : (ko ? "Main 상태 확인 " : "Main state checked ")}{observedAt ?? lastConfirmedAt ?? "—"}</small>
-  </section>;
+    </div>
+  </details>;
 }

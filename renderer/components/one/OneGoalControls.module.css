@@ -19,12 +19,12 @@
 .helpButton { width: 27px; height: 27px; border: 1px solid var(--paper-edge); border-radius: 50% !important; font-weight: 700 !important; }
 .help { position: absolute; z-index: 20; bottom: calc(100% + 6px); right: 0; box-sizing: border-box; width: min(360px, 100%); max-height: min(52vh, 440px); overflow: auto; padding: 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); font-size: 11px; line-height: 1.5; }
 .help p { margin: 0 0 7px; overflow-wrap: anywhere; }
-.review { margin: 6px 0 4px; padding: 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); font-size: 12px; line-height: 1.5; }
+.review { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; box-sizing: border-box; max-height: min(34vh, 280px); margin: 6px 0 4px; padding: 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); font-size: 12px; line-height: 1.5; }
 .reviewHeading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .reviewHeading strong { font-size: 13px; }
 .reviewIntro, .reviewNote, .reviewBlocker { margin: 7px 0; color: var(--muted-deep); }
 .reviewBlocker { color: var(--ink); font-weight: 600; }
-.reviewList { display: grid; gap: 7px; max-height: min(34vh, 300px); overflow: auto; padding: 2px; }
+.reviewList { display: grid; gap: 7px; min-height: 0; overflow: auto; padding: 2px; }
 .reviewItem { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid var(--paper-edge); border-radius: 8px; cursor: pointer; }
 .reviewItem:has(input:disabled) { cursor: default; }
 .reviewItem input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--ink); }
