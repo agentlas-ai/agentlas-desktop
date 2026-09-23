@@ -4369,9 +4369,30 @@ app.whenReady().then(async () => {
       if (scheduled.length) console.info("[long-run] ongoing observation recovery", scheduled);
       // A pinned-runtime classification may take time. Do not hold the UI or
       // other startup recovery behind this narrow legacy metadata repair.
+      // Owner 2026-09-23: no Goal stays blocked or waits on a button. After the specific recovery
+      // passes above, sweep every remaining stop once (observe → continue/redo, resume with runtime
+      // fallback, scheduled retry, or a recorded cancel), then keep sweeping while the app runs.
+      const { sweepBlockedGoals, BLOCKED_GOAL_SWEEP_INTERVAL_MS } = await import("./long-run/blocked-goal-sweep");
       void resumeLegacyOngoingBlockedGoals(invocationService)
         .then((legacy) => { if (legacy.length) console.info("[long-run] legacy ongoing startup reconciliation", legacy); })
-        .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error));
+        .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error))
+        .finally(() => {
+          try {
+            const swept = sweepBlockedGoals(invocationService, "startup");
+            if (swept.length) console.info("[long-run] blocked goal sweep", swept);
+          } catch (error) {
+            console.error("[long-run] blocked goal sweep failed", error);
+          }
+          const timer = setInterval(() => {
+            try {
+              const swept = sweepBlockedGoals(invocationService, "periodic").filter((entry) => entry.action !== "deferred");
+              if (swept.length) console.info("[long-run] blocked goal sweep", swept);
+            } catch (error) {
+              console.error("[long-run] blocked goal sweep failed", error);
+            }
+          }, BLOCKED_GOAL_SWEEP_INTERVAL_MS);
+          timer.unref?.();
+        });
     } catch (error) {
       console.error("[long-run] checkpoint startup reconciliation failed", error);
     }

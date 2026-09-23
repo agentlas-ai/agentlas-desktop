@@ -1121,6 +1121,129 @@ export function blockHostPausedForEffectBoundaryUncertainty(runId: string, expec
   return blocked;
 }
 
+/** Ledger kind of the host's "no Goal stays blocked" sweep (owner 2026-09-23). */
+export const BLOCKED_GOAL_SWEEP_EVENT_KIND = "run.blocked_sweep";
+export const BLOCKED_GOAL_SWEEP_SCHEMA = "agentlas.blocked-goal-sweep.v1";
+
+export interface BlockedGoalRetry {
+  seq: number;
+  /** The blocker this retry stands in for; restored when the retry comes due. */
+  fromReason: string | null;
+  kind: "observe" | "resume";
+  retryIndex: number;
+  nextAt: string;
+  effectUncertain: boolean;
+}
+
+/** A host-owned retry schedule that no later transition has superseded (a user pause, a new turn, a stop). */
+export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null {
+  const run = getLongRun(runId);
+  if (!run || !(run.status === "waiting_tool"
+    || (run.status === "paused" && ["app_closed", "crash_recovery"].includes(run.pauseReason ?? "")))) return null;
+  const row = getDb().prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = ?
+    ORDER BY seq DESC LIMIT 1`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { seq: number; payload_json: string } | undefined;
+  if (!row) return null;
+  const superseded = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND seq > ? AND (
+      (kind = 'run.status_changed' AND json_extract(payload_json, '$.to') NOT IN ('waiting_tool','paused'))
+      OR kind IN ('run.user_control','run.wait_subscription')) LIMIT 1`).get(runId, row.seq);
+  if (superseded) return null;
+  try {
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    if (payload.action !== "retry_scheduled" || (payload.kind !== "observe" && payload.kind !== "resume")
+      || typeof payload.nextAt !== "string" || !Number.isSafeInteger(payload.retryIndex)) return null;
+    return { seq: row.seq, fromReason: typeof payload.fromReason === "string" ? payload.fromReason : null,
+      kind: payload.kind, retryIndex: Number(payload.retryIndex), nextAt: payload.nextAt,
+      effectUncertain: payload.effectUncertain === true };
+  } catch { return null; }
+}
+
+/**
+ * 막힌 목표를 '자동 재시도 예약'으로 옮긴다 — 오너 지시 2026-09-23 "블락되는거 전부다 치워라",
+ * 정정 "눌러서 이어가는게 결국 멈춘거 아닌가".
+ *
+ * 앱이 지금 당장 확인(효과 관찰)도 재개도 못 할 때(런타임 없음·사용 한도·관찰 모름) 사람을 기다리지 않고
+ * 스스로 다시 할 시각을 원장에 적는다. 상태는 'waiting_tool'(앱이 기다리는 중)이고, 그 시각이 되면
+ * 스윕이 원래 사유로 되돌려(reopenDueBlockedGoalRetry) 같은 판단을 다시 한다. 이 쓰기는 어떤 실행도
+ * 허가하지 않는다 — 불확실한 효과는 여전히 읽기 전용 관찰만 풀 수 있다. blocked→waiting_tool 은
+ * 일반 전이표에 없으므로 여기서만 CAS 로 쓴다.
+ */
+export function scheduleBlockedGoalRetry(input: {
+  runId: string;
+  expectedVersion: number;
+  kind: "observe" | "resume";
+  fromReason: string | null;
+  retryIndex: number;
+  nextAt: string;
+  detail: string;
+  trigger: string;
+  effectUncertain: boolean;
+  appInstanceId?: string | null;
+}): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(input.runId);
+    // A host-written dispatch failure pause (runtime_unavailable) is the same "try again later" fact:
+    // accept it here so no failed dispatch is left waiting for a person.
+    const hostDispatchPause = current?.status === "paused" && current.pauseReason === "runtime_unavailable"
+      && input.trigger.startsWith("dispatch-failed");
+    if (!current || current.surface === "science" || current.version !== input.expectedVersion
+      || !(current.status === "blocked" || hostDispatchPause || pendingBlockedGoalRetry(current.id))) throw new Error("blocked_goal_retry_state_changed");
+    const now = new Date().toISOString();
+    if (current.status !== "waiting_tool") {
+      const changed = db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=NULL,
+        app_instance_id=COALESCE(?, app_instance_id), paused_at=NULL, updated_at=?, version=version+1
+        WHERE id=? AND status=? AND version=?`)
+        .run(input.appInstanceId ?? null, now, input.runId, current.status, input.expectedVersion);
+      if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
+      appendEventInDb({ runId: input.runId, kind: "run.status_changed", actorKind: "host",
+        payload: { from: current.status, to: "waiting_tool", reason: "blocked-sweep-retry-scheduled" }, at: now });
+    }
+    appendEventInDb({ runId: input.runId, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
+      payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "retry_scheduled", kind: input.kind,
+        fromReason: input.fromReason, retryIndex: input.retryIndex, nextAt: input.nextAt,
+        detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
+        effectUncertain: input.effectUncertain, appInstanceId: input.appInstanceId ?? null }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  const next = getLongRun(input.runId);
+  if (!next) throw new Error("blocked_goal_retry_readback_failed");
+  return next;
+}
+
+/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts this run's automatic
+ * retries and resumes in the last 24 h, so a failure that keeps coming back slows down instead of spinning,
+ * and a Goal that recovered starts fast again the next day. */
+export function nextBlockedGoalRetrySlot(runId: string, now = Date.now()): { retryIndex: number; nextAt: string } {
+  const since = new Date(now - 24 * 60 * 60_000).toISOString();
+  const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND occurred_at > ?
+    AND json_extract(payload_json, '$.action') IN ('retry_scheduled','resumed')`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, since) as { n: number };
+  const retryIndex = prior.n;
+  const delayMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
+  return { retryIndex, nextAt: new Date(now + delayMs).toISOString() };
+}
+
+/** The retry came due: put back the exact blocker it stood in for, so the same (observation/resume) decision runs again. */
+export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(runId);
+    const retry = current ? pendingBlockedGoalRetry(runId) : null;
+    if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
+    const now = new Date().toISOString();
+    const reason = retry.fromReason ?? "blocked_goal_retry_due";
+    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
+      .run(reason, now, runId, current.status, expectedVersion);
+    if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
+    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
+      payload: { from: current.status, to: "blocked", reason, retryDue: true, retryIndex: retry.retryIndex }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  const next = getLongRun(runId);
+  if (!next) throw new Error("blocked_goal_retry_readback_failed");
+  return next;
+}
+
 export function resumeLongRunByUser(runId: string, appInstanceId: string, expectedVersion: number): LongRunRecord {
   const current = getLongRun(runId);
   if (!current) throw new Error(`long_run_not_found:${runId}`);
