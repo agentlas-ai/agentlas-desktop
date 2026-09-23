@@ -770,6 +770,16 @@ interface StreamTurnResult {
   terminalUsage?: { inputTokens: number; outputTokens: number };
 }
 
+function rejectsStreamUsageOption(status: number, text: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  try {
+    const value = JSON.parse(text) as { error?: { type?: unknown; code?: unknown; param?: unknown } };
+    return value?.error?.type === "invalid_request_error"
+      && value.error.code === "unsupported_parameter"
+      && (value.error.param === "stream_options" || value.error.param === "stream_options.include_usage");
+  } catch { return false; }
+}
+
 async function streamChatTurn(
   resp: Response,
   onPartial: (acc: string) => void,
@@ -1045,6 +1055,7 @@ export async function runLocalOpenAiChat(
   let observedInputTokens = 0;
   let observedOutputTokens = 0;
   let usageComplete = true;
+  let streamUsageUnsupported = false;
   const observeTurnUsage = (result: StreamTurnResult): void => {
     const usage = result.terminalUsage;
     if (!usage || !usageComplete
@@ -1062,7 +1073,7 @@ export async function runLocalOpenAiChat(
     const requestBody: Record<string, unknown> = {
             model,
             stream: true,
-            ...(runtimeKind === "byok" || runtimeKind === "lmstudio"
+            ...(!streamUsageUnsupported && (runtimeKind === "byok" || runtimeKind === "lmstudio")
               ? { stream_options: { include_usage: true } } : {}),
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
@@ -1188,35 +1199,62 @@ export async function runLocalOpenAiChat(
     }
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
-      const failureClass = localHttpFailureClass(errText);
-      if (failureClass === "context") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
-      // Only explicit structured unsupported-tools markers permit the legacy downgrade.
-      if (failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
-        // A host-broker receipt must describe the inventory admitted to the
-        // provider invocation. Retrying this Workforce turn without that
-        // inventory would make a later success receipt false.
-        if (approvalContext.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
-        if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
-        sawUnsupportedToolCallAttempt = true;
-        events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
-        const fallback = await fetch(chatEndpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...opts.headers },
-          signal: req.signal,
-            body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
-        });
-        if (!fallback.ok) {
-          const fallbackErrText = await fallback.text().catch(() => "");
-          throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
+      if (!req.signal?.aborted && Object.hasOwn(requestBody, "stream_options")
+        && rejectsStreamUsageOption(resp.status, errText)) {
+        // This structured validation refusal precedes generation. Retry the
+        // identical request once without the unsupported usage option. Since
+        // the retry cannot promise a terminal usage pair, keep the whole
+        // invocation's observed usage unknown, including earlier tool turns.
+        usageComplete = false;
+        streamUsageUnsupported = true;
+        const retryBody = { ...requestBody };
+        delete retryBody.stream_options;
+        try {
+          resp = await fetch(chatEndpoint, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...opts.headers },
+            signal: req.signal,
+            body: JSON.stringify(retryBody),
+          });
+        } catch {
+          if (req.signal?.aborted) throw abortReasonError(req);
+          throw new Error(opts.unreachableMessage);
         }
-        const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
-        observeTurnUsage(result);
-        if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
-        finalText = result.text;
-        reachedAnswer = true;
-        break;
+        if (!resp.ok) {
+          const retryError = await resp.text().catch(() => "");
+          throw new Error(`${providerLabel} API ${resp.status}: ${retryError.slice(0, 300)}`);
+        }
+      } else {
+        const failureClass = localHttpFailureClass(errText);
+        if (failureClass === "context") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        // Only explicit structured unsupported-tools markers permit the legacy downgrade.
+        if (failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
+          // A host-broker receipt must describe the inventory admitted to the
+          // provider invocation. Retrying this Workforce turn without that
+          // inventory would make a later success receipt false.
+          if (approvalContext.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
+          if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
+          sawUnsupportedToolCallAttempt = true;
+          events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
+          const fallback = await fetch(chatEndpoint, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...opts.headers },
+            signal: req.signal,
+              body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
+          });
+          if (!fallback.ok) {
+            const fallbackErrText = await fallback.text().catch(() => "");
+            throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
+          }
+          const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
+          observeTurnUsage(result);
+          if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
+          finalText = result.text;
+          reachedAnswer = true;
+          break;
+        }
+        throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
       }
-      throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
