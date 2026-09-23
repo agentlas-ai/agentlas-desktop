@@ -153,6 +153,40 @@ function toEntry(r: Row): MemoryEntry {
   };
 }
 
+/**
+ * Original-language wording of an English memory (plan 2026-09-22 §9-8).
+ * `content` is the English search surface; this side table keeps the authority
+ * text. A side table, not a column: the schema ladder is versioned and shared
+ * with concurrent work, and an additive table needs no version step. Forgetting
+ * a memory must forget this too — see revocations.ts redactMemory.
+ */
+export function ensureMemoryNativeTable(db = getDb()): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS memory_entry_native (
+    entry_id TEXT PRIMARY KEY REFERENCES memory_entries(id) ON DELETE CASCADE,
+    content_native TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`);
+}
+
+export function getMemoryNative(entryId: string): string | null {
+  try {
+    const row = getDb().prepare("SELECT content_native FROM memory_entry_native WHERE entry_id = ?")
+      .get(entryId) as { content_native: string } | undefined;
+    return row?.content_native ?? null;
+  } catch {
+    return null; // table absent on stores that never received an English memory
+  }
+}
+
+/** Called wherever a memory's content is redacted or forgotten. */
+export function forgetMemoryNative(entryId: string, db = getDb()): void {
+  try {
+    db.prepare("DELETE FROM memory_entry_native WHERE entry_id = ?").run(entryId);
+  } catch {
+    // no table → nothing to forget
+  }
+}
+
 export interface NewMemoryEntry {
   scope: MemoryScope;
   kind: MemoryKind;
@@ -169,6 +203,8 @@ export interface NewMemoryEntry {
   intakeRunId?: string | null;
   /** Trusted in-process epoch captured before a background model call. */
   intakeEpoch?: number | null;
+  /** Original-language wording when `content` is the English rendering. */
+  contentNative?: string;
 }
 
 export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
@@ -220,6 +256,13 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       JSON.stringify(embedding.vector),
       now,
     );
+    const native = e.contentNative?.trim();
+    if (native && native !== e.content.trim()) {
+      ensureMemoryNativeTable();
+      getDb().prepare(
+        "INSERT OR REPLACE INTO memory_entry_native (entry_id, content_native, created_at) VALUES (?, ?, ?)",
+      ).run(id, native.slice(0, 4_000), now);
+    }
   });
   insert.immediate();
   const entry: MemoryEntry = {

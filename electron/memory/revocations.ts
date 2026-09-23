@@ -755,6 +755,9 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
         ).run(now, id);
       }
       redactMemory.run(now, id);
+      // The original-language side table (store.ts memory_entry_native) must be
+      // forgotten with the content. Inline, not imported: store.ts imports this file.
+      try { getDb().prepare("DELETE FROM memory_entry_native WHERE entry_id = ?").run(id); } catch { /* no table */ }
     }
 
     return {
