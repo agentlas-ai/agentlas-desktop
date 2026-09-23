@@ -317,7 +317,7 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
   let afterId = "";
   while (true) {
     const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
-      AND surface IN ('one','work') AND execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
+      AND surface IN ('one','work') AND execution_location = 'desktop-local'
       AND (status = 'blocked'
         OR (status = 'paused' AND pause_reason IN ('runtime_unavailable','app_closed','crash_recovery'))
         OR (status = 'waiting_tool' AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind = ?)))
