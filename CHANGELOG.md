@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.38 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- One: messages in team and task conversations with a chosen model were refused with
+  "One team preflight refused the current binding" since 1.2.33. They are accepted again.
+- One and Work: a message sent while a Goal is running now joins that Goal as new direction
+  instead of being handed back to the composer. If team staffing cannot be decided, the
+  message still goes through the ordinary One route. Remaining refusals say which check
+  failed and what to do.
+
 ## 1.2.37 — 2026-09-23
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
