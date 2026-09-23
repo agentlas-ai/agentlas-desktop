@@ -62,10 +62,20 @@ check("mentioning the plugin inlines its full router", invoked.includes(marker),
 check("not mentioning it does NOT inline the full router (budget)", !listOnly.includes(marker));
 check("invoked prompt is larger than the list", invoked.length > listOnly.length, `${listOnly.length} → ${invoked.length}`);
 
-// 예산: 목록은 플러그인당 몇 줄이어야 한다. 라우터 하나가 2KB 를 넘는 것이 흔하므로,
-// 목록이 라우터 전문 크기에 근접하면 규칙이 깨진 것이다.
-check("the always-on list stays small next to a full router",
-  listOnly.length < routerBody.length + 1200, `list ${listOnly.length} vs router ${routerBody.length}`);
+// 예산: 목록은 **플러그인당** 몇 줄이어야 한다. 예전에는 목록 전체를 라우터 하나와 비교했는데,
+// 설치된 플러그인이 늘면(과학 번들 20여 개) 목록 전체는 정당하게 커진다 — 그 비교는 설치 개수를
+// 재고 있었지 규칙을 재고 있지 않았다(2026-09-23: 5908 vs 1266 로 거짓 FAIL). 이제 두 가지를 잰다:
+// 고정 머리말(사용법·정직 규칙)은 상한이 있고, 플러그인 한 개의 블록은 몇 줄(이름·설명·라우터 경로·
+// 스킬 목록)을 넘지 않으며 라우터 전문을 싣지 않는다.
+const firstBlock = listOnly.indexOf("\n### @");
+const preamble = firstBlock >= 0 ? listOnly.slice(0, firstBlock) : listOnly;
+const blocks = firstBlock >= 0 ? listOnly.slice(firstBlock + 1).split(/\n(?=### @)/) : [];
+const PER_PLUGIN_BUDGET = 900;
+const oversized = blocks.filter((block) => block.length > PER_PLUGIN_BUDGET || block.split("\n").filter(Boolean).length > 5);
+check("the fixed preamble stays bounded", preamble.length < 2400, `preamble ${preamble.length}`);
+check("each plugin's always-on block is a few lines, not its router",
+  blocks.length > 0 && oversized.length === 0,
+  `${blocks.length} blocks, largest ${Math.max(0, ...blocks.map((b) => b.length))} chars${oversized.length ? `; oversized: ${oversized.map((b) => b.split("\n")[0]).join(", ")}` : ""}`);
 
 console.log(failed ? `\n${failed} failure(s)` : "\nrouter injection OK");
 process.exit(failed ? 1 : 0);
