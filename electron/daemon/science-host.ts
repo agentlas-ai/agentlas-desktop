@@ -29,6 +29,7 @@ import { registerPreparedMcpConfig } from "../mcp-tools/prepared-transport";
 import { activeScienceExtension, resolveExactVerifiedScienceRenderer, resolveExactVerifiedScienceRendererExecutor,
   resolveExactVerifiedScienceRendererExecutorBinding, resolveVerifiedScienceRenderer, resolveVerifiedScienceRendererExecutor } from "../extensions/science";
 import { probePdfLatexProfile } from "../science-host/pdflatex";
+import { configureScienceMathPython } from "../science-host/math-python";
 import { listScienceTypesetProfileCatalog } from "../science-host/typeset-profile-catalog";
 import { renderManuscriptPdf, resolveTectonic } from "../science-host/render-pdf";
 
@@ -44,6 +45,7 @@ export function installDaemonScienceHost(input: {
   assertExecution(): void;
   presentQuestion(question: unknown): void;
 }) {
+  configureScienceMathPython();
   let questionUiRelease: string | null = null;
   const releases = new Set<() => void>();
   const currentRelease = () => {

@@ -57,6 +57,7 @@ import {
 
 // OS 권한이 필요해 데스크탑에 남은 넷
 import { probePdfLatexProfile } from "./science-host/pdflatex";
+import { configureScienceMathPython } from "./science-host/math-python";
 import { listScienceTypesetProfileCatalog } from "./science-host/typeset-profile-catalog";
 import { renderManuscriptPdf, resolveTectonic } from "./science-host/render-pdf";
 import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./science-host/workbook-intake-ipc";
@@ -137,6 +138,7 @@ function registerScienceMcpPreparedConfig(input: ScienceMcpPreparedRegistration)
 
 /** 부팅에서 한 번만 부른다. 두 번 불러도 안전하다. */
 export function installDesktopScienceHost(): void {
+  configureScienceMathPython();
   if (installed) return;
   const compatibility = installScienceHost({
     aliveRuntime: desktopAliveRuntime,

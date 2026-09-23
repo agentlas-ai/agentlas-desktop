@@ -213,6 +213,10 @@ const BUNDLED_PYTHON_PACKAGES = [
   "rpds-py==2026.6.3",
   "attrs==26.1.0",
   "typing-extensions==4.16.0",
+  // Science Math must run from the signed, offline Desktop runtime rather
+  // than depending on a researcher's separate Python installation.
+  "sympy==1.14.0",
+  "mpmath==1.3.0",
 ];
 
 /** 대상 플랫폼의 휠 태그. 크로스 아키텍처 빌드에서 네이티브 휠(rpds-py)을 바르게 고르게 한다. */
@@ -249,7 +253,7 @@ console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine pa
   });
 }
 // 넣었다고 믿지 않고 실제로 불러 본다 — 없으면 그 기능은 사용자 손에서 죽는다.
-for (const moduleName of ["jsonschema", "referencing"]) {
+for (const moduleName of ["jsonschema", "referencing", "sympy", "mpmath"]) {
   execFileSync(bin, ["-c", `import ${moduleName}`], {
     env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
   });
