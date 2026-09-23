@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.40 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Automations that an assistant created now run on the model you use today — the model of the
+  conversation they report to, or your Worker default — instead of the model that happened to
+  be selected when they were created. A model you picked yourself for an automation is kept.
+  When that model is at its usage limit, or keeps getting stuck, one run moves to another
+  model from your Worker list; your choice is not changed.
+- An automation that keeps repeating the same page lookups or visits without doing anything
+  now stops with a clear reason instead of reporting success.
+- Browser lookups for element references (such as `e826`) are turned back with a hint to use
+  the reference directly, and a failed outcome check no longer waits on the automation's own
+  model: your Orchestrator models judge first.
+- Replies and automation reports to you stay in your app language even when the task says
+  content must be written in another language.
+
 ## 1.2.39 — 2026-09-24
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
