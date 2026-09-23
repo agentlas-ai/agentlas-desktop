@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Cursor Agent CLI runtime. The official headless contract is
 // `cursor-agent --print --output-format stream-json --model <model> <prompt>`.
 //
@@ -184,6 +185,8 @@ function eventText(value: unknown): string {
 }
 
 export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  if (assertScienceRecoveryRequest(req, "cursor"))
+    throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
     // This legacy driver cannot bind the exact per-run native browser safely.
     // The supported ACP path carries the Main-approved session configuration.

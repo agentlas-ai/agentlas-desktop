@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Grok CLI text runtime — official xAI CLI (`x.ai/cli`, verified with grok 0.2.x).
 // Headless contract: --prompt-file + --cwd + --output-format streaming-json.
 // Authentication is normally OAuth (`grok login`); XAI/GROK_API_KEY remains a supported fallback.
@@ -395,6 +396,8 @@ export function isGrokQuotaExhausted(value: string): boolean {
 }
 
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  if (assertScienceRecoveryRequest(req, "grok"))
+    throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
     // This legacy driver cannot bind the exact per-run native browser safely.
     // The supported ACP path carries the Main-approved session configuration.

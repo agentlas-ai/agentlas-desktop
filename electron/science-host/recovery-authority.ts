@@ -16,7 +16,9 @@ export interface ScienceRecoveryScope {
 }
 type Grant = Readonly<ScienceRecoveryScope> & { ownerId: string; current: () => void };
 const grants = new WeakMap<object, Grant>();
-const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas", "byok", "lmstudio", "mlx", "agentlas-local"]);
+const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas", "byok",
+  "lmstudio", "mlx", "agentlas-local", "kimi", "grok", "cursor"]);
+const builtinAcpKinds = new Set(["kimi", "grok", "cursor"]);
 // Only adapters with a stateless provider wire and entry guards are admitted.
 const supportedByok = new Set(["anthropic", "openai", "google", "upstage", "custom", "glm",
   "kimi", "deepseek", "minimax", "xai", "openrouter"]);
@@ -122,4 +124,16 @@ export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: s
     throw new Error("science_recovery_runner_scope_mismatch");
   }
   return true;
+}
+
+/** A selected legacy kind may recover only through its exact built-in ACP seat.
+ * Generic ACP selections retain their explicit seat identity. No kind/model rewrite. */
+export function assertScienceRecoveryAcpRequest(req: RunnerRequest, specId: string): boolean {
+  if (req.scienceRecoveryCapability === undefined) return assertScienceRecoveryRequest(req);
+  const selected = readGrant(req.scienceRecoveryCapability).runtimeSelection;
+  const seatMatches = selected.kind === "acp" ? selected.acpAgentId === specId
+    : builtinAcpKinds.has(selected.kind) && selected.kind === specId;
+  if (!seatMatches || (selected.source != null && req.runtimeSource !== selected.source))
+    throw new Error("science_recovery_acp_scope_mismatch");
+  return assertScienceRecoveryRequest(req, selected.kind);
 }

@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
 // Headless contract: `kimi -p <prompt> --output-format stream-json`.
 import path from "node:path";
@@ -335,6 +336,8 @@ function runKimiProcess(
 }
 
 export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
+  if (assertScienceRecoveryRequest(req, "kimi"))
+    throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
     // This legacy driver cannot bind the exact per-run native browser safely.
     // The supported ACP path carries the Main-approved session configuration.

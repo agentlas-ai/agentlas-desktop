@@ -1,5 +1,5 @@
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
-import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { assertScienceRecoveryAcpRequest } from "../science-host/recovery-authority";
 // Generic ACP runner — one client for every runtime that speaks the Agent Client
 // Protocol (PRD 2026-08-15 D-5). Replaces the weak hand-coded drivers of the
 // "B" grade runtimes (cursor: no tool display; grok: tool kind guessed from
@@ -843,7 +843,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
    * 무한 재시도가 원천적으로 불가능하다.
    */
   const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
-    assertScienceRecoveryRequest(req, "acp");
+    const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
     const locale = pickLocale(req);
     const nativeMcp = prepareNativeAcpMcpBinding(req);
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
@@ -890,7 +890,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .update(executableIdentity.fingerprint)
         .digest("hex")
       : null;
-    const savedSession = !assertScienceRecoveryRequest(req, "acp") && req.chatId
+    const savedSession = !recovery && req.chatId
       ? getRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
       : null;
     const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
@@ -922,21 +922,27 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const turnSink: AcpTurnSink = {
       onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
       onRequest: async (method, params) => {
-        if (method === "session/request_permission") return client.answerPermission(params);
+        if (method === "session/request_permission") {
+          assertScienceRecoveryAcpRequest(req, spec.id);
+          return client.answerPermission(params);
+        }
         throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
       },
       onStatus: (s) => events.onStatus(s),
     };
-    const openSession = () => openAcp(spec, {
-      command: executableIdentity.executable,
-      cwd,
-      env: runEnv,
-      timeoutMs: 60_000,
-      label: req.backendLabel || spec.label,
-      ...(executableOwner ? { executableOwner } : {}),
-      // 도구 관문 — grok 의 `agent` 하위 명령만 이 플래그를 받는다(openAcp 주석 참조).
-      ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
-    });
+    const openSession = () => {
+      assertScienceRecoveryAcpRequest(req, spec.id);
+      return openAcp(spec, {
+        command: executableIdentity.executable,
+        cwd,
+        env: runEnv,
+        timeoutMs: 60_000,
+        label: req.backendLabel || spec.label,
+        ...(executableOwner ? { executableOwner } : {}),
+        // 도구 관문 — grok 의 `agent` 하위 명령만 이 플래그를 받는다(openAcp 주석 참조).
+        ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
+      });
+    };
 
     let session: Session | null = null;
     let lease: AcpSessionLease<Session> | null = null;
@@ -1053,6 +1059,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       if (!sessionId) {
         nativeMcp?.assertCurrent();
+        assertScienceRecoveryAcpRequest(req, spec.id);
         created = await session.conn.request("session/new", { cwd, mcpServers: mcp.servers }, { timeoutMs: 60_000, signal: req.signal });
         sessionId = String(created?.sessionId ?? "");
         if (!sessionId) throw new Error("ACP session/new returned no sessionId");
@@ -1152,6 +1159,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           schemaFallback,
         ].filter(Boolean).join("\n\n");
       nativeMcp?.assertCurrent();
+      assertScienceRecoveryAcpRequest(req, spec.id);
       effectRun = beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
       const result = await session.conn.request(
         "session/prompt",
@@ -1160,8 +1168,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       );
       effectTerminal = typeof result?.stopReason === "string" ? result.stopReason : null;
       client.finish();
-      // 세션은 이제 실재한다 — 거절/빈 답이어도 다음 턴이 이어갈 수 있게 먼저 저장한다.
-      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
+      // Ordinary turns retain the session; fresh recovery must never seed a later resume.
+      if (!recovery && req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);
@@ -1282,5 +1290,14 @@ export function acpOrLegacyRunner(kind: string, legacy: Runner): Runner {
   const spec = ACP_AGENTS[kind];
   if (!spec) return legacy;
   const acp = createAcpRunner(spec);
-  return (req, events) => (acpDisabledFor(kind) ? legacy(req, events) : acp(req, events));
+  return (req, events) => {
+    const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
+    if (acpDisabledFor(kind)) {
+      // Respect the host transport setting; never downgrade a fresh recovery
+      // into a legacy driver with different history/browser boundaries.
+      if (recovery) throw new Error("science_recovery_acp_transport_disabled");
+      return legacy(req, events);
+    }
+    return acp(req, events);
+  };
 }
