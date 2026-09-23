@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
+import { runtimeCooldown } from "../runtime/runtime-cooldown";
 import {
   inspectJudgmentCapability,
   type JudgmentCapabilityReceipt,
@@ -57,6 +58,24 @@ export interface JudgmentSelectionPolicy {
   poolFingerprint: string;
   receipt: "required";
 }
+
+/**
+ * How an explicit pin may be joined by the owner's configured orchestrator pool.
+ *
+ * ★오너 2026-09-23 "판정기는 왜 안티그래비티지, 모델 지피티 루나 아닌가": 자동화 판정이
+ *   실행 핀(agy)에만 묶여 있었고 후보가 그 하나뿐이라, 핀이 한 번 45초를 넘기면
+ *   (실측 14:11Z timeout 45505ms) 곧바로 judgment_unavailable → 자동화 error 였다.
+ *   풀에는 codex gpt-6-luna(성공 p50 7.5s)와 claude opus 가 멀쩡히 있었다.
+ *
+ *   - pin_then_pool: 핀이 먼저, 핀이 한도·시간초과·거절·규격 불량이면 풀 순서대로.
+ *     (그래프 검증 노드처럼 사람이 그 단계의 모델을 고른 자리)
+ *   - pool_then_pin: 오너의 오케스트레이터 풀이 먼저, 풀이 없거나 전멸하면 핀.
+ *     (무인 자동화의 결과 판정 — 판정기는 오너가 역할 기본값으로 정한 모델이다)
+ *
+ *   풀 밖의 공급자로는 절대 가지 않는다. 어떤 후보가 판정했는지는 attempt 영수증
+ *   (route explicit_pin | orchestrator_pool)으로 남는다. 저장된 핀은 바꾸지 않는다.
+ */
+export type JudgmentPinFallback = "pin_then_pool" | "pool_then_pin";
 
 /** Value-free outcome of one actual runner attempt; diagnostic text stays private. */
 export interface JudgmentRuntimeAttempt {
@@ -151,6 +170,8 @@ export interface JudgeSpec<V extends string> {
   runtimeSelection?: RuntimeSelection;
   /** Independent judgments use the configured orchestrator pool, never the work pin. */
   selectionPolicy?: JudgmentSelectionPolicy;
+  /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
+  pinFallback?: JudgmentPinFallback;
 }
 
 export interface Verdict<V extends string> {
@@ -205,6 +226,8 @@ export interface RequiredJudgeSpec<V extends string> {
   runtimeSelection?: RuntimeSelection;
   /** Independent scope judgments use the configured orchestrator pool, never the work pin. */
   selectionPolicy?: JudgmentSelectionPolicy;
+  /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
+  pinFallback?: JudgmentPinFallback;
   /** Independent scope judgments must never receive tool-capable context. */
   requireNoTools?: true;
 }
@@ -366,6 +389,18 @@ export function runtimeSelectionCacheScope(
   })}`;
 }
 
+/** Cache scope for a verdict that may have been produced by a pin's pool fallback. */
+function judgmentCacheScope(
+  selection: RuntimeSelection | undefined,
+  selectionPolicy: JudgmentSelectionPolicy | undefined,
+  pinFallback: JudgmentPinFallback | undefined,
+): string {
+  const base = runtimeSelectionCacheScope(selection, selectionPolicy);
+  if (!pinFallback || selectionPolicy || !(selection ?? invocationJudgmentContext()?.selection)) return base;
+  const pool = readJudgmentPool();
+  return `${base}\u0000pin-fallback:${pinFallback}:${pool.state === "configured" ? pool.fingerprint : pool.state}`;
+}
+
 function subsetCacheKey(kind: string, labels: readonly string[], input: string): string {
   return `${kind}\u0000${labels.join(",")}\u0000${intentSignature(input)}`;
 }
@@ -464,6 +499,8 @@ export async function callConnectedModel(opts: {
   onPartial?: (text: string) => void;
   /** Structured reflection/metadata calls must use the runner's no-tools gate. */
   requireNoTools?: true;
+  /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
+  pinFallback?: JudgmentPinFallback;
 }): Promise<string | null> {
   return (await callJudgmentModelDetailed(opts)).text;
 }
@@ -490,6 +527,8 @@ export async function callConnectedModelDetailed(opts: {
   authoring?: boolean;
   /** Structured reflection/metadata calls must use the runner's no-tools gate. */
   requireNoTools?: true;
+  /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
+  pinFallback?: JudgmentPinFallback;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   return callJudgmentModelDetailed(opts);
 }
@@ -535,6 +574,11 @@ async function callJudgmentModelDetailed(opts: {
   authoring?: boolean;
   /** Optional metadata preparation must not dispatch a tool-capable model. */
   requireNoTools?: true;
+  /**
+   * Only meaningful with an explicit pin. See JudgmentPinFallback — the pool
+   * joins the candidate list; no provider outside the pin and the pool is ever tried.
+   */
+  pinFallback?: JudgmentPinFallback;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   const inherited = invocationJudgmentContext();
   const explicitSelection = opts.runtimeSelection;
@@ -594,6 +638,38 @@ async function callJudgmentModelDetailed(opts: {
     ]);
   const route: JudgmentRuntimeReceipt["route"] = opts.runtimeSelection ? "explicit_pin" : pool?.state === "configured" ? "orchestrator_pool" : "legacy";
   const fingerprint = opts.runtimeSelection ? routingFingerprint([opts.runtimeSelection]) : pool?.fingerprint ?? "legacy";
+  // Each candidate carries its own route so the receipt names who actually judged.
+  type JudgmentCandidate = { runtime: RuntimeStatus; route: JudgmentRuntimeReceipt["route"]; fingerprint: string };
+  let candidates: JudgmentCandidate[] = ordered.map((runtime) => ({ runtime, route, fingerprint }));
+  const pinFallback = opts.runtimeSelection && !opts.selectionPolicy ? opts.pinFallback : undefined;
+  let pinFallbackPoolSize = 0;
+  if (pinFallback) {
+    // An unreadable/unconfigured pool leaves the pin exactly as it was — never a
+    // reason to refuse the pin, never a licence to try every detected provider.
+    const fallbackPool = readJudgmentPool();
+    if (fallbackPool.state === "configured") {
+      const poolCandidates: JudgmentCandidate[] = fallbackPool.selections
+        .filter((selection) => !requiresNoTools
+          || inspectJudgmentCapability(selection, "no_tools").status === "verified")
+        .map((selection) => selectExactRuntime(runtimes, selection)?.active)
+        .filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
+        .map((runtime) => ({ runtime, route: "orchestrator_pool" as const, fingerprint: fallbackPool.fingerprint }));
+      pinFallbackPoolSize = poolCandidates.length;
+      // A pin known to be in a quota/auth cooldown goes last: asking a runtime we
+      // already know is exhausted spends the whole judgment budget on a known answer.
+      const pinCooling = active ? runtimeCooldown(active) : null;
+      const merged = pinFallback === "pool_then_pin" || pinCooling
+        ? [...poolCandidates, ...candidates]
+        : [...candidates, ...poolCandidates];
+      const seen = new Set<string>();
+      candidates = merged.filter((candidate) => {
+        const identity = judgmentSelectionIdentity(candidate.runtime);
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      });
+    }
+  }
   if (requiresNoTools && !opts.runtimeSelection && pool?.state === "configured" && configuredSelections.length === 0) {
     const first = pool.selections[0];
     const capability = first ? inspectJudgmentCapability(first, "no_tools") : undefined;
@@ -613,7 +689,7 @@ async function callJudgmentModelDetailed(opts: {
       message: capability?.reason ?? "judgment_no_verified_capability_in_pool",
     }, ...(noToolReceipt ? { runtimeReceipt: noToolReceipt } : {}) };
   }
-  if (!ordered.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
+  if (!candidates.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
     kind: "refused", runtime: "judgment", source: "marker", message: "judgment_selected_runtime_unavailable",
   } };
   if (requiresNoTools && !opts.runtimeSelection && pool?.state !== "configured") return { text: null, failure: {
@@ -625,7 +701,8 @@ async function callJudgmentModelDetailed(opts: {
       `[judgment-runtime-selection] kind=${opts.runtimeSelection.kind} `
         + `backend=${opts.runtimeSelection.backend ?? "-"} source=${opts.runtimeSelection.source ?? "-"} `
         + `model=${opts.runtimeSelection.model ?? active?.model ?? "-"} `
-        + `resolved=${active ? "yes" : "no"}`,
+        + `resolved=${active ? "yes" : "no"}`
+        + (pinFallback ? ` fallback=${pinFallback} pool=${pinFallbackPoolSize}` : ""),
     );
   }
 
@@ -672,7 +749,8 @@ async function callJudgmentModelDetailed(opts: {
   const failedOutcome = (failure: RunnerFailure, timedOut = false): JudgmentRuntimeAttempt["outcome"] =>
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
-  for (const [runtimeIndex, runtime] of ordered.entries()) {
+  for (const [runtimeIndex, candidate] of candidates.entries()) {
+      const { runtime, route, fingerprint: candidateFingerprint } = candidate;
       const livePool = !opts.runtimeSelection ? readJudgmentPool() : null;
       if (opts.selectionPolicy
         ? (livePool?.state !== "configured" || livePool.fingerprint !== opts.selectionPolicy.poolFingerprint)
@@ -689,7 +767,7 @@ async function callJudgmentModelDetailed(opts: {
       if (capability && capability.status !== "verified") {
         runtimeReceipt = {
           route,
-          fingerprint,
+          fingerprint: candidateFingerprint,
           execution: "not_invoked",
           ...(runtime.longContextEnabled !== undefined ? { longContext: runtime.longContextEnabled } : {}),
           ...(runtime.effort ? { effort: runtime.effort } : {}),
@@ -706,7 +784,7 @@ async function callJudgmentModelDetailed(opts: {
       }
       const picked = pickRunner(runtime);
       if (!picked) continue;
-      runtimeReceipt = { route, fingerprint, execution: "invoked", selection: {
+      runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "invoked", selection: {
         kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
       }, longContext: runtime.longContextEnabled,
       ...(runtime.effort ? { effort: runtime.effort } : {}),
@@ -720,7 +798,7 @@ async function callJudgmentModelDetailed(opts: {
       // quota/auth/refusal failures therefore donate their unused time to the
       // next candidate instead of dividing the budget across every detected
       // but unusable provider.
-      const attemptTimeoutMs = runtimeIndex === ordered.length - 1
+      const attemptTimeoutMs = runtimeIndex === candidates.length - 1
         ? remainingMs
         : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
       const accounting = beginAccountedInference(runtime);
@@ -885,7 +963,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     judgedInput = floor.redacted;
   }
 
-  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy);
+  const runtimeScope = judgmentCacheScope(spec.runtimeSelection, spec.selectionPolicy, spec.pinFallback);
   const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
   const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
   const cached = spec.selectionPolicy ? undefined : cacheGet<V>(cacheKey);
@@ -928,6 +1006,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     locale: spec.locale,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
     ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
+    ...(spec.pinFallback ? { pinFallback: spec.pinFallback } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -950,7 +1029,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     source: "llm",
     runtimeReceipt: detailed.runtimeReceipt,
   };
-  if (!spec.selectionPolicy && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy)) {
+  if (!spec.selectionPolicy && runtimeScope === judgmentCacheScope(spec.runtimeSelection, spec.selectionPolicy, spec.pinFallback)) {
     cacheSet(cacheKey, stored);
     durablePut(spec.kind, signature, stored);
   }
@@ -971,7 +1050,7 @@ export async function judgeRequired<V extends string>(
     redactedInput = floor.redacted;
     containedSecret = floor.containedSecret;
   }
-  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy);
+  const runtimeScope = judgmentCacheScope(spec.runtimeSelection, spec.selectionPolicy, spec.pinFallback);
   const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
   const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
   const cached = spec.selectionPolicy ? undefined : cacheGet<V>(cacheKey);
@@ -1002,6 +1081,7 @@ export async function judgeRequired<V extends string>(
     accept: (text) => parseVerdict<V>(text, spec.labels) !== null,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
     ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
+    ...(spec.pinFallback ? { pinFallback: spec.pinFallback } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -1025,7 +1105,7 @@ export async function judgeRequired<V extends string>(
   if (!parsed) {
     return { verdict: null, confidence: 0, reason: "judgment_invalid_output", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: "exit" };
   }
-  if (!spec.selectionPolicy && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection, spec.selectionPolicy)) {
+  if (!spec.selectionPolicy && runtimeScope === judgmentCacheScope(spec.runtimeSelection, spec.selectionPolicy, spec.pinFallback)) {
     cacheSet(cacheKey, { ...parsed, source: "llm", runtimeReceipt: detailed.runtimeReceipt });
     durablePut(spec.kind, signature, { ...parsed, source: "llm" });
   }
@@ -1509,6 +1589,8 @@ interface ChecklistJudgeSpec {
   locale?: RuntimeLocale;
   /** Graph evals pass their automation/node runtime so judgment cannot cross providers. */
   runtimeSelection?: RuntimeSelection;
+  /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
+  pinFallback?: JudgmentPinFallback;
   maxInputChars?: number;
   /**
    * 사람의 교정 기록 — "이런 결과를 판정이 틀리게 봤고, 사람은 이렇게 판단했다".
@@ -1593,7 +1675,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
   const correctionLines = corrections.map((c) =>
     `- A result like: "${secretValueFloor(c.subjectPreview).redacted.slice(0, 200)}" — the person ruled ${c.correctedVerdict.toUpperCase()}${c.note ? ` (${c.note.slice(0, 150)})` : ""}`);
   // ★교정이 캐시 키에 들어가야 한다 — 아니면 새 교정이 와도 캐시된 옛 판정이 그대로 나온다.
-  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
+  const runtimeScope = judgmentCacheScope(spec.runtimeSelection, undefined, spec.pinFallback);
   const cacheKey = [
     spec.kind,
     spec.salt ?? "",
@@ -1641,6 +1723,9 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     ...(spec.signal ? { signal: spec.signal } : {}),
     ...(spec.locale ? { locale: spec.locale } : {}),
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
+    ...(spec.pinFallback ? { pinFallback: spec.pinFallback } : {}),
+    // 채점표도 규격 JSON 이 파싱돼야 답이다 — 못 맞춘 후보는 실패로 치고 다음 후보로 간다.
+    ...(spec.pinFallback ? { accept: (text: string) => parseChecklistJson(text, spec.items) !== null } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -1662,7 +1747,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     reasonText: settled.reasonText,
     source: settled.verdict === null ? "unavailable" : "llm",
   };
-  if (settled.verdict !== null && runtimeScope === runtimeSelectionCacheScope(spec.runtimeSelection)) checklistCacheSet(cacheKey, result);
+  if (settled.verdict !== null && runtimeScope === judgmentCacheScope(spec.runtimeSelection, undefined, spec.pinFallback)) checklistCacheSet(cacheKey, result);
   return result;
 }
 

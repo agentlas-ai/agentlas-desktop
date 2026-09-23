@@ -546,6 +546,8 @@ export async function runMainToolDispatch(
   // annotations. Plan cannot borrow an existing mutation approval.
   // minPerm is an approval profile, not an effect declaration (image generation
   // currently has minPerm=read). Only these host implementations are observational.
+  // judgment-exempt: 관측된 런타임 도구 이름을 분류하는 게 아니다 — Main 이 직접 구현한
+  // 로컬 루프 내장 도구(resolved.kind === "builtin")의 닫힌 집합에서 계획 모드 승인 대상을 고른다.
   const planMutation = resolved.kind === "builtin"
     ? !["list_dir", "read_file", "ask_user"].includes(resolved.builtinName)
     : planMcpToolIsMutating({ authority: planReadAuthority, toolName: resolved.serverToolName, args });

@@ -1,4 +1,4 @@
-import { judgeRequired } from "./system-agents/judgment";
+import { judgeRequired, type RequiredVerdict } from "./system-agents/judgment";
 import { currentUiLocale } from "./ui-locale";
 import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
 import type { RuntimeSelection } from "../shared/types";
@@ -23,6 +23,55 @@ export interface AutomationResultClassification {
   reasonCode: string | null;
   reason: string | null;
   evidence: string | null;
+  /** Which judge actually answered (or every judge that was tried). Host fact, not model prose. */
+  judge?: AutomationJudgeReceipt;
+}
+
+/**
+ * 어느 판정기가 이 실행을 판정했는가 — 값 없는 호스트 기록.
+ * ★오너가 "판정기는 왜 안티그래비티냐"고 물었을 때 답할 기록이 main.log 한 줄뿐이었다.
+ *   실행 영수증(run_events)에 남겨야 화면·측정이 같은 사실을 본다.
+ */
+export interface AutomationJudgeReceipt {
+  schemaVersion: "agentlas.automation-judge-receipt.v1";
+  /** The route of the judge that produced the verdict, or null when none did. */
+  route: "explicit_pin" | "orchestrator_pool" | "legacy" | null;
+  kind: string | null;
+  model: string | null;
+  attempts: Array<{ route: string; kind: string; model: string | null; outcome: string; elapsedMs: number }>;
+}
+
+/**
+ * 무인 자동화의 결과 판정기는 오너의 오케스트레이터 풀이 먼저다 — 핀은 풀이 없거나 전멸할 때의 뒷줄.
+ * 실행은 계속 자동화 핀으로 돈다(이 값은 판정만 정한다).
+ */
+export const AUTOMATION_JUDGE_PIN_FALLBACK = "pool_then_pin" as const;
+
+function judgeReceiptOf(verdict: Pick<RequiredVerdict<string>, "verdict" | "runtimeReceipt" | "attempts">): AutomationJudgeReceipt | undefined {
+  const attempts = (verdict.attempts ?? []).map((attempt) => ({
+    route: attempt.runtimeReceipt.route,
+    kind: attempt.runtimeReceipt.selection.kind,
+    model: attempt.runtimeReceipt.selection.model ?? null,
+    outcome: attempt.outcome,
+    elapsedMs: attempt.elapsedMs,
+  }));
+  const answered = verdict.verdict !== null ? verdict.runtimeReceipt : undefined;
+  if (!answered && attempts.length === 0) return undefined;
+  return {
+    schemaVersion: "agentlas.automation-judge-receipt.v1",
+    route: answered?.route ?? null,
+    kind: answered?.selection.kind ?? null,
+    model: answered?.selection.model ?? null,
+    attempts,
+  };
+}
+
+function withJudge(
+  classification: AutomationResultClassification,
+  verdict: Pick<RequiredVerdict<string>, "verdict" | "runtimeReceipt" | "attempts">,
+): AutomationResultClassification {
+  const judge = judgeReceiptOf(verdict);
+  return judge ? { ...classification, judge } : classification;
 }
 
 const STATUSES = ["ok", "partial", "error", "skipped", "blocked", "needs_input"] as const;
@@ -272,10 +321,10 @@ export async function classifyAutomationOutcome(
     ].join(" "),
     locale,
     scanSecrets: true,
-    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection } : {}),
+    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection, pinFallback: AUTOMATION_JUDGE_PIN_FALLBACK } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
-  if (!verdict.verdict) return judgmentUnavailable(locale);
+  if (!verdict.verdict) return withJudge(judgmentUnavailable(locale), verdict);
   /*
    * ★관측이 판정을 이긴다 — 호스트가 결정한다, 모델이 아니라.
    *
@@ -288,7 +337,7 @@ export async function classifyAutomationOutcome(
    * 그 외 상태(partial/blocked/needs_input/error)도 그대로 둔다: 이미 성공이 아니다.
    */
   if (verdict.verdict === "ok" && opts.toolActivity && opts.toolActivity.callCount === 0) {
-    return {
+    return withJudge({
       status: "error",
       outcome: "error",
       reasonCode: "claimed_without_tools",
@@ -297,15 +346,15 @@ export async function classifyAutomationOutcome(
           ? "실행이 성공했다고 보고했지만 호스트가 관측한 도구 호출이 0건입니다 — 이 대화 밖은 아무것도 바뀌지 않았습니다."
           : "The run reported success, but the host observed zero tool calls — nothing outside this conversation changed.",
       evidence: null,
-    };
+    }, verdict);
   }
-  return {
+  return withJudge({
     status: verdict.verdict,
     outcome: verdict.verdict,
     reasonCode: verdict.verdict === "ok" ? null : "controller_judged",
     reason: verdict.reason || null,
     evidence: null,
-  };
+  }, verdict);
 }
 
 /** Exceptions are already known not to be success; the controller only decides
@@ -328,10 +377,10 @@ export async function classifyAutomationFailure(
     ].join(" "),
     locale,
     scanSecrets: true,
-    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection } : {}),
+    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection, pinFallback: AUTOMATION_JUDGE_PIN_FALLBACK } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
-  if (!verdict.verdict) return unresolved("judgment_unavailable", null);
+  if (!verdict.verdict) return withJudge(unresolved("judgment_unavailable", null), verdict);
   // ★원문 그대로 보여야 하는 실패는 판정이 쓴 사람 문장으로 **바꾸지 않는다**.
   //
   //   레지스트리는 실패 코드마다 "카드로 풀어 쓸 것"과 "원문 그대로 둘 것"을 갈라 선언한다
@@ -341,11 +390,11 @@ export async function classifyAutomationFailure(
   //   이 저장소는 같은 병으로 이미 사고를 겪었다: 판정이 원본 에러를 사람 문장으로 갈아 끼워
   //   기계 표식이 사라지고, 그래서 위험한 재실행이 허용됐다.
   const verbatimHit = GRAPH_VERBATIM_CODES.find((code) => value.includes(code));
-  return {
+  return withJudge({
     status: verdict.verdict,
     outcome: verdict.verdict,
     reasonCode: "controller_judged",
     reason: verbatimHit ? value.slice(0, 2_000) : (verdict.reason || null),
     evidence: null,
-  };
+  }, verdict);
 }
