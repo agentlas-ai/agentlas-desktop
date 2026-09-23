@@ -2218,6 +2218,7 @@ export class InvocationService {
       goalLongRun && goalLongRun.surface !== "science"
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
         source: executionContext?.source, nativeScienceTool: binding => effectBoundary.nativeScienceTool(binding),
+        nativeScienceFailure: observation => effectBoundary.nativeScienceFailure(observation),
         begin: admission => effectBoundary.adapterStarted(admission), finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report) }, () => Promise.resolve().then(() => runMcpInvocation(
       runReq,
       (rawEvent) => {
