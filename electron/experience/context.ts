@@ -10,6 +10,7 @@ import {
   isRuntimeEligibleExperienceEnvironmentProfile,
 } from "./taxonomy";
 import { localEmbeddingTokens, rankHybridLocal } from "../memory/local-embedding";
+import { nativeRecallFor } from "../memory/native-text";
 
 export const EXPERIENCE_CORE = [
   "## Experience",
@@ -117,8 +118,16 @@ export function buildExperienceRoutingPrior(input: {
   const matchedTerms = [...new Set(related.flatMap((candidate) =>
     candidate.taskTerms.filter((term) => taskSet.has(term))))].slice(0, 6);
   if (matchedTerms.length === 0) return null;
+  // Original wording is a second ranking channel (English migration, plan 2026-09-23 D-5).
+  const relatedNatives = nativeRecallFor("experience_candidate", related.map((candidate) => candidate.id));
   const bestEvidenceFit = rankHybridLocal(input.task, related.map((candidate) => ({
     id: candidate.id,
+    ...(relatedNatives.has(candidate.id)
+      ? {
+          altText: `${relatedNatives.get(candidate.id)!.text} ${candidate.taskTerms.join(" ")}`,
+          altEmbedding: relatedNatives.get(candidate.id)!.vector,
+        }
+      : {}),
     text: `${candidate.summary} ${candidate.taskTerms.join(" ")}`,
     embedding: candidate.embedding,
     prior: confidencePrior(candidate),
@@ -163,8 +172,17 @@ export function buildExperienceContext(input: {
     basePackageHash: input.basePackageHash,
     taskTerms: [...terms],
   });
+  // English summary is the capsule; the original wording is a second ranking
+  // channel only, so a native-language task still matches (plan 2026-09-23 D-5).
+  const candidateNatives = nativeRecallFor("experience_candidate", candidates.map((item) => item.id));
   const ranked = rankHybridLocal(input.task, candidates.map((item) => ({
     id: item.id,
+    ...(candidateNatives.has(item.id)
+      ? {
+          altText: `${candidateNatives.get(item.id)!.text} ${item.taskTerms.join(" ")}`,
+          altEmbedding: candidateNatives.get(item.id)!.vector,
+        }
+      : {}),
     text: `${item.summary} ${item.taskTerms.join(" ")}`,
     embedding: item.embedding,
     prior: confidencePrior(item),

@@ -8,6 +8,7 @@ import {
   type LocalMemoryEmbedding,
 } from "./local-embedding";
 import { assertMemoryWriteAllowed } from "./revocations";
+import { enqueueEnglishTranslation, ensureNativeTextTables, nativeTextsFor } from "./native-text";
 
 export interface RequestContext {
   userIntent?: string;
@@ -161,11 +162,8 @@ function toEntry(r: Row): MemoryEntry {
  * a memory must forget this too — see revocations.ts redactMemory.
  */
 export function ensureMemoryNativeTable(db = getDb()): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS memory_entry_native (
-    entry_id TEXT PRIMARY KEY REFERENCES memory_entries(id) ON DELETE CASCADE,
-    content_native TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  )`);
+  // Same DDL plus the forget triggers and the other side tables (native-text.ts).
+  ensureNativeTextTables(db);
 }
 
 export function getMemoryNative(entryId: string): string | null {
@@ -265,6 +263,11 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
     }
   });
   insert.immediate();
+  // English migration, write path (plan 2026-09-23 D-7): a non-English memory
+  // without its original-wording twin (the model ignored the English envelope,
+  // or a host writer stored user text) is queued for idle translation. SQL only
+  // — the turn is never blocked on a model.
+  if (!e.contentNative?.trim()) enqueueEnglishTranslation("memory_entry", id, e.content);
   const entry: MemoryEntry = {
     id,
     scope: e.scope,
@@ -462,7 +465,26 @@ export function findEquivalentMemoryId(
        LIMIT 1`,
     )
     .get(scope, kind, norm, projectPath, projectPath, agentId) as { id: string } | undefined;
-  return row?.id ?? null;
+  if (row?.id) return row.id;
+  // A memory translated to English keeps its original wording in the side
+  // table; the same original arriving again (an older engine, an import) is
+  // still the same memory.
+  try {
+    const nativeRow = getDb()
+      .prepare(
+        `SELECT m.id FROM memory_entries m
+           JOIN memory_entry_native n ON n.entry_id = m.id
+         WHERE m.scope = ? AND m.kind = ? AND lower(trim(n.content_native)) = ?
+           AND m.superseded_at IS NULL
+           AND (m.project_path IS ? OR m.project_path = ?)
+           AND (m.scope != 'agent_repo' OR m.agent_id IS ?)
+         LIMIT 1`,
+      )
+      .get(scope, kind, norm, projectPath, projectPath, agentId) as { id: string } | undefined;
+    return nativeRow?.id ?? null;
+  } catch {
+    return null; // side table absent: nothing was translated on this store
+  }
 }
 
 export function hasEquivalentMemory(
@@ -477,7 +499,10 @@ export function hasEquivalentMemory(
 
 /** 에이전트 상세 UI용 — 프로젝트에 귀속되지 않은 agent-repo 메모리만 최신순.
  *  프로젝트 메모리는 프로젝트가 소유하므로 전역 에이전트 상세에서 섞거나 노출하지 않는다. */
-export function listMemoryEntriesForAgentUi(agentId: string, limit = 100): MemoryEntry[] {
+export function listMemoryEntriesForAgentUi(
+  agentId: string,
+  limit = 100,
+): Array<MemoryEntry & { contentEnglish?: string }> {
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
@@ -486,7 +511,14 @@ export function listMemoryEntriesForAgentUi(agentId: string, limit = 100): Memor
        ORDER BY created_at DESC LIMIT ?`,
     )
     .all(agentId, limit) as Row[];
-  return rows.map(toEntry);
+  // People see the original wording; the English text stays the model-facing
+  // and search surface (plan 2026-09-23 D-5).
+  const entries = rows.map(toEntry);
+  const natives = nativeTextsFor("memory_entry", entries.map((entry) => entry.id));
+  return entries.map((entry) => {
+    const native = natives.get(entry.id);
+    return native ? { ...entry, content: native, contentEnglish: entry.content } : entry;
+  });
 }
 
 /** 드리밍 통합이 흡수한 원본 엔트리들을 superseded 처리(파괴 아님 — 복구 가능 이력 유지). */

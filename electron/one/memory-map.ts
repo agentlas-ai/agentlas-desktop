@@ -21,6 +21,7 @@ import {
 } from "../memory/project-files";
 
 import { BUILTIN_ONE_AGENT_ID as ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
+import { nativeTextsFor } from "../memory/native-text";
 const MAX_RENDERED_RELATIONS_PER_NODE = 12;
 const MAX_RENDERED_RELATIONS = 40_000;
 
@@ -345,10 +346,17 @@ export function getOneMemoryMap(): OneMemoryMapSnapshot {
   const positive = weighted.filter((value) => value > 0).sort((a, b) => a - b);
   const densityCeiling = positive[Math.floor(Math.max(0, positive.length - 1) * 0.94)] ?? 1;
 
+  // Tickets carry the wording the memory was written in; after the English
+  // migration that is the side-table original, so match on either.
+  const mapNatives = nativeTextsFor("memory_entry", rows.map((row) => row.id));
   const nodes: OneMemoryMapNode[] = rows.map((row) => {
     const normalized = normalizedContent(row.content);
+    const native = mapNatives.get(row.id);
+    const normalizedNative = native ? normalizedContent(native) : null;
     const pathSlug = row.project_path ? safeSlug(path.basename(row.project_path)) : null;
-    const projectSlug = (normalized ? ticketSlugs.get(normalized) : null) ?? pathSlug;
+    const projectSlug = (normalized ? ticketSlugs.get(normalized) : null)
+      ?? (normalizedNative ? ticketSlugs.get(normalizedNative) : null)
+      ?? pathSlug;
     const position = positions.get(row.id) ?? { x: 0.5, y: 0.5 };
     const density = Math.min(1, (relationWeights.get(row.id) ?? 0) / Math.max(0.001, densityCeiling));
     return {
@@ -392,6 +400,8 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   ).all(ONE_AGENT_ID, capped) as Array<{
     id: string; scope: string; kind: string; content: string; project_path: string | null; evidence_json: string; created_at: string;
   }>;
+  // People see the original wording; English is the search/model surface.
+  const listNatives = nativeTextsFor("memory_entry", rows.map((row) => row.id));
   return rows.map((row) => {
     let evidenceCount = 0;
     try {
@@ -400,7 +410,7 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
     } catch {
       evidenceCount = 0;
     }
-    const content = String(row.content ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim();
+    const content = String(listNatives.get(row.id) ?? row.content ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim();
     return {
       id: row.id,
       kind: row.kind,
@@ -422,15 +432,18 @@ export function forgetOneDurableMemoryEntry(memoryId: string): { ok: boolean; me
   cachedMap = null;
 
   for (const projectPath of forgotten.projectPaths) {
-    try {
-      forgetProjectMemoryProjection(
-        projectPath,
-        forgotten.kind,
-        forgotten.contentHash,
-        forgotten.forgottenAt,
-      );
-    } catch {
-      console.warn("[memory] forgotten project projection reconciliation failed");
+    // The original wording of a translated memory is projected under its own hash.
+    for (const contentHash of [forgotten.contentHash, ...forgotten.nativeContentHashes]) {
+      try {
+        forgetProjectMemoryProjection(
+          projectPath,
+          forgotten.kind,
+          contentHash,
+          forgotten.forgottenAt,
+        );
+      } catch {
+        console.warn("[memory] forgotten project projection reconciliation failed");
+      }
     }
   }
   for (const slug of findAgentNestExperienceSlugs(forgotten.sourceMemoryIds)) {

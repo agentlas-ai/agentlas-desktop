@@ -39,7 +39,16 @@ export interface OneDurableBlock {
   content: string;
   evidence: string;
   hash: string;
+  /** Original wording when the engine wrote the block in English (`  - Native:` / `  - 원문:`). */
+  native?: string;
 }
+
+/**
+ * Engine format (Agentlas-OS one_workspace._durable_block_text): the original
+ * wording sits on the line right AFTER the ticket line that ends with
+ * `<!-- h:… -->`, so it follows the matched block rather than being inside it.
+ */
+const NATIVE_LINE_AFTER_BLOCK_RE = /^[^\n]*\n[ \t]+- (?:Native|원문):[ \t]*([^\n]*)/;
 
 /**
  * 소울 파일에서 durable 블록을 뽑는 순수 함수.
@@ -48,12 +57,15 @@ export interface OneDurableBlock {
 export function parseOneDurableBlocks(text: string): OneDurableBlock[] {
   const blocks: OneDurableBlock[] = [];
   for (const match of text.matchAll(DURABLE_BLOCK_RE)) {
-    const [, kind, content, evidence, hash] = match;
+    const [whole, kind, content, evidence, hash] = match;
+    const tail = text.slice((match.index ?? 0) + whole.length, (match.index ?? 0) + whole.length + 8_000);
+    const native = NATIVE_LINE_AFTER_BLOCK_RE.exec(tail)?.[1]?.trim();
     blocks.push({
       kind,
       content: content.trim(),
       evidence: evidence.trim(),
       hash,
+      ...(native && native !== content.trim() ? { native } : {}),
     });
   }
   return blocks;
@@ -180,6 +192,8 @@ export function importOneDurableMemory(rootOverride?: string): OneImportResult {
         scope: "agent_repo" as MemoryScope,
         kind: normalizeKind(block.kind),
         content: block.content,
+        // English block with its original wording → side table (plan §9-8).
+        ...(block.native ? { contentNative: block.native } : {}),
         agentId: ONE_AGENT_ID,
         sensitivity: "internal",
         // 첫 항목이 멱등 키다. 두 번째는 One 이 기록한 원 근거.

@@ -27,6 +27,7 @@ import {
 } from "./safe-project-read";
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 import { listMemoryEpisodesForContext } from "./tickets";
+import { nativeRecallFor } from "./native-text";
 import { filterRevokedProjectSoul } from "./revocations";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
 import { looksSecret } from "../../shared/secret-patterns";
@@ -442,8 +443,19 @@ function confidencePrior(confidence: MemoryEntry["confidence"]): number {
 function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): MemoryEntry[] {
   const query = String(taskPrompt ?? "").trim();
   if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
+  // English is the search/capsule surface; the original wording is a second
+  // channel (better of the two, lexical and vector) so a question in the user's
+  // language still finds a translated memory (plan §9-8 condition B — English
+  // storage with a native query — measured median rank 1,476). Measured on the
+  // owner's store copy: concatenating both into one text diluted the original's
+  // lexical match (Korean top-1 17→13 of 20); max-of-two keeps it. The capsule
+  // stays English.
+  const natives = nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
   const ranked = rankHybridLocal(query, entries.map((entry) => ({
     id: entry.id,
+    ...(natives.has(entry.id)
+      ? { altText: [natives.get(entry.id)!.text, entry.kind].join(" "), altEmbedding: natives.get(entry.id)!.vector }
+      : {}),
     text: [
       entry.content,
       entry.kind,
@@ -483,9 +495,13 @@ function timelineSection(
       || (Boolean(owner?.chatId) && episode.chatId === owner?.chatId && episode.agentId === (owner?.agentId ?? null)));
   if (episodes.length === 0) return null;
   const query = String(taskPrompt ?? "").trim();
+  const episodeNatives = query ? nativeRecallFor("memory_episode", episodes.map((episode) => episode.id)) : new Map();
   const picked = query && localEmbeddingTokens(query).length > 0
     ? rankHybridLocal(query, episodes.map((episode) => ({
         id: episode.id,
+        ...(episodeNatives.has(episode.id)
+          ? { altText: episodeNatives.get(episode.id)!.text, altEmbedding: episodeNatives.get(episode.id)!.vector }
+          : {}),
         text: episode.summary,
         embedding: episode.embedding.vector,
         episode,

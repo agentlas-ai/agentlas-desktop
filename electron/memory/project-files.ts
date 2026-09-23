@@ -34,6 +34,7 @@ import {
   commitMemoryProjectionWrites,
   finishMemoryProjectionWrite,
   type MemoryProjectionWriterLease,
+  NATIVE_TWIN_SOURCE_SUFFIX,
 } from "./revocations";
 import {
   CAREER_GRAPH_CONFIG_FILE,
@@ -1638,7 +1639,7 @@ function transformProjectCleanupLine(
     const parsed = JSON.parse(line) as Record<string, unknown>;
     const curatorProjection = parsed.action === "written"
       && (parsed.source_provenance === "assistant-turn" || parsed.source_provenance === "task-force-synthesis");
-    const exactSource = curatorProjection && parsed.memory_id === input.sourceMemoryId;
+    const exactSource = curatorProjection && parsed.memory_id === projectionMemoryId(input.sourceMemoryId);
     const legacySource = curatorProjection && parsed.memory_id === undefined;
     if (
       typeof parsed.content === "string"
@@ -1663,6 +1664,17 @@ function transformProjectCleanupLine(
     if (error instanceof ProjectCleanupInvalidUtf8Error) throw error;
   }
   return { output: raw, inAutoSection: false };
+}
+
+/**
+ * The memory id a projection line was written under. An original-wording twin
+ * cleanup target (English migration, revocations.ts) carries the memory id plus
+ * a suffix so it can have its own lease row; the soul/log lines carry the id.
+ */
+function projectionMemoryId(sourceMemoryId: string): string {
+  return sourceMemoryId.endsWith(NATIVE_TWIN_SOURCE_SUFFIX)
+    ? sourceMemoryId.slice(0, -NATIVE_TWIN_SOURCE_SUFFIX.length)
+    : sourceMemoryId;
 }
 
 function withCurrentProjectCleanupLease<T>(
@@ -1954,13 +1966,13 @@ export function reconcileProjectMemoryProjectionCleanup(
         input.kind,
         input.contentHash,
         input.forgottenAt,
-        [input.sourceMemoryId],
+        [projectionMemoryId(input.sourceMemoryId)],
       );
       return isProjectMemoryProjectionForgotten(
         identity.root,
         input.kind,
         input.contentHash,
-        [input.sourceMemoryId],
+        [projectionMemoryId(input.sourceMemoryId)],
       );
     });
     return immediate.executed
