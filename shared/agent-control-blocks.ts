@@ -204,6 +204,7 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
   visible = options?.streaming
     ? trimIncompleteControlTail(trimPartialReversedHeadingFence(visible))
     : trimIncompleteMarkerTail(visible);
+  visible = stripRunawayJsonFenceTail(visible, options?.streaming === true);
   visible = stripOrphanCodeFences(visible);
   return visible.replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -212,6 +213,17 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
 const FENCE_LINE_RE = /^[ \t]*```[A-Za-z0-9_+.-]*[ \t]*$/;
 /** A closing fence carries no info string (CommonMark; same rule as the Markdown renderer). */
 const CLOSING_FENCE_LINE_RE = /^[ \t]*```[ \t]*$/;
+
+/** A failed model tail can be an unclosed JSON fence containing only repeated `json` lines. */
+const RUNAWAY_JSON_FENCE_TAIL_RE = /(?:^|\n)[ \t]*```json[ \t]*\r?\n(?:[ \t]*json[ \t]*(?:\r?\n|$)){2,}[ \t]*$/i;
+const STREAMING_RUNAWAY_JSON_FENCE_TAIL_RE = /(?:^|\n)[ \t]*```json[ \t]*\r?\n(?:[ \t]*json[ \t]*(?:\r?\n|$)){1,}[ \t]*$/i;
+
+function stripRunawayJsonFenceTail(value: string, streaming: boolean): string {
+  const match = value.match(streaming ? STREAMING_RUNAWAY_JSON_FENCE_TAIL_RE : RUNAWAY_JSON_FENCE_TAIL_RE);
+  if (!match || match.index == null) return value;
+  const fenceStart = match.index + (match[0].startsWith("\n") ? 1 : 0);
+  return value.slice(0, fenceStart);
+}
 
 /** Hide a reversed JSON fence while its first body line is still becoming a control heading. */
 function trimPartialReversedHeadingFence(value: string): string {
