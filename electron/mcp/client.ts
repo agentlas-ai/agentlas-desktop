@@ -2591,7 +2591,9 @@ ${effectiveUserPrompt}`;
     const selected = runtimeChoice.active;
     const modelListIsAuthoritative = ["ollama", "lmstudio", "mlx"].includes(selected.kind)
       || selected.modelDiscovery?.status === "ok";
-    if (selected.credentialAccess?.status === "unavailable" || selected.modelDiscovery?.stale
+    // A failed discovery may retain the last good model list. Its stale flag
+    // does not prove the pinned model cannot run; let the exact runtime try.
+    if (selected.credentialAccess?.status === "unavailable"
       || (modelListIsAuthoritative && req.runtimeSelection?.model && !selected.availableModels?.includes(req.runtimeSelection.model))) {
       runtimeChoice = null;
     }
