@@ -196,7 +196,7 @@ import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, type GoalToolSelection
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
-import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown } from "../runtime/runtime-cooldown";
+import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown, clearRuntimeCooldown, parseRetryHint } from "../runtime/runtime-cooldown";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
@@ -278,6 +278,7 @@ import type {
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  InvocationRuntimeFailure,
   AgentlasSurfaceManifest,
   JsonObject,
   OrchestrationTarget,
@@ -636,6 +637,10 @@ class InvocationRunnerFailureError extends Error {
       && error.#failure.kind === "quota" && error.#failure.source === "marker";
   }
 
+  static providerFailure(error: unknown): Readonly<RunnerFailure> | null {
+    return error instanceof InvocationRunnerFailureError && (#failure in error) ? error.#failure : null;
+  }
+
   static imageInputFailure(error: unknown): { code: string; message: string } | null {
     // Only the host's typed runner-result boundary can mint this brand. A
     // provider message, serialized error or forged prototype is not evidence.
@@ -679,25 +684,58 @@ class InvocationRunnerFailureError extends Error {
   }
 }
 
+function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationRuntimeFailure | null {
+  const failure = InvocationRunnerFailureError.providerFailure(error);
+  if (!failure || !["quota", "auth", "refused"].includes(failure.kind)) return null;
+  const reset = failure.kind === "quota" ? parseRetryHint(failure.retryAfterHint, now) : null;
+  return {
+    kind: failure.kind as InvocationRuntimeFailure["kind"],
+    source: failure.source,
+    ...(failure.providerCode && /^[a-zA-Z0-9_.-]{1,96}$/.test(failure.providerCode)
+      ? { providerCode: failure.providerCode } : {}),
+    ...(reset !== null && reset > now && reset <= now + 30 * 24 * 60 * 60_000
+      ? { retryAfterAt: new Date(reset).toISOString() } : {}),
+  };
+}
+
 function invocationFailure(
   req: McpInvocationRequest,
   fallbackCode: string,
   error: unknown,
-): { code: string; message: string } {
+): { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
+  const runtimeFailure = invocationRuntimeFailure(error);
   const projectResidencyFailure = InvocationRunnerFailureError.projectResidencyBusyFailure(error);
   if (projectResidencyFailure) {
     const ko = "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 새 CLI를 시작하지 않았습니다. 현재 실행이 끝난 뒤 다시 보내 주세요. 기존 대화와 입력은 보존됩니다.";
     const en = "Another chat in this Work project is still using its provider. The new CLI was not started; send again after the current turn finishes. Your existing transcript and input are preserved.";
-    return { code: projectResidencyFailure.code, message: pickLocale(req) === "ko" ? ko : en };
+    return { code: projectResidencyFailure.code, message: pickLocale(req) === "ko" ? ko : en,
+      ...(runtimeFailure ? { runtimeFailure } : {}) };
   }
   const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error)
     ?? InvocationRunnerFailureError.localContextFailure(error)
     ?? InvocationRunnerFailureError.readToolScopeFailure(error);
-  if (capabilityFailure) return capabilityFailure;
+  if (capabilityFailure) return { ...capabilityFailure, ...(runtimeFailure ? { runtimeFailure } : {}) };
   const raw = error instanceof Error ? error.message : String(error);
+  if (runtimeFailure?.kind === "auth" || runtimeFailure?.kind === "refused") {
+    return { code: runtimeFailure.kind === "auth" ? "runtime_auth" : "runtime_refused", message: raw, runtimeFailure };
+  }
   if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
     return { code: error.code, message: raw };
+  }
+  const quota = runtimeFailure?.kind === "quota" ? runtimeFailure.kind : /\bquota\b|hit your weekly limit|usage limit/i.test(raw)
+    ? raw.match(/^([a-z0-9-]+) runtime quota:/i)?.[1] ?? null
+    : undefined;
+  if (quota !== undefined) {
+    const who = quota === "quota" ? InvocationRunnerFailureError.providerFailure(error)?.runtime ?? "this model"
+      : quota ?? (pickLocale(req) === "ko" ? "이 모델" : "this model");
+    return {
+      code: "runtime_quota",
+      ...(runtimeFailure ? { runtimeFailure } : {}),
+      message: pickLocale(req) === "ko"
+        ? `${who} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. 이미 도착한 팀원 답변은 위에 그대로 있습니다. (${raw})`
+        : `${who} has hit its usage limit. Switch models or send again after it resets. Any teammate replies that already arrived are still above. (${raw})`,
+    };
   }
   const toolFailureCode = classifyToolFailure({ result: raw });
   if (toolFailureCode !== "tool_failed") {
@@ -705,18 +743,6 @@ function invocationFailure(
     return {
       code: toolFailureCode,
       message: `${toolFailureCopy(toolFailureCode, locale) ?? raw} (${raw})`,
-    };
-  }
-  const quota = /\bquota\b|hit your weekly limit|usage limit/i.test(raw)
-    ? raw.match(/^([a-z0-9-]+) runtime quota:/i)?.[1] ?? null
-    : undefined;
-  if (quota !== undefined) {
-    const who = quota ?? (pickLocale(req) === "ko" ? "이 모델" : "this model");
-    return {
-      code: "runtime_quota",
-      message: pickLocale(req) === "ko"
-        ? `${who} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. 이미 도착한 팀원 답변은 위에 그대로 있습니다. (${raw})`
-        : `${who} has hit its usage limit. Switch models or send again after it resets. Any teammate replies that already arrived are still above. (${raw})`,
     };
   }
   return { code: fallbackCode, message: raw };

@@ -4845,7 +4845,7 @@ export interface McpInvocationEvent {
   delta?: string;
   /** 델타 적용 후 전체 텍스트 길이 — 렌더러가 누적 결과를 검증해 어긋나면 재동기화한다. */
   textLen?: number;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure };
   /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
   notice?: {
     level: "info" | "success" | "warning" | "error";
@@ -4955,6 +4955,15 @@ export interface McpInvocationEvent {
   nodeId?: string;
   /** 노드 실행 상태 — 캔버스가 이 값으로 노드/엣지 애니메이션을 그린다. */
   nodeState?: WorkflowNodeRunState;
+}
+
+/** Host-observed provider failure. The reset time is parsed from a runner hint,
+ * never inferred from the human-readable error message. */
+export interface InvocationRuntimeFailure {
+  kind: "quota" | "auth" | "refused";
+  source: "marker" | "exit" | "heuristic";
+  providerCode?: string;
+  retryAfterAt?: string;
 }
 
 /** 워크플로우 그래프 노드의 라이브 실행 상태(설계 §5 P2 — 캔버스 오버레이). */
@@ -6478,6 +6487,7 @@ export interface InvocationRunReceipt {
   model?: string;
   errorCode?: string;
   errorMessage?: string;
+  runtimeFailure?: InvocationRuntimeFailure;
   /**
    * Tool authority this run executed under, replayed from the durable start
    * record. Automatic recovery needs it: a `read` run cannot have mutated
