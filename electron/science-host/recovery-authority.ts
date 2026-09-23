@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeSelection } from "../../shared/types";
 import type { InvocationExecutionContext } from "../mcp/client";
 import type { RunnerRequest } from "../runtime/runner";
+import { isAgentlasServingModel } from "../../shared/agentlas-serving";
 
 /** Main-only future Science writer contract. No IPC/preload mint endpoint. */
 export interface ScienceRecoveryScope {
@@ -15,7 +16,7 @@ export interface ScienceRecoveryScope {
 }
 type Grant = Readonly<ScienceRecoveryScope> & { ownerId: string; current: () => void };
 const grants = new WeakMap<object, Grant>();
-const supported = new Set(["codex", "claude-code", "antigravity", "acp"]);
+const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas"]);
 type Selection = { kind: string; backend?: string | null; model?: string | null; source?: string | null;
   effort?: string | null; acpAgentId?: string | null };
 const selectionKey = (s: Selection) => JSON.stringify(
@@ -48,6 +49,7 @@ export function issueScienceRecoveryCapability(scope: ScienceRecoveryScope, asse
       scope.science.researchDirectorPackageVersion, scope.science.researchDirectorPackageDigest,
       scope.science.researchDirectorSystemPromptSha256].every(value => typeof value === "string" && value.trim())
     || !supported.has(scope.runtimeSelection?.kind) || !scope.runtimeSelection.model?.trim()
+    || (scope.runtimeSelection.kind === "agentlas" && !isAgentlasServingModel(scope.runtimeSelection.model))
     || (scope.runtimeSelection.kind === "acp" && !scope.runtimeSelection.acpAgentId?.trim())
     || typeof assertCurrent !== "function") throw new Error("science_recovery_scope_invalid");
   assertCurrent();

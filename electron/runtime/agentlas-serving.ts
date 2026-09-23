@@ -27,6 +27,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
 const MAX_TOOL_RESULT_CHARS = 20_000;
@@ -263,6 +264,9 @@ async function runAgentlasServingWithTools(
 }
 
 export const runAgentlasServing: Runner = async (req, events): Promise<RunnerResult> => {
+  // A recovery grant must still match the exact fresh request at the provider
+  // boundary, before authentication, prompt construction or a charged call.
+  assertScienceRecoveryRequest(req, "agentlas");
   const cookie = getSessionCookieHeader();
   if (!cookie) throw signInRequired(req.locale);
 
