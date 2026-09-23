@@ -17,6 +17,8 @@ export interface EffectObservationTicket {
   readonly attemptIds: readonly string[];
   readonly digest: string;
   readonly surface: string;
+  /** "attempts": uncertain worker attempts; "boundary": no attempt rows, only an unsealed last invocation. */
+  readonly kind: "attempts" | "boundary";
   readonly dispatcher: EffectObservationDispatcher;
 }
 
@@ -34,4 +36,39 @@ export function takeEffectObservationTicket(runId: string): EffectObservationTic
   const ticket = tickets.get(runId) ?? null;
   tickets.delete(runId);
   return ticket;
+}
+
+/** Goals whose effect observation is in flight — the chip shows "checking" instead of "review outcome". */
+const observingGoals = new Set<string>();
+/** Automations whose effect observation is in flight (headless path). */
+const observingAutomations = new Set<string>();
+
+export function markGoalObserving(goalId: string, observing: boolean): void {
+  if (observing) observingGoals.add(goalId); else observingGoals.delete(goalId);
+}
+export function isGoalObserving(goalId: string | null | undefined): boolean {
+  return Boolean(goalId && observingGoals.has(goalId));
+}
+export function markAutomationObserving(automationId: string, observing: boolean): void {
+  if (observing) observingAutomations.add(automationId); else observingAutomations.delete(automationId);
+}
+export function isAutomationObserving(automationId: string | null | undefined): boolean {
+  return Boolean(automationId && observingAutomations.has(automationId));
+}
+
+/** Headless automation observation seam, registered by automation-scheduler at module load (QA registers a fake).
+ * Kept in this import-free module so registration never depends on module load order. */
+export interface AutomationObservationRuntime {
+  isAutomationRunning(automationId: string): boolean;
+  /** Headless read-only run on the automation's own session (Main-built request only). */
+  runHeadless(automationId: string, request: import("../../shared/types").McpInvocationRequest, signal: AbortSignal): Promise<{ finalText?: string }>;
+  /** Queue the automation's next run now; false when refused (lease/running/quiescing). */
+  enqueueRun(automationId: string): boolean;
+}
+let automationRuntime: AutomationObservationRuntime | null = null;
+export function registerAutomationObservationRuntime(runtime: AutomationObservationRuntime | null): void {
+  automationRuntime = runtime;
+}
+export function automationObservationRuntime(): AutomationObservationRuntime | null {
+  return automationRuntime;
 }

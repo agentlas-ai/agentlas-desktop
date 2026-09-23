@@ -257,6 +257,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     invocation: view.continuity?.invocation,
     automations: view.continuity?.automations,
     observationFresh,
+    effectObservationChecking: view.context?.effectObservation === "checking"
+      || view.continuity?.goal?.effectObservation === "checking",
   });
   const resumable = observationFresh && (status === "paused" || status === "blocked") && !claimedWaitNeedsReview;
   const pausable = observationFresh && Boolean(status && !["paused", "pausing", "blocked", "completed", "failed", "cancelled", "cancelling"].includes(status));
@@ -300,6 +302,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : surface.state === "scheduled_wait" ? (ko ? "예약됨" : "Scheduled")
     : surface.state === "waiting_confirmation" ? (ko ? "확인 필요" : "Confirm")
     : surface.state === "waiting" ? (ko ? "대기 중" : "Waiting")
+    : surface.state === "checking_effects" ? (ko ? "반영 여부 확인 중" : "Checking…")
     : surface.state === "blocked_uncertain" ? (ko ? "결과 확인 필요" : "Review outcome")
     : surface.state === "blocked" ? (ko ? "조치 필요" : "Needs action")
     : surface.state.startsWith("paused") ? (ko ? "일시정지" : "Paused")

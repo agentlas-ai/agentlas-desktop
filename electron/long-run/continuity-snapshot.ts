@@ -5,6 +5,7 @@ import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { getAutomation, getAutomationLiveRunId, getAutomationLiveRunState } from "../store/automations";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { isGoalObserving } from "./effect-observation-tickets";
 import { getGoalRuntimeSelectionEvidence } from "./runtime-handoff";
 import { latestRuntimePlan } from "./plan";
 import { isCurrentGoalAutomationBinding } from "./automation-provenance";
@@ -75,6 +76,7 @@ export function getChatContinuitySnapshot(chatId: string, hostActiveRunId: strin
         nextWakeAt: strategy.nextWakeAt } : null,
       wait: boundWait ? { waitId: boundWait.waitId, state: boundWait.state, subjectKind: boundWait.intent.subject.kind,
         nextCheckAt: boundWait.nextCheckAt, executionAvailability: "app-running" } : null,
+      effectObservation: isGoalObserving(goalId) ? "checking" : null,
     } : null;
 
     const start = db.prepare(`SELECT id, run_id, seq, kind, ts, payload_json FROM run_events

@@ -48,6 +48,8 @@ import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph } from "./workflow/run-graph";
+import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
+import { registerAutomationObservationRuntime, type AutomationObservationRuntime } from "./long-run/effect-observation-tickets";
 import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
 import {
@@ -146,6 +148,28 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
 let installQuiescing = false;
 const running = new Set<string>();
+
+/*
+ * 묻기 전에 직접 본다(오너 2026-09-23) — 보류된 자동화·자동화가 이어받는 목표의 효과를 읽기 전용으로
+ * 한 번 본다. 요청은 effect-observation 이 Main 에서 permissions "read" 로만 만들고, 여기서는
+ * 자동화 세션·브라우저 프로필로 그대로 돌린다(쓰기 권한을 넘기는 길이 없다).
+ */
+const automationObservationRuntime: AutomationObservationRuntime = {
+  isAutomationRunning: (id) => running.has(id),
+  runHeadless: (id, request, signal) => {
+    if (request.permissions !== "read") return Promise.reject(new Error("effect_observation_must_be_read_only"));
+    const lifetime = new MainInvocationLifetime(admitMainAutomation(id), id, request.runId ?? id, "automation");
+    return lifetime.run(() => withRunPriority("background", () => runMcpInvocation(
+      request,
+      (ev) => recordMcpInvocationEvent(request.runId!, request, ev),
+      signal,
+      undefined,
+      { source: "automation" },
+    )));
+  },
+  enqueueRun: (id) => enqueueAutomationRunNow(id, admitMainAutomation(id)).accepted,
+};
+registerAutomationObservationRuntime(automationObservationRuntime);
 
 // 이 프로세스의 리스 소유자 식별자. 현재 제품 경로는 GUI만 실행하지만, 오래된
 // headless 표식이 원장에 남아 있어도 소유자를 정확히 구분할 수 있게 형식은 유지한다.
@@ -1786,6 +1810,11 @@ function tick(): void {
     }
   } catch (err) {
     console.error("[automation] read-only graph recovery failed:", err);
+  }
+  try {
+    sweepAutomationEffectObservations(automationObservationRuntime);
+  } catch (err) {
+    console.error("[automation] effect observation sweep failed:", err);
   }
   void runDueAutomations(new Date(), withMainScheduledRoot)
     .catch(error => console.error("[automation] scheduled dispatch failed:", error));

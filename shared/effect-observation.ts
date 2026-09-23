@@ -24,6 +24,11 @@ export interface EffectObservationReport {
   verdict: EffectObservationVerdict;
   attemptIds: string[];
   evidence: string;
+  /**
+   * Optional exact text a reported target produced (automation steps that declare
+   * `produces`). Only keys from the expected set are accepted; nothing is inferred.
+   */
+  outputs: Record<string, string>;
 }
 
 export type ParsedEffectObservation =
@@ -32,6 +37,7 @@ export type ParsedEffectObservation =
   | { status: "absent" };
 
 const MAX_EVIDENCE = 500;
+const MAX_OUTPUT = 16_000;
 
 function markerLines(text: string): string[] {
   return text.split("\n").filter((line) => line.trim().startsWith(EFFECT_OBSERVATION_MARKER));
@@ -46,12 +52,12 @@ export function parseEffectObservationMarker(text: string, expectedAttemptIds: r
   const lines = markerLines(text);
   if (lines.length !== 1) return { status: "invalid", reason: lines.length ? "effect_observation_ambiguous" : "effect_observation_not_on_own_line" };
   const body = lines[0].trim().slice(EFFECT_OBSERVATION_MARKER.length).trim();
-  if (body.length > 4096) return { status: "invalid", reason: "effect_observation_too_large" };
+  if (body.length > 64_000) return { status: "invalid", reason: "effect_observation_too_large" };
   let value: unknown;
   try { value = JSON.parse(body); } catch { return { status: "invalid", reason: "effect_observation_malformed" }; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return { status: "invalid", reason: "effect_observation_malformed" };
   const item = value as Record<string, unknown>;
-  if (Object.keys(item).some((key) => !["verdict", "attempts", "evidence"].includes(key))) {
+  if (Object.keys(item).some((key) => !["verdict", "attempts", "evidence", "outputs"].includes(key))) {
     return { status: "invalid", reason: "effect_observation_unknown_field" };
   }
   if (item.verdict !== "done" && item.verdict !== "not_done" && item.verdict !== "unknown") {
@@ -66,10 +72,22 @@ export function parseEffectObservationMarker(text: string, expectedAttemptIds: r
     || JSON.stringify(reported) !== JSON.stringify(expected)) {
     return { status: "invalid", reason: "effect_observation_attempts_mismatch" };
   }
+  const outputs: Record<string, string> = {};
+  if (item.outputs !== undefined) {
+    if (!item.outputs || typeof item.outputs !== "object" || Array.isArray(item.outputs)) {
+      return { status: "invalid", reason: "effect_observation_outputs_invalid" };
+    }
+    for (const [key, value] of Object.entries(item.outputs as Record<string, unknown>)) {
+      if (!expected.includes(key) || typeof value !== "string" || !value.trim() || value.length > MAX_OUTPUT) {
+        return { status: "invalid", reason: "effect_observation_outputs_invalid" };
+      }
+      outputs[key] = value;
+    }
+  }
   const evidence = typeof item.evidence === "string" ? item.evidence.replace(/\s+/g, " ").trim() : "";
   // 보았다고 말하려면 무엇을 보았는지 적어야 한다. 근거 없는 done/not_done 은 모름이다.
   if (item.verdict !== "unknown" && !evidence) return { status: "invalid", reason: "effect_observation_evidence_missing" };
-  return { status: "reported", report: { verdict: item.verdict, attemptIds: expected, evidence: evidence.slice(0, MAX_EVIDENCE) } };
+  return { status: "reported", report: { verdict: item.verdict, attemptIds: expected, evidence: evidence.slice(0, MAX_EVIDENCE), outputs } };
 }
 
 /** 표식 줄을 본문에서 지운다. 표식이 없으면 원문 그대로. */

@@ -85,6 +85,7 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
     invocation: continuity.invocation,
     automations: rows,
     observationFresh: true,
+    effectObservationChecking: goal.effectObservation === "checking",
   });
   const surfaceConsistent = observedSurface.state === surface.state;
 
