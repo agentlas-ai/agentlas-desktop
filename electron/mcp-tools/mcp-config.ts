@@ -49,7 +49,7 @@ import {
   MCP_PROXY_LAUNCH_ENV,
   mcpProxyControlInfoPath,
 } from "./proxy-channel";
-import { mcpProxyApprovalPort } from "./proxy-server";
+import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
 import {
   BROWSER_CDP_LAUNCHER_BASENAME,
@@ -204,7 +204,29 @@ export interface McpConfigBuildOptions {
     planPath?: string;
     /** Main-owned Antigravity browser scope; never supplied by renderer JSON. */
     residentKey?: string;
+    /**
+     * Main-issued read-only effect observation / reconciliation run. With read
+     * permission it binds agentlas-browser in the Main-enforced read-only profile
+     * on every runtime (codex read runs always get that profile).
+     */
+    readOnlyObservation?: true;
   };
+}
+
+/**
+ * Whether this run's agentlas-browser is bound in the Main-enforced read-only
+ * profile (proxy-server.ts readOnlyBrowserToolIsMutating). Codex read runs have
+ * approval_policy "never" and refused every non-readOnlyHint MCP call, including
+ * browser_navigate and browser_tabs (production 2026-09-23, codex-cli 0.156.1:
+ * "MCP tool call requires approval, but approval policy is never"), so an
+ * observation could never refresh the page. Codex already refused every mutating
+ * browser call there, so this profile removes no capability from codex read runs;
+ * other runtimes get it only for Main-issued observation runs.
+ */
+export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["toolGate"]): boolean {
+  if (!gate || gate.planMode || gate.simulation === true) return false;
+  if ((gate.permission ?? "read") !== "read") return false;
+  return gate.runtime === "codex" || gate.readOnlyObservation === true;
 }
 
 export interface BrowserApprovalScope {
@@ -223,9 +245,13 @@ function mcpProxySpec(
   ownedHandles: string[],
   residentHandles: string[],
   planReadAuthority?: "agentlas-browser" | "cua-driver",
+  readOnlyBrowser?: boolean,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
-  const gate = opts?.toolGate;
-  if (!gate) return null;
+  const toolGate = opts?.toolGate;
+  if (!toolGate) return null;
+  // The observation marker is a config-time input only; the proxy gate carries the
+  // resolved per-server profile (readOnlyBrowser), never the raw request flag.
+  const { readOnlyObservation: _readOnlyObservation, ...gate } = toolGate;
   if (mcpProxyApprovalPort() <= 0) {
     throw new Error(gate.planMode ? "plan_mode_mcp_gate_unavailable" : "mcp_proxy_gate_unavailable");
   }
@@ -234,7 +260,8 @@ function mcpProxySpec(
     throw new Error(gate.planMode ? "plan_mode_mcp_proxy_unavailable" : "mcp_proxy_child_unavailable");
   }
   const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
-    cwd: gate.cwd === undefined ? (opts?.workingFolder ?? process.cwd()) : gate.cwd, catalogId, planReadAuthority });
+    cwd: gate.cwd === undefined ? (opts?.workingFolder ?? process.cwd()) : gate.cwd, catalogId, planReadAuthority,
+    ...(readOnlyBrowser ? { readOnlyBrowser: true as const } : {}) });
   if (isPersistentMcpProxyLaunch(handle)) residentHandles.push(handle);
   else ownedHandles.push(handle);
   return {
@@ -919,7 +946,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           env: wrapperEnv,
         };
         consentTransport = actual;
-        const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles, browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined);
+        const browserReadOnly = s.catalogId === "agentlas-browser" && agentlasBrowserReadOnlyProfile(opts?.toolGate);
+        const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,
+          browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly);
+        if (browserReadOnly && !proxied) throw new Error("browser-read-only-gate-unavailable");
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -928,7 +958,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // External stdio MCPs launch through the least-privilege wrapper. The
         // child gets OS necessities and only its own mapped credentials, never
         // LLM auth or another MCP's opaque alias.
-        const codexLaunch = opts?.toolGate?.planMode ? proxied : null;
+        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly ? proxied : null;
         pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexLaunch?.command ?? process.execPath));
         pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexLaunch?.args ?? wrapperArgs));
         pushCodexConfig(
@@ -939,6 +969,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         );
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
+        }
+        if (browserReadOnly && codexLaunch) {
+          // Codex's own gate stays "never" for everything else. Only the read-only
+          // profile's tools are pre-approved at the vendor layer, and every one of
+          // their calls still passes the Main proxy's argument-level read-only check.
+          for (const tool of READ_ONLY_BROWSER_TOOLS) {
+            pushCodexConfig(codexConfigArgs, key, `tools.${tool}.approval_mode`, tomlString("approve"));
+          }
         }
       }
     } else if (s.url) {
