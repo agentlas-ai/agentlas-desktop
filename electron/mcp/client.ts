@@ -5781,7 +5781,9 @@ ${effectiveUserPrompt}`;
         const goalBudget = activeGoalId ? getLongRunByGoalId(activeGoalId) : null;
         const monetaryRefusal = goalBudget && goalBudget.surface !== "science" ? longRunMonetaryRefusal(goalBudget) : null;
         if (monetaryRefusal) throw new Error(monetaryRefusal);
-        const aliveUsageAttempt = executionContext?.source === "alive" ? ++aliveUsageAttemptOrdinal : null;
+        // A missing runner is a known pre-dispatch failure, not an unknown
+        // provider charge. Begin coverage only for a selected provider.
+        const aliveUsageAttempt = executionContext?.source === "alive" && picked ? ++aliveUsageAttemptOrdinal : null;
         if (aliveUsageAttempt !== null && req.runId) {
           // Required coverage marker: a missing terminal pair for any provider
           // attempt makes the bounded Alive wake's total unknown.
