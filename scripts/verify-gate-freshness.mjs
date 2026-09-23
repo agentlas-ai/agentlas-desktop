@@ -123,7 +123,10 @@ function snapshotGates(files, trackedUnion) {
 const PATH_RE = /(["'])((?:renderer|electron|shared|dist|docs)\/[^"'\n]+?\.(?:tsx?|cjs|mjs|css|json|md))\1/g;
 // 코퍼스용은 더 넓다: 게이트가 언급하는 모든 저장소 텍스트 파일(모바일·문서·설정 포함).
 // 죽은 경로 판정은 위의 좁은 PATH_RE 로만 한다 — 넓히면 저장소 파일이 아닌 문자열까지 물어 오탐이 된다.
-const CORPUS_PATH_RE = /(["'])([\w.@-]+(?:\/[^"'\n]+)+?\.(?:tsx?|jsx?|cjs|mjs|css|json|md|txt|html|sh|py|toml|ya?ml|dart|kt|swift|rs|go))\1/g;
+// No nested quantifier: `(?:\/[^"'\n]+)+?` backtracked exponentially on a long
+// single-line string (a 1,820-char golden value inlined in a gate hung every
+// desktop commit for 90+ minutes on 2026-09-23). Same language: ≥1 slash.
+const CORPUS_PATH_RE = /(["'])([\w.@-]+\/[^"'\n]*?\.(?:tsx?|jsx?|cjs|mjs|css|json|md|txt|html|sh|py|toml|ya?ml|dart|kt|swift|rs|go))\1/g;
 const JOIN_RE = /(?:path\.)?join\(\s*(?:root|__dirname|repoRoot|REPO_ROOT)\s*,\s*((?:["'][^"']*["']\s*,\s*)*["'][^"']*["'])\s*\)/g;
 const READ_RE = /readFileSync\([^)]*?(["'])((?:renderer|electron|shared)\/[^"'\n]+?)\1/g;
 // assert.match(subject, /.../) 한 줄 안의 정규식 리터럴만 앵커로 본다(doesNotMatch는 제외).

@@ -470,6 +470,7 @@ import {
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
 import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
+import { isGoalObserving } from "./long-run/effect-observation-tickets";
 import { emitDesktopStoreChange } from "./store/change-bus";
 import {
   confirmDesktopLongRunResumeDispatched,
@@ -4369,8 +4370,9 @@ export function registerIpcHandlers(): void {
     // observation run before the person is asked. Idempotent per attempt set.
     try { maybeDispatchEffectObservation(invocationService, chat.goalId, "goal-context"); }
     catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
-    const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    const loaded = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
+    const context = loaded && isGoalObserving(chat.goalId) ? { ...loaded, effectObservation: "checking" as const } : loaded;
     const wait = latestGoalWaitSubscription(chat.goalId);
     if (!context || !wait || wait.chatId !== id) return context;
     return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
@@ -4501,6 +4503,9 @@ export function registerIpcHandlers(): void {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
       throw new TypeError("A current long-run version is required to review");
     }
+    // While a read-only effect observation runs, there is nothing for the person to
+    // review yet: the chip shows the checking state and Resume just re-reads it.
+    if (isGoalObserving(expectedGoalId)) return null;
     const run = getLongRunByGoalId(expectedGoalId);
     if (!run || run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
     const review = getLongRunAttemptReview(run.id);
@@ -4536,6 +4541,13 @@ export function registerIpcHandlers(): void {
     }
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
       throw new TypeError("A current long-run version is required to resume");
+    }
+    // Resume pressed while the app is already looking: not an error (never
+    // auto_goal_resume_chat_busy). Return the checking state; the observation's
+    // own outcome continues the Goal or hands the one-sentence Resume back.
+    if (isGoalObserving(chat.goalId)) {
+      const checking = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+      return checking ? { ...checking, effectObservation: "checking" as const } : checking;
     }
     const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");

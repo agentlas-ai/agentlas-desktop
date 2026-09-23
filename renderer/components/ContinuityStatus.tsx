@@ -30,6 +30,7 @@ function goalStatus(snapshot: ChatContinuitySnapshot, ko: boolean, observationSt
     invocation: snapshot.invocation,
     automations: snapshot.automations,
     observationFresh: !observationStale,
+    effectObservationChecking: goal.effectObservation === "checking",
   });
   return goalSurfaceStatusLabel(status.state, ko ? "ko" : "en");
 }
@@ -138,6 +139,7 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
     invocation: snapshot.invocation,
     automations: snapshot.automations,
     observationFresh: !error,
+    effectObservationChecking: snapshot.goal.effectObservation === "checking",
   }) : null;
   return <details className={detail ? styles.detail : styles.compact} open={detail || undefined} data-continuity-status={detail ? "detail" : "compact"}
     data-observation={error ? "stale" : "confirmed"} aria-label={ko ? "작업 연속성 상태" : "Work continuity status"}>

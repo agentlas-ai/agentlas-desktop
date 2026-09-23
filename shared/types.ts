@@ -801,6 +801,8 @@ export interface ChatContinuitySnapshot {
     wait: null | { waitId: string; state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
       subjectKind: "invocation" | "artifact" | "timer"; nextCheckAt: string | null;
       executionAvailability: "app-running" };
+    /** Main-owned: a read-only effect observation is running for this Goal. */
+    effectObservation?: "checking" | null;
   };
   invocation: null | {
     runId: string;
@@ -1882,6 +1884,8 @@ export interface ChatGoalContext {
   blockedReason?: string | null;
   version?: number;
   executionLocation?: "desktop-local" | "web-hosted";
+  /** Main-owned: a read-only effect observation is running for this Goal (look before asking). */
+  effectObservation?: "checking" | null;
   wait?: {
     waitId: string;
     state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";

@@ -17,6 +17,7 @@ export type GoalSurfaceState =
   | "waiting"
   | "waiting_confirmation"
   | "blocked_uncertain"
+  | "checking_effects"
   | "blocked"
   | "paused_app_closed"
   | "paused_crash_recovery"
@@ -39,6 +40,8 @@ export type GoalSurfaceStatusInput = {
   automations?: readonly Automation[];
   /** False means the renderer only has a retained snapshot, not live authority. */
   observationFresh: boolean;
+  /** Main is running a read-only effect observation for this blocked Goal (look before asking). */
+  effectObservationChecking?: boolean;
 };
 
 export type GoalAutomationSummary = {
@@ -96,6 +99,7 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
     return { ...fallback, state: "paused" };
   }
   if (status === "blocked") {
+    if (input.effectObservationChecking) return { ...fallback, state: "checking_effects" };
     if (blockedReason === "goal_wait_ongoing_authority_required") return { ...fallback, state: "waiting_confirmation" };
     if (blockedReason === "goal_wait_claimed_dispatch_uncertain"
       || blockedReason === "goal_wait_claimed_binding_changed"
@@ -128,6 +132,7 @@ export function goalSurfaceStatusLabel(state: GoalSurfaceState, locale: "ko" | "
     case "waiting": return ko ? "이 Goal의 결과·입력 대기 중" : "This Goal is waiting for a result or input";
     case "waiting_confirmation": return ko ? "다음 Goal 판단 주기 확인 대기" : "The next Goal decision cycle awaits confirmation";
     case "blocked_uncertain": return ko ? "이전 호출·효과 경계 불확실 · 자동 재실행 중단 · 확인 필요" : "Previous dispatch/effect boundary uncertain · automatic replay stopped · review needed";
+    case "checking_effects": return ko ? "이전 작업이 반영됐는지 직접 확인하는 중" : "Checking whether the earlier action went through";
     case "blocked": return ko ? "Goal이 실제로 차단됨 · 조치 필요" : "Goal is actually blocked · action needed";
     case "paused_app_closed": return ko ? "앱 종료로 멈춤 · 재개 조건 확인 중" : "Paused when the app closed · checking whether safe resume is possible";
     case "paused_crash_recovery": return ko ? "중단된 실행을 복구해 멈춤 · 안전한 재개 조건 확인 중" : "Paused after recovering an interrupted run · checking safe resume conditions";

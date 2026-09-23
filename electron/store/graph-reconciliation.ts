@@ -25,6 +25,7 @@ import { emitDesktopStoreChange } from "./change-bus";
 import { computeNextRun, getAutomation } from "./automations";
 import { getDb } from "./db";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
+import { synthesizeLegacyGraph } from "../automation-emitter";
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -106,6 +107,19 @@ function occurrenceVars(automationId: string, occurrenceId: string): Record<stri
 
 function validId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.includes("\0");
+}
+
+/**
+ * The graph a run actually executed. A prompt-only (legacy) automation — every
+ * Goal continuation is one — runs through runGraph with an in-memory two-node
+ * graph (automation-scheduler: synthesizeLegacyGraph) that is never stored.
+ * graphExecutionDigest ignores automation.graph, so the stored run digest
+ * matches this reconstruction exactly; a mismatch still fails as graph drift.
+ */
+function executionGraphAutomation(automation: Automation): Automation {
+  return automation.graph && automation.graph.nodes.length > 0
+    ? automation
+    : { ...automation, graph: synthesizeLegacyGraph(automation) };
 }
 
 function strictGraph(automation: Automation): WorkflowGraph {
@@ -233,7 +247,7 @@ function loadReconciliation(
   if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
   const automation = getAutomation(automationId);
   if (!automation) throw new Error("automation_graph_reconciliation_automation_missing");
-  const graph = strictGraph(automation);
+  const graph = strictGraph(executionGraphAutomation(automation));
   const run = exact
     ? getDb().prepare(
         `SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
@@ -453,6 +467,22 @@ export function getAutomationGraphReconciliation(
   const latest = loadReconciliation(automationId);
   if (!latest || inspectedRunIds.has(latest.run.id)) return null;
   return latest.view;
+}
+
+/**
+ * Effect-observation seam (owner 2026-09-23 "look before asking"): the same
+ * exact reconciliation view, including prompt-only automations whose run used
+ * the synthesized legacy graph. The renderer-facing getter above keeps its
+ * historical empty state for graphless rows; reconcileAutomationGraph accepts
+ * both because it re-loads through the same executionGraphAutomation.
+ */
+export function getAutomationEffectHold(automationId: string): AutomationGraphReconciliation | null {
+  if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
+  const automation = getAutomation(automationId);
+  if (!automation) throw new Error("automation_graph_reconciliation_automation_missing");
+  if (automation.graph && automation.graph.nodes.length > 0) return getAutomationGraphReconciliation(automationId);
+  const latest = loadReconciliation(automationId);
+  return latest?.view ?? null;
 }
 
 /**
