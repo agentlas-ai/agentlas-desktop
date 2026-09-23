@@ -767,6 +767,7 @@ interface StreamTurnResult {
   toolCalls: OpenAiToolCall[];
   missingToolCallIds: boolean;
   incompleteToolCalls: boolean;
+  terminalUsage?: { inputTokens: number; outputTokens: number };
 }
 
 async function streamChatTurn(
@@ -776,6 +777,10 @@ async function streamChatTurn(
 ): Promise<StreamTurnResult> {
   let acc = "";
   let finishReason: string | undefined;
+  let sawDone = false;
+  let terminalUsage: StreamTurnResult["terminalUsage"];
+  let terminalUsageChunks = 0;
+  let lastChunkWasUsage = false;
   let lastEmit = 0;
   // OpenAI-호환 로컬 서버(ollama·LM Studio·MLX)는 생각을 delta.reasoning_content(또는
   // ollama의 delta.reasoning / delta.thinking)로 따로 준다. 자기 행으로 흘린다.
@@ -785,9 +790,11 @@ async function streamChatTurn(
   for await (const line of iterSseLines(resp)) {
     if (!line.startsWith("data:")) continue;
     const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
+    if (payload === "[DONE]") { sawDone = true; break; }
+    lastChunkWasUsage = false;
     try {
       const event = JSON.parse(payload) as {
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null;
         choices?: Array<{
           finish_reason?: string;
           delta?: {
@@ -803,6 +810,17 @@ async function streamChatTurn(
           };
         }>;
       };
+      if (event.usage && Array.isArray(event.choices) && event.choices.length === 0) {
+        terminalUsageChunks += 1;
+        const input = event.usage.prompt_tokens;
+        const output = event.usage.completion_tokens;
+        if (Number.isSafeInteger(input) && Number(input) >= 0
+          && Number.isSafeInteger(output) && Number(output) >= 0
+          && Number(input) + Number(output) <= Number.MAX_SAFE_INTEGER) {
+          terminalUsage = { inputTokens: Number(input), outputTokens: Number(output) };
+          lastChunkWasUsage = true;
+        }
+      }
       if (typeof event.choices?.[0]?.finish_reason === "string") finishReason = event.choices[0].finish_reason;
       const delta = event.choices?.[0]?.delta;
       const thought = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
@@ -847,6 +865,8 @@ async function streamChatTurn(
       function: { name: entry.name, arguments: entry.args },
     }));
   return { text: acc.trim(), toolCalls, finishReason,
+    ...(sawDone && finishReason && terminalUsageChunks === 1 && lastChunkWasUsage && terminalUsage
+      ? { terminalUsage } : {}),
     missingToolCallIds: pendingCalls.some((entry) => !entry.id),
     incompleteToolCalls: pendingCalls.some((entry) => !entry.name),
   };
@@ -1022,11 +1042,28 @@ export async function runLocalOpenAiChat(
   let identicalToolTurns = 0;
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
   let surfaceFallbackApplied = false;
+  let observedInputTokens = 0;
+  let observedOutputTokens = 0;
+  let usageComplete = true;
+  const observeTurnUsage = (result: StreamTurnResult): void => {
+    const usage = result.terminalUsage;
+    if (!usage || !usageComplete
+      || observedInputTokens + usage.inputTokens > Number.MAX_SAFE_INTEGER
+      || observedOutputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER
+      || observedInputTokens + observedOutputTokens + usage.inputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER) {
+      usageComplete = false;
+      return;
+    }
+    observedInputTokens += usage.inputTokens;
+    observedOutputTokens += usage.outputTokens;
+  };
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     const requestBody: Record<string, unknown> = {
             model,
             stream: true,
+            ...(runtimeKind === "byok" || runtimeKind === "lmstudio"
+              ? { stream_options: { include_usage: true } } : {}),
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
@@ -1173,6 +1210,7 @@ export async function runLocalOpenAiChat(
           throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
         }
         const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
+        observeTurnUsage(result);
         if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
         finalText = result.text;
         reachedAnswer = true;
@@ -1182,6 +1220,7 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
+    observeTurnUsage(result);
     if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
     if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
       || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
@@ -1284,11 +1323,15 @@ export async function runLocalOpenAiChat(
         ? workforceNativeToolEnforcement(req, runtimeKind, [])
         : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
+  const observedUsage = usageComplete
+    ? { inputTokens: observedInputTokens, outputTokens: observedOutputTokens } : undefined;
+  if (observedUsage) events.onTerminalObservedUsage?.(observedUsage);
   return {
     // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을
     // 주지 않기 위해서다. 판정은 어디까지나 failure 칸이 한다.
     text: answer || (failure ? failure.message : ""),
     ...(failure ? { failure } : {}),
+    ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: enforcement,
   };
 }

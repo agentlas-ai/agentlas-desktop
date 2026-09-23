@@ -786,6 +786,9 @@ export const runGoogleByok: Runner = async (
   let lastEmit = 0;
   let reachedAnswer = false;
   let includeTools = functionDeclarations.length > 0;
+  let observedInputTokens = 0;
+  let observedOutputTokens = 0;
+  let usageComplete = true;
   /** Monotonic across every SSE event in this provider invocation. */
   let responseIndex = 0;
 
@@ -842,14 +845,28 @@ export const runGoogleByok: Runner = async (
       name: string;
       args: Record<string, unknown>;
     }> = [];
+    let terminalUsage: { inputTokens: number; outputTokens: number } | undefined;
+    let sawFinishReason = false;
     for await (const line of iterSseLines(resp)) {
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
       if (!payload) continue;
+      if (payload === "[DONE]") break;
+      // Usage on an intermediate chunk may be a subtotal. Only the last
+      // response frame of a finished stream can account for this request.
+      terminalUsage = undefined;
       try {
         const event = JSON.parse(payload) as {
-          candidates?: Array<{ content?: { parts?: GooglePart[] } }>;
+          candidates?: Array<{ content?: { parts?: GooglePart[] }; finishReason?: string }>;
+          usageMetadata?: { promptTokenCount?: unknown; totalTokenCount?: unknown };
         };
+        sawFinishReason ||= event.candidates?.some((candidate) => typeof candidate.finishReason === "string") ?? false;
+        const input = event.usageMetadata?.promptTokenCount;
+        const total = event.usageMetadata?.totalTokenCount;
+        if (Number.isSafeInteger(input) && Number(input) >= 0
+          && Number.isSafeInteger(total) && Number(total) >= Number(input)) {
+          terminalUsage = { inputTokens: Number(input), outputTokens: Number(total) - Number(input) };
+        }
         const currentResponseIndex = responseIndex;
         responseIndex += 1;
         const parts = event.candidates?.[0]?.content?.parts ?? [];
@@ -893,6 +910,15 @@ export const runGoogleByok: Runner = async (
         // authority, so ignore them just as the previous text-only adapter did.
       }
     }
+    if (!terminalUsage || !sawFinishReason || !usageComplete
+      || observedInputTokens + terminalUsage.inputTokens > Number.MAX_SAFE_INTEGER
+      || observedOutputTokens + terminalUsage.outputTokens > Number.MAX_SAFE_INTEGER
+      || observedInputTokens + observedOutputTokens + terminalUsage.inputTokens + terminalUsage.outputTokens > Number.MAX_SAFE_INTEGER) {
+      usageComplete = false;
+    } else {
+      observedInputTokens += terminalUsage.inputTokens;
+      observedOutputTokens += terminalUsage.outputTokens;
+    }
     if (functionCalls.length === 0 || req.untrustedNoTools) {
       reachedAnswer = true;
       break;
@@ -935,9 +961,13 @@ export const runGoogleByok: Runner = async (
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
+  const observedUsage = usageComplete
+    ? { inputTokens: observedInputTokens, outputTokens: observedOutputTokens } : undefined;
+  if (observedUsage) events.onTerminalObservedUsage?.(observedUsage);
   return {
     text: answer || (failure ? failure.message : ""),
     ...(failure ? { failure } : {}),
+    ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: failure
       ? broker?.finish(false)
       : broker
