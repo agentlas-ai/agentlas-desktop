@@ -1,5 +1,6 @@
 import type { InstallIdentity } from "./install-identity";
 import type { IpcMain } from "electron";
+import { normalizeIpcArgsInPlace } from "./ipc-args-normalize";
 
 // Capture only the launch request. The environment cannot grant admission:
 // Main must supply the actual package state and validated install identity.
@@ -92,11 +93,17 @@ export function assertDevelopmentIpcAllowed(channel: string, args: readonly unkn
   throw new DevelopmentEffectPolicyError("development_effect_policy_disabled", `ipc:${channel}`);
 }
 
-/** Local registration adapter; never replaces Electron's global IPC object. */
+/**
+ * Local registration adapter; never replaces Electron's global IPC object.
+ * Every Main `handle` registration goes through here, so this is also the one
+ * place where "key present with value undefined" becomes "key absent" before
+ * any handler or validator sees the arguments (see ./ipc-args-normalize).
+ */
 export function developmentIpcBoundary(source: Pick<IpcMain, "handle">): Pick<IpcMain, "handle"> {
   return {
     handle(channel, listener) {
       source.handle(channel, (event, ...args) => {
+        normalizeIpcArgsInPlace(args);
         assertDevelopmentIpcAllowed(channel, args);
         return listener(event, ...args);
       });
