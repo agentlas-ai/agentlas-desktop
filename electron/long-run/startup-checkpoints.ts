@@ -16,7 +16,7 @@ import { latestRuntimePlan } from "./plan";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
-  blockHostPausedForEffectBoundaryUncertainty, listLongRunTasks, recordLongRunCycle, unsettledLongRunAttemptCount } from "../store/long-runs";
+  blockHostPausedForEffectBoundaryUncertainty, listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
@@ -485,6 +485,8 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
     // A claimed wake without a dispatch receipt is inspectable, never replayed.
     const wait = latestGoalWaitSubscription(candidate.goalId);
     if (wait && ["pending", "claimed"].includes(wait.state)) continue;
+    // A host-scheduled blocked-goal retry owns its own next step (blocked-goal-sweep.ts).
+    if (pendingBlockedGoalRetry(candidate.id)) continue;
     const evaluated = getDb().prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_startup' AND json_extract(payload_json, '$.appInstanceId') = ? LIMIT 1")
       .get(candidate.id, appInstanceId);
     if (evaluated) continue;
