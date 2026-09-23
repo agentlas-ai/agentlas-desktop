@@ -474,7 +474,7 @@ export function applyTranslation(
   db: Db,
   job: LoadedJob,
   english: string,
-  meta: { translator: string; backCheck: number; intakeEpoch: number | null },
+  meta: { translator: string; backCheck: number | null; intakeEpoch: number | null },
 ): "translated" | "stale" | "forgotten" {
   const now = new Date().toISOString();
   const embedding = autoLocalEmbedding(english);
