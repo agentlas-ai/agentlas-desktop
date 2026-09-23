@@ -672,6 +672,7 @@ export function curateEvents(
         scope: effectiveScope,
         kind: ev.memory_kind,
         content: ev.content,
+        ...(ev.content_native ? { contentNative: ev.content_native } : {}),
         projectId: ctx.projectId,
         projectPath,
         agentId: effectiveAgentId,

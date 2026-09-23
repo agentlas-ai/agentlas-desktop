@@ -18,6 +18,8 @@ export interface RawMemoryEvent {
   confidence: "high" | "medium" | "low";
   sensitivity: "public" | "internal" | "private" | "confidential" | "secret";
   evidence_refs: string[];
+  /** Original-language wording; `content` is English (plan §9-8). */
+  content_native?: string;
   request_context?: RequestContext;
 }
 
@@ -105,6 +107,8 @@ function normalize(raw: unknown): RawMemoryEvent | null {
     sensitivity: coerceSensitivity(o.sensitivity),
     evidence_refs: evidence,
   };
+  const native = typeof o.content_native === "string" ? o.content_native.trim().slice(0, 4_000) : "";
+  if (native && native !== content) event.content_native = native;
   const requestContext = coerceRequestContext(o.request_context);
   if (requestContext) event.request_context = requestContext;
   return event;
