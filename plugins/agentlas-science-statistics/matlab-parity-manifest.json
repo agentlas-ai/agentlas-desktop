@@ -287,8 +287,8 @@
     },
     "figureCatalog": {
       "schema": "agentlas.science.statistics.figure-catalog/v1",
-      "catalogVersion": "2.0.0",
-      "templateCount": 227,
+      "catalogVersion": "2.1.0",
+      "templateCount": 228,
       "templateIds": [
         "distribution-histogram-density",
         "distribution-empirical-cdf",
@@ -342,6 +342,7 @@
         "estimation-meta-analysis-funnel",
         "estimation-meta-analysis-influence",
         "multivariate-bivariate-count-heatmap",
+        "multivariate-paired-scatter",
         "estimation-factorial-interaction-means",
         "contingency-observed-count-heatmap",
         "estimation-multiplicity-raw-adjusted-p",
@@ -3366,6 +3367,18 @@
       }
     },
     {
+      "id": "multivariate-paired-scatter",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
       "id": "estimation-factorial-interaction-means",
       "taxonomyIds": [
         "matlab.plot.line"
@@ -5473,28 +5486,28 @@
     }
   ],
   "aggregate": {
-    "rowCount": 406,
+    "rowCount": 407,
     "analysis": {
       "implemented": 179,
       "partial": 0,
       "missing": 0,
-      "not-applicable": 227
+      "not-applicable": 228
     },
     "renderer": {
       "implemented": 0,
-      "partial": 402,
+      "partial": 403,
       "missing": 4,
       "not-applicable": 0
     },
     "interaction": {
       "implemented": 0,
       "partial": 1,
-      "missing": 405,
+      "missing": 406,
       "not-applicable": 0
     },
     "export": {
       "implemented": 0,
-      "partial": 402,
+      "partial": 403,
       "missing": 4,
       "not-applicable": 0
     }

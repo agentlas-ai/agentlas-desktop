@@ -5,7 +5,7 @@ const path = require("node:path");
 
 const CATALOG_FILE = "figure-catalog.json";
 const CATALOG_SCHEMA = "agentlas.science.statistics.figure-catalog/v1";
-const MAX_CATALOG_BYTES = 512 * 1024;
+const MAX_CATALOG_BYTES = 1024 * 1024;
 const MIN_TEMPLATE_COUNT = 40;
 const MIN_FAMILY_COVERAGE = 4;
 

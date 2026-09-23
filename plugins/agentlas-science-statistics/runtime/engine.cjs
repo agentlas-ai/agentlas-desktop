@@ -1477,6 +1477,69 @@ function bivariateBins(x, y, bins = 32) {
   });
 }
 
+/** Preserve paired values for visual review; switch to declared counts only for dense inputs. */
+function correlationFigure(data) {
+  const title = `${data.yLabel} by ${data.xLabel}`;
+  if (data.x.length > 5_000) {
+    return vegaArtifact("relationship", `${title} · paired counts in 32 × 32 bins`, {
+      data: { values: bivariateBins(data.x, data.y) },
+      mark: "rect",
+      encoding: {
+        x: { field: "x0", type: "quantitative", title: data.xLabel, bin: "binned" },
+        x2: { field: "x1" },
+        y: { field: "y0", type: "quantitative", title: data.yLabel, bin: "binned" },
+        y2: { field: "y1" },
+        color: { field: "count", type: "quantitative", title: "Paired observations", legend: { format: "d" } },
+        tooltip: [
+          { field: "x0", title: `${data.xLabel} from`, format: ".6g" },
+          { field: "x1", title: `${data.xLabel} to`, format: ".6g" },
+          { field: "y0", title: `${data.yLabel} from`, format: ".6g" },
+          { field: "y1", title: `${data.yLabel} to`, format: ".6g" },
+          { field: "count", title: "Paired observations", format: "d" },
+        ],
+      },
+    });
+  }
+  const pairs = new Map();
+  for (let index = 0; index < data.x.length; index += 1) {
+    const x = data.x[index];
+    const y = data.y[index];
+    const key = JSON.stringify([x, y]);
+    const existing = pairs.get(key);
+    if (existing) existing.count += 1;
+    else pairs.set(key, { x, y, count: 1 });
+  }
+  const values = [...pairs.values()];
+  const maxCount = Math.max(...values.map((pair) => pair.count));
+  return vegaArtifact("paired-scatter", title, {
+    data: { values },
+    layer: [
+      {
+        mark: { type: "point", filled: true, opacity: 0.8 },
+        encoding: {
+          x: { field: "x", type: "quantitative", title: data.xLabel, scale: { zero: false, padding: 12 } },
+          y: { field: "y", type: "quantitative", title: data.yLabel, scale: { zero: false, padding: 12 } },
+          size: { field: "count", type: "quantitative", scale: { type: "sqrt", domain: [1, Math.max(2, maxCount)], range: [95, 340] }, legend: null },
+          tooltip: [
+            { field: "x", title: data.xLabel, format: ".8g" },
+            { field: "y", title: data.yLabel, format: ".8g" },
+            { field: "count", title: "Paired observations", format: "d" },
+          ],
+        },
+      },
+      {
+        transform: [{ filter: "datum.count > 1" }],
+        mark: { type: "text", align: "left", baseline: "bottom", dx: 8, dy: -6 },
+        encoding: {
+          x: { field: "x", type: "quantitative" },
+          y: { field: "y", type: "quantitative" },
+          text: { field: "count", type: "quantitative", format: "d" },
+        },
+      },
+    ],
+  });
+}
+
 function minMax(values) {
   let min = values[0];
   let max = values[0];
@@ -2033,7 +2096,7 @@ function analyzeCorrelation(method, data, options, budget) {
       diagnostics: [{ name: "ties", status: core.xTies.length || core.yTies.length ? "present" : "absent", xTieBlocks: core.xTies.length, yTieBlocks: core.yTies.length }, { name: "p-value method", requested: options.pValueMethod, used: exact ? "exact" : "asymptotic", exactEligibility: "n <= 9 and no ties" }],
       artifacts: [
         tableArtifact(`Kendall tau-b: ${data.xLabel} and ${data.yLabel}`, "Rank association with tie-aware inference.", [{ key: "coefficient", label: "Tau-b", type: "number" }, { key: "lower", label: "CI lower", type: "number" }, { key: "upper", label: "CI upper", type: "number" }, { key: "statistic", label: "S", type: "number" }, { key: "z", label: "z", type: "number" }, { key: "pValue", label: "p", type: "number" }, { key: "method", label: "P-value method", type: "string" }, { key: "n", label: "N", type: "number" }], [{ coefficient: core.coefficient, lower, upper, statistic: core.s, z, pValue, method: exact ? "exact" : "asymptotic", n: data.x.length }]),
-        vegaArtifact("relationship", `${data.yLabel} by ${data.xLabel}`, { data: { values: bivariateBins(data.x, data.y) }, mark: "rect", encoding: { x: { field: "x0", type: "quantitative", title: data.xLabel, bin: "binned" }, x2: { field: "x1" }, y: { field: "y0", type: "quantitative", title: data.yLabel, bin: "binned" }, y2: { field: "y1" }, color: { field: "count", type: "quantitative", title: "N" }, tooltip: [{ field: "count" }] } }),
+        correlationFigure(data),
       ],
     };
   }
@@ -2077,7 +2140,7 @@ function analyzeCorrelation(method, data, options, budget) {
     diagnostics: [jarqueBera(data.x, budget), jarqueBera(data.y, budget), ...(method === "spearman_correlation" ? [{ name: "ties", status: ties.x.length || ties.y.length ? "present" : "absent", xTieBlocks: ties.x.length, yTieBlocks: ties.y.length }, { name: "p-value method", requested: options.pValueMethod, used: exact ? "exact" : "asymptotic", exactEligibility: "n <= 9 and no ties" }] : [])],
     artifacts: [
       tableArtifact(`${coefficientName}: ${data.xLabel} and ${data.yLabel}`, `${coefficientName} with inferential test and confidence interval.`, [{ key: "coefficient", label: "Coefficient", type: "number" }, { key: "lower", label: "CI lower", type: "number" }, { key: "upper", label: "CI upper", type: "number" }, { key: "statistic", label: "Statistic", type: "number" }, { key: "df", label: "df", type: "number" }, { key: "pValue", label: "p", type: "number" }, { key: "n", label: "N", type: "number" }], [{ coefficient: r, lower, upper, statistic, df, pValue, n: x.length }]),
-      vegaArtifact("relationship", `${data.yLabel} by ${data.xLabel}`, { data: { values: bivariateBins(data.x, data.y) }, mark: "rect", encoding: { x: { field: "x0", type: "quantitative", title: data.xLabel, bin: "binned" }, x2: { field: "x1" }, y: { field: "y0", type: "quantitative", title: data.yLabel, bin: "binned" }, y2: { field: "y1" }, color: { field: "count", type: "quantitative", title: "N" }, tooltip: [{ field: "count" }] } }),
+      correlationFigure(data),
     ],
   };
 }

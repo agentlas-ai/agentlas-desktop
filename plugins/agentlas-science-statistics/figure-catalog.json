@@ -1,6 +1,6 @@
 {
   "schema": "agentlas.science.statistics.figure-catalog/v1",
-  "catalogVersion": "2.0.0",
+  "catalogVersion": "2.1.0",
   "templates": [
     {
       "id": "distribution-histogram-density",
@@ -3658,6 +3658,76 @@
       "marks": [
         "rect",
         "heatmap"
+      ],
+      "interactions": [
+        "tooltip",
+        "zoom-pan"
+      ],
+      "exportProfiles": [
+        "journal-vector",
+        "journal-raster-600dpi",
+        "supplement-static"
+      ],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "multivariate-paired-scatter",
+      "family": "multivariate",
+      "question": "What shape and repeated paired values are present in the observed two-variable relationship?",
+      "requiredFields": [
+        {
+          "role": "x",
+          "type": "quantitative",
+          "cardinality": "one",
+          "constraints": [
+            "finite",
+            "consistent-length"
+          ],
+          "provenance": "model-output"
+        },
+        {
+          "role": "y",
+          "type": "quantitative",
+          "cardinality": "one",
+          "constraints": [
+            "finite",
+            "consistent-length"
+          ],
+          "provenance": "model-output"
+        },
+        {
+          "role": "count",
+          "type": "quantitative",
+          "cardinality": "one",
+          "constraints": [
+            "positive",
+            "integer",
+            "consistent-length"
+          ],
+          "provenance": "model-output"
+        }
+      ],
+      "requiredStatistics": [
+        {
+          "name": "exact paired coordinates and multiplicities",
+          "assumptions": [
+            "Each plotted coordinate preserves the input values without binning or jitter.",
+            "The sum of point multiplicities equals the analyzed paired sample size."
+          ],
+          "provenance": "model-derived"
+        }
+      ],
+      "renderer": {
+        "id": "agentlas.vega",
+        "capabilities": [
+          "cartesian-2d",
+          "layered-marks",
+          "vector-export"
+        ]
+      },
+      "marks": [
+        "point",
+        "text"
       ],
       "interactions": [
         "tooltip",
