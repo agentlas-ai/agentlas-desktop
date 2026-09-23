@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.35 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Windows: connecting Claude Code, Codex, or Grok now downloads the vendor's official
+  Windows executable directly — no npm, no bundled Node, no `.cmd` launcher — verified
+  against a SHA-512 pinned in this release. Downloads use the system network stack (system
+  proxy and Windows certificate store), fall back to a mirror, resume interrupted
+  transfers, and retry; the npm path remains only as a fallback.
+- Windows: launchers written by Agentlas no longer break when the Windows user name is not
+  ASCII. `cmd.exe` reads `.cmd` files in the console code page, so paths are now written
+  relative to `%USERPROFILE%` / `%LOCALAPPDATA%`.
+- Windows: the login window opens even where PowerShell is unavailable or blocked by policy.
+- First-run connect shows "Getting ready… first time only" while installing and "Log in in
+  the window that opened" while waiting for login.
+- One: an ongoing Goal is shown as one compact line below the conversation instead of a
+  stack of panels over it; details live behind a small (?) popover.
+- One: resuming a Goal after interrupted work is one sentence and one button. It never
+  replays the interrupted attempts, and it is no longer refused when the Goal has a linked
+  automation, when an attempt has no recorded activity, or when there were more than 20.
+- One: Goals keep observing through verifier outages, quota exhaustion, wait-registration
+  failures, and transient database locks instead of stopping as blocked; Graph automations
+  resume after proven read-only failures and hand safe quota failures to another provider.
+
 ## 1.2.34 — 2026-09-23
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
