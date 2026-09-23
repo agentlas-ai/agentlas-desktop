@@ -29,7 +29,10 @@ import { tStatus } from "./status-i18n";
 import { prepareMainToolLoop, runMainToolDispatch, trackToolTurnProgress } from "./local-tool-loop";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
-const MAX_TOOL_EXCHANGES = 32;
+// Match the bounded local/BYOK provider loops. Context and credit admission
+// normally stop a run earlier; this remains a final nonconvergence circuit.
+const MAX_TOOL_EXCHANGES = 200;
+const MAX_SERVING_TOOLS = 300;
 const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /** 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다. */
@@ -140,7 +143,7 @@ type ServingToolCall = { id: string; name: string; input: Record<string, unknown
 type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }> };
 
 function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): ServingToolCall[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("invalid_serving_tool_frame");
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_SERVING_TOOLS) throw new Error("invalid_serving_tool_frame");
   const ids = new Set<string>();
   return value.map((raw: unknown) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
@@ -163,7 +166,7 @@ async function runAgentlasServingWithTools(
   cookie: string,
 ): Promise<RunnerResult> {
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
-  if (tools.length < 1 || tools.length > 100) throw new Error("science_tool_inventory_unavailable");
+  if (tools.length < 1 || tools.length > MAX_SERVING_TOOLS) throw new Error("science_tool_inventory_unavailable");
   const originalByAlias = new Map<string, string>();
   const definitions = tools.map((tool) => {
     const original = tool.function.name;
@@ -181,12 +184,20 @@ async function runAgentlasServingWithTools(
   let progress = { signature: "", identicalTurns: 0 };
   let accumulatedText = "";
   for (let turn = 0; turn <= MAX_TOOL_EXCHANGES; turn += 1) {
+    const requestBody = JSON.stringify({ model, system: context.system, messages: context.turns, maxTokens: outputReserve,
+      toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges });
+    // The serving tier exposes a conservative 128k window. Count the full
+    // growing tool transcript and schemas before another charged model call.
+    if (estimateTransportTokens(requestBody) + outputReserve + 256 > AGENTLAS_SERVING_CONTEXT_WINDOW) {
+      return { text: accumulatedText, failure: { kind: "refused", runtime: "agentlas", source: "marker",
+        providerCode: "model_context_capacity_exceeded",
+        message: "The Agentlas serving tool transcript exceeds the conservative context budget." } };
+    }
     const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, "x-agentlas-client": "desktop",
         "accept-language": req.locale === "ko" ? "ko" : "en" },
-      body: JSON.stringify({ model, system: context.system, messages: context.turns, maxTokens: outputReserve,
-        toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges }),
+      body: requestBody,
       ...(req.signal ? { signal: req.signal } : {}),
     });
     if (!response.ok) {
