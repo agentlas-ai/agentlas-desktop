@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
 import { collectCurrentExecutionProofs } from "./execution-proof";
@@ -77,7 +78,7 @@ export function finishVerifiedOngoingOneCycle(input: {
     const run = getLongRunByGoalId(input.goalId);
     const revision = getChatGoalRevision(input.goalId);
     const checkpoint = latestTaskCheckpoint(input.goalId);
-    if (!run || run.surface !== "one" || run.status !== "running"
+    if (!run || !ownsHostGoalLoop(run.surface) || run.status !== "running"
       || !revision || revision.lifecycle !== "ongoing"
       || getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision
       || checkpoint?.checkpointId !== input.checkpoint.checkpointId
@@ -1392,7 +1393,7 @@ export async function verifyGoalCompletionClaim(input: {
     let cycleCheckpointId: string | null = null;
     if (disposition === "cycle_completed") {
       if (!input.invocationRunId) throw new Error("goal_wait_attempt_missing");
-      if (run.surface === "one") {
+      if (ownsHostGoalLoop(run.surface)) {
         if (!checkpoint) throw new Error("one_goal_episode_checkpoint_changed");
         const cycle = finishVerifiedOngoingOneCycle({ goalId: input.goalId,
           invocationRunId: input.invocationRunId, checkpoint,

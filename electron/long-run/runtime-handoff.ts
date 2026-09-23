@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import type { GoalRuntimeSelectionReceipt, RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { getChat, setChatRuntimeSelection } from "../store/chats";
@@ -44,7 +45,7 @@ export function autoHandoffGoalRuntimeAtWait(input: {
   const now = input.now ?? Date.now();
   const run = getLongRunByGoalId(input.checkpoint.goalId);
   const revision = getChatGoalRevision(input.checkpoint.goalId);
-  if (!run || run.surface !== "one" || revision?.lifecycle !== "ongoing"
+  if (!run || !ownsHostGoalLoop(run.surface) || revision?.lifecycle !== "ongoing"
     || revision.revision !== input.checkpoint.goalRevision
     || getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision
     || input.checkpoint.sideEffects.state !== "settled") return { state: "unchanged" };

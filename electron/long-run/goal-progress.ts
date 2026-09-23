@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import { createHash } from "node:crypto";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
@@ -105,7 +106,7 @@ export function observeOngoingOneGoalProgress(goalId: string): OngoingGoalProgre
   const run = getLongRunByGoalId(goalId);
   const revision = getChatGoalRevision(goalId);
   const binding = run ? getLongRunGoalRevisionBinding(run.id) : null;
-  if (!run || run.surface !== "one" || !run.rootChatId || !revision || revision.lifecycle !== "ongoing"
+  if (!run || !ownsHostGoalLoop(run.surface) || !run.rootChatId || !revision || revision.lifecycle !== "ongoing"
     || binding?.revision !== revision.revision) {
     return unknown(revision?.revision ?? 0);
   }

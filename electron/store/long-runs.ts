@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import { normalizeLongRunUsage, readLongRunCostAccounting, longRunMonetaryRefusal, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { createHash, randomUUID } from "node:crypto";
@@ -2199,7 +2200,7 @@ export function settleVerifiedLongRun(runId: string): "completed" | "cycle_compl
       // Legacy Work episodes reset here. One records exactly once after its
       // settled checkpoint; keep the previous fingerprint/streak until that
       // evidence comparison occurs. Consumed cycles and cost stay intact.
-      if (run.surface !== "one") getDb().prepare("UPDATE long_runs SET last_progress_key = NULL, stall_streak = 0 WHERE id = ?").run(runId);
+      if (!ownsHostGoalLoop(run.surface)) getDb().prepare("UPDATE long_runs SET last_progress_key = NULL, stall_streak = 0 WHERE id = ?").run(runId);
       transitionLongRun({ runId, to: "running", actorKind: "host", reason: "ongoing-cycle-verified" });
       return "cycle_completed";
     }
@@ -2240,7 +2241,7 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
   }
   const monetaryRefusal = longRunMonetaryRefusal(run);
   if (monetaryRefusal) return decision(false, monetaryRefusal);
-  if (run.surface === "one" && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing"
+  if (ownsHostGoalLoop(run.surface) && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing"
     && run.stallStreak >= run.stallWindow) return decision(false, "stall_replan_required");
   if (openTaskCount <= 0) return decision(false, "no_open_tasks");
   return decision(true, "open_tasks_remain");
@@ -2358,7 +2359,7 @@ export function recordLongRunCycle(input: {
     const sameProgress = input.progressState === "unknown"
       || Boolean(input.progressKey && run.lastProgressKey === input.progressKey);
     const stallStreak = sameProgress ? run.stallStreak + 1 : 0;
-    const replanRequired = stallStreak >= run.stallWindow && run.surface === "one"
+    const replanRequired = stallStreak >= run.stallWindow && ownsHostGoalLoop(run.surface)
       && Boolean((input.verifiedCheckpointId || input.sourceInvocationId) && input.progressState)
       && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing";
     const shouldBlock = stallStreak >= run.stallWindow && !replanRequired;

@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import type { OngoingEpisodeStrategy, OngoingStallReplan, RuntimePlanSnapshot } from "../../shared/runtime-plan";
 import type { CheckpointCriterion, GoalVerificationDisposition } from "../../shared/long-run-checkpoint";
 import { getDb } from "../store/db";
@@ -57,7 +58,7 @@ export function recordOngoingStallReplan(runId: string, replan: OngoingStallRepl
     const revision = run ? getChatGoalRevision(run.goalId) : null;
     const checkpoint = run ? latestTaskCheckpoint(run.goalId) : null;
     const binding = run ? getLongRunGoalRevisionBinding(run.id) : null;
-    if (!run || run.surface !== "one" || run.status !== "waiting_tool"
+    if (!run || !ownsHostGoalLoop(run.surface) || run.status !== "waiting_tool"
       || revision?.lifecycle !== "ongoing" || revision.revision !== replan.goalRevision
       || binding?.revision !== revision.revision || !checkpoint
       || checkpoint.checkpointId !== replan.sourceCheckpointId

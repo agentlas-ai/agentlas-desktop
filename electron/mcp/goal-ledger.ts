@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import type { LongRunUsageInput } from "../long-run/budget";
 // Compatibility bridge from the existing Goal-mode loop to Desktop-owned
 // long-running work. Agentlas OS and its Python ledger are intentionally not
@@ -226,7 +227,7 @@ export async function recordGoalLedgerCycle(input: {
   try {
     const run = getLongRunByGoalId(input.goalId);
     const ongoingOne = input.progressAuthority === "one-host-receipts"
-      && run?.surface === "one" && getChatGoalRevision(input.goalId)?.lifecycle === "ongoing";
+      && ownsHostGoalLoop(run?.surface) && getChatGoalRevision(input.goalId)?.lifecycle === "ongoing";
     if (ongoingOne) {
       // This executes inside an unfinished invocation, possibly once per
       // model pass. The current episode has no settled verification receipt

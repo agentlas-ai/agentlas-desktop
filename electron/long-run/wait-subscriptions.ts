@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -150,7 +151,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       const due = Date.parse(input.intent.subject.notBefore);
       if (due < now + 60_000 || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
     }
-    if (input.recoveryMode && (run.surface !== "one" || input.intent.subject.kind !== "timer"
+    if (input.recoveryMode && (!ownsHostGoalLoop(run.surface) || input.intent.subject.kind !== "timer"
       || run.stallStreak < run.stallWindow || !input.recoveryProgressKey
       || input.recoveryProgressKey !== (run.lastProgressKey ?? `one-host:unknown:revision:${revision.revision}`))) {
       throw new Error("goal_wait_stall_recovery_invalid");
@@ -206,7 +207,7 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
     const unresolvedPriorEffects = Boolean(run && getDb().prepare(
       "SELECT 1 FROM long_run_worker_attempts WHERE run_id=? AND side_effect_state='uncertain' LIMIT 1",
     ).get(run.id));
-    const stalled = run?.surface === "one" && revision?.lifecycle === "ongoing"
+    const stalled = run != null && ownsHostGoalLoop(run.surface) && revision?.lifecycle === "ongoing"
       && run.stallStreak >= run.stallWindow;
     const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
     const recoveryMode = stalled
@@ -473,7 +474,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         }
         const checkpoint = candidateCheckpoint(wait);
         prepareCheckpointContinuation(checkpoint);
-        if (current.surface !== "one" || !revision || revision.lifecycle !== "ongoing"
+        if (!ownsHostGoalLoop(current.surface) || !revision || revision.lifecycle !== "ongoing"
           || revision.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) {
           failure = "goal_wait_goal_revision_changed";
         } else if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) {
@@ -490,7 +491,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     }
     let quotaInventory: Awaited<ReturnType<typeof detectRuntimes>> | null = null;
     let quotaWaitUntil: number | null = null;
-    if (due && !failure && candidate.surface === "one" && !wait.recoveryMode) {
+    if (due && !failure && ownsHostGoalLoop(candidate.surface) && !wait.recoveryMode) {
       try {
         const checkpoint = candidateCheckpoint(wait);
         const current = prepareCheckpointContinuation(checkpoint).runtimeSelection;
@@ -549,7 +550,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       if (getChatGoalRevision(wait.goalId)?.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) failure = "goal_wait_goal_revision_changed";
       if (wait.recoveryMode) {
         const revision = getChatGoalRevision(wait.goalId);
-        if (current.surface !== "one" || revision?.lifecycle !== "ongoing"
+        if (!ownsHostGoalLoop(current.surface) || revision?.lifecycle !== "ongoing"
           || !revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))
           || current.stallStreak < current.stallWindow
           || wait.recoveryProgressKey !== (current.lastProgressKey ?? `one-host:unknown:revision:${revision.revision}`)) {

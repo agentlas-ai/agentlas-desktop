@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import { prepareCheckpointContinuation } from "./continuation";
 import { claimGoalRuntimeSelection } from "./runtime-handoff";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
@@ -221,7 +222,7 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
         .get(run.id, wait.checkpointId) as { payload_json: string } | undefined : undefined;
       const priorCheckpoint = prior ? JSON.parse(prior.payload_json).checkpoint as LongRunTaskCheckpoint : null;
       const plan = checkpoint.capsule.plan;
-      diagnosticClaim = Boolean(run?.surface === "one" && revision?.lifecycle === "ongoing"
+      diagnosticClaim = Boolean(run != null && ownsHostGoalLoop(run.surface) && revision?.lifecycle === "ongoing"
         && revision.revision === checkpoint.goalRevision
         && wait?.waitId === recoveryWaitId && wait?.state === "pending"
         && wait?.runId === run.id && wait?.goalId === goalId && wait?.goalRevision === revision.revision
