@@ -322,6 +322,7 @@ let localModelOwnerCleanup: (() => Promise<void>) | null = null;
 let scienceDaemonClient: ReturnType<typeof createScienceDaemonClient> | null = null;
 let scienceExecutionIpc: ReturnType<typeof registerScienceDaemonExecutionIpc> | null = null;
 let scienceDaemonStartupPromise: ReturnType<ReturnType<typeof createScienceDaemonClient>["ensureStarted"]> | null = null;
+let reconcileAutostartAfterSciencePolicy: (() => Promise<void>) | null = null;
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeAuthSessionRestoration: (() => void) | null = null;
@@ -2274,7 +2275,15 @@ app.whenReady().then(async () => {
   ipcMain.handle("science:approvalPolicy:set", (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().setApprovalPolicy(input as SetScienceApprovalPolicyInput);
+    const policy = scienceStore().setApprovalPolicy(input as SetScienceApprovalPolicyInput);
+    if (policy.mode === "autonomous" && policy.scopes.includes("full-autonomy")) {
+      // The new grant is durable before this side effect. Re-read the Science
+      // owner and OS preference; a missed login-service attempt can retry on
+      // the next launch without repeating the owner's approval revision.
+      void reconcileAutostartAfterSciencePolicy?.().catch(error =>
+        console.error("[daemon] Full Autonomy login continuity reconcile failed", error));
+    }
+    return policy;
   });
   const scienceRuntimeInput = (envelope: unknown) => {
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
@@ -3846,22 +3855,33 @@ app.whenReady().then(async () => {
   // Ask the live Science owner whether recoverable work exists; the GUI never
   // runs Science recovery merely to decide whether to install a login entry.
   if (daemonStoreBootstrapToken) {
-    void (scienceDaemonStartupPromise ?? Promise.resolve(null)).catch(error => {
-      console.error("[daemon] Science recovery observation unavailable", error);
-      return null;
-    }).then(async (status) => {
-      let hasRecoverableScienceWork = false;
-      if (status?.state === "ready" && scienceDaemonClient) {
-        try { hasRecoverableScienceWork = await scienceDaemonClient.commandObserved({ op: "autostart.hasRecoverableScienceWork" }) === true; }
-        catch (error) { console.error("[daemon] recoverable Science work observation failed", error); }
-      }
-      const policy = resolveDaemonAutostartPolicy({ hasRecoverableScienceWork });
-      const daemon = await daemonStartupPromise;
-      if (!daemon || daemon.outcome.status === "failed" || daemon.outcome.status === "disabled") return;
-      const command = daemon.module.buildDaemonAutostartCommand({ ...desktopDaemonClientOptions(), storeBootstrapToken: daemonStoreBootstrapToken });
-      const result = daemon.module.reconcileDaemonAutostart(policy.enabled, command);
-      console.info("[daemon] login continuity", { enabled: policy.enabled, reason: policy.reason, installed: result.installed, loaded: result.loaded });
-    }).catch(error => console.error("[daemon] login continuity reconcile failed", error));
+    let reconciliation: Promise<void> = Promise.resolve();
+    const reconcileForLatestScienceWork = () => {
+      // Startup and a new Full Autonomy grant must not race: the later pass
+      // observes current durable work and always runs after the earlier one.
+      reconciliation = reconciliation.catch(() => {}).then(async () => {
+        const scienceReady = scienceDaemonStartupPromise
+          ?? (scienceDaemonClient ? scienceDaemonClient.ensureStarted() : Promise.resolve(null));
+        const status = await scienceReady.catch(error => {
+          console.error("[daemon] Science recovery observation unavailable", error);
+          return null;
+        });
+        let hasRecoverableScienceWork = false;
+        if (status?.state === "ready" && scienceDaemonClient) {
+          try { hasRecoverableScienceWork = await scienceDaemonClient.commandObserved({ op: "autostart.hasRecoverableScienceWork" }) === true; }
+          catch (error) { console.error("[daemon] recoverable Science work observation failed", error); }
+        }
+        const policy = resolveDaemonAutostartPolicy({ hasRecoverableScienceWork });
+        const daemon = await daemonStartupPromise;
+        if (!daemon || daemon.outcome.status === "failed" || daemon.outcome.status === "disabled") return;
+        const command = daemon.module.buildDaemonAutostartCommand({ ...desktopDaemonClientOptions(), storeBootstrapToken: daemonStoreBootstrapToken });
+        const result = daemon.module.reconcileDaemonAutostart(policy.enabled, command);
+        console.info("[daemon] login continuity", { enabled: policy.enabled, reason: policy.reason, installed: result.installed, loaded: result.loaded });
+      });
+      return reconciliation;
+    };
+    reconcileAutostartAfterSciencePolicy = reconcileForLatestScienceWork;
+    void reconcileForLatestScienceWork().catch(error => console.error("[daemon] login continuity reconcile failed", error));
   }
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact

@@ -272,6 +272,15 @@ export function createDaemonScienceService(options: {
           -- An enabled Alive agent is durable work even when its next wake is
           -- observation-driven or a periodic review rather than a timestamp.
           OR EXISTS (SELECT 1 FROM alive_agents WHERE status='enabled')
+          -- The owner can enable Full Autonomy while this GUI is already open.
+          -- Its latest durable policy is work even before the next Alive sync
+          -- materializes/enables the corresponding agent row.
+          OR EXISTS (
+            SELECT 1 FROM project_approval_policies p
+            WHERE p.revision=(SELECT MAX(latest.revision) FROM project_approval_policies latest WHERE latest.project_id=p.project_id)
+              AND p.mode='autonomous'
+              AND EXISTS (SELECT 1 FROM json_each(p.scopes_json) WHERE value='full-autonomy')
+          )
           -- Reconcile a wake/action that crossed a runtime boundary before
           -- shutdown, including one whose agent was suspended meanwhile.
           OR EXISTS (SELECT 1 FROM alive_wakes WHERE status IN ('reserved','running'))
