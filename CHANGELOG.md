@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.39 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Goals can look before they continue: checks that confirm an earlier step now refresh the
+  page in a read-only browser that Agentlas enforces (no clicks, typing, or uploads), also
+  for conversations that are not open and on Codex. If the page cannot be seen, the reason
+  is recorded and the check runs again on its own.
+- Requests between the app window and Agentlas no longer fail because an optional field
+  was empty, and refusals now carry their reason to the screen with a specific next step.
+- Work: starting a task, changing the model, or resuming a Goal no longer fails for ACP
+  runtimes or when "Default" is chosen. Automations refuse an invalid runtime choice when
+  saved instead of failing on every run.
+- Your own API keys: models the app does not know are no longer refused before sending.
+
 ## 1.2.38 — 2026-09-23
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
