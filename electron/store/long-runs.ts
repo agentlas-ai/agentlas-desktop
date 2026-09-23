@@ -408,8 +408,10 @@ function longRunAttemptSetDigest(runId: string, throughEventSeq: number, receipt
 export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafeEpochRecord | null {
   const row = getDb().prepare(
     `SELECT seq, payload_json FROM long_run_events
-     WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user'
-       AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts'
+     WHERE run_id = ? AND ((kind = 'run.user_control' AND actor_kind = 'user'
+         AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts')
+       OR (kind = '${EFFECT_OBSERVATION_EVENT_KIND}' AND actor_kind = 'host'
+         AND json_extract(payload_json, '$.action') = 'settle_uncertain_attempts'))
      ORDER BY seq DESC LIMIT 1`,
   ).get(runId) as { seq: number; payload_json: string } | undefined;
   if (!row) return null;
@@ -429,9 +431,16 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
     // their audit records, but do not let those legacy events authorize new
     // automatic work without the explicit, exact user-review attestation.
     const attestation = payload.attestation;
-    if (attestation?.schemaVersion !== "agentlas.uncertain-attempt-user-attestation.v1"
-      || attestation.statement !== "user_says_external_outcomes_reviewed_before_new_work"
-      || attestation.externalOutcomeProof !== "not_observed_by_host"
+    // Two attestation kinds may settle an attempt set: the person's one-sentence
+    // statement, or a Main-dispatched read-only observation that looked at the
+    // external system and returned an exact machine verdict (done / not_done).
+    const userAttested = attestation?.schemaVersion === "agentlas.uncertain-attempt-user-attestation.v1"
+      && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
+      && attestation.externalOutcomeProof === "not_observed_by_host";
+    const observed = attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
+      && (attestation.statement === "observed_external_outcome_done" || attestation.statement === "observed_external_outcome_not_done")
+      && attestation.externalOutcomeProof === "observed_read_only_by_model";
+    if (!attestation || (!userAttested && !observed)
       || !Array.isArray(attestation.reviewedAttemptIds)
       || attestation.reviewedAttemptIds.length === 0
       || attestation.reviewedAttemptIds.some((id) => typeof id !== "string" || !attemptIds.includes(id))
@@ -598,6 +607,77 @@ export function acknowledgeUncertainLongRunAttempts(
     result = { attemptIds: review.attemptIds, version, safeEpoch };
   })();
   if (changed) emitDesktopStoreChange({ entity: "long-run", id: runId });
+  return result!;
+}
+
+export const EFFECT_OBSERVATION_EVENT_KIND = "run.effect_observation";
+export const EFFECT_OBSERVATION_ATTESTATION_SCHEMA = "agentlas.uncertain-attempt-observation-attestation.v1";
+
+/**
+ * 효과 관찰(오너 지시 2026-09-23 "직접 보면 알잖아") — Main 이 띄운 읽기 전용 관찰 실행이 바깥을
+ * 직접 보고 낸 정확한 판정(done / not_done)으로 불확실한 시도 묶음을 정리한다.
+ *
+ * 사람의 확인과는 다른 증명 종류다(externalOutcomeProof = observed_read_only_by_model, 근거 문자열 포함).
+ * 호출부는 관찰을 띄울 때의 시도 집합을 넘기고, 여기서 같은 트랜잭션 안에서 그 집합이 그대로인지
+ * 다시 대조한다 — 그 사이 새 시도가 생겼거나 하나라도 아직 돌고 있으면 거절한다.
+ * 이 기록은 옛 시도를 재실행할 권한이 아니다: done 이면 "다시 하지 않는다", not_done 이면
+ * "새 작업으로 다시 해도 된다"는 뜻이고, 둘 다 다음 턴이 새로 결정한다.
+ */
+export function settleUncertainAttemptsByObservation(runId: string, input: {
+  attemptIds: readonly string[];
+  verdict: "done" | "not_done";
+  evidence: string;
+  observationInvocationRunId: string;
+  observationDigest: string;
+}): LongRunAttemptAcknowledgment {
+  const db = getDb();
+  let result: LongRunAttemptAcknowledgment | null = null;
+  db.transaction(() => {
+    const review = getLongRunAttemptReview(runId);
+    if (!review.attemptIds.length) throw new Error("effect_observation_nothing_to_settle");
+    if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) throw new Error("goal_resume_uncertain_review_too_large");
+    if (review.attempts.some((attempt) => attempt.state === "running")) throw new Error("auto_goal_resume_attempt_unsettled");
+    if (JSON.stringify([...review.attemptIds].sort()) !== JSON.stringify([...input.attemptIds].sort())) {
+      throw new Error("effect_observation_attempt_set_changed");
+    }
+    const evidence = input.evidence.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!evidence) throw new Error("effect_observation_evidence_missing");
+    const receipts = db.prepare(
+      `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
+         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
+       FROM long_run_worker_attempts AS a
+       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
+         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
+         AND json_extract(e.payload_json, '$.attemptId') = a.id
+       WHERE a.run_id = ? AND a.state <> 'running'
+         AND (a.state = 'uncertain' OR a.side_effect_state = 'uncertain')
+       GROUP BY a.id ORDER BY a.id`,
+    ).all(runId) as Array<{ attempt_id: string; state: LongRunAttemptState;
+      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
+      last_attempt_event_seq: number }>;
+    const attemptReceipts: LongRunAcknowledgedAttemptReceipt[] = receipts.map((row) => ({
+      attemptId: row.attempt_id, state: row.state, sideEffectState: row.side_effect_state,
+      updatedAt: row.updated_at, completedAt: row.completed_at, lastAttemptEventSeq: row.last_attempt_event_seq,
+    }));
+    const attemptIds = attemptReceipts.map((receipt) => receipt.attemptId);
+    const run = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?").get(runId) as { last_event_seq: number } | undefined;
+    if (!run) throw new Error(`long_run_not_found:${runId}`);
+    const safeEpoch: LongRunAttemptSafeEpoch = { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1",
+      throughEventSeq: run.last_event_seq,
+      attemptSetDigest: longRunAttemptSetDigest(runId, run.last_event_seq, attemptReceipts) };
+    appendEventInDb({ runId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
+      payload: { action: "settle_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch,
+        observationInvocationRunId: input.observationInvocationRunId, observationDigest: input.observationDigest,
+        attestation: { schemaVersion: EFFECT_OBSERVATION_ATTESTATION_SCHEMA,
+          reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
+          statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
+          externalOutcomeProof: "observed_read_only_by_model", verdict: input.verdict, evidence } },
+      at: new Date().toISOString() });
+    const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
+    if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
+    result = { attemptIds: review.attemptIds, version, safeEpoch };
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
   return result!;
 }
 

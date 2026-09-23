@@ -16,7 +16,7 @@ import { resolveGoalLifecycle } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
 import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
-import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
+import { goalResumeRecoveryBlockerCode, isGoalResumeEffectBoundaryUncertainBlocker } from "../../shared/long-run";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -213,7 +213,10 @@ export async function prepareInvocationAutomaticGoal(input: {
  * actor "user": 사람이 누른 재개. 호출부가 acknowledgeUncertainLongRunAttempts 를 먼저 적고 그 뒤 판번호를 넘긴다.
  * actor "host": 자동 재개. 불확실한 부작용은 사람만 풀 수 있으므로 그것이 남아 있으면 거부한다.
  */
-export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host"): import("../../shared/types").McpInvocationRequest | null {
+export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host",
+  /** Main-only: a read-only observation already looked at the external outcome of the
+   * interrupted attempts and the ledger recorded its exact verdict in this transaction. */
+  observation?: { verdict: "done" | "not_done"; evidence: string }): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
   const revision = getChatGoalRevision(chat.goal_id);
@@ -223,7 +226,13 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   const recoveryBlocker = goalResumeRecoveryBlockerCode(run.blockedReason);
-  if (recoveryBlocker) throw new Error(recoveryBlocker);
+  // The startup effect-boundary blocker is written only when attempts were left
+  // unsettled (startup-checkpoints blockForReview). A settled observation of those
+  // exact attempts is the proof that blocker was waiting for. A claimed-wait
+  // blocker is a different question and is never lifted here.
+  if (recoveryBlocker && !(observation && actor === "host" && isGoalResumeEffectBoundaryUncertainBlocker(run.blockedReason))) {
+    throw new Error(recoveryBlocker);
+  }
   if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
   if (actor === "user" ? liveLongRunAttemptCount(run.id) : unsettledLongRunAttemptCount(run.id)) {
     throw new Error("auto_goal_resume_attempt_unsettled");
@@ -249,7 +258,11 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
     userPrompt: `Resume the existing goal within its remaining budget and original permissions. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
       ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. First inspect Activity and the external state read-only; do not repeat previous side effects or make a new external change until the prior outcomes are reconciled. If evidence is absent, report them as unknown."
-      : ""}\n\n${revision.objective}` };
+      : observation?.verdict === "done"
+        ? ` A read-only check just observed that the interrupted earlier action already took effect (evidence: ${observation.evidence}). Do not repeat it; continue with the next remaining step.`
+        : observation?.verdict === "not_done"
+          ? ` A read-only check just observed that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). It is safe to perform it again as part of the next step; re-check the current state right before acting.`
+          : ""}\n\n${revision.objective}` };
 }
 
 /** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */

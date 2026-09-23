@@ -23,6 +23,7 @@ import { reconcileHostPausedLongRuns } from "./startup-reconciler";
 import { agentRunCwd } from "../runtime/exec";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN } from "../../shared/long-run";
+import { maybeDispatchEffectObservation } from "./effect-observation";
 
 export interface CheckpointStartupDispatcher {
   activeChatIds(): string[];
@@ -494,6 +495,10 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         appendLongRunEvent({ runId: candidate.id, kind: "run.checkpoint_startup", actorKind: "host",
           payload: { appInstanceId, status: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, diagnostic } });
         results.push({ runId: candidate.id, status: "skipped", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN });
+        // Look before asking (owner 2026-09-23): the attempts left unsettled by the
+        // restart get one read-only observation instead of waiting for a person.
+        try { maybeDispatchEffectObservation(dispatcher, candidate.goalId, "startup"); }
+        catch (error) { console.warn("[effect-observation] startup dispatch failed:", error); }
         return true;
       } catch { return false; }
     };
