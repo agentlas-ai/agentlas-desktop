@@ -960,10 +960,19 @@ function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflight
 function validRuntimeSelection(value: unknown): value is RuntimeSelection {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  const allowed = new Set(["kind", "backend", "source", "role", "inherit", "model", "longContext", "effort"]);
-  if (Object.keys(record).some((key) => !allowed.has(key))) return false;
+  /*
+   * ★오너 실사고 2026-09-23 — 목표가 돌던 단톡방에 보낸 새 지시가 두 번 연속
+   *   "One team preflight refused the current binding"(invalid_request)으로 거절됐다.
+   *   1.2.33 부터 렌더러의 고정 런타임 선택이 `acpAgentId` 키를 늘 싣는데(codex 면
+   *   값이 undefined), Electron IPC(V8 직렬화)는 undefined 값의 키를 그대로 넘긴다.
+   *   여기 허용 목록에 그 키가 없어서 **모델을 고정한 모든 One 팀·과업 전송**이
+   *   목표 우회 판정에 닿기도 전에 거절됐다. 값이 undefined 인 키는 없는 키이고,
+   *   `acpAgentId` 는 RuntimeSelection 의 정식 필드다(selectExactRuntime 이 acp 에서 쓴다).
+   */
+  const allowed = new Set(["kind", "backend", "source", "acpAgentId", "role", "inherit", "model", "longContext", "effort"]);
+  if (Object.keys(record).some((key) => record[key] !== undefined && !allowed.has(key))) return false;
   if (typeof record.kind !== "string" || record.kind.length < 1 || record.kind.length > 64) return false;
-  for (const key of ["backend", "source", "role", "model", "effort"] as const) {
+  for (const key of ["backend", "source", "acpAgentId", "role", "model", "effort"] as const) {
     if (record[key] !== undefined && (typeof record[key] !== "string" || record[key].length > 512)) return false;
   }
   for (const key of ["inherit", "longContext"] as const) {
@@ -1050,7 +1059,8 @@ export async function prepareOneTeamPreflight(
   const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
   if (
     !input || typeof input !== "object"
-    || inputKeys.some((key) => !allowedInputKeys.has(key))
+    // Electron IPC keeps undefined-valued keys; an undefined key is an absent key.
+    || inputKeys.some((key) => (input as unknown as Record<string, unknown>)[key] !== undefined && !allowedInputKeys.has(key))
     || !ID_RE.test(input.chatId)
     || typeof input.userPrompt !== "string"
     || input.userPrompt.trim().length < 1
@@ -1066,17 +1076,18 @@ export async function prepareOneTeamPreflight(
     || (input.permission !== undefined && input.permission !== "read" && input.permission !== "write")
     || (input.runtimeSelection !== undefined && !validRuntimeSelection(input.runtimeSelection))
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
+  if (input.runtimeSelection) {
+    input = {
+      ...input,
+      runtimeSelection: Object.fromEntries(
+        Object.entries(input.runtimeSelection).filter(([, value]) => value !== undefined),
+      ) as unknown as RuntimeSelection,
+    };
+  }
   const requestedAgentIds = input.requestedAgentIds ?? [];
   const attachmentInput = input.attachmentRef === undefined ? null : inspectOneAttachmentInput({
     ref: input.attachmentRef, chatId: input.chatId, userPrompt: input.userPrompt,
   });
-  const pinnedRuntime = input.runtimeSelection || attachmentInput ? await liveRuntime(deps, input.runtimeSelection) : null;
-  // Managed Local currently loads text GGUFs without a vision projector. This
-  // known limitation precedes staffing inference; no team or substitute model
-  // can make this exact selected runtime accept the prepared image.
-  if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
-    return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
-  }
   const readChat = deps.getChat ?? getChat;
   const initialChat = readChat(input.chatId);
   if (!initialChat) throw new OneTeamPreflightError("stale_binding", "The One conversation no longer exists");
@@ -1084,7 +1095,18 @@ export async function prepareOneTeamPreflight(
   // staffing judgement turn the Goal's canonical Task into a team decision;
   // the normal invocation admission below will perform the Goal CAS/steer
   // transition exactly once.
+  //
+  // ★2026-09-23: this check now precedes the runtime probe. A message sent to a
+  // chat whose Goal is running/waiting is a steer/revision of that Goal; a
+  // transient runtime-detection miss (runtime_changed) must not refuse it here.
+  // Invocation admission re-resolves the runtime with its own fallback policy.
   if (goalOwnsChat(initialChat, deps.getGoalStatus)) {
+    if (attachmentInput?.hasImages) {
+      const goalRuntime = await liveRuntime(deps, input.runtimeSelection).catch(() => null);
+      if (goalRuntime?.kind === "agentlas-local") {
+        return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
+      }
+    }
     const goalStatus = (deps.getGoalStatus ?? goalStatusForPreflight)(initialChat.goalId as string);
     console.warn("[one-team-preflight] goal_owned_bypass", JSON.stringify({
       chatId: initialChat.id,
@@ -1094,13 +1116,30 @@ export async function prepareOneTeamPreflight(
     }));
     return { kind: "not_required" };
   }
+  const pinnedRuntime = input.runtimeSelection || attachmentInput ? await liveRuntime(deps, input.runtimeSelection) : null;
+  // Managed Local currently loads text GGUFs without a vision projector. This
+  // known limitation precedes staffing inference; no team or substitute model
+  // can make this exact selected runtime accept the prepared image.
+  if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
+    return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
+  }
   const teamNeed = await resolveOneTeamNeed(
     input.userPrompt,
     deps,
     requestedAgentIds.length > 0 || input.dynamicTeamRequested === true,
     input.runtimeSelection,
   );
-  if (teamNeed.source === "unavailable") throw new OneTeamPreflightError("judgment_unavailable", "The selected model could not decide staffing; no substitute team or provider was selected");
+  // ★2026-09-23 오너 규칙 "막다른 길 금지": the staffing judge being unreachable
+  // is not a reason to drop the user's message. Continue on the ordinary One
+  // route (the chat's bound runtime and seats, no new team proposal) and leave a
+  // machine-readable trace. No substitute provider or team is selected here.
+  if (teamNeed.source === "unavailable") {
+    console.warn("[one-team-preflight] judgment_unavailable_fallback", JSON.stringify({
+      chatId: input.chatId,
+      route: "not_required",
+    }));
+    return { kind: "not_required" };
+  }
   if (!teamNeed.needed) return { kind: "not_required" };
   const reasons = teamNeed.reasons;
   recoverReservations(deps);

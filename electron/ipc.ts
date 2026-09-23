@@ -5080,6 +5080,14 @@ export function registerIpcHandlers(): void {
       return await prepareOneTeamPreflight(input);
     } catch (error) {
       if (error instanceof OneTeamPreflightError) {
+        // Content-free machine trace: the renderer only sees the code, and a
+        // refusal that never reaches main.log cannot be diagnosed (2026-09-23).
+        console.warn("[one-team-preflight] refused", JSON.stringify({
+          code: error.code,
+          chatId: typeof input?.chatId === "string" ? input.chatId : null,
+          hasExpectedTask: typeof input?.expectedTaskId === "string",
+          pinnedRuntimeKind: typeof input?.runtimeSelection?.kind === "string" ? input.runtimeSelection.kind : null,
+        }));
         return { kind: "preflight_error" as const, code: error.code };
       }
       throw error;

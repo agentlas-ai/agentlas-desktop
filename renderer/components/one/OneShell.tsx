@@ -130,7 +130,7 @@ import { stripAgentControlBlocks, stripAgentIdentityBadges } from "@shared/agent
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
-import { OneSubmitPreflightError, prepareOneTeamPreflightForSubmit, type OneSubmitTaskBinding } from "@/lib/one-submit-binding";
+import { OneSubmitPreflightError, oneSubmitPreflightNotice, prepareOneTeamPreflightForSubmit, type OneSubmitTaskBinding } from "@/lib/one-submit-binding";
 import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
@@ -4666,10 +4666,40 @@ export function OneShell() {
           setBusy(true);
           setActivity(initialOneActivityState());
           setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
-          if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
-          setActionNotice(runLocale === "ko" ? "이미 실행 중인 작업에 다시 연결했습니다." : "Reconnected to the run already in progress.");
           subscribeRun(attachment.runId);
           if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+          /*
+           * ★오너 규칙 2026-09-23 — 진행 중인 목표·실행이 있는 방에 보낸 말은 거절하거나
+           *   "다시 보내세요"로 돌려보내지 않는다. 목표 스윕이 방금 다시 돌린 실행에
+           *   화면이 아직 붙지 않았을 때(runIdRef 없음) 여기로 온다. 예전에는 다시 붙기만
+           *   하고 글은 작성창으로 되돌렸다. 이제 같은 방의 기존 방향 전환(steer)으로
+           *   넘겨 현재 실행이 정리되면 이어서 반영한다. 첨부·One 대리 문장은 steer 가
+           *   받지 않으므로 예전처럼 작성창에 남긴다.
+           */
+          let steered = false;
+          if (!options?.promptOrigin && !options?.attachments && !options?.teamRef) {
+            try {
+              const steerReceipt = await api.invoke.steer({
+                chatId,
+                userPrompt: text,
+                steeringMode: "interrupt",
+                taskIntent,
+                oneMode: true,
+                locale: runLocale,
+                onePermissionMode: runPermissionMode,
+                permissions: executionPermission,
+                ...(effectiveRuntimeSelection ? { runtimeSelection: effectiveRuntimeSelection } : {}),
+                sessionRouting: false,
+              });
+              steered = steerReceipt.accepted && steerReceipt.chatId === chatId;
+            } catch { steered = false; }
+          }
+          if (!steered && !options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
+          setActionNotice(steered
+            ? (runLocale === "ko"
+              ? "진행 중인 실행에 다시 연결했고, 새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 반영합니다."
+              : "Reconnected to the run in progress and saved the new instruction. It continues as soon as the current execution settles.")
+            : (runLocale === "ko" ? "이미 실행 중인 작업에 다시 연결했습니다." : "Reconnected to the run already in progress."));
           return;
         }
       }
@@ -5617,6 +5647,14 @@ export function OneShell() {
         setActionNotice(appLocale === "ko"
           ? "작업 연결 정보를 갱신하지 못해 실행하지 않았습니다. 입력과 첨부는 작성창에 보존했습니다. 작업을 확인한 뒤 다시 보내 주세요."
           : "The task connection could not be refreshed, so nothing started. Your text and attachments are preserved in the composer. Check the task, then send again.");
+        setError(null);
+        return;
+      }
+      if (cause instanceof OneSubmitPreflightError) {
+        // Every automatic path (Goal steer bypass, judge fallback, one rebind)
+        // already ran in the shared helper. Name the exact cause and next step.
+        setActionNotice(oneSubmitPreflightNotice(cause.code, appLocale === "ko"));
+        requestOneOperationalRecovery("one-submit", cause);
         setError(null);
         return;
       }
