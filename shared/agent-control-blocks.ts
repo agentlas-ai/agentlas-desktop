@@ -114,9 +114,27 @@ const DANGLING_HEADING_DROPS_TAIL: ReadonlySet<string> = new Set([
   "## Memory Events",
 ]);
 
+/** Some models put the heading inside the JSON fence instead of before it. */
+const REVERSED_JSON_FENCE_BEFORE_HEADING_RE = /(?:^|\n)[ \t]*```json[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*$/i;
+const CLOSING_JSON_FENCE_AFTER_HEADING_RE = /^[ \t]*```[ \t]*\r?$/m;
+
 function headingHit(value: string, heading: string): Hit | null {
   const start = value.indexOf(heading);
   if (start < 0) return null;
+  // A reversed envelope is "```json\n## Memory Events\n{...}\n```".
+  // Include its opener before searching for a fence after the heading: with
+  // repeated tickets, the ordinary search could pair this ticket's closer
+  // with the next ticket's opener and leave visible `json` code blocks.
+  const precedingFence = value.slice(0, start).match(REVERSED_JSON_FENCE_BEFORE_HEADING_RE);
+  if (precedingFence?.index != null) {
+    const fenceStart = precedingFence.index + (precedingFence[0].startsWith("\n") ? 1 : 0);
+    const afterHeading = value.slice(start + heading.length);
+    const close = afterHeading.match(CLOSING_JSON_FENCE_AFTER_HEADING_RE);
+    return {
+      index: fenceStart,
+      cutTo: close?.index == null ? value.length : start + heading.length + close.index + close[0].length,
+    };
+  }
   const after = value.slice(start + heading.length);
   const fence = after.match(FENCE_RE);
   if (fence && fence.index != null) {
@@ -183,7 +201,9 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
   // run stopped mid-marker leaves "<<agentl" at the end of the persisted answer
   // (measured 2026-08-16, cancelled gemini run) — a `<<…` marker prefix at the
   // very end is never content, so it goes too. Headings are left alone here.
-  visible = options?.streaming ? trimIncompleteControlTail(visible) : trimIncompleteMarkerTail(visible);
+  visible = options?.streaming
+    ? trimIncompleteControlTail(trimPartialReversedHeadingFence(visible))
+    : trimIncompleteMarkerTail(visible);
   visible = stripOrphanCodeFences(visible);
   return visible.replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -192,6 +212,16 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
 const FENCE_LINE_RE = /^[ \t]*```[A-Za-z0-9_+.-]*[ \t]*$/;
 /** A closing fence carries no info string (CommonMark; same rule as the Markdown renderer). */
 const CLOSING_FENCE_LINE_RE = /^[ \t]*```[ \t]*$/;
+
+/** Hide a reversed JSON fence while its first body line is still becoming a control heading. */
+function trimPartialReversedHeadingFence(value: string): string {
+  const match = value.match(/(?:^|\n)[ \t]*```json[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*([^\r\n]*)$/i);
+  if (!match || match.index == null) return value;
+  const headingPrefix = match[1];
+  if (!AGENT_CONTROL_HEADINGS.some((heading) => heading.startsWith(headingPrefix))) return value;
+  const fenceStart = match.index + (match[0].startsWith("\n") ? 1 : 0);
+  return value.slice(0, fenceStart);
+}
 
 /**
  * Models wrap control blocks in a code fence ("```\n<<agentlas-ask>>…\n```").
