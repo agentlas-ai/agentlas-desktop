@@ -7,7 +7,8 @@ import type { WorkStartAPI, WorkStartInput, WorkStartOptions, WorkStartReceipt }
 import type { RuntimeSelection, RuntimeStatus } from '../shared/types';
 import { getDb } from './store/db';
 import { createProject, getProject, updateProject } from './store/projects';
-import { createChat, getChat, setChatRuntimeSelection, setChatWorkingFolder } from './store/chats';
+import { createChat, getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection, setChatWorkingFolder } from './store/chats';
+import { normalizeRuntimeSelectionInput, runtimeMatchesSelection, selectionForRuntime } from '../shared/runtime-selection';
 import { getCanonicalTaskForChat } from './store/tasks';
 import { listInstalledAgentsReadOnly } from './mcp/registry';
 import { detectRuntimes } from './runtime/detect';
@@ -16,6 +17,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Row = { intent_id: string; input_digest: string; project_id: string; chat_id: string; task_id: string; prompt_text: string; options_json: string; runtime_selection_json: string; status: WorkStartReceipt['status']; claim_token: string | null; error_code: string | null };
 function receipt(row: Row): WorkStartReceipt { return { intentId: row.intent_id, inputDigest: row.input_digest, projectId: row.project_id, chatId: row.chat_id, taskId: row.task_id, prompt: row.prompt_text, options: JSON.parse(row.options_json), runtimeSelection: JSON.parse(row.runtime_selection_json), status: row.status, errorCode: row.error_code }; }
 function exactKeys(value: unknown, keys: string[]): asserts value is Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new Error('work_start_input_invalid'); }
+export function normalizeWorkStartInput(input: WorkStartInput): WorkStartInput { return normalize(input); }
 function normalize(input: WorkStartInput): WorkStartInput {
   exactKeys(input, ['intentId','prompt','projectId','runtimeSelection','options']);
   if (!UUID.test(input.intentId) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 250_000 || input.prompt.includes('\0') || input.projectId !== undefined && !UUID.test(input.projectId)) throw new Error('work_start_input_invalid');
@@ -24,11 +26,32 @@ function normalize(input: WorkStartInput): WorkStartInput {
   for (const key of ['planMode','goalMode','appsGenerateMode','sessionRouting','stormbreakerMode']) if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new Error('work_start_options_invalid');
   for (const key of ['images','files','taskForceTargets']) if (options[key] !== undefined && (!Array.isArray(options[key]) || options[key].length > 32)) throw new Error('work_start_attachments_invalid');
   if (JSON.stringify(options).length > 32_000_000) throw new Error('work_start_attachments_too_large');
-  if (input.runtimeSelection !== undefined) exactKeys(input.runtimeSelection, ['kind','backend','source','role','inherit','model','longContext','effort']);
+  // ★2026-09-23 — 이 허용 목록이 acpAgentId·label 을 몰라 ACP 엔진으로는 Work 를 시작할 수 없었다.
+  //   RuntimeSelection 을 받는 모든 Main 경계는 공용 정규화기 하나를 쓴다("" = 없음).
+  if (input.runtimeSelection !== undefined) normalizeRuntimeSelectionInput(input.runtimeSelection, { roles: ['orchestrator'], allowInherit: false });
   return { ...input, options: { ...options, sessionRouting: true } as WorkStartOptions };
 }
 function canonical(value: unknown): string { if (Array.isArray(value)) return '['+value.map(canonical).join(',')+']'; if (value && typeof value === 'object') return '{'+Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>JSON.stringify(k)+':'+canonical(v)).join(',')+'}';return JSON.stringify(value); }
-function pin(runtime: RuntimeStatus, selection?: RuntimeSelection): RuntimeSelection { return { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: selection?.model ?? runtime.model ?? undefined, effort: selection?.effort ?? runtime.effort ?? undefined, longContext: selection?.longContext ?? runtime.longContextEnabled ?? false, role: 'orchestrator', inherit: false }; }
+/**
+ * The stored pin is exactly what the chat store will read back (normalizeChatRuntimeSelection),
+ * so the claim-time comparison cannot diverge on "" vs absent or on the ACP seat/label.
+ * A requested "" model/effort is the picker's explicit "engine default" and stays absent.
+ */
+function pin(runtime: RuntimeStatus, selection?: RuntimeSelection): RuntimeSelection {
+  const built = selectionForRuntime(runtime, {
+    model: selection && selection.model !== undefined ? selection.model : undefined,
+    effort: selection && selection.effort !== undefined ? selection.effort : undefined,
+    longContext: selection?.longContext ?? runtime.longContextEnabled ?? false,
+    role: 'orchestrator', inherit: false,
+  });
+  const normalized = normalizeChatRuntimeSelection(built);
+  if (!normalized) throw new Error('work_start_runtime_unavailable');
+  return normalized;
+}
+/** Contract seam: the exact pin createWorkStart stores and claimWorkStart compares. */
+export const workStartRuntimePin = pin;
+export function storedWorkStartPin(json: string): RuntimeSelection | null { return storedPin(json); }
+function storedPin(json: string): RuntimeSelection | null { try { return normalizeChatRuntimeSelection(JSON.parse(json)); } catch { return null; } }
 function owned(intentId: string, chatId: string): Row {
   if (!UUID.test(intentId) || !UUID.test(chatId)) throw new Error('work_start_scope_invalid');
   const row = getDb().prepare('SELECT * FROM work_start_intents WHERE intent_id=? AND chat_id=?').get(intentId,chatId) as Row | undefined;
@@ -41,10 +64,10 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
   const input=normalize(raw), digest=createHash('sha256').update(canonical(input)).digest('hex'),db=getDb();
   const prior=db.prepare('SELECT * FROM work_start_intents WHERE intent_id=?').get(input.intentId) as Row | undefined;
   if (prior) { if (prior.input_digest !== digest) throw new Error('work_start_intent_conflict');return receipt(owned(input.intentId,prior.chat_id)); }
-  const runtimes=await detect();const requested=input.runtimeSelection;
-  const runtime=requested ? runtimes.find(r=>r.kind===requested.kind && (!requested.backend || r.backend===requested.backend) && (!requested.source || r.source===requested.source)) : runtimes.find(r=>r.active);
+  const runtimes=await detect();const requested=input.runtimeSelection?normalizeRuntimeSelectionInput(input.runtimeSelection):undefined;
+  const runtime=requested ? runtimes.find(r=>runtimeMatchesSelection(r,requested)) : runtimes.find(r=>r.active);
   if (!runtime || runtime.credentialAccess?.status === 'unavailable' || runtime.signInRequired) throw new Error('work_start_runtime_unavailable');
-  const selection=pin(runtime,requested);
+  const selection=pin(runtime,input.runtimeSelection);
   const controller=listInstalledAgentsReadOnly().find(a=>a.slug==='agentlas-orchestrator');if (!controller) throw new Error('work_start_orchestrator_unavailable');
   let createdFolder: string | null = null;
   try { return db.transaction(()=>{
@@ -79,7 +102,7 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
 }
 export function getWorkStart(input: Parameters<WorkStartAPI['get']>[0]): WorkStartReceipt { exactKeys(input,['intentId','chatId']);return receipt(owned(input.intentId,input.chatId)); }
 export function claimWorkStart(input: Parameters<WorkStartAPI['claim']>[0]): { receipt: WorkStartReceipt; claimToken: string | null } {
-  exactKeys(input,['intentId','chatId']);return getDb().transaction(()=>{ const row=owned(input.intentId,input.chatId);if(row.status!=='queued')return {receipt:receipt(row),claimToken:null};if(canonical(getChat(input.chatId)?.runtimeSelection)!==canonical(JSON.parse(row.runtime_selection_json)))throw new Error('work_start_runtime_binding_changed');const token=randomUUID();getDb().prepare("UPDATE work_start_intents SET status='claimed',claim_token=?,updated_at=? WHERE intent_id=? AND status='queued'").run(token,new Date().toISOString(),row.intent_id);return {receipt:receipt(owned(input.intentId,input.chatId)),claimToken:token}; }).immediate();
+  exactKeys(input,['intentId','chatId']);return getDb().transaction(()=>{ const row=owned(input.intentId,input.chatId);if(row.status!=='queued')return {receipt:receipt(row),claimToken:null};if(canonical(getChat(input.chatId)?.runtimeSelection)!==canonical(storedPin(row.runtime_selection_json)))throw new Error('work_start_runtime_binding_changed');const token=randomUUID();getDb().prepare("UPDATE work_start_intents SET status='claimed',claim_token=?,updated_at=? WHERE intent_id=? AND status='queued'").run(token,new Date().toISOString(),row.intent_id);return {receipt:receipt(owned(input.intentId,input.chatId)),claimToken:token}; }).immediate();
 }
 export function settleWorkStart(input: Parameters<WorkStartAPI['settle']>[0]): WorkStartReceipt {
   exactKeys(input,['intentId','chatId','claimToken','accepted']);if(!UUID.test(input.claimToken)||typeof input.accepted!=='boolean')throw new Error('work_start_settlement_invalid');

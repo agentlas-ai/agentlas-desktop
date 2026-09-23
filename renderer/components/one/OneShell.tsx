@@ -1,6 +1,7 @@
 "use client";
 
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
+import { readStoredRuntimeSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -448,15 +449,8 @@ function readStoredOneRuntimeSelection(): RuntimeSelection | null {
   try {
     const value = JSON.parse(window.localStorage.getItem(ONE_RUNTIME_STORAGE_KEY) ?? "null") as Partial<RuntimeSelection> | null;
     if (!value || typeof value.kind !== "string" || typeof value.backend !== "string") return null;
-    return {
-      kind: value.kind as RuntimeSelection["kind"],
-      backend: value.backend,
-      ...(typeof value.model === "string" && value.model ? { model: value.model } : {}),
-      ...(typeof value.effort === "string" && value.effort ? { effort: value.effort } : {}),
-      ...(typeof value.longContext === "boolean" ? { longContext: value.longContext } : {}),
-      role: "orchestrator",
-      inherit: false,
-    };
+    // ACP 좌석(acpAgentId·label)을 보존한다 — 예전 판은 여기서 좌석을 떨궈 재시작 뒤 One 의 ACP 고정이 거절됐다.
+    return readStoredRuntimeSelection(value, { source: undefined, role: "orchestrator", inherit: false });
   } catch {
     return null;
   }
@@ -4147,16 +4141,7 @@ export function OneShell() {
 
   const oneRuntimeSelection = useMemo<RuntimeSelection | undefined>(() => {
     if (!oneRuntime || !oneRuntimePinned) return undefined;
-    return {
-      kind: oneRuntime.kind,
-      backend: oneRuntime.backend,
-      acpAgentId: oneRuntime.acpAgentId,
-      model: oneRuntime.model ?? undefined,
-      effort: oneRuntime.effort ?? undefined,
-      longContext: oneRuntime.kind === "byok" ? oneRuntime.longContextEnabled ?? false : undefined,
-      role: "orchestrator",
-      inherit: false,
-    };
+    return selectionForRuntime(oneRuntime, { role: "orchestrator", inherit: false, includeSource: false });
   }, [oneRuntime, oneRuntimePinned]);
 
   const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }, runtimeOverride?: RuntimeStatus) => {
@@ -4169,16 +4154,7 @@ export function OneShell() {
         ? undefined
         : baseRuntime.effort;
     const nextRuntime = withOneRuntimeSelection(baseRuntime, nextModel, requestedEffort);
-    const selection: RuntimeSelection = {
-      kind: nextRuntime.kind,
-      backend: nextRuntime.backend,
-      acpAgentId: nextRuntime.acpAgentId,
-      model: nextRuntime.model ?? undefined,
-      effort: nextRuntime.effort ?? undefined,
-      longContext: nextRuntime.kind === "byok" ? nextRuntime.longContextEnabled ?? false : undefined,
-      role: "orchestrator",
-      inherit: false,
-    };
+    const selection: RuntimeSelection = selectionForRuntime(nextRuntime, { role: "orchestrator", inherit: false, includeSource: false });
     const api = ipc();
     let acknowledgedSelection = selection;
     let acknowledgedRuntime = nextRuntime;

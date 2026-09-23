@@ -7,6 +7,8 @@ import { useT } from '@/lib/i18n';
 import { isUserFacingProjectPoolMember } from '@/lib/project-agent-roster';
 import { pendingWorkStart, persistWorkStart, workStartBridge } from '@/lib/work-start-intent';
 import type { InstalledAgent, Project, RuntimeSelection, RuntimeStatus } from '@/lib/types';
+import { runtimeMatchesSelection, selectionForRuntime } from '@shared/runtime-selection';
+import { failureCode } from '@/lib/invocation-failure';
 import menus from './PanelPopover.module.css';
 import styles from './WorkWorkspaceEntry.module.css';
 
@@ -25,14 +27,15 @@ export function WorkWorkspaceEntry(){
     const refresh=()=>{const request=++generation.current;const api=ipc();if(!api){setError(ko?'앱 연결을 확인한 뒤 다시 시도해 주세요.':'The app bridge is unavailable.');return;}
       // 프로젝트 목록은 런타임 감지(첫 실행 최대 10초)를 기다리지 않는다 — 실측(2026-09-13 프로덕션): 감지가 끝나기 전엔 프로젝트 메뉴가 비어 있었다.
       void Promise.all([api.projects.list(),api.team.list()]).then(([p,a])=>{if(disposed||request!==generation.current)return;setProjects(p);setAgents(a);}).catch(()=>{if(!disposed)setError(ko?'프로젝트 목록을 읽지 못했습니다.':'Projects could not be read.');});
-      void api.runtime.detect().then(r=>{if(disposed||request!==generation.current)return;setRuntimeLoaded(true);const pin=selectionRef.current;setRuntime((pin?r.find(item=>item.kind===pin.kind&&item.backend===pin.backend&&item.source===pin.source):r.find(item=>item.active))??null);}).catch(()=>{if(!disposed)setError(ko?'모델 상태를 읽지 못했습니다.':'Model status could not be read.');});};
+      void api.runtime.detect().then(r=>{if(disposed||request!==generation.current)return;setRuntimeLoaded(true);const pin=selectionRef.current;setRuntime((pin?r.find(item=>runtimeMatchesSelection(item,pin)):r.find(item=>item.active))??null);}).catch(()=>{if(!disposed)setError(ko?'모델 상태를 읽지 못했습니다.':'Model status could not be read.');});};
     refresh();const off=ipcEvents()?.onStoreChanged?.(event=>{if(['project','runtime','agent'].includes(event.entity))refresh();});
     const pending=pendingWorkStart();if(pending){setPrefill(pending.prompt);setProjectId(pending.projectId??null);setSelection(pending.runtimeSelection);}
     return()=>{disposed=true;off?.();};
   },[ko]);
   useEffect(()=>{if(!runtime)return;let disposed=false;void ipc()?.runtime.listModels({kind:runtime.kind,backend:runtime.backend,availableModels:runtime.availableModels}).then(result=>{if(!disposed)setModels(result);}).catch(()=>{if(!disposed)setModels([]);});return()=>{disposed=true;};},[runtime?.kind,runtime?.backend,runtime?.source]);
   useEffect(()=>{if(!menu)return;const close=(event:PointerEvent)=>{if(!root.current?.contains(event.target as Node))setMenu(false);};const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){setMenu(false);trigger.current?.focus();}};document.addEventListener('pointerdown',close);document.addEventListener('keydown',key);return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',key);};},[menu]);
-  const exactSelection=selection??(runtime?{kind:runtime.kind,backend:runtime.backend,source:runtime.source,model:runtime.model??undefined,effort:runtime.effort??undefined,longContext:runtime.longContextEnabled}:undefined);
+  // ★ACP 좌석(acpAgentId)까지 싣는 공용 조립기 — 손으로 만든 선택은 ACP 엔진 시작을 막았다.
+  const exactSelection=selection??(runtime?selectionForRuntime(runtime,{longContext:runtime.longContextEnabled??false}):undefined);
   const selectedRuntime=runtime?{...runtime,model:exactSelection?.model??runtime.model,effort:exactSelection?.effort??runtime.effort}:null;
   async function start(text:string,options?:SendOptions){
     if(submitting.current)return;submitting.current=true;setBusy(true);setError('');
@@ -41,7 +44,7 @@ export function WorkWorkspaceEntry(){
       const intent=persistWorkStart({prompt:text,...(projectId?{projectId}:{}),runtimeSelection:exactSelection,options});const result=await bridge.create(intent);
       if(result.intentId!==intent.intentId||result.prompt!==text)throw new Error('work_start_receipt_mismatch');
       window.dispatchEvent(new Event('agentlas:projects-changed'));navigate(`/workspace/task?id=${encodeURIComponent(result.chatId)}&workStart=${encodeURIComponent(result.intentId)}`);
-    }catch(cause){setPrefill(text);setError(ko?'작업을 시작하지 못했습니다. 입력은 보존했습니다. 모델과 프로젝트 연결을 확인한 뒤 다시 보내 주세요.':'Work could not start. Your input is preserved. Check the model and project connection, then send again.');}finally{submitting.current=false;setBusy(false);}
+    }catch(cause){setPrefill(text);const code=failureCode(cause);const suffix=code?(ko?` (사유 코드: ${code})`:` (reason code: ${code})`):'';setError((ko?'작업을 시작하지 못했습니다. 입력은 보존했습니다. 모델과 프로젝트 연결을 확인한 뒤 다시 보내 주세요.':'Work could not start. Your input is preserved. Check the model and project connection, then send again.')+suffix);}finally{submitting.current=false;setBusy(false);}
   }
   return <section className={styles.entry} data-work-entry>
     <header className={`${styles.header} titlebar-drag`}>

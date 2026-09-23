@@ -55,6 +55,7 @@ import {
 import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from "@/lib/build-scan";
 import type { ChatQuestion } from "@/components/ChatStream";
 import type { CloudAgentPublishProgressEvent, CloudAgentPublishStage } from "@shared/types";
+import { selectionForRuntime } from "@shared/runtime-selection";
 
 type StageState = "pending" | "active" | "done" | "error";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -468,7 +469,7 @@ export default function BuildPage() {
     const [runtimeKeyPart, modelId] = key.split("::");
     const r = runtimes.find((x) => `${x.kind}:${x.source}` === runtimeKeyPart);
     setBuildRuntime(r
-      ? { kind: r.kind, backend: r.backend, source: r.source, model: modelId || r.model || undefined }
+      ? selectionForRuntime(r, { model: modelId || r.model || null, effort: null, longContext: undefined })
       : null);
   };
 
@@ -861,7 +862,7 @@ export default function BuildPage() {
                   <button
                     onClick={() => {
                       const active = runtimes.find((item) => item.active) ?? runtimes[0];
-                      void startBuild(active ? { kind: active.kind, backend: active.backend, source: active.source, model: active.model ?? undefined, longContext: active.longContextEnabled, effort: active.effort ?? undefined } : undefined);
+                      void startBuild(active ? selectionForRuntime(active, { longContext: active.longContextEnabled ?? undefined }) : undefined);
                     }}
                     disabled={Boolean(startBlocker)}
                     /* 막는 사유 문장이 아래에 있는데 단추에는 없었다 — 같은 문장을 붙인다. */

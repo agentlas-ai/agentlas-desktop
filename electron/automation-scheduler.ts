@@ -1,4 +1,5 @@
 import { bindAutomationRunStop, releaseAutomationRunStop } from "./automation-execution-control";
+import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { deliverAutomationResult } from "./automation-delivery";
 import { claimAutomationNotification } from "./automation-notifications";
@@ -772,14 +773,10 @@ async function runOne(
       // stored Worker role order; detection order must never choose its model.
       const activeRuntime = rolePriorityRuntimes(await detectRuntimes(), "worker")[0] ?? null;
       if (!activeRuntime) throw new Error("No runtime is available to pin for this automation.");
-      a = pinAutomationRuntimeIfUnset(a.id, {
-          kind: activeRuntime.kind,
-          backend: activeRuntime.backend,
-          source: activeRuntime.source,
-          model: activeRuntime.model ?? undefined,
-          longContext: activeRuntime.longContextEnabled,
-          effort: activeRuntime.effort ?? undefined,
-      });
+      // selectionForRuntime carries the exact ACP seat; a hand-built pin dropped it.
+      a = pinAutomationRuntimeIfUnset(a.id, selectionForRuntime(activeRuntime, {
+        longContext: activeRuntime.longContextEnabled ?? undefined,
+      }));
       tryRecordRunEvent({
         runId: currentRunId ?? `automation-pin-${a.id}-${Date.now()}`,
         kind: "automation_runtime_pinned",
