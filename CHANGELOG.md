@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.36 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- One and Work: a Goal no longer stays blocked. When the result of an earlier step is
+  uncertain, Agentlas looks for itself with one read-only check and then continues, redoes
+  the step, or checks again later on its own. Model or usage failures move to another
+  connected model or retry on a schedule. Goals end only when completed, or cancelled with
+  the reason recorded. Blocked Goals left by earlier versions are cleared the first time
+  this version starts.
+- Automations: holds on an automation, and Goals that an automation continues, are checked
+  directly before asking you anything.
+- Memory: memories are now kept in English for search, with the original wording kept and
+  shown to you. On first start, memories saved in other languages are translated gradually
+  in the background (a daily cap, only while the app is idle), using a local model or a
+  signed-in Claude Code; if neither is available the original stays and is still found.
+  Forgetting a memory forgets both versions.
+- Memory: adding to a project's memory file no longer rewrites the whole file.
+
 ## 1.2.35 — 2026-09-23
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
