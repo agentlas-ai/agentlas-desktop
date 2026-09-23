@@ -1216,8 +1216,16 @@ export function appendSoulMemory(
     } catch {
       content = soulTemplate(path.basename(projectPath) || "Project");
     }
-    if (!content.includes(AUTO_SECTION)) content += `\n${AUTO_SECTION}\n`;
     const block = lines.map((l) => `- ${l}`).join("\n") + "\n";
+    // The engine's One curator also appends project blocks to this file
+    // (Agentlas-OS 4330d444). Rewriting the whole file from an earlier read
+    // would drop a block written in between; with the section present, only
+    // append (O_APPEND writes do not erase each other).
+    if (content.includes(AUTO_SECTION) && fs.existsSync(soulPath)) {
+      fs.appendFileSync(soulPath, (content.endsWith("\n") ? "" : "\n") + block, "utf8");
+      return;
+    }
+    content += `\n${AUTO_SECTION}\n`;
     fs.writeFileSync(soulPath, content.replace(/\s*$/, "\n") + block, "utf8");
   } catch {
     // best-effort
