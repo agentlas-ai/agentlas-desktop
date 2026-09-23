@@ -518,7 +518,7 @@ const missingDataPattern = {
   },
   matlabParity: { taxonomyIds: ["matlab.stats.descriptive-visualization", "matlab.stats.hypothesis.distribution"] },
   coverage: {
-    implementedBoundary: "Missingness accounting (per variable, per pattern, monotone check) and Little's (1988) MCAR chi-square from an EM maximum-likelihood mean and covariance, for 2..24 continuous numeric variables and 4..5000 rows with explicit nulls. No categorical or ordinal variables, no sentinel-code detection, no covariate-dependent (Jamshidian-Jalal) MCAR test, and no pattern-mixture modelling.",
+    implementedBoundary: "Missingness accounting (per variable, per pattern, monotone check) and Little's (1988) MCAR chi-square from an EM maximum-likelihood mean and covariance, for 2..24 continuous numeric variables and 4..5000 rows with explicit nulls. A fully missing selected variable is retained in descriptive counts and patterns with null observed moments; EM and Little's test are explicitly not evaluated because its mean and covariance are unidentifiable. At least one variable must have observed values. No categorical or ordinal variables, no sentinel-code detection, no covariate-dependent (Jamshidian-Jalal) MCAR test, and no pattern-mixture modelling.",
     oracle: {
       level: "external-library-partial",
       evidence: ["contracts/missing-data-scipy-crosscheck.py"],

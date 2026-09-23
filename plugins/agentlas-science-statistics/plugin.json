@@ -389,8 +389,8 @@
       },
       {
         "path": "coverage-manifest.json",
-        "sha256": "bac2a68a5e06ef47d7c80d9b5eb1df92dfb1b1be8c8963ac6b5d695a5b19e981",
-        "bytes": 269447
+        "sha256": "34b2967af34f0821a9cd3ecf8b430e9252064b7638b01f5d9f33d5e9b497f648",
+        "bytes": 269707
       },
       {
         "path": "figure-catalog.json",
@@ -514,8 +514,8 @@
       },
       {
         "path": "runtime/methods/missing-data.cjs",
-        "sha256": "ff70817180bcd36ded44f92c72efe0c608f88c467a6568183652e85d8303a69a",
-        "bytes": 83333
+        "sha256": "8b82de6b9c296428d91aaa0a89a89bb201410824ea0704a8fa72bd0361ebba06",
+        "bytes": 84983
       },
       {
         "path": "runtime/methods/mixed-models.cjs",
