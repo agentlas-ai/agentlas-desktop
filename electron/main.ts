@@ -4070,6 +4070,14 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[dreaming] scheduler start failed:", err);
   }
+  // 전면 영어 마이그레이션(기획 2026-09-23 데스크탑 절) — 한 번 큐를 채우고 유휴에서 끝까지 번역한다.
+  // dreaming 설정과 무관(별도 1회 작업), 하드 옵트아웃 meta 만 존중. 부팅 경로 밖(지연·유휴 타이머).
+  try {
+    const { startEnglishMemoryMigration } = await import("./memory/english-migration");
+    startEnglishMemoryMigration();
+  } catch (err) {
+    console.error("[english-memory] scheduler start failed:", err);
+  }
   // 조건 트리거 매니저(설계 §3) — fs 변경/체인 완료 이벤트를 리스너에 등록(유휴 0).
   // 헤드리스 러너에서는 등록하지 않는다(위 early-return 분기). 스케줄러의 실행 함수를 주입.
   try {

@@ -8,6 +8,15 @@ import {
   DEVICE_LOCAL_BORROWED_OWNER_SCOPE,
 } from "../agents/borrowed-owner-scope";
 import { getDb } from "../store/db";
+import { nativeTextsFor } from "./native-text";
+
+/**
+ * Cleanup-target source id for the original-wording twin of a translated
+ * memory. The target table is unique per (source, kind, ref), so the twin needs
+ * its own source id (and source→revocation link); project-files.ts strips the
+ * suffix before matching the projection's memory_id.
+ */
+export const NATIVE_TWIN_SOURCE_SUFFIX = "#native";
 
 export type MemoryRevocationReason = "exact-content-revoked" | "stale-intake-epoch";
 
@@ -59,6 +68,12 @@ export interface ForgottenMemoryProjection {
   kind: MemoryKind;
   content: string;
   contentHash: string;
+  /**
+   * Hashes of the original wording of translated rows (English migration).
+   * Soul/log lines written before the translation carry this wording, so the
+   * projection cleanup must match these too.
+   */
+  nativeContentHashes: string[];
   projectPaths: string[];
   forgottenAt: string;
   revokedEpoch: number;
@@ -660,15 +675,24 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
          FROM memory_entries
         WHERE scope = ? AND kind = ?`,
     ).all(selected.scope, selected.kind) as ForgettableMemoryRow[];
-    const matched = candidates.filter((row) =>
-      memoryOwnerKey({
+    // English migration: a translated row's original wording lives in the side
+    // table. The same original under the same owner is the same memory, and it
+    // must be forgotten everywhere it was projected in that wording.
+    const candidateNatives = nativeTextsFor("memory_entry", candidates.map((row) => row.id));
+    const selectedNative = candidateNatives.get(selected.id);
+    const selectedNativeHash = selectedNative ? memoryContentHash(selectedNative) : null;
+    const matched = candidates.filter((row) => {
+      if (memoryOwnerKey({
         scope: row.scope,
         projectId: row.project_id,
         projectPath: row.project_path,
         agentId: row.agent_id,
         chatId: row.chat_id,
-      }) === ownerKey && memoryContentHash(row.content) === contentHash,
-    );
+      }) !== ownerKey) return false;
+      if (memoryContentHash(row.content) === contentHash) return true;
+      const native = candidateNatives.get(row.id);
+      return Boolean(selectedNativeHash && native && memoryContentHash(native) === selectedNativeHash);
+    });
     const sourceMemoryIds = matched.map((row) => row.id);
     const projectPaths = [...new Set(matched.map((row) => row.project_path).filter((value): value is string => Boolean(value)))];
     if (sourceMemoryIds.length === 0) return null;
@@ -707,6 +731,53 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
           revocationId: canonicalRevocation.revocationId,
           targetKind: "agent-nest-scan",
           targetRef: activeNestOwnerScopeKey,
+          now,
+        });
+      }
+    }
+
+    // Tombstone the original wording too: soul/log lines written before the
+    // translation carry it, and the same original must not be admitted again.
+    const nativeHashes = new Map<string, string[]>();
+    for (const row of matched) {
+      const native = candidateNatives.get(row.id);
+      if (!native) continue;
+      const hash = memoryContentHash(native);
+      if (hash === contentHash) continue;
+      const rows = nativeHashes.get(hash) ?? [];
+      rows.push(row.id);
+      nativeHashes.set(hash, rows);
+    }
+    for (const [nativeHash, rowIds] of nativeHashes) {
+      getDb().prepare(
+        `INSERT INTO memory_revocations (
+           revocation_id, owner_key, memory_kind, content_hash, source_memory_id,
+           revoked_epoch, revoked_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_key, memory_kind, content_hash) DO UPDATE SET
+           source_memory_id = excluded.source_memory_id,
+           revoked_epoch = excluded.revoked_epoch,
+           revoked_at = excluded.revoked_at`,
+      ).run(`mrv_${randomUUID()}`, ownerKey, selected.kind, nativeHash, selected.id, epoch, now);
+      const nativeRevocation = getDb().prepare(
+        `SELECT revocation_id AS revocationId FROM memory_revocations
+          WHERE owner_key = ? AND memory_kind = ? AND content_hash = ?`,
+      ).get(ownerKey, selected.kind, nativeHash) as { revocationId: string };
+      for (const row of matched) {
+        if (!rowIds.includes(row.id)) continue;
+        const projectPath = canonicalProjectPath(row.project_path);
+        if (!projectPath) continue;
+        // The cleanup lease requires a source→revocation link for its own source id.
+        getDb().prepare(
+          `INSERT INTO memory_revocation_sources (source_memory_id, revocation_id)
+           VALUES (?, ?)
+           ON CONFLICT(source_memory_id) DO UPDATE SET revocation_id = excluded.revocation_id`,
+        ).run(`${row.id}${NATIVE_TWIN_SOURCE_SUFFIX}`, nativeRevocation.revocationId);
+        enqueueRevocationCleanupTarget({
+          sourceMemoryId: `${row.id}${NATIVE_TWIN_SOURCE_SUFFIX}`,
+          revocationId: nativeRevocation.revocationId,
+          targetKind: "project-files",
+          targetRef: projectPath,
           now,
         });
       }
@@ -765,6 +836,7 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
       kind: selected.kind,
       content: selected.content,
       contentHash,
+      nativeContentHashes: [...nativeHashes.keys()],
       projectPaths,
       forgottenAt: now,
       revokedEpoch: epoch,

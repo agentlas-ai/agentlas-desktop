@@ -12,6 +12,7 @@ import {
   parseLocalEmbedding,
   type LocalMemoryEmbedding,
 } from "./local-embedding";
+import { enqueueEnglishTranslation } from "./native-text";
 
 export type MemoryEmitterStatus = "valid" | "empty" | "missing" | "malformed" | "read_only";
 export type MemoryCuratorMode = "semantic" | "policy" | "policy_fallback" | "read_only";
@@ -155,14 +156,15 @@ function insertEpisode(
 ): void {
   const summary = compactTurnSummary(turnSummary);
   const embedding = summary ? autoLocalEmbedding(summary) : null;
-  getDb().prepare(
+  const episodeId = `mep_${randomUUID()}`;
+  const inserted = getDb().prepare(
     `INSERT OR IGNORE INTO memory_episodes (
        episode_id, ticket_id, project_id, project_path_hash, agent_id, chat_id, summary, summary_hash,
        embedding_model, embedding_adapter, embedding_model_sha256,
        embedding_content_hash, embedding_dimensions, embedding_json, created_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    `mep_${randomUUID()}`,
+    episodeId,
     ticketId,
     ctx.projectId ?? null,
     projectPathHash(ctx.projectPath),
@@ -178,6 +180,9 @@ function insertEpisode(
     embedding ? JSON.stringify(embedding.vector) : null,
     createdAt,
   );
+  // English migration write path (plan 2026-09-23 D-7): a non-English turn
+  // summary is queued for idle translation; the turn never waits on a model.
+  if (summary && inserted.changes === 1) enqueueEnglishTranslation("memory_episode", episodeId, summary);
 }
 
 /** Idempotent for a runtime turn: retries reuse the same run+node ticket. */

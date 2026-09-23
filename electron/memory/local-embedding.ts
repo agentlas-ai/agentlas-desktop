@@ -695,6 +695,14 @@ export interface HybridRankable {
   text: string;
   embedding: readonly number[];
   prior?: number;
+  /**
+   * The same item in a second wording — the original of a memory whose `text`
+   * is its English translation (English migration, plan 2026-09-23). Each
+   * channel takes the better of the two, so a translated row keeps every match
+   * its original had and gains the English ones.
+   */
+  altText?: string;
+  altEmbedding?: readonly number[];
 }
 
 export interface HybridRanked<T extends HybridRankable> {
@@ -733,11 +741,20 @@ export function rankHybridLocal<T extends HybridRankable>(
 ): HybridRanked<T>[] {
   const queryEmbedding = autoLocalEmbedding(query);
   const queryVector = queryEmbedding.vector;
-  const measured = items.map((item) => ({
-    item,
-    lexicalScore: lexicalOverlap(query, item.text),
-    vectorScore: cosineSimilarity(queryVector, item.embedding),
-  }));
+  const measured = items.map((item) => {
+    const altUsable = Boolean(item.altText) && !hangulBeyondModel(item.altText ?? "");
+    return {
+      item,
+      lexicalScore: Math.max(
+        lexicalOverlap(query, item.text),
+        item.altText ? lexicalOverlap(query, item.altText) : 0,
+      ),
+      vectorScore: Math.max(
+        cosineSimilarity(queryVector, item.embedding),
+        altUsable && item.altEmbedding ? cosineSimilarity(queryVector, item.altEmbedding) : Number.NEGATIVE_INFINITY,
+      ),
+    };
+  });
   const bestVectorScore = Math.max(0, ...measured.map((entry) => entry.vectorScore));
   // CJK no longer gets its own floor: that existed because the English-only
   // asset could not read it, and a model that reads Korean should not be second-

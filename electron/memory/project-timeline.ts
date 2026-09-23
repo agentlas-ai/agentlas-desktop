@@ -28,6 +28,7 @@ import { listProjectMemoryEpisodes } from "./tickets";
 import { summarizeCompletedWork } from "./work-summary";
 import { localizePolicyTurnSummary } from "./policy-turn-summary";
 import { currentUiLocale } from "../ui-locale";
+import { nativeTextsFor } from "./native-text";
 
 const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
 const CODE_MAP_FULL_FILE = "code-map/project-map.json";
@@ -293,11 +294,14 @@ export function getProjectTimelineSnapshot(
     return rows;
   };
 
+  // People see the original wording of an episode translated for the English
+  // index (plan 2026-09-23 D-5); the English summary stays the recall surface.
+  const episodeNatives = nativeTextsFor("memory_episode", episodes.map((episode) => episode.id));
   for (const episode of episodes) {
     const fallback = locale === "ko" ? "작업 기록" : "Work record";
     // 정책이 적은 문장("답이 나오기 전에 …")은 저장 당시 언어라 — 지금 화면 언어로 바꿔 보여준다.
     const summary = summarizeCompletedWork(
-      localizePolicyTurnSummary(episode.summary, locale),
+      localizePolicyTurnSummary(episodeNatives.get(episode.id) ?? episode.summary, locale),
       fallback,
       locale,
     );
