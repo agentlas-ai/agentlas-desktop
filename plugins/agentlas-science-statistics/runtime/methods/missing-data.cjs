@@ -272,8 +272,12 @@ const missingDataPattern = {
     H.assertKeys(data, ["variables", "datasetLabel"], "data");
     const parsed = parseColumns(data.variables, "data.variables", "Variable", H, { minColumns: 2, maxColumns: MAX_VARIABLES, rows: null, allowMissing: true });
     if (parsed.n < 4) H.fail("STAT_INSUFFICIENT_SAMPLE", "missing_data_pattern requires at least four rows");
+    if (parsed.columns.every((column) => column.every((value) => value === null))) {
+      H.fail("STAT_INSUFFICIENT_SAMPLE", "missing_data_pattern needs at least one variable with observed values");
+    }
     parsed.columns.forEach((column, index) => {
       const observed = observedOf(column);
+      if (observed.length === 0) return;
       if (observed.length < 2) H.fail("STAT_INSUFFICIENT_SAMPLE", `variable ${parsed.names[index]} has fewer than two observed values`);
       const { min, max } = H.minMax(observed);
       if (min === max) H.fail("STAT_DEGENERATE", `variable ${parsed.names[index]} is constant among its observed values`);
@@ -293,7 +297,7 @@ const missingDataPattern = {
         observed: observed.length,
         missing,
         percentMissing: (100 * missing) / n,
-        observedMean: H.mean(observed, budget),
+        observedMean: observed.length ? H.mean(observed, budget) : null,
         observedSd: observed.length >= 2 ? Math.sqrt(H.variance(observed, true, budget)) : null,
       };
     });
@@ -359,14 +363,17 @@ const missingDataPattern = {
       }
       if (observed.length) usableRows.push({ row, observed, missing, values: columns.map((column) => column[row]) });
     }
-    if (usableRows.length < j + 1) H.fail("STAT_INSUFFICIENT_SAMPLE", "too few rows with at least one observed value to estimate the mean and covariance");
-    const em = emNormal(usableRows, j, options.tolerance, options.emIterations, H, budget);
+    const allMissingVariables = variableRows.filter((row) => row.observed === 0).map((row) => row.variable);
+    if (!allMissingVariables.length && usableRows.length < j + 1) H.fail("STAT_INSUFFICIENT_SAMPLE", "too few rows with at least one observed value to estimate the mean and covariance");
+    // A fully missing variable has no identifiable mean or covariance. Keep the descriptive
+    // accounting for every selected variable, but do not fit EM or report a Little MCAR test.
+    const em = allMissingVariables.length ? null : emNormal(usableRows, j, options.tolerance, options.emIterations, H, budget);
 
     let statistic = 0;
     let dfSum = 0;
     let patternsUsed = 0;
     const mcarRows = [];
-    for (const entry of patternRows) {
+    for (const entry of em ? patternRows : []) {
       const rows = patternMap.get(entry.pattern);
       const observed = [];
       for (let variable = 0; variable < j; variable += 1) if (entry.pattern[variable] === "1") observed.push(variable);
@@ -389,15 +396,18 @@ const missingDataPattern = {
       patternsUsed += 1;
       mcarRows.push({ pattern: entry.pattern, count: rows.length, variablesObserved: observed.length, contribution });
     }
-    const df = dfSum - j;
-    const evaluated = df > 0;
-    statistic = finiteOrFail(statistic, "Little MCAR statistic is not finite", H);
+    const df = em ? dfSum - j : 0;
+    const evaluated = em !== null && df > 0;
+    const notEvaluatedReason = allMissingVariables.length
+      ? `Little MCAR test cannot estimate a mean or covariance for fully missing variable(s): ${allMissingVariables.join(", ")}`
+      : "degrees of freedom are not positive; the patterns carry no information beyond the variable count";
+    if (em) statistic = finiteOrFail(statistic, "Little MCAR statistic is not finite", H);
     const pValue = evaluated ? Math.min(1, Math.max(0, H.pFromChiSquare(statistic, df))) : null;
 
     const testRows = [
-      { statistic: "Little MCAR chi-square", value: statistic },
+      { statistic: "Little MCAR chi-square", value: evaluated ? statistic : null },
       { statistic: "degrees of freedom", value: evaluated ? df : 0 },
-      { statistic: "p value", value: evaluated ? pValue : 0 },
+      { statistic: "p value", value: pValue },
       { statistic: "missing-data patterns", value: patternRows.length },
       { statistic: "patterns entering the test", value: patternsUsed },
       { statistic: "complete rows", value: completeRows },
@@ -423,18 +433,19 @@ const missingDataPattern = {
       ],
       tests: evaluated
         ? [{ name: "Little MCAR test", statistic, distribution: "chi-square", df, pValue, method: "Little (1988) pooled pattern-mean Mahalanobis distance from the EM maximum-likelihood mean", interpretationBoundary: "rejecting MCAR does not identify MAR or MNAR; failing to reject is not evidence for MCAR" }]
-        : [{ name: "Little MCAR test", status: "not_evaluated", reason: "degrees of freedom are not positive; the patterns carry no information beyond the variable count", df }],
+        : [{ name: "Little MCAR test", status: "not_evaluated", reason: notEvaluatedReason, df }],
       confidenceIntervals: [],
       effectSizes: [{ name: "proportion of missing cells", estimate: variableRows.reduce((total, row) => total + row.missing, 0) / (n * j), interpretationBoundary: "describes how much data is absent, not how much bias the absence causes" }],
       assumptions: [
         { name: "missingness indicator is explicit", status: "verified", note: "Every absent value arrived as null; sentinel codes such as -99 are not detected." },
         { name: "multivariate normality of the analysis variables", status: "not_established", note: "Little's test derives from the normal likelihood; heavy tails or categorical codings distort it." },
-        { name: "MCAR (testable)", status: evaluated ? "tested" : "not_evaluated", note: "The chi-square is the only assumption this method tests; MAR and MNAR are untestable from the observed data." },
+        { name: "MCAR (testable)", status: evaluated ? "tested" : "not_evaluated", note: evaluated ? "The chi-square is the only assumption this method tests; MAR and MNAR are untestable from the observed data." : notEvaluatedReason },
         { name: "patterns have enough rows for a pattern mean", status: patternRows.every((row) => row.count >= 2) ? "verified" : "requires_design_review", smallestPattern: Math.min(...patternRows.map((row) => row.count)) },
       ],
       diagnostics: [
         { name: "monotone missingness", status: monotone ? "monotone" : "non-monotone", variableOrder: monotoneOrder.map((entry) => entry.name), firstViolatingRow: monotoneViolationRow, detail: monotone ? "A monotone pattern admits sequential regression imputation without iteration." : "A non-monotone pattern requires chained equations or full-information likelihood." },
-        { name: "EM convergence", status: "converged", iterations: em.iterations, maxParameterChange: em.change, tolerance: options.tolerance, detail: "Maximum-likelihood mean and covariance (divisor n) under an ignorable mechanism." },
+        { name: "EM convergence", status: em ? "converged" : "not_evaluated", ...(em ? { iterations: em.iterations, maxParameterChange: em.change, tolerance: options.tolerance } : {}), detail: em ? "Maximum-likelihood mean and covariance (divisor n) under an ignorable mechanism." : notEvaluatedReason },
+        ...(allMissingVariables.length ? [{ name: "fully missing variables", status: "requires_design_review", variables: allMissingVariables, detail: "These variables have no observed values; their observed means and standard deviations cannot be estimated." }] : []),
         { name: "pattern concentration", status: "evaluated", patterns: patternRows.length, largestPatternShare: patternRows[0].percentOfRows / 100, completeCaseShare: completeRows / n },
         { name: "complete-case loss", status: completeRows / n < 0.9 ? "material" : "limited", rowsLostToCompleteCaseAnalysis: n - completeRows, detail: "Rows a complete-case analysis would silently discard." },
       ],
@@ -446,7 +457,7 @@ const missingDataPattern = {
           { key: "percentMissing", label: "Missing (%)", type: "number" },
           { key: "observedMean", label: "Observed mean", type: "number" },
           { key: "observedSd", label: "Observed SD", type: "number" },
-        ], variableRows, ["Observed means are computed on the observed values only and are biased under any mechanism other than MCAR."], "missing-data-variable-summary-table"),
+        ], variableRows, ["Observed means are computed on the observed values only and are biased under any mechanism other than MCAR.", ...(allMissingVariables.length ? ["A fully missing variable has no observed mean or standard deviation; null denotes not estimable."] : [])], "missing-data-variable-summary-table"),
         H.tableArtifact(`Missing-data patterns: ${parsed.datasetLabel}`, "Every distinct pattern of observed variables with its row count. 1 marks an observed variable in the declared variable order.", [
           { key: "pattern", label: "Pattern (1 = observed)", type: "string" },
           { key: "count", label: "Rows", type: "number" },
@@ -458,7 +469,7 @@ const missingDataPattern = {
         H.tableArtifact(`MCAR test and missingness accounting: ${parsed.datasetLabel}`, "Little's MCAR chi-square with its degrees of freedom and p value, plus the row and cell accounting a reviewer asks for before any imputation.", [
           { key: "statistic", label: "Quantity", type: "string" },
           { key: "value", label: "Value", type: "number" },
-        ], testRows, evaluated ? ["Degrees of freedom are the summed count of observed variables across patterns minus the number of variables."] : ["The test was not evaluated: the degrees of freedom are not positive."], "missing-data-mcar-test-table"),
+        ], testRows, evaluated ? ["Degrees of freedom are the summed count of observed variables across patterns minus the number of variables."] : [`The test was not evaluated: ${notEvaluatedReason}.`], "missing-data-mcar-test-table"),
         H.vegaArtifact("missing-data-percent-missing-plot", `Percent missing by variable: ${parsed.datasetLabel}`, {
           data: { values: variableRows },
           mark: { type: "bar" },
