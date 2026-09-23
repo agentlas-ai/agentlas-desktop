@@ -301,6 +301,8 @@ export function mainToolBrokerInventory(
  */
 export interface LocalToolApprovalContext {
   scienceCollectionCapability?: object;
+  /** Main-owned dynamic authority checked again after an asynchronous approval. */
+  assertCurrent?: () => void;
   planMode?: true;
   runtimeKind: string;
   sessionKey: string;
@@ -583,6 +585,7 @@ export async function runMainToolDispatch(
     };
   }
   approval.signal?.throwIfAborted();
+  approval.assertCurrent?.();
   if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, resolved);
   if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
   if (resolved.kind === "builtin") {
@@ -593,6 +596,7 @@ export async function runMainToolDispatch(
       import("../multimodal/image"),
     ]);
     approval.signal?.throwIfAborted();
+    approval.assertCurrent?.();
     const downloadProof = resolved.builtinName === "browser_download"
       ? beginBrowserDownloadProof({...approval,toolId:eventCallId,toolName:call.toolName}) : null;
     const fileProof = beginBuiltinFileProof({ ...approval, toolId: eventCallId, toolName: call.toolName, builtinName: resolved.builtinName });
@@ -657,6 +661,8 @@ export async function runMainToolDispatch(
       import("../mcp-tools/client"),
       import("../media/capture-artifacts"),
     ]);
+    approval.signal?.throwIfAborted();
+    approval.assertCurrent?.();
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
@@ -1180,6 +1186,21 @@ export async function runLocalOpenAiChat(
     if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
       || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
       throw new Error("science_collection_tool_frame_invalid");
+    }
+    if (approvalContext.scienceCollectionCapability && result.toolCalls.length > 0) {
+      const ids = new Set<string>();
+      for (const call of result.toolCalls) {
+        if (ids.has(call.id)) throw new Error("science_collection_tool_frame_invalid");
+        ids.add(call.id);
+        try {
+          const args: unknown = JSON.parse(call.function.arguments);
+          if (!args || typeof args !== "object" || Array.isArray(args)) {
+            throw new Error("science_collection_tool_frame_invalid");
+          }
+        } catch {
+          throw new Error("science_collection_tool_frame_invalid");
+        }
+      }
     }
     // A provider is allowed to hallucinate a tool_calls block even though it
     // received no tools. In the untrusted boundary, treat that response as a

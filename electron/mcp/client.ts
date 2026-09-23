@@ -3,6 +3,8 @@ import { issueScienceCollectionCapability, assertScienceCollectionRuntimeSelecti
 import { readScienceCollectionAuthority } from "../science-host/collection-authority";
 import { resolveScienceRecoveryAuthority, freshScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { readScienceRecoveryAuthority } from "../science-host/recovery-mint";
+import { bindScienceAliveDesktopToolWake, bindScienceDesktopToolTurn,
+  type ScienceAliveDesktopToolScope } from "../science-host/desktop-tool-bridge";
 import { ALIVE_DECISION_OUTPUT_SCHEMA } from "../alive-decision-schema";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
@@ -3524,8 +3526,9 @@ ${effectiveUserPrompt}`;
     // beside the host's receipt-producing search_paleontology_occurrences),
     // so a Research Director can loop on the wrong surface and bypass the
     // downstream Science receipts. The built-in catalog already contains the
-    // trusted adapters for every installed Science Lab; other MCP servers are
-    // intentionally not carried into this turn.
+    // trusted adapters for every installed Science Lab. Other installed
+    // servers are discoverable through the turn-bound lazy Desktop bridge,
+    // never inserted wholesale into the Science session config.
     // Codex launches with this exact cwd (see the root RunnerRequest below and
     // codex.ts's agentRunCwd fallback). Science must bind its isolated CODEX_HOME
     // project-trust entry to that directory, not infer a workspace from the
@@ -3542,6 +3545,17 @@ ${effectiveUserPrompt}`;
     const scienceGrant = scienceReview
       ? await reviewGrantWithCwd(executionContext.scienceReview!, req.runId!, req.chatId, codexLaunch)
       : await turnGrantWithCwd(executionContext.science!, undefined, undefined, { planMode: planReadOnly }, codexLaunch);
+    if (!scienceReview && !planReadOnly && !scienceCollectionCurrent && executionContext.science) {
+      if (executionContext.science.invocationRunId !== req.runId || req.chatId !== chat.id)
+        throw new Error("science_desktop_tool_run_binding_mismatch");
+      const releaseDesktopTools = bindScienceDesktopToolTurn(executionContext.science, {
+        chatId: req.chatId, agentId: agent.id, runtimeKind: active.kind,
+        permission: normalizedPermission, cwd: workingFolder ?? codexLaunch.cwd,
+        signal, approvalScope: browserApprovalScope,
+      });
+      const previousCleanup = mcpConfigCleanup;
+      mcpConfigCleanup = () => { try { releaseDesktopTools(); } finally { previousCleanup?.(); } };
+    }
     mcpConfigPath = scienceGrant.configPath;
     if (scienceCollectionCurrent) scienceCollectionCapability = issueScienceCollectionCapability(mcpConfigPath, scienceCollectionCurrent);
     mcpAllowedTools = scienceGrant.allowedTools;
@@ -3558,7 +3572,7 @@ ${effectiveUserPrompt}`;
     mcpIncludedServers = [scienceGrant.includedServer];
     mcpAutoSelectionPrompt = scienceReview ? "Independently assess the reserved scientific input. All tools and native runtime actions remain read-only. Only read_criterion_review_input is granted; do not create research state or borrow another agent. Return the exact requested findings JSON." : planReadOnly
       ? "Agentlas Science Plan mode is read-only for files, shell, and research state. Only the exact granted discovery tools may be called. Describe a plan without creating contracts, hypotheses, studies, artifacts, approvals, downloads, or other state. Unavailable research tools remain unavailable until a separate execution turn."
-      : `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report the returned analytic false-alarm upper bound, model period standard error, assumptions, and warnings without upgrading a grid peak into a confirmed physical period or a standard error into a confidence interval. Call analyze_light_curve_periodicity_depth with explicit inputs when the frozen plan requires sampling-window, alias, bootstrap, or robustness analysis; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix. This Science research turn may use its granted Science tools directly. Research-state tool calls are validated by the host; do not ask for an extra tool permission or treat a granted Science tool as forbidden. Native file and shell actions follow the selected runtime's actual permission and project workspace, not a separate Science read-only rule. Claim a research state change or artifact only after its typed receipt.`.trim();
+      : `Agentlas Science owns this research session and its Science Lab tools. Choose the tools relevant to the user request from the live catalog and returned descriptors; Desktop tools are available through the Science bridge when listed. Follow any route and limits in the Science surface context and each tool receipt. Ground claims about prior research, novelty, citations, and measured results in returned source IDs or provider receipts; distinguish metadata from verified full text and disclose partial failures. Do not invent data, artifacts, external effects, or completion receipts. Stop when the user stops or a host authority becomes stale. Respond as Agentlas Science without the One or Hope prefix. Native file and shell actions follow the selected runtime permission and project workspace. Claim a research state change or artifact only after its typed receipt.`.trim();
   }
 
   // Alive is a separate actor: its attachment, not its hidden Work chat or
@@ -3581,6 +3595,28 @@ ${effectiveUserPrompt}`;
       mcpAutoSelectionPrompt = "The attached Science tool bridge is unavailable in this installed build. No Science tools are granted; do not claim a Science tool call or receipt. You may still reason about the observed state and propose only a host-validated action.";
     } else {
       const aliveGrant = await science.materializeAliveScienceMcpGrant(authority, { cwd: workingFolder ?? agentRunCwd() });
+      let releaseAliveDesktopTools: (() => void) | undefined;
+      try {
+      const store = (await import("agentlas-science")).scienceStore();
+      const principal = store.aliveLifetime().preparedToolPrincipal({ ...authority, domain: "science" }, Date.now());
+      const projectId = principal.scope.projectId;
+      const conversationId = principal.scope.conversationId;
+      if (typeof projectId !== "string" || typeof conversationId !== "string"
+        || principal.agentId !== store.scienceAliveAgentId(projectId))
+        throw new Error("alive_desktop_tool_wake_binding_invalid");
+      const policy = store.aliveResearchContinuationAuthority(projectId, conversationId);
+      if (policy.stopped || !policy.fullAutonomyStanding) throw new Error("alive_desktop_tool_policy_stale");
+      const desktopScope: ScienceAliveDesktopToolScope = { projectId, conversationId,
+        agentId: authority.agentId, wakeId: authority.wakeId, controlEpoch: authority.controlEpoch,
+        attachmentId: authority.attachmentId, attachmentGeneration: principal.attachmentGeneration,
+        scopeSha256: createHash("sha256").update(JSON.stringify(principal.scope)).digest("hex"),
+        conversationStopEpoch: policy.conversationStopEpoch,
+        approvalPolicySha256: policy.approvalPolicySha256 };
+      releaseAliveDesktopTools = bindScienceAliveDesktopToolWake(desktopScope, {
+        chatId: req.chatId, agentId: authority.agentId, runtimeKind: active.kind,
+        permission: normalizedPermission, cwd: workingFolder ?? agentRunCwd(),
+        signal, approvalScope: browserApprovalScope,
+      });
       mcpConfigPath = aliveGrant.configPath;
       mcpAllowedTools = aliveGrant.allowedTools;
       mcpCodexConfigArgs = aliveGrant.codexConfigArgs;
@@ -3592,7 +3628,19 @@ ${effectiveUserPrompt}`;
           ? " You may call alive_propose_research_hypothesis for an evidence-bound proposal; Science independently requires a current standing hypothesis grant and may refuse. Copy wake_id exactly from this wake's host-provided context. A proposal is not an approval or an experimental result; inspect the returned receipt before changing your plan."
           : " No Alive-specific Science write tool is granted in this installed build; do not claim you changed research state through one.");
       ephemeralToolGrant = aliveGrant.sessionScoped !== true;
-      mcpConfigCleanup = () => { science.revokeAliveScienceMcpGrant?.(authority.wakeId); };
+      const previousCleanup = mcpConfigCleanup;
+      mcpConfigCleanup = () => {
+        try { releaseAliveDesktopTools?.(); }
+        finally {
+          try { science.revokeAliveScienceMcpGrant?.(authority.wakeId); }
+          finally { previousCleanup?.(); }
+        }
+      };
+      } catch (error) {
+        releaseAliveDesktopTools?.();
+        science.revokeAliveScienceMcpGrant?.(authority.wakeId);
+        throw error;
+      }
     }
   }
 

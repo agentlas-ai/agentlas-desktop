@@ -395,6 +395,21 @@ async function runAnthropicMessages(
     if (req.scienceCollectionCapability && orderedToolUse.some(([, entry]) => !entry.id || !entry.name)) {
       throw new Error("science_collection_tool_frame_invalid");
     }
+    if (req.scienceCollectionCapability) {
+      const ids = new Set<string>();
+      for (const [, entry] of orderedToolUse) {
+        if (ids.has(entry.id)) throw new Error("science_collection_tool_frame_invalid");
+        ids.add(entry.id);
+        try {
+          const args: unknown = entry.json ? JSON.parse(entry.json) : {};
+          if (!args || typeof args !== "object" || Array.isArray(args)) {
+            throw new Error("science_collection_tool_frame_invalid");
+          }
+        } catch {
+          throw new Error("science_collection_tool_frame_invalid");
+        }
+      }
+    }
     toolTurnsTaken += 1;
     const progress = trackToolTurnProgress(
       toolProgress,

@@ -5,6 +5,7 @@ import { installScienceHost, scienceStore, SCIENCE_HOST_CONTRACT_VERSION, SCIENC
 import { desktopAliveRuntime } from "../alive-runtime";
 import { desktopAliveClock } from "../alive-clock";
 import { scienceCriterionReviewHost } from "../science-host/criterion-review";
+import { scienceAliveDesktopTools, scienceDesktopTools } from "../science-host/desktop-tool-bridge";
 import { mintForwardSteeringRecoveryCapability } from "../science-host/recovery-mint";
 import { scienceEvidenceCollectionHost } from "../runtime/science-collection-boundary";
 import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "../long-run/science-boundary";
@@ -154,6 +155,14 @@ export function installDaemonScienceHost(input: {
       criterionReview: { ...scienceCriterionReviewHost,
         start: (...args: Parameters<typeof scienceCriterionReviewHost.start>) => { input.assertExecution(); return scienceCriterionReviewHost.start(...args); },
       },
+      ...{ desktopTools: {
+        list: (...args: Parameters<typeof scienceDesktopTools.list>) => { input.assertExecution(); return scienceDesktopTools.list(...args); },
+        call: (...args: Parameters<typeof scienceDesktopTools.call>) => { input.assertExecution(); return scienceDesktopTools.call(...args); },
+      } },
+      ...{ aliveDesktopTools: {
+        list: (...args: Parameters<typeof scienceAliveDesktopTools.list>) => { input.assertExecution(); return scienceAliveDesktopTools.list(...args); },
+        call: (...args: Parameters<typeof scienceAliveDesktopTools.call>) => { input.assertExecution(); return scienceAliveDesktopTools.call(...args); },
+      } },
       registerMcpPreparedConfig: registerPrepared,
       reconcileScienceBoundary: boundary => reconcileScienceBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) }),
       inspectLegacyForwardRecoveryBoundary: boundary => inspectLegacyForwardRecoveryBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) }),

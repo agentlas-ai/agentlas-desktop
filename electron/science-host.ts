@@ -1,4 +1,5 @@
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
+import { scienceAliveDesktopTools, scienceDesktopTools } from "./science-host/desktop-tool-bridge";
 import { mintForwardSteeringRecoveryCapability } from "./science-host/recovery-mint";
 import { scienceEvidenceCollectionHost } from "./runtime/science-collection-boundary";
 import { desktopAliveRuntime } from "./alive-runtime";
@@ -216,6 +217,8 @@ export function installDesktopScienceHost(): void {
       ...{ mintForwardSteeringRecoveryCapability },
       ...{ evidenceCollection: scienceEvidenceCollectionHost },
       criterionReview: scienceCriterionReviewHost,
+      ...{ desktopTools: scienceDesktopTools },
+      ...{ aliveDesktopTools: scienceAliveDesktopTools },
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
       reconcileScienceBoundary: async (input) => {
         return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) });
