@@ -335,9 +335,13 @@ export async function prepareMainToolLoop(
   runtimeKind: string,
 ): Promise<MainToolLoopContext> {
   const collection = req.scienceCollectionCapability;
+  // Agentlas Serving gains tools only through an explicit MCP grant. The
+  // server-side model must see that grant's catalog, not Desktop builtins that
+  // happen to be available in the current workspace.
+  const servingMcpOnly = runtimeKind === "agentlas" && Boolean(req.mcpConfigPath);
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
-    if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local"].includes(runtimeKind)) {
+    if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {
       throw new Error("science_collection_transport_unsupported");
     }
     if (req.history.length || req.planMode || req.workforceRuntimeToolGrant || req.untrustedNoTools) {
@@ -354,13 +358,13 @@ export async function prepareMainToolLoop(
         const imageSlotDiagnosis = await multimodalImageSlotDiagnosis();
         return loadMainToolInventory(
           req.mcpConfigPath,
-          req.cwd,
+          servingMcpOnly ? undefined : req.cwd,
           (req.permission ?? "read") as ToolPermission,
           req.unattended !== true && req.noSynchronousAsk !== true,
           imageSlotDiagnosis.state === "ready",
           req.signal,
           req.browserOnly === true,
-          await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
+          servingMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
