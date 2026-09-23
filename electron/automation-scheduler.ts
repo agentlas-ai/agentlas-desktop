@@ -61,11 +61,23 @@ import {
 } from "./hephaestus/loop-engineering";
 import { currentUiLocale } from "./ui-locale";
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
+
+/** 어느 판정기가 이 실행을 판정했는지 실행 영수증에 남긴다(값 없는 호스트 사실). */
+function recordAutomationJudgeReceipt(
+  runId: string | null,
+  automationId: string,
+  phase: "outcome" | "failure",
+  classified: { judge?: AutomationJudgeReceipt },
+): void {
+  if (!runId || !classified.judge) return;
+  tryRecordRunEvent({ runId, kind: "automation_judge_receipt", automationId, payload: { phase, ...classified.judge } });
+}
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
   classifyAutomationOutcome,
   isJudgmentUnavailable,
+  type AutomationJudgeReceipt,
   type AutomationResultStatus,
 } from "./automation-result";
 import { hasInvocationRunReceipt, observedToolActivity } from "./store/run-events";
@@ -999,6 +1011,7 @@ async function runOne(
           // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
           declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
+        recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
         if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
@@ -1012,6 +1025,7 @@ async function runOne(
         const classified = await classifyAutomationFailure(graphError, {
           runtimeSelection: a.runtimeSelection,
         });
+        recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
         runStatus = outVals.length > 0 ? "partial" : classified.status;
         runReasonCode = classified.reasonCode ?? null;
         runError = classified.reasonCode
@@ -1187,6 +1201,7 @@ async function runOne(
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
           declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
+        recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
         if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.
@@ -1316,6 +1331,7 @@ async function runOne(
     const classified = controller.signal.aborted
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
       : await classifyAutomationFailure(rawError, { runtimeSelection: a.runtimeSelection });
+    if ("judge" in classified) recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
     runStatus = controller.signal.aborted ? "partial" : classified.status;
     runReasonCode = classified.reasonCode ?? null;
     // Keep the graph kernel's machine gate alongside the human explanation.

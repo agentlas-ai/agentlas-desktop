@@ -4,6 +4,8 @@ import { mcpEffectOutputDigest, type MainMcpEffectReceipt } from "../mcp-tools/e
 
 /** These synchronous read primitives have no background command/session handle.
  * DONE for shell, browser, MCP or delegated tools does not prove job quiescence. */
+// judgment-exempt: "바깥을 바꿨나"가 아니라 "DONE 이 곧 작업 종료(배경 핸들 없음)를 증명하나"를 묻는
+// agy 프로토콜 고유 원시 목록이다 — 효과 판정은 여전히 couldHaveChangedTheOutsideWorld 가 한다.
 const SYNCHRONOUS_READS = new Set(["view_file", "list_dir"]);
 const MAX_TRACKED_TOOLS = 4096;
 const MAX_FRAME_KINDS = 128;

@@ -489,6 +489,53 @@ function automationAlreadyObserved(automationId: string, digest: string): boolea
   ).get(automationId, AUTOMATION_EFFECT_OBSERVATION_EVENT_KIND, digest));
 }
 
+/**
+ * ★목표 없는 자동화 보류는 "모름" 한 번으로 영원히 멈췄다.
+ *
+ *   실측 2026-09-23 (Threads 자동화 f7a61706): 13:56Z 관찰이 앱 재시작으로 끊겨
+ *   inconclusive(effect_observation_marker_missing) 로 끝났다. 목표에 묶인 보류는
+ *   scheduleObservationRetry 가 다시 볼 시각을 적지만, 목표 없는 자동화에는 그 길이 없었고
+ *   다이제스트당 한 번 규칙이 두 번째 관찰을 막았다 — 다음 실행 시각(nextRunAt)은 null 로
+ *   남아, 사람이 다른 일로 자동화를 고치기 전까지 아무도 다시 보지 않았다.
+ *
+ *   같은 보류를 회차(epoch)로 다시 본다: 앞 회차가 inconclusive 이거나, 끝 기록 없이
+ *   관찰 시간 상한을 넘겼을 때만. 간격은 10·20·40·80분, 최대 4회차 — 무한 관찰은 없다.
+ *   관찰은 여전히 읽기 전용이고, 재개는 관찰의 판정으로만 열린다.
+ */
+const AUTOMATION_OBSERVATION_MAX_EPOCH = 4;
+const AUTOMATION_OBSERVATION_RETRY_BASE_MS = 10 * 60_000;
+
+function automationObservationHistory(automationId: string, digest: string): { dispatchedAt: number | null; actions: string[] } {
+  const rows = getDb().prepare(
+    `SELECT ts, json_extract(payload_json, '$.action') AS action FROM run_events
+      WHERE automation_id = ? AND kind = ? AND json_extract(payload_json, '$.observationDigest') = ?
+      ORDER BY ts ASC LIMIT 20`,
+  ).all(automationId, AUTOMATION_EFFECT_OBSERVATION_EVENT_KIND, digest) as Array<{ ts: string; action: string | null }>;
+  const dispatched = rows.find((row) => row.action === "dispatched");
+  const at = dispatched ? Date.parse(dispatched.ts) : NaN;
+  return { dispatchedAt: Number.isFinite(at) ? at : null, actions: rows.map((row) => String(row.action ?? "")) };
+}
+
+/** Next re-observation epoch for an automation-only hold, or why none is due. */
+export function nextAutomationObservationEpoch(
+  automationId: string,
+  digestFor: (epoch: number) => string,
+  now = Date.now(),
+): { epoch: number } | { skip: string } {
+  for (let epoch = 1; epoch <= AUTOMATION_OBSERVATION_MAX_EPOCH; epoch += 1) {
+    const previous = automationObservationHistory(automationId, digestFor(epoch - 1));
+    if (automationAlreadyObserved(automationId, digestFor(epoch))) continue;
+    if (previous.actions.includes("settled")) return { skip: "already_observed" };
+    const lookedWithoutAnswer = previous.actions.includes("inconclusive")
+      || (previous.dispatchedAt !== null && now - previous.dispatchedAt > EFFECT_OBSERVATION_TIME_LIMIT_MS + 60_000);
+    if (!lookedWithoutAnswer) return { skip: "already_observed" };
+    const dueAt = (previous.dispatchedAt ?? 0) + AUTOMATION_OBSERVATION_RETRY_BASE_MS * 2 ** (epoch - 1);
+    if (now < dueAt) return { skip: "observation_retry_not_due" };
+    return { epoch };
+  }
+  return { skip: "observation_retry_exhausted" };
+}
+
 function nodeActivity(runId: string, nodeId: string): string[] {
   const rows = getDb().prepare(
     "SELECT payload_json FROM run_events WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use' ORDER BY seq DESC LIMIT 8",
@@ -541,10 +588,17 @@ function planAutomationObservation(runtime: AutomationObservationRuntime, automa
   if (!ids.length && !goal) return { skip: "nothing_to_observe" };
   if (!ids.length) return { skip: "no_uncertain_attempts" };
   if (ids.length > MAX_OBSERVED_ATTEMPTS) return { skip: "too_many_attempts" };
-  const digest = automationEffectObservationDigest({ automationId, runId: hold?.runId ?? null,
+  const digestFor = (value: number): string => automationEffectObservationDigest({ automationId, runId: hold?.runId ?? null,
     occurrenceId: hold?.occurrenceId ?? null, checkpointDigest: hold?.checkpointDigest ?? null, ids,
-    ...(epoch > 0 ? { epoch } : {}) });
-  if (automationAlreadyObserved(automationId, digest)) return { skip: "already_observed" };
+    ...(value > 0 ? { epoch: value } : {}) });
+  let digest = digestFor(epoch);
+  if (automationAlreadyObserved(automationId, digest)) {
+    // A Goal-bound hold has its own re-observation schedule (scheduleObservationRetry).
+    if (epoch !== 0 || goal || !hold) return { skip: "already_observed" };
+    const retry = nextAutomationObservationEpoch(automationId, digestFor);
+    if ("skip" in retry) return retry;
+    digest = digestFor(retry.epoch);
+  }
   return { plan: { automation, hold, goal, ids, digest } };
 }
 
