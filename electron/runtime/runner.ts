@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { runtimeNativeAbilitiesLine } from "./native-capabilities";
@@ -857,6 +858,10 @@ export function withoutMcpTransportEnv(env: NodeJS.ProcessEnv | undefined): Node
 /** Display guidance only: this marker never grants tools, credentials or authority. */
 export function withNativeBrowserGuidance(runner: Runner): Runner {
   return (req, events) => {
+    // Recovery prompts are Main-bound canonical state. Display-only guidance
+    // must not reintroduce turnContext after the last fresh-request override.
+    // The adapter still validates the exact native browser MCP binding.
+    if (assertScienceRecoveryRequest(req)) return runner(req, events);
     // Every measured no-tools boundary intentionally omits MCP config. Remove
     // transport-only parent state at the shared runner edge as a final guard,
     // so Firm, Taskforce, Swarm, and future control turns obey the same pair.
