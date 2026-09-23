@@ -20,6 +20,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { getDb } from "../store/db";
+import { applyTranslation } from "./english-migration";
+import { isNonEnglishText, translationSourceHash } from "./native-text";
 import { insertMemoryEntry, listMemoryEvidenceTokensForAgent } from "./store";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 
@@ -28,6 +31,8 @@ import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 export const ONE_AGENT_ID = BUILTIN_ONE_AGENT_ID;
 
 const ONE_SOUL_RELATIVE = path.join(".agentlas", "project-soul-memory.md");
+/** Engine `english-memory-backfill.v1` writes old h → English successor h here. */
+const ONE_TRANSLATION_MAP_RELATIVE = path.join(".agentlas", "translation-map.json");
 
 /** `- **[kind]** 내용` + `- 근거|Evidence: …` (+ 선택적 `- Project:` 줄) + `<!-- h:hash -->` 블록.
  *  근거 라벨은 한/영 두 세대가 실존한다 — 한글만 받던 시절 영문 블록은 한 번도 반입되지 못했다(실측 2026-08-11). */
@@ -84,6 +89,67 @@ export function selectUnimported(
     pending.push(block);
   }
   return pending;
+}
+
+/**
+ * The engine's English migration appends a NEW block (new h:) for every
+ * translated one and supersedes the old h:. Imported as-is, each would become a
+ * second desktop memory beside the row this app already holds for the old h:
+ * (~1,700 duplicates on the owner's drawer). Returns successor → predecessor.
+ */
+export function readEngineTranslationSuccessors(root: string): Map<string, string> {
+  const successors = new Map<string, string>();
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(root, ONE_TRANSLATION_MAP_RELATIVE), "utf8")) as unknown;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return successors;
+    for (const [oldHash, newHash] of Object.entries(data as Record<string, unknown>)) {
+      if (/^[0-9a-f]{16}$/.test(oldHash) && typeof newHash === "string" && /^[0-9a-f]{16}$/.test(newHash)) {
+        successors.set(newHash, oldHash);
+      }
+    }
+  } catch {
+    // no migration yet → nothing to link
+  }
+  return successors;
+}
+
+/**
+ * Link the engine's English successor to the row already imported for its
+ * predecessor instead of inserting a duplicate. If that row is still in the
+ * original language, adopt the engine's English in place (same guarded write
+ * the desktop translator uses: hash-checked, forget-aware, original kept in the
+ * side table), so the same memory is not translated twice.
+ */
+function adoptEngineTranslation(predecessor: string, block: OneDurableBlock): "linked" | "gone" {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT id, content, sensitivity, evidence_json FROM memory_entries
+      WHERE scope = 'agent_repo' AND agent_id = ? AND superseded_at IS NULL AND evidence_json LIKE ?
+      LIMIT 1`,
+  ).get(ONE_AGENT_ID, `%"one-soul:${predecessor}"%`) as
+    { id: string; content: string; sensitivity: string | null; evidence_json: string } | undefined;
+  // Predecessor forgotten or superseded on this desktop: its translation must not return as new memory.
+  if (!row) return "gone";
+  if (isNonEnglishText(row.content) && !isNonEnglishText(block.content)) {
+    const outcome = applyTranslation(db, {
+      kind: "memory_entry",
+      id: row.id,
+      sourceHash: translationSourceHash(row.content),
+      attempts: 0,
+      text: row.content,
+      sensitivity: row.sensitivity,
+    }, block.content, { translator: "engine:english-memory-backfill.v1", backCheck: null, intakeEpoch: null });
+    if (outcome === "forgotten") return "gone";
+  }
+  let evidence: unknown = [];
+  try { evidence = JSON.parse(row.evidence_json); } catch { evidence = []; }
+  const list = Array.isArray(evidence) ? evidence.filter((item): item is string => typeof item === "string") : [];
+  const token = `one-soul:${block.hash}`;
+  if (!list.includes(token)) {
+    db.prepare("UPDATE memory_entries SET evidence_json = ? WHERE id = ?")
+      .run(JSON.stringify([...list, token]), row.id);
+  }
+  return "linked";
 }
 
 export interface OneImportResult {
@@ -183,10 +249,22 @@ export function importOneDurableMemory(rootOverride?: string): OneImportResult {
 
   const blocks = parseOneDurableBlocks(text);
   result.scanned = blocks.length;
-  const pending = selectUnimported(blocks, importedHashes());
+  const already = importedHashes();
+  const pending = selectUnimported(blocks, already);
   result.skipped = blocks.length - pending.length;
+  const successors = readEngineTranslationSuccessors(root);
 
   for (const block of pending) {
+    const predecessor = successors.get(block.hash);
+    if (predecessor && already.has(predecessor)) {
+      try {
+        adoptEngineTranslation(predecessor, block);
+        result.skipped += 1;
+      } catch {
+        result.failed += 1;
+      }
+      continue;
+    }
     try {
       insertMemoryEntry({
         scope: "agent_repo" as MemoryScope,
