@@ -123,7 +123,7 @@ export function pluginRouterPrompt(userPrompt?: string): string {
     "How to use one:",
     `- Open the router file listed below, follow its routing rules, then open the workflow skill it names.`,
     `- Inside a skill, \`$name\` means another skill (\`<plugin>/skills/<name>/SKILL.md\`) or a shared reference (\`<plugin>/references/<name>.md\`); \`@name\` means a host tool.`,
-    "- If a skill needs a tool you do not have, say so and stop. Never describe work you could not carry out.",
+    "- If a skill needs a tool you do not have, do not stop there: first use the capabilities this runtime already has (its own web search, image generation, shell, file tools), then call `agentlas_resolve_plugins` / `agentlas_tool_search` to find an installed or Hub plugin that covers the gap. An installed plugin you name that way is attached on the next turn automatically; a Hub plugin that is not installed needs the owner's approval, so name its slug and what it would do. Never describe work you could not carry out.",
     "",
   ];
 
@@ -145,8 +145,37 @@ export function pluginRouterPrompt(userPrompt?: string): string {
   // 명시 호출된 플러그인은 라우터를 읽는 왕복 없이 바로 따를 수 있도록 전문을 싣는다.
   for (const p of listed) {
     if (!mentioned(prompt, p)) continue;
-    lines.push(`### ${p.mention} router (invoked in this turn)`, "", p.routerBody.trim(), "");
+    lines.push(renderInvokedRouter(p, "invoked in this turn"));
   }
 
   return lines.join("\n");
+}
+
+function renderInvokedRouter(p: InstalledPlugin, why: string): string {
+  return [`### ${p.mention} router (${why})`, `Router file: ${p.routerPath}`, "", p.routerBody.trim(), ""].join("\n");
+}
+
+/**
+ * 이번 턴의 라우팅 판정(auto-select)이 고른 스킬 플러그인의 라우터 전문.
+ *
+ * `@slug` 멘션과 **같은 인라인 경로**를 쓴다 — 사용자가 이름을 몰라도, 판정이 이 턴에 필요하다고 본
+ * 플러그인은 멘션된 것과 똑같이 라우터를 읽은 상태로 시작한다. 턴 컨텍스트(턴 단위)에 실리므로
+ * 다른 대화·다음 턴으로 새지 않는다. 이미 멘션된 플러그인은 시스템 프롬프트가 싣고 있으므로 뺀다.
+ */
+export function selectedPluginRouterPrompt(selected: ReadonlyArray<{ slug: string; reason?: string }>, userPrompt = ""): string {
+  if (!selected.length) return "";
+  const bySlug = new Map(listInstalledPlugins().map((plugin) => [plugin.slug, plugin]));
+  const blocks: string[] = [];
+  for (const choice of selected) {
+    const plugin = bySlug.get(choice.slug);
+    if (!plugin || mentioned(userPrompt, plugin)) continue;
+    blocks.push(renderInvokedRouter(plugin, `routed to this turn${choice.reason ? `: ${choice.reason.slice(0, 200)}` : ""}`));
+  }
+  if (!blocks.length) return "";
+  return [
+    "## Plugins routed to this turn",
+    "The host's relevance routing selected these installed plugins for this request. Follow each router's rules and open the workflow skill it names; combine them with this runtime's own abilities and the attached MCP tools.",
+    "",
+    ...blocks,
+  ].join("\n");
 }

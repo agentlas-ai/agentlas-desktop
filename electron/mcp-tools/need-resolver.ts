@@ -30,6 +30,17 @@ export interface McpNeedCandidate {
   origin: "hub" | "local";
   /** True when using this tool would force a credential/API-key prompt on the user. */
   needsCredential?: boolean;
+  /**
+   * "skill-plugin": an installed plugin whose skills (instructions + references) the
+   * host inlines for this turn. No credential, no side effect, no install.
+   */
+  kind?: "tool" | "skill-plugin";
+  /**
+   * May the deterministic local-relevance fallback pick this when the judge cannot
+   * answer? Only installed, credential-free entries qualify — the fallback must
+   * never install a tool, raise a key prompt, or change the browser host binding.
+   */
+  fallbackEligible?: boolean;
 }
 
 export interface ResolvedMcpNeeds {
@@ -101,6 +112,7 @@ export const MCP_NEED_JUDGMENT_GUIDANCE = [
   "An entry marked 'needs credential' costs the user a blocking API-key prompt before the run starts, so name it only when the task is impossible without it.",
   "AGENT CONTEXT is standing background (who the agent is, its general instructions, session policy, working folder). It describes what the agent may do in general and is never this turn's request: a service, site, or credential mentioned only there must not be selected unless the CURRENT TASK itself requires it.",
   "Err toward returning fewer tools.",
+  "Entries marked 'skill plugin' are different: they are installed instruction packs (domain workflows and references) with no credential, install, or side effect. Select a skill plugin whenever the CURRENT TASK or the Goal falls inside its domain, even if the task could be attempted without it — relevance, not strict necessity, is the rule for skill plugins. Do not select one for an unrelated task.",
 ].join(" ");
 
 /** Render the standing agent context as background, clearly separated from the current task. */
@@ -163,7 +175,7 @@ export async function resolveMcpNeeds(input: {
   const inventory = candidates
     .map(
       (candidate) =>
-        `- ${candidate.id} (${candidate.origin}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
+        `- ${candidate.id} (${candidate.origin}${candidate.kind === "skill-plugin" ? ", skill plugin" : ""}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
     )
     .join("\n");
 

@@ -21,6 +21,14 @@ import { buildToolAccessNotice } from "../../shared/tool-access-notice";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { isKeylessPlaywrightMcpDuplicate } from "./mcp-config";
+import {
+  listInstalledPluginCandidates,
+  pluginCandidateId,
+  pluginSlugFromCandidateId,
+  rankByLocalRelevance,
+  type InstalledPluginCandidate,
+} from "../plugins/plugin-candidates";
+import { selectedPluginRouterPrompt } from "../plugins/router-prompt";
 import type {
   AutomationHubMode,
   AutomationToolMode,
@@ -73,6 +81,18 @@ export interface HubPluginCandidate {
   score: number;
 }
 
+/** An installed plugin the relevance routing attached to this turn (skills inlined, tools attached). */
+export interface RoutedPluginSelection {
+  slug: string;
+  name: string;
+  reason: string;
+  /** judge = resident judgment; local-relevance = deterministic fallback; retained = same active Goal;
+   *  requested = the model asked for it in the previous turn of this conversation. */
+  source: "judge" | "local-relevance" | "retained" | "requested";
+  hasSkills: boolean;
+  toolIds: string[];
+}
+
 export interface AutoSelectedMcpContext {
   /** Main-only scope for a provided-credentials retry in this invocation. */
   goalSelectionScope?: Omit<GoalToolSelectionReceipt, "selectedIds">;
@@ -93,6 +113,10 @@ export interface AutoSelectedMcpContext {
   pendingApprovalTools?: string[];
   /** True when the resident judge actually decided this run's optional tool set. */
   needsDecided: boolean;
+  /** Installed plugins routed to this turn. Their router text is inlined in the turn context. */
+  routedPlugins?: RoutedPluginSelection[];
+  /** Who chose the optional set: the judge, the deterministic fallback, or nobody. */
+  selectionSource?: "judge" | "local-relevance" | "none";
   /** Value-free note: nothing was decided, or the candidate inventory was capped. */
   needsNote?: string;
   /**
@@ -128,6 +152,8 @@ export interface AutoSelectMcpDependencies {
     signal?: AbortSignal;
     timeoutMs?: number;
   }) => Promise<ResolvedMcpNeeds>;
+  /** Installed plugin manifests as routing candidates (injectable for isolated tests). */
+  listPluginCandidates: () => InstalledPluginCandidate[];
 }
 
 /** Build a deterministic fixed-assignment result for an agent whose One Team
@@ -190,6 +216,7 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
       : server.catalogId === "agentlas-browser" || server.catalogId === "playwright" ? 20_000 : 12_000,
   }),
   resolveNeeds: resolveMcpNeeds,
+  listPluginCandidates: () => listInstalledPluginCandidates(),
 };
 
 // Tool selection is decided by resolveMcpNeeds() (electron/mcp-tools/need-resolver.ts),
@@ -204,6 +231,8 @@ const HUB_PLUGIN_LOOKUP_TIMEOUT_MS = 8_000;
 const HUB_PLUGIN_CANDIDATE_LIMIT = 8;
 /** Hub inventory offered to the resident judge in one call. */
 const HUB_PLUGIN_INVENTORY_LIMIT = 60;
+/** Project turns keep local-first: a shorter Hub shelf for the same single judgment. */
+const HUB_PLUGIN_PROJECT_INVENTORY_LIMIT = 20;
 
 const LOCAL_PLUGIN_SCAN_DIRS = [
   path.join(os.homedir(), ".codex", "plugins", "cache"),
@@ -327,6 +356,7 @@ function cloneContext(context: AutoSelectedMcpContext): AutoSelectedMcpContext {
     tools: context.tools.map((tool) => ({ ...tool, missingEnv: [...tool.missingEnv] })),
     localInventory: [...context.localInventory],
     hubPlugins: context.hubPlugins.map((plugin) => ({ ...plugin })),
+    ...(context.routedPlugins ? { routedPlugins: context.routedPlugins.map((plugin) => ({ ...plugin, toolIds: [...plugin.toolIds] })) } : {}),
     ...(context.pendingApprovalTools ? { pendingApprovalTools: [...context.pendingApprovalTools] } : {}),
   };
 }
@@ -415,6 +445,13 @@ export async function autoSelectMcpTools(input: {
   fixedServerIds?: string[];
   /** Graph-declared tool ids; canonical browser declarations suppress duplicate probing. */
   requiredToolCatalogIds?: string[];
+  /**
+   * Installed plugin slugs the model asked for during the previous turn of this
+   * conversation (agentlas_resolve_plugins / tool_search result, or opening the
+   * plugin's router). Main-derived from tool events, never from renderer input.
+   * Only already-installed plugins are honoured; Hub installs keep the owner gate.
+   */
+  requestedPluginSlugs?: string[];
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -457,12 +494,16 @@ export async function autoSelectMcpTools(input: {
       server.transport, server.command, server.args, server.url, server.envKeys, server.installedAt]))
     .sort().join("\n")).digest("hex");
   const installedFingerprint = registryFingerprint(initialInstalledServers);
+  let pluginCandidates: InstalledPluginCandidate[] = [];
+  try { pluginCandidates = deps.listPluginCandidates(); } catch { pluginCandidates = []; }
+  const pluginBySlug = new Map(pluginCandidates.map((plugin) => [plugin.slug, plugin]));
+  const pluginFingerprint = shortHash(pluginCandidates.map((plugin) => `${plugin.slug}:${plugin.toolIds.join(",")}`).join("|"));
   let expectedInstalledFingerprint = installedFingerprint;
   if (input.bypassSelectionMemo) invalidateMcpSelectionMemo();
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(",")].join("\u0000")
+      fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -492,7 +533,8 @@ export async function autoSelectMcpTools(input: {
     && JSON.stringify(input.resolveActiveGoalScope?.() ?? null) === JSON.stringify(activeGoalScope));
   const goalScopeStillCurrent = (): boolean => goalBindingStillCurrent()
     && registryFingerprint(deps.listInstalledServers()) === expectedInstalledFingerprint;
-  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}` : "";
+  const requestedPluginSlugs = [...new Set((input.requestedPluginSlugs ?? []).filter((slug) => pluginBySlug.has(slug)))].sort();
+  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}` : "";
   if (memoKey && !activeGoalScope) {
     const hit = selectionMemo.get(memoKey);
     if (hit && Date.now() - hit.at < SELECTION_MEMO_TTL_MS) return cloneContext(hit.context);
@@ -545,7 +587,10 @@ export async function autoSelectMcpTools(input: {
   // 그래서 프로젝트 턴에서는 Hub 인벤토리를 **가져오지도 않는다** — 5분 캐시가 비어 있을 때의
   // 8초 대기까지 함께 사라진다.
   const projectScoped = isExplicitProjectFolder(input.workingFolder);
-  const offerHubToJudge = hubAllowed && !projectScoped;
+  // ★Owner 2026-09-23: plugin search is routing too. A project turn still sees a
+  // capped Hub shelf (suggestions only — nothing from the Hub is installed without
+  // the owner's approval); local plugins and installed tools stay first.
+  const offerHubToJudge = hubAllowed;
   const hubInventory = await fetchHubPluginInventory(offerHubToJudge);
 
   // ── Pins: settings and explicit user choices. These are the ONLY tools that may be
@@ -623,6 +668,7 @@ export async function autoSelectMcpTools(input: {
     pinnedReasons.set(server.catalogId, "already installed and enabled by the user");
   }
 
+  const pluginToolIds = new Set(pluginCandidates.flatMap((plugin) => plugin.toolIds));
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
@@ -635,15 +681,21 @@ export async function autoSelectMcpTools(input: {
       && !(input.requiredToolCatalogIds ?? []).includes("brave-search")) return false;
     if (entry.id === "hephaestus-network") return hubAllowed;
     return true;
-  }).map((entry) => ({
-    id: entry.id,
-    name: entry.nameEn || entry.name,
-    description: entry.descriptionEn || entry.description,
-    origin: "local" as const,
-    needsCredential: entry.envRequirements.some((requirement) => requirement.required),
-  }));
+  }).map((entry) => {
+    const needsCredential = entry.envRequirements.some((requirement) => requirement.required);
+    return {
+      id: entry.id,
+      name: entry.nameEn || entry.name,
+      description: entry.descriptionEn || entry.description,
+      origin: "local" as const,
+      needsCredential,
+      // A tool shipped by an installed plugin is the owner's own choice; the
+      // deterministic fallback may attach it when it is credential-free.
+      ...(!needsCredential && pluginToolIds.has(entry.id) ? { fallbackEligible: true } : {}),
+    };
+  });
 
-  const hubOffered = hubInventory.listings.slice(0, HUB_PLUGIN_INVENTORY_LIMIT);
+  const hubOffered = hubInventory.listings.slice(0, projectScoped ? HUB_PLUGIN_PROJECT_INVENTORY_LIMIT : HUB_PLUGIN_INVENTORY_LIMIT);
   const hubCandidates: McpNeedCandidate[] = hubOffered.map((listing) => ({
     id: listing.slug,
     name: listing.nameEn || listing.name || listing.slug,
@@ -677,8 +729,24 @@ export async function autoSelectMcpTools(input: {
       needsCredential: server.envKeys.length > 0,
     }));
 
+  // Installed plugins that ship skills are first-class candidates next to MCP tools.
+  // Built from each manifest — no per-plugin table. implicit:"never" plugins stay
+  // unmentioned unless the user names them.
+  const promptLower = input.userPrompt.toLowerCase();
+  const mentionedPlugin = (plugin: InstalledPluginCandidate): boolean => promptLower.includes(plugin.mention.toLowerCase());
+  const skillCandidates: McpNeedCandidate[] = pluginCandidates
+    .filter((plugin) => plugin.hasSkills && (plugin.implicit !== "never" || mentionedPlugin(plugin)))
+    .map((plugin) => ({
+      id: pluginCandidateId(plugin.slug),
+      name: plugin.name,
+      description: plugin.description,
+      origin: "local" as const,
+      kind: "skill-plugin" as const,
+      fallbackEligible: true,
+    }));
+
   // ONE judgment call decides the whole optional tool set — Hub entries offered first.
-  const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates];
+  const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates, ...skillCandidates];
   const needsCandidateCount = needsCandidates.length;
   const needs = await deps.resolveNeeds({
     // The judge reads this turn's request on its own; agent name, folder and the
@@ -699,11 +767,61 @@ export async function autoSelectMcpTools(input: {
     timeoutMs: 15_000,
   });
   const neededIds = new Set(needs.needed);
+  // ── Deterministic fallback — selection must never be empty merely because the
+  // judge timed out or could not run. Same candidates, local relevance only, and
+  // only installed credential-free entries: no install, no key prompt, no change
+  // of the browser/computer-use host binding. An unrelated task selects nothing.
+  let selectionSource: "judge" | "local-relevance" | "none" = needs.decided ? "judge" : "none";
+  const fallbackIds: string[] = [];
+  if (!needs.decided) {
+    const query = [input.userPrompt, activeGoalScope?.objective ?? "", ...(activeGoalScope?.acceptanceCriteria ?? [])]
+      .filter(Boolean).join("\n");
+    const eligible = needsCandidates.filter((candidate) => candidate.fallbackEligible && !candidate.needsCredential
+      && !blockedByHostBinding(candidate.id)
+      && candidate.id !== "agentlas-browser" && candidate.id !== "cua-driver" && candidate.id !== "playwright");
+    const hits = rankByLocalRelevance(query, eligible.map((candidate) => {
+      const slug = pluginSlugFromCandidateId(candidate.id);
+      return { id: candidate.id, text: (slug && pluginBySlug.get(slug)?.searchText) || `${candidate.name}\n${candidate.description}` };
+    }));
+    for (const hit of hits) { neededIds.add(hit.id); fallbackIds.push(hit.id); }
+    if (hits.length > 0) selectionSource = "local-relevance";
+  }
   // Reuse only exact prior choices in the same still-active host scope. Inserting
   // IDs before normal resolution prevents carrying stale ready/credential states.
   if (goalScopeStillCurrent()) {
     for (const id of retainedIds) neededIds.add(id);
   } else retainedIds.clear();
+
+  // ── Routed plugins: skills inlined for this turn, the plugin's own tools attached with them.
+  const routedPlugins: RoutedPluginSelection[] = [];
+  const routePlugin = (slug: string, source: RoutedPluginSelection["source"], reason: string): void => {
+    const plugin = pluginBySlug.get(slug);
+    if (!plugin || routedPlugins.some((routed) => routed.slug === slug)) return;
+    routedPlugins.push({ slug, name: plugin.name, reason, source, hasSkills: plugin.hasSkills, toolIds: [...plugin.toolIds] });
+    for (const toolId of plugin.toolIds) {
+      const entry = MCP_TOOL_CATALOG.find((candidate) => candidate.id === toolId);
+      if (!entry || blockedByHostBinding(toolId)) continue;
+      // A tool that needs a key may prompt only when the judge itself chose its plugin.
+      if (source !== "judge" && entry.envRequirements.some((requirement) => requirement.required)) continue;
+      neededIds.add(toolId);
+    }
+  };
+  for (const id of needs.needed) {
+    const slug = pluginSlugFromCandidateId(id);
+    if (slug) routePlugin(slug, "judge", `resident judgment: ${needs.reason || "the task is in this plugin's domain"}`);
+  }
+  for (const id of fallbackIds) {
+    const slug = pluginSlugFromCandidateId(id);
+    if (slug) routePlugin(slug, "local-relevance", "local relevance ranking (the resident judge did not answer)");
+  }
+  for (const id of retainedIds) {
+    const slug = pluginSlugFromCandidateId(id);
+    if (slug) routePlugin(slug, "retained", "previous routing in this active Goal");
+  }
+  for (const slug of requestedPluginSlugs) routePlugin(slug, "requested", "requested by the agent in the previous turn of this conversation");
+  for (const plugin of pluginCandidates) {
+    if (mentionedPlugin(plugin)) routePlugin(plugin.slug, "requested", `explicit ${plugin.mention} mention`);
+  }
   if (automaticHostDecision) {
     const choseBrowser = neededIds.has("agentlas-browser");
     const choseComputerUse = neededIds.has("cua-driver");
@@ -725,11 +843,13 @@ export async function autoSelectMcpTools(input: {
   const needsNote = [
     needs.decided
       ? ""
-      : "The optional-tool judgment did not return a selection. Only configured tools and revalidated selections from this active Goal are available.",
+      : selectionSource === "local-relevance"
+        ? `The optional-tool judgment did not return a selection; a deterministic local relevance ranking attached: ${fallbackIds.join(", ")}.`
+        : "The optional-tool judgment did not return a selection. Only configured tools and revalidated selections from this active Goal are available.",
     cappedHub > 0 ? `${cappedHub} further Hub plugins were not offered to the selector this run.` : "",
     // 조용히 줄이지 않는다 — 왜 Hub 후보가 없는지 영수증에 남긴다.
-    projectScoped && hubAllowed
-      ? "Project-first: Hub plugins were not pre-judged this run because this is an initialized project folder. Hub stays reachable at runtime through hephaestus-network."
+    projectScoped && hubAllowed && cappedHub > 0
+      ? "Project-first: only a short Hub shelf was offered to the selector for this project folder. The full Hub stays reachable at runtime through hephaestus-network."
       : "",
     needs.omitted.length > 0 ? `${needs.omitted.length} candidates exceeded the selector inventory cap.` : "",
   ]
@@ -986,13 +1106,18 @@ export async function autoSelectMcpTools(input: {
     hubPlugins,
     ...(pendingApprovalTools.length > 0 ? { pendingApprovalTools } : {}),
     needsDecided: needs.decided,
+    ...(routedPlugins.length > 0 ? { routedPlugins } : {}),
+    selectionSource,
     needsOutcome: { decided: needs.decided, candidateCount: needsCandidateCount, reason: needs.reason },
     ...(needsNote ? { needsNote } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
   // ── sticky 합집합 병합 — 같은 대화의 도구셋은 넓어지기만 한다(캐시 보존) ──
   if (goalScopeKey && conversationId && goalScopeStillCurrent()) {
-    const selectedIds = context.tools.filter((tool) => neededIds.has(tool.id) && tool.state === "ready").map((tool) => tool.id);
+    const selectedIds = [
+      ...context.tools.filter((tool) => neededIds.has(tool.id) && tool.state === "ready").map((tool) => tool.id),
+      ...routedPlugins.map((plugin) => pluginCandidateId(plugin.slug)),
+    ];
     const finalGoalScopeKey = goalScopeKeyFor(expectedInstalledFingerprint);
     memoSet(goalSelectionMemo, conversationId, { scopeKey: finalGoalScopeKey, selectedIds });
     if (receiptScope && input.writeGoalSelection) {
@@ -1001,7 +1126,7 @@ export async function autoSelectMcpTools(input: {
         scopeHash: createHash("sha256").update(finalGoalScopeKey).digest("hex"), selectedIds }); } catch { /* No durable hint was saved. */ }
     }
   }
-  if (!activeGoalScope && structuralKey && needs.decided) {
+  if (!activeGoalScope && structuralKey && (needs.decided || selectionSource === "local-relevance")) {
     const sticky = stickySelectionMemo.get(structuralKey);
     if (sticky && Date.now() - sticky.at <= STICKY_SELECTION_TTL_MS) {
       const freshIds = new Set(context.tools.map((tool) => tool.id));
@@ -1019,7 +1144,7 @@ export async function autoSelectMcpTools(input: {
 
 export function buildMcpAutoSelectionPrompt(
   selected: AutoSelectedMcpContext,
-  opts?: { toolMode?: AutomationToolMode; hubMode?: AutomationHubMode },
+  opts?: { toolMode?: AutomationToolMode; hubMode?: AutomationHubMode; userPrompt?: string },
 ): string {
   // 붙은 도구가 없을 때 침묵하지 않는다. 이전에는 여기서 빈 문자열을 반환해, 도구가
   // 하나도 없는 실행에 **아무 안내도 나가지 않았다** — 도구가 없다는 사실 자체가
@@ -1092,6 +1217,8 @@ export function buildMcpAutoSelectionPrompt(
           .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}`)
           .join("; ")}. Healthy MCPs remain available; degrade only the function that depends on an unavailable capability.`
       : "",
+    "Mid-task capability gaps: call agentlas_resolve_plugins or agentlas_tool_search (hephaestus-network) before declaring something impossible. An already-installed plugin you name there is attached automatically on the next turn of this conversation/Goal; a Hub plugin that is not installed needs the owner's approval — name its slug and what it would do.",
+    selectedPluginRouterPrompt(selected.routedPlugins ?? [], opts?.userPrompt ?? ""),
   ]
     .filter(Boolean)
     .join("\n");

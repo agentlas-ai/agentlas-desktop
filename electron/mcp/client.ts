@@ -216,6 +216,7 @@ import {
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
 import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
+import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
 import { browserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
@@ -272,6 +273,7 @@ import {
 import type { ToolBrokerLevel } from "../../shared/graph-tool-broker";
 import { runtimeKindCanUseMcp } from "../../shared/runtime-mcp";
 import { RUNTIME_NATIVE_CAPABILITIES } from "../runtime/native-capabilities";
+import { listInstalledPluginCandidates, pluginSlugsNamedInToolEvent } from "../plugins/plugin-candidates";
 import type {
   Chat,
   AppFactoryAppRecord,
@@ -381,6 +383,32 @@ function sealOneLocalArtifactPaths(
       }];
     })),
   };
+}
+
+/**
+ * Installed plugin slugs the agent looked up or opened during the most recent
+ * earlier run of this chat. They are attached on this turn automatically; the
+ * slugs are re-checked against the installed plugin root by auto-select, so a
+ * Hub plugin that is not installed can never be attached this way.
+ */
+function readMidTurnPluginRequests(chatId: string, currentRunId?: string): string[] {
+  try {
+    const rows = getDb().prepare(
+      "SELECT run_id, payload_json FROM run_events WHERE chat_id = ? AND kind = 'plugin_requested_mid_turn' ORDER BY rowid DESC LIMIT 20",
+    ).all(chatId) as Array<{ run_id: string; payload_json: string }>;
+    const latestRun = rows.find((row) => row.run_id !== currentRunId)?.run_id;
+    if (!latestRun) return [];
+    const slugs = new Set<string>();
+    for (const row of rows) {
+      if (row.run_id !== latestRun) continue;
+      const payload = JSON.parse(row.payload_json) as { slugs?: unknown };
+      if (!Array.isArray(payload.slugs)) continue;
+      for (const slug of payload.slugs) if (typeof slug === "string" && /^[a-z0-9][a-z0-9-]{1,63}$/u.test(slug)) slugs.add(slug);
+    }
+    return [...slugs].slice(0, 8);
+  } catch {
+    return [];
+  }
 }
 
 function mainOneProfileContext(req: McpInvocationRequest): string {
@@ -2579,7 +2607,13 @@ ${effectiveUserPrompt}`;
    * 를 낸 뒤에야 폴백이 돌았다. 이미 아는 사실을 확인하려고 7분을 쓴 것이다.
    * 저장된 선택은 건드리지 않는다 — 시한이 지나면 다음 턴이 알아서 원래 모델로 간다.
    */
-  if (runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored && !continuationRuntimePinned) {
+  // Work gets the same pre-run cooldown avoidance for a runtime it did not pin
+  // (owner 2026-09-23: long-run behaviour must match One). A Work composer pin
+  // stays the user's exact decision and is never swapped here.
+  const workUnpinnedCooldownAvoidance = req.oneMode !== true && !runtimeResolution.pinHonored
+    && chat?.originSurface === "work" && req.agentAppMode !== true;
+  if (runtimeChoice && ((req.oneMode === true && runtimeResolution.pinHonored) || workUnpinnedCooldownAvoidance)
+    && !continuationRuntimePinned) {
     const cooling = runtimeCooldown(runtimeChoice.active);
     if (cooling) {
       const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
@@ -3105,6 +3139,9 @@ ${effectiveUserPrompt}`;
           recordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_tool_selection", payload: { ...receipt } });
         },
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
+        // An installed plugin the agent looked up or opened mid-turn in this
+        // conversation's previous run is attached now (never a Hub install).
+        requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
       };
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
       const keyConfigurationRevision = getEnvConfigurationRevision();
@@ -3181,7 +3218,34 @@ ${effectiveUserPrompt}`;
       mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedContext, {
         toolMode: selectedContext.effectiveToolMode,
         hubMode: req.hubMode,
+        userPrompt: effectiveUserPrompt,
       });
+      if (selectedContext.routedPlugins?.length || selectedContext.selectionSource) {
+        // The routing decision is a ledger fact for every turn, Work and One alike.
+        tryRecordRunEvent({
+          runId: req.runId ?? `chat:${chat.id}`,
+          kind: "plugin_route_selection",
+          chatId: chat.id,
+          agentId: agent.id,
+          payload: {
+            source: selectedContext.selectionSource ?? "none",
+            routed: (selectedContext.routedPlugins ?? []).map((plugin) => ({
+              slug: plugin.slug, source: plugin.source, hasSkills: plugin.hasSkills, toolIds: plugin.toolIds,
+            })),
+          },
+        });
+      }
+      if (selectedContext.routedPlugins?.length) {
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · routed",
+            result: selectedContext.routedPlugins
+              .map((plugin) => `${plugin.slug} (${plugin.source}${plugin.toolIds.length ? `; tools: ${plugin.toolIds.join(", ")}` : ""})`)
+              .join("\n"),
+          },
+        });
+      }
       if (keyGate.fallbackPrompt) {
         // 거절/시간초과 폴백 — 남은 도구들로 대안을 찾으라는 정직한 지시 블록.
         mcpAutoSelectionPrompt = `${mcpAutoSelectionPrompt}\n${keyGate.fallbackPrompt}`.trim();
@@ -3640,9 +3704,15 @@ ${effectiveUserPrompt}`;
     onCommittedImage: (filePath) => { collectDurableToolImages?.([filePath]); },
   });
 
+  // Host pre-turn image generation is for runtimes that cannot draw by
+  // themselves. Codex/Antigravity request images through their own image
+  // generation (or the host generate_image tool) and the host copies each
+  // result into the working folder. One and Work now share the same rule —
+  // the old One exclusion predates the unified One/Work image binding.
+  const runtimeDrawsItself = (RUNTIME_NATIVE_CAPABILITIES[active.kind] ?? []).includes("image.generate");
   const imageGenerationRequired = !req.agentAppMode
-    && !req.oneMode
     && chat.kind !== "division"
+    && !runtimeDrawsItself
     && naturalLanguageRequiresImageGeneration(req.userPrompt);
   /*
    * ★찍어 달라고 했으면 찍은 것이 있어야 한다 — 그리라고는 하지 않았으므로 생성은 하지 않고
@@ -5408,6 +5478,15 @@ ${effectiveUserPrompt}`;
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], _imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin) => {
         let sourceUrls: string[] | undefined;
+        if (!isError && req.runId && !req.agentAppMode) {
+          try {
+            const slugs = pluginSlugsNamedInToolEvent({ name, args, result }, listInstalledPluginCandidates());
+            if (slugs.length) {
+              tryRecordRunEvent({ runId: req.runId, kind: "plugin_requested_mid_turn", chatId: chat.id, agentId: agent.id,
+                payload: { slugs, tool: name.slice(0, 120) } });
+            }
+          } catch { /* Optional routing hint; never breaks the run. */ }
+        }
         if (isError) {
           observedOneToolFailure = true;
           passToolFailures += 1;
@@ -5851,9 +5930,11 @@ ${effectiveUserPrompt}`;
         false,
         [generated.artifactPath],
       );
+      const workspaceImageCopy = copyGeneratedImageIntoWorkspace({ cwd: resolvedResultFolder ?? workingFolder,
+        permission: normalizedPermission, sourcePath: generated.artifactPath, label: "image" });
       hostGeneratedImageContext = locale === "ko"
-        ? "\n\n[Agentlas 이미지 결과]\n호스트가 실제 이미지 한 장을 생성해 이 메시지에 첨부했습니다. 첨부된 이미지를 실제 결과로 사용하고, 추가 이미지를 생성했다고 말하지 마세요."
-        : "\n\n[Agentlas image result]\nThe host generated and attached one real image for this request. Use that attached image as the actual result and do not claim that another image was generated.";
+        ? `\n\n[Agentlas 이미지 결과]\n호스트가 실제 이미지 한 장을 생성해 이 메시지에 첨부했습니다. 첨부된 이미지를 실제 결과로 사용하고, 추가 이미지를 생성했다고 말하지 마세요.${workspaceImageCopy ? `\n작업 폴더 사본: ${workspaceImageCopy} — 업로드·문서 등 다음 단계에는 이 경로를 쓰세요.` : ""}`
+        : `\n\n[Agentlas image result]\nThe host generated and attached one real image for this request. Use that attached image as the actual result and do not claim that another image was generated.${workspaceImageCopy ? `\nWorking-folder copy: ${workspaceImageCopy} — use this path for uploads, documents and later steps.` : ""}`;
       sink({
         kind: "tool-use",
         status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
