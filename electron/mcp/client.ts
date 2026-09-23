@@ -107,6 +107,7 @@ import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cl
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
+import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
@@ -2895,7 +2896,10 @@ ${effectiveUserPrompt}`;
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
   const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked");
-  const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && (
+  // A Main-issued read-only effect observation is one look at the outside world,
+  // never a Goal cycle, Stormbreaker loop or multi-pass continuation.
+  const effectObservationRun = Boolean(effectObservationTicket(req.runId));
+  const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
@@ -5076,7 +5080,7 @@ ${effectiveUserPrompt}`;
     // execution guidance and therefore cannot upsert the objective.
     let activeGoalId: string | null = null;
     let activeGoal: GoalLedgerSnapshot | null = null;
-    if (!scienceRecovery && !req.agentAppMode && chat.kind !== "division") {
+    if (!scienceRecovery && !req.agentAppMode && chat.kind !== "division" && !effectObservationRun) {
       activeGoalId = getChatGoalId(chat.id);
       if (!activeGoalId && req.goalMode && canWrite) {
         activeGoalId = durableWorkforceGoalId;
@@ -5834,7 +5838,7 @@ ${effectiveUserPrompt}`;
     // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 라이브 루프를 기본으로 쓴다 —
     // "goal 명령은 완성될 때까지 계속 도는 루프가 기본"(오너 요구). 정지 판단은 모델이 아니라
     // goal 원장(예산·무진전·명시 종료)이 내린다.
-    const continuousMode = !scienceRecovery && !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" &&
+    const continuousMode = !scienceRecovery && !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" && !effectObservationRun &&
       (chat.continuousMode === true || activeGoalId != null);
     const maxPasses = req.agentAppMode || (req.oneMode && req.fastMode === true) || scienceRecovery
       ? 1

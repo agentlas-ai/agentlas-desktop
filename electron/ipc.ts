@@ -469,6 +469,7 @@ import {
   lastGoalLedgerFailure,
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
+import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
 import { emitDesktopStoreChange } from "./store/change-bus";
 import {
   confirmDesktopLongRunResumeDispatched,
@@ -4382,6 +4383,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
+    // Look before asking (owner 2026-09-23): a Goal blocked only because an
+    // interrupted attempt's external outcome is unknown gets one read-only
+    // observation run before the person is asked. Idempotent per attempt set.
+    try { maybeDispatchEffectObservation(invocationService, chat.goalId, "goal-context"); }
+    catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
     const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
     const wait = latestGoalWaitSubscription(chat.goalId);

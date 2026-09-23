@@ -49,6 +49,11 @@ import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
+import {
+  completeEffectObservation, effectObservationTicket, maybeDispatchEffectObservation, readEffectObservationFromFinal,
+  EFFECT_OBSERVATION_TIME_LIMIT_MS,
+} from "../long-run/effect-observation";
+import { stripEffectObservationMarker, type ParsedEffectObservation } from "../../shared/effect-observation";
 import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
 import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { claimCheckpointContinuation, latestTaskCheckpoint } from "../long-run/checkpoint";
@@ -1339,6 +1344,14 @@ export class InvocationService {
       req.runId,
       (candidate) => this.activeRuns.hasSeen(candidate) || hasInvocationRunReceipt(candidate),
     );
+    // 효과 관찰 실행(Main 발행 표)은 정확히 그 번호·그 대화·읽기 전용으로만 돈다 — 요청 본문이
+    // 아니라 Main 이 들고 있는 표로 판정하고, 조금이라도 어긋나면 디스패치 전에 거절한다.
+    const effectObservation = effectObservationTicket(req.runId);
+    if (effectObservation && (runId !== req.runId || effectObservation.chatId !== req.chatId || workspaceBinding
+      || executionContext || req.permissions !== "read" || req.agentAppMode
+      || (requestedOneMode && selectedOnePermissionMode !== "read"))) {
+      throw new Error("effect_observation_must_be_read_only");
+    }
     const runWorkspaceBinding = workspaceBinding
       ? immutableWorkspaceBinding(workspaceBinding)
       : undefined;
@@ -1607,6 +1620,7 @@ export class InvocationService {
       } : {}),
       ...(attachmentCapabilitySummary ? { attachmentCapabilitySummary } : {}),
     };
+    if (effectObservation && runReq.permissions !== "read") throw new Error("effect_observation_must_be_read_only");
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused")
       && localUserTurn && runReq.taskIntent !== "conversation") {
       // A new task message must not silently reactivate a claimed wait whose
@@ -1999,7 +2013,15 @@ export class InvocationService {
 
     const effectBoundary = new InvocationEffectBoundaryTracker(runId, runReq.chatId);
     let terminalObserved = false;
-    let projectionGoalId = chat.goalId;
+    // A read-only effect observation looks at the outside world for a blocked
+    // Goal; it is not a Goal cycle. It must not bind a controller attempt, claim
+    // completion, register waits or run the verifier on that Goal.
+    let projectionGoalId = effectObservation ? null : chat.goalId;
+    let effectObservationParsed: ParsedEffectObservation | null = null;
+    let effectObservationFailed = false;
+    const effectObservationDeadline = effectObservation
+      ? setTimeout(() => this.cancelWithReason(runId, new Error("effect_observation_time_budget")), EFFECT_OBSERVATION_TIME_LIMIT_MS)
+      : null;
     if (!projectionGoalId && runReq.goalMode && (runReq.permissions === "write" || runReq.permissions === "full")) {
       projectionGoalId = resolveDesktopWorkforceGoalId({
         chatGoalId: null,
@@ -2164,7 +2186,8 @@ export class InvocationService {
      * 답해야 일어나고, 무응답은 기존 계약대로 거부로 닫힌다.
      */
     const permissionEscalationEligible =
-      !runReq.agentAppMode
+      !effectObservation
+      && !runReq.agentAppMode
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
@@ -2241,6 +2264,13 @@ export class InvocationService {
          * 본문에서 지우고, 그 사실만 남겨 완주 후 승인칩이 잇는다. 부분 스트림과
          * 최종 본문을 같은 함수로 지워 델타 좌표계가 갈라지지 않게 한다.
          */
+        // 효과 관찰 판정은 원문 final 의 고정 표식 한 줄에서만 읽는다(지우기 전에). 부분 스트림의
+        // 표식 줄도 화면에 보이지 않게 여기서 지운다.
+        if (effectObservation && !event.agentId && (event.kind === "final" || event.kind === "partial")
+          && typeof event.text === "string") {
+          if (event.kind === "final") effectObservationParsed = readEffectObservationFromFinal(runId, event.text);
+          event = { ...event, text: stripEffectObservationMarker(event.text) };
+        }
         if (
           permissionEscalationEligible
           && !event.agentId
@@ -3123,6 +3153,8 @@ export class InvocationService {
             hasFinalText: Boolean(result.finalText?.trim()),
           },
         });
+        // An effect observation owns no Goal semantics (see projectionGoalId).
+        if (effectObservation) return;
         if (result.goalWaitRequest && !executionContext) {
           try {
             if (controller.signal.aborted || record.steeringInterruptRequested) return;
@@ -3322,6 +3354,7 @@ export class InvocationService {
       })
       .catch((error: unknown) => {
         settleGoalControllerAttempt(false);
+        effectObservationFailed = true;
         const failedGoalId = record.automaticGoalId ??
           (error instanceof Error && error.message === "durable_user_message_hook_failed" ? projectionGoalId : null);
         if (failedGoalId && !controller.signal.aborted) {
@@ -3476,6 +3509,15 @@ export class InvocationService {
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,
         });
+        if (effectObservation) {
+          if (effectObservationDeadline) clearTimeout(effectObservationDeadline);
+          try {
+            completeEffectObservation({ runId, parsed: effectObservationParsed,
+              aborted: controller.signal.aborted, failed: effectObservationFailed });
+          } catch (error) {
+            console.warn("[effect-observation] completion failed:", error);
+          }
+        }
       }));
 
     return { runId };
@@ -3529,6 +3571,10 @@ export class InvocationService {
       if (checkpoint.sideEffects.state === "uncertain") {
         const current = getLongRunByGoalId(input.goalId);
         if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_side_effects_uncertain" });
+        // Look before asking: one read-only observation of the interrupted
+        // attempts' external outcome (at most once per attempt set).
+        try { maybeDispatchEffectObservation(this, input.goalId, "checkpoint"); }
+        catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
         return;
       }
       const continuation = prepareCheckpointContinuation(checkpoint);
