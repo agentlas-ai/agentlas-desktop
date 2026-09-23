@@ -232,6 +232,42 @@ function say(chatId: string, runId: string, ko: string, en: string): void {
   }
 }
 
+/**
+ * Why an observation could not look, as a machine code read from the run's own typed events
+ * (never from prose). Returns null when the browser was reachable or never needed.
+ *   effect_observation_browser_unavailable:<code> — the tool connection could not be prepared,
+ *   or every agentlas-browser call the model made was refused / failed.
+ * The caller still schedules the same automatic re-observation; this only names the cause.
+ */
+export function observationBrowserUnavailableCode(observationRunId: string): string | null {
+  try {
+    const rows = getDb().prepare(
+      `SELECT kind, payload_json FROM run_events WHERE run_id = ?
+         AND kind IN ('mcp_config_failure', 'mcp_tool-use', 'browser_binding') ORDER BY seq LIMIT 400`,
+    ).all(observationRunId) as Array<{ kind: string; payload_json: string }>;
+    let refused: string | null = null;
+    let succeeded = false;
+    for (const row of rows) {
+      let payload: Record<string, unknown>;
+      try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { continue; }
+      if (row.kind === "mcp_config_failure") {
+        const code = typeof payload.reasonCode === "string" ? payload.reasonCode : "mcp-runtime-config-unavailable";
+        return `effect_observation_browser_unavailable:${code}`.slice(0, 120);
+      }
+      if (row.kind !== "mcp_tool-use" || typeof payload.toolName !== "string" || !payload.toolName.startsWith("agentlas-browser.")) continue;
+      if (payload.toolIsError === true) {
+        refused ??= typeof payload.toolFailureCode === "string" && /^[a-z0-9_.-]{1,64}$/i.test(payload.toolFailureCode)
+          ? payload.toolFailureCode : "tool_failed";
+      } else if (payload.toolIsError === false && typeof payload.toolResultPreview === "string") {
+        succeeded = true;
+      }
+    }
+    return refused && !succeeded ? `effect_observation_browser_unavailable:${refused}`.slice(0, 120) : null;
+  } catch {
+    return null;
+  }
+}
+
 export type EffectObservationDispatchResult =
   | { status: "dispatched"; runId: string }
   | { status: "skipped"; reason: string };
@@ -353,8 +389,12 @@ export function completeEffectObservation(input: {
   if (!ticket) return null;
   markGoalObserving(ticket.goalId, false);
   const fallback = (reason: string): EffectObservationOutcome => {
-    recordInconclusive(ticket, reason);
-    return { outcome: "fallback", reason };
+    // A look that never reached the browser is not "unknown": name the machine cause so the
+    // scheduled re-observation (not a human) is visibly waiting on browser availability.
+    const cause = reason === "effect_observation_marker_missing" || reason === "effect_observation_unknown"
+      || reason === "effect_observation_run_failed" ? observationBrowserUnavailableCode(ticket.observationRunId) : null;
+    recordInconclusive(ticket, cause ?? reason);
+    return { outcome: "fallback", reason: cause ?? reason };
   };
   if (input.aborted) return fallback("effect_observation_aborted");
   if (input.failed) return fallback("effect_observation_run_failed");
@@ -621,7 +661,10 @@ function completeAutomationEffectObservation(input: {
     tryRecordRunEvent({ runId: plan.hold?.runId ?? observationRunId, kind: AUTOMATION_EFFECT_OBSERVATION_EVENT_KIND,
       automationId, payload: { observationDigest: plan.digest, observationInvocationRunId: observationRunId, ...payload } });
   };
-  const fallback = (reason: string, observed?: "done" | "not_done"): AutomationEffectObservationOutcome => {
+  const fallback = (rawReason: string, observed?: "done" | "not_done"): AutomationEffectObservationOutcome => {
+    const reason = !observed && (rawReason === "effect_observation_marker_missing" || rawReason === "effect_observation_unknown"
+      || rawReason === "effect_observation_run_failed")
+      ? observationBrowserUnavailableCode(observationRunId) ?? rawReason : rawReason;
     record({ action: "inconclusive", reason, ...(observed ? { observedVerdict: observed } : {}) });
     if (plan.goal) {
       try {

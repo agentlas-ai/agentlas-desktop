@@ -17,6 +17,8 @@ export type McpProxyGate = {
   serverKey: string; runtime: string; sessionKey: string; permission?: "read" | "write" | "full";
   cwd?: string; chatId?: string; unattended?: boolean; simulation?: boolean; planMode?: boolean;
   catalogId: string | null; planReadAuthority?: "agentlas-browser" | "cua-driver"; planPath?: string;
+  /** Main-minted read-only browser profile (mcp-config.ts); enforced before the arbiter. */
+  readOnlyBrowser?: true;
   /** Stable Main-owned identity for an Antigravity browser resident scope. */
   residentKey?: string;
 };
@@ -38,6 +40,7 @@ type Frame = Record<string, any>;
 type Policy = {
   mutating: (input: { catalogId?: string | null; toolName: string }) => boolean;
   planMutating: (input: { authority?: unknown; toolName: string; args?: unknown }) => boolean;
+  readOnlyMutating?: (input: { toolName: string; args?: unknown }) => boolean;
 };
 const launches = new Map<string, Registration>();
 const residentLaunches = new Map<string, string>();
@@ -411,6 +414,9 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
       const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
+      // Read-only observation profile: fail closed if the policy is missing, and deny before any
+      // arbiter or durable consent rule can answer (a saved "always allow" never turns a look into a click).
+      if (gate.readOnlyBrowser && (!policy.readOnlyMutating || policy.readOnlyMutating({ toolName: tool, args }))) { deny(wireId, "read_only_denied"); return; }
       const digest = await schema(tool, signal); validate(); signal.throwIfAborted();
       const ask: RuntimeToolPermissionAsk = { runtime: gate.runtime, sessionKey: gate.sessionKey,
         tool: `mcp__${gate.serverKey}__${tool}`, kind: "other", cwd: gate.cwd, permission: gate.permission,

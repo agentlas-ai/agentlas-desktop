@@ -291,6 +291,9 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 
+/** Runtimes whose read permission keeps a configured tool surface usable. Antigravity's headless
+ * read mode refuses it outright (runtime/antigravity.ts antigravityReadToolFailure). */
+const OBSERVATION_READ_TOOL_CAPABLE = (kind: string): boolean => kind !== "antigravity";
 const ONE_LOCAL_ARTIFACT_PATH_KEYS = ["path", "filePath", "localPath", "file"] as const;
 const ONE_LOCAL_ARTIFACT_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp",
@@ -1786,6 +1789,14 @@ async function runMcpInvocationInContext(
   // Every caller, including legacy/direct integrations, crosses the same
   // fail-closed boundary. Unknown or omitted permission is read-only.
   const normalizedPermission = effectiveInvocationPermission(req.permissions, planReadOnly);
+  /*
+   * Main-issued read-only effect observation: the One/Work ticket (registered by Main before
+   * dispatch) or the automation observation (Main-minted `effect-observation-` run id). The
+   * identity only ever narrows this run: it selects the Main-enforced read-only browser profile
+   * and steers away from runtimes that cannot use tools under read permission.
+   */
+  const readOnlyObservationRun = normalizedPermission === "read" && (Boolean(effectObservationTicket(req.runId))
+    || (Boolean(req.automationId) && typeof req.runId === "string" && req.runId.startsWith("effect-observation-")));
   if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
   const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
   // A Mobile run consumes only the main-owned snapshot captured at the Bridge
@@ -2659,6 +2670,26 @@ ${effectiveUserPrompt}`;
       controllerFallbackBeforeRun = fallback;
     }
   }
+  /*
+   * ★A read-only observation must be able to call its read tools. Antigravity's headless read
+   * mode refuses any configured tool surface (antigravityReadToolFailure →
+   * agy_read_tools_unsupported), so an observation pinned there failed every retry (production
+   * 2026-09-23, automation observation on an agy-pinned automation). Start such a run on the
+   * next orchestrator runtime instead; the pin itself is not rewritten.
+   */
+  if (runtimeChoice && readOnlyObservationRun && !continuationRuntimePinned
+    && !OBSERVATION_READ_TOOL_CAPABLE(runtimeChoice.active.kind)) {
+    const fallback = rolePriorityRuntimes(runtimes, "orchestrator")
+      .find((candidate) => OBSERVATION_READ_TOOL_CAPABLE(candidate.kind) && pickRunner(candidate));
+    const fallbackPicked = fallback ? pickRunner(fallback) : null;
+    tryRecordRunEvent({ runId: req.runId!, chatId: req.chatId, kind: "observation_runtime_selection",
+      payload: { schemaVersion: 1, reasonCode: "observation_read_tools_unsupported",
+        refusedKind: runtimeChoice.active.kind, fallbackKind: fallback?.kind ?? null } });
+    if (fallback && fallbackPicked) {
+      runtimeChoice = { active: fallback, picked: fallbackPicked, override: null, unavailableOverride: null };
+      controllerFallbackBeforeRun = fallback;
+    }
+  }
   if (!runtimeChoice) {
     sink({
       kind: "error",
@@ -3373,9 +3404,24 @@ ${effectiveUserPrompt}`;
         // The daemon imports this client too. Load Electron's native views only
         // for a real interactive browser grant, never during headless startup.
         const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
-        nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
-          presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture),
-          permission: normalizedPermission, signal: signal ?? new AbortController().signal });
+        try {
+          nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
+            presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture),
+            permission: normalizedPermission, signal: signal ?? new AbortController().signal });
+        } catch (grantError) {
+          /*
+           * ★A chat that is not open in a window has no native guest owner. Background goal
+           * cycles and sweep-dispatched effect observations are exactly those chats, and every
+           * one of them died here before the runner started (production 1.2.37, 2026-09-23:
+           * 8 runs `mcp-runtime-config-unavailable` "(unknown)" ~2s after start). Without a
+           * window the browser still exists: the dedicated persistent profile that unattended
+           * runs already use. Bind that instead and record the machine reason.
+           */
+          if (signal?.aborted || !(grantError instanceof Error) || grantError.message !== "native-browser-task-unbound") throw grantError;
+          nativeBrowserGrant = undefined;
+          tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "browser_binding",
+            payload: { schemaVersion: 1, binding: "dedicated-profile", reasonCode: "native-browser-task-unbound" } });
+        }
       }
       const cfg = await buildMcpConfigFile({
         // Graph nodes can share a runId. Every preparation, including doctor
@@ -3420,6 +3466,7 @@ ${effectiveUserPrompt}`;
           ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
           ...(executionContext ? { unattended: true } : {}),
           ...(antigravityBrowserResidentKey ? { residentKey: antigravityBrowserResidentKey } : {}),
+          ...(readOnlyObservationRun ? { readOnlyObservation: true as const } : {}),
         },
       });
       mcpConfigCleanup = cfg?.cleanup;
@@ -3484,9 +3531,15 @@ ${effectiveUserPrompt}`;
             try {
               if (ids.includes("agentlas-browser")) {
                 const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
+                const grantSignal = input.signal ?? signal ?? new AbortController().signal;
                 grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
-                  permission: input.permission!, signal: input.signal ?? signal ?? new AbortController().signal,
-                  presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture) });
+                  permission: input.permission!, signal: grantSignal,
+                  presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture) })
+                  // Same rule as the root run: no window owner → the dedicated persistent profile.
+                  .catch((grantError: unknown) => {
+                    if (grantSignal.aborted || !(grantError instanceof Error) || grantError.message !== "native-browser-task-unbound") throw grantError;
+                    return undefined;
+                  });
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
@@ -3494,6 +3547,7 @@ ${effectiveUserPrompt}`;
                 toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
                   permission: input.permission!, ...(input.cwd ? { cwd: input.cwd } : {}), chatId: chat.id,
                   ...(browserApprovalScope ? { approvalScope: browserApprovalScope } : {}),
+                  ...(readOnlyObservationRun ? { readOnlyObservation: true as const } : {}),
                   ...(req.simulation === true ? { simulation: true as const } : {}) } });
               const boundIds = new Set(childConfig?.includedServers?.flatMap((row) => [row.serverId, row.catalogId].filter(Boolean)));
               if (!childConfig || ids.some((id) => !boundIds.has(id)) || (grant && !childConfig.nativeBrowserBound)) {
@@ -3526,11 +3580,18 @@ ${effectiveUserPrompt}`;
       // when config creation fails. A Full Access grant is not transferable to
       // that old proxy. Preserve the failure before any runner dispatch.
       if (signal?.aborted) return earlyResult();
-      const diagnostic = browserCdpHostFailureDiagnostic(err);
+      const hostDiagnostic = browserCdpHostFailureDiagnostic(err);
+      // A non-launcher failure used to collapse to {unknown, unknown} and "(unknown)" in the
+      // message, hiding e.g. native-browser-task-unbound. Carry a bounded machine code only.
+      const thrownCode = err instanceof Error && /^[a-z][a-z0-9_-]{2,80}$/.test(err.message) ? err.message : null;
+      const diagnostic = hostDiagnostic.code === "unknown" && thrownCode
+        ? { ...hostDiagnostic, code: thrownCode } as typeof hostDiagnostic : hostDiagnostic;
       const scopeChanged = err && typeof err === "object" && "code" in err
         && err.code === "mcp-goal-tool-scope-changed";
       const code = scopeChanged ? "mcp-goal-tool-scope-changed" : "mcp-runtime-config-unavailable";
       console.error("[mcp]", { code, diagnostic });
+      tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_config_failure",
+        payload: { schemaVersion: 1, code, stage: diagnostic.stage, reasonCode: diagnostic.code } });
       // 진단이 { unknown, unknown } 뿐이면 원인을 알 길이 없다(격리 앱 실측 2026-09-13). 개발 진단용으로만 원문을 남긴다.
       if (process.env.AGENTLAS_MCP_CONFIG_DEBUG === "1") console.error("[mcp] config failure detail:", err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err));
       sink({ kind: "error", error: {
