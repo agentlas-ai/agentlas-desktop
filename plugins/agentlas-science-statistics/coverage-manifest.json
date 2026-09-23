@@ -6273,7 +6273,7 @@
     },
     {
       "method": "inverse_probability_weighting",
-      "implementedBoundary": "Complete-case linear regression reweighted by the inverse of a logistic response propensity fitted on fully observed analysis covariates plus optional auxiliary variables (1..12 of each, 8..5000 rows), with stabilised weights, optional upper-quantile truncation, a weight-distribution diagnostic and an HC0 sandwich covariance. Missing values are allowed in the outcome only; the sandwich treats the fitted weights as known and the estimator is not augmented or doubly robust.",
+      "implementedBoundary": "Complete-case linear regression reweighted by the inverse of a logistic response propensity fitted on fully observed analysis covariates plus optional auxiliary variables (1..12 of each, 8..5000 rows), with stabilised weights, optional upper-quantile truncation, a weight-distribution diagnostic and an HC0 sandwich covariance. Fully missing selected optional auxiliary variables are omitted with an explicit diagnostic; partially missing auxiliary variables and missing analysis covariates remain invalid. The sandwich treats the fitted weights as known and the estimator is not augmented or doubly robust.",
       "oracleCoverage": {
         "level": "external-library-partial",
         "evidence": [
@@ -6300,6 +6300,7 @@
           "weight distribution",
           "positivity screen",
           "response model convergence",
+          "fully missing auxiliary variables (when omitted)",
           "weighted versus complete-case comparison",
           "variance estimator boundary"
         ],
@@ -6312,7 +6313,7 @@
       "knownGaps": [
         "standard errors that account for the estimated propensity (the two-stage correction or a bootstrap over both stages)",
         "augmented inverse probability weighting and other doubly robust estimators",
-        "missing values in the covariates as well as the outcome",
+        "partially missing auxiliary or analysis covariates",
         "categorical covariates in the response model",
         "calibration or entropy-balancing weights"
       ],
@@ -6758,5 +6759,5 @@
       "independentlyCrossChecked": true
     }
   ],
-  "manifestSha256": "sha256:5169f80e619e6802a20f47500f117f51d60a107f56fa795be741549d469274dc"
+  "manifestSha256": "sha256:4233808fe5710e88c7ade57f7c868c7f72749cb95e34b517f7070d006ce47127"
 }

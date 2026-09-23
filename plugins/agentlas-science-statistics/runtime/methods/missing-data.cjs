@@ -991,7 +991,7 @@ const inverseProbabilityWeighting = {
     properties: {
       y: { type: "array", minItems: 8, maxItems: MAX_ROWS, items: { type: ["number", "null"] } },
       predictors: columnSchema(1, MAX_PREDICTORS, false),
-      auxiliary: columnSchema(1, MAX_PREDICTORS, false),
+      auxiliary: columnSchema(1, MAX_PREDICTORS, true),
       outcomeLabel: { type: "string", minLength: 1, maxLength: 128 },
     },
   },
@@ -999,12 +999,24 @@ const inverseProbabilityWeighting = {
     H.assertKeys(data, ["y", "predictors", "auxiliary", "outcomeLabel"], "data");
     const y = gappyVector(data.y, "data.y", H, 8);
     const predictors = parseColumns(data.predictors, "data.predictors", "Predictor", H, { minColumns: 1, maxColumns: MAX_PREDICTORS, rows: y.length, allowMissing: false });
-    const auxiliary = data.auxiliary === undefined
+    const selectedAuxiliary = data.auxiliary === undefined
       ? { names: [], columns: [] }
-      : parseColumns(data.auxiliary, "data.auxiliary", "Auxiliary", H, { minColumns: 1, maxColumns: MAX_PREDICTORS, rows: y.length, allowMissing: false });
-    for (const name of auxiliary.names) {
+      : parseColumns(data.auxiliary, "data.auxiliary", "Auxiliary", H, { minColumns: 1, maxColumns: MAX_PREDICTORS, rows: y.length, allowMissing: true });
+    for (const name of selectedAuxiliary.names) {
       if (predictors.names.includes(name)) H.fail("STAT_INVALID_INPUT", `data.auxiliary reuses the analysis predictor name ${name}`);
     }
+    const auxiliary = { names: [], columns: [] };
+    const omittedAuxiliaryNames = [];
+    selectedAuxiliary.columns.forEach((column, index) => {
+      if (column.every((value) => value === null)) {
+        omittedAuxiliaryNames.push(selectedAuxiliary.names[index]);
+      } else if (column.some((value) => value === null)) {
+        H.fail("STAT_INVALID_INPUT", `data.auxiliary[${index}].values must be fully observed unless the entire optional column is null`);
+      } else {
+        auxiliary.names.push(selectedAuxiliary.names[index]);
+        auxiliary.columns.push(column);
+      }
+    });
     const n = y.length;
     const respondents = y.filter((value) => value !== null).length;
     if (respondents === n) H.fail("STAT_INVALID_INPUT", "no outcome is missing; fit linear_regression directly instead of reweighting");
@@ -1023,11 +1035,12 @@ const inverseProbabilityWeighting = {
       predictorColumns: predictors.columns,
       auxiliaryNames: auxiliary.names,
       auxiliaryColumns: auxiliary.columns,
+      omittedAuxiliaryNames,
       outcomeLabel: H.label(data.outcomeLabel, "Outcome", "data.outcomeLabel"),
     };
   },
   analyze(parsed, options, budget, H) {
-    const { y, n, predictorNames, predictorColumns, auxiliaryNames, auxiliaryColumns } = parsed;
+    const { y, n, predictorNames, predictorColumns, auxiliaryNames, auxiliaryColumns, omittedAuxiliaryNames } = parsed;
     const responseNames = ["Intercept", ...predictorNames, ...auxiliaryNames];
     const responseColumns = [...predictorColumns, ...auxiliaryColumns];
     const responseDesign = Array.from({ length: n }, (_, row) => [1, ...responseColumns.map((column) => column[row])]);
@@ -1165,6 +1178,7 @@ const inverseProbabilityWeighting = {
         responseRate,
         predictors: predictorNames.length,
         auxiliary: auxiliaryNames.length,
+        ...(omittedAuxiliaryNames.length ? { auxiliarySelected: auxiliaryNames.length + omittedAuxiliaryNames.length, auxiliaryOmitted: omittedAuxiliaryNames.length } : {}),
         coefficients: p,
         effectiveSampleSize,
         dfResidual,
@@ -1200,13 +1214,16 @@ const inverseProbabilityWeighting = {
         { name: "missing at random given the response model covariates", status: "not_established", note: "The weights only remove the part of the non-response that these covariates explain." },
         { name: "positivity (every row could have responded)", status: minPropensity > 0.05 ? "verified" : "requires_design_review", minimumFittedProbability: minPropensity, note: "Fitted probabilities near zero produce extreme weights and unstable estimates." },
         { name: "response model is correctly specified", status: "not_established", note: "Inverse probability weighting is not doubly robust here; a misspecified propensity model biases the weighted estimate." },
-        { name: "outcome is the only variable with missing values", status: "verified", note: "Analysis covariates were required to be fully observed." },
+        omittedAuxiliaryNames.length
+          ? { name: "fitted covariates are fully observed", status: "verified", note: `Fully missing optional auxiliary variables were omitted from the response model: ${omittedAuxiliaryNames.join(", ")}. Analysis predictors and retained auxiliary variables were fully observed.` }
+          : { name: "outcome is the only variable with missing values", status: "verified", note: "Analysis covariates were required to be fully observed." },
         { name: "sandwich treats the estimated weights as known", status: "requires_design_review", note: "Ignoring propensity estimation typically makes this standard error conservative, but that is not guaranteed under misspecification." },
       ],
       diagnostics: [
         { name: "weight distribution", status: coefficientOfVariation > 1 ? "unstable" : "acceptable", coefficientOfVariation, designEffect: 1 + coefficientOfVariation * coefficientOfVariation, effectiveSampleSize, maxWeightOverMean: sortedWeights[sortedWeights.length - 1] / weightMean, truncated: truncatedCount, truncationCut },
         { name: "positivity screen", status: minPropensity > 0.05 ? "acceptable" : "violated", minimumFittedProbability: minPropensity, maximumFittedProbability: maxPropensity, rowsBelow0p05: propensity.probability.filter((value) => value < 0.05).length },
         { name: "response model convergence", status: "converged", iterations: propensity.iterations, maxCoefficientStep: propensity.change, tolerance: options.tolerance, algorithm: "iteratively reweighted least squares" },
+        ...(omittedAuxiliaryNames.length ? [{ name: "fully missing auxiliary variables", status: "omitted", variables: omittedAuxiliaryNames, detail: "These selected optional variables contain no observed information and were excluded from the response propensity model." }] : []),
         { name: "weighted versus complete-case comparison", status: "evaluated", largestShift: Math.max(...coefficientRows.slice(1).map((row) => Math.abs(row.difference))), detail: "A large shift means the complete-case analysis was leaning on the missingness mechanism." },
         { name: "variance estimator boundary", status: "declared", detail: "HC0 sandwich on the weighted score. The point estimate and this sandwich are invariant to rescaling all weights by a constant, so stabilisation changes reporting, not inference." },
       ],
@@ -1232,7 +1249,7 @@ const inverseProbabilityWeighting = {
           { key: "z", label: "z", type: "number" },
           { key: "pValue", label: "p", type: "number" },
           { key: "oddsRatio", label: "Odds ratio", type: "number" },
-        ], propensityRows, ["A covariate that predicts response strongly is the reason complete-case analysis would have been biased."], "missing-data-ipw-propensity-table"),
+        ], propensityRows, ["A covariate that predicts response strongly is the reason complete-case analysis would have been biased.", ...(omittedAuxiliaryNames.length ? [`Fully missing optional auxiliary variables were omitted: ${omittedAuxiliaryNames.join(", ")}.`] : [])], "missing-data-ipw-propensity-table"),
         H.tableArtifact(`Weight diagnostics: ${parsed.outcomeLabel}`, "Distribution of the stabilised weights, the positivity range, and the precision cost of weighting.", [
           { key: "statistic", label: "Quantity", type: "string" },
           { key: "value", label: "Value", type: "number" },
@@ -1277,7 +1294,7 @@ const inverseProbabilityWeighting = {
   },
   matlabParity: { taxonomyIds: ["matlab.stats.regression", "matlab.stats.classification"] },
   coverage: {
-    implementedBoundary: "Complete-case linear regression reweighted by the inverse of a logistic response propensity fitted on fully observed analysis covariates plus optional auxiliary variables (1..12 of each, 8..5000 rows), with stabilised weights, optional upper-quantile truncation, a weight-distribution diagnostic and an HC0 sandwich covariance. Missing values are allowed in the outcome only; the sandwich treats the fitted weights as known and the estimator is not augmented or doubly robust.",
+    implementedBoundary: "Complete-case linear regression reweighted by the inverse of a logistic response propensity fitted on fully observed analysis covariates plus optional auxiliary variables (1..12 of each, 8..5000 rows), with stabilised weights, optional upper-quantile truncation, a weight-distribution diagnostic and an HC0 sandwich covariance. Fully missing selected optional auxiliary variables are omitted with an explicit diagnostic; partially missing auxiliary variables and missing analysis covariates remain invalid. The sandwich treats the fitted weights as known and the estimator is not augmented or doubly robust.",
     oracle: {
       level: "external-library-partial",
       evidence: ["contracts/missing-data-scipy-crosscheck.py"],
@@ -1286,10 +1303,10 @@ const inverseProbabilityWeighting = {
     },
     diagnostic: {
       level: "method-specific-partial",
-      emitted: ["weight distribution", "positivity screen", "response model convergence", "weighted versus complete-case comparison", "variance estimator boundary"],
+      emitted: ["weight distribution", "positivity screen", "response model convergence", "fully missing auxiliary variables (when omitted)", "weighted versus complete-case comparison", "variance estimator boundary"],
       limitations: ["does not test MAR", "does not diagnose response-model misspecification", "does not propagate propensity estimation uncertainty into the interval"],
     },
-    knownGaps: ["standard errors that account for the estimated propensity (the two-stage correction or a bootstrap over both stages)", "augmented inverse probability weighting and other doubly robust estimators", "missing values in the covariates as well as the outcome", "categorical covariates in the response model", "calibration or entropy-balancing weights"],
+    knownGaps: ["standard errors that account for the estimated propensity (the two-stage correction or a bootstrap over both stages)", "augmented inverse probability weighting and other doubly robust estimators", "partially missing auxiliary or analysis covariates", "categorical covariates in the response model", "calibration or entropy-balancing weights"],
   },
 };
 
