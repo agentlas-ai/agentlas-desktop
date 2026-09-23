@@ -864,6 +864,12 @@ export interface RunLocalOpenAiChatOptions {
   estimatedContextWindow?: number;
   estimatedOutputReserve?: number;
   capacitySource?: "built-in" | "catalog" | "unknown";
+  /**
+   * BYOK cloud providers only: the estimated window is a default, not evidence, and the
+   * provider refuses an oversized request explicitly. Compact history but never
+   * pre-refuse. (Local servers may silently truncate, so they keep the pre-check.)
+   */
+  unknownCapacityProviderEnforced?: true;
   /** Managed local only: exact-tokenizer overflow may excerpt historical turns
    * and retry. The current request, instructions, tools and results stay intact. */
   dynamicHistoryCompaction?: true;
@@ -1047,7 +1053,7 @@ export async function runLocalOpenAiChat(
         inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
         if (inputEstimate + reserve <= window) reportHistoryCompaction(droppedCount);
       }
-      if (inputEstimate + reserve > window) {
+      if (inputEstimate + reserve > window && !opts.unknownCapacityProviderEnforced) {
         return { text: "", failure: { kind: "refused", runtime: runtimeKind, source: "marker",
           providerCode: "model_context_capacity_exceeded",
           message: req.locale === "ko"

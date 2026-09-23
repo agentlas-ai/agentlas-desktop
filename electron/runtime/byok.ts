@@ -29,6 +29,7 @@ import {
   type ByokBackend,
   defaultByokModel,
   resolveEffectiveContextWindow,
+  UNKNOWN_CONTEXT_WINDOW,
   needsLongContextToggle,
 } from "../../shared/models";
 
@@ -97,24 +98,37 @@ function prepareContext(
   };
 }
 
-function byokContextCapacity(backend: ByokBackend, model: string, req: RunnerRequest, events: RunnerEvents) {
+/*
+ * ★2026-09-23 — 모르는 모델(사용자 지정·OpenRouter·새 id)의 용량을 16k 로 두고, UTF-8 바이트를
+ *   토큰으로 세고(1바이트=1토큰), 출력 예약 8192 를 빼니 ~17.5KB 시스템 프롬프트만으로 넘쳤다.
+ *   요청을 한 번도 보내지 않고 model_context_capacity_exceeded 로 거절했다. 용량을 모른다는 건
+ *   넘친다는 증거가 아니다. 모르면 카탈로그 기본값(UNKNOWN_CONTEXT_WINDOW)으로 이전 대화만
+ *   접고, 미리 거절하지 않는다 — 클라우드 제공자는 넘치면 명시적으로 거절하므로 그 답을 전한다.
+ */
+export function byokContextCapacity(backend: ByokBackend, model: string, req: RunnerRequest, events: RunnerEvents) {
   const resolved = resolveEffectiveContextWindow(backend, model, !!req.longContext);
   if (resolved.source === "unknown") {
     events.onNotice?.({ level: "warning", code: "model-context-capacity-estimated",
       message: req.locale === "ko"
-        ? "이 모델의 실제 문맥 용량을 확인하지 못해 보수적 추정치를 적용합니다."
-        : "This model's actual context capacity is unknown; using a conservative estimate." });
+        ? "이 모델의 실제 문맥 용량을 확인하지 못했습니다. 미리 거절하지 않고 보내며, 넘치면 제공자의 답을 그대로 알려 드립니다."
+        : "This model's actual context capacity is unknown. The request is sent without a pre-check; if it is too large, the provider's answer is shown." });
   }
-  return { window: resolved.contextWindow ?? 16_000, source: resolved.source };
+  return {
+    window: resolved.contextWindow ?? UNKNOWN_CONTEXT_WINDOW,
+    source: resolved.source,
+    known: resolved.source !== "unknown",
+  };
 }
 
 /** Re-evaluate the complete outgoing provider body on every tool turn. The
  * callback replaces only the initial chat-history segment; later tool
  * call/result pairs, current request, system and schemas remain untouched. */
-function byokHistoryAdmission(input: {
+export function byokHistoryAdmission(input: {
   req: RunnerRequest;
   events: RunnerEvents;
   window: number;
+  /** false: the window is a default, not evidence. Compact history, but never pre-refuse. */
+  capacityKnown: boolean;
   outputReserve: number;
   budgetState: { value: number };
   outgoingBody: () => unknown;
@@ -136,7 +150,7 @@ function byokHistoryAdmission(input: {
           : `Sent untrusted excerpts of ${compacted.droppedCount} earlier messages to fit this model's estimated context. Current request and instructions are unchanged.` });
     }
   }
-  return estimate + input.outputReserve <= input.window;
+  return estimate + input.outputReserve <= input.window || !input.capacityKnown;
 }
 
 // ── SSE 라인 파서 (3개 API 공통) ──────────────────────────
@@ -307,7 +321,7 @@ async function runAnthropicMessages(
     const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
       messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
       ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) });
-    if (!byokHistoryAdmission({ req, events, window: capacity.window, outputReserve: outputLimit,
+    if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
       replaceHistory: (recent, digest) => {
@@ -581,6 +595,8 @@ async function runOpenAiCompletionWithMainToolLoop(
       model,
       estimatedContextWindow: capacity.window,
       estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4)),
+      // A cloud provider refuses an oversized request explicitly; an unknown window is not a reason to refuse first.
+      ...(capacity.known ? {} : { unknownCapacityProviderEnforced: true as const }),
       unreachableMessage: `${providerLabel} API unreachable`,
     },
     openAiMessages(recent, system, req),
@@ -753,7 +769,7 @@ export const runGoogleByok: Runner = async (
       generationConfig: { maxOutputTokens: outputLimit },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
     });
-    if (!byokHistoryAdmission({ req, events, window: capacity.window, outputReserve: outputLimit,
+    if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
       replaceHistory: (recent, digest) => {
