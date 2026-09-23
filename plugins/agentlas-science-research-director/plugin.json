@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-research-director",
   "name": "Agentlas Science Research Director",
-  "version": "1.24.15",
+  "version": "1.24.16",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -34,7 +34,7 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "8e1dd6c58a06e17da8d825e0355e1e99a9ea83de9e3f9683b846550a43e555d9",
+    "promptSha256": "09585b5581ae45564bc4b13212e13c401b3fd367de41eacc3e41c19f986e1b1c",
     "failClosed": true
   },
   "provides": {
@@ -75,8 +75,8 @@
     "files": [
       {
         "path": "agent/agent.md",
-        "sha256": "838135bb2629f23201706758e57070fca4bef03da5abf14082a4ab5696b7f71c",
-        "bytes": 71516
+        "sha256": "0b7ab96a3ec3a034a2e86a163671da1f75e6339cfd203fbed974c999ca80fe50",
+        "bytes": 71679
       },
       {
         "path": "agent/routing-card.json",
@@ -110,8 +110,8 @@
       },
       {
         "path": "skills/direct-study/SKILL.md",
-        "sha256": "ff45485d3a33522643dbe9ac41a52b930d25344bd797f7479505fb907a504f3e",
-        "bytes": 19570
+        "sha256": "a39d52ee1733a4283f3a4be677d8ce68fcc16025330941de1352d29a9f6ef284",
+        "bytes": 19692
       },
       {
         "path": "skills/index/SKILL.md",

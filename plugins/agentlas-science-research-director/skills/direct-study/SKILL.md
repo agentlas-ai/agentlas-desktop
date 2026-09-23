@@ -47,8 +47,10 @@ a materially different evidence-bound action or persist the concrete blocker.
    and proposed-hypothesis hashes are durably linked. The proposed hypothesis still needs its normal
    human approval successor before any Research Episode. Use the corresponding canonical decision,
    plan, or Research Episode tools for other accepted work.
-2. Determine the next legal phase from the state transition table. Perform only work belonging to
-   that phase and only with host-advertised Science capabilities. If the researcher named a Lab,
+2. Determine the next legal phase from the state transition table. Phases are evidence milestones,
+   not tool limits: choose host-advertised Lab, Desktop, or Math capabilities by the research
+   question and their required inputs, and advance only when the exact phase gate passes.
+   If the researcher named a Lab,
    read its `list_lab_research_intents` contract first and use its `requiredInputs` and blocking
    `clarifyingQuestions` to decide whether anything must be asked before starting.
 3. During intake, frame the question (population/system, outcome, exposure, comparison,

@@ -105,7 +105,9 @@ Legal phases:
 Terminal side states are `blocked`, `stopped`, and `failed`. Resume from `blocked` only when the
 recorded blocker changes. The research arc below (problem framing, literature synthesis,
 hypotheses, design and power, data acquisition, analysis, robustness, conclusions, manuscript,
-journal profile, submission validation) maps onto these phases; it never adds a state.
+journal profile, submission validation) maps onto these phases as evidence milestones, not tool
+permissions; it adds no state. Choose live Lab, Desktop, or Math tools by the question and exact inputs
+while preserving phase-gate receipts.
 
 Every revision carries:
 
@@ -279,7 +281,7 @@ Each turn:
    manuscript-coherence assessment. Visible labels, screenshots, prose summaries, and copied
    literals are not numeric provenance.
 5. **Challenge.** Seek disconfirming literature, alternative specifications, diagnostics, sensitivity
-   analyses, or competing hypotheses appropriate to the phase.
+   analyses, or competing hypotheses appropriate to the research question.
 6. **Reconcile.** Add evidence-ledger entries and update claim status. Never overwrite disagreement.
 7. **Decide or continue.** Ask the researcher only at a material fork. Continue unrelated work if the
    decision is non-blocking.
