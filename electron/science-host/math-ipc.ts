@@ -1,5 +1,5 @@
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
-import type { ScienceDaemonClient } from "./daemon-client";
+import { ScienceDaemonClientError, type ScienceDaemonClient } from "./daemon-client";
 
 function inputEnvelope(value: unknown): { projectId: string; requestId: string; command?: unknown } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science-math-request-invalid");
@@ -19,7 +19,7 @@ function inputEnvelope(value: unknown): { projectId: string; requestId: string; 
 export function registerScienceMathHandlers(input: {
   ipcMain: Pick<IpcMain, "handle">;
   assertScienceSender(event: IpcMainInvokeEvent, envelope: unknown): unknown;
-  client: Pick<ScienceDaemonClient, "command" | "cancelMath">;
+  client: Pick<ScienceDaemonClient, "command" | "commandObserved" | "cancelMath">;
 }): void {
   input.ipcMain.handle("science:math:command", (event, envelope: unknown) => {
     input.assertScienceSender(event, envelope);
@@ -28,8 +28,22 @@ export function registerScienceMathHandlers(input: {
     if (!request.command || typeof request.command !== "object" || Array.isArray(request.command)) {
       throw new Error("science-math-command-invalid");
     }
+    const command = { op: "math.command" as const, input: { ...request, command: request.command } };
+    // Inspecting saved Math is read-only. Use the verified, already-ready
+    // daemon without a startup attempt; an unrelated ensure failure must not
+    // hide records that the daemon can serve. Start only when it is absent or
+    // Science has not been loaded yet.
+    if ((request.command as { action?: unknown }).action === "inspect") {
+      return input.client.commandObserved(command).catch(error => {
+        if (error instanceof ScienceDaemonClientError && error.failure.outcome === "not-dispatched"
+          && ["science_daemon_connection_failed", "science_daemon_science_unavailable"].includes(error.failure.code)) {
+          return input.client.command(command);
+        }
+        throw error;
+      });
+    }
     // No reply deadline: a GUI wait is not the lifetime of a computation.
-    return input.client.command({ op: "math.command", input: { ...request, command: request.command } });
+    return input.client.command(command);
   });
   input.ipcMain.handle("science:math:cancel", (event, envelope: unknown) => {
     input.assertScienceSender(event, envelope);
