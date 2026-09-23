@@ -269,6 +269,13 @@ export function createDaemonScienceService(options: {
         const row = db.prepare(`SELECT (
           EXISTS (SELECT 1 FROM science_turns WHERE status IN ('queued','running','cancelling'))
           OR EXISTS (SELECT 1 FROM loop_sessions WHERE status IN ('running','queued','pausing'))
+          -- An enabled Alive agent is durable work even when its next wake is
+          -- observation-driven or a periodic review rather than a timestamp.
+          OR EXISTS (SELECT 1 FROM alive_agents WHERE status='enabled')
+          -- Reconcile a wake/action that crossed a runtime boundary before
+          -- shutdown, including one whose agent was suspended meanwhile.
+          OR EXISTS (SELECT 1 FROM alive_wakes WHERE status IN ('reserved','running'))
+          OR EXISTS (SELECT 1 FROM alive_actions WHERE status IN ('reserved','executing'))
           OR EXISTS (
             SELECT 1 FROM loop_sessions s
             JOIN conversation_runtime_bindings b ON b.runtime_chat_id=s.runtime_chat_id AND b.project_id=s.project_id
