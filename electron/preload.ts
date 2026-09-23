@@ -1,6 +1,6 @@
 // Renderer는 sandbox에 갇혀 있고, 노출하는 IPC만 사용 가능.
 // shared/types.ts AgentlasIpc 모양과 1:1 일치해야 한다.
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer as electronIpcRenderer, webUtils } from "electron";
 import type {
   ToolApprovalDecision,
   ToolApprovalRequestEvent,
@@ -43,6 +43,67 @@ import type {
   SitePublishProviderPage,
   SiteSurface,
 } from "../shared/site-studio";
+
+// <ipc-undefined-keys>
+// IPC 경계 규칙: "값이 undefined 인 키" ≡ "키 없음". Electron IPC(V8 structured clone)는
+// JSON 과 달리 값이 undefined 인 키를 보존해서, Main 의 정확한 키 허용 목록이 그 키를
+// 모르는 키로 거절했다(1.2.33~1.2.37 One 팀 메시지 invalid_request). Main 은
+// developmentIpcBoundary 에서 같은 규칙으로 다시 정리한다(electron/ipc-args-normalize.ts);
+// 여기는 이중 방어다. 샌드박스 preload 는 상대 모듈을 require 할 수 없어 인라인 사본이다.
+// 호출자(화면) 소유 객체를 바꾸지 않도록 copy-on-write — 바꿀 것이 없으면 같은 참조.
+// 일반 객체만 키를 지우고, 배열은 길이를 유지하며, Uint8Array·Date·Map 등은 건드리지 않는다.
+// "지우기"는 undefined 가 아니라 명시적 null 로 보낸다.
+const IPC_INVOKE_NORMALIZE_MAX_DEPTH = 64;
+function ipcCopyWithoutUndefinedKeys(value: unknown, depth: number, seen: Map<object, unknown>): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  if (depth > IPC_INVOKE_NORMALIZE_MAX_DEPTH) return value;
+  seen.set(value, value);
+  if (Array.isArray(value)) {
+    let outArray: unknown[] | null = null;
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      const next = ipcCopyWithoutUndefinedKeys(item, depth + 1, seen);
+      if (next !== item) {
+        if (!outArray) outArray = value.slice();
+        outArray[index] = next;
+      }
+    }
+    if (outArray) seen.set(value, outArray);
+    return outArray ?? value;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  let out: Record<string, unknown> | null = null;
+  for (let position = 0; position < keys.length; position += 1) {
+    const key = keys[position];
+    const item = record[key];
+    const next = item === undefined ? undefined : ipcCopyWithoutUndefinedKeys(item, depth + 1, seen);
+    if (!out && (item === undefined || next !== item)) {
+      out = proto === null ? Object.create(null) as Record<string, unknown> : {};
+      for (let before = 0; before < position; before += 1) out[keys[before]] = record[keys[before]];
+    }
+    if (out && item !== undefined) out[key] = next;
+  }
+  if (out) seen.set(value, out);
+  return out ?? value;
+}
+function normalizeIpcInvokeArgs(args: unknown[]): unknown[] {
+  const seen = new Map<object, unknown>();
+  return args.map((arg) => ipcCopyWithoutUndefinedKeys(arg, 0, seen));
+}
+// </ipc-undefined-keys>
+
+// 이 파일의 모든 `ipcRenderer.invoke(...)` 는 이 한 자리를 지난다. Electron 의 원본은
+// electronIpcRenderer 로만 부르고, 이 객체 밖에서 원본을 직접 부르지 않는다.
+const ipcRenderer = {
+  invoke: (channel: string, ...args: unknown[]): ReturnType<typeof electronIpcRenderer.invoke> =>
+    electronIpcRenderer.invoke(channel, ...normalizeIpcInvokeArgs(args)),
+  on: electronIpcRenderer.on.bind(electronIpcRenderer),
+  removeListener: electronIpcRenderer.removeListener.bind(electronIpcRenderer),
+};
 
 const api: AgentlasIpc = {
   workStart: {
