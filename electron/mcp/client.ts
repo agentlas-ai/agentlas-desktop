@@ -7,6 +7,7 @@ import { ALIVE_DECISION_OUTPUT_SCHEMA } from "../alive-decision-schema";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
+import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -4715,8 +4716,8 @@ ${effectiveUserPrompt}`;
   // signal; only an explicit request to use another language may override this.
   if (req.oneMode && !req.agentAppMode) {
     turnContextParts.push(locale === "ko"
-      ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
-      : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. Do not mention or quote this contract.\n[/Host response-language contract]");
+      ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
+      : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
   }
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
@@ -6703,8 +6704,10 @@ ${effectiveUserPrompt}`;
               ...monitoring,
               ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
               name: a.name,
-              // An explicit user runtime remains the execution binding of the
-              // durable job. Later Worker defaults must not silently replace it.
+              // The chat's runtime at this moment is copied as the job's pin. It is a
+              // copy, not a separate owner choice: unattended runs follow the owner's
+              // *current* chat/worker configuration (automation-runtime-plan.ts) until
+              // the owner edits the pin itself. Recorded below as agent_copy.
               ...(req.runtimeSelection ? { runtimeSelection: req.runtimeSelection } : {}),
               scheduleHuman: a.schedule,
               targetType,
@@ -6716,6 +6719,7 @@ ${effectiveUserPrompt}`;
               timezone: a.tz && a.tz.trim() ? a.tz : null,
               graphJson: a.graph ?? null,
             });
+            if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
             // Only this newly created automation, inside an exact ongoing-Goal
             // invocation, may acquire a Goal revision provenance receipt.
             // Existing same-name/goal_id automations are never auto-adopted.

@@ -100,6 +100,14 @@ import {
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { rolePriorityRuntimes } from "./runtime/selection";
+import { planAutomationRuntimeForRun } from "./automation-runtime-provenance";
+import {
+  AUTOMATION_NO_PROGRESS_LOOP,
+  createNoProgressGuard,
+  noProgressLoopError,
+  noteNoProgressEvent,
+  type NoProgressDecision,
+} from "./automation-progress-guard";
 import { withRunPriority } from "./runtime/run-priority";
 import { admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
@@ -686,6 +694,8 @@ async function runOne(
   let machineError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
+  let noProgressLoop: NoProgressDecision | null = null;
   let graphRunAttempted = false;
   const isGraphAutomation = Boolean(a.graph && a.graph.nodes.length > 0);
   const scheduledOccurrenceId =
@@ -801,6 +811,24 @@ async function runOne(
         );
       }
     }
+    /*
+     * ★에이전트가 만들며 복사한 핀은 오너의 지금 설정을 따른다(목표 대화 모델 칩 → 워커 풀).
+     *   오너가 고른 핀은 그대로. 어느 쪽이든 한도/인증 쿨다운이거나 최근 연속 "제자리 돌기"면
+     *   워커 풀의 다른 공급자로 이번 실행만 넘긴다. 저장된 핀은 바꾸지 않는다(automation-runtime-plan.ts).
+     *   도구 0건 재시도(zeroToolRetried)는 호출자가 고른 런타임을 그대로 쓴다.
+     */
+    if (!opts?.zeroToolRetried) {
+      try {
+        const plan = await planAutomationRuntimeForRun(
+          a,
+          currentRunId ?? opts?.runId ?? `automation-runtime-plan-${a.id}-${Date.now()}`,
+        );
+        if (plan.changed && plan.selection) a = { ...a, runtimeSelection: plan.selection };
+      } catch (planError) {
+        // 계획을 못 세우면 저장된 핀으로 돈다 — 실행을 막을 이유가 아니다.
+        console.warn(`[automation] runtime plan unavailable (${a.id}):`, planError);
+      }
+    }
     const missingHubSlugs = new Set<string>();
     if (a.targetType === "hub" && !a.targetVersion) missingHubSlugs.add(a.targetId);
     for (const node of a.graph?.nodes ?? []) {
@@ -888,6 +916,10 @@ async function runOne(
       // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
       // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
       const graphWatchdog = createAutomationWatchdogState();
+      const graphProgressGuard = createNoProgressGuard();
+      // 사용자 중지(controller)와 섞지 않는다 — 섞으면 catch 가 "사용자가 멈췄다"로 적는다.
+      const noProgressController = new AbortController();
+      const graphSignal = AbortSignal.any([controller.signal, noProgressController.signal]);
       let lastDurableHeartbeatAt = 0;
       const persistGraphHeartbeat = (at = Date.now()): void => {
         if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
@@ -919,7 +951,7 @@ async function runOne(
         //   run-graph.ts 를 고치지 않고도 문맥(AsyncLocalStorage)으로 전파된다.
         const graphRun = Promise.resolve().then(() => withRunPriority("background", () =>
           runGraph(a, a.graph!, {
-            signal: controller.signal,
+            signal: graphSignal,
             ...(opts?.dryRun ? { dryRun: true } : {}),
             ...(opts?.fresh ? { fresh: true } : {}),
           runId,
@@ -932,6 +964,25 @@ async function runOne(
               if (!acceptGraphEvents) return;
               noteAutomationWatchdogEvent(graphWatchdog, ev);
               persistGraphHeartbeat();
+              if (!noProgressLoop) {
+                const loop = noteNoProgressEvent(graphProgressGuard, ev);
+                if (loop) {
+                  noProgressLoop = loop;
+                  tryRecordRunEvent({
+                    runId,
+                    kind: AUTOMATION_NO_PROGRESS_LOOP,
+                    automationId: a.id,
+                    ...(loop.nodeId ? { nodeId: loop.nodeId } : {}),
+                    payload: {
+                      rule: loop.rule, tool: loop.tool, fingerprint: loop.fingerprint, count: loop.count,
+                      kind: a.runtimeSelection?.kind ?? null,
+                      backend: a.runtimeSelection?.backend ?? null,
+                      model: a.runtimeSelection?.model ?? null,
+                    },
+                  });
+                  noProgressController.abort(new Error(noProgressLoopError(loop)));
+                }
+              }
               // ★실패가 아닌 **상태 변화**도 화면에 보낸다 (커넥터 C44).
               //
               // 예전에는 `nodeState`가 붙은 이벤트만 건너갔다. 그래서 긴 노드가 도는 동안
@@ -948,18 +999,21 @@ async function runOne(
             },
           }),
         ));
-        result = await awaitAutomationRunnerWithAbortGrace(graphRun, controller.signal);
+        result = await awaitAutomationRunnerWithAbortGrace(graphRun, graphSignal);
       } catch (err) {
         // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
         if (graphStall) {
           throw new Error(automationWatchdogError(graphStall));
         }
+        if (noProgressLoop && !controller.signal.aborted) throw new Error(noProgressLoopError(noProgressLoop));
         throw err;
       } finally {
         acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
       if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
+      // 그래프가 중단 신호를 받고도 결과를 돌려준 경우 — 멈춘 이유는 호스트가 센 반복이다.
+      if (noProgressLoop) throw new Error(noProgressLoopError(noProgressLoop));
       const graphHasUnconfirmedMutation = Object.values(result.nodeFailures ?? {}).some((failure: unknown) =>
         failure && typeof failure === "object" && "code" in failure
         && (failure as { code?: unknown }).code === "MUTATION_UNVERIFIED",
@@ -1328,8 +1382,12 @@ async function runOne(
     // 판정은 원문을 읽기 좋은 한 문장으로 **교체**하므로, 교체된 문장에서 다시 표식을 찾으면
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = rawError;
+    const loopStopped = noProgressLoop !== null && !controller.signal.aborted;
     const classified = controller.signal.aborted
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
+      : loopStopped
+      // 판정 모델에게 묻지 않는다 — 호스트가 센 사실이고, 표식(reasonCode)이 다음 실행의 핸드오프를 연다.
+      ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: rawError.replace(/^automation_no_progress_loop:\s*/, "") }
       : await classifyAutomationFailure(rawError, { runtimeSelection: a.runtimeSelection });
     if ("judge" in classified) recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
     runStatus = controller.signal.aborted ? "partial" : classified.status;

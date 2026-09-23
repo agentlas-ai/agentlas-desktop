@@ -465,6 +465,26 @@ function applyStoredRoleSelection(
 }
 
 /**
+ * One exact owner choice (a goal chat's model chip) → the live runtime it names, gated
+ * exactly like a role-pool member: credential readable, not in cooldown, model present,
+ * quota not exhausted. null means "not usable right now" — the caller falls back to the pool.
+ * Used by agent-created automations that follow the owner's current configuration
+ * (automation-runtime-plan.ts) instead of a stale copied pin.
+ */
+export function runtimeForOwnerSelection(
+  runtimes: RuntimeStatus[],
+  selection: RuntimeSelection | null | undefined,
+): RuntimeStatus | null {
+  if (!selection) return null;
+  const matched = runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection));
+  if (!matched) return null;
+  const candidate = applyStoredRoleSelection(matched, selection);
+  if (isRuntimeCredentialUnavailable(candidate) || runtimeCooldown(candidate)) return null;
+  if (runtimeSelectionUnavailableReason(candidate, runtimeStatusSelection(candidate))) return null;
+  return candidate;
+}
+
+/**
  * Returns live runtimes in the exact order stored in model_role_members.
  *
  * `pickActive()` is intentionally a UI/legacy helper: it follows the detected
