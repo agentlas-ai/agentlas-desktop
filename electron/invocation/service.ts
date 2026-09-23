@@ -880,6 +880,17 @@ function immutableWorkspaceBinding(
   });
 }
 
+/** Admission ledger reason for a proven pre-dispatch refusal: the thrown machine code, never prose. */
+export function preDispatchRefusalReasonCode(error: unknown): string {
+  const identifier = /^[a-z][a-z0-9_-]{0,79}$/;
+  const own = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  if (typeof own === "string" && identifier.test(own)) return own;
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (identifier.test(message)) return message;
+  const leading = /^([a-z][a-z0-9_]{2,79}):\s/.exec(message)?.[1];
+  return leading ?? "main_start_pre_dispatch_refused";
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -1157,7 +1168,10 @@ export class InvocationService {
         const decision = decideInvocationAdmission({
           ...durableAdmission,
           decision: "rejected",
-          reasonCode: "main_start_pre_dispatch_refused",
+          // ★2026-09-23 — 실제 거절 코드를 남긴다. 고정 사유만 남기면 화면이 구체 문구
+          //   (예산 소진·정리 중·앱 종료 중…)를 원리적으로 고를 수 없었다. 식별자 모양일 때만
+          //   쓴다(사용자 내용은 원장에 들어가지 않는다). 아니면 예전 고정 사유.
+          reasonCode: preDispatchRefusalReasonCode(error),
           noStartProof: {
             kind: "owner-start-boundary-not-crossed",
             verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch,
