@@ -1,3 +1,4 @@
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
@@ -78,7 +79,7 @@ export function withGoalWaitAccounting<T>(input: {
       .get(run.id) as { payload_json: string } | undefined : undefined;
     let wait: Record<string, unknown> | null = null;
     try { wait = row ? JSON.parse(row.payload_json).subscription : null; } catch { /* Refuse malformed host state. */ }
-    if (!run || run.surface !== "one" || run.rootChatId !== input.chatId
+    if (!run || !ownsHostGoalLoop(run.surface) || run.rootChatId !== input.chatId
       || !["waiting_tool", "paused"].includes(run.status)
       || (run.status === "paused" && !["app_closed", "crash_recovery"].includes(run.pauseReason ?? ""))
       || revision?.lifecycle !== "ongoing" || revision.revision !== input.goalRevision
