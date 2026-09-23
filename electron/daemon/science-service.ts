@@ -173,6 +173,11 @@ export function createDaemonScienceService(options: {
         import("../runtime/tool-approval"), import("../store/capability-grants"), import("../confirm/ask-user"),
       ]);
       assertExecution();
+      // A verified Science build has a durable question inbox and an
+      // authenticated answer command even when no renderer is attached yet.
+      // Register that build capability before recovery can open a headless
+      // turn; registration is not evidence that a person saw or answered it.
+      host.registerQuestionUi();
       for (const request of approvals.listPendingToolApprovals()) approvalProjection(request);
       unsubscribe.push(approvals.onToolApprovalRequested(request => {
         const projected = approvalProjection(request);
