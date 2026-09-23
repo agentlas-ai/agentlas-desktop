@@ -64,6 +64,7 @@ export type LongRunStatus = (typeof LONG_RUN_STATUSES)[number];
 
 export const LONG_RUN_PAUSE_REASONS = [
   "user",
+  "agent_paused",
   "app_closed",
   "budget",
   "runtime_unavailable",

@@ -1057,7 +1057,7 @@ export function transitionLongRun(input: {
     ).run(
       input.to,
       input.to === "paused"
-        ? isLongRunPauseReason(input.reason) ? input.reason : "user"
+        ? isLongRunPauseReason(input.reason) ? input.reason : current.surface === "science" ? "agent_paused" : "user"
         : null,
       input.to === "blocked" ? input.reason?.slice(0, 500) ?? "blocked" : null,
       input.appInstanceId ?? null,
@@ -2108,7 +2108,7 @@ export function applyScienceLongRunProjectionStatus(input: {
     if (!allPassed) throw new Error("science_projection_completion_evidence_missing");
   }
   const now = new Date().toISOString();
-  const pauseReason = input.to === "paused" ? input.pauseReason ?? "user" : null;
+  const pauseReason = input.to === "paused" ? input.pauseReason ?? "agent_paused" : null;
   const completedAt = LONG_RUN_TERMINAL_STATUSES.has(input.to) ? now : null;
   const db = getDb();
   db.transaction(() => {
