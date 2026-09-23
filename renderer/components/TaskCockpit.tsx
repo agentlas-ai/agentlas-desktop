@@ -4757,6 +4757,56 @@ function ChatPage() {
           return false;
         }
         /*
+         * ★오너 규칙 2026-09-23 — 진행 중인 목표·실행이 있는 대화에 보낸 새 지시는
+         *   "다시 보내세요"로 돌려보내지 않는다. 화면이 그 실행을 몰랐을 때(목표 스윕이
+         *   방금 다시 돌린 경우 등) Main 은 chat busy 로 거절한다. 그 말은 같은 대화의
+         *   기존 방향 전환(steer) 큐로 넘기고, 돌고 있는 실행에 다시 붙는다.
+         *   Main 이 이 runId 를 받아들인 적이 없다는 것이 확인된 때만(거절·미발송) 한다.
+         */
+        if (isChatBusyFailure(cause) && (admissionStatus === "rejected" || !requestDispatched)) {
+          const steered = await api.invoke.steer({
+            chatId: chat.id,
+            userPrompt: invocationPrompt,
+            steeringMode: "interrupt",
+            images,
+            locale,
+            permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+            planMode: opts?.planMode,
+            goalMode: opts?.goalMode,
+            appsGenerateMode: opts?.appsGenerateMode,
+            taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
+            sessionRouting: project ? true : opts?.sessionRouting,
+            stormbreakerMode: opts?.stormbreakerMode,
+            runtimeSelection: chat.runtimeSelection ?? undefined,
+          }).catch(() => null);
+          if (!isCurrentChat()) return false;
+          if (steered?.accepted && steered.chatId === chat.id) {
+            clearWorkUncertainAdmission(chat.id, runId);
+            const attached = await api.invoke.attach(chat.id).catch(() => null);
+            if (!isCurrentChat()) return false;
+            const liveRunId = attached?.runId ?? steered.activeRunId ?? steered.runId ?? null;
+            transcriptRevisionRef.current += 1;
+            if (liveRunId) {
+              setMessages((m) => m.map((msg) => msg.id === placeholderId ? { ...msg, runId: liveRunId } : msg));
+              runIdRef.current = liveRunId;
+              lastRunIdRef.current = liveRunId;
+              subscribeRun(liveRunId, placeholderId);
+              if (attached && typeof api.invoke.replay !== "function") {
+                const lastStatusRef = { text: "" };
+                for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef, attached.runId);
+              }
+            } else {
+              setMessages((m) => m.filter((msg) => msg.id !== placeholderId));
+              setBusy(false);
+              runIdRef.current = null;
+            }
+            setSessionNotice(locale === "ko"
+              ? "이 대화의 실행이 이미 진행 중이라 새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 반영합니다."
+              : "This chat already has a run in progress, so the new instruction was saved. It continues as soon as the current execution settles.");
+            return true;
+          }
+        }
+        /*
          * ★"입력 내용은 보존되었습니다" 가 사실이 아니었다 (오너 실사용 2026-09-07:
          * "내가 보낸 메세지가 자꾸 없어진다 사진도 없어지고").
          *
