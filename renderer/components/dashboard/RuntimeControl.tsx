@@ -16,6 +16,7 @@ import {
   type RuntimeModelPickerOption,
 } from "./RuntimeModelPicker";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeIdentityKey, runtimeMatchesSelection as sharedRuntimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { describeRoleWriteFailure } from "@/lib/runtime-role-failure";
 import type { LocalModelHubSnapshot, LocalModelInstallationReceipt } from "@shared/local-model-hub";
 
@@ -102,18 +103,15 @@ const BACKEND_LABEL: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
-function runtimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source">): string {
-  return `${runtime.kind}\u0000${runtime.backend}\u0000${runtime.source}`;
+function runtimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "acpAgentId">): string {
+  return runtimeIdentityKey(runtime);
 }
 
 function runtimeMatchesSelection(
   runtime: RuntimeStatus,
   selection: RuntimeSelection,
 ): boolean {
-  if (runtime.kind !== selection.kind) return false;
-  if (selection.backend && runtime.backend !== selection.backend) return false;
-  if (selection.source && runtime.source !== selection.source) return false;
-  return true;
+  return sharedRuntimeMatchesSelection(runtime, selection);
 }
 
 function selectionKey(selection: RuntimeSelection): string {
@@ -121,6 +119,7 @@ function selectionKey(selection: RuntimeSelection): string {
     selection.kind,
     selection.backend ?? "",
     selection.source ?? "",
+    selection.acpAgentId ?? "",
     selection.model ?? "",
     selection.effort ?? "",
     selection.longContext ? "long" : "standard",
@@ -520,6 +519,8 @@ export function RuntimeControl() {
         kind: currentSelection.kind,
         backend: currentSelection.backend ?? "custom",
         source: currentSelection.source ?? "unavailable",
+        ...(currentSelection.acpAgentId ? { acpAgentId: currentSelection.acpAgentId } : {}),
+        ...(currentSelection.label ? { label: currentSelection.label } : {}),
         version: null,
         active: false,
       };
@@ -573,19 +574,8 @@ export function RuntimeControl() {
     runtime: RuntimeStatus,
     role: RuntimeRole,
   ): RuntimeSelection {
-    return {
-      kind: runtime.kind,
-      backend: runtime.backend,
-      source: runtime.source,
-      model: runtime.model ?? undefined,
-      longContext:
-        runtime.kind === "byok"
-          ? runtime.longContextEnabled ?? false
-          : undefined,
-      effort: runtime.effort ?? undefined,
-      role,
-      inherit: false,
-    };
+    // 공용 조립기 — ACP 좌석(acpAgentId·label)까지 싣는다(역할 표는 v120 부터 그 열을 가진다).
+    return selectionForRuntime(runtime, { role, inherit: false });
   }
 
   function selectionCandidatesForRuntime(

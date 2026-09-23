@@ -17,6 +17,7 @@ import { navigate } from "@/lib/navigation";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { cliModelTagLabel, runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeIdentityKey, runtimeSupportsAgentOverride, selectionForRuntime } from "@shared/runtime-selection";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import {
   projectPoolMemberKey,
@@ -3252,6 +3253,15 @@ function runtimeStatusKey(runtime: Pick<RuntimeStatus, "kind" | "backend">): str
   return `${runtime.kind}:${runtime.backend}`;
 }
 
+/*
+ * ★2026-09-23 — 에이전트별 고정 표에는 ACP 좌석 신원을 담을 열이 없어 Main 이 저장을
+ *   agent_runtime_override_acp_unsupported 로 거절한다(예전엔 저장된 척하고 역할 풀로 실행).
+ *   고를 수 없게 비활성화하고 "채팅에서 선택"으로 갈 길을 적는다.
+ */
+function agentOverrideUnsupported(runtime: Pick<RuntimeStatus, "kind">): boolean {
+  return !runtimeSupportsAgentOverride(runtime);
+}
+
 const RUNTIME_KIND_DISPLAY: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
@@ -3359,7 +3369,7 @@ function RuntimeAssignmentPanel({
     : null;
 
   useEffect(() => {
-    const selectable = runtimeStatuses.filter((runtime) => runtime.kind !== "ollama");
+    const selectable = runtimeStatuses.filter((runtime) => runtime.kind !== "ollama" && !agentOverrideUnsupported(runtime));
     const fallback = selectable.find((runtime) => runtime.active) ?? selectable[0];
     const source = selectedOverride
       ? runtimeStatuses.find(
@@ -3431,16 +3441,12 @@ function RuntimeAssignmentPanel({
     }
     setSaving(true);
     try {
-      const selection: RuntimeSelection = {
-        kind: selectedRuntime.kind,
-        backend: selectedRuntime.backend,
-        source: selectedRuntime.source,
-        model: selectedModel || undefined,
-        longContext: selectedRuntime.kind === "byok" ? selectedRuntime.longContextEnabled ?? false : undefined,
+      const selection: RuntimeSelection = selectionForRuntime(selectedRuntime, {
+        model: selectedModel || null,
         // effort는 그 런타임이 실제 노출한 tier일 때만 저장 — claude의 "max"가 codex 오버라이드로
         // 새어 codex를 exit 1 시키던 사고 차단(RuntimeControl.tsx와 동일한 kind 게이팅).
-        effort: effortOptions.some((option) => option.id === selectedEffort) ? selectedEffort : undefined,
-      };
+        effort: effortOptions.some((option) => option.id === selectedEffort) ? selectedEffort : null,
+      });
       await api.agentRuntime.set({
         scope: selectedTarget.scope,
         targetId: selectedTarget.targetId,
@@ -3520,8 +3526,12 @@ function RuntimeAssignmentPanel({
             style={runtimeSelectStyle}
           >
             {runtimeStatuses.filter((runtime) => runtime.kind !== "ollama" || selectedOverride?.selection.kind === "ollama").map((runtime) => (
-              <option key={runtimeStatusKey(runtime)} value={runtimeStatusKey(runtime)} disabled={runtime.kind === "ollama"}>
-                {runtimeDisplayName(runtime)}{runtime.kind === "ollama" ? ` · ${locale === "ko" ? "이전 필요" : "migration required"}` : ""}
+              <option key={runtimeIdentityKey(runtime)} value={runtimeStatusKey(runtime)} disabled={runtime.kind === "ollama" || agentOverrideUnsupported(runtime)}>
+                {runtimeDisplayName(runtime)}{runtime.kind === "ollama"
+                  ? ` · ${locale === "ko" ? "이전 필요" : "migration required"}`
+                  : agentOverrideUnsupported(runtime)
+                    ? ` · ${locale === "ko" ? "채팅에서 선택" : "choose in chat"}`
+                    : ""}
               </option>
             ))}
           </select>

@@ -14,6 +14,7 @@ import { ipc } from "@/lib/ipc";
 import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
 import type { CreateOneTeamAgentResult, OneOrgCollaborationStyle } from "@shared/one-org";
 import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
+import { readStoredRuntimeSelection, runtimeSupportsAgentOverride, selectionForRuntime } from "@shared/runtime-selection";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { OneBottomSheet } from "./OneBottomSheet";
@@ -85,19 +86,8 @@ const EMPTY_DRAFT: StoredDraft = {
 };
 
 function storedRuntimeSelection(value: unknown): RuntimeSelection | null {
-  if (!value || typeof value !== "object") return null;
-  const row = value as Partial<RuntimeSelection>;
-  if (typeof row.kind !== "string") return null;
-  return {
-    kind: row.kind as RuntimeSelection["kind"],
-    ...(typeof row.backend === "string" ? { backend: row.backend } : {}),
-    ...(typeof row.source === "string" ? { source: row.source } : {}),
-    ...(typeof row.model === "string" && row.model ? { model: row.model } : {}),
-    ...(typeof row.effort === "string" && row.effort ? { effort: row.effort } : {}),
-    ...(typeof row.longContext === "boolean" ? { longContext: row.longContext } : {}),
-    role: "worker",
-    inherit: false,
-  };
+  const selection = readStoredRuntimeSelection(value, { role: "worker", inherit: false });
+  return selection && runtimeSupportsAgentOverride(selection) ? selection : null;
 }
 
 function runtimeSelectionKey(selection: RuntimeSelection): string {
@@ -105,6 +95,7 @@ function runtimeSelectionKey(selection: RuntimeSelection): string {
     kind: selection.kind,
     backend: selection.backend ?? null,
     source: selection.source ?? null,
+    acpAgentId: selection.acpAgentId ?? null,
     model: selection.model ?? null,
   });
 }
@@ -408,7 +399,8 @@ export function OneCreateAgentDialog({
     let cancelled = false;
     setModelsLoading(true);
     void api.runtime.detect().then(async (runtimes) => {
-      const rows = await Promise.all(runtimes.map(async (runtime: RuntimeStatus) => {
+      // ACP 엔진은 에이전트별 고정 표에 좌석 열이 없어 Main 이 저장을 거절한다 — 고를 수 없게 뺀다.
+      const rows = await Promise.all(runtimes.filter((runtime: RuntimeStatus) => runtimeSupportsAgentOverride(runtime)).map(async (runtime: RuntimeStatus) => {
         const models = await api.runtime.listModels({
           kind: runtime.kind,
           backend: runtime.backend,
@@ -423,14 +415,13 @@ export function OneCreateAgentDialog({
               ? [{ model: undefined, label: runtimeModelFallbackLabel(runtime.kind, ko ? "ko" : "en", runtime), tag: undefined }]
               : [];
         return selections.map((model) => {
-          const selection: RuntimeSelection = {
-            kind: runtime.kind,
-            backend: runtime.backend,
-            source: runtime.source,
-            ...(model.model ? { model: model.model } : {}),
+          const selection: RuntimeSelection = selectionForRuntime(runtime, {
+            model: model.model ?? null,
+            effort: null,
+            longContext: undefined,
             role: "worker",
             inherit: false,
-          };
+          });
           const key = runtimeSelectionKey(selection);
           return {
             key,

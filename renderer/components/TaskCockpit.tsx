@@ -2,6 +2,7 @@
 
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
+import { selectionForRuntime } from "@shared/runtime-selection";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -4986,24 +4987,19 @@ function ChatPage() {
   async function applySelection(patch: { model?: string; effort?: string }) {
     const api = ipc();
     if (!api || !activeRuntime || !chat) return;
-    const selection: RuntimeSelection = {
-      kind: activeRuntime.kind,
-      backend: activeRuntime.backend,
-      // source(=CLI 실행 파일의 절대경로)는 일부러 저장하지 않는다. detect()는 (kind, backend)
-      // 조합마다 런타임을 최대 1개만 만들므로 source는 식별에 아무 것도 더해주지 않는 반면,
-      // CLI를 업그레이드/재설치하면 경로가 바뀌어 exact pin이 영구히 안 맞게 된다
-      // (→ 매 전송 "Pinned automation runtime is unavailable", 칩도 사라져 되돌릴 수 없음).
-      // 이 제스처의 의도는 "이 채팅에서 이 모델을 쓴다"이지 "이 바이너리 경로에 영구 결박"이 아니다.
-      model: patch.model !== undefined ? patch.model || undefined : activeRuntime.model ?? undefined,
-      longContext:
-        activeRuntime.kind === "byok" ? (activeRuntime.longContextEnabled ?? false) : undefined,
-      effort:
-        patch.effort !== undefined
-          ? patch.effort || undefined
-          : activeRuntime.effort ?? undefined,
+    // source(=CLI 실행 파일의 절대경로)는 일부러 저장하지 않는다. detect()는 (kind, backend)
+    // 조합마다 런타임을 최대 1개만 만들므로 source는 식별에 아무 것도 더해주지 않는 반면,
+    // CLI를 업그레이드/재설치하면 경로가 바뀌어 exact pin이 영구히 안 맞게 된다.
+    // ACP 좌석은 kind/backend 가 같아도 acpAgentId 로 갈린다 — 공용 조립기가 그 신원을 싣는다
+    // (손으로 만든 선택이 acpAgentId 를 빠뜨려 ACP 채팅의 모델 변경이 늘 거절됐다, 2026-09-23).
+    const selection: RuntimeSelection = selectionForRuntime(activeRuntime, {
+      model: patch.model,
+      effort: patch.effort,
+      longContext: activeRuntime.kind === "byok" ? (activeRuntime.longContextEnabled ?? false) : undefined,
       role: "orchestrator",
       inherit: false,
-    };
+      includeSource: false,
+    });
     try {
       const updated = await api.chats.setRuntimeSelection(chat.id, selection);
       if (

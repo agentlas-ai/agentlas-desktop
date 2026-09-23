@@ -36,16 +36,26 @@ import {
   type RuntimeModelPickerOption,
 } from "@/components/dashboard/RuntimeModelPicker";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeIdentityKey, runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
 
 type TargetType = "agent" | "firm" | "hub";
 
-function automationRuntimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source">): string {
-  return `${runtime.kind}:${runtime.backend}:${runtime.source}`;
+// ★키에 ACP 좌석(acpAgentId)이 없으면 ACP 엔진 둘이 같은 칸이 되고, 저장되는 핀에서 좌석이
+//   빠져 매 실행 pinned_runtime_contract_invalid 로 죽었다(2026-09-23). 공용 신원 키를 쓴다.
+function automationRuntimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "acpAgentId">): string {
+  return runtimeIdentityKey(runtime);
 }
 
 function automationRuntimeKeyForSelection(selection: RuntimeSelection): string {
-  return `${selection.kind}:${runtimeBackendForSelection(selection)}:${selection.source ?? ""}`;
+  return runtimeIdentityKey({ ...selection, backend: runtimeBackendForSelection(selection) });
+}
+
+function automationRuntimeForSelection(runtimes: RuntimeStatus[], selection: RuntimeSelection): RuntimeStatus | undefined {
+  return runtimes.find((runtime) => runtimeMatchesSelection(runtime, {
+    ...selection,
+    backend: runtimeBackendForSelection(selection),
+  }));
 }
 
 function automationModelOptionKey(runtime: RuntimeStatus, model: string | undefined): string {
@@ -57,6 +67,7 @@ function automationSelectionKey(selection: RuntimeSelection): string {
     selection.kind,
     selection.backend ?? "",
     selection.source ?? "",
+    selection.acpAgentId ?? "",
     selection.model ?? "",
   ].join("\u0000");
 }
@@ -318,25 +329,18 @@ function NewAutomationPage() {
       // 사용자가 실행 AI를 건드렸을 때만 보낸다. 만들기는 null 을 받지 않으므로(활성 런타임을
       // 따라가는 것이 기본) 값이 있을 때만 싣고, 편집은 null 로 "따라가기"로 되돌릴 수 있다.
       const pickedRuntime = runtimeKey
-        ? runtimeOptions.find((r) => `${r.kind}:${r.backend}:${r.source}` === runtimeKey)
-          ?? (runtimeSelectionDraft
-            ? runtimeOptions.find((runtime) => (
-                runtime.kind === runtimeSelectionDraft.kind
-                && runtime.backend === runtimeBackendForSelection(runtimeSelectionDraft)
-                && (!runtimeSelectionDraft.source || runtime.source === runtimeSelectionDraft.source)
-              ))
-            : undefined)
+        ? runtimeOptions.find((r) => automationRuntimeKey(r) === runtimeKey)
+          ?? (runtimeSelectionDraft ? automationRuntimeForSelection(runtimeOptions, runtimeSelectionDraft) : undefined)
         : undefined;
       const pickedSelection = runtimeSelectionDraft;
+      // 저장 전 검사는 Main(store/automations encodeAutomationRuntimeSelection)이 한다 — 여기선
+      // 공용 조립기로 좌석 신원까지 실어 보낸다. 모델/작업량 미선택은 "엔진 기본값"(키 없음).
       const runtimeSelection = runtimeKey
         ? pickedRuntime
-          ? {
-              kind: pickedRuntime.kind,
-              backend: pickedRuntime.backend,
-              source: pickedRuntime.source,
-              ...(pickedSelection?.model?.trim() ? { model: pickedSelection.model.trim() } : {}),
-              ...(pickedSelection?.effort?.trim() ? { effort: pickedSelection.effort.trim() } : {}),
-            }
+          ? selectionForRuntime(pickedRuntime, {
+              model: pickedSelection?.model ?? null,
+              effort: pickedSelection?.effort ?? null,
+            })
           : pickedSelection
         : null;
       if (editId) {
@@ -374,13 +378,7 @@ function NewAutomationPage() {
   const selectedSelection = runtimeSelectionDraft;
   const selectedRuntime = runtimeKey
     ? runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === runtimeKey)
-      ?? (selectedSelection
-        ? runtimeOptions.find((runtime) => (
-            runtime.kind === selectedSelection.kind
-            && runtime.backend === runtimeBackendForSelection(selectedSelection)
-            && (!selectedSelection.source || runtime.source === selectedSelection.source)
-          ))
-        : undefined)
+      ?? (selectedSelection ? automationRuntimeForSelection(runtimeOptions, selectedSelection) : undefined)
     : undefined;
   const modelOptions = useMemo<RuntimeModelPickerOption[]>(() => {
     const options: RuntimeModelPickerOption[] = [];
@@ -416,11 +414,7 @@ function NewAutomationPage() {
     }
 
     if (selectedSelection) {
-      const currentRuntime = runtimeOptions.find((runtime) => (
-        runtime.kind === selectedSelection.kind
-        && runtime.backend === runtimeBackendForSelection(selectedSelection)
-        && (!selectedSelection.source || runtime.source === selectedSelection.source)
-      ));
+      const currentRuntime = automationRuntimeForSelection(runtimeOptions, selectedSelection);
       const currentKey = currentRuntime
         ? automationModelOptionKey(currentRuntime, selectedSelection.model)
         : `unavailable\u0000${automationSelectionKey(selectedSelection)}`;
@@ -433,6 +427,8 @@ function NewAutomationPage() {
             kind: selectedSelection.kind,
             backend: runtimeBackendForSelection(selectedSelection),
             source: selectedSelection.source ?? "unavailable",
+            ...(selectedSelection.acpAgentId ? { acpAgentId: selectedSelection.acpAgentId } : {}),
+            ...(selectedSelection.label ? { label: selectedSelection.label } : {}),
             version: null,
             active: false,
           },
@@ -462,13 +458,10 @@ function NewAutomationPage() {
       ? currentEffort
       : undefined;
     setRuntimeKey(automationRuntimeKey(option.runtime));
-    setRuntimeSelectionDraft({
-      kind: option.runtime.kind,
-      backend: option.runtime.backend,
-      source: option.runtime.source,
-      ...(option.model ? { model: option.model } : {}),
-      ...(nextEffort ? { effort: nextEffort } : {}),
-    });
+    setRuntimeSelectionDraft(selectionForRuntime(option.runtime, {
+      model: option.model ?? null,
+      effort: nextEffort ?? null,
+    }));
   }
 
   function useAutomationRoleDefault() {

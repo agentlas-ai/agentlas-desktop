@@ -9,6 +9,7 @@ import { decodeAutomationMonitor, decodeAutomationPollState, type AutomationMoni
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { RUNTIME_KINDS as SHARED_RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS as SHARED_RUNTIME_BACKENDS } from "../../shared/runtime-backends";
+import { normalizeRuntimeSelectionInput, RUNTIME_SELECTION_KEYS as SHARED_RUNTIME_SELECTION_KEYS, RuntimeSelectionContractError } from "../../shared/runtime-selection";
 import { createHash, randomUUID } from "node:crypto";
 import type { GraphJournalKindGenerated } from "../../shared/graph-vocabulary.generated";
 import { hostname } from "node:os";
@@ -136,7 +137,7 @@ const RUNTIME_BACKENDS = new Set<string>(SHARED_RUNTIME_BACKENDS);
  * 예약 실행 때마다 pinned_runtime_contract_invalid 로 죽었다(2026-09-13 프로덕션 1.2.0 실측:
  * "오늘 할 일 3개" 자동화의 즉시 실행이 실패 보고만 남겼다). 타입이 아는 키는 계약도 안다.
  */
-const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "acpAgentId", "label", "model", "longContext", "effort", "role", "inherit"]);
+const RUNTIME_SELECTION_KEYS: ReadonlySet<string> = new Set<string>(SHARED_RUNTIME_SELECTION_KEYS);
 
 type StoredContractState = "missing" | "valid" | "invalid";
 
@@ -173,6 +174,28 @@ export function decodeRuntimeSelection(raw: string | null | undefined): {
     // The caller distinguishes damaged data from a truly missing legacy pin.
   }
   return { state: "invalid" };
+}
+
+/**
+ * Save-time gate. ★2026-09-23 — 저장은 검사 없이 JSON 을 그대로 넣고, 검사는 예약 실행 때
+ * decodeRuntimeSelection 이 처음 했다. 그래서 잘못된 핀(ACP 좌석 없음, 빈 모델 "")이
+ * "저장됨"으로 보였다가 매 실행 pinned_runtime_contract_invalid 로 죽었다. 이제 저장 때
+ * 같은 규칙으로 한 번 정규화하고, 실행 검사가 거절할 값이면 저장부터 코드로 거절한다.
+ */
+export function encodeAutomationRuntimeSelection(value: RuntimeSelection | null | undefined): string | null {
+  if (value == null) return null;
+  let normalized: RuntimeSelection;
+  try {
+    normalized = normalizeRuntimeSelectionInput(value);
+  } catch (error) {
+    const code = error instanceof RuntimeSelectionContractError ? error.code : "runtime_selection_invalid";
+    throw new RuntimeSelectionContractError(`automation_${code}`, `The automation runtime pin is invalid (${code}).`);
+  }
+  const json = JSON.stringify(normalized);
+  if (decodeRuntimeSelection(json).state !== "valid") {
+    throw new RuntimeSelectionContractError("automation_runtime_selection_invalid", "The automation runtime pin is invalid.");
+  }
+  return json;
 }
 
 function parseRuntimeSelection(raw: string | null | undefined): RuntimeSelection | undefined {
@@ -286,7 +309,7 @@ export function findAutomationByGoalId(goalId: string): Automation | null {
 export function pinAutomationRuntimeIfUnset(id: string, selection: RuntimeSelection): Automation {
   getDb()
     .prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ? AND runtime_selection_json IS NULL")
-    .run(JSON.stringify(selection), id);
+    .run(encodeAutomationRuntimeSelection(selection), id);
   const automation = getAutomation(id);
   if (!automation) throw new Error(`Automation not found: ${id}`);
   emitDesktopStoreChange({ entity: "automation", id });
@@ -476,7 +499,7 @@ export function createAutomation(input: {
       normalizeHubMode(input.hubMode),
       normalizeExecutionPermission(input.executionPermission),
       input.targetVersion?.trim() || null,
-      input.runtimeSelection ? JSON.stringify(input.runtimeSelection) : null,
+      encodeAutomationRuntimeSelection(input.runtimeSelection),
       input.projectId ?? null,
     );
   // goal 은 additive 컬럼이라 INSERT 목록을 안 건드리고 따로 채운다(빈 값이면 안 쓴다).
@@ -522,7 +545,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     patch.targetVersion !== undefined ? patch.targetVersion.trim() || null : row.target_version;
   const runtimeSelectionJson =
     patch.runtimeSelection !== undefined
-      ? patch.runtimeSelection ? JSON.stringify(patch.runtimeSelection) : null
+      ? encodeAutomationRuntimeSelection(patch.runtimeSelection)
       : row.runtime_selection_json;
   const executionPermission =
     patch.executionPermission === undefined

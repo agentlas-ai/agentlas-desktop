@@ -1,4 +1,5 @@
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
+import { isValidRuntimeSelectionInput } from "../../shared/runtime-selection";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
@@ -958,27 +959,14 @@ function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflight
 }
 
 function validRuntimeSelection(value: unknown): value is RuntimeSelection {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
   /*
    * ★오너 실사고 2026-09-23 — 목표가 돌던 단톡방에 보낸 새 지시가 두 번 연속
    *   "One team preflight refused the current binding"(invalid_request)으로 거절됐다.
-   *   1.2.33 부터 렌더러의 고정 런타임 선택이 `acpAgentId` 키를 늘 싣는데(codex 면
-   *   값이 undefined), Electron IPC(V8 직렬화)는 undefined 값의 키를 그대로 넘긴다.
-   *   여기 허용 목록에 그 키가 없어서 **모델을 고정한 모든 One 팀·과업 전송**이
-   *   목표 우회 판정에 닿기도 전에 거절됐다. 값이 undefined 인 키는 없는 키이고,
-   *   `acpAgentId` 는 RuntimeSelection 의 정식 필드다(selectExactRuntime 이 acp 에서 쓴다).
+   *   손으로 적은 허용 목록이 RuntimeSelection 의 키(acpAgentId, 그다음엔 모바일이 싣는
+   *   label)를 하나씩 몰라서였다. 이제 공용 정규화기(shared/runtime-selection) 하나로 본다 —
+   *   타입이 아는 키는 계약도 안다. undefined/null/"" 는 없는 값이다.
    */
-  const allowed = new Set(["kind", "backend", "source", "acpAgentId", "role", "inherit", "model", "longContext", "effort"]);
-  if (Object.keys(record).some((key) => record[key] !== undefined && !allowed.has(key))) return false;
-  if (typeof record.kind !== "string" || record.kind.length < 1 || record.kind.length > 64) return false;
-  for (const key of ["backend", "source", "acpAgentId", "role", "model", "effort"] as const) {
-    if (record[key] !== undefined && (typeof record[key] !== "string" || record[key].length > 512)) return false;
-  }
-  for (const key of ["inherit", "longContext"] as const) {
-    if (record[key] !== undefined && typeof record[key] !== "boolean") return false;
-  }
-  return true;
+  return isValidRuntimeSelectionInput(value);
 }
 
 async function liveRuntime(

@@ -1,4 +1,5 @@
 import { getDb } from "./db";
+import { RuntimeSelectionContractError, runtimeSupportsAgentOverride } from "../../shared/runtime-selection";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import type {
   AgentRuntimeOverride,
@@ -50,6 +51,19 @@ function assertScope(scope: AgentRuntimeOverrideScope): void {
 function normalizeSelection(selection: RuntimeSelection): RuntimeSelection {
   if (!VALID_KINDS.has(selection.kind)) {
     throw new Error(`Unknown runtime kind: ${selection.kind}`);
+  }
+  /*
+   * ★2026-09-23 — 이 표에는 ACP 좌석 신원(acpAgentId)을 담을 열이 없다. 예전엔 kind "acp" 를
+   *   그대로 저장했고, 실행 때 좌석 대조(selection.ts runtimeMatchesOverride)가 영원히 안 맞아
+   *   조용히 역할 풀로 실행됐다(사용자는 고정했다고 믿는다). 공유 스키마 사다리를 올리지 않고
+   *   가장 안전한 쪽을 고른다: 저장 때 코드로 거절한다. 화면은 ACP 를 에이전트별 고정 목록에서
+   *   "지원 안 함"으로 비활성화해 이 거절에 닿지 않는다. 열이 생기면 여기만 풀면 된다.
+   */
+  if (!runtimeSupportsAgentOverride(selection)) {
+    throw new RuntimeSelectionContractError(
+      "agent_runtime_override_acp_unsupported",
+      "ACP engines cannot be pinned per agent yet. Choose the ACP engine in the chat instead.",
+    );
   }
   return {
     kind: selection.kind,
