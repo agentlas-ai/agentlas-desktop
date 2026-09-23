@@ -297,6 +297,7 @@ async function runAnthropicMessages(
   let outputTokens = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
+  let usageComplete = true;
   let reachedAnswer = false;
 
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
@@ -337,6 +338,10 @@ async function runAnthropicMessages(
     // 이번 턴에 모인 tool_use 블록. index 로 들어와 조각조각 쌓인다.
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
     let stopReason: string | null = null;
+    let turnInputObserved = false;
+    let turnOutputObserved = false;
+    let turnOutputTokens = 0;
+    let messageStopped = false;
 
     for await (const line of iterSseLines(resp)) {
       if (!line.startsWith("data:")) continue;
@@ -369,19 +374,32 @@ async function runAnthropicMessages(
           }
         } else if (event.type === "message_start" && event.message?.usage) {
           const usage = event.message.usage;
+          turnInputObserved = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
+            .some((value) => value != null)
+            && [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
+              .every((value) => value == null || (Number.isSafeInteger(value) && value >= 0));
           // ★누적한다. 왕복이 여러 번이면 각 턴의 입력이 전부 실제 비용이다 —
           // 마지막 턴만 싣던 방식은 도구를 쓸수록 영수증이 작아진다.
           inputTokens += usage.input_tokens ?? 0;
           cacheRead += usage.cache_read_input_tokens ?? 0;
           cacheWrite += usage.cache_creation_input_tokens ?? 0;
         } else if (event.type === "message_delta") {
-          if (event.usage?.output_tokens != null) outputTokens += event.usage.output_tokens;
+          // Anthropic reports a cumulative count within each streamed message.
+          if (Number.isSafeInteger(event.usage?.output_tokens) && event.usage!.output_tokens! >= 0) {
+            turnOutputTokens = event.usage!.output_tokens!;
+            turnOutputObserved = true;
+          }
           if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
+        } else if (event.type === "message_stop") {
+          messageStopped = true;
         }
       } catch {
         // 빈 줄 또는 ping — 무시
       }
     }
+    outputTokens += turnOutputTokens;
+    usageComplete = usageComplete && turnInputObserved && turnOutputObserved && messageStopped
+      && Number.isSafeInteger(inputTokens + cacheRead + cacheWrite + outputTokens);
 
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
       throw new Error("science_collection_tool_frame_invalid");
@@ -470,6 +488,9 @@ async function runAnthropicMessages(
   } else {
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
+  }
+  if (usageComplete) {
+    events.onTerminalObservedUsage?.({ inputTokens: totalInput, outputTokens });
   }
   return {
     text: answer || (failure ? failure.message : ""),

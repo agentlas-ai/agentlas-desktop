@@ -588,6 +588,8 @@ export interface RunnerEvents {
   onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, origin?: ToolInvocationOrigin) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
+  /** Complete provider-reported input/output pair at this turn's terminal boundary. Never estimated. */
+  onTerminalObservedUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   /**
    * reasoning(thinking) 구간 신호 — 구간 시작/증분/종료. durationMs는 end에만(이번 구간 지속 ms).
    * `text`: delta면 이번 증분, end면 이 구간에서 러너가 이미 전문을 아는 경우(codex의

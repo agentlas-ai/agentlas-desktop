@@ -136,14 +136,54 @@ function finalResult(runId: string, chatId: string): { text: string; tokensUsed?
   return { text: rows[0]!.text, ...(tokensUsed === undefined ? {} : { tokensUsed }) };
 }
 
+function measuredWakeUsage(runId: string, chatId: string): { attempts: boolean; tokensUsed?: number } {
+  const rows = getDb().prepare(`SELECT kind, payload_json AS payloadJson FROM run_events
+    WHERE run_id=? AND chat_id=? AND kind IN ('alive_provider_attempt_started','alive_provider_usage_observed')
+    ORDER BY seq`).all(runId, chatId) as Array<{ kind: string; payloadJson: string }>;
+  if (rows.length === 0) return { attempts: false };
+  const attempts = new Set<number>();
+  const usage = new Map<number, number>();
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(row.payloadJson) as Record<string, unknown>; }
+    catch { return { attempts: true }; }
+    const attempt = payload.attempt;
+    if (payload.schemaVersion !== "agentlas.alive-provider-usage.v1"
+      || !Number.isSafeInteger(attempt) || Number(attempt) < 1) return { attempts: true };
+    const ordinal = Number(attempt);
+    if (row.kind === "alive_provider_attempt_started") {
+      if (attempts.has(ordinal)) return { attempts: true };
+      attempts.add(ordinal);
+      continue;
+    }
+    const input = payload.observedInputTokens;
+    const output = payload.observedOutputTokens;
+    if (usage.has(ordinal) || !Number.isSafeInteger(input) || Number(input) < 0
+      || !Number.isSafeInteger(output) || Number(output) < 0
+      || Number(input) + Number(output) > Number.MAX_SAFE_INTEGER) return { attempts: true };
+    usage.set(ordinal, Number(input) + Number(output));
+  }
+  if (attempts.size === 0 || usage.size !== attempts.size) return { attempts: true };
+  let tokensUsed = 0;
+  for (let attempt = 1; attempt <= attempts.size; attempt += 1) {
+    if (!attempts.has(attempt)) return { attempts: true };
+    const measured = usage.get(attempt);
+    if (measured === undefined || tokensUsed + measured > Number.MAX_SAFE_INTEGER) return { attempts: true };
+    tokensUsed += measured;
+  }
+  return { attempts: true, tokensUsed };
+}
+
 function aliveReceipt(receipt: InvocationRunReceipt | null): AliveRuntimeReceipt | null {
   if (!receipt || !isAliveChat(receipt.chatId)
     || (receipt.status !== "completed" && receipt.status !== "failed"
       && receipt.status !== "cancelled" && receipt.status !== "interrupted")) return null;
   const final = receipt.status === "completed" ? finalResult(receipt.runId, receipt.chatId) : null;
   const decision = final ? parseAliveDecision(final.text) : undefined;
+  const measured = measuredWakeUsage(receipt.runId, receipt.chatId);
+  const tokensUsed = measured.attempts ? measured.tokensUsed : final?.tokensUsed;
   return { runId: receipt.runId, status: receipt.status,
-    ...(final?.tokensUsed === undefined ? {} : { tokensUsed: final.tokensUsed }),
+    ...(tokensUsed === undefined ? {} : { tokensUsed }),
     ...(final?.text ? { finalText: final.text.slice(0, 4_096) } : {}),
     ...(receipt.errorCode ? { errorCode: receipt.errorCode } : {}),
     ...(decision ? { decision } : {}) };

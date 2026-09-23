@@ -645,6 +645,7 @@ export function reduceAgyLine(
     finalResponse?: string;
     inputTokens: number;
     outputTokens: number;
+    usagePairObserved?: boolean;
     /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
     deniedTools?: AntigravityDenial[];
     /**
@@ -913,6 +914,10 @@ export function reduceAgyLine(
   if (step.usage) {
     state.inputTokens = step.usage.input_tokens ?? state.inputTokens;
     state.outputTokens = step.usage.output_tokens ?? state.outputTokens;
+    state.usagePairObserved = step.state === "DONE"
+      && Number.isSafeInteger(step.usage.input_tokens) && step.usage.input_tokens! >= 0
+      && Number.isSafeInteger(step.usage.output_tokens) && step.usage.output_tokens! >= 0
+      && step.usage.input_tokens! + step.usage.output_tokens! <= Number.MAX_SAFE_INTEGER;
   }
   return delta ? { delta } : { activity: "agent_response" };
 }
@@ -2213,6 +2218,7 @@ async function runPreparedAntigravity(
       finalResponse?: string;
       inputTokens: number;
       outputTokens: number;
+      usagePairObserved?: boolean;
       deniedTools?: AntigravityDenial[];
       conversationId?: string;
       resultStatus?: string;
@@ -2336,8 +2342,10 @@ async function runPreparedAntigravity(
         events.onStatus(`agy: ${step.activity}`);
         lastEmit = now;
       }
-      if (residentSession && step.activity === "result") {
+      if (step.activity === "result") {
         resultSeen = true;
+      }
+      if (residentSession && step.activity === "result") {
         // Let the current line finish all reductions/emissions before closing
         // this sink. This also isolates duplicate result lines in the same
         // stdout chunk.
@@ -2399,6 +2407,9 @@ async function runPreparedAntigravity(
       }
       cleanupAgyPrompt();
       req.signal?.removeEventListener("abort", onAbort);
+      if (resultSeen && agyState.usagePairObserved) {
+        events.onTerminalObservedUsage?.({ inputTokens: agyState.inputTokens, outputTokens: agyState.outputTokens });
+      }
       if (req.signal?.aborted) {
         reject(abortReasonError(req));
         return;
@@ -2529,7 +2540,7 @@ async function runPreparedAntigravity(
         resolve({
           text: trimmed,
           ...(failure ? { failure } : {}),
-          ...((agyState.inputTokens || agyState.outputTokens)
+          ...(resultSeen && agyState.usagePairObserved
             ? {
               tokens: agyState.outputTokens,
               observedUsage: { inputTokens: agyState.inputTokens, outputTokens: agyState.outputTokens },
@@ -2556,6 +2567,9 @@ async function runPreparedAntigravity(
             ...(agyState.resultRetryAfterHint ? { retryAfterHint: agyState.resultRetryAfterHint } : {}),
             ...(typeof code === "number" ? { exitCode: code } : {}),
           },
+          ...(resultSeen && agyState.usagePairObserved
+            ? { observedUsage: { inputTokens: agyState.inputTokens, outputTokens: agyState.outputTokens } }
+            : {}),
         });
       } else {
         resolve({

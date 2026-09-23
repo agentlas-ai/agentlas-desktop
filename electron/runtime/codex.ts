@@ -935,6 +935,7 @@ function runCodexProcess(
         const turnOutput = deltaFromBaseline(reportedOutputTokens, usageBaseline.output);
         if (turnInput != null && turnOutput != null) {
           observedUsage = { inputTokens: turnInput, outputTokens: turnOutput };
+          events.onTerminalObservedUsage?.(observedUsage);
         }
         const turnCached = deltaFromBaseline(reportedCachedInputTokens, usageBaseline.cachedInput);
         if (turnInput != null && turnInput > 0 && turnCached != null) {
@@ -1516,6 +1517,10 @@ async function runCodexResidentTurn(input: {
       case "turn/completed": {
         const turn = params?.turn;
         if (!turn || (turnId && String(turn.id ?? "") !== turnId)) break;
+        if (usage.last && Number.isSafeInteger(usage.last.inputTokens) && usage.last.inputTokens >= 0
+          && Number.isSafeInteger(usage.last.outputTokens) && usage.last.outputTokens >= 0) {
+          events.onTerminalObservedUsage?.(usage.last);
+        }
         workforceObservation?.completeTurn(params);
         if (turn.status === "interrupted") interrupted = true;
         failure = codexFailureFromTurn(turn) ?? failure;

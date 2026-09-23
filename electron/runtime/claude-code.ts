@@ -1887,15 +1887,18 @@ const runClaudeTurn = async (
           // 셋이 다르지만 영수증 칸은 정수 하나뿐이므로, 과소보고보다 실제
           // 문맥 크기를 싣는 쪽을 택했다.
           const usage = ev.usage;
-          const inputTotal =
-            (usage.input_tokens ?? 0)
-            + (usage.cache_read_input_tokens ?? 0)
-            + (usage.cache_creation_input_tokens ?? 0);
-          if (inputTotal > 0 || usage.output_tokens != null) {
+          const inputParts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens];
+          const inputTotal = inputParts.reduce<number>((total, value) => total + (value ?? 0), 0);
+          if (inputParts.some((value) => value !== undefined && value !== null)
+            && inputParts.every((value) => value == null || (Number.isSafeInteger(value) && value >= 0))
+            && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens! >= 0
+            && Number.isSafeInteger(inputTotal)
+            && inputTotal + usage.output_tokens! <= Number.MAX_SAFE_INTEGER) {
             observedUsage = {
               inputTokens: inputTotal,
-              outputTokens: usage.output_tokens ?? 0,
+              outputTokens: usage.output_tokens!,
             };
+            events.onTerminalObservedUsage?.(observedUsage);
           }
         }
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
