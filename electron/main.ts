@@ -2040,7 +2040,14 @@ app.whenReady().then(async () => {
     const status = assertScienceSender(event, input);
     // On a fresh install the execution owner creates/migrates Science before
     // this data-only GUI opens it. Reopening an existing owner is idempotent.
-    if (scienceDaemonClient) await (scienceDaemonStartupPromise ?? scienceDaemonClient.ensureStarted());
+    if (scienceDaemonClient) {
+      let owner = await (scienceDaemonStartupPromise ?? scienceDaemonClient.ensureStarted());
+      // The daemon may have started before an optional Science suite was installed.
+      // Its earlier "disabled" result is not a live owner and must not be used
+      // to open the GUI's data-client store on the first post-install visit.
+      if (owner.state === "disabled") owner = await scienceDaemonClient.ensureStarted();
+      if (owner.state !== "ready") throw new Error("science_daemon_science_unavailable");
+    }
     assertScienceSender(event, input);
     return {
       extensionId: status.id,
