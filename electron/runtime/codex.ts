@@ -67,6 +67,7 @@ import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-res
 import type { AcpSessionLease } from "./acp-session-pool";
 import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
+import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { bindNativeFileProofObserver } from "../long-run/file-proof";
 import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver } from "../invocation/adapter-effect-context";
 import {
@@ -147,19 +148,26 @@ function codexImageToolCapability(req: RunnerRequest): string {
   return slot ? `${CODEX_IMAGE_TOOL_VERSION}:${slot.runtimeKind}:${slot.model}` : "unavailable";
 }
 
-function codexImageToolInstructions(enabled: boolean): string {
+export function codexImageToolInstructions(enabled: boolean): string {
+  // ★Codex's own image_gen is a native ability (feature `image_generation`, stable).
+  // The old contract told the model generation was "unavailable" whenever the
+  // host slot was empty, and forbade its own image workflow when the slot was
+  // ready — contradicting the runtime. Both routes are now allowed; the host
+  // copies every result into the working folder so later steps have a path.
+  const copyRule = "The host copies every generated image into the working folder's `assets/` directory and reports that path. Use that path for later steps (browser uploads, documents, slides); do not look for images in the runtime's private image store.";
+  const honesty = "Say an image was generated only after a tool or your image generation actually returned one; if it failed, say so and preserve the reason. Never claim an image is above, attached, or displayed without that result.";
   return enabled
     ? [
         "## Agentlas image output contract",
-        `For any request to create or edit an image, call the host tool \`${CODEX_IMAGE_TOOL_NAME}\`.`,
-        "Do not inspect image skill files, spawn another image workflow yourself, or claim success from prose.",
-        "You may say an image was generated or displayed only after the tool returns success=true with inputImage content.",
-        "If the tool returns success=false, say generation failed and preserve its reason; never say the image is above or attached.",
+        `To create or edit an image, call the host tool \`${CODEX_IMAGE_TOOL_NAME}\` (the owner's configured image engine) or use your own built-in image generation.`,
+        copyRule,
+        honesty,
       ].join("\n")
     : [
         "## Agentlas image output contract",
-        "No host image-generation tool is attached to this thread.",
-        "Never claim that an image was generated, attached, shown above, or displayed. Report that generation is unavailable instead.",
+        "No host image-generation tool is attached to this thread. Use your own built-in image generation when an image is needed.",
+        copyRule,
+        honesty,
       ].join("\n");
 }
 
@@ -221,6 +229,7 @@ function buildPrompt(req: RunnerRequest): string {
     undefined,
     undefined,
     req.surfaceGate,
+    KIND,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -253,6 +262,7 @@ function buildDeveloperInstructions(req: RunnerRequest): string {
     undefined,
     undefined,
     req.surfaceGate,
+    KIND,
   );
 }
 
@@ -666,7 +676,7 @@ function runCodexProcess(
     const isToolItem = (type: string | undefined): boolean => {
       if (!type || type === "agent_message" || type === "reasoning") return false;
       return ["fileChange", "FileChange", "file_change"].includes(type)
-        || /tool|function|command|shell|exec|mcp/i.test(type);
+        || /tool|function|command|shell|exec|mcp|image_?generation/i.test(type);
     };
     const record = (value: unknown): Record<string, unknown> | null => (
       value && typeof value === "object" && !Array.isArray(value)
@@ -886,15 +896,35 @@ function runCodexProcess(
             if (item.id) itemCapturePaths.set(item.id, artifactPaths);
           }
         }
+        // Native image generation: never echo the base64 result; copy the bytes
+        // into the working folder and report only that path.
+        let toolName = name;
+        let toolResultText = resultText;
+        if (/image_?generation/i.test(item.type ?? "")) {
+          toolName = "image_gen";
+          toolResultText = ev.type === "item.completed" ? (isError ? "failed" : "completed") : undefined;
+          if (ev.type === "item.completed" && !isError) {
+            const savedPath = typeof (item as any).saved_path === "string" ? (item as any).saved_path
+              : typeof (item as any).savedPath === "string" ? (item as any).savedPath : null;
+            const copied = copyGeneratedImageIntoWorkspace({ cwd: req.cwd ?? agentRunCwd(), permission: req.permission,
+              label: "image", sourcePath: savedPath,
+              base64: savedPath ? null : typeof item.result === "string" ? item.result : null });
+            if (copied) {
+              artifactPaths = [copied];
+              toolResultText = `Image generated and copied to ${copied}`;
+            }
+          }
+        }
         // 도구 이벤트 전에 본문을 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
         if (text) {
           events.onPartial(text);
           lastEmit = Date.now();
         }
         events.onTool?.(
-          name,
-          argsText && argsText.length > 2000 ? `${argsText.slice(0, 2000)}…` : argsText,
-          resultText,
+          toolName,
+          /image_?generation/i.test(item.type ?? "") ? undefined
+            : argsText && argsText.length > 2000 ? `${argsText.slice(0, 2000)}…` : argsText,
+          toolResultText,
           item.id,
           isError,
           artifactPaths,
@@ -1192,6 +1222,18 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
         isError: completed && (item.status === "failed" || item.success === false),
       };
       }
+    case "imageGeneration":
+    case "image_generation": {
+      // Never echo `result` — it is the image itself (base64). The host copies
+      // the bytes into the working folder and reports only that path.
+      const failed = item.status === "failed" || item.failure != null;
+      return {
+        name: "image_gen",
+        args: asText({ prompt: typeof item.revisedPrompt === "string" ? item.revisedPrompt.slice(0, 1200) : undefined }),
+        result: completed ? (failed ? asText({ status: item.status ?? "failed", failure: item.failure ?? null }) : "completed") : undefined,
+        isError: completed && failed,
+      };
+    }
     case "webSearch":
       return {
         name: "web_search",
@@ -1463,6 +1505,15 @@ async function runCodexResidentTurn(input: {
           let artifactPaths = item?.type === "dynamicToolCall"
             ? dynamicToolArtifactPaths.get(itemId)
             : tool.artifactPaths;
+          if ((item?.type === "imageGeneration" || item?.type === "image_generation") && !tool.isError) {
+            const savedPath = typeof item.savedPath === "string" ? item.savedPath : typeof item.saved_path === "string" ? item.saved_path : null;
+            const copied = copyGeneratedImageIntoWorkspace({ cwd, permission: req.permission, label: "image",
+              sourcePath: savedPath, base64: savedPath ? null : typeof item.result === "string" ? item.result : null });
+            if (copied) {
+              artifactPaths = [copied];
+              tool.result = `Image generated and copied to ${copied}`;
+            }
+          }
           if (item?.type === "mcpToolCall" && !tool.isError) {
             artifactPaths = mcpToolArtifactPaths.get(itemId);
             if (!artifactPaths) {
@@ -1601,10 +1652,12 @@ async function runCodexResidentTurn(input: {
           };
         }
         dynamicToolArtifactPaths.set(callId, [generated.artifactPath]);
+        const workspaceCopy = copyGeneratedImageIntoWorkspace({ cwd, permission: req.permission,
+          sourcePath: generated.artifactPath, label: "image" });
         return {
           success: true,
           contentItems: [
-            { type: "inputText", text: `Image generation succeeded with ${generated.engine ?? imageToolSlot.runtimeKind}. The image is attached to this tool result.` },
+            { type: "inputText", text: `Image generation succeeded with ${generated.engine ?? imageToolSlot.runtimeKind}. The image is attached to this tool result.${workspaceCopy ? ` A copy is saved in the working folder at ${workspaceCopy} — use this path for uploads and later steps.` : ""}` },
             { type: "inputImage", imageUrl: generated.src },
           ],
         };

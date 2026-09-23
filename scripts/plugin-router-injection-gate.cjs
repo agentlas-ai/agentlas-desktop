@@ -50,7 +50,11 @@ const invoked = pluginRouterPrompt(`${mention} redesign this screen`);
 check("router-bearing plugin appears in the always-on list", listOnly.includes(mention), `looked for ${mention}`);
 check("the list names the router file so the model can open it", /Router: .*SKILL\.md/.test(listOnly));
 check("the list explains $skill / @tool resolution", listOnly.includes("`$name`") && listOnly.includes("`@name`"));
-check("the list carries the honesty rule about missing tools", /say so and stop/i.test(listOnly));
+// 2026-09-23: a missing tool is no longer a stop — the rule is "use native abilities,
+// resolve installed/Hub plugins, and never describe work you could not carry out".
+check("the list carries the honesty rule about missing tools", /Never describe work you could not carry out/.test(listOnly));
+check("the list routes a missing tool to plugin resolution instead of a dead end",
+  /agentlas_resolve_plugins/.test(listOnly) && !/say so and stop/i.test(listOnly));
 
 const routerBody = fs.readFileSync(path.join(root, slug, "skills", "index", "SKILL.md"), "utf8");
 const marker = (routerBody.split("\n").find((l) => l.startsWith("# ")) || "# Skill Purpose").trim();

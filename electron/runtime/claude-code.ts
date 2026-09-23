@@ -848,6 +848,7 @@ const runClaudeTurn = async (
     runReq.workforceRuntimeToolGrant,
     undefined,
     runReq.surfaceGate,
+    "claude-code",
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
   const savedSession = !assertScienceRecoveryRequest(runReq, "claude-code") && !runReq.untrustedNoTools && runReq.chatId

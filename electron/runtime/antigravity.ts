@@ -1,3 +1,4 @@
+import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
@@ -237,6 +238,7 @@ export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_
     undefined,
     undefined,
     req.surfaceGate,
+    "antigravity",
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -2297,6 +2299,11 @@ async function runPreparedAntigravity(
             if (staged) {
               stagedAgyGeneratedImageSources.add(staged.sourcePath);
               toolArtifactPaths.push(staged.artifactPath);
+              // The image lives outside the run folder; give later steps (uploads,
+              // documents) a working-folder copy and say where it is.
+              const workspaceCopy = copyGeneratedImageIntoWorkspace({ cwd: runReq.cwd, permission: runReq.permission,
+                sourcePath: staged.artifactPath, label: "image" });
+              if (workspaceCopy) events.onStatus(`[image] generated image copied to ${workspaceCopy}`);
             }
           }
           const artifactPaths = freshAgyArtifactPaths(toolArtifactPaths, invocationStartedAtMs);

@@ -1,5 +1,6 @@
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
+import { runtimeNativeAbilitiesLine } from "./native-capabilities";
 import { createHash } from "node:crypto";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -1081,6 +1082,8 @@ export function wrapSystemPrompt(
   contextProfile?: "managed-local",
   /** "exclude" builds the same prompt without the optional Surface protocol (capacity fallback); forceSurface still wins. */
   surfaceGate?: "auto" | "exclude",
+  /** The concrete runtime running this prompt — names its own built-in abilities (native-capabilities.ts). */
+  nativeRuntimeKind?: string,
 ): string {
   if (untrustedNoTools) {
     const requested = untrustedAllowedMcpTools ?? [];
@@ -1162,10 +1165,12 @@ export function wrapSystemPrompt(
     forceSurface === true ||
     (surfaceGate !== "exclude" && (userPrompt === undefined || surfaceFastPathHit(userPrompt)));
 
+  const nativeAbilities = runtimeNativeAbilitiesLine(nativeRuntimeKind);
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
     responseLanguageGuide(locale, userPrompt),
     toolsLine,
+    ...(nativeAbilities ? [nativeAbilities] : []),
     "",
     ASK_PROTOCOL,
     "",
