@@ -411,6 +411,12 @@ function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string |
     && !runtime.availableModels!.includes(model);
 }
 
+/** Keep exact pins on their selected provider unless its own authoritative
+ * inventory proves the model absent or its credential cannot be read. */
+export function pinnedRuntimeCredentialOrModelUnavailable(runtime: RuntimeStatus): boolean {
+  return isRuntimeCredentialUnavailable(runtime) || runtimeModelUnavailable(runtime, runtime.model);
+}
+
 function runtimeSelectionUnavailableReason(
   runtime: RuntimeStatus | undefined,
   selection: Pick<import("../../shared/types").RuntimeSelection, "kind" | "model">,
