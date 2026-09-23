@@ -394,13 +394,13 @@
       },
       {
         "path": "figure-catalog.json",
-        "sha256": "8cf615c518369eaddd4846a52af76a0c12379079d34e4b5d1576d4405b5bc00d",
-        "bytes": 523203
+        "sha256": "63c15ce3452eaed6f31b9484df737a68aa295f125324a7b5d9cc150efab8edf0",
+        "bytes": 525047
       },
       {
         "path": "matlab-parity-manifest.json",
-        "sha256": "fadd5131abd0ad67e0778ea1453da5e63dadddcdec8d9458567963c0f5683eeb",
-        "bytes": 136291
+        "sha256": "fa29a14aebe846b6f124ea44629fb1fe228614a26ad54cccc31bcf62982432ad",
+        "bytes": 136612
       },
       {
         "path": "README.md",
@@ -434,13 +434,13 @@
       },
       {
         "path": "runtime/engine.cjs",
-        "sha256": "5abddc80317ac4cfafc06396bc3601e471698e24ad59f36ff35674b04a3432be",
-        "bytes": 341313
+        "sha256": "4293c50f344c067fb895791b20df5b38933f3de7f1f2b36e947ba738a56fd53c",
+        "bytes": 343217
       },
       {
         "path": "runtime/figure-catalog.cjs",
-        "sha256": "bb5b60c13ba962aa1d0f3e2fbcb539415a65a0cf6106afa035f9d309bf3e72b2",
-        "bytes": 13319
+        "sha256": "7644a9ef39dd16eb06f52ba353c996c9a256dad4ff07f0292c08bf8e99cfc344",
+        "bytes": 13320
       },
       {
         "path": "runtime/methods/anova-extended.cjs",
