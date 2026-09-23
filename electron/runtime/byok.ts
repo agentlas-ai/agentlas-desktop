@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
 // Node 20+ 글로벌 fetch + ReadableStream으로 SSE 파싱. 외부 SDK 의존성 없음.
 //
@@ -67,6 +68,7 @@ function prepareContext(
   req: RunnerRequest,
   _events: RunnerEvents,
 ): { model: string; recent: RunnerRequest["history"]; system: string } {
+  assertScienceRecoveryRequest(req, "byok", backend);
   const model = resolveModel(backend, req);
   if (!model) {
     throw new Error(
@@ -323,6 +325,7 @@ async function runAnthropicMessages(
         transmittedHistoryCount = next.length;
       },
     })) return { text: "", failure: byokContextFailure(req) };
+    assertScienceRecoveryRequest(req, "byok", backend);
     const resp = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers,
@@ -451,6 +454,7 @@ async function runAnthropicMessages(
         input = {};
       }
       assistantContent.push({ type: "tool_use", id: entry.id, name: entry.name, input });
+      assertScienceRecoveryRequest(req, "byok", backend);
       const outcome = await runOneToolCall(
         byName,
         { id: entry.id, type: "function", function: { name: entry.name, arguments: entry.json } },
@@ -535,6 +539,7 @@ export const runAnthropicByok: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "byok", "anthropic");
   const key = await readApiKey("anthropic");
   if (!key) throw new Error(tStatus(req.locale, "errKeyMissingAnthropic"));
   return runAnthropicMessages("anthropic", "https://api.anthropic.com", { "x-api-key": key }, req, events);
@@ -548,6 +553,7 @@ export const runAnthropicByok: Runner = async (
  */
 function makeAnthropicCompatByok(backend: ByokBackend): Runner {
   return async (req, events) => {
+    assertScienceRecoveryRequest(req, "byok", backend);
     const preset = anthropicCompatProvider(backend);
     if (!preset) throw new Error(`Unknown Anthropic-compatible backend: ${backend}`);
     const key = await readApiKey(backend);
@@ -617,6 +623,7 @@ async function runOpenAiCompletionWithMainToolLoop(
       req,
       events,
       runtimeKind: "byok",
+      recoveryBackend: backend,
       host: baseUrl.replace(/\/$/, ""),
       chatEndpoint: endpoint,
       headers: { authorization: `Bearer ${key}` },
@@ -637,6 +644,7 @@ async function runOpenAICompatible(
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> {
+  assertScienceRecoveryRequest(req, "byok", backend);
   const key = await readApiKey(backend);
   if (!key) {
     throw new Error(
@@ -687,6 +695,7 @@ export const runOpenAIByok: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "byok", "openai");
   const key = await readApiKey("openai");
   if (!key) throw new Error(tStatus(req.locale, "errKeyMissingOpenAI"));
   return runOpenAiCompletionWithMainToolLoop(
@@ -699,6 +708,7 @@ export const runUpstageByok: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "byok", "upstage");
   const key = await readApiKey("upstage");
   if (!key) throw new Error("Upstage Solar API key missing (Settings → BYOK)");
   return runOpenAiCompletionWithMainToolLoop(
@@ -713,6 +723,7 @@ export const runCustomByok: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "byok", "custom");
   const key = await readApiKey("custom");
   if (!key) throw new Error("Custom API key missing (Settings → BYOK)");
 
@@ -732,6 +743,7 @@ export const runGoogleByok: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  assertScienceRecoveryRequest(req, "byok", "google");
   const key = await readApiKey("google");
   if (!key) throw new Error(tStatus(req.locale, "errKeyMissingGoogle"));
 
@@ -813,6 +825,7 @@ export const runGoogleByok: Runner = async (
       },
     })) return { text: "", failure: byokContextFailure(req) };
     const requestBody = outgoingBody();
+    assertScienceRecoveryRequest(req, "byok", "google");
     let resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -826,6 +839,7 @@ export const runGoogleByok: Runner = async (
       if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
       includeTools = false;
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
+      assertScienceRecoveryRequest(req, "byok", "google");
       resp = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -926,6 +940,7 @@ export const runGoogleByok: Runner = async (
     contents.push({ role: "model", parts: modelParts });
     const resultParts: GooglePart[] = [];
     for (const call of functionCalls) {
+      assertScienceRecoveryRequest(req, "byok", "google");
       const outcome = await runMainToolDispatch(
         byName,
         {

@@ -16,7 +16,10 @@ export interface ScienceRecoveryScope {
 }
 type Grant = Readonly<ScienceRecoveryScope> & { ownerId: string; current: () => void };
 const grants = new WeakMap<object, Grant>();
-const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas"]);
+const supported = new Set(["codex", "claude-code", "antigravity", "acp", "agentlas", "byok", "lmstudio", "mlx", "agentlas-local"]);
+// Only adapters with a stateless provider wire and entry guards are admitted.
+const supportedByok = new Set(["anthropic", "openai", "google", "upstage", "custom", "glm",
+  "kimi", "deepseek", "minimax", "xai", "openrouter"]);
 type Selection = { kind: string; backend?: string | null; model?: string | null; source?: string | null;
   effort?: string | null; acpAgentId?: string | null };
 const selectionKey = (s: Selection) => JSON.stringify(
@@ -49,6 +52,7 @@ export function issueScienceRecoveryCapability(scope: ScienceRecoveryScope, asse
       scope.science.researchDirectorPackageVersion, scope.science.researchDirectorPackageDigest,
       scope.science.researchDirectorSystemPromptSha256].every(value => typeof value === "string" && value.trim())
     || !supported.has(scope.runtimeSelection?.kind) || !scope.runtimeSelection.model?.trim()
+    || (scope.runtimeSelection.kind === "byok" && !supportedByok.has(scope.runtimeSelection.backend ?? ""))
     || (scope.runtimeSelection.kind === "agentlas" && !isAgentlasServingModel(scope.runtimeSelection.model))
     || (scope.runtimeSelection.kind === "acp" && !scope.runtimeSelection.acpAgentId?.trim())
     || typeof assertCurrent !== "function") throw new Error("science_recovery_scope_invalid");
@@ -97,7 +101,7 @@ export function freshScienceRecoveryRequest(req: RunnerRequest, capability: obje
 }
 
 /** Provider boundary: reject tampering/stale authority before session lookup or prompt construction. */
-export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: string): boolean {
+export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: string, backend?: string): boolean {
   if (req.scienceRecoveryCapability === undefined) {
     if (req.runtimeSessionOwnerId?.startsWith("science-recovery:"))
       throw new Error("science_recovery_main_capability_required");
@@ -106,12 +110,15 @@ export function assertScienceRecoveryRequest(req: RunnerRequest, runtimeKind?: s
   const grant = readGrant(req.scienceRecoveryCapability);
   if (req.chatId !== grant.chatId || req.agentId !== grant.science.researchDirectorAgentId
     || (runtimeKind !== undefined && runtimeKind !== grant.runtimeSelection.kind)
+    || (runtimeKind === "byok" && backend !== grant.runtimeSelection.backend)
     || req.model !== grant.runtimeSelection.model
     || (grant.runtimeSelection.effort != null && req.effort !== grant.runtimeSelection.effort)
     || req.runtimeSessionOwnerId !== grant.ownerId || req.sessionFingerprintSeed !== grant.ownerId
-    || req.singleUse !== true || req.runtimeSessionId !== undefined || req.history.length !== 0
+    || req.singleUse !== true || req.unattended !== true || req.noSynchronousAsk !== true
+    || req.runtimeSessionId !== undefined || req.history.length !== 0
     || req.turnContext !== undefined || req.turnContextStable !== undefined || req.images !== undefined
-    || req.systemPrompt !== grant.systemPrompt || req.userPrompt !== grant.userPrompt) {
+    || req.systemPrompt !== grant.systemPrompt || req.userPrompt !== grant.userPrompt
+    || req.surfaceUserPrompt !== grant.userPrompt) {
     throw new Error("science_recovery_runner_scope_mismatch");
   }
   return true;

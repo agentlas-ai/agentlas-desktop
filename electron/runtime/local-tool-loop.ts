@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
@@ -898,6 +899,8 @@ export interface RunLocalOpenAiChatOptions {
   req: RunnerRequest;
   events: RunnerEvents;
   runtimeKind: string;
+  /** Exact adapter identity for Main-owned BYOK recovery; never a display label. */
+  recoveryBackend?: string;
   /** 예: "http://localhost:1234" — chatEndpoint는 항상 "/v1/chat/completions" */
   host: string;
   model: string;
@@ -941,6 +944,7 @@ export async function runLocalOpenAiChat(
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
+  const recovery = assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
   const chatEndpoint = opts.chatEndpoint ?? `${host}/v1/chat/completions`;
   const providerLabel = opts.providerLabel ?? host;
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
@@ -955,10 +959,10 @@ export async function runLocalOpenAiChat(
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
         .digest("hex")
     : null;
-  const previousSession = req.chatId
+  const previousSession = !recovery && req.chatId
     ? getRuntimeSession(req.chatId, runtimeKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
-  if (req.chatId && sessionFingerprint) {
+  if (!recovery && req.chatId && sessionFingerprint) {
     // OpenAI-compatible local servers have no provider conversation ID. The
     // durable Agentlas chat history is the source of truth, while this
     // logical session record makes continuity visible and detects model/host
@@ -1183,6 +1187,7 @@ export async function runLocalOpenAiChat(
         return {text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)};
       }
     }
+    assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     let resp: Response;
     try {
       resp = await fetch(chatEndpoint, {
@@ -1213,6 +1218,7 @@ export async function runLocalOpenAiChat(
         streamUsageUnsupported = true;
         const retryBody = { ...requestBody };
         delete retryBody.stream_options;
+        assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
         try {
           resp = await fetch(chatEndpoint, {
             method: "POST",
@@ -1240,6 +1246,7 @@ export async function runLocalOpenAiChat(
           if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
           sawUnsupportedToolCallAttempt = true;
           events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
+          assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
           const fallback = await fetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
@@ -1320,6 +1327,7 @@ export async function runLocalOpenAiChat(
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
+      assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
       const outcome = await runOneToolCall(byName, call, events, approvalContext, broker);
       messages.push(outcome.toolMessage);
       if (outcome.visionMessage && opts.acceptsImageResults !== false) visionMessages.push(outcome.visionMessage);

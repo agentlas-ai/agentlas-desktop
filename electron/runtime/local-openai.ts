@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // OpenAI 호환 로컬 서버(LM Studio / MLX 등) 공용 감지 + 실호출.
 // Ollama(runtime/ollama.ts)와 달리 이들은 "표준 OpenAI" 엔드포인트를 쓴다:
 //   - 모델 목록: GET  {host}/v1/models           → { data: [{ id }] }
@@ -61,6 +62,7 @@ export function makeLocalOpenAiRunner(
   } = {},
 ): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+    assertScienceRecoveryRequest(req, runtimeKind);
     const host = hostFn();
     const model = req.model?.trim();
     if (!model) {
@@ -72,6 +74,7 @@ export function makeLocalOpenAiRunner(
     // A managed resident reports its exact n_ctx. Generic compatible servers
     // may only have catalog metadata; unknown is explicitly an estimate.
     const contextWindow = await options.contextWindowFn?.();
+    assertScienceRecoveryRequest(req, runtimeKind);
     const capacity = contextWindow === undefined ? resolveEffectiveContextWindow(runtimeKind, model, false) : null;
     const recent = req.history;
     const systemText = req.systemPrompt;

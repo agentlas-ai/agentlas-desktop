@@ -1,3 +1,4 @@
+import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { createHash } from "node:crypto";
 import type { Runner } from "../runtime/runner";
 import { makeLocalOpenAiRunner } from "../runtime/local-openai";
@@ -25,6 +26,7 @@ export function createManagedLocalModelRunner(manager: LocalModelHubOwnerPort): 
   const textRunner = makeRunner(false);
   const visionRunner = makeRunner(true);
   return async (request, events) => {
+    assertScienceRecoveryRequest(request, "agentlas-local");
     const installation = manager.residentInstallation();
     if (request.model !== installation.fileName) {
       throw new Error("resident_model_selection_mismatch");
