@@ -3757,6 +3757,9 @@ export async function runGraph(
               chatId: nodeChat.id,
               automationId: automation.id,
               userPrompt: executionPrompt,
+              // ★오너에게 가는 보고의 언어 = 오너의 화면 언어. 요청에 locale 이 없으면 pickLocale 이
+              //   "en" 으로 떨어져, 한국어 화면의 오너도 자동화 보고를 영어로 받았다(게시물 언어 규칙과 별개).
+              locale: currentUiLocale(),
               // 시뮬레이션만 읽기 권한으로 내려 실행한다 — 런타임이 쓰기 도구를 거부하므로
               // 선언되지 않은 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
               // 실전 실행은 `effectivePermission` 이 read 여도 도구를 켠다: 런타임의 read 는

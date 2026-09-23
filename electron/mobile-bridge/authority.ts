@@ -3123,6 +3123,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const automation = updateAutomation(id, {
           runtimeSelection: automationSelection,
         });
+        // 휴대폰에서 고른 핀은 오너의 명시적 선택 — 복사본 추종을 멈춘다.
+        const { recordAutomationPinProvenance } = await import("../automation-runtime-provenance");
+        recordAutomationPinProvenance(id, "owner", "mobile");
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(projectMobileBridgeAutomation(automation), request.method);
       }

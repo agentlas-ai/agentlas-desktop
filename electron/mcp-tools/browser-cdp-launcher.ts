@@ -1594,6 +1594,55 @@ function approvalContextUrl(name, args, observedUrl) {
 `;
 
 /**
+ * ★browser_find 는 "보이는 글자"를 찾는 도구다 — 스냅샷 ref(e826)는 이미 찾은 결과다.
+ *
+ * 실측(Threads 자동화 f7a61706, 2026-09-23 16:00Z): agy 가 스냅샷에서 얻은 ref 를 browser_find 의
+ * text 로 다시 넣었다(e826·e833·e839·e845·e851). 페이지 글자에 "e826"은 없으므로 매번 빈 결과였고,
+ * 모델은 같은 프로필을 다시 열어 처음부터 되풀이했다. 상위 Playwright MCP 설명엔 이 구분이 없다.
+ * 설명(tools/list)에 한 줄을 붙이고, ref 모양의 text/regex 는 보내지 않고 바로 길을 알려 준다.
+ */
+export const BROWSER_FIND_GUIDANCE_SOURCE = String.raw`
+// Playwright refs are lowercase (e123, f1e2). "E2" (a spreadsheet cell) is page text.
+const SNAPSHOT_REF_TEXT = /^\s*(?:\[?\s*[Rr][Ee][Ff]\s*[=:]\s*)?((?:f\d{1,4})?e\d{1,6})\s*\]?\s*$/;
+function snapshotRefShapedQuery(args) {
+  const input = args && typeof args === 'object' ? args : {};
+  for (const key of ['text', 'regex']) {
+    const value = input[key];
+    if (typeof value !== 'string') continue;
+    const bare = value.replace(/^\/(.*)\/[a-z]*$/i, '$1').replace(/^\^|\$$/g, '');
+    const match = SNAPSHOT_REF_TEXT.exec(bare);
+    if (match) return match[1];
+  }
+  return null;
+}
+function browserFindArgumentFailure(name, args) {
+  if (name !== 'browser_find') return null;
+  const ref = snapshotRefShapedQuery(args);
+  if (!ref) return null;
+  return {
+    content: [{ type: 'text', text: '"' + ref + '" is a snapshot ref, not text on the page, so browser_find cannot match it. ' +
+      'A ref is already the element you found: act on it directly, e.g. browser_click {"target":"' + ref + '"}, ' +
+      'browser_hover {"target":"' + ref + '"} or browser_type {"target":"' + ref + '", "text":"..."}. ' +
+      'Use browser_find only with words that are visible on the page. The tool call was not dispatched.' }],
+    isError: true,
+    _meta: {
+      agentlasToolDispatch: 'not-dispatched',
+      agentlasFailureCode: 'browser_find_snapshot_ref_as_text',
+    },
+  };
+}
+const BROWSER_FIND_REF_GUIDANCE = ' Search only for words visible on the page. Snapshot refs such as e123 are not page text: pass a ref directly as "target" to browser_click / browser_hover / browser_type instead of searching for it.';
+function patchBrowserToolDescriptions(tools) {
+  if (!Array.isArray(tools)) return tools;
+  for (const tool of tools) {
+    if (!tool || tool.name !== 'browser_find' || typeof tool.description !== 'string') continue;
+    if (!tool.description.includes('Snapshot refs such as e123')) tool.description += BROWSER_FIND_REF_GUIDANCE;
+  }
+  return tools;
+}
+`;
+
+/**
  * Request lifecycle shared by the materialized stdio proxy and regression
  * tests. MCP clients can cancel a tools/call while the approval sheet is open;
  * the original action must never be forwarded after that cancellation.
@@ -2716,6 +2765,7 @@ async function ensureChrome() {
 // ── 승인 게이트 ──────────────────────────────────────────────────
 ${BROWSER_APPROVAL_CLASSIFIER_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
+${BROWSER_FIND_GUIDANCE_SOURCE}
 function readCdpPageUrl() {
   if (NATIVE_ENDPOINT) return nativeRequest(nativeLeaseEndpoint + '/json/list', 'GET').then(extractCdpPageUrl, () => '');
   return new Promise((resolve) => {
@@ -3199,7 +3249,7 @@ async function main() {
       const name = msg.params.name || '';
       const originalArgs = msg.params.arguments || {};
       const args = normalizeToolArguments(name, originalArgs);
-      const argumentFailure = browserEvaluateArgumentFailure(name, args);
+      const argumentFailure = browserEvaluateArgumentFailure(name, args) || browserFindArgumentFailure(name, args);
       if (argumentFailure) { writeClient({ jsonrpc: '2.0', id: msg.id, result: argumentFailure }); return; }
       const forwardedLine = args === originalArgs
         ? line
@@ -3274,6 +3324,7 @@ async function main() {
     }
     // tools/list 응답 → 스킬 툴 주입.
     if (msg && msg.result && Array.isArray(msg.result.tools)) {
+      patchBrowserToolDescriptions(msg.result.tools);
       const have = new Set(msg.result.tools.map((t) => t.name));
       for (const st of [...SKILL_TOOLS, UNIFIED_CUA_TOOL]) if (!have.has(st.name)) msg.result.tools.push(st);
       writeClient(msg); return;

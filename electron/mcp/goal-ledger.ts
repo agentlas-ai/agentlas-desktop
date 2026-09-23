@@ -5,6 +5,7 @@ import type { LongRunUsageInput } from "../long-run/budget";
 // part of this path: One, Work, and Science must remain inspectable and
 // pausable from the Desktop store alone.
 import { createHash } from "node:crypto";
+import { normalizeProgressText } from "../../shared/progress-key";
 import {
   ensureGoalLongRun,
   getLongRunByGoalId,
@@ -295,13 +296,8 @@ export async function completeGoalLedgerGoal(input: {
  * 매번 '새 진전'이 되었고, 순환 상한(maxCycles)은 null 이라 멈출 것이 없었다. 숫자·기억 이벤트 블록·공백·문장부호를 걷어낸 뒤 해시한다.
  */
 export function goalProgressKeyForText(text: string): string {
-  const normalized = (text ?? "")
-    .replace(/## Memory Events[\s\S]*$/i, "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .toLowerCase()
-    .replace(/\d+/g, "#")
-    .replace(/[^\p{L}\p{N}#]+/gu, " ")
-    .trim();
+  // 정규화는 자동화 도구 반복 감지(automation-progress-guard)와 한 벌이다.
+  const normalized = normalizeProgressText(text);
   return `sha256:${createHash("sha256").update(normalized).digest("hex").slice(0, 40)}`;
 }
 

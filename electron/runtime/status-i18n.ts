@@ -55,6 +55,11 @@ const DICT = {
       "로컬 모델({model})이 답을 한 글자도 내지 않고 끝났습니다. 모델을 바꾸거나 더 짧은 요청으로 다시 시도하세요.",
     errLocalToolLoopStuck:
       "로컬 모델({model})이 도구 호출만 {turns}번 반복하고 답에 도달하지 못했습니다. 이번 실행은 결과로 인정하지 않습니다.",
+    // ★2026-09-23 실측: 오너가 "영어로만 쓰고 영어계정만 인터랙티브 하셈"(Threads 게시 규칙)이라고 쓰자
+    //   모델이 그걸 "이번 메시지의 다른 출력 언어 요청"으로 읽고 오너에게도 영어로 답·보고했다.
+    //   결과물 언어 규칙은 결과물에만 걸린다 — 답변 언어는 화면 언어 그대로.
+    sysReplyLanguageScope:
+      "\"게시물은 영어로만\"처럼 다른 사람에게 내보낼 결과물의 언어 규칙은 그 결과물에만 적용됩니다. 사용자에게 하는 답변·보고·요약의 언어를 바꾸라는 요청이 아니므로, 사용자에게는 계속 화면 언어로 답하세요.",
     sysGuide:
       "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요.",
     sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
@@ -114,6 +119,8 @@ const DICT = {
       "The local model ({model}) finished without producing a single character. Try another model or a shorter request.",
     errLocalToolLoopStuck:
       "The local model ({model}) kept calling tools for {turns} turns without reaching an answer. This run is not accepted as a result.",
+    sysReplyLanguageScope:
+      "A language rule for content you produce for others (for example \"post only in English\" or \"write the email in Japanese\") governs that content only. It is not a request to change the language you use with the user: keep replies, reports and summaries to the user in the interface language.",
     sysGuide:
       "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.",
     sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",

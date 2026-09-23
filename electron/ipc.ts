@@ -502,6 +502,7 @@ import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
 import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
+import { noteOwnerAutomationPinEdit } from "./automation-runtime-provenance";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
 import { continueOneFromTaskResult } from "./one/task-continuation";
@@ -5229,7 +5230,10 @@ export function registerIpcHandlers(): void {
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
       { timeoutMs: 6_000 },
     );
+    const before = getAutomation(id)?.runtimeSelection ?? null;
     const next = updateAutomation(id, patch);
+    // 오너가 핀을 실제로 바꾼 경우만 "오너의 선택"으로 적는다 — 그 뒤로는 복사본 추종을 멈춘다.
+    noteOwnerAutomationPinEdit(id, before, patch, "desktop_editor");
     await resyncTriggers();
     return next;
   });
