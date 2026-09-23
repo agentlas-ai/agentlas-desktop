@@ -335,7 +335,9 @@ export async function prepareMainToolLoop(
   const collection = req.scienceCollectionCapability;
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
-    if (runtimeKind !== "byok") throw new Error("science_collection_transport_unsupported");
+    if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local"].includes(runtimeKind)) {
+      throw new Error("science_collection_transport_unsupported");
+    }
     if (req.history.length || req.planMode || req.workforceRuntimeToolGrant || req.untrustedNoTools) {
       throw new Error("science_collection_isolated_request_required");
     }
@@ -365,6 +367,14 @@ export async function prepareMainToolLoop(
   //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
   const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local";
   const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, indirectToolSurface);
+  if (collection) {
+    const admitted = [...byName.values()].filter((tool) => tool.kind === "mcp")
+      .map((tool) => tool.serverToolName);
+    if (admitted.length !== SCIENCE_COLLECTION_TOOLS.length
+      || SCIENCE_COLLECTION_TOOLS.some((name) => !admitted.includes(name))) {
+      throw new Error("science_collection_tool_inventory_incomplete");
+    }
+  }
   return {
     tools,
     byName,
@@ -749,6 +759,8 @@ interface StreamTurnResult {
   finishReason?: string;
   text: string;
   toolCalls: OpenAiToolCall[];
+  missingToolCallIds: boolean;
+  incompleteToolCalls: boolean;
 }
 
 async function streamChatTurn(
@@ -820,14 +832,18 @@ async function streamChatTurn(
     }
   }
   if (thinkingOpen) onThinking?.("end", Date.now() - thinkingStartedAt);
-  const toolCalls: OpenAiToolCall[] = [...pending.values()]
+  const pendingCalls = [...pending.values()];
+  const toolCalls: OpenAiToolCall[] = pendingCalls
     .filter((entry) => entry.name)
     .map((entry, i) => ({
       id: entry.id ?? `call_${i}`,
       type: "function" as const,
       function: { name: entry.name, arguments: entry.args },
     }));
-  return { text: acc.trim(), toolCalls, finishReason };
+  return { text: acc.trim(), toolCalls, finishReason,
+    missingToolCallIds: pendingCalls.some((entry) => !entry.id),
+    incompleteToolCalls: pendingCalls.some((entry) => !entry.name),
+  };
 }
 
 export interface RunLocalOpenAiChatOptions {
@@ -1136,6 +1152,7 @@ export async function runLocalOpenAiChat(
         // A host-broker receipt must describe the inventory admitted to the
         // provider invocation. Retrying this Workforce turn without that
         // inventory would make a later success receipt false.
+        if (approvalContext.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
         if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
         sawUnsupportedToolCallAttempt = true;
         events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
@@ -1160,6 +1177,10 @@ export async function runLocalOpenAiChat(
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
     if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
+    if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
+      || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
+      throw new Error("science_collection_tool_frame_invalid");
+    }
     // A provider is allowed to hallucinate a tool_calls block even though it
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
