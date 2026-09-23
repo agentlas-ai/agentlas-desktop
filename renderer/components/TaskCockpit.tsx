@@ -9,7 +9,7 @@ import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { ContinuityStatus } from "./ContinuityStatus";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
-import type { ChatHostNotice } from "../../shared/types";
+import type { ChatHostNotice, GoalResumeConfirmation, GoalResumeReview } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 
@@ -6021,10 +6021,29 @@ function ChatPage() {
         setSessionNotice(failureMessage(cause));
       });
   }, [chat]);
-  const handleResumeGoal = useCallback(() => {
+  /*
+   * ★2026-09-23 — Work 의 재개는 검토 없이 resumeGoal 만 불렀다. 멈춘 시도가 있으면 Main 이
+   *   goal_resume_uncertain_review_required 로 거절하고, Work 에는 그걸 풀 화면이 없었다(막다른 길).
+   *   One 과 같은 순서를 쓴다: 먼저 getGoalResumeReview — 효과 관찰이 도는 중이거나 멈춘 시도가
+   *   없으면 null 이라 곧바로 재개한다(자동 해소 우선). 사람이 볼 것이 남았을 때만 한 문장과
+   *   "이어가기" 하나를 보이고, 그 확인이 곧 정확한 시도 집합에 대한 confirmation 이다.
+   */
+  const [goalResumeReview, setGoalResumeReview] = useState<GoalResumeReview | null>(null);
+  // A review names one exact attempt set; a new Goal version or another chat invalidates it.
+  useEffect(() => { setGoalResumeReview(null); }, [chat?.id, goalContext?.version]);
+  const handleResumeGoal = useCallback((confirmation?: GoalResumeConfirmation) => {
     if (!chat || !goalContext?.version) return;
     const expectedVersion = goalContext.version;
-    void ipc()?.chats.resumeGoal(chat.id, expectedVersion, goalContext.goalId)
+    const goalId = goalContext.goalId;
+    const api = ipc();
+    void (async () => {
+      if (!confirmation) {
+        const review = await api?.chats.getGoalResumeReview(chat.id, expectedVersion, goalId);
+        if (review) { setGoalResumeReview(review); return null; }
+      }
+      setGoalResumeReview(null);
+      return api?.chats.resumeGoal(chat.id, expectedVersion, goalId, confirmation) ?? null;
+    })()
       .then((context) => {
         if (context) setGoalContext(context);
       })
@@ -6843,6 +6862,38 @@ function ChatPage() {
           {sessionNotice}
         </div>
       )}
+      {goalResumeReview && (
+        <div
+          role="region"
+          data-goal-review={goalResumeReview.blocker ?? "ready"}
+          aria-label={locale === "ko" ? "멈춘 작업 이어가기" : "Continue interrupted work"}
+          style={{
+            width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0", padding: "8px 10px", borderRadius: 8,
+            boxSizing: "border-box", border: "var(--hairline)", background: "var(--paper-2)",
+            color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.45, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+          }}
+        >
+          <span style={{ flex: "1 1 260px" }}>{goalResumeReview.blocker === "running"
+            ? (locale === "ko" ? "아직 끝나지 않은 작업이 있어요. 끝나면 다시 눌러 주세요." : "A task is still finishing. Try again once it is done.")
+            : goalResumeReview.blocker
+              ? (locale === "ko" ? "이 목표는 여기서 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "This goal cannot be continued safely here. The goal stays paused.")
+              : (locale === "ko"
+                ? `멈추기 전 작업 ${goalResumeReview.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
+                : `The ${goalResumeReview.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`)}</span>
+          <button type="button" className="btn" onClick={() => setGoalResumeReview(null)}>
+            {goalResumeReview.blocker ? (locale === "ko" ? "닫기" : "Close") : (locale === "ko" ? "나중에" : "Not now")}
+          </button>
+          {!goalResumeReview.blocker && (
+            <button type="button" className="btn btn-primary" data-goal-review-primary="true"
+              onClick={() => handleResumeGoal({
+                runId: goalResumeReview.runId, version: goalResumeReview.version, attemptIds: goalResumeReview.attemptIds,
+                attemptSetDigest: goalResumeReview.attemptSetDigest, reviewedAttemptIds: goalResumeReview.attemptIds,
+              })}>
+              {locale === "ko" ? "이어가기" : "Continue"}
+            </button>
+          )}
+        </div>
+      )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput
           onSend={handleChatInputSend}
@@ -6873,7 +6924,7 @@ function ChatPage() {
           goalPauseReason={goalContext?.pauseReason}
           goalBlockedReason={goalContext?.blockedReason}
           goalStatusStale={goalContextStale}
-          onResumeGoal={handleResumeGoal}
+          onResumeGoal={() => handleResumeGoal()}
           onPauseGoal={handlePauseGoal}
           onEditGoal={handleEditGoal}
           onToggleContinuous={handleToggleContinuous}
