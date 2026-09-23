@@ -15,7 +15,7 @@ import { HostContinuationNotice } from "../HostContinuationNotice";
 import { OneGoalControls } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { failureMessage, goalAdmissionControlFailure, isChatBusyFailure } from "@/lib/invocation-failure";
+import { failureCode, failureMessage, goalAdmissionControlFailure, goalAdmissionControlFailureForCode, ipcErrorCode, isChatBusyFailure } from "@/lib/invocation-failure";
 import {
   type CSSProperties,
   Fragment,
@@ -256,10 +256,13 @@ function keepPrevIfDeepEqual<T>(next: T): (prev: T | null | undefined) => T {
   };
 }
 
+/*
+ * ★2026-09-23 — 예전엔 cause.code 만 봤다. Electron IPC 는 커스텀 속성을 버리므로 이 값은
+ *   늘 undefined 였고, 무해한 경합(already_resolved·stale_binding)도 운영 복구로 번졌다.
+ *   이제 IPC 경계가 싣는 코드 접두어까지 ipcErrorCode 하나로 읽는다.
+ */
 function oneTeamPreflightErrorCode(cause: unknown): string | undefined {
-  if (!cause || typeof cause !== "object") return undefined;
-  const code = (cause as { code?: unknown }).code;
-  return typeof code === "string" ? code : undefined;
+  return ipcErrorCode(cause);
 }
 
 const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
@@ -4317,7 +4320,7 @@ export function OneShell() {
     }
     let observedAdmissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
     let optimisticUserMessageId: string | null = null;
-    const reconcileAcceptedAdmission = async (candidateRunId: string): Promise<boolean> => {
+    const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<boolean> => {
       const admission = await api.invoke.admission(candidateRunId);
       observedAdmissionStatus = admission.status;
       if (admission.status !== "absent" && admission.chatId !== chatId) return false;
@@ -4364,7 +4367,25 @@ export function OneShell() {
           } catch { /* Keep the draft and report the missing read below. */ }
         }
         if (activeThreadChatIdRef.current !== chatId) return true;
-        setActionNotice(runLocale === "ko"
+        /*
+         * ★2026-09-23 — 이 갈래는 goalAdmissionControlFailure 보다 먼저 돈다. 예전엔 Main 이 모든
+         *   사전 거절을 고정 사유(main_start_pre_dispatch_refused)로 적었고 여기서는 일반 문구만
+         *   냈다 — 구체 문구(예산 소진·정리 중·앱 종료 중…)가 원리적으로 닿지 않았다. 이제 원장에
+         *   실제 코드가 남으니, 그 코드(없으면 방금 받은 오류의 코드)로 구체 문구를 먼저 고른다.
+         */
+        const recordedCode = admission.rejectionReasonCode && admission.rejectionReasonCode !== "main_start_pre_dispatch_refused"
+          ? admission.rejectionReasonCode
+          : rejectionCause !== undefined ? failureCode(rejectionCause) ?? null : null;
+        const specific = goalAdmissionControlFailureForCode(recordedCode, runLocale === "ko");
+        if (specific) {
+          admissionRecoveryFenceRef.current.set(chatId, { runId: candidateRunId, accepted: false, notice: specific.message, rejectedAt: Date.now() });
+          setActionNotice(specific.message);
+          return true;
+        }
+        const codeSuffix = recordedCode
+          ? (runLocale === "ko" ? ` (사유 코드: ${recordedCode})` : ` (reason code: ${recordedCode})`)
+          : "";
+        setActionNotice((runLocale === "ko"
           ? goalDirection
             ? directionVisible
               ? "새 지시는 대화에 기록됐지만 실행되지 않았습니다. Goal 상태를 확인한 뒤 목표 수정 또는 재개를 직접 선택해 주세요. 자동 재전송은 하지 않습니다."
@@ -4374,7 +4395,7 @@ export function OneShell() {
             ? directionVisible
               ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
               : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
-            : "The previous request was confirmed not to have started. Review it before sending a new request.");
+            : "The previous request was confirmed not to have started. Review it before sending a new request.") + codeSuffix);
         return true;
       }
       const observed = await api.invoke.receipt(candidateRunId);
@@ -4619,7 +4640,7 @@ export function OneShell() {
           : "The run was accepted. The view could not refresh yet; do not resend the request.");
       }
     } catch (cause) {
-      try { if (await reconcileAcceptedAdmission(runId)) return; }
+      try { if (await reconcileAcceptedAdmission(runId, cause)) return; }
       catch { /* An unavailable receipt remains ambiguous, never rejected. */ }
       const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");
       const chatBusyFailure = isChatBusyFailure(cause);

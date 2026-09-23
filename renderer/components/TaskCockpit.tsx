@@ -17,7 +17,7 @@ import { InactiveToolNotice } from "@/components/InactiveToolNotice";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
-import { detailForUser, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
+import { detailForUser, failureCode, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
@@ -188,9 +188,20 @@ function startFailureText(cause: unknown, locale: string, hadImages: boolean): s
       ? `이 대화가 아직 앞 요청을 돌리는 중이라 시작하지 못했습니다. ${restored} ${raw}`
       : `This turn did not start because the chat is still running an earlier request. ${restored} ${raw}`;
   }
+  // ★2026-09-23 — 알려진 거절 문구는 할 일까지 담고 있다. "다시 보내 주세요"를 덧붙이지 않는다.
+  const known = knownStartFailureHuman(cause, ko);
+  if (known) {
+    return ko
+      ? `작업을 시작하지 못해 이 턴은 기록에 남지 않았습니다. ${restored} ${known}`
+      : `The task did not start, so this turn was not recorded. ${restored} ${known}`;
+  }
+  // 결정적 거절(기계 코드)에는 "이유가 오지 않았다"가 거짓이다 — 코드를 보여 준다.
+  const code = raw ? undefined : failureCode(cause);
   const why = raw
     ? (ko ? ` 이유: ${raw}` : ` Reason: ${raw}`)
-    : (ko ? " 이유가 오지 않았습니다." : " No reason came back.");
+    : code
+      ? (ko ? ` 사유 코드: ${code}.` : ` Reason code: ${code}.`)
+      : (ko ? " 이유가 오지 않았습니다." : " No reason came back.");
   return ko
     ? `작업을 시작하지 못해 이 턴은 기록에 남지 않았습니다. ${restored}${why} 다시 보내 주세요.`
     : `The task did not start, so this turn was not recorded. ${restored}${why} Send it again.`;
