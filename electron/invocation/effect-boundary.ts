@@ -1,3 +1,4 @@
+import { verifyScienceSchemaRejection, type ScienceSchemaRejectionSettlement } from "./science-schema-rejection";
 import { isHostPreflightTool } from "../../shared/tool-activity";
 import type { McpInvocationEvent } from "../../shared/types";
 import { getDb } from "../store/db";
@@ -38,6 +39,7 @@ export interface RuntimeEffectBoundaryReceipt {
   effects: "settled" | "uncertain"; ledgerComplete: boolean; observedToolEventCount: number;
   operations: Operation[]; pendingEffectRefs: string[];
   adapterScopes?: Array<AdapterEffectAdmission & { report: AdapterEffectReport | null }>;
+  scienceSchemaRejections?: ScienceSchemaRejectionSettlement[];
 }
 /** Main owns this instance from invocation start until the runner promise
  * settles. Tool text is never interpreted. Result arrival + typed provider error
@@ -52,6 +54,7 @@ export class InvocationEffectBoundaryTracker {
   private readonly adapterScopes = new Map<string, AdapterEffectAdmission & { report: AdapterEffectReport | null }>();
   private readonly scienceCorrelations = new Map<string, ScienceToolCorrelation>();
   private readonly scienceFailureObservations = new Map<string, Set<string>>();
+  private readonly scienceFailureValues = new Map<string, ScienceNativeFailureObservation>();
   constructor(private readonly runId: string, private readonly chatId: string) {}
   nativeScienceTool(binding: ScienceToolCorrelation): void {
     if (binding.invocationRunId !== this.runId || binding.chatId !== this.chatId) { this.uncertainties.add("science-native-binding-mismatch"); return; }
@@ -76,12 +79,13 @@ export class InvocationEffectBoundaryTracker {
       const seen = this.scienceFailureObservations.get(binding.providerToolId) ?? new Set<string>();
       if (seen.has(digest)) return;
       // Preserve conflicting observations as separate immutable rows. These
-      // receipts never add settledFailureIds or change effect classification.
+      // observations alone never settle effects; only independent host proof can.
       recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_science_native_failure_observed",
         sourceEventId: `science-native-failure:${binding.providerToolId}:${digest}`, evidencePhase: "observed",
         payload: { observation, conflictingObservation: seen.size > 0 } });
       seen.add(digest);
       this.scienceFailureObservations.set(binding.providerToolId, seen);
+      this.scienceFailureValues.set(binding.providerToolId, observation);
     } catch { this.recordingFailed(); }
   }
   adapterStarted(admission: AdapterEffectAdmission): void {
@@ -128,6 +132,26 @@ export class InvocationEffectBoundaryTracker {
       const pending=new Set(this.uncertainties);
       const settledFailures = new Set([...this.adapterScopes.values()].filter(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete)
         .flatMap(scope => scope.report?.settledFailureIds ?? []));
+      const scienceSchemaRejections: ScienceSchemaRejectionSettlement[] = [];
+      const candidates = [...this.scienceFailureValues].flatMap(([toolId, observation]) => {
+        const operation = this.operations.get(`root:root:${toolId}`);
+        if (this.scienceFailureObservations.get(toolId)?.size !== 1 || operation?.outcome !== "failed"
+          || !operation.startObserved || !operation.resultObserved) return [];
+        const proof = verifyScienceSchemaRejection(observation);
+        return proof ? [proof] : [];
+      });
+      for (const proof of candidates) {
+        // A server attempt cannot settle two distinct native provider calls.
+        if (candidates.filter(candidate => candidate.attemptId === proof.attemptId).length !== 1) {
+          pending.add("science-schema-rejection-attempt-reused"); continue;
+        }
+        try {
+          recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_science_schema_rejection_verified",
+            sourceEventId: `science-schema-rejection:${proof.attemptId}:${proof.binding.providerToolId}`, evidencePhase: "observed", payload: { ...proof } });
+          scienceSchemaRejections.push(proof);
+          settledFailures.add(proof.binding.providerToolId);
+        } catch { this.recordingFailed(); pending.add("science-schema-rejection-recording-failed"); }
+      }
       const dynamicCovered = (kind: string): boolean => {
         const scopes = [...this.adapterScopes.values()].filter(scope => scope.adapterKind === kind);
         return scopes.some(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete === true)
@@ -159,16 +183,16 @@ export class InvocationEffectBoundaryTracker {
       for (const operation of this.operations.values()) {
         const correlation = operation.toolId && this.scienceCorrelations.get(operation.toolId);
         if (operation.outcome !== "failed" || !correlation) continue;
-        // Intentionally no producer: capture is not proof of effect settlement.
-        // Adding a producer also requires durable reader/snapshot verification;
-        // never retrofit the old immutable uncertain boundary in this loop.
+        if (scienceSchemaRejections.some(proof => proof.binding.providerToolId === operation.toolId)) continue;
+        // All other failures still lack independently verified settlement.
         const decision = verifyScienceFailureSettlement(correlation);
         if (!decision.settled) pending.add(`operation:${operation.key}:${decision.code}`);
       }
       for(const operation of this.operations.values()) if(operation.outcome !== (operation.toolId && settledFailures.has(operation.toolId) ? "failed" : "succeeded")) pending.add(`operation:${operation.key}:${operation.outcome}`);
       const receipt=boundEffectBoundary({schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
         adapterKinds:[...this.adapters].sort(),coverage,effects:pending.size?"uncertain":"settled",ledgerComplete,observedToolEventCount:this.observedTools,
-        operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()]},this.runId);
+        operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()],
+        ...(scienceSchemaRejections.length ? { scienceSchemaRejections } : {})},this.runId);
       recordRunEvent({runId:this.runId,chatId:this.chatId,kind:"runtime_effect_boundary",sourceEventId:`runtime-effect-boundary:${this.runId}:${terminal.id}`,
         evidencePhase:receipt.effects==="settled"?"executed":"uncertain",payload:{...receipt}});
       return receipt;

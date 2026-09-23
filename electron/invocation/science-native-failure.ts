@@ -8,13 +8,14 @@ export interface ScienceNativeFailureObservation {
   failureSignal: "provider-status-failed" | "provider-error" | "mcp-is-error";
   resultSha256: string | null; resultBytes: number;
   errorSha256: string | null; errorBytes: number;
+  schemaRejection?: { attemptId: string; receiptSha256: string; responseSha256: string };
 }
 const MAX_BYTES = 2 * 1024 * 1024;
 const invalid = (): never => { throw new Error("science-native-failure-observation-invalid"); };
 
 /** Hash the original JSON object, never a UI preview or parsed error prose.
  * Bounds also prevent a malformed provider object from exhausting the observer. */
-function digest(value: unknown): { sha256: string | null; bytes: number } {
+export function digestScienceNativeJson(value: unknown): { sha256: string | null; bytes: number } {
   if (value === undefined || value === null) return { sha256: null, bytes: 0 };
   let budget = MAX_BYTES;
   const canonical = (item: unknown, depth: number): string => {
@@ -43,7 +44,7 @@ export function parseScienceNativeFailureObservation(value: unknown): ScienceNat
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const v = value as Record<string, unknown>;
   const keys = ["schemaVersion", "binding", "completionKind", "failureSignal", "resultSha256", "resultBytes", "errorSha256", "errorBytes"];
-  if (Object.keys(v).length !== keys.length || Object.keys(v).some(key => !keys.includes(key))
+  if (keys.some(key => !Object.prototype.hasOwnProperty.call(v, key)) || Object.keys(v).some(key => ![...keys, "schemaRejection"].includes(key))
     || v.schemaVersion !== "agentlas.science-native-failure-observation.v1"
     || !["item.completed", "item/completed"].includes(String(v.completionKind))
     || !["provider-status-failed", "provider-error", "mcp-is-error"].includes(String(v.failureSignal))) return invalid();
@@ -56,6 +57,12 @@ export function parseScienceNativeFailureObservation(value: unknown): ScienceNat
   }
   if ((v.failureSignal === "provider-error" && v.errorSha256 === null)
     || (v.failureSignal === "mcp-is-error" && v.resultSha256 === null)) return invalid();
+  if (v.schemaRejection !== undefined) {
+    const ref = v.schemaRejection as Record<string, unknown>;
+    if (!ref || typeof ref !== "object" || Object.keys(ref).sort().join() !== "attemptId,receiptSha256,responseSha256"
+      || typeof ref.attemptId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(ref.attemptId)
+      || ![ref.receiptSha256, ref.responseSha256].every(h => typeof h === "string" && /^[a-f0-9]{64}$/.test(h))) return invalid();
+  }
   return { ...v, binding } as unknown as ScienceNativeFailureObservation;
 }
 
@@ -74,9 +81,21 @@ export function captureScienceNativeFailureObservation(runId: string, chatId: st
     const failureSignal = item.status === "failed" ? "provider-status-failed" : item.error != null ? "provider-error"
       : result?.isError === true || result?.is_error === true ? "mcp-is-error" : null;
     if (!failureSignal) return null;
-    const resultDigest = digest(item.result), errorDigest = digest(item.error);
+    const resultDigest = digestScienceNativeJson(item.result), errorDigest = digestScienceNativeJson(item.error);
+    let schemaRejection: ScienceNativeFailureObservation["schemaRejection"];
+    // Only the original structured MCP response can bind a receipt; text is never parsed.
+    const structured = result?.structuredContent;
+    if (structured && typeof structured === "object" && !Array.isArray(structured)) {
+      const response = structured as Record<string, unknown>, ref = response.scienceSchemaRejection as Record<string, unknown> | undefined;
+      if (response.ok === false && response.code === "science-tool-input-schema-invalid" && ref
+        && Object.keys(ref).sort().join() === "attemptId,receiptSha256,schemaVersion"
+        && ref.schemaVersion === "agentlas.science-schema-rejection-reference.v1") {
+        schemaRejection = { attemptId: ref.attemptId as string, receiptSha256: ref.receiptSha256 as string,
+          responseSha256: digestScienceNativeJson(structured).sha256! };
+      }
+    }
     return parseScienceNativeFailureObservation({ schemaVersion: "agentlas.science-native-failure-observation.v1", binding,
       completionKind, failureSignal, resultSha256: resultDigest.sha256, resultBytes: resultDigest.bytes,
-      errorSha256: errorDigest.sha256, errorBytes: errorDigest.bytes });
+      errorSha256: errorDigest.sha256, errorBytes: errorDigest.bytes, ...(schemaRejection ? { schemaRejection } : {}) });
   } catch { return null; }
 }

@@ -48,7 +48,8 @@ export function captureScienceToolCorrelation(runId: string, chatId: string, raw
  * Implementation must read authenticated Science invocation receipts and
  * independently verify transaction closure and every output's actual bytes.
  * A generic catch, provider isError, model text, or an error-code whitelist
- * cannot implement this interface. No production producer is installed yet. */
+ * cannot implement this interface. The lifecycle schema-rejection bridge is the
+ * only production producer; all other failure classes remain unconfirmed. */
 export interface ScienceFailureSettlementProducer {
   readVerifiedReceipt(binding: ScienceToolCorrelation): {
     binding: ScienceToolCorrelation; receiptSha256: string; errorCode: string;

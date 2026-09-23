@@ -1,3 +1,5 @@
+import { verifyScienceSchemaRejection, type ScienceSchemaRejectionSettlement } from "./science-schema-rejection";
+import type { ScienceNativeFailureObservation } from "./science-native-failure";
 import { isEffectStatusOnlyTool, isSettledPreparationScope } from "./effect-boundary";
 import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { createHash } from "node:crypto";
@@ -46,6 +48,34 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     const scopeProofs = exactBoundary?.adapterScopes as Array<{ rootBound: boolean; chatId: string | null; report: { complete: boolean; settledFailureIds?: string[] } | null }> | undefined;
     const settledFailures = new Set((scopeProofs ?? []).filter(scope => scope.rootBound && scope.chatId === input.expectedChatId && scope.report?.complete)
       .flatMap(scope => scope.report?.settledFailureIds ?? []));
+    // New snapshots must carry their own verified rejection and native witnesses.
+    // Never search for new proof to upgrade an old uncertain boundary.
+    const schemaProofs = (exactBoundary?.scienceSchemaRejections ?? []) as ScienceSchemaRejectionSettlement[];
+    const proofRows = rows.filter(row => row.kind === "runtime_science_schema_rejection_verified");
+    if (schemaProofs.length !== proofRows.length) pending.add("science-schema-rejection-snapshot-mismatch");
+    for (const proof of schemaProofs) {
+      try {
+        const toolId = proof.binding.providerToolId;
+        if (proof.binding.chatId !== input.expectedChatId || schemaProofs.filter(p => p.attemptId === proof.attemptId || p.binding.providerToolId === toolId).length !== 1) throw new Error("binding");
+        const exact = (row: EventRow) => {
+          const { runtimeEvidence: _evidence, ...metadata } = payload(row);
+          return parseEffectMetadata(row.kind, metadata, input.invocationRunId)!;
+        };
+        const verified = proofRows.filter(row => exact(row).attemptId === proof.attemptId);
+        const correlations = rows.filter(row => row.kind === "runtime_science_tool_correlation" && exact(row).providerToolId === toolId);
+        const observations = rows.filter(row => row.kind === "runtime_science_native_failure_observed"
+          && (exact(row).observation as ScienceNativeFailureObservation).binding.providerToolId === toolId);
+        if (verified.length !== 1 || correlations.length !== 1 || observations.length !== 1 || !terminal || !effectRow
+          || observations[0].seq <= correlations[0].seq || observations[0].seq >= terminal.seq
+          || verified[0].seq <= terminal.seq || verified[0].seq >= effectRow.seq
+          || JSON.stringify(exact(verified[0])) !== JSON.stringify(proof)
+          || JSON.stringify(exact(correlations[0])) !== JSON.stringify(proof.binding)) throw new Error("witness");
+        const observation = exact(observations[0]);
+        if (observation.conflictingObservation !== false
+          || JSON.stringify(verifyScienceSchemaRejection(observation.observation as ScienceNativeFailureObservation)) !== JSON.stringify(proof)) throw new Error("receipt");
+        settledFailures.add(toolId);
+      } catch { pending.add("science-schema-rejection-proof-unconfirmed"); }
+    }
     if (!terminal) pending.add(`invocation:${input.invocationRunId}:terminal-pending`);
     if (terminal && terminal.kind !== "invoke_completed") pending.add(`event:${terminal.id}:effects-unconfirmed`);
     for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain" || attempt.side_effect_state === "uncertain") pending.add(`attempt:${attempt.id}`);

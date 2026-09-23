@@ -1,3 +1,4 @@
+import { parseScienceSchemaRejectionSettlement } from "./science-schema-rejection";
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
 import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { parseScienceToolCorrelation } from "./science-failure-settlement";
@@ -44,6 +45,11 @@ function admission(value: unknown, runId: string, completed: boolean): AdapterEf
     ...(completed ? { report: v.report === null ? null : report(v.report) } : {}) };
 }
 export function parseEffectMetadata(kind: string, value: unknown, runId: string): Record<string, unknown> | null {
+  if (kind === "runtime_science_schema_rejection_verified") {
+    const proof = parseScienceSchemaRejectionSettlement(value);
+    if (proof.binding.invocationRunId !== runId) return fail();
+    return { ...proof };
+  }
   if (kind === "runtime_science_native_failure_observed") {
     const v = object(value, ["observation", "conflictingObservation"]);
     const observation = parseScienceNativeFailureObservation(v.observation);
@@ -59,7 +65,7 @@ export function parseEffectMetadata(kind: string, value: unknown, runId: string)
   let result: Record<string, unknown>;
   if (kind !== "runtime_effect_boundary") result = { ...admission(value, runId, kind === "runtime_adapter_effect_completed") };
   else {
-    const v = object(value, ["schemaVersion", "terminalEventId", "terminalSeq", "adapterKinds", "coverage", "effects", "ledgerComplete", "observedToolEventCount", "operations", "pendingEffectRefs", "adapterScopes"]);
+    const v = object(value, ["schemaVersion", "terminalEventId", "terminalSeq", "adapterKinds", "coverage", "effects", "ledgerComplete", "observedToolEventCount", "operations", "pendingEffectRefs", "adapterScopes", "scienceSchemaRejections"]);
     if (v.schemaVersion !== "agentlas.runtime-effect-boundary.v1" || !["complete", "unknown"].includes(String(v.coverage)) || !["settled", "uncertain"].includes(String(v.effects))) return fail();
     const operations = array(v.operations, item => {
       const operation = object(item, ["key", "toolId", "startObserved", "resultObserved", "outcome"]);
@@ -68,7 +74,12 @@ export function parseEffectMetadata(kind: string, value: unknown, runId: string)
     });
     result = { schemaVersion: v.schemaVersion, terminalEventId: id(v.terminalEventId), terminalSeq: count(v.terminalSeq), adapterKinds: array(v.adapterKinds, id, 128),
       coverage: v.coverage, effects: v.effects, ledgerComplete: bool(v.ledgerComplete), observedToolEventCount: count(v.observedToolEventCount),
-      operations, pendingEffectRefs: array(v.pendingEffectRefs, id), ...(v.adapterScopes === undefined ? {} : { adapterScopes: array(v.adapterScopes, item => admission(item, runId, true), 512) }) };
+      operations, pendingEffectRefs: array(v.pendingEffectRefs, id),
+      ...(v.scienceSchemaRejections === undefined ? {} : { scienceSchemaRejections: array(v.scienceSchemaRejections, item => {
+        const proof = parseScienceSchemaRejectionSettlement(item);
+        if (proof.binding.invocationRunId !== runId) return fail();
+        return proof;
+      }) }), ...(v.adapterScopes === undefined ? {} : { adapterScopes: array(v.adapterScopes, item => admission(item, runId, true), 512) }) };
   }
   if (Buffer.byteLength(JSON.stringify(result)) > EFFECT_METADATA_MAX_BYTES) throw new Error("runtime-effect-metadata-overflow");
   return result;

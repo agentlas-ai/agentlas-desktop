@@ -1,3 +1,4 @@
+import { installScienceSchemaRejectionReader } from "./invocation/science-schema-rejection";
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
 import { scienceAliveDesktopTools, scienceDesktopTools } from "./science-host/desktop-tool-bridge";
 import { mintForwardSteeringRecoveryCapability } from "./science-host/recovery-mint";
@@ -235,5 +236,10 @@ export function installDesktopScienceHost(): void {
     projection: { project: (snapshot) => { projectScienceLoopLongRun(snapshot); } },
   });
   if (compatibility.status !== "compatible") throw new Error(compatibility.code);
+  installScienceSchemaRejectionReader((invocationRunId, attemptId) => {
+    // Older pinned Science packages provide no proof and remain uncertain.
+    const store = scienceStore() as unknown as { readSchemaPreDispatchRejection?: (runId: string, attemptId: string) => unknown };
+    return store.readSchemaPreDispatchRejection?.(invocationRunId, attemptId) ?? null;
+  });
   installed = true;
 }
