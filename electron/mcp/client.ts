@@ -5430,6 +5430,10 @@ ${effectiveUserPrompt}`;
       mcpConfigPath,
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       ...(ephemeralToolGrant ? { ephemeralToolGrant: true as const } : {}),
+      // Science / Alive-Science grants are the whole catalog; a generic One/Work config is not.
+      ...(mcpConfigPath && (executionContext?.source === "science" || scienceReview
+        || (isAliveControllerRun && executionContext?.aliveScience))
+        ? { mcpGrantCatalogOnly: true as const } : {}),
       mcpAllowedTools,
       mcpCodexConfigArgs,
       // C38 — 관문을 실제로 건 것은 **이 경로**뿐이다. 관문 파일이 여기 실리는 순간에만

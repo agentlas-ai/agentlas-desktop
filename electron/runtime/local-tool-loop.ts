@@ -336,10 +336,11 @@ export async function prepareMainToolLoop(
   runtimeKind: string,
 ): Promise<MainToolLoopContext> {
   const collection = req.scienceCollectionCapability;
-  // Agentlas Serving gains tools only through an explicit MCP grant. The
-  // server-side model must see that grant's catalog, not Desktop builtins that
-  // happen to be available in the current workspace.
-  const servingMcpOnly = runtimeKind === "agentlas" && Boolean(req.mcpConfigPath);
+  // Under a Science / Alive-Science grant the server-side model must see that
+  // grant's catalog only (it already bridges the Desktop tools it admits). An
+  // ordinary One/Work run gets the same builtins as every host-loop runtime —
+  // before 2026-09-24 serving in Work had no file/shell tools at all.
+  const servingMcpOnly = runtimeKind === "agentlas" && Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
     if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {

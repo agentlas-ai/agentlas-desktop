@@ -245,7 +245,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   agentlas: {
     systemPrompt: { delivery: "native-role", evidence: "electron/runtime/agentlas-serving.ts sends the system prompt as its own field" },
     resume: { kind: "none", implemented: false, evidence: "each turn carries its history; the server holds no session (structural)" },
-    image: { kind: "none", evidence: "the serving endpoint takes text turns only" },
+    image: { kind: "native-inline", evidence: "agentlas-serving.ts sends images[] and reads done.imagesAccepted; a server that does not echo it gets an images-not-delivered notice instead of a silent drop" },
     commandSurfaces: [],
     transcript: null,
     distinctiveContextFiles: [],
@@ -292,8 +292,9 @@ export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | n
   lmstudio: { via: "response-format" },
   mlx: { via: "response-format" },
   "agentlas-local": { via: "response-format" },
-  // 서빙은 우리 서버가 본문을 만든다. 지금 창구는 대화 텍스트만 주고받는다.
-  agentlas: null,
+  // 서빙은 우리 서버가 본문을 만든다 — outputSchema 를 Responses API text.format(json_schema) 로 건다.
+  // 서버가 done.outputFormat 으로 강제를 확인하지 않으면 러너는 지시문 폴백임을 상태줄에 남긴다.
+  agentlas: { via: "response-format" },
 };
 
 /**
