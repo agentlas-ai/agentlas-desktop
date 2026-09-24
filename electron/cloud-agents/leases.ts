@@ -20,7 +20,6 @@
 //   GET  /api/account/agent-leases
 //     → [{slug, leasedUntil}]
 
-import { randomUUID } from "node:crypto";
 import type { AgentLeasePurchaseInput } from "../../shared/types";
 
 import { getAuthSession, getSessionCookieHeader } from "../auth";
@@ -154,88 +153,10 @@ export async function getAgentLeaseQuote(slug: string): Promise<AgentLeaseQuote>
   }
 }
 
-function leasePurchaseFailureMessage(code: string): string {
-  switch (code) {
-    case "forbidden": return "You do not have permission to purchase a lease in this workspace.";
-    case "price_changed": return "The lease price changed. Review the new price before confirming again.";
-    case "lease_not_offered": return "This agent does not offer long-term leases.";
-    case "insufficient_credits": return "There are not enough credits for this lease.";
-    case "lease_recovery_incomplete": return "The original purchase needs to be checked. Keep the same request; do not start another purchase.";
-    case "idempotency_key_conflict": return "The request differs from the original purchase. Check that purchase before continuing.";
-    case "unauthorized": return "Sign in to the original account to check this lease.";
-    default: return "The purchase result is not confirmed. Check the same request before starting another purchase.";
-  }
-}
-
-export async function purchaseAgentLease(input: AgentLeasePurchaseInput): Promise<AgentLeasePurchaseResult> {
-  const authAtRequest = captureLeaseAuthIdentity();
-  if (!authAtRequest) {
-    return { ok: false, code: "signed_out", message: "Sign in to agentlas.cloud to lease an agent." };
-  }
-  const days = input?.days;
-  if (!Number.isSafeInteger(days) || days < 1 || days > 30) {
-    return { ok: false, code: "invalid_days", message: "A lease runs between 1 and 30 days." };
-  }
-  if (typeof input?.slug !== "string" || !input.slug.trim() || input.slug.length > 256) {
-    return { ok: false, code: "invalid_slug", message: "The Hub agent identifier is invalid." };
-  }
-  const { expectedPerDayCredits, expectedTotalCredits } = input;
-  if (!validCredits(expectedPerDayCredits) || !validCredits(expectedTotalCredits)
-    || expectedTotalCredits !== expectedPerDayCredits * days) {
-    return { ok: false, code: "invalid_quote", message: "Check the lease price before confirming the purchase." };
-  }
-  try {
-    const base = webBase();
-    // One key per user confirmation (this function runs once per confirmed
-    // purchase click) — a network retry of the same confirmation must not
-    // charge twice, while a deliberate second purchase gets a fresh key.
-    const idempotencyKey = input.idempotencyKey ?? randomUUID();
-    if (!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) {
-      return { ok: false, code: "invalid_idempotency_key", message: "The lease request identity is invalid." };
-    }
-    const response = await fetch(`${base}/api/account/agent-leases`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: authAtRequest.cookie, origin: base },
-      body: JSON.stringify({ slug: input.slug.trim(), days, expectedPerDayCredits, expectedTotalCredits, idempotencyKey }),
-    });
-    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!leaseAuthIdentityCurrent(authAtRequest)) {
-      return { ok: false, code: "account_changed", message: "The account changed while confirming this lease. Check the original account for the result." };
-    }
-    if (response.ok) {
-      if (!body || typeof body !== "object" || !validExpiry(body.leasedUntil)
-        || body.days !== days || body.perDayCredits !== expectedPerDayCredits
-        || body.ok !== true || typeof body.replayed !== "boolean"
-        || body.idempotencyKey !== idempotencyKey || body.priceKind !== "INGEST"
-        || (body.replayed === true
-          ? body.idempotencyKey !== idempotencyKey || body.chargedCredits !== 0
-          : body.chargedCredits !== expectedTotalCredits)) {
-        return { ok: false, code: "http", message: "The purchase result could not be verified. Retry the same confirmation." };
-      }
-      // The shelf just changed price-wise; auto-hire cost estimates must see it.
-      invalidateAgentLeaseCache();
-      return {
-        ok: true,
-        leasedUntil: body.leasedUntil,
-        days,
-        perDayCredits: expectedPerDayCredits,
-        chargedCredits: body.replayed === true ? 0 : expectedTotalCredits,
-      };
-    }
-    return {
-      ok: false,
-      code: typeof body.error === "string" ? body.error : `http_${response.status}`,
-      ...(typeof body.needed === "number" ? { needed: body.needed } : {}),
-      ...(typeof body.have === "number" ? { have: body.have } : {}),
-      message: leasePurchaseFailureMessage(typeof body.error === "string" ? body.error : "unknown"),
-    };
-  } catch {
-    return {
-      ok: false,
-      code: "network",
-      message: "Could not reach agentlas.cloud.",
-    };
-  }
+// Marketplace settlement and paid Hub leases were permanently retired.
+// Legacy IPC callers are refused before a network request can bill credits.
+export async function purchaseAgentLease(_input: AgentLeasePurchaseInput): Promise<AgentLeasePurchaseResult> {
+  return { ok: false, code: "marketplace_leases_retired", message: "Paid Hub leases are retired." };
 }
 
 export async function listAgentLeases(): Promise<AgentLeaseRow[]> {

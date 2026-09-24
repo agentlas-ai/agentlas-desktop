@@ -28,7 +28,6 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { openProjectSettings } from "@/lib/project-settings";
-import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { judgeSubsetViaBridge } from "@/lib/judgment";
 import {
@@ -243,10 +242,6 @@ function ProjectPage() {
   // ── Hub 렌트/장기대여 상태 (오너 결정 2026-08-18: 24h 자동 리스 폐지) ──
   // 렌트허용은 (projectId × slug) 데스크탑 로컬 저장, 대여는 서버 계정 상태.
   const [rentAllowedSlugs, setRentAllowedSlugs] = useState<Set<string>>(new Set());
-  const [leaseUntilBySlug, setLeaseUntilBySlug] = useState<Map<string, string>>(new Map());
-  const [leaseDialog, setLeaseDialog] = useState<{ slug: string; name: string } | null>(null);
-  const [leaseRefreshTick, setLeaseRefreshTick] = useState(0);
-  const [agentKindsHelpOpen, setAgentKindsHelpOpen] = useState(false);
   // 에이전트 픽커 검색 — 목록이 길어 이름/slug로 즉시 좁힌다(클라이언트 필터).
   const [rosterQuery, setRosterQuery] = useState("");
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
@@ -296,7 +291,7 @@ function ProjectPage() {
     return hubSlugByTargetId.get(member.targetId.trim().toLowerCase()) ?? null;
   }, [hubSlugByTargetId]);
 
-  // 패널이 열릴 때마다 렌트허용/대여 상태를 새로 읽는다(대여 만료·타 기기 변경 반영).
+  // 프로젝트별 Hub 자동 사용 설정을 읽는다.
   const agentsPanelOpen = teamTreeOpen || editingTeam;
   useEffect(() => {
     if (!agentsPanelOpen || !id) return;
@@ -310,19 +305,8 @@ function ProjectPage() {
       .catch(() => {
         // 읽기 실패는 기본(OFF) 표시로 남긴다 — 쓰기가 아니므로 복구 배너는 띄우지 않는다.
       });
-    void api.agentLeases.list()
-      .then((rows) => {
-        if (cancelled) return;
-        const now = Date.now();
-        setLeaseUntilBySlug(new Map(rows
-          .filter((row) => Number.isFinite(Date.parse(row.leasedUntil)) && Date.parse(row.leasedUntil) > now)
-          .map((row) => [row.slug.toLowerCase(), row.leasedUntil])));
-      })
-      .catch(() => {
-        // 미로그인/오프라인 — 대여 배지 없이 컨트롤만 보여준다.
-      });
     return () => { cancelled = true; };
-  }, [agentsPanelOpen, id, leaseRefreshTick]);
+  }, [agentsPanelOpen, id]);
 
   async function toggleRentAllowed(slug: string, allowed: boolean) {
     const api = ipc();
@@ -1158,20 +1142,6 @@ function ProjectPage() {
         </div>
       )}
 
-      {leaseDialog && (
-        <AgentLeaseDialog
-          slug={leaseDialog.slug}
-          agentName={leaseDialog.name}
-          locale={locale}
-          onClose={() => setLeaseDialog(null)}
-          onLeased={() => {
-            // 성공 — 닫고 대여 상태를 다시 읽는다(배지로 전환, 컨트롤 숨김).
-            setLeaseDialog(null);
-            setLeaseRefreshTick((tick) => tick + 1);
-          }}
-        />
-      )}
-
       {startChatError && (
         <section style={{ maxWidth: 1280, margin: "16px auto 0", padding: "0 24px" }} role="alert">
           <div style={{ ...pageNotice, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -1296,38 +1266,7 @@ function ProjectPage() {
                 <IconSparkles size={13} />
                 {locale === "ko" ? "Hub 추천" : "Recommend from Hub"}
               </button>
-              <button
-                type="button"
-                className="project-agent-help"
-                aria-expanded={agentKindsHelpOpen}
-                aria-label={locale === "ko" ? "렌트·장기대여·포크 안내" : "About rent, lease, and fork"}
-                title={locale === "ko" ? "렌트·장기대여·포크 안내" : "About rent, lease, and fork"}
-                onClick={() => setAgentKindsHelpOpen((current) => !current)}
-              >
-                ?
-              </button>
             </div>
-            {agentKindsHelpOpen ? (
-              <div role="dialog" aria-label={locale === "ko" ? "이용 방식 안내" : "How hiring works"} className="project-agent-help-pop">
-                <dl>
-                  <dt>{locale === "ko" ? "렌트" : "Rent"}</dt>
-                  <dd>{locale === "ko"
-                    ? "작업당 과금. 렌트허용을 켜면 고지 없이 작업마다 호출·과금되고, 크레딧 부족 시에만 팝업이 뜹니다."
-                    : "Billed per work order. With Allow rent on, the agent is called and billed per work order without a notice; only an insufficient-credits popup interrupts."}</dd>
-                  <dt>{locale === "ko" ? "장기대여" : "Lease"}</dt>
-                  <dd>{locale === "ko"
-                    ? "일 단위 선불 대여. 계정에 귀속되어, 기간 중에는 어느 프로젝트에서든 호출이 무료입니다."
-                    : "Prepaid day-based lease, bound to your account. While it lasts, calls are free in every project."}</dd>
-                  <dt>{locale === "ko" ? "포크" : "Fork"}</dt>
-                  <dd>{locale === "ko"
-                    ? "내 워크스페이스로 사본 구매. 웹 에이전트 상세 페이지에서만 가능하며, 허브 재등록은 불가합니다."
-                    : "Buy a copy into your workspace. Web agent page only; it cannot be re-published to the Hub."}</dd>
-                </dl>
-                <button type="button" onClick={() => setAgentKindsHelpOpen(false)}>
-                  {locale === "ko" ? "닫기" : "Close"}
-                </button>
-              </div>
-            ) : null}
             {(teamTreeOpen || editingTeam) && <div className="project-agent-workbench project-agent-workbench-compact" data-editing={editingTeam}>
               <ProjectTeamOrgChart
                 locale={locale}
@@ -1345,9 +1284,7 @@ function ProjectPage() {
                 hubCard={{
                   slugFor: hubSlugForMember,
                   rentAllowed: rentAllowedSlugs,
-                  leaseUntil: leaseUntilBySlug,
                   onToggleRent: (slug, allowed) => void toggleRentAllowed(slug, allowed),
-                  onLease: (slug, name) => setLeaseDialog({ slug, name }),
                 }}
               />
               {editingTeam ? (
@@ -2097,14 +2034,12 @@ function ProjectPage() {
   );
 }
 
-/** Hub 북마크 카드 전용 컨트롤(렌트허용 토글·장기대여) 배선. 로컬/클라우드 카드는 무관. */
+/** Hub 북마크 카드의 프로젝트별 자동 사용 설정. */
 interface ProjectHubCardControls {
   /** Hub 멤버의 targetId → slug 복원. null 이면 컨트롤을 그리지 않는다. */
   slugFor: (member: ProjectAgentPoolMember) => string | null;
   rentAllowed: Set<string>;
-  leaseUntil: Map<string, string>;
   onToggleRent: (slug: string, allowed: boolean) => void;
-  onLease: (slug: string, name: string) => void;
 }
 
 function ProjectTeamOrgChart({
@@ -2155,22 +2090,11 @@ function ProjectTeamOrgChart({
   }
 
   const ko = locale === "ko";
-  // Hub 북마크 카드의 오른쪽 컨트롤:
-  //   활성 대여 → 배지만(두 컨트롤 숨김) / 그 외 → [렌트허용] 토글 + [장기대여] 버튼.
+  // Hub 공개 에이전트의 자동 사용 여부만 선택한다.
   const renderHubControls = (member: ProjectAgentPoolMember) => {
     if (!hubCard) return null;
     const slug = hubCard.slugFor(member);
     if (!slug) return null;
-    const leasedUntil = hubCard.leaseUntil.get(slug) ?? null;
-    if (leasedUntil) {
-      const date = new Date(leasedUntil);
-      const label = Number.isFinite(date.getTime())
-        ? ko
-          ? `${new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(date)}까지 대여`
-          : `Leased until ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date)}`
-        : ko ? "대여 중" : "Leased";
-      return <span className="project-agent-lease-badge">{label}</span>;
-    }
     const allowed = hubCard.rentAllowed.has(slug);
     return (
       <span className="project-agent-hub-controls" onPointerDown={(event) => event.stopPropagation()}>
@@ -2180,18 +2104,11 @@ function ProjectTeamOrgChart({
           role="switch"
           aria-checked={allowed}
           title={ko
-            ? "켜면 이 프로젝트 작업에 고지 없이 작업당 호출·과금됩니다. 끄면 자동 고용에서 제외됩니다."
-            : "On: auto-hired and billed per work order with no notice. Off: excluded from auto-hire for this project."}
+            ? "켜면 이 프로젝트에서 자동으로 사용할 수 있습니다."
+            : "On: this project may use the agent automatically."}
           onClick={() => hubCard.onToggleRent(slug, !allowed)}
         >
-          {ko ? "렌트허용" : "Allow rent"}
-        </button>
-        <button
-          type="button"
-          className="project-agent-lease-button"
-          onClick={() => hubCard.onLease(slug, member.nameSnapshot)}
-        >
-          {ko ? "장기대여" : "Lease"}
+          {ko ? "자동 사용" : "Auto use"}
         </button>
       </span>
     );

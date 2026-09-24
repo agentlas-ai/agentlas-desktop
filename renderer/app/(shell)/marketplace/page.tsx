@@ -22,7 +22,6 @@ import { installedServerMatchesPluginSlug, normalizePluginSlug } from "@shared/p
 import { PluginLogo } from "@/components/PluginLogo";
 import { EntityKindIcon } from "@/components/EntityKindIcon";
 import { IconAlertTriangle } from "@/components/Icon";
-import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   ExperienceHubCatalogResult,
@@ -220,11 +219,6 @@ function MarketplacePage() {
   // 앱 어디에서도 연결할 수 없게 된다.
   const [desktopCatalog, setDesktopCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [bookmarkedIdentities, setBookmarkedIdentities] = useState<Set<string>>(new Set());
-  // 활성 장기대여(일 단위 선불, 계정 귀속) — 대여 중인 slug 는 카드에 가격 대신
-  // 만료일 배지를 단다. 대여 상태의 단일 정본은 main 의 60초 캐시(agentLeases IPC)다.
-  const [leaseUntilBySlug, setLeaseUntilBySlug] = useState<Map<string, string>>(new Map());
-  const [leaseDialog, setLeaseDialog] = useState<{ slug: string; name: string } | null>(null);
-  const [leaseRefreshTick, setLeaseRefreshTick] = useState(0);
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -303,22 +297,6 @@ function MarketplacePage() {
   useEffect(() => {
     void refresh();
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void ipc()?.agentLeases.list()
-      .then((rows) => {
-        if (cancelled || !Array.isArray(rows)) return;
-        const now = Date.now();
-        setLeaseUntilBySlug(new Map(rows
-          .filter((row) => Number.isFinite(Date.parse(row.leasedUntil)) && Date.parse(row.leasedUntil) > now)
-          .map((row) => [row.slug.toLowerCase(), row.leasedUntil])));
-      })
-      .catch(() => {
-        // 미로그인/오프라인이면 배지 없이 가격만 보여준다.
-      });
-    return () => { cancelled = true; };
-  }, [leaseRefreshTick]);
 
   useEffect(() => {
     if (hubView !== "experience") return;
@@ -649,9 +627,6 @@ function MarketplacePage() {
                 setExperienceCatalogRevision((current) => current + 1);
               }}
               onOpenChip={(detailPath) => void openHubPage(detailPath)}
-              onBrowse={() => void openHubPage("/marketplace?category=ontology")}
-              onSell={() => void openHubPage("/experience")}
-              onManage={() => router.push("/library/agents?tab=ontology")}
             />
           ) : (
           <>
@@ -894,17 +869,12 @@ function MarketplacePage() {
                   installedServerMatchesPluginSlug(server, listing.slug))}
                       bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
-                      leasedUntil={leaseUntilBySlug.get((listing.slug || "").toLowerCase()) ?? null}
                       autoOpenInstall={
                         deepLinkInstallSlug !== null
                         && (listing.slug || "").toLowerCase() === deepLinkInstallSlug
                       }
                       onBookmark={() => void bookmarkOne(listing)}
                       onCopyCall={() => void copyHubCall(listing.slug)}
-                      onLease={() => setLeaseDialog({
-                        slug: listing.slug,
-                        name: pickLocalized(listing, locale).name,
-                      })}
                       onOpenProfile={() => router.push(
                         `/marketplace/profile?slug=${encodeURIComponent(listing.slug)}`
                         + `&name=${encodeURIComponent(pickLocalized(listing, locale).name)}`,
@@ -1000,19 +970,6 @@ function MarketplacePage() {
           </div>
         </div>
       </div>
-      {leaseDialog && (
-        <AgentLeaseDialog
-          slug={leaseDialog.slug}
-          agentName={leaseDialog.name}
-          locale={locale}
-          onClose={() => setLeaseDialog(null)}
-          onLeased={() => {
-            // 성공 — 닫고 대여 목록을 다시 읽는다(main 캐시는 구매 시 무효화됨).
-            setLeaseDialog(null);
-            setLeaseRefreshTick((tick) => tick + 1);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -1023,29 +980,23 @@ function ExperienceChipHubIntro({
   catalogLoading,
   onRetry,
   onOpenChip,
-  onBrowse,
-  onSell,
-  onManage,
 }: {
   ko: boolean;
   catalog: ExperienceHubCatalogResult | null;
   catalogLoading: boolean;
   onRetry: () => void;
   onOpenChip: (detailPath: string) => void;
-  onBrowse: () => void;
-  onSell: () => void;
-  onManage: () => void;
 }) {
   const benefits = ko
     ? [
         ["막혔던 일을 더 빨리 해결", "실제로 해결했던 순서와 확인 방법을 다음 작업에 다시 씁니다."],
         ["결과물의 취향을 일정하게 유지", "내가 고른 문체·구성·디자인 방향을 새 작업에도 이어갑니다."],
-        ["구매 전에 효과와 가격 확인", "어떤 업무에서 무엇이 좋아지는지, 얼마인지 먼저 보고 결정합니다."],
+        ["경험의 쓰임 확인", "어떤 업무에 도움이 되는지 살펴봅니다."],
       ]
     : [
         ["Solve familiar blockers faster", "Reuse steps and checks that already worked in real tasks."],
         ["Keep output style consistent", "Carry your preferred tone, structure, and visual direction into new work."],
-        ["See the value and price first", "Review what improves, where it helps, and what it costs before buying."],
+        ["Explore how it helps", "See which tasks benefit from the shared experience."],
       ];
   return (
     <section data-testid="experience-chip-hub-entry" style={{ display: "grid", gap: 16 }}>
@@ -1072,14 +1023,14 @@ function ExperienceChipHubIntro({
 
       <div className="card" data-testid="experience-hub-catalog" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div>
-          <strong style={{ display: "block", fontSize: 15 }}>{ko ? "Hub에서 판매 중인 경험칩" : "Experience Chips on Hub"}</strong>
+          <strong style={{ display: "block", fontSize: 15 }}>{ko ? "공개된 경험칩" : "Public Experience Chips"}</strong>
           <span style={{ display: "block", marginTop: 4, color: "var(--rd-ink-3)", fontSize: 12.5 }}>
-            {ko ? "효과와 가격을 먼저 보고, 필요한 칩만 고르세요." : "Compare the benefit and price before choosing a chip."}
+            {ko ? "에이전트에 연결된 경험을 살펴보세요." : "Explore the experience shared with agents."}
           </span>
         </div>
         {catalogLoading || !catalog ? (
           <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5 }}>
-            {ko ? "판매 중인 경험칩을 확인하는 중…" : "Checking available Experience Chips…"}
+            {ko ? "공개된 경험칩을 확인하는 중…" : "Loading public Experience Chips…"}
           </div>
         ) : catalog.status === "unavailable" ? (
           <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
@@ -1088,7 +1039,7 @@ function ExperienceChipHubIntro({
           </div>
         ) : catalog.status === "empty" ? (
           <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
-            {ko ? "현재 공개 판매 중인 경험칩이 없습니다. 비공개로 저장 중인 경험은 여기에 나타나지 않습니다." : "No Experience Chips are publicly on sale right now. Private drafts never appear here."}
+            {ko ? "아직 공개된 경험칩이 없습니다." : "No public Experience Chips yet."}
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 10 }}>
@@ -1104,17 +1055,8 @@ function ExperienceChipHubIntro({
                     {chip.workLabels.map((label) => <RdTag key={label} dashed size="s">{label}</RdTag>)}
                   </div>
                 ) : null}
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                  {chip.offers.length > 0 ? chip.offers.map((offer) => (
-                    <RdTag key={`${offer.mode}:${offer.durationDays ?? "forever"}:${offer.credits}`} bg={C.green} size="s">
-                      {offer.mode === "purchase"
-                        ? (ko ? `계속 사용 · ${offer.credits.toLocaleString()} 크레딧` : `Keep · ${offer.credits.toLocaleString()} credits`)
-                        : (ko ? `${offer.durationDays}일 · ${offer.credits.toLocaleString()} 크레딧` : `${offer.durationDays} days · ${offer.credits.toLocaleString()} credits`)}
-                    </RdTag>
-                  )) : <RdTag dashed size="s">{ko ? "현재 판매 중 아님" : "Not currently for sale"}</RdTag>}
-                </div>
                 <button type="button" className="btn sm primary" onClick={() => onOpenChip(chip.detailPath)}>
-                  {ko ? "좋아지는 점과 가격 보기" : "See benefits and price"}
+                  {ko ? "경험칩 보기" : "View Experience Chip"}
                 </button>
               </article>
             ))}
@@ -1122,49 +1064,6 @@ function ExperienceChipHubIntro({
         )}
       </div>
 
-      <div className="card" data-testid="experience-purchase-flow" style={{ padding: 18, display: "grid", gap: 14 }}>
-        <div>
-          <strong style={{ display: "block", fontSize: 15 }}>
-            {ko ? "구매 후, 적용할 에이전트를 고릅니다" : "After buying, choose the agent that should use it"}
-          </strong>
-          <span style={{ display: "block", marginTop: 5, color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
-            {ko
-              ? "결제만으로 자동 장착되지는 않습니다. Desktop의 내 에이전트에서 직접 확인한 뒤 새 대화부터 적용합니다."
-              : "Payment never attaches a chip automatically. Confirm it in My Agents on Desktop, then apply it to new conversations."}
-          </span>
-        </div>
-        <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
-          {(
-            ko
-              ? [["1", "Hub에서 가격 선택", "7일·30일·90일·영구 사용 중 선택"], ["2", "내 에이전트에서 장착", "내 에이전트 › 경험 › 새 대화부터 적용"], ["3", "새 대화 시작", "지금 대화는 그대로 두고 다음 대화부터 사용"]]
-              : [["1", "Choose a price on Hub", "Pick 7, 30, 90 days, or keep it"], ["2", "Attach in My Agents", "My Agents › Ontology Chips › Apply to new conversations"], ["3", "Start a new conversation", "The current chat stays unchanged"]]
-          ).map(([number, title, body]) => (
-            <li key={number} style={{ padding: 12, border: "1px solid var(--rd-hair)", borderRadius: 10, background: "var(--rd-surface-2)", display: "grid", gridTemplateColumns: "24px 1fr", columnGap: 8, alignItems: "start" }}>
-              <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: 999, background: "var(--rd-ink)", color: "var(--rd-surface)", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 800 }}>{number}</span>
-              <span>
-                <strong style={{ display: "block", color: "var(--rd-ink)", fontSize: 12.5 }}>{title}</strong>
-                <span style={{ display: "block", marginTop: 3, color: "var(--rd-ink-3)", fontSize: 11.5, lineHeight: 1.45 }}>{body}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button type="button" className="btn sm primary" onClick={onBrowse}>
-            {ko ? "경험칩과 가격 보기" : "Browse chips and prices"}
-          </button>
-          <button type="button" className="btn sm" onClick={onSell}>
-            {ko ? "내 경험칩 소개·가격 정하기" : "Describe and price my chip"}
-          </button>
-          <button type="button" className="btn sm" onClick={onManage}>
-            {ko ? "구매한 칩 장착하기" : "Attach a purchased chip"}
-          </button>
-        </div>
-        <small style={{ color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
-          {ko
-            ? "로그인과 결제 확인은 안전한 Hub 브라우저 화면에서 진행합니다. 판매도 ‘내 경험칩 소개·가격 정하기’에서 시작합니다."
-            : "Sign-in and payment confirmation happen in the secure Hub browser page. Selling starts with ‘Describe and price my chip’."}
-        </small>
-      </div>
     </section>
   );
 }
@@ -1245,12 +1144,10 @@ function AgentCard({
   pluginServerInstalled,
   bookmarked,
   bookmarking,
-  leasedUntil = null,
   autoOpenInstall = false,
   onBookmark,
   onCopyCall,
   onOpenProfile,
-  onLease,
 }: {
   listing: MarketplaceListing;
   locale: Locale;
@@ -1261,14 +1158,10 @@ function AgentCard({
   pluginServerInstalled: boolean;
   bookmarked: boolean;
   bookmarking: boolean;
-  /** 활성 장기대여 만료 시각 — 있으면 작업당 가격 대신 대여 배지를 단다. */
-  leasedUntil?: string | null;
   onBookmark: () => void;
   onCopyCall: () => void;
   /** 허브의 공개 소개 페이지를 앱 안에 띄운다. 데스크탑 전용 도구에는 소개가 없다. */
   onOpenProfile: () => void;
-  /** [장기대여] — 호출형 Hub 에이전트에만 그린다. 대여는 계정 귀속(모든 프로젝트 유효). */
-  onLease?: () => void;
 }) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
@@ -1348,14 +1241,6 @@ function AgentCard({
   // 그래프는 서버가 뭐라 광고했든 호출형이 아니다 — 낡은 인덱스 스냅샷이
   // callable:true를 실어 와도 여기서 끊는다(서버 normalizeEntry와 같은 경계).
   const callable = !plugin && !graph && isCallableHubListing(listing);
-  const perCallCredits = graph
-    ? 0
-    : typeof listing.perCallCredits === "number"
-      && Number.isFinite(listing.perCallCredits)
-      && listing.perCallCredits >= 0
-      && listing.perCallCredits <= 1_000_000
-      ? listing.perCallCredits
-      : null;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
   // 이 플러그인을 실제로 제공하는 사이트. Hub가 아직 homepage를 못 돌려주는 낡은 응답이면
   // 최소한 Hub 자체 상세 페이지(manifestUrl)로라도 보낸다 — 링크가 아예 없는 것보다 낫다.
@@ -1402,17 +1287,7 @@ function AgentCard({
             : graph
               ? (ko ? "받아서 내 자동화로" : "Install as my automation")
               : callable
-                // 가격을 한 줄에 붙여 말한다 — 같은 값을 오른쪽 크레딧 원에서 한 번
-                // 더 보여주던 중복을 없앴다(오너 지시 2026-08-16).
-                // 24시간 자동 리스는 폐지(오너 결정 2026-08-18) — RENT는 작업당 과금.
-                // 활성 장기대여 중이면 가격 대신 만료일을 말한다(기간 중 호출 무료).
-                ? (leasedUntil
-                  ? (ko
-                    ? `${new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(new Date(leasedUntil))}까지 대여`
-                    : `Leased until ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(leasedUntil))}`)
-                  : perCallCredits === null
-                    ? (ko ? "가격 확인 필요" : "Price unavailable")
-                    : (ko ? `작업당 ${perCallCredits} 크레딧` : `${perCallCredits} credits per work order`))
+                ? (ko ? "공개 에이전트" : "Public agent")
                 : (ko ? "설치 후 사용" : "Install to use")}
         </span>
       </div>
@@ -1453,8 +1328,7 @@ function AgentCard({
           )}
           <div className="hub-card-author">{author}</div>
         </div>
-        {/* 크레딧 원(3/10)은 없앴다 — 같은 값이 카드 맨 윗줄에 이미 글자로 적힌다.
-            오른쪽에 숫자만 뜬 원은 무슨 숫자인지 툴팁을 열어야 알 수 있었다. */}
+        {/* Hub listing categories are shown without the retired credit price. */}
         {callable && !plugin ? null : plugin ? (
           <RdTag className="hub-credit-tag" bg={C.blue}>
             {listing.category || cardLabel}
@@ -1731,21 +1605,7 @@ function AgentCard({
             {ko ? "채팅에 붙여넣기" : "Paste into chat"}
           </button>
         ) : null}
-        {/* [장기대여] — 프로젝트 상세의 Hub 카드와 같은 다이얼로그(채널 패리티).
-            대여 가격(레거시 와이어 id INGEST)은 에이전트 단위라 싱글 에이전트에만 그린다.
-            활성 대여 중에는 카드 윗줄 배지가 상태를 말하고, 버튼은 연장으로 이어진다. */}
-        {callable && entityKind === "single" && onLease ? (
-          <button
-            type="button"
-            className="btn sm hub-card-action-btn"
-            onClick={onLease}
-            title={ko
-              ? "일 단위 선불 대여 — 계정 귀속이라 기간 중에는 어느 프로젝트에서든 호출이 무료입니다."
-              : "Prepaid day-based lease, bound to your account — calls are free in every project while it lasts."}
-          >
-            {leasedUntil ? (ko ? "대여 연장" : "Extend lease") : (ko ? "장기대여" : "Lease")}
-          </button>
-        ) : null}
+        {/* Paid Hub leases were retired with marketplace settlement. */}
       </div>
     </div>
   );

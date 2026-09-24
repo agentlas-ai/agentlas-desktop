@@ -2278,9 +2278,7 @@ ${effectiveUserPrompt}`;
   }
   if (req.sessionRouting) {
     const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
-    // 프로젝트 렌트 정책(오너 결정 2026-08-18) — Hub 자동 보강은 이 프로젝트에서
-    // 렌트허용이 켜진 slug 로만 제한한다(작업당 과금, 고지 없음). 렌트허용 목록이
-    // 비어 있으면 Hub 자동 고용 없이 사용자에게 확인을 구하는 것이 계약이다.
+    // Hub 자동 보강은 프로젝트에서 허용한 slug 로만 제한한다.
     const rentAllowed = invocationProjectId
       ? (() => {
           try {
@@ -2294,11 +2292,11 @@ ${effectiveUserPrompt}`;
       ? []
       : locale === "ko"
         ? [rentAllowed.length > 0
-            ? `Hub 자동 고용은 이 프로젝트에서 렌트허용된 에이전트로만 제한됩니다: ${rentAllowed.join(", ")}. 그 밖의 Hub 에이전트는 사용자가 명시적으로 지목한 경우에만 부르세요.`
-            : "이 프로젝트는 렌트허용된 Hub 에이전트가 없습니다. 사용자가 명시적으로 지목하지 않는 한 유료 Hub 에이전트를 자동 고용하지 마세요."]
+            ? `Hub 자동 사용은 이 프로젝트에서 허용된 에이전트로만 제한됩니다: ${rentAllowed.join(", ")}. 그 밖의 Hub 에이전트는 사용자가 명시적으로 지목한 경우에만 부르세요.`
+            : "이 프로젝트는 자동 사용이 허용된 Hub 에이전트가 없습니다. 사용자가 명시적으로 지목하지 않는 한 Hub 에이전트를 자동으로 호출하지 마세요."]
         : [rentAllowed.length > 0
-            ? `Hub auto-hire is limited to the agents this project allows for rent: ${rentAllowed.join(", ")}. Call any other Hub agent only when the user explicitly names it.`
-            : "This project has no rent-allowed Hub agents. Do not auto-hire paid Hub agents unless the user explicitly names one."];
+            ? `Hub auto-use is limited to the agents this project allows: ${rentAllowed.join(", ")}. Call any other Hub agent only when the user explicitly names it.`
+            : "This project has no Hub agents enabled for automatic use. Call one only when the user explicitly names it."];
     const sessionRoutingPolicy = locale === "ko"
       ? [
           "[Agentlas 세션 팀 정책]",
