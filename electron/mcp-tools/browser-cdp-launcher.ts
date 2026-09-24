@@ -1632,13 +1632,30 @@ function browserFindArgumentFailure(name, args) {
   };
 }
 const BROWSER_FIND_REF_GUIDANCE = ' Search only for words visible on the page. Snapshot refs such as e123 are not page text: pass a ref directly as "target" to browser_click / browser_hover / browser_type instead of searching for it.';
+const BROWSER_SNAPSHOT_START_GUIDANCE = ' The dedicated Agentlas browser starts with no site open: if the page is about:blank, open the site your task names with browser_navigate first.';
 function patchBrowserToolDescriptions(tools) {
   if (!Array.isArray(tools)) return tools;
   for (const tool of tools) {
-    if (!tool || tool.name !== 'browser_find' || typeof tool.description !== 'string') continue;
-    if (!tool.description.includes('Snapshot refs such as e123')) tool.description += BROWSER_FIND_REF_GUIDANCE;
+    if (!tool || typeof tool.description !== 'string') continue;
+    if (tool.name === 'browser_find' && !tool.description.includes('Snapshot refs such as e123')) tool.description += BROWSER_FIND_REF_GUIDANCE;
+    if (tool.name === 'browser_snapshot' && !tool.description.includes('starts with no site open')) tool.description += BROWSER_SNAPSHOT_START_GUIDANCE;
   }
   return tools;
+}
+// The dedicated browser launches with --no-startup-window, so the first
+// observation before any navigation is an empty about:blank page. Workers read
+// that as "the account surface is blank" and held every step instead of
+// opening the site. Say what the blank page means, in the result itself.
+const BLANK_PAGE_URL_LINE = /^- Page URL: (?:about:blank|chrome:\/\/newtab\/?)\s*$/m;
+const LOADED_PAGE_URL_LINE = /^- Page URL: (?!about:blank\s*$|chrome:\/\/newtab\/?\s*$)\S/m;
+const BLANK_PAGE_GUIDANCE = 'Agentlas Browser note: no site is loaded yet. The dedicated browser opens on an empty about:blank page, so this blank page says nothing about the website, account or its state. Open the site your task names with browser_navigate (for example its profile or dashboard URL), then observe again before judging it.';
+function withBlankPageGuidance(result) {
+  if (!result || typeof result !== 'object' || result.isError || !Array.isArray(result.content)) return result;
+  const text = result.content
+    .filter((item) => item && item.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text).join('\n');
+  if (!BLANK_PAGE_URL_LINE.test(text) || LOADED_PAGE_URL_LINE.test(text) || text.includes('Agentlas Browser note: no site is loaded yet')) return result;
+  return { ...result, content: [...result.content, { type: 'text', text: BLANK_PAGE_GUIDANCE }] };
 }
 `;
 
@@ -3321,6 +3338,10 @@ async function main() {
       const call = pending.get(msg.id); pending.delete(msg.id);
       const isErr = msg.result && msg.result.isError;
       if (!isErr && !msg.error) recording.push(call);
+    }
+    if (msg && msg.id != null && msg.result && Array.isArray(msg.result.content)) {
+      const guided = withBlankPageGuidance(msg.result);
+      if (guided !== msg.result) { writeClient({ ...msg, result: guided }); return; }
     }
     // tools/list 응답 → 스킬 툴 주입.
     if (msg && msg.result && Array.isArray(msg.result.tools)) {
