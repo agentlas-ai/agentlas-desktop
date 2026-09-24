@@ -108,8 +108,8 @@
       },
       {
         "path": "runtime/earth-geochemistry.cjs",
-        "sha256": "769474a58b86ff14d92b2c80deac6fc48aa9d5eb549b18306622b43fb1e82bb0",
-        "bytes": 35161
+        "sha256": "e95418882aba05c1062550480abf88dc594b034933901819db223897526c6889",
+        "bytes": 36149
       },
       {
         "path": "runtime/earth-hydrology.cjs",

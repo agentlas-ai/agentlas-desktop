@@ -83,8 +83,12 @@ function normalizeIsochronInput(value) {
     const sigmaX = sigmaFactor * (percent ? rawSx / 100 * x : rawSx);
     const sigmaY = sigmaFactor * (percent ? rawSy / 100 * y : rawSy);
     if (!(sigmaX > 0) || !(sigmaY > 0)) throw N.fail("earth-isochron-sample-sigma-invalid", "uncertainties must be positive after conversion", { id });
-    const correlation = item.correlation === undefined || item.correlation === null ? 0 : C.finite(item.correlation, -0.999999, 0.999999, "earth-isochron-sample-correlation");
-    return { id, x, y, sigmaX, sigmaY, correlation };
+    const reportedCorrelation = item.correlation === undefined || item.correlation === null
+      ? null : C.finite(item.correlation, -0.999999, 0.999999, "earth-isochron-sample-correlation");
+    // York's fit assumes unreported error correlations are zero. Retain the
+    // reported value separately so the result never presents that assumption
+    // as a measured coefficient.
+    return { id, x, y, sigmaX, sigmaY, correlation: reportedCorrelation ?? 0, reportedCorrelation };
   });
   const confidenceLevel = input.confidenceLevel === undefined ? 0.95 : C.finite(input.confidenceLevel, 0.8, 0.999, "earth-isochron-confidence-level");
   const ageUnit = input.ageUnit === undefined ? "Ma" : C.text(input.ageUnit, 1, 4, "earth-isochron-age-unit");
@@ -185,8 +189,10 @@ function analyzeIsochron(value) {
   // MSWD acceptance envelope (Wendt & Carl 1991): 1 ± 2·sqrt(2/f).
   const mswdUpperBound = 1 + 2 * Math.sqrt(2 / fit.degreesOfFreedom);
   const fitClass = fit.mswd <= mswdUpperBound ? "isochron (scatter explained by analytical error)" : "errorchron (excess scatter beyond analytical error)";
+  const unreportedCorrelationCount = input.samples.filter((sample) => sample.reportedCorrelation === null).length;
   const sampleRows = input.samples.map((s, i) => ({
-    id: s.id, x: s.x, y: s.y, sigmaX: N.rounded(s.sigmaX), sigmaY: N.rounded(s.sigmaY), correlation: s.correlation,
+    id: s.id, x: s.x, y: s.y, sigmaX: N.rounded(s.sigmaX), sigmaY: N.rounded(s.sigmaY),
+    correlation: s.reportedCorrelation, correlationUsed: s.correlation,
     weight: N.rounded(fit.weights[i]), fitted: N.rounded(fit.intercept + fit.slope * s.x), residual: N.rounded(fit.residuals[i]),
     weightedResidual: N.rounded(fit.residuals[i] * Math.sqrt(fit.weights[i])), xAdjusted: N.rounded(fit.xAdjusted[i]), yAdjusted: N.rounded(fit.yAdjusted[i]),
   }));
@@ -208,6 +214,7 @@ function analyzeIsochron(value) {
     ],
     notes: [
       `Uncertainties supplied as ${input.uncertaintyKind}; converted to 1σ absolute before weighting. Quoted ± values are t(${fit.degreesOfFreedom} df)·SE·expansion at ${input.confidenceLevel * 100}% confidence.`,
+      ...(unreportedCorrelationCount > 0 ? [`Unreported error correlation ρ for ${unreportedCorrelationCount} sample(s) was assumed zero in the York fit; source values remain null in the sample table.`] : []),
       "The age assumes an initially homogeneous daughter ratio and a closed system since crystallisation; the regression cannot test these assumptions.",
     ],
   };
@@ -215,11 +222,12 @@ function analyzeIsochron(value) {
     schema: "agentlas.science-table/v1", title: "Isochron samples, weights, and residuals",
     columns: [
       { id: "id", label: "Sample", type: "string", unit: null }, { id: "x", label: input.catalogue.xLabel, type: "number", unit: null }, { id: "y", label: input.catalogue.yLabel, type: "number", unit: null },
-      { id: "sigmaX", label: "σx (1σ)", type: "number", unit: null }, { id: "sigmaY", label: "σy (1σ)", type: "number", unit: null }, { id: "correlation", label: "ρ", type: "number", unit: null },
+      { id: "sigmaX", label: "σx (1σ)", type: "number", unit: null }, { id: "sigmaY", label: "σy (1σ)", type: "number", unit: null },
+      { id: "correlation", label: "Reported ρ", type: "number", unit: null }, { id: "correlationUsed", label: "ρ used in fit", type: "number", unit: null },
       { id: "weight", label: "York weight W", type: "number", unit: null }, { id: "fitted", label: "Fitted y", type: "number", unit: null }, { id: "residual", label: "Residual", type: "number", unit: null },
       { id: "weightedResidual", label: "Weighted residual", type: "number", unit: null },
     ],
-    rows: sampleRows.map((row) => [row.id, row.x, row.y, row.sigmaX, row.sigmaY, row.correlation, row.weight, row.fitted, row.residual, row.weightedResidual]),
+    rows: sampleRows.map((row) => [row.id, row.x, row.y, row.sigmaX, row.sigmaY, row.correlation, row.correlationUsed, row.weight, row.fitted, row.residual, row.weightedResidual]),
   };
   const xMin = Math.min(...input.samples.map((s) => s.x));
   const xMax = Math.max(...input.samples.map((s) => s.x));
@@ -246,7 +254,7 @@ function analyzeIsochron(value) {
   const analysis = {
     schema: "agentlas.earth.isochron-analysis/v1",
     methodRevision: "york-2004-correlated-errors-mswd/v1",
-    source: { sourceContentSha256: input.sourceContentSha256, sampleCount: input.samples.length },
+    source: { sourceContentSha256: input.sourceContentSha256, sampleCount: input.samples.length, unreportedCorrelationCount },
     settings: { system: input.system, parent: input.catalogue.parent, daughter: input.catalogue.daughter, normalizer: input.catalogue.normalizer, decayConstantPerYear: input.lambda, decayConstantSource: input.lambdaSource, uncertaintyKind: input.uncertaintyKind, confidenceLevel: input.confidenceLevel, ageUnit: input.ageUnit },
     regression: {
       slope: N.rounded(fit.slope), slopeStandardError: N.rounded(fit.slopeStandardError), intercept: N.rounded(fit.intercept), interceptStandardError: N.rounded(fit.interceptStandardError),
@@ -259,6 +267,7 @@ function analyzeIsochron(value) {
     publicationTable, sampleTable, vegaLite, contentReceipts,
     assumptions: [
       "York (2004) maximum-likelihood line with per-sample x/y uncertainties and error correlation; no outlier rejection or model-2/model-3 error treatment.",
+      ...(unreportedCorrelationCount > 0 ? [`Error correlation ρ was unreported for ${unreportedCorrelationCount} sample(s); the fit assumed ρ=0 for those samples. Reported ρ remains null in the sample table.`] : []),
       "The isochron age requires an initially homogeneous daughter-isotope ratio and closed-system behaviour; MSWD tests only internal scatter against the stated analytical errors.",
       "Decay constants are tabulated with their sources; changing λ changes the age but not the regression.",
     ],
