@@ -1171,6 +1171,82 @@ export function createAutomationStrategyProposalForRun(
   });
 }
 
+/** Review failures that mean "this draft was made under a definition that no longer exists". */
+const STALE_DEFINITION_REVIEW_REASONS = new Set([
+  "proposal_review_boundary_changed",
+  "proposal_review_source_definition_unavailable",
+  "proposal_origin_adoption_stale",
+  "proposal_apply_stale",
+]);
+
+export interface AutomationStrategyProposalBacklogResult {
+  liveProposalId: string | null;
+  superseded: number;
+  staleResolved: number;
+}
+
+/**
+ * One live proposal per automation (P0-5, A2).
+ *
+ * Measured on the owner's store (2026-09-24, Threads f7a61706): 21 proposals were `pending` — a draft per
+ * run, never retired. 11 of them could not even be reviewed (`proposal_review_boundary_changed`: the
+ * definition had moved since their run) and 9 waited on a person. Nothing ever closed a pending row except
+ * an explicit decision, so the pile only grew and the owner's review surface filled with dead drafts.
+ *
+ * Rule: the newest pending proposal is the live one. Every older pending draft is closed as superseded
+ * (a newer run's reflection saw the same automation later). A live draft that failed review because its
+ * definition moved is closed as stale — the next run, under the current definition, produces a fresh draft
+ * that is reviewed against the current definition. Applied/approved/rejected rows are never touched, and
+ * nothing here changes the graph, schedule, Goal, or authority: it only retires receipts.
+ */
+export function settleAutomationStrategyProposalBacklog(
+  automationId: string,
+  liveProposalId: string | null = null,
+): AutomationStrategyProposalBacklogResult {
+  const id = identity(automationId, "automation_id");
+  const db = getDb();
+  const result = db.transaction((): AutomationStrategyProposalBacklogResult => {
+    const rows = db.prepare(
+      `SELECT id, receipt_json FROM automation_strategy_proposals
+        WHERE automation_id = ? AND state = 'pending' ORDER BY created_at DESC, rowid DESC`,
+    ).all(id) as Array<{ id: string; receipt_json: string }>;
+    if (rows.length === 0) return { liveProposalId: null, superseded: 0, staleResolved: 0 };
+    const liveId = liveProposalId && rows.some((row) => row.id === liveProposalId) ? liveProposalId : rows[0]!.id;
+    const now = new Date().toISOString();
+    let superseded = 0;
+    let staleResolved = 0;
+    for (const row of rows) {
+      let current: AutomationStrategyProposalReceipt;
+      try { current = parseReceipt(row.receipt_json); } catch { continue; }
+      const stale = row.id === liveId
+        && current.adjudication.status === "unavailable"
+        && STALE_DEFINITION_REVIEW_REASONS.has(current.adjudication.reason);
+      if (row.id === liveId && !stale) continue;
+      const reason = stale
+        ? `proposal_stale_definition: ${current.adjudication.reason}`
+        : `proposal_superseded_by: ${liveId}`;
+      saveReceipt({
+        ...current,
+        status: "rejected",
+        reviewStatus: "rejected",
+        adjudication: {
+          status: "judged",
+          decision: "uncertain",
+          reason,
+          reviewedAt: now,
+          authorization: null,
+          runtimeReceipt: current.adjudication.runtimeReceipt,
+        },
+        updatedAt: now,
+      }, "pending", false);
+      if (stale) staleResolved += 1; else superseded += 1;
+    }
+    return { liveProposalId: staleResolved > 0 ? null : liveId, superseded, staleResolved };
+  })();
+  if (result.superseded > 0 || result.staleResolved > 0) emitDesktopStoreChange({ entity: "automation", id });
+  return result;
+}
+
 export function getAutomationStrategyProposal(id: string): AutomationStrategyProposalReceipt | null {
   const row = proposalById(identity(id, "proposal_id"));
   return row ? parseReceipt(row.receipt_json) : null;
