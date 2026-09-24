@@ -41,12 +41,12 @@ export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 export const SCIENCE_RESEARCH_DIRECTOR_SLUG = "agentlas-science-research-director";
 export const ALIVE_CONTROLLER_SLUG = "agentlas-alive-controller";
-export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.24.18";
+export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.24.19";
 // Hash of the canonical prompt assembled from agent/soul.md, agent/agent.md,
 // skills/direct-study/SKILL.md and skills/write-manuscript/SKILL.md (persona -> contract -> workflows).
 // The Science runtime refuses to dispatch when the installed package differs.
 // Regenerate from composeResearchDirectorSystemPrompt and the four prompt assets declared in plugin.json.
-export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "b6057f2c3d6e00fb9b910b3e405cebfea2fbb0452cf7c4ae1750acddfea91301";
+export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "06159dd633094fd2a1d16acf1880fcad00b1cfe2fcc1926501f151fe5cf208b0";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.

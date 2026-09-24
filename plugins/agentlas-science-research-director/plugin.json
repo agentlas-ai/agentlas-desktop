@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-research-director",
   "name": "Agentlas Science Research Director",
-  "version": "1.24.18",
+  "version": "1.24.19",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -34,7 +34,7 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "b6057f2c3d6e00fb9b910b3e405cebfea2fbb0452cf7c4ae1750acddfea91301",
+    "promptSha256": "06159dd633094fd2a1d16acf1880fcad00b1cfe2fcc1926501f151fe5cf208b0",
     "failClosed": true
   },
   "provides": {
@@ -120,8 +120,8 @@
       },
       {
         "path": "skills/write-manuscript/SKILL.md",
-        "sha256": "9fb6689d813800d6a7a5bc8bfbe761c1511a021516e9583d43bbddc90bb3921e",
-        "bytes": 34544
+        "sha256": "1f17fb648321c19b58a66ffd5b75ead3403650ae8bf64b77aac1394b2bfdf56c",
+        "bytes": 35636
       }
     ]
   }

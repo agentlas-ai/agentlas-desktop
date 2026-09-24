@@ -175,6 +175,18 @@ bridge in the actual section, preserving the immutable bindings and claim ledger
 editorial skill, not a truth gate: passing its prose review never replaces the host's Blueprint,
 scholarly-flow, numeric-coherence, or journal-validation receipts.
 
+At final revision, check the reader's path within and between paragraphs. For each paragraph,
+identify the context its opening makes familiar, the exact evidence or reasoning it adds, and the
+bounded point its ending leaves behind. Read those endings in sequence: each should make the next
+paragraph's question intelligible without an unexplained change of subject. Introduce a new term
+or result only after enough context to interpret it; repair a jump with an evidence-backed bridge,
+not a transition phrase. Each Results paragraph must answer a stated question with bound data or a
+derivation. Then compare the title, Abstract, Introduction gap, Results sequence, and Discussion
+conclusion against one evidence-bounded central contribution. This reader-flow pass adapts the
+paragraph and logical-sequence guidance of [Mensh and Kording](https://doi.org/10.1371/journal.pcbi.1005619)
+and the familiar-to-new information principle of [Gopen and Swan](https://courses.ems.psu.edu/styleforstudents/print/c10_p6.html);
+it is editorial review, not a new truth gate or a rigid article template.
+
 At that final pass, use the argument pattern that fits the *project's* article family and exact
 Blueprint. For an empirical claim, follow question → prespecified design → measured result →
 sensitivity or competing explanation → bounded interpretation. For a method, follow problem →
