@@ -237,9 +237,17 @@ async function resolveReflectionContextWindow(
   } catch {
     // A missing runtime snapshot is handled by the conservative fallback below.
   }
-  const capacities = selections.map((selection) => {
+  // Budget only the members the reflection call can actually dispatch to. The
+  // judgment runner drops a pool member whose exact runtime (kind/backend/
+  // source) is not detected right now, so that member can never receive this
+  // evidence. Charging it the unknown-model 16k ceiling made every reflection
+  // "input too large" whenever one saved member was merely not installed at
+  // its recorded path, even though a detected 1M-context member would judge.
+  // A failed or empty runtime snapshot keeps the conservative ceiling for all.
+  const capacities = selections.flatMap((selection) => {
     const exact = selectExactRuntime(runtimes, selection)?.active ?? null;
-    return runtimeModelContextWindow(selection, exact) ?? UNKNOWN_CONTEXT_WINDOW_TOKENS;
+    if (!exact && runtimes.length > 0) return [];
+    return [runtimeModelContextWindow(selection, exact) ?? UNKNOWN_CONTEXT_WINDOW_TOKENS];
   });
   return capacities.length > 0 ? Math.min(...capacities) : null;
 }
