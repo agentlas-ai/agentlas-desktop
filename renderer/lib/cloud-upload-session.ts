@@ -53,13 +53,7 @@ export interface CloudUploadResult {
    * asset that is.
    */
   needsOverwriteConfirmation?: boolean;
-  /**
-   * The published listing's slug, kept so the result card can price it.
-   *
-   * Pricing is a separate call made after the publish succeeded, and the slug
-   * is the only identifier the registration receipt carries — there is no
-   * agentDefinitionId in it, which is why the server accepts a slug.
-   */
+  /** Published listing slug for opening its public Agent Space. */
   slug?: string;
 }
 

@@ -30,8 +30,8 @@ const SUGGESTION_FALLBACKS: Record<SuggestionFallbackKey, Record<Locale, string>
     en: "One creates only a new public description and basic structure. Customer data, sign-in information, internal documents, and conversations are not copied.",
   },
   "one.sug.hub.box_small": {
-    ko: "게시 권한·내가 올릴 권리·크레딧 기능·수수료는 아직 확인이 필요합니다. 게시 직전에 포함 내용을 다시 보고 직접 승인하며, 수익은 보장되지 않습니다.",
-    en: "Publishing access, your right to publish, credit availability, and fees still need review. You see the included items and approve again before publishing; earnings are not guaranteed.",
+    ko: "게시 권한과 내가 올릴 권리를 확인해야 합니다. 공개 전에 포함 내용을 다시 보고 직접 승인합니다.",
+    en: "Publishing access and your right to publish still need review. You see the included items and approve again before sharing.",
   },
 };
 

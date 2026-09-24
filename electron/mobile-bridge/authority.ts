@@ -687,13 +687,8 @@ function projectBorrowableHubAgents() {
     name: boundedRedactedText(bookmark.listing.name, 512),
     nameEn: boundedRedactedText(bookmark.listing.nameEn, 512),
     entityKind: bookmark.listing.entityKind === "team" ? "team" : "agent",
-    perCallCredits:
-      typeof bookmark.listing.perCallCredits === "number"
-        && Number.isFinite(bookmark.listing.perCallCredits)
-        && bookmark.listing.perCallCredits >= 0
-        && bookmark.listing.perCallCredits <= 1_000_000
-        ? bookmark.listing.perCallCredits
-        : null,
+    // Mobile's compatibility DTO must not surface pre-closure bookmark prices.
+    perCallCredits: 0,
   }));
 }
 

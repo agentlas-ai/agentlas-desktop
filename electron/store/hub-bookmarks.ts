@@ -81,6 +81,8 @@ export function normalizeHubBookmarkListing(input: MarketplaceListing): Marketpl
     ...normalized,
     slug: String(normalized.slug ?? "").trim(),
     entityKind,
+    // Persisted bookmarks can contain old marketplace prices; keep them inert.
+    perCallCredits: 0,
   };
 }
 

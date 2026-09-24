@@ -95,9 +95,8 @@ function serverBookmarkRecord(value: unknown): HubBookmarkServerRecord | null {
     ...(cleanString(row.tagline) ? { tagline: cleanString(row.tagline) } : {}),
     ...(cleanString(row.taglineKo) ? { taglineKo: cleanString(row.taglineKo) } : {}),
     ...(cleanString(row.ownerName) ? { ownerName: cleanString(row.ownerName) } : {}),
-    ...(cleanNumber(row.perCallCredits) !== undefined
-      ? { perCallCredits: cleanNumber(row.perCallCredits) }
-      : {}),
+    // Bookmarks may outlive the paid marketplace. Never restore historical rates.
+    perCallCredits: 0,
     bookmarkedAt,
     updatedAt,
   };
@@ -140,7 +139,7 @@ function publicHubRecordToListing(value: unknown): MarketplaceListing | null {
       : cleanString(row.availabilityReason) || "hub_profile_not_callable",
     source: "hub-profile",
     entityKind: kind,
-    perCallCredits: cleanNumber(row.perCallCredits),
+    perCallCredits: 0,
     verifiedInvocations: totalBorrows,
     totalBorrows,
     todayBorrows: cleanNumber(row.todayBorrows),
@@ -178,7 +177,7 @@ function premiumTeamRecordToListing(value: unknown): MarketplaceListing | null {
     routingStatus: callable ? callTool : "premium_team_not_invokable",
     source: "hub-team-registry",
     entityKind: "team",
-    perCallCredits: cleanNumber(row.perCallCredits),
+    perCallCredits: 0,
     agentCount: cleanNumber(row.roles) ?? 1,
   };
 }

@@ -5737,7 +5737,7 @@ function AgentDetailView({
                 />
                 <div data-testid="ontology-human-guide" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 9 }}>
                   <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "구매한 경험 칩 쓰기" : "Use a purchased chip"}</strong>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "공유된 경험 칩 쓰기" : "Use a shared chip"}</strong>
                     <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
                       {locale === "ko" ? "아래에서 이 도구에 장착된 칩과 다음 프로젝트 실행 적용 상태를 확인합니다." : "See what is attached to this tool and what will apply to the next project run below."}
                     </span>
@@ -5746,9 +5746,9 @@ function AgentDetailView({
                     </Link>
                   </div>
                   <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "내 경험 칩 만들고 팔기" : "Create and sell my chip"}</strong>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "내 경험 칩 만들고 공유하기" : "Create and share my chip"}</strong>
                     <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
-                      {locale === "ko" ? "실제 작업에서 배운 해결법을 고르고, 개인정보를 뺀 소개와 가격을 정합니다." : "Choose a method learned from real work, then set privacy-safe buyer copy and a price."}
+                      {locale === "ko" ? "실제 작업에서 배운 해결법을 고르고, 개인정보를 뺀 소개를 작성합니다." : "Choose a method learned from real work, then write a privacy-safe description."}
                     </span>
                   </div>
                 </div>
@@ -5770,8 +5770,8 @@ function AgentDetailView({
                   <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 56, padding: "10px 12px", display: "flex", alignItems: "center", gap: 9 }}>
                     <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: 11, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}><IconLayers size={15} /></span>
                     <div>
-                      <strong style={{ display: "block", fontSize: 13 }}>{locale === "ko" ? "내 경험칩 만들기·판매" : "Create and sell my Experience Chips"}</strong>
-                      <span style={{ display: "block", marginTop: 2, color: "var(--muted-deep)", fontSize: 10.5 }}>{locale === "ko" ? "필요할 때만 열어 판매할 경험과 공개 상태를 관리합니다." : "Open only when you want to manage saleable experience and publishing."}</span>
+                      <strong style={{ display: "block", fontSize: 13 }}>{locale === "ko" ? "내 경험칩 만들기·공유" : "Create and share my Experience Chips"}</strong>
+                      <span style={{ display: "block", marginTop: 2, color: "var(--muted-deep)", fontSize: 10.5 }}>{locale === "ko" ? "검토한 경험과 무료 공개 상태를 관리합니다." : "Manage reviewed experience and free sharing."}</span>
                     </div>
                     <span title={locale === "ko" ? "저장된 경험칩" : "Saved Experience Chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--ok-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "경험" : "Experience"} {ontologySummary?.packCount ?? 0}</span>
                     <span title={locale === "ko" ? "아직 검토할 취향" : "Taste drafts to review"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--warn-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "취향" : "Taste"} {ontologySummary?.tasteDraftCount ?? 0}</span>

@@ -211,15 +211,6 @@ function cleanNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function cleanPriceCredits(value: unknown): number | undefined {
-  return typeof value === "number"
-    && Number.isFinite(value)
-    && value >= 0
-    && value <= 1_000_000
-    ? value
-    : undefined;
-}
-
 function cleanPackageHash(value: unknown): string | undefined {
   const hash = cleanString(value).toLowerCase();
   return /^[a-f0-9]{64}$/u.test(hash) ? hash : undefined;
@@ -629,11 +620,10 @@ function normalizeListing(raw: MarketplaceListing): MarketplaceListing | null {
     trustGrade: trustGrade(record.trustGrade),
     installCount: cleanNumber(record.installCount, cleanNumber(record.verifiedInvocations)),
     manifestUrl,
+    // Hub calls are free. Discard paid values from older search caches and servers.
+    perCallCredits: 0,
   };
-  const perCallCredits = cleanPriceCredits(record.perCallCredits);
   const packageHash = cleanPackageHash(record.packageHash);
-  if (perCallCredits === undefined) delete normalized.perCallCredits;
-  else normalized.perCallCredits = perCallCredits;
   if (packageHash === undefined) delete normalized.packageHash;
   else normalized.packageHash = packageHash;
   return normalized;
@@ -799,9 +789,6 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
   );
   const taglineKo = cleanString(raw.taglineKo, taglineEn);
   const totalBorrows = cleanNumber(raw.totalBorrows);
-  // 공개 응답에 실린 값만 가격으로 보존한다. 누락·음수·비정상 값은 미상이며,
-  // 자산 종류만 보고 3/10 크레딧을 만들어 내면 견적과 실제 결제가 달라진다.
-  const perCallCredits = cleanPriceCredits(raw.perCallCredits);
   const packageHash = cleanPackageHash(raw.packageHash);
   // REST `kind` carries the entity shape (agent/team); delivery state lives in
   // deliveryKind. Anything other than an explicit cloud-callable is install-only.
@@ -831,7 +818,8 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
     routingStatus: "public-profile",
     source: "hub-profile",
     entityKind,
-    ...(perCallCredits !== undefined ? { perCallCredits } : {}),
+    // Keep the legacy wire field at zero for older clients; never revive a price.
+    perCallCredits: 0,
     ...(packageHash ? { packageHash } : {}),
     // verifiedInvocations is the invocation trust ledger, not borrow volume.
     ...(Number.isFinite(Number(raw.verifiedInvocations))
@@ -840,8 +828,7 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
     totalBorrows,
     todayBorrows: cleanNumber(raw.todayBorrows),
     assetCount: cleanNumber(raw.assetCount),
-    // Absent agentCount means UNKNOWN. Substituting 1 for a team under-quotes
-    // credit estimates, so leave it unset instead.
+    // Absent agentCount means UNKNOWN; keep the authoritative roster size.
     ...(Number.isFinite(Number(raw.agentCount)) ? { agentCount: cleanNumber(raw.agentCount) } : {}),
     lastRoutingSuccessAt: cleanIsoString(raw.lastBorrowedAt),
   };
