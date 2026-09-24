@@ -1050,8 +1050,8 @@ function ProjectPage() {
           ) : null}
           <p style={{ margin: 0, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.5 }}>
             {locale === "ko"
-              ? "추가한 에이전트는 북마크에도 저장됩니다. 붙이기는 무료이며, 실제 실행 비용과 계정 권한은 실행할 때 확인합니다."
-              : "Added agents are also saved to bookmarks. Attaching is free; execution cost and account entitlement are checked when the agent runs."}
+              ? "추가한 에이전트는 북마크에도 저장됩니다. 공개 Hub 에이전트는 무료로 붙이고 호출할 수 있습니다. 실행에는 선택한 AI 제공자의 사용 한도가 적용될 수 있습니다."
+              : "Added agents are also saved to bookmarks. Public Hub agents are free to attach and invoke. Your selected AI provider may apply its own usage limits."}
           </p>
         </div>
       </SharedDialog>
