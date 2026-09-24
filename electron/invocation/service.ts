@@ -2316,7 +2316,10 @@ export class InvocationService {
           && !event.agentId
           && (event.kind === "final" || event.kind === "partial")
           && typeof event.text === "string"
-          && hasPermissionEscalationMarker(event.text)
+          && (hasPermissionEscalationMarker(event.text)
+            // Measured 2026-09-24: the model wrote the marker as its last line, but the final event text
+            // is built from the stripped durable copy — no chip was ever offered. The client carries the fact.
+            || (event.kind === "final" && event.permissionEscalationMarkerForVerification === true))
         ) {
           if (event.kind === "final") permissionEscalationRequested = true;
           event = { ...event, text: stripPermissionEscalationMarker(event.text) };
@@ -2611,12 +2614,14 @@ export class InvocationService {
         if (
           durableTextForVerification !== undefined
           || event.durableAssistantMessageIdForVerification !== undefined
+          || event.permissionEscalationMarkerForVerification !== undefined
         ) {
           event = {
             ...event,
             ...(durableMessageId ? { durableMessageId } : {}),
             durableTextForVerification: undefined,
             durableAssistantMessageIdForVerification: undefined,
+            permissionEscalationMarkerForVerification: undefined,
           };
         }
         if (goalInvocationProjection) {
