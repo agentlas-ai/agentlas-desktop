@@ -9,7 +9,8 @@
  * observe(): goal status from the long-run ledger (host facts only, no prose). salience = meaningful change only
  * (status/pause/blocker/revision/retry slot), so volatile counters never spend a model turn.
  *   running/queued/verifying/waiting_*  → work "running" (the goal owns its next step; Alive waits)
- *   blocked                             → work "paused" (continuable through the blocked-goal sweep path)
+ *   blocked (not yet swept)             → work "paused" (continuable through the blocked-goal sweep path)
+ *   a sweep retry is scheduled          → work "running" (the host owns that next step and its backoff)
  *   paused by a host pause              → work "paused"
  *   paused by the owner / approval / budget → blockedBy (an owner boundary Alive never bypasses)
  *   completed/failed/cancelled          → work "terminal"
@@ -44,6 +45,8 @@ export interface GoalPlaygroundDeps {
   pendingApproval(chatId: string): boolean;
   /** Host-scheduled retry slot (blocked-goal sweep) or wait-subscription check time: the next safe run. */
   nextSafeRunAt(run: GoalRunView): string | null;
+  /** A blocked-goal sweep retry is scheduled for this run (its next step exists and may be brought forward). */
+  hostRetryPending(runId: string): boolean;
   latestReceipt(chatId: string): { status: string; errorCode: string | null; finishedAt: string | null } | null;
   continueGoal(runId: string, expectedVersion: number): GoalContinueOutcome;
 }
@@ -97,6 +100,9 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     let work: AlivePlaygroundObservation["work"];
     let blockedBy: string | null = null;
     if (TERMINAL.has(run.status)) work = "terminal";
+    // A blocked-goal sweep retry is scheduled (waiting_tool, or a host pause that carried it): the host owns the
+    // next step and its backoff. Alive waits instead of forcing it (see continueGoalForAlive).
+    else if (this.deps.hostRetryPending(run.id)) work = "running";
     else if (run.status === "paused") {
       if (ALIVE_CONTINUABLE_PAUSES.has(run.pauseReason ?? "")) work = "paused";
       else {

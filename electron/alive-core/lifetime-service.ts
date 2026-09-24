@@ -26,6 +26,12 @@ export interface AliveLifetimeServiceOptions {
    * The host escalates it with state.unchangedReviews (e.g. 5m → 15m → 60m); a salience change always wakes.
    */
   reviewFloorMs?: (agent: AliveAgent) => number;
+  /**
+   * After an action the domain accepted, the life does not wake again for this long: the playground's own next
+   * step (a resumed turn, an effect observation) is what changes the world, and a controller woken by every
+   * intermediate change re-acts on it. Isolated live run 2026-09-24: 21 wakes + 21 accepted actions in 10 min.
+   */
+  actionSpacingMs?: number;
 }
 
 /** Agent time belongs to the host clock, and survives the completion or removal of a playground. */
@@ -153,6 +159,9 @@ export class AliveLifetimeService {
       if (agent.budget.deadlineMs !== null && nowMs >= agent.budget.deadlineMs) { beats.push(this.wait(agent, "grant.deadline-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.budget.tokensUsed >= agent.budget.tokenLimit) { beats.push(this.wait(agent, "grant.tokens-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.state.usageUnknown === true) { beats.push(this.wait(agent, "grant.usage-unavailable", nowMs)); continue; }
+      const lastAction = agent.state.lastAction as { ok?: unknown; atMs?: unknown } | undefined;
+      if (this.options.actionSpacingMs && lastAction?.ok === true && typeof lastAction.atMs === "number"
+        && nowMs - lastAction.atMs < this.options.actionSpacingMs) { beats.push(this.wait(agent, "action.spacing", nowMs)); continue; }
       const lastReview = agent.state.lastReview as { errorCode?: unknown; runtimeBindingSha256?: unknown; grantRevision?: unknown } | undefined;
       const runtimeBindingChanged = Boolean(lastReview && lastReview.runtimeBindingSha256 !== digest(agent.runtimeBinding));
       const grantChanged = Boolean(lastReview && lastReview.grantRevision !== (agent.state.grantRevision ?? null));

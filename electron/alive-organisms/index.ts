@@ -18,6 +18,7 @@ import { noteRuntimeFailure } from "../runtime/runtime-cooldown";
 import { desktopAliveClock } from "../alive-clock";
 import { ALIVE_CONTROLLER_SLUG, builtinAgentId } from "../architecture/manifest";
 import { cachedAliveModelOrder, refreshAliveModelOrder } from "./model-order";
+import { runAliveServingDecision } from "./serving-wake";
 import { AliveHostError, AliveOrganismHost, parseAliveSurfaceChat, parseAliveTokenLimit, type AliveHostDeps } from "./host";
 import type { GoalPlaygroundDeps, GoalRunView } from "./goal-playground";
 import type { AliveChangedEvent, AliveState, AliveSurface } from "../../shared/alive";
@@ -49,6 +50,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
     const wait = latestGoalWaitSubscription(run.goalId);
     return wait && (wait.state === "pending" || wait.state === "claimed") ? wait.nextCheckAt : null;
   },
+  hostRetryPending: (runId) => Boolean(pendingBlockedGoalRetry(runId)),
   latestReceipt: (chatId) => {
     const receipt = invocationService.latestReceipt(chatId);
     return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, finishedAt: receipt.finishedAt ?? null } : null;
@@ -81,14 +83,16 @@ export function startAliveOrganisms(): AliveOrganismHost {
     intervalMs: aliveOrganismTickMs(),
     playground: playgroundDeps,
     light: {
-      pickRunner: (status) => pickRunner(status),
+      // The Agentlas-served runtime gets the decision-only serving call (own prompt, strict schema, measured usage),
+      // not the chat harness runner; every CLI runtime uses its runner's judgment no-tools path.
+      pickRunner: (status) => status.kind === "agentlas" ? { runner: runAliveServingDecision, label: "Agentlas" } : pickRunner(status),
       // Quota/auth marks the member cooling, so the next wake falls down the pool order.
       noteFailure: (status, failure) => { noteRuntimeFailure(status, failure); },
     },
     projectName: (projectId) => getProject(projectId)?.name ?? null,
     controllerInstalled: () => Boolean(getDb().prepare("SELECT id FROM installed_agents WHERE id=? AND slug=? AND builtin=1")
       .get(builtinAgentId(ALIVE_CONTROLLER_SLUG), ALIVE_CONTROLLER_SLUG)),
-    refreshModelOrder: () => refreshAliveModelOrder(),
+    refreshModelOrder: (facts) => refreshAliveModelOrder(Date.now(), facts),
     cachedModelOrder: cachedAliveModelOrder,
     emit: broadcast,
     registerShutdown: (stop) => {

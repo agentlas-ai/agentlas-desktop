@@ -18,6 +18,20 @@
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
+import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+
+/**
+ * What a light wake taught about a runtime (durable, keyed by kind + source + CLI version so an upgrade re-tests):
+ *  - cannot-judge: the runner refused the no-tools boundary before spawning (typed RuntimeJudgmentRefusal),
+ *    e.g. Antigravity ("no verified isolation") — measured 2026-09-24;
+ *  - usage-unmeasured: it answered but reported no token usage (grok 4.7, measured 2026-09-24), which would
+ *    leave every token-bounded wake "usage unknown".
+ * Alive's pool order skips such a member with a coded reason instead of falling back to a heavy path.
+ */
+export type AliveRuntimeFact = "cannot-judge" | "usage-unmeasured";
+export function aliveRuntimeFactKey(status: Pick<RuntimeStatus, "kind" | "source" | "version">): string {
+  return JSON.stringify([status.kind, status.source ?? null, status.version ?? null]);
+}
 
 export interface LightWakeRow {
   wakeId: string; agentId: string; status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -44,6 +58,9 @@ export function ensureLightWakeSchema(db: Database.Database): void {
     attempt_started INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER, output_tokens INTEGER,
     tool_calls INTEGER NOT NULL DEFAULT 0, final_text TEXT, error_code TEXT,
     process_started_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, settled_at_ms INTEGER)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS alive_runtime_facts (
+    runtime_key TEXT NOT NULL, fact TEXT NOT NULL CHECK(fact IN ('cannot-judge','usage-unmeasured')),
+    observed_at_ms INTEGER NOT NULL, PRIMARY KEY(runtime_key, fact))`);
   const columns = (db.prepare("PRAGMA table_info(alive_light_wakes)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!columns.includes("tool_names_json")) db.exec("ALTER TABLE alive_light_wakes ADD COLUMN tool_names_json TEXT");
 }
@@ -61,6 +78,18 @@ export class LightWakeRunner {
   constructor(private readonly deps: LightWakeDeps) { ensureLightWakeSchema(deps.db); }
 
   isActive(wakeId: string): boolean { return this.active.has(wakeId); }
+
+  facts(status: Pick<RuntimeStatus, "kind" | "source" | "version">): AliveRuntimeFact[] {
+    return (this.deps.db.prepare("SELECT fact FROM alive_runtime_facts WHERE runtime_key=?").all(aliveRuntimeFactKey(status)) as Array<{ fact: AliveRuntimeFact }>)
+      .map((row) => row.fact);
+  }
+
+  private learn(status: RuntimeStatus, fact: AliveRuntimeFact): void {
+    try {
+      this.deps.db.prepare("INSERT INTO alive_runtime_facts(runtime_key,fact,observed_at_ms) VALUES (?,?,?) ON CONFLICT DO NOTHING")
+        .run(aliveRuntimeFactKey(status), fact, this.deps.now());
+    } catch { /* the DB closed under a quit */ }
+  }
 
   onSettled(listener: (row: LightWakeRow) => void): () => void {
     this.listeners.add(listener);
@@ -98,6 +127,9 @@ export class LightWakeRunner {
       longContext: false, permission: "read", untrustedNoTools: true, judgmentOnly: true, surfaceGate: "exclude",
       maxOutputTokens: 600, outputSchema: { name: "agentlas_alive_goal_decision_v2", schema: input.schema },
       signal: controller.signal, locale: "en",
+      // Codex keeps provider-global config (plugins, MCP servers) unless told to ignore it: 29.5k → 22.6k input
+      // tokens per wake measured 2026-09-24. Other runners already exclude user config on this path.
+      ...(input.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
     }, {
       onPartial: () => {}, onStatus: () => {},
       onTool: (name, _args, _result, id) => { toolIds.set(id ?? `${name}:${toolIds.size}`, String(name).slice(0, 80)); },
@@ -109,9 +141,16 @@ export class LightWakeRunner {
         const known = observed ?? (PRE_GENERATION_FAILURES.has(result.failure.kind) ? { inputTokens: 0, outputTokens: 0 } : null);
         this.settle(input.wakeId, "failed", known, null, `runtime-${result.failure.kind}`);
       } else {
+        if (!observed) this.learn(input.status, "usage-unmeasured");
         this.settle(input.wakeId, "completed", observed, result.text ?? "", null);
       }
     }, (error: unknown) => {
+      if (isJudgmentRefusal(error)) {
+        // Typed refusal before discovery/spawn: nothing reached a provider, a known 0.
+        this.learn(input.status, "cannot-judge");
+        this.settle(input.wakeId, "failed", { inputTokens: 0, outputTokens: 0 }, null, "runtime-cannot-judge");
+        return;
+      }
       const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "") : "";
       const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
       this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage, null,

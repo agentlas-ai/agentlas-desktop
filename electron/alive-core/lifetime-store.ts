@@ -229,7 +229,7 @@ export class AliveLifetimeStore {
         ? Math.min(Number.MAX_SAFE_INTEGER, priorFailures + 1) : priorFailures;
       this.update(agent.agentId, { state: { ...agent.state,
         lastAction: { actionId: result.actionId, ok: result.ok, code: result.code,
-          invocationRunId: result.invocationRunId ?? null },
+          invocationRunId: result.invocationRunId ?? null, atMs: nowMs },
         ...(sameEpoch ? { actionFailureEpoch: agent.controlEpoch,
           actionFailureGrantRevision: agent.state.grantRevision ?? null,
           actionFailureFingerprint: agent.state.lastActionWorldSha ?? null, failedActions: failures,

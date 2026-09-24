@@ -338,6 +338,10 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
     || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
   const budget = { dispatches: 0 };
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
+  // A host-scheduled retry owns the next step and its spacing. Isolated live run 2026-09-24: letting the
+  // orchestrator bring a pending effect-observation retry forward turned the sweep's growing backoff into a
+  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). Alive never overrides that schedule.
+  if (pendingBlockedGoalRetry(run.id)) return deferred("retry_owns_next_step", run.blockedReason);
   if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) {
     return deferred("alive_goal_not_continuable", run.blockedReason);
   }
