@@ -90,8 +90,8 @@ export interface OneTeamPreflightRole {
     slug: string;
     /**
      * `hub-borrow` 는 사람이 직접 앉힌 call-only Hub 좌석이다. 로컬 지시문이
-     * 없으므로 실행은 Hub borrow 로 가고 크레딧이 든다 — 카드가 그렇게 말해야
-     * 한다. 조용히 빼면 "왜 One 만 답하지" 로만 보인다(오너 지적 2026-08-24,
+     * 없으므로 실행은 무료 Hub 호출 경로로 간다. 조용히 빼면 "왜 One 만 답하지"로만
+     * 보인다(오너 지적 2026-08-24,
      * 실측 2026-08-25: 좌석 2명이 call_only 로 탈락해 solo_started).
      */
     source: "installed" | "firm-node" | "hub-borrow";
@@ -142,6 +142,7 @@ export interface OneTeamPreflightProposal {
   complexityReasons: OneTeamPreflightComplexityReason[];
   roles: OneTeamPreflightRole[];
   cost: {
+    /** Legacy field name retained for stored proposals; new public Hub calls cost no Agentlas credits. */
     hubBorrowing: "none" | "unknown";
     runtimeUsage: "unknown";
     currency: null;
