@@ -81,6 +81,12 @@ export interface RunnerRequest {
    */
   browserOnly?: true;
   /**
+   * Main-authored: this run's owner explicitly selected Computer Use (tool mode
+   * "computer-use"). Only then may an unattended or browser-only run reach a
+   * runtime's own vendor desktop-control surfaces (codex-desktop-surface.ts).
+   */
+  desktopControlGrant?: true;
+  /**
    * Main이 Mobile 또는 무인 read 자동화에만 부여하는 격리 표식.
    * renderer/wire 입력에서 받지 않는다. 이 표식이 있으면 로컬 CLI·MCP·파일 도구를
    * 사용하지 않고, 명시적으로 전달된 컨텍스트와 이미지로만 답해야 한다.
