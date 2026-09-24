@@ -48,6 +48,8 @@ import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import { EFFECT_OBSERVATION_EXHAUSTED, isEffectUncertainBlockReason, maybeDispatchEffectObservation } from "./effect-observation";
 import { isGoalObserving, type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
+import { holdingAgentResidency } from "../runtime/agent-residency";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 
 export type BlockedGoalSweepAction = "observation_dispatched" | "resumed" | "retry_scheduled" | "cancelled" | "deferred";
 
@@ -165,7 +167,28 @@ const CANCEL_ON_RESUME_REFUSAL: Record<string, string> = {
   auto_goal_resume_surface_mismatch: "goal_chat_binding_missing",
 };
 
+/**
+ * Another turn in the same Work project holds its provider (the admission that refused this Goal's turn
+ * with work_project_residency_busy). Measured 2026-09-24: two Goals in one project made the sweep resume
+ * the waiting one every 60 s, fail again, and post the same "continuing" notice each time.
+ */
+export function projectHeldByAnotherTurn(run: LongRunRecord, dispatcher: EffectObservationDispatcher): boolean {
+  const projectId = run.rootChatId ? getChat(run.rootChatId)?.projectId ?? null : null;
+  if (!projectId) return false;
+  if (holdingAgentResidency().some((entry) => entry.projectId === projectId && entry.inUse && entry.chatId !== run.rootChatId)) return true;
+  return dispatcher.activeChatIds().some((chatId) => chatId !== run.rootChatId && getChat(chatId)?.projectId === projectId);
+}
+
+/** The previous sweep resume of this run was for the same blocked cause: the person was already told. */
+function alreadyToldForCause(run: LongRunRecord): boolean {
+  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.fromReason') AS reason FROM long_run_events
+    WHERE run_id = ? AND kind = ? AND json_extract(payload_json, '$.action') = 'resumed' ORDER BY seq DESC LIMIT 1`)
+    .get(run.id, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { reason: string | null } | undefined;
+  return Boolean(row && run.blockedReason && row.reason === run.blockedReason);
+}
+
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
+  const toldBefore = alreadyToldForCause(run);
   const chatId = run.rootChatId!;
   let prepared: { request: NonNullable<ReturnType<typeof automaticGoalResumeRequest>>; queuedId: string } | null = null;
   let current = run;
@@ -206,7 +229,8 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     }
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
-  notify(run, "멈춰 있던 목표를 원래 권한과 예산 그대로 다시 이어갑니다. 결과는 끝나면 다시 검증합니다.",
+  // Once per blocked cause: a repeat of the same stop is not news to the person.
+  if (!toldBefore) notify(run, "멈춰 있던 목표를 원래 권한과 예산 그대로 다시 이어갑니다. 결과는 끝나면 다시 검증합니다.",
     "Continuing the stopped goal with its original permissions and budget. The result is verified again when it finishes.");
   try {
     dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
@@ -311,6 +335,11 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
     run = current;
   }
 
+  // 2a. Its turn was refused because another turn holds this Work project: wait for that turn to end
+  // (resumeGoalsWaitingOnProject is called when it settles). No model start, no retry schedule, no notice.
+  if (run.status === "blocked" && run.blockedReason === WORK_PROJECT_RESIDENCY_BUSY_CODE && projectHeldByAnotherTurn(run, dispatcher)) {
+    return defer("project_held_by_another_turn");
+  }
   // 2. Effects are settled (or absent): continue the goal itself.
   const chat = run.rootChatId ? getChat(run.rootChatId) : null;
   if (!chat || chat.goalId !== run.goalId) return cancel(run, "goal_chat_binding_missing", trigger);
@@ -392,6 +421,32 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
       } catch (error) {
         results.push({ runId: id, fromReason: null, action: "deferred", detail: errorCode(error, "blocked_goal_sweep_failed") });
       }
+    }
+  }
+  return results;
+}
+
+/**
+ * Event-driven half of the project wait: called when a turn in a Work project settles. Goals of that
+ * project that were refused as work_project_residency_busy continue now instead of on the next minute tick.
+ */
+export function resumeGoalsWaitingOnProject(dispatcher: EffectObservationDispatcher, projectId: string): BlockedGoalSweepResult[] {
+  try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
+  const rows = getDb().prepare(`SELECT l.id FROM long_runs AS l JOIN chats AS c ON c.id = l.root_chat_id
+    WHERE l.status = 'blocked' AND l.blocked_reason = ? AND c.project_id = ?
+      AND l.surface IN ('one','work') AND l.execution_location = 'desktop-local' AND l.host_owner_kind = 'desktop'
+    ORDER BY l.updated_at LIMIT 10`).all(WORK_PROJECT_RESIDENCY_BUSY_CODE, projectId) as Array<{ id: string }>;
+  const results: BlockedGoalSweepResult[] = [];
+  const budget = { dispatches: BLOCKED_GOAL_SWEEP_MAX_DISPATCHES - 1 }; // one successor: the project admits one turn
+  for (const { id } of rows) {
+    try {
+      const run = getLongRun(id);
+      if (!run) continue;
+      const result = sweepOne(run, dispatcher, "project-released", budget);
+      if (result) results.push(result);
+      if (result?.action === "resumed") break;
+    } catch (error) {
+      results.push({ runId: id, fromReason: null, action: "deferred", detail: errorCode(error, "blocked_goal_sweep_failed") });
     }
   }
   return results;

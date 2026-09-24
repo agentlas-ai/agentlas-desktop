@@ -101,6 +101,8 @@ import {
 import { getProject } from "../store/projects";
 import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
+import { resumeGoalsWaitingOnProject } from "../long-run/blocked-goal-sweep";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   admitInvocationWithStartReceipt,
   decideInvocationAdmission,
@@ -894,14 +896,14 @@ export function preDispatchRefusalReasonCode(error: unknown): string {
 }
 
 /** The checkpoint's own controller attempt settled without any observed operation (sideEffectState none). */
-function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string | null): boolean {
+function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string | null): { errorCode: string | null } | null {
   const run = invocationRunId ? getLongRunByGoalId(goalId) : null;
-  if (!run || !invocationRunId || unsettledLongRunAttemptCount(run.id)) return false;
-  const row = getDb().prepare(`SELECT a.state, a.side_effect_state FROM long_run_worker_attempts AS a
+  if (!run || !invocationRunId || unsettledLongRunAttemptCount(run.id)) return null;
+  const row = getDb().prepare(`SELECT a.state, a.side_effect_state, a.error_code FROM long_run_worker_attempts AS a
     JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
     WHERE a.run_id = ? AND a.invocation_run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
-    .get(run.id, invocationRunId) as { state: string; side_effect_state: string } | undefined;
-  return row?.state === "interrupted" && row.side_effect_state === "none";
+    .get(run.id, invocationRunId) as { state: string; side_effect_state: string; error_code: string | null } | undefined;
+  return row?.state === "interrupted" && row.side_effect_state === "none" ? { errorCode: row.error_code } : null;
 }
 
 export class InvocationService {
@@ -2143,6 +2145,8 @@ export class InvocationService {
      * Goal projection exists.
      */
     let lastControllerSelection: RuntimeSelection | null = null;
+    /** The root runtime's typed failure code, so the attempt keeps a recoverable cause (e.g. project busy). */
+    let observedRuntimeErrorCode: string | null = null;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
       // A Goal revision owns a new durable task. Reusing one controller worker
@@ -2201,7 +2205,8 @@ export class InvocationService {
         // effect observation, one per attempt, while the project stayed busy.
         sideEffectState: completed ? "committed" : effectBoundary.observedNoOperations() ? "none" : "uncertain",
         ...(!completed
-          ? { errorCode: terminalDisposition.errorCode ?? "runtime_interrupted" }
+          ? { errorCode: observedRuntimeErrorCode === WORK_PROJECT_RESIDENCY_BUSY_CODE
+            ? WORK_PROJECT_RESIDENCY_BUSY_CODE : terminalDisposition.errorCode ?? "runtime_interrupted" }
           : {}),
       });
       goalInvocationProjection?.settleOpenWorkers(completed);
@@ -2300,6 +2305,7 @@ export class InvocationService {
           lastControllerSelection = event.runtimeSelection;
           bindGoalControllerAttempt(event.runtimeSelection);
         }
+        if (event.kind === "error" && !event.agentId && typeof event.error?.code === "string") observedRuntimeErrorCode = event.error.code;
         /*
          * 권한 승격 표식은 사용자에게 보여줄 문장이 아니다 — 감지 즉시 화면·기록
          * 본문에서 지우고, 그 사실만 남겨 완주 후 승인칩이 잇는다. 부분 스트림과
@@ -3614,6 +3620,14 @@ export class InvocationService {
         this.publishActiveChats();
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
         this.drainSteerQueue(runReq.chatId);
+        // A turn in a Work project released it: Goals refused as project-busy continue now (event-driven).
+        if (chat.projectId && !effectObservation) {
+          const projectId = chat.projectId;
+          setTimeout(() => {
+            try { resumeGoalsWaitingOnProject(this, projectId); }
+            catch (error) { console.warn("[blocked-goal-sweep] project release resume failed:", error); }
+          }, 1_500).unref?.();
+        }
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,
         });
@@ -3676,12 +3690,15 @@ export class InvocationService {
           : "A follow-up verification step still needs the attachment. The Goal was paused instead of silently reusing a one-turn file grant. Reattach the file in this conversation to continue.");
         return;
       }
-      if (checkpoint.sideEffects.state === "uncertain" && !checkpoint.sideEffects.attemptRefs.length
-        && checkpointProducerHadNoEffects(input.goalId, checkpoint.invocationRunId)) {
+      const noEffects = checkpoint.sideEffects.state === "uncertain" && !checkpoint.sideEffects.attemptRefs.length
+        ? checkpointProducerHadNoEffects(input.goalId, checkpoint.invocationRunId) : null;
+      if (noEffects) {
         // The producer turn failed before touching anything: not an effect question. The blocked-goal
-        // sweep resumes it through the ordinary resume path (no model observation).
+        // sweep resumes it through the ordinary resume path (no model observation). A turn refused because
+        // another turn holds the Work project waits for that turn (resumeGoalsWaitingOnProject).
         const current = getLongRunByGoalId(input.goalId);
-        if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_producer_no_effects" });
+        if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host",
+          reason: noEffects.errorCode === WORK_PROJECT_RESIDENCY_BUSY_CODE ? WORK_PROJECT_RESIDENCY_BUSY_CODE : "checkpoint_producer_no_effects" });
         return;
       }
       if (checkpoint.sideEffects.state === "uncertain") {
