@@ -113,6 +113,16 @@ export interface AutomationStrategyOriginAdoptionReceipt {
   proposalId: string;
   proposalInputDigest: string;
   approvedAt: string;
+  /**
+   * Who adopted the origin. Absent = an explicit human review decision (the
+   * original path). `owner_goal_delegation` = the owning Goal chat's current
+   * revision already carries the owner's full-permission authority receipt
+   * for this ongoing work, so Main records the adoption itself instead of
+   * leaving the proposal silently pending. The authority ref is copied
+   * verbatim from the Goal revision (machine receipt, never prose).
+   */
+  authority?: "owner_goal_delegation";
+  authorityRef?: string;
 }
 
 export interface AutomationStrategyProposalObservationV1 {
@@ -213,6 +223,8 @@ const MAX_PATCH_OPS = 4;
 const MAX_REVIEW_EVIDENCE_CHARS = 32_000;
 const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const DEFINITION_DIGEST_RE = /^[a-f0-9]{64}$/;
+/** Host-written Goal authority receipt for a full-permission owner invocation. */
+const OWNER_FULL_AUTHORITY_REF_RE = /^invocation:[^\s]{1,300}:permission:full$/;
 const RUN_STATUSES = new Set<AutomationRunRecord["status"]>([
   "ok", "partial", "error", "skipped", "blocked", "needs_input",
 ]);
@@ -416,7 +428,10 @@ function parseOriginAdoption(value: unknown): AutomationStrategyOriginAdoptionRe
     || typeof raw.sourceDefinitionDigest !== "string" || !DEFINITION_DIGEST_RE.test(raw.sourceDefinitionDigest)
     || typeof raw.proposalId !== "string" || !raw.proposalId.trim()
     || typeof raw.proposalInputDigest !== "string" || !DIGEST_RE.test(raw.proposalInputDigest)
-    || typeof raw.approvedAt !== "string" || !Number.isFinite(Date.parse(raw.approvedAt))) {
+    || typeof raw.approvedAt !== "string" || !Number.isFinite(Date.parse(raw.approvedAt))
+    || (raw.authority !== undefined && raw.authority !== "owner_goal_delegation")
+    || ((raw.authority === undefined) !== (raw.authorityRef === undefined))
+    || (raw.authorityRef !== undefined && (typeof raw.authorityRef !== "string" || !OWNER_FULL_AUTHORITY_REF_RE.test(raw.authorityRef)))) {
     throw new Error("origin_adoption_invalid");
   }
   return {
@@ -433,6 +448,7 @@ function parseOriginAdoption(value: unknown): AutomationStrategyOriginAdoptionRe
     proposalId: raw.proposalId,
     proposalInputDigest: raw.proposalInputDigest,
     approvedAt: raw.approvedAt,
+    ...(raw.authority ? { authority: raw.authority, authorityRef: raw.authorityRef } : {}),
   };
 }
 
@@ -1351,6 +1367,52 @@ function createOriginAdoptionReceipt(
   };
 }
 
+/**
+ * Owner-delegated adoption of an unverified monitor origin (2026-09-24).
+ *
+ * Measured on the owner's store: a Goal chat updated its own automation in
+ * place (automation.update never binds a Goal), so every later strategy
+ * proposal - 8 of 8 "change" drafts, each judged within_scope - stopped at
+ * "automation origin is unverified; explicit user approval is required" and
+ * stayed pending forever. No approval sheet surfaced (that sheet only opens
+ * for payment), so the automation self-correction loop was silently shut
+ * while the Goal revision already recorded the owner's full-permission grant.
+ *
+ * This returns the exact authority receipt only when every machine fact
+ * lines up; it never reads prose:
+ *  - the automation is agent-created, unbound, and its monitor origin is an
+ *    owner (role=user) message inside the very Goal chat it points at - the
+ *    Goal's opening request or a later owner message;
+ *  - the Goal is active/blocked, ongoing, and its current revision was sourced
+ *    from an owner message and carries an `invocation:*:permission:full` ref.
+ * Payment, Goal-contract amendments, and schedule/permission scope outside the
+ * allowlisted patch surface are handled before/after this and stay gated.
+ */
+function ownerDelegatedAuthorityRef(
+  current: AutomationStrategyProposalReceipt,
+  boundary: StrategyReviewBoundary,
+): string | null {
+  if (!current.goalOwnershipUnverified || current.goalBound || boundary.originAdoption) return null;
+  const { automation, goal, goalRevision } = boundary;
+  if (!goal || !goalRevision || !["active", "blocked"].includes(goal.status)) return null;
+  if (goalRevision.lifecycle !== "ongoing") return null;
+  if (automation.createdBy !== "agent" || automation.goalId !== null || !automation.monitor) return null;
+  if (automation.monitor.originChatId !== goalRevision.chatId || goalRevision.goalId !== current.goalId) return null;
+  if (goalRevision.sourceMessage.role !== "user" || goalRevision.originalRequest.role !== "user") return null;
+  const originMessageId = automation.monitor.originMessageId;
+  if (!originMessageId) return null;
+  const origin = getDb().prepare("SELECT chat_id, role, created_at FROM chat_messages WHERE id = ?")
+    .get(originMessageId) as { chat_id: string; role: string; created_at: string } | undefined;
+  const firstRevision = getChatGoalRevision(goalRevision.goalId, 1);
+  // The origin is either the Goal's own opening request or a later owner
+  // message in the same chat - never something written before the Goal.
+  if (!origin || origin.chat_id !== goalRevision.chatId || origin.role !== "user" || !firstRevision
+    || !Number.isFinite(Date.parse(origin.created_at))
+    || (originMessageId !== firstRevision.sourceMessage.messageId
+      && Date.parse(origin.created_at) < Date.parse(firstRevision.createdAt))) return null;
+  return goalRevision.authorityRefs.find((ref) => OWNER_FULL_AUTHORITY_REF_RE.test(ref)) ?? null;
+}
+
 function normalizeGoalAmendmentInput(input: AutomationStrategyGoalAmendmentInput): AutomationStrategyGoalAmendmentInput {
   if (!input || typeof input.text !== "string" || input.text.length > MAX_TEXT_CHARS || input.text.includes("\0")) {
     throw new AutomationStrategyProposalError("proposal_goal_amendment_input_invalid", "goal_amendment_text_invalid");
@@ -1690,6 +1752,42 @@ export async function adjudicateAutomationStrategyProposal(
     authorization === "within_scope" ? "within_scope" : authorization === "goal_amendment" ? "goal_amendment" : "user_approval");
   if (verdict.verdict === "goal_amendment_required") {
     return saveAdjudication(current, storedConflict, "needs_user_approval", adjudication);
+  }
+  if ((verdict.verdict === "within_scope" || verdict.verdict === "needs_user_approval")
+    && !current.requiresPaymentApproval
+    && current.goalOwnershipUnverified && !boundary.originAdoption) {
+    const authorityRef = ownerDelegatedAuthorityRef(current, boundary);
+    if (authorityRef && safeExecutableChange(boundary.automation, current)) {
+      const delegatedAdjudication = judgedAdjudication(
+        "within_scope",
+        "The owner delegated this ongoing Goal with full permission; its Goal chat automation was adopted for strategy-only changes.",
+        verdict.runtimeReceipt,
+        "within_scope",
+      );
+      const delegated = {
+        ...current,
+        conflict: "within_scope" as const,
+        originAdoption: {
+          ...createOriginAdoptionReceipt(current, boundary),
+          authority: "owner_goal_delegation" as const,
+          authorityRef,
+        },
+        adjudication: delegatedAdjudication,
+      };
+      try {
+        return applyProposalAtomically(delegated, {
+          expectedStatus: current.status,
+          conflict: "within_scope",
+          adjudication: delegatedAdjudication,
+        });
+      } catch (error) {
+        if (error instanceof AutomationStrategyProposalError
+          && ["proposal_apply_stale", "proposal_transition_conflict", "automation_strategy_goal_binding_stale", "automation_strategy_goal_revision_stale", "proposal_origin_adoption_stale"].includes(error.code)) {
+          return saveReviewUnavailable(current, error.code);
+        }
+        throw error;
+      }
+    }
   }
   if (verdict.verdict === "needs_user_approval"
     && !current.requiresPaymentApproval
