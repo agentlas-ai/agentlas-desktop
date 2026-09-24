@@ -166,9 +166,6 @@ import {
   type MobileBridgeBuildStatus,
   type MobileBridgeCloudDeleteResultDto,
   type MobileBridgeHubPublishDto,
-  type MobileBridgeHubPricesDto,
-  type MobileBridgeHubPriceRefusalDto,
-  MOBILE_BRIDGE_HUB_PRICE_KINDS,
   type MobileBridgeCloudRefusalDto,
   type MobileBridgeCloudUploadSaveDto,
   type MobileBridgeCloudUploadPreviewDto,
@@ -3555,52 +3552,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         };
         return asJsonValue(published, request.method);
       }
-      // Legacy price RPC stays only to refuse older Mobile clients. Publishing
-      // is free, and cloudAgentActions.setHubPrices always returns retirement.
+      // Keep the legacy RPC name for older Mobile clients, but never delegate
+      // pricing to an injected action or a remote service. Hub is free.
       case "cloud.setHubPrices": {
-        const params = guardedParams(request, ["slug", "prices", "idempotencyKey"]);
-        const slug = requiredIdentifier(params, "slug", RUN_ID_RE);
-        this.consumeWriteIdempotencyKey(request, params);
-        const sessionRefusal = this.cloudSessionRefusal();
-        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-        const pricesInput = params.prices;
-        if (!pricesInput || typeof pricesInput !== "object" || Array.isArray(pricesInput)) {
-          throw new TypeError("cloud.setHubPrices requires a prices object");
-        }
-        const patch: Partial<Record<(typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number], number | null>> = {};
-        for (const kind of MOBILE_BRIDGE_HUB_PRICE_KINDS) {
-          if (!(kind in pricesInput)) continue;
-          const value = (pricesInput as Record<string, unknown>)[kind];
-          if (value === null) {
-            patch[kind] = null;
-          } else if (Number.isInteger(value)) {
-            patch[kind] = value as number;
-          } else {
-            throw new TypeError(`cloud.setHubPrices ${kind} must be null or an integer`);
-          }
-        }
-        const result = await this.cloudAgentActions.setHubPrices({ slug, patch });
-        if (!result.ok) {
-          const refusal: MobileBridgeHubPriceRefusalDto = {
-            code: boundedRedactedText(result.code, 160),
-            message: boundedRedactedText(result.message, 1_000),
-            ...(typeof result.kind === "string" ? { kind: boundedRedactedText(result.kind, 16) } : {}),
-            ...(typeof result.minCredits === "number" ? { minCredits: result.minCredits } : {}),
-            ...(typeof result.maxCredits === "number" ? { maxCredits: result.maxCredits } : {}),
-          };
-          return asJsonValue({ refusal }, request.method);
-        }
-        const prices: MobileBridgeHubPricesDto["prices"] = {};
-        for (const kind of MOBILE_BRIDGE_HUB_PRICE_KINDS) {
-          const value = result.prices[kind];
-          if (typeof value === "number" && Number.isFinite(value)) prices[kind] = value;
-        }
-        const priced: MobileBridgeHubPricesDto = {
-          ok: true,
-          changed: result.changed === true,
-          prices,
-        };
-        return asJsonValue(priced, request.method);
+        return asJsonValue({ refusal: {
+          code: "marketplace_pricing_retired",
+          message: "Hub agent pricing is retired.",
+        } }, request.method);
       }
       case "agents.cloudDelete": {
         const params = guardedParams(request, ["slug", "idempotencyKey"]);
