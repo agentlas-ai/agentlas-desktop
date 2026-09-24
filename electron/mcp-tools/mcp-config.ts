@@ -51,6 +51,7 @@ import {
 } from "./proxy-channel";
 import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
+import { agentRunCwd } from "../runtime/exec";
 import {
   BROWSER_CDP_LAUNCHER_BASENAME,
   BROWSER_CDP_LAUNCHER_PATH_ENV,
@@ -279,8 +280,13 @@ function mcpProxySpec(
   if (!fs.existsSync(childPath)) {
     throw new Error(gate.planMode ? "plan_mode_mcp_proxy_unavailable" : "mcp_proxy_child_unavailable");
   }
+  // The proxied server runs where the runtime CLI runs. Falling back to Main's
+  // process.cwd() gave it a different root than the CLI (packaged: "/", dev: the
+  // app folder), so a browser file upload of an image the run just wrote to
+  // agent-cwd/assets was refused as "outside allowed roots" (dev-app E2E
+  // 2026-09-24, Threads automation publish node). agentRunCwd() is the runners' cwd.
   const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
-    cwd: gate.cwd === undefined ? (opts?.workingFolder ?? process.cwd()) : gate.cwd, catalogId, planReadAuthority,
+    cwd: gate.cwd === undefined ? (opts?.workingFolder ?? agentRunCwd()) : gate.cwd, catalogId, planReadAuthority,
     ...(readOnlyBrowser ? { readOnlyBrowser: true as const } : {}) });
   if (isPersistentMcpProxyLaunch(handle)) residentHandles.push(handle);
   else ownedHandles.push(handle);
