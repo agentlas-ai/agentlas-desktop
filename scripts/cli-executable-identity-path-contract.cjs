@@ -79,6 +79,16 @@ check("찾은 실행 파일이 spawnCli 가 쓸 PATH 의 첫 후보와 같다", 
   assert.strictEqual(identity && identity.executable, expected);
 });
 
+check("CLI 실행 환경은 알려진 NODE_ENV 의 끝 개행만 정규화하고 호출자 값을 보존한다", () => {
+  const base = { PATH: GUI_PATH, NODE_ENV: "development\n" };
+  assert.strictEqual(envForCli("claude", base).NODE_ENV, "development");
+  assert.strictEqual(base.NODE_ENV, "development\n", "호출자 환경을 변형하면 안 된다");
+  for (const mode of ["development", "production", "test"]) {
+    assert.strictEqual(envForCli("claude", { PATH: GUI_PATH, NODE_ENV: mode }).NODE_ENV, mode);
+  }
+  assert.strictEqual(envForCli("claude", { PATH: GUI_PATH, NODE_ENV: "custom\n" }).NODE_ENV, "custom\n");
+});
+
 check("회귀 방향 — 호출자 원래 PATH 만으로는 찾지 못한다(옛 동작)", () => {
   assert.strictEqual(resolveOnPath("agy", GUI_PATH), null,
     "이 검사는 보강된 PATH 덕에 통과한 것인지 구분하지 못한다");

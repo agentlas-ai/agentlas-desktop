@@ -139,6 +139,14 @@ export function isCurrentElectronExecutable(command: string): boolean {
 /** Environment for a CLI child, with a hard Node-mode guard for self-spawns. */
 export function envForCli(command: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = withCliPath(base);
+  // Bun-based CLIs (including Claude Code) compile NODE_ENV into a JSON define.
+  // A trailing newline inherited from a GUI launcher makes even `claude --version`
+  // fail while parsing defines.json. Canonicalize only known Node modes; leave
+  // custom values alone so this boundary does not reinterpret caller settings.
+  const nodeEnv = env.NODE_ENV;
+  if (nodeEnv && /^(?:development|production|test)$/.test(nodeEnv.trim())) {
+    env.NODE_ENV = nodeEnv.trim();
+  }
   if (isCurrentElectronExecutable(command)) env.ELECTRON_RUN_AS_NODE = "1";
   return env;
 }
