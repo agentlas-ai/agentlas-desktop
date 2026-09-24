@@ -157,6 +157,11 @@ section order or evidence for a new project's claims:
   allows results and discussion to be separate or combined, and asks authors to relate results
   to the hypothesis without overstating conclusions. These are venue examples, not automatic
   submission rules for another journal.
+- Sharma et al., [*Local vortex line topology and geometry in turbulence*](https://doi.org/10.1017/jfm.2021.613),
+  *Journal of Fluid Mechanics* 924, A13 (2021), is an open-access fluid-dynamics example that
+  develops the governing geometry, describes simulations and numerical validation, then states
+  findings within the simulated regimes. Adapt that ordering when it fits the project's question;
+  its flow fields, thresholds, and conclusions are not evidence for another study.
 
 For each planned section, write an original reader path before the final prose pass: **question or
 gap → design or derivation and assumptions → exact observation or theorem step → independent check
@@ -197,6 +202,31 @@ contrasting bodies of evidence → synthesis → uncertainty. These are editoria
 template that licenses missing experiments or proof steps. Do not insert a landmark article's
 claims, citations, wording, or numbers into the project's manuscript unless that article is
 independently committed as relevant project evidence and its claim is supported by exact spans.
+
+Apply a final field-specific reader check where the study calls for it:
+
+- **Mathematics:** state the main result and its scope early; define symbols, quantifiers, and
+  hypotheses before using them. Make the dependency from each lemma to the claimed theorem
+  followable, and identify where each assumption enters the proof. If a step is only a CAS result,
+  describe it as computation, not as a proved theorem. This adapts the reader-guidance and
+  proof-clarity advice in [Bell et al., *Notices of the AMS*](https://doi.org/10.1090/noti2305).
+- **Physics:** let a reader locate the question and prior-work gap, the measured or derived result,
+  its calibration or independent check, uncertainty or competing explanation, and the regime of
+  validity before accepting the headline conclusion. Keep the title and Abstract aligned with
+  those bounded results. [APS Physical Review Letters author guidance](https://journals.aps.org/prl/authors)
+  is an audience and argument example, not a rule for every physics journal.
+- **Fluid dynamics:** define the governing equations and constitutive or closure assumptions,
+  domain, initial and boundary conditions, variables and dimensionless groups needed to understand
+  the result. For a numerical study, report the solver and resolution, a convergence or sensitivity
+  check where applicable, and any comparison used to validate the physical interpretation. For an
+  experiment, report the relevant apparatus and measurement limits instead. Explain which flow
+  regime was tested and narrow conclusions when a check is absent. Distinguish numerical
+  verification from validation and from a formal proof. Follow a named venue's current notation,
+  abstract, figure, and equation rules, such as the
+  [JFM author instructions](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/information/author-instructions/preparing-your-materials).
+
+These guides shape the original argument only. They never supply this project's scientific facts,
+citations, numbers, or proof steps. Use the exact project bindings and claim ledger for those.
 
 ## Draft in passes
 
