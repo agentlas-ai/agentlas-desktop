@@ -120,6 +120,12 @@ import {
 } from "./automation-strategy";
 import { recordAutomationRecovery } from "./automation-recovery";
 import { buildAutomationContinuityCapsulePrompt } from "./automation-progress-facts";
+import {
+  automationRunActionCalls,
+  automationRunSettlementCause,
+  decideAndRecordAutomationPersistence,
+} from "./persistence-ledger";
+import { runtimeCooldownForSelection } from "./runtime/runtime-cooldown";
 import { declaredGoalForAutomation } from "./automation-declared-goal";
 import type {
   TriggerDeliveryHooks,
@@ -695,6 +701,8 @@ async function runOne(
   /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
   let noProgressLoop: NoProgressDecision | null = null;
   let graphRunAttempted = false;
+  /** 커널/러너가 예외 없이 끝까지 돌았는가(판정 전) — 자기 보류 판정의 호스트 사실. */
+  let runCompleted = false;
   const isGraphAutomation = Boolean(a.graph && a.graph.nodes.length > 0);
   const scheduledOccurrenceId =
     (opts?.advanceSchedule ?? true) &&
@@ -1046,6 +1054,7 @@ async function runOne(
           .filter((step) => step.output.trim().length > 0),
       };
       if (runStatus === "ok") {
+        runCompleted = true;
         // ★두 답을 두 칸에 남긴다.
         //
         // 예전에는 여기서 `runStatus = classified.outcome` 으로 **커널의 답을 지웠다**.
@@ -1246,6 +1255,7 @@ async function runOne(
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
+        runCompleted = true;
         // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         const classified = await classifyAutomationOutcome(output, {
@@ -1499,6 +1509,43 @@ async function runOne(
         // review is advisory, so a temporary DB/model handoff failure cannot
         // change the execution result or lease settlement.
         console.error("[automation] strategy cycle handoff failed:", strategyError);
+      }
+    }
+    // ── 지속 정책(P0-2): 보류는 성공이 아니다 ────────────────────────────────
+    // 끝까지 돌았는데 바깥을 바꾼 호출이 0이고 판정이 목표 미충족으로 본 실행(자기 보류), 또는 도구 없이
+    // 했다고 주장한 실행은 호스트 사실로 원인을 걸고 다음 수를 원장에 남긴다. 다음 실행이 그 수를 소비한다:
+    // replan 은 계획 캡슐의 호스트 지시로, switch_runtime 은 실행 계획의 1회 핸드오프로(저장된 핀은 그대로).
+    // 실측 f7a61706: 19회 중 15회가 스스로 고른 무변경 보류였고 판정은 이를 수용·판정 불가로 받았다.
+    if (runLedgerRecorded && !parentMissing && !leaseOwnershipLost && !opts?.dryRun && currentRunId
+      && !controller.signal.aborted) {
+      try {
+        const actionCalls = automationRunActionCalls(currentRunId);
+        // 둘 다 호스트가 쓴 표식이다: 판정 reasonCode, 또는 그래프 커널의 노드 실패 코드.
+        const claimedWithoutTools = runReasonCode === "claimed_without_tools"
+          || (machineError ?? "").startsWith("[claimed_without_tools]")
+          || (machineError ?? "").includes("NODE_CLAIMED_WITHOUT_TOOLS");
+        const cause = actionCalls === null ? null : automationRunSettlementCause({
+          completed: runCompleted,
+          outcome: runOutcome,
+          reasonCode: claimedWithoutTools ? "claimed_without_tools" : runReasonCode,
+          actionCalls,
+        });
+        if (cause) {
+          const ranOn = a.runtimeSelection;
+          const pool = rolePriorityRuntimes(await detectRuntimes(), "worker");
+          const switchableRuntimes = pool.filter((runtime) =>
+            (runtime.backend ?? null) !== (ranOn?.backend ?? null)
+            && !runtimeCooldownForSelection(selectionForRuntime(runtime))).length;
+          const latest = getAutomation(a.id);
+          decideAndRecordAutomationPersistence({
+            automation: { id: a.id, enabled: latest?.enabled ?? a.enabled },
+            runId: currentRunId,
+            cause,
+            switchableRuntimes,
+          });
+        }
+      } catch (persistenceError) {
+        console.warn("[automation] persistence decision unavailable:", persistenceError);
       }
     }
     // 재실행 정지는 커널이 남긴 결정론적 신호(부수효과가 반영됐는지 알 수 없음)만 보고 정한다.

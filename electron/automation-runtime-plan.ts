@@ -52,6 +52,11 @@ export interface AutomationRuntimePlanInput {
   cooling: (selection: RuntimeSelection) => { kind: string; until: number } | null;
   /** 가장 최근 실행부터 연속으로 automation_no_progress_loop 로 끝난 실행 수와 그때의 공급자. */
   recentNoProgress: { count: number; backend: string | null };
+  /**
+   * 지속 정책이 직전 실행에 대해 switch_runtime 을 골랐는가(자기 보류 두 번째·도구 없는 주장 등).
+   * 원장 영수증(persistence_decision)이 근거다. 없으면 생략.
+   */
+  persistenceSwitch?: { cause: string } | null;
 }
 
 export type AutomationRuntimeRoute =
@@ -65,7 +70,7 @@ export interface AutomationRuntimePlan {
   provenance: AutomationPinProvenance;
   route: AutomationRuntimeRoute;
   handoff: null | {
-    reason: "cooldown" | "no_progress_loop";
+    reason: "cooldown" | "no_progress_loop" | "persistence_switch_runtime";
     from: { kind: string; backend: string | null; model: string | null };
     cooldownKind?: string;
   };
@@ -131,12 +136,13 @@ export function planAutomationRuntime(input: AutomationRuntimePlanInput): Automa
     const cooling = hardCooldown(input, selection);
     const looping = input.recentNoProgress.count >= NO_PROGRESS_HANDOFF_AFTER
       && (input.recentNoProgress.backend === null || input.recentNoProgress.backend === (selection.backend ?? null));
-    if (cooling || looping) {
+    const persistenceSwitch = Boolean(input.persistenceSwitch);
+    if (cooling || looping || persistenceSwitch) {
       const alternate = input.workerPool.find((candidate) =>
         candidate.backend !== selection!.backend && !hardCooldown(input, workerSelection(candidate)));
       if (alternate) {
         handoff = {
-          reason: cooling ? "cooldown" : "no_progress_loop",
+          reason: cooling ? "cooldown" : looping ? "no_progress_loop" : "persistence_switch_runtime",
           from: { kind: selection.kind, backend: selection.backend ?? null, model: selection.model ?? null },
           ...(cooling ? { cooldownKind: cooling.kind } : {}),
         };

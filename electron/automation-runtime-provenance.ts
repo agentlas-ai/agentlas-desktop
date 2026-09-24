@@ -13,6 +13,7 @@ import {
   type AutomationPinProvenance,
   type AutomationRuntimePlan,
 } from "./automation-runtime-plan";
+import { latestAutomationPersistenceDecision } from "./persistence-ledger";
 
 /*
  * 핀 출처는 스키마를 늘리지 않고 run_events(삭제 없는 원장)에 남긴다.
@@ -113,6 +114,12 @@ export function recentNoProgressRuns(automationId: string): { count: number; bac
   }
 }
 
+/** 지속 정책이 직전 실행에 대해 런타임 전환을 골랐으면 그 원인(원장 영수증). */
+export function persistenceSwitchFor(automationId: string): { cause: string } | null {
+  const decision = latestAutomationPersistenceDecision(automationId);
+  return decision && decision.move === "switch_runtime" ? { cause: decision.cause } : null;
+}
+
 /**
  * 이번 실행의 런타임을 정하고, 저장된 핀과 다르면 영수증을 남긴다. 저장된 핀은 바꾸지 않는다.
  */
@@ -132,6 +139,7 @@ export async function planAutomationRuntimeForRun(
     workerPool: rolePriorityRuntimes(detected, "worker"),
     cooling: (selection) => runtimeCooldownForSelection(selection),
     recentNoProgress: recentNoProgressRuns(a.id),
+    persistenceSwitch: persistenceSwitchFor(a.id),
   });
   if (plan.changed || plan.handoff) {
     tryRecordRunEvent({
