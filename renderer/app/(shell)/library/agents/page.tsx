@@ -1934,7 +1934,7 @@ function LibraryAgentsView() {
                     )}
                     {row.useCount > 0 && (
                       <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 750, padding: "2px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
-                        {locale === "ko" ? `빌림 · ${row.useCount}` : `Borrowed · ${row.useCount}`}
+                        {locale === "ko" ? `사용 ${row.useCount}회` : `Used ${row.useCount} times`}
                       </span>
                     )}
                   </button>

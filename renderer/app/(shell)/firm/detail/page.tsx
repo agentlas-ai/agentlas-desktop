@@ -1828,7 +1828,7 @@ function AgentDetailView({
                         <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
                           <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
                           <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
-                            {own.owned ? `${own.label} · owned` : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
+                            {own.owned ? `${own.label} · owned` : (locale === "ko" ? "공개 Hub 게스트 · 호출 전용" : "Public Hub guest · call-only")}
                           </span>
                           <div className="agent-ownership-path">{own.origin}</div>
                           {own.localPath && own.origin !== own.localPath && (
