@@ -135,21 +135,19 @@ function orderListingsForHub(listings: MarketplaceListing[], hubLive: boolean): 
   });
 }
 
-/** 같은 slug이 "호출 가능" 카드와 "설치 전용" 카드로 이중 인덱싱될 때(동일 패키지의 그림자)
+/** 같은 엔티티가 "호출 가능" 카드와 "설치 전용" 카드로 이중 인덱싱될 때(동일 패키지의 그림자)
  *  설치 전용 그림자를 숨긴다 — 호출 가능한 쪽이 상위호환(설치 없이 바로 실행)이라 중복 카드가 헷갈린다.
- *  둘 다 호출 가능한 진짜 별개 엔티티(팀+에이전트 동일 slug)는 그대로 둘 다 남겨 북마크 정체성을 보존한다. */
+ *  slug가 같아도 팀과 에이전트는 별개이므로 북마크 정체성을 보존한다. */
 function dropInstallOnlyShadows(listings: MarketplaceListing[]): MarketplaceListing[] {
-  const callableSlugs = new Set<string>();
+  const callableIdentities = new Set<string>();
   for (const l of listings) {
-    if (l.callable === true || l.kind === "cloud-callable") {
-      const slug = (l.slug || "").trim().toLowerCase();
-      if (slug) callableSlugs.add(slug);
+    if (isCallableHubListing(l)) {
+      if (l.slug?.trim()) callableIdentities.add(hubListingIdentityKey(l));
     }
   }
   return listings.filter((l) => {
-    if (l.callable === true || l.kind === "cloud-callable") return true;
-    const slug = (l.slug || "").trim().toLowerCase();
-    return !(slug && callableSlugs.has(slug));
+    if (isCallableHubListing(l)) return true;
+    return !l.slug?.trim() || !callableIdentities.has(hubListingIdentityKey(l));
   });
 }
 
@@ -1172,8 +1170,12 @@ function AgentCard({
           )}
           <div className="hub-card-author">{author}</div>
         </div>
-        {/* Hub listing categories are shown without the retired credit price. */}
-        {callable && !plugin ? null : plugin ? (
+        {/* A callable public agent is free; the retired per-call price stays hidden. */}
+        {callable && !plugin ? (
+          <RdTag className="hub-credit-tag" bg={C.green}>
+            {ko ? "무료 호출" : "Free to call"}
+          </RdTag>
+        ) : plugin ? (
           <RdTag className="hub-credit-tag" bg={C.blue}>
             {listing.category || cardLabel}
           </RdTag>
