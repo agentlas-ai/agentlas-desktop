@@ -99,11 +99,23 @@ function isSameOrigin(target: string): boolean {
   }
 }
 
-/** 임베드 안에 머물러도 되는 주소인가 — 공개 소개 페이지만. */
+/** 임베드 안에 머물러도 되는 주소인가 — 공개 Agent Space 페이지만. */
 function isProfilePath(target: string): boolean {
   try {
     const url = new URL(target);
-    return url.origin === allowedOrigin() && /^\/p\/[a-z0-9][a-z0-9-]*\/?$/.test(url.pathname);
+    return url.origin === allowedOrigin()
+      && /^\/p\/[a-z0-9][a-z0-9-]*(?:\/(?:files|experience|discussions(?:\/[a-f0-9-]{36})?))?\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Experience Chips live in Agent Space; their existing detail pages open in the browser. */
+function isExperienceChipDetailPath(target: string): boolean {
+  try {
+    const url = new URL(target);
+    return url.origin === allowedOrigin()
+      && /^\/ontology\/(?:taste\/)?[^/]+\/?$/.test(url.pathname);
   } catch {
     return false;
   }
@@ -209,20 +221,31 @@ export async function openHubProfileView(input: {
   const url = `${allowedOrigin()}/p/${slug}`;
   view.setBackgroundColor("#00000000");
 
-  // 임베드 안에 머무를 수 있는 건 소개 페이지뿐이다.
-  //  · 다른 소개(/p/…)로 가는 링크 → 그대로 안에서 이동.
+  // 임베드 안에 머무를 수 있는 건 Agent Space 공개 페이지뿐이다.
+  //  · 소개, Files, Discussions, Experience Chips → 그대로 안에서 이동.
+  //  · 경험칩 상세(/ontology/…) → 기본 브라우저에서 연다.
   //  · 웹의 다른 화면(예: 페이지 안의 "← Marketplace") → 브라우저를 열지 않고
   //    데스크탑 자기 허브 화면으로 돌려보낸다. 앱 안에서 웹 마켓플레이스가
   //    열리면 같은 화면이 두 벌이 된다.
   //  · 바깥 사이트 → 사용자의 기본 브라우저.
+  const leaveAgentSpace = (target: string): void => {
+    if (isExperienceChipDetailPath(target)) {
+      void shell.openExternal(target).catch(() => undefined);
+    } else if (!isSameOrigin(target)) {
+      void shell.openExternal(target).catch(() => undefined);
+    }
+    if (!window.isDestroyed()) window.webContents.send("marketplace:profileViewExit");
+  };
   view.webContents.on("will-navigate", (event, target) => {
     if (isProfilePath(target)) return;
     event.preventDefault();
-    if (isSameOrigin(target)) {
-      if (!window.isDestroyed()) window.webContents.send("marketplace:profileViewExit");
-      return;
-    }
-    void shell.openExternal(target).catch(() => undefined);
+    leaveAgentSpace(target);
+  });
+  // Next.js client-side Links use history navigation; `will-navigate` does not
+  // guard those transitions. Keep the same Agent Space boundary after them.
+  view.webContents.on("did-navigate-in-page", () => {
+    const target = view.webContents.getURL();
+    if (!isProfilePath(target)) leaveAgentSpace(target);
   });
   view.webContents.setWindowOpenHandler(({ url: target }) => {
     void shell.openExternal(target).catch(() => undefined);

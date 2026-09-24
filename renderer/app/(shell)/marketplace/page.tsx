@@ -24,7 +24,6 @@ import { EntityKindIcon } from "@/components/EntityKindIcon";
 import { IconAlertTriangle } from "@/components/Icon";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
-  ExperienceHubCatalogResult,
   HephaestusCommandResult,
   MarketplaceListing,
   McpToolCatalogEntry,
@@ -45,7 +44,6 @@ const C = {
  */
 type HubCategory = "all" | "agent" | "team" | "graph";
 type HubEntityCategory = HubCategory | "plugin";
-type HubView = "agents" | "experience";
 
 function isLiveHubListing(listing: MarketplaceListing): boolean {
   return listing.source === "hub-index" || listing.source === "hub-profile" || listing.source === "hub-plugin" || listing.kind === "cloud-callable" || listing.callable === true;
@@ -202,11 +200,7 @@ function MarketplacePage() {
 
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
-  const [hubView, setHubView] = useState<HubView>(() => searchParams.get("view") === "experience" ? "experience" : "agents");
   const [category, setCategory] = useState<HubCategory>("all");
-  const [experienceCatalog, setExperienceCatalog] = useState<ExperienceHubCatalogResult | null>(null);
-  const [experienceCatalogLoading, setExperienceCatalogLoading] = useState(false);
-  const [experienceCatalogRevision, setExperienceCatalogRevision] = useState(0);
 
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
@@ -297,28 +291,6 @@ function MarketplacePage() {
   useEffect(() => {
     void refresh();
   }, []);
-
-  useEffect(() => {
-    if (hubView !== "experience") return;
-    let cancelled = false;
-    setExperienceCatalogLoading(true);
-    void ipc()?.experience.hubCatalog()
-      .then((result) => {
-        if (!cancelled) setExperienceCatalog(result);
-      })
-      .catch(() => {
-        if (!cancelled) setExperienceCatalog({
-          status: "unavailable",
-          chips: [],
-          checkedAt: new Date().toISOString(),
-          message: ko ? "지금은 Hub 경험칩 목록을 불러오지 못했습니다." : "Experience Chips are temporarily unavailable.",
-        });
-      })
-      .finally(() => {
-        if (!cancelled) setExperienceCatalogLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [hubView, ko, experienceCatalogRevision]);
 
   useEffect(
     () => onHubBookmarkChange((change) => {
@@ -541,24 +513,6 @@ function MarketplacePage() {
     ? ko ? "계정 로그인됨" : "Account signed in"
     : ko ? "로그인 필요" : "Signed out";
 
-  async function openHubPage(pathname: string) {
-    const api = ipc();
-    if (!api?.fs?.openPath) return;
-    let origin = "https://agentlas.cloud";
-    try {
-      if (sourceStatus?.baseUrl?.startsWith("http")) origin = new URL(sourceStatus.baseUrl).origin;
-    } catch {
-      // Keep the public Hub origin when a diagnostic base URL is malformed.
-    }
-    const result = await api.fs.openPath(`${origin}${pathname}`);
-    if (!result.ok) {
-      setImportNotice({
-        tone: "error",
-        text: result.message || (ko ? "Hub 페이지를 열지 못했습니다." : "Could not open the Hub page."),
-      });
-    }
-  }
-
   return (
     <div className="rd hub-desktop-root">
       <div className="titlebar-nodrag hub-desktop-scroll">
@@ -589,47 +543,9 @@ function MarketplacePage() {
                 </span>
               </div>
             </div>
-            <div
-              role="tablist"
-              aria-label={ko ? "Hub에서 찾을 것" : "What to find on Hub"}
-              className="hub-view-tabs"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={hubView === "agents"}
-                className="hub-view-tab"
-                data-active={hubView === "agents"}
-                onClick={() => setHubView("agents")}
-              >
-                {ko ? "AI 인재·도구" : "AI talent & tools"}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={hubView === "experience"}
-                className="hub-view-tab"
-                data-active={hubView === "experience"}
-                onClick={() => setHubView("experience")}
-              >
-                {ko ? "경험칩 사고팔기" : "Buy & sell Experience Chips"}
-              </button>
-            </div>
             <main className="rd-page hub-web-content">
               <div className="hub-page-root">
-          {hubView === "experience" ? (
-            <ExperienceChipHubIntro
-              ko={ko}
-              catalog={experienceCatalog}
-              catalogLoading={experienceCatalogLoading}
-              onRetry={() => {
-                setExperienceCatalog(null);
-                setExperienceCatalogRevision((current) => current + 1);
-              }}
-              onOpenChip={(detailPath) => void openHubPage(detailPath)}
-            />
-          ) : (
-          <>
+          {/* Experience Chips belong to each agent's Agent Space, reached from a Hub card. */}
           <div
             className="card portal-search-panel rd-card-cream"
             data-tour-id="hub.search"
@@ -963,108 +879,12 @@ function MarketplacePage() {
               <button type="button" className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(Math.min(totalPages, safePage + 1))}>{ko ? "다음" : "Next"}</button>
             </nav>
           )}
-          </>
-          )}
               </div>
             </main>
           </div>
         </div>
       </div>
     </div>
-  );
-}
-
-function ExperienceChipHubIntro({
-  ko,
-  catalog,
-  catalogLoading,
-  onRetry,
-  onOpenChip,
-}: {
-  ko: boolean;
-  catalog: ExperienceHubCatalogResult | null;
-  catalogLoading: boolean;
-  onRetry: () => void;
-  onOpenChip: (detailPath: string) => void;
-}) {
-  const benefits = ko
-    ? [
-        ["막혔던 일을 더 빨리 해결", "실제로 해결했던 순서와 확인 방법을 다음 작업에 다시 씁니다."],
-        ["결과물의 취향을 일정하게 유지", "내가 고른 문체·구성·디자인 방향을 새 작업에도 이어갑니다."],
-        ["경험의 쓰임 확인", "어떤 업무에 도움이 되는지 살펴봅니다."],
-      ]
-    : [
-        ["Solve familiar blockers faster", "Reuse steps and checks that already worked in real tasks."],
-        ["Keep output style consistent", "Carry your preferred tone, structure, and visual direction into new work."],
-        ["Explore how it helps", "See which tasks benefit from the shared experience."],
-      ];
-  return (
-    <section data-testid="experience-chip-hub-entry" style={{ display: "grid", gap: 16 }}>
-      <div className="card rd-card-cream" style={{ padding: 22, display: "grid", gap: 10 }}>
-        <div className="portal-eyebrow">EXPERIENCE CHIP</div>
-        <h1 style={{ margin: 0, fontFamily: "var(--rd-f-display)", fontSize: 30, fontWeight: 500 }}>
-          {ko ? "에이전트에게, 이미 잘된 방법을 더하세요" : "Give your agent a method that already worked"}
-        </h1>
-        <p style={{ margin: 0, maxWidth: 760, color: "var(--rd-ink-2)", fontSize: 14, lineHeight: 1.65 }}>
-          {ko
-            ? "경험칩은 새로운 에이전트가 아닙니다. 내가 쓰는 에이전트에 문제 해결법이나 취향을 더해, 비슷한 일을 더 빠르고 일관되게 하도록 돕습니다."
-            : "An Experience Chip is not another agent. It adds a proven method or preference to an agent you already use, helping it handle similar work faster and more consistently."}
-        </p>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
-        {benefits.map(([title, body]) => (
-          <article key={title} className="card" style={{ padding: 16, display: "grid", gap: 7 }}>
-            <strong style={{ color: "var(--rd-ink)", fontSize: 14 }}>{title}</strong>
-            <span style={{ color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>{body}</span>
-          </article>
-        ))}
-      </div>
-
-      <div className="card" data-testid="experience-hub-catalog" style={{ padding: 18, display: "grid", gap: 12 }}>
-        <div>
-          <strong style={{ display: "block", fontSize: 15 }}>{ko ? "공개된 경험칩" : "Public Experience Chips"}</strong>
-          <span style={{ display: "block", marginTop: 4, color: "var(--rd-ink-3)", fontSize: 12.5 }}>
-            {ko ? "에이전트에 연결된 경험을 살펴보세요." : "Explore the experience shared with agents."}
-          </span>
-        </div>
-        {catalogLoading || !catalog ? (
-          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5 }}>
-            {ko ? "공개된 경험칩을 확인하는 중…" : "Loading public Experience Chips…"}
-          </div>
-        ) : catalog.status === "unavailable" ? (
-          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ color: "var(--rd-ink-3)", fontSize: 12.5 }}>{catalog.message || (ko ? "목록을 불러오지 못했습니다." : "The catalog is unavailable.")}</span>
-            <button type="button" className="btn sm" onClick={onRetry}>{ko ? "다시 확인" : "Retry"}</button>
-          </div>
-        ) : catalog.status === "empty" ? (
-          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
-            {ko ? "아직 공개된 경험칩이 없습니다." : "No public Experience Chips yet."}
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 10 }}>
-            {catalog.chips.slice(0, 6).map((chip) => (
-              <article key={chip.detailPath} className="card" style={{ padding: 14, display: "grid", gap: 8 }}>
-                <div>
-                  <strong style={{ display: "block", fontSize: 14 }}>{chip.title}</strong>
-                  <span style={{ display: "block", marginTop: 3, color: "var(--rd-ink-3)", fontSize: 11.5 }}>{ko ? `${chip.author}의 경험` : `Experience by ${chip.author}`}</span>
-                </div>
-                <span style={{ color: "var(--rd-ink-2)", fontSize: 12.5, lineHeight: 1.5 }}>{chip.benefits[0] || chip.summary}</span>
-                {chip.workLabels.length > 0 ? (
-                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                    {chip.workLabels.map((label) => <RdTag key={label} dashed size="s">{label}</RdTag>)}
-                  </div>
-                ) : null}
-                <button type="button" className="btn sm primary" onClick={() => onOpenChip(chip.detailPath)}>
-                  {ko ? "경험칩 보기" : "View Experience Chip"}
-                </button>
-              </article>
-            ))}
-          </div>
-        )}
-      </div>
-
-    </section>
   );
 }
 
