@@ -37,7 +37,6 @@ import { rolePriorityRuntimes } from "../runtime/selection";
 import { runtimeCooldown, runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import type { WorkforcePrepareCheckpointReceipt } from "../mcp/workforce-orchestrator";
-import { listChatMessages } from "../store/chats";
 import { getOrCreateAutomationSession } from "../store/automation-sessions";
 import {
   startGraphRun,
@@ -62,7 +61,7 @@ import { buildAutomationStrategyProposalDirective } from "../automation-strategy
 import { inspectAutomationStrategyRevisionForRun } from "../store/automation-strategy-revisions";
 import { runAutomationStrategyCycle } from "../automation-strategy-cycle";
 import { getAutomationDefinitionDigest } from "../long-run/automation-provenance";
-import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
+import { buildAutomationContinuityCapsulePrompt } from "../automation-progress-facts";
 import { graphInputRequirement } from "../../shared/graph-trigger-input";
 import {
   declaredEnvelope,
@@ -867,6 +866,68 @@ export function hasReplaySafePreparedWorkforce(checkpoint: GraphCheckpoint, node
     toolReceipts.every((receipt) => isReplaySafeGraphToolReceipt(checkpoint, nodeId, receipt));
 }
 
+/**
+ * An agent step that was still running when the app stopped (restart, crash,
+ * update) is recorded as in-flight, and an in-flight step blocks the next run
+ * as `automation_ambiguous_side_effect`. That is right when the step may have
+ * acted outside - but measured 2026-09-23, the interrupted step had only looked
+ * (0 acting tool calls) and the hold still cost the automation a whole cycle.
+ *
+ * Replay is allowed only when the host's own receipts prove the step never
+ * requested anything but a read: every completed receipt is read-only, and every
+ * tool request the host recorded for that step (run_events, written before the
+ * call executes) passes the same argument-checked read-only classifier that
+ * the live run uses. Anything unknown keeps the hold. Only `agent` steps
+ * qualify - other step types act through the host, not through tool calls.
+ */
+export function reconcileReadOnlyInterruptedAgentNodes(
+  checkpoint: GraphCheckpoint,
+  failedRunId: string,
+  graph: WorkflowGraph,
+): string[] {
+  const candidates = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])];
+  const safe = new Set<string>();
+  for (const nodeId of candidates) {
+    const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || node.type !== "agent") continue;
+    if ((checkpoint.toolReceipts[nodeId] ?? []).some((receipt) => !receipt.readOnly)) continue;
+    let rows: Array<{ payload_json: string | null }> = [];
+    try {
+      rows = getDb().prepare(
+        `SELECT payload_json FROM run_events
+          WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use'
+          ORDER BY seq ASC LIMIT 2001`,
+      ).all(failedRunId, nodeId) as Array<{ payload_json: string | null }>;
+    } catch {
+      continue;
+    }
+    if (rows.length > 2000) continue;
+    const readOnlyRequests = new Map<string, string>();
+    let readOnly = true;
+    for (const row of rows) {
+      let payload: Record<string, unknown> | null = null;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) as Record<string, unknown> : null; } catch { payload = null; }
+      if (!payload) { readOnly = false; break; }
+      const name = typeof payload.toolName === "string" ? payload.toolName : "";
+      if (!name) continue;
+      const id = typeof payload.toolId === "string" ? payload.toolId : "";
+      const args = payload.toolArgs;
+      if (args === undefined && id && readOnlyRequests.get(id) === name) continue;
+      if (isReadOnlyCheckpointTool(name, args)) {
+        if (id) readOnlyRequests.set(id, name);
+        continue;
+      }
+      readOnly = false;
+      break;
+    }
+    if (readOnly) safe.add(nodeId);
+  }
+  if (safe.size === 0) return [];
+  checkpoint.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((nodeId) => !safe.has(nodeId));
+  checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !safe.has(nodeId));
+  return [...safe].sort();
+}
+
 export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheckpoint): string[] {
   const replaySafePreparedNodes = new Set(
     [...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds]
@@ -1017,21 +1078,9 @@ function buildNodeContinuityPrompt(chatId: string, prompt: string, strategyDirec
   // 전략 진화 지시문은 실패 스트릭이 있을 때만 비어 있지 않다. 프롬프트 바로 앞에 붙여
   // 재시도가 동일 방법을 반복하지 못하게 한다(continuity capsule보다 뒤 = 더 지배적 위치).
   const effectivePrompt = strategyDirective ? `${strategyDirective}\n\n${prompt}` : prompt;
-  const prior = listChatMessages(chatId, 12)
-    .filter((message) => message.role === "assistant" || message.role === "system")
-    .slice(-4)
-    .map((message) => (
-      `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`
-    ));
-  if (prior.length === 0) return effectivePrompt;
-  return [
-    AUTOMATION_CONTINUITY_OPEN,
-    "This is the same durable automation session and occurrence. Continue from prior outcomes; do not restart setup or repeat an external action already recorded as complete.",
-    ...prior,
-    AUTOMATION_CONTINUITY_CLOSE,
-    "",
-    effectivePrompt,
-  ].join("\n");
+  // 캡슐은 호스트가 센 사실(실행 상태·도구 호출 수)과 최신 서술 1개만 싣는다 — 이전 실행의
+  // "보류" 서술 4개가 매 노드 앞에 붙어 다음 실행의 관성이 되던 자리(2026-09-24 실측).
+  return buildAutomationContinuityCapsulePrompt(chatId, effectivePrompt);
 }
 
 /**
@@ -1673,6 +1722,12 @@ export async function runGraph(
       }
       if (checkpoint) {
         reconcileReplaySafePreparedWorkforceNodes(checkpoint);
+        const readOnlyReplayable = reconcileReadOnlyInterruptedAgentNodes(checkpoint, latestFailed.runId, graph);
+        if (readOnlyReplayable.length > 0) {
+          console.info("[graph] interrupted read-only step(s) replayable", JSON.stringify({
+            automationId: automation.id, failedRunId: latestFailed.runId, nodeIds: readOnlyReplayable,
+          }));
+        }
         if (checkpoint.inFlightNodeIds.length > 0 || checkpoint.ambiguousNodeIds.length > 0) {
           releaseCoordinateIfNotStarted();
           throw new Error(

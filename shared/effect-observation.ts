@@ -39,8 +39,23 @@ export type ParsedEffectObservation =
 const MAX_EVIDENCE = 500;
 const MAX_OUTPUT = 16_000;
 
+/**
+ * The marker line with presentation wrappers removed. Observers answering in a
+ * chat persona (measured 2026-09-24: 7 of 7 looks came back as markdown with a
+ * name prefix and a progress bar) put the line in backticks, bold, a list item
+ * or a quote. Only leading/trailing markdown punctuation is removed - the body
+ * must still start with the exact marker and parse as the strict JSON below.
+ */
+function markerLine(line: string): string | null {
+  const unwrapped = line.trim()
+    .replace(/^(?:[>*_`~\-]+[ \t]*)+/, "")
+    .replace(/(?:[ \t]*[*_`~]+)+$/, "")
+    .trim();
+  return unwrapped.startsWith(EFFECT_OBSERVATION_MARKER) ? unwrapped : null;
+}
+
 function markerLines(text: string): string[] {
-  return text.split("\n").filter((line) => line.trim().startsWith(EFFECT_OBSERVATION_MARKER));
+  return text.split("\n").map(markerLine).filter((line): line is string => line !== null);
 }
 
 /**
@@ -94,6 +109,6 @@ export function parseEffectObservationMarker(text: string, expectedAttemptIds: r
 export function stripEffectObservationMarker(text: string): string {
   if (!text || !text.includes(EFFECT_OBSERVATION_MARKER)) return text;
   return text.split("\n")
-    .filter((line) => !line.trim().startsWith(EFFECT_OBSERVATION_MARKER))
+    .filter((line) => markerLine(line) === null)
     .join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
 }

@@ -20,7 +20,8 @@ import {
 } from "./store/automation-strategy-proposals";
 import { getLatestAutomationStrategyRevision } from "./store/automation-strategy-revisions";
 import { readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
-import { reflectAutomationStrategyProposal } from "./automation-strategy-reflection";
+import { reflectAutomationStrategyProposal, type AutomationStrategyReflectionInput } from "./automation-strategy-reflection";
+import { automationNoActionStreak, recentAutomationRunFacts } from "./automation-progress-facts";
 import {
   AUTOMATION_STRATEGY_RUN_EVENT_QUERY_LIMIT,
   buildAutomationStrategyFollowUpEvidence,
@@ -152,6 +153,24 @@ function unavailable(
   }));
 }
 
+/** Host-counted no-progress signal carried into the next strategy reflection. */
+function readRecentRunProgress(automationId: string): AutomationStrategyReflectionInput["recentRunProgress"] {
+  try {
+    return {
+      noActionStreak: automationNoActionStreak(automationId),
+      runs: recentAutomationRunFacts(automationId, 6).map((fact) => ({
+        ranAt: fact.ranAt,
+        status: fact.status,
+        outcome: fact.outcome,
+        actionCalls: fact.actionCalls,
+        observationCalls: fact.observationCalls,
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function outputObservation(input: AutomationStrategyCycleInput, metrics: ReturnType<typeof summarizeAutomationStrategyRun>["metrics"]): AutomationStrategyProposalObservationV1 {
   return {
     schemaVersion: "agentlas.automation-strategy-observation.v1",
@@ -250,6 +269,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           observation,
           terminalOutput: input.output ?? null,
           previousRevision: getLatestAutomationStrategyRevision(input.automationId),
+          recentRunProgress: readRecentRunProgress(input.automationId),
           ...(input.goalRecommendation ? { goalRecommendation: input.goalRecommendation } : {}),
           signal: input.signal,
         });

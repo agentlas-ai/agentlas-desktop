@@ -842,12 +842,12 @@
       "id": "graph/1/continuity.capsule",
       "boundary": "이전 실행 → 이번 실행",
       "status": "implemented",
-      "implementedAs": "run-graph.ts buildAutomationContinuityPrompt (AUTOMATION_CONTINUITY_OPEN/CLOSE)",
+      "implementedAs": "automation-progress-facts.ts buildAutomationContinuityCapsulePrompt (AUTOMATION_CONTINUITY_OPEN/CLOSE), called by run-graph.ts and automation-scheduler.ts",
       "payload": [
         {
           "field": "priorMessages",
           "grade": "degradable",
-          "note": "최근 assistant·system 4개, 각 1,200자 상한"
+          "note": "호스트 사실(최근 4회 상태·결과·행동/관찰 도구 호출 수, 무행동 연속 수) + 최신 assistant·system 서술 각 1개(신뢰 안 된 요약 표식, 800자 상한). 이전 실행의 보류 서술이 다음 실행의 관성이 되던 자리(2026-09-24)"
         },
         {
           "field": "open/close",
