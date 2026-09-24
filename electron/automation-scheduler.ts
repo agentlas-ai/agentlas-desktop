@@ -134,6 +134,9 @@ import type {
   TriggerEventPayload,
 } from "./store/trigger-events";
 
+/** 무활동 감시견이 멈춘 실행의 타입 원인 — 사용자 중지(automation_stopped_by_user)와 다르다. */
+export const AUTOMATION_WATCHDOG_STALL = "automation_watchdog_stall";
+
 const MAX_SCHEDULE_OCCURRENCE_ATTEMPTS = 3;
 const SCHEDULE_RETRY_BASE_MS = 15 * 60_000;
 
@@ -804,6 +807,13 @@ async function runOne(
   let currentRunId: string | null = null;
   /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
   let noProgressLoop: NoProgressDecision | null = null;
+  /**
+   * 무활동 감시견이 멈춘 실행(P0-7, A12). 감시견은 예전에 **사용자의 중지 손잡이(controller)**를 당겼다 — 그래서
+   * 바깥 catch 가 `controller.signal.aborted` 를 보고 "사용자가 멈췄다(automation_stopped_by_user)"로 적었고,
+   * 복구 경로(`!controller.signal.aborted` 조건)도 건너뛰었다. 이제 감시견은 자기 손잡이를 당기고 타입 원인을 남긴다.
+   */
+  let watchdogStall: AutomationWatchdogDecision | null = null;
+  const watchdogController = new AbortController();
   let graphRunAttempted = false;
   /** 커널/러너가 예외 없이 끝까지 돌았는가(판정 전) — 자기 보류 판정의 호스트 사실. */
   let runCompleted = false;
@@ -1029,7 +1039,7 @@ async function runOne(
       const graphProgressGuard = createNoProgressGuard();
       // 사용자 중지(controller)와 섞지 않는다 — 섞으면 catch 가 "사용자가 멈췄다"로 적는다.
       const noProgressController = new AbortController();
-      const graphSignal = AbortSignal.any([controller.signal, noProgressController.signal]);
+      const graphSignal = AbortSignal.any([controller.signal, noProgressController.signal, watchdogController.signal]);
       let lastDurableHeartbeatAt = 0;
       const persistGraphHeartbeat = (at = Date.now()): void => {
         if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
@@ -1050,7 +1060,8 @@ async function runOne(
         );
         if (decision.stalled) {
           graphStall = decision;
-          controller.abort(new Error(automationWatchdogError(decision)));
+          watchdogStall = decision;
+          watchdogController.abort(new Error(automationWatchdogError(decision)));
         }
       }, 30_000);
       let result;
@@ -1302,7 +1313,8 @@ async function runOne(
           toolMode: a.toolMode ?? "auto",
           hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
         };
-        // 무활동 워치독 — 이벤트가 STALL_INACTIVITY_MS 동안 없으면 행으로 판정, abort.
+        // 무활동 워치독 — 이벤트가 STALL_INACTIVITY_MS 동안 없으면 행으로 판정, abort(감시견 전용 손잡이).
+        const invocationSignal = AbortSignal.any([controller.signal, watchdogController.signal]);
         const invocationWatchdog = createAutomationWatchdogState();
         let stallDecision: AutomationWatchdogDecision | null = null;
         const stallTimer = setInterval(() => {
@@ -1313,7 +1325,8 @@ async function runOne(
           );
           if (decision.stalled) {
             stallDecision = decision;
-            controller.abort(new Error(automationWatchdogError(decision)));
+            watchdogStall = decision;
+            watchdogController.abort(new Error(automationWatchdogError(decision)));
           }
         }, 30_000);
         let result;
@@ -1337,12 +1350,12 @@ async function runOne(
                 }
                 recordMcpInvocationEvent(runId, req, ev);
               },
-              controller.signal,
+              invocationSignal,
               undefined,
               { source: "automation" },
             ),
           ));
-          result = await awaitAutomationRunnerWithAbortGrace(invocationRun, controller.signal);
+          result = await awaitAutomationRunnerWithAbortGrace(invocationRun, invocationSignal);
         } catch (err) {
           if (stallDecision) {
             throw new Error(automationWatchdogError(stallDecision));
@@ -1495,8 +1508,12 @@ async function runOne(
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = rawError;
     const loopStopped = noProgressLoop !== null && !controller.signal.aborted;
+    const watchdogStopped = watchdogStall !== null && !controller.signal.aborted;
     const classified = controller.signal.aborted
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
+      : watchdogStopped
+      // 호스트가 잰 사실(무활동 시간)이다 — 판정 모델에게 묻지 않고, 사용자 중지로도 적지 않는다. 복구 경로로 간다.
+      ? { status: "error" as const, reasonCode: AUTOMATION_WATCHDOG_STALL, reason: automationWatchdogError(watchdogStall!) }
       : loopStopped
       // 판정 모델에게 묻지 않는다 — 호스트가 센 사실이고, 표식(reasonCode)이 다음 실행의 핸드오프를 연다.
       ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: rawError.replace(/^automation_no_progress_loop:\s*/, "") }
