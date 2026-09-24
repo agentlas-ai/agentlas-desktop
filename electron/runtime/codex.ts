@@ -2105,13 +2105,20 @@ export const runCodex: Runner = async (
   // must not be widened by provider-global config. This path uses one-shot
   // exec because app-server has no equivalent isolation flag.
   const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
-  // Unattended and browser-only runs never reach Codex's own desktop/Chrome
-  // control plugins unless Main granted Computer Use (codex-desktop-surface.ts).
+  // Unattended and browser-only runs never reach Codex's own desktop control
+  // plugins, and no run reaches a browser other than the Agentlas one (bundled
+  // chrome/browser plugins, user Playwright-style servers), unless Main granted
+  // Computer Use (codex-desktop-surface.ts).
+  const hostServerNames = [...new Set(mcpArgs.flatMap((arg) => {
+    const m = /^mcp_servers\.("[^"]+"|[A-Za-z0-9_-]+)\./.exec(arg);
+    return m ? [m[1].replace(/^"|"$/g, "")] : [];
+  }))];
   const desktopSurface = codexDesktopSurfaceArgs({
     unattended: runReq.unattended === true,
     browserOnly: runReq.browserOnly === true,
     desktopControlGrant: runReq.desktopControlGrant === true,
     userConfigIgnored: runReq.isolatedMcpConfig === true,
+    hostServerNames,
     env: runReq.env ?? process.env,
     cwd: runReq.cwd ?? agentRunCwd(),
   });

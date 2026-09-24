@@ -30,24 +30,50 @@
  *     config is not loaded, so every such override is a transport-less server.
  *     Dev-app E2E 2026-09-24 (browser-mode Threads automation, isolated exec):
  *     "Error loading config.toml: invalid transport in `mcp_servers.computer-use`".
+ *
+ * Browser surfaces are narrower and always closed (2026-09-24, owner: "당근
+ * 내장브라우저에서 하겠지? 자꾸 외부크롬 켜지는거 같아서"). Every Agentlas run
+ * already has an owned browser — the in-app guest for a watched chat, the
+ * dedicated Chrome for Testing profile otherwise — so a runtime's own browser
+ * plugin (bundled chrome/browser) or a user-level browser-automation MCP server
+ * (`@playwright/mcp` defaults to the installed Google Chrome channel) only adds
+ * a second, external Chrome window with a different login state. Those close on
+ * every run unless Main granted Computer Use; the ChatGPT desktop-control hosts
+ * above keep the attended/unattended rule. Owned references: OpenAI Atlas runs
+ * its agent in its own StoragePartition; Playwright MCP's persistent profile
+ * launches the installed Chrome channel (microsoft/playwright-mcp#1483).
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-/** ChatGPT-bundled plugins that control the owner's desktop or personal Chrome. */
-export const CODEX_DESKTOP_CONTROL_PLUGINS = [
+/** ChatGPT-bundled plugins that control the owner's desktop. */
+export const CODEX_DESKTOP_ONLY_PLUGINS = [
   "computer-use@openai-bundled",
   "unified-computer-use@openai-bundled",
   "computer-history@openai-bundled",
+] as const;
+
+/** Codex plugins whose only job is to drive a browser other than the Agentlas one. */
+export const CODEX_BROWSER_PLUGINS = [
   "chrome@openai-bundled",
   "browser@openai-bundled",
+  "playwright@claude-plugins-official",
 ] as const;
+
+/** Main's own browser server name in `-c mcp_servers.<name>` (mcpConfigKey of the catalog id). */
+const AGENTLAS_BROWSER_SERVER = "agentlas-browser";
+
+/** Every vendor desktop/browser plugin closed for unattended or browser-only runs. */
+export const CODEX_DESKTOP_CONTROL_PLUGINS = [...CODEX_DESKTOP_ONLY_PLUGINS, ...CODEX_BROWSER_PLUGINS] as const;
 
 /** Names the ChatGPT app writes into the user config for its desktop/browser hosts. */
 const DESKTOP_CONTROL_SERVER_NAMES = new Set(["node_repl", "computer-use", "cua_repl"]);
 /** Launch evidence of the same hosts under another server name. */
 const DESKTOP_CONTROL_SERVER_EVIDENCE = /SKY_CUA_SERVICE_PATH|BROWSER_USE_AVAILABLE_BACKENDS|SkyComputerUseClient|cua_node|cua-repl/;
+/** User-level browser-automation servers (they launch their own, usually the installed, Chrome). */
+const BROWSER_AUTOMATION_SERVER_NAMES = new Set(["playwright", "chrome-devtools", "puppeteer", "browsermcp", "browser-use"]);
+const BROWSER_AUTOMATION_SERVER_EVIDENCE = /@playwright\/mcp|playwright-mcp|chrome-devtools-mcp|@modelcontextprotocol\/server-puppeteer|puppeteer-mcp|@browsermcp\/mcp|browser-use/;
 
 export interface CodexDesktopSurfaceInput {
   unattended?: boolean;
@@ -55,6 +81,8 @@ export interface CodexDesktopSurfaceInput {
   desktopControlGrant?: boolean;
   /** The spawn passes `--ignore-user-config`: user-declared servers do not exist. */
   userConfigIgnored?: boolean;
+  /** Server names Main itself binds for this run (`-c mcp_servers.<name>.*`); never overridden here. */
+  hostServerNames?: readonly string[];
   env?: NodeJS.ProcessEnv;
   cwd?: string;
 }
@@ -69,6 +97,11 @@ export interface CodexDesktopSurfaceDecision {
 export function codexDesktopSurfaceClosed(input: CodexDesktopSurfaceInput): boolean {
   if (input.desktopControlGrant) return false;
   return input.unattended === true || input.browserOnly === true;
+}
+
+/** Whether this run must be kept off browsers other than the Agentlas-owned one. */
+export function codexBrowserSurfaceClosed(input: CodexDesktopSurfaceInput): boolean {
+  return input.desktopControlGrant !== true;
 }
 
 function codexHomeFor(input: CodexDesktopSurfaceInput): string {
@@ -92,6 +125,15 @@ function unquoteTomlKey(key: string): string {
  * never returned or logged.
  */
 export function declaredDesktopControlServers(tomlText: string): string[] {
+  return declaredServers(tomlText, DESKTOP_CONTROL_SERVER_NAMES, DESKTOP_CONTROL_SERVER_EVIDENCE);
+}
+
+/** Declared user-level browser-automation servers (Playwright, DevTools, Puppeteer …). */
+export function declaredBrowserAutomationServers(tomlText: string): string[] {
+  return declaredServers(tomlText, BROWSER_AUTOMATION_SERVER_NAMES, BROWSER_AUTOMATION_SERVER_EVIDENCE);
+}
+
+function declaredServers(tomlText: string, names: ReadonlySet<string>, evidence: RegExp): string[] {
   const bodies = new Map<string, string>();
   let current: string | null = null;
   for (const line of tomlText.split(/\r?\n/)) {
@@ -109,16 +151,16 @@ export function declaredDesktopControlServers(tomlText: string): string[] {
     if (!/^[A-Za-z0-9_-]+$/.test(name)) continue; // cannot be addressed safely as a dotted -c key
     const hasTransport = /^\s*(command|url)\s*=/m.test(body);
     if (!hasTransport) continue; // a bare override would fail Codex bootstrap
-    if (DESKTOP_CONTROL_SERVER_NAMES.has(name) || DESKTOP_CONTROL_SERVER_EVIDENCE.test(body)) out.push(name);
+    if (names.has(name) || evidence.test(body)) out.push(name);
   }
   return out.sort();
 }
 
-function readUserConfigServers(codexHome: string): string[] {
+function readUserConfigServers(codexHome: string, classify: (toml: string) => string[]): string[] {
   const names = new Set<string>();
   for (const file of ["config.toml", "managed_config.toml"]) {
     try {
-      for (const name of declaredDesktopControlServers(fs.readFileSync(path.join(codexHome, file), "utf8"))) names.add(name);
+      for (const name of classify(fs.readFileSync(path.join(codexHome, file), "utf8"))) names.add(name);
     } catch {
       /* A missing or unreadable file declares nothing. */
     }
@@ -127,18 +169,35 @@ function readUserConfigServers(codexHome: string): string[] {
 }
 
 /**
- * `-c` overrides that keep this run off Codex's vendor desktop-control
- * surfaces. Empty when the run keeps them (attended, or Computer Use granted).
+ * `-c` overrides that keep this run off Codex's vendor desktop-control surfaces
+ * (unattended/browser-only) and off every non-Agentlas browser: bundled browser
+ * plugins always, user browser-automation servers when the run is unattended or
+ * Main bound the Agentlas browser. Empty only for a Computer Use run.
  */
 export function codexDesktopSurfaceArgs(input: CodexDesktopSurfaceInput): CodexDesktopSurfaceDecision {
-  if (!codexDesktopSurfaceClosed(input)) return { args: [], receipt: null };
+  const desktopClosed = codexDesktopSurfaceClosed(input);
+  const browserClosed = codexBrowserSurfaceClosed(input);
+  if (!desktopClosed && !browserClosed) return { args: [], receipt: null };
+  const plugins = [...(desktopClosed ? CODEX_DESKTOP_ONLY_PLUGINS : []), ...(browserClosed ? CODEX_BROWSER_PLUGINS : [])];
   const args: string[] = [];
-  for (const plugin of CODEX_DESKTOP_CONTROL_PLUGINS) args.push("-c", `plugins.${plugin}.enabled=false`);
-  const servers = input.userConfigIgnored ? [] : readUserConfigServers(codexHomeFor(input));
-  for (const server of servers) args.push("-c", `mcp_servers.${server}.enabled=false`);
-  const reason = input.browserOnly ? "browser_only" : "unattended";
+  for (const plugin of plugins) args.push("-c", `plugins.${plugin}.enabled=false`);
+  const host = new Set(input.hostServerNames ?? []);
+  const servers = new Set<string>();
+  if (!input.userConfigIgnored) {
+    const home = codexHomeFor(input);
+    if (desktopClosed) for (const name of readUserConfigServers(home, declaredDesktopControlServers)) servers.add(name);
+    // A user browser-automation server is a second browser beside the Agentlas
+    // one Main bound for this run (or on a run nobody watches). An attended turn
+    // without a bound browser reads no config at all (hermetic residency gate).
+    if (browserClosed && (desktopClosed || host.has(AGENTLAS_BROWSER_SERVER))) {
+      for (const name of readUserConfigServers(home, declaredBrowserAutomationServers)) servers.add(name);
+    }
+  }
+  const closedServers = [...servers].filter((name) => !host.has(name)).sort();
+  for (const server of closedServers) args.push("-c", `mcp_servers.${server}.enabled=false`);
+  const desktop = desktopClosed ? `closed reason=${input.browserOnly ? "browser_only" : "unattended"}` : "open";
   return {
     args,
-    receipt: `[codex-surface] desktop_control=closed reason=${reason} plugins=${CODEX_DESKTOP_CONTROL_PLUGINS.length} user_servers=${servers.join("|") || "-"}`,
+    receipt: `[codex-surface] desktop_control=${desktop} browser_surface=${browserClosed ? "closed" : "open"} plugins=${plugins.length} user_servers=${closedServers.join("|") || "-"}`,
   };
 }
