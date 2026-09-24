@@ -152,3 +152,33 @@ export function planAutomationRuntime(input: AutomationRuntimePlanInput): Automa
   }
   return { selection, provenance, route, handoff, changed: !sameSelection(selection, input.stored) };
 }
+
+/**
+ * 복구 런(System Optimizer)을 어느 런타임으로 띄우는가 (P0-4, A3).
+ *
+ * 실측(설치본 2026-09-24, f7a61706): 복구 런 10회 중 4회가 고치려던 실행과 **같은 오류**(503 용량·전송 점유·한도)로
+ * 죽었다. 복구 런이 실패한 자동화의 핀(a.runtimeSelection) 그대로 떴기 때문이다 — 같은 런타임이라 같이 죽는다.
+ *
+ * 규칙: 오너가 저장한 워커 풀 순서에서, 실패한 실행의 공급자(backend)가 아니고 한도/인증 쿨다운도 아닌 첫 구성원.
+ * 그런 구성원이 없으면 실패한 런타임 그대로(실행을 막지 않는다). 순수 함수 — 감지·쿨다운은 호출자가 넣는다.
+ */
+export interface RecoveryRuntimePlan {
+  selection: RuntimeSelection | undefined;
+  switched: boolean;
+  reason: "other_pool_member" | "no_alternative" | "no_failing_runtime";
+}
+
+export function planRecoveryRuntime(input: {
+  failing: RuntimeSelection | undefined;
+  workerPool: PlannableRuntime[];
+  cooling: (selection: RuntimeSelection) => { kind: string; until: number } | null;
+}): RecoveryRuntimePlan {
+  const cooled = (selection: RuntimeSelection): boolean => {
+    const entry = input.cooling(selection);
+    return Boolean(entry && (entry.kind === "quota" || entry.kind === "auth"));
+  };
+  const alternate = input.workerPool.find((candidate) =>
+    (candidate.backend ?? null) !== (input.failing?.backend ?? null) && !cooled(workerSelection(candidate)));
+  if (alternate) return { selection: workerSelection(alternate), switched: true, reason: "other_pool_member" };
+  return { selection: input.failing, switched: false, reason: input.failing ? "no_alternative" : "no_failing_runtime" };
+}
