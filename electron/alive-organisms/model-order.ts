@@ -40,9 +40,15 @@ const sameSeat = (a: Pick<RuntimeSelection, "kind" | "backend" | "source" | "mod
   a.kind === b.kind && (a.backend ?? null) === (b.backend ?? null) && (a.source ?? null) === (b.source ?? null)
   && (a.model ?? null) === (b.model ?? null) && (a.acpAgentId ?? null) === (b.acpAgentId ?? null);
 
+/**
+ * A member saved as "engine default" has no model id; an Alive wake still needs an exact one. Use the model the
+ * CLI itself reports as its default (config file, then the last observed run) — recorded on the receipt, never
+ * invented. With neither, the member is not selectable (pool.member-model-unknown).
+ */
 function statusSelection(runtime: RuntimeStatus): RuntimeSelection {
   return { kind: runtime.kind, backend: runtime.backend, source: runtime.source, acpAgentId: runtime.acpAgentId,
-    label: runtime.label, model: runtime.model ?? undefined, effort: runtime.effort ?? undefined,
+    label: runtime.label, model: runtime.model ?? runtime.cliDefaultModel ?? runtime.observedDefaultModel ?? undefined,
+    effort: runtime.effort ?? undefined,
     longContext: runtime.longContextEnabled };
 }
 
@@ -60,7 +66,7 @@ export function buildAliveModelOrder(input: {
         && (!wanted.backend || candidate.backend === wanted.backend)
         && (!wanted.source || candidate.source === wanted.source)
         && (wanted.kind !== "acp" || candidate.acpAgentId === wanted.acpAgentId)
-        && (!wanted.model || candidate.model === wanted.model));
+        && (!wanted.model || candidate.model === wanted.model || statusSelection(candidate).model === wanted.model));
       const selection = live ? statusSelection(live) : null;
       const model = (selection?.model ?? wanted.model ?? "").trim();
       // A seat already listed (the same member saved in both roles) is one seat in the order.
@@ -75,6 +81,16 @@ export function buildAliveModelOrder(input: {
     });
   }
   return out;
+}
+
+/**
+ * An unconfigured (legacy) store has no pool rows; execution then uses the active orchestrator runtime
+ * (rolePriorityRuntimes' legacy branch). Alive follows the same rule instead of never waking.
+ */
+export function legacyMembers(members: Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>>,
+  usable: Record<"orchestrator" | "worker", RuntimeStatus[]>): Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>> {
+  if (members.orchestrator.length > 0) return members;
+  return { ...members, orchestrator: usable.orchestrator.map((runtime) => ({ selection: statusSelection(runtime) })) };
 }
 
 let cached: { atMs: number; entries: AliveModelOrderEntry[] } | null = null;
@@ -94,7 +110,7 @@ export async function refreshAliveModelOrder(nowMs = Date.now()): Promise<AliveM
     orchestrator: rolePriorityRuntimes(detected, "orchestrator"),
     worker: members.worker.length ? rolePriorityRuntimes(detected, "worker") : [],
   };
-  const entries = buildAliveModelOrder({ members, usable, exact: exactOk });
+  const entries = buildAliveModelOrder({ members: legacyMembers(members, usable), usable, exact: exactOk });
   cached = { atMs: nowMs, entries };
   return entries;
 }

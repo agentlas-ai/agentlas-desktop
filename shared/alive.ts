@@ -43,6 +43,10 @@ export interface AliveGetStateInput { surface: AliveSurface; chatId: string }
 export interface AliveSetEnabledInput {
   surface: AliveSurface; chatId: string; enabled: boolean; tokenLimit?: number | null; moveFrom?: boolean;
 }
+/**
+ * Also the owner's way out of status "usage-unknown" (a wake killed mid-call can never report its usage):
+ * setting the limit — even to the same value — acknowledges those wakes and the life continues.
+ */
 export interface AliveSetTokenLimitInput { surface: AliveSurface; chatId: string; tokenLimit: number | null }
 export interface AliveChangedEvent { surface: AliveSurface; chatId?: string; scopeId: string }
 
