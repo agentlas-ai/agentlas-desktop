@@ -16,6 +16,19 @@ import { classifyTool } from "./tool-taxonomy";
 /** 호스트가 실행 전에 스스로 부르는 조회들의 접두사. 사용자 작업이 아니다. */
 const HOST_PREFLIGHT_PREFIX = "Agentlas Plugins";
 
+/**
+ * Host supervisor notices (electron/hephaestus/stormbreaker-supervisor.ts) ride the tool-use
+ * channel so the person sees them, but the host writes them itself: no provider operation id,
+ * no arguments, nothing dispatched outside. Measured 2026-09-24: four of them per turn were
+ * counted as "unidentified" operations with unknown outcome, so every supervised Goal turn —
+ * a read-only One answer included — ended with effects "uncertain" and blocked.
+ */
+export const HOST_SUPERVISOR_NOTICE_PREFIX = "Stormbreaker Loop ·";
+
+export function isHostSupervisorNotice(toolName: string | null | undefined): boolean {
+  return String(toolName ?? "").trim().startsWith(HOST_SUPERVISOR_NOTICE_PREFIX);
+}
+
 /** 편성 감사용 읽기 전용 호출 — 바깥을 바꾸지 않는다. */
 const READ_ONLY_WORKFORCE_TOOLS = /^workforce\.(?:search_candidates|validate_selection)\b/i;
 

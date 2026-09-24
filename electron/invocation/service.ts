@@ -893,6 +893,17 @@ export function preDispatchRefusalReasonCode(error: unknown): string {
   return leading ?? "main_start_pre_dispatch_refused";
 }
 
+/** The checkpoint's own controller attempt settled without any observed operation (sideEffectState none). */
+function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string | null): boolean {
+  const run = invocationRunId ? getLongRunByGoalId(goalId) : null;
+  if (!run || !invocationRunId || unsettledLongRunAttemptCount(run.id)) return false;
+  const row = getDb().prepare(`SELECT a.state, a.side_effect_state FROM long_run_worker_attempts AS a
+    JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+    WHERE a.run_id = ? AND a.invocation_run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
+    .get(run.id, invocationRunId) as { state: string; side_effect_state: string } | undefined;
+  return row?.state === "interrupted" && row.side_effect_state === "none";
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -2123,6 +2134,15 @@ export class InvocationService {
     }
     let goalControllerAttemptId: string | null = null;
     let goalControllerAttemptSettled = false;
+    /*
+     * The orchestrator's runtime-selected event can arrive before the automatic Goal is admitted
+     * (the admission judgment runs inside the pre-execution hook, ~9s in the 2026-09-24 isolated run).
+     * Binding only on that event left every first-turn Goal without a controller attempt, so its
+     * checkpoint could never mint settled effects and blocked on checkpoint_side_effects_uncertain
+     * after turn one — even a read-only "2+2" One goal. Remember the selection and bind once the
+     * Goal projection exists.
+     */
+    let lastControllerSelection: RuntimeSelection | null = null;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
       // A Goal revision owns a new durable task. Reusing one controller worker
@@ -2176,7 +2196,10 @@ export class InvocationService {
       settleLongRunWorkerAttempt({
         attemptId: goalControllerAttemptId,
         state: completed ? "completed" : "interrupted",
-        sideEffectState: completed ? "committed" : "uncertain",
+        // A turn that failed before any tool operation (measured: work_project_residency_busy refused
+        // the CLI start) did nothing outside; "uncertain" sent every such retry to a ~150-230k-token
+        // effect observation, one per attempt, while the project stayed busy.
+        sideEffectState: completed ? "committed" : effectBoundary.observedNoOperations() ? "none" : "uncertain",
         ...(!completed
           ? { errorCode: terminalDisposition.errorCode ?? "runtime_interrupted" }
           : {}),
@@ -2273,6 +2296,7 @@ export class InvocationService {
           && !event.agentId
           && (!event.modelRole || event.modelRole === "orchestrator")
         ) {
+          lastControllerSelection = event.runtimeSelection;
           bindGoalControllerAttempt(event.runtimeSelection);
         }
         /*
@@ -3055,6 +3079,7 @@ export class InvocationService {
           boundGoal = resumed;
           stoppedGoalReactivation = null;
           refreshGoalProjection();
+          if (lastControllerSelection) bindGoalControllerAttempt(lastControllerSelection);
         }
         // Only ordinary local, user-authored root-chat work enters automatic
         // Goal. Science and remote/automation authority keep their own adapters.
@@ -3113,6 +3138,7 @@ export class InvocationService {
           record.automaticGoalId = admitted.goalId;
           transitionLongRun({ runId: admitted.id, to: "running", actorKind: "host", reason: "automatic-goal-user-dispatch" });
           refreshGoalProjection();
+          if (lastControllerSelection) bindGoalControllerAttempt(lastControllerSelection);
           setChatGoalBinding(chat.id, admitted.goalId);
           const goalEvent: McpInvocationEvent = { kind: "tool-use", tool: { name: "Goal", result:
             `${admitted.objective}\n\n${admitted.acceptanceCriteria.map((criterion) => `• ${criterion}`).join("\n")}\n\n` +
@@ -3198,6 +3224,18 @@ export class InvocationService {
             hasFinalText: Boolean(result.finalText?.trim()),
           },
         });
+        /*
+         * The verdict is read from the runner's own final text. The final *event* no longer carries
+         * the marker: the client's universal sink derives its text from the durable copy, and the
+         * durable copy has every protocol line stripped (stripStrayProtocolTokens) — so from the
+         * first observation (2026-09-23) every One/Work look ended effect_observation_marker_missing
+         * although the model wrote a valid marker (session transcript, 2026-09-24). The automation
+         * path already read result.finalText and settled.
+         */
+        if (effectObservation && effectObservationParsed?.status !== "reported" && typeof result.finalText === "string") {
+          const raw = readEffectObservationFromFinal(runId, result.finalText);
+          if (raw && (raw.status !== "absent" || !effectObservationParsed)) effectObservationParsed = raw;
+        }
         // An effect observation owns no Goal semantics (see projectionGoalId).
         if (effectObservation) return;
         /*
@@ -3626,6 +3664,14 @@ export class InvocationService {
         appendChatMessage(record.chatId, "assistant", locale === "ko"
           ? "첨부파일이 필요한 후속 검증 단계가 남아 있습니다. 원본 첨부를 자동으로 재사용하지 않도록 목표를 멈췄습니다. 같은 대화에 파일을 다시 첨부하고 이어서 실행해 주세요."
           : "A follow-up verification step still needs the attachment. The Goal was paused instead of silently reusing a one-turn file grant. Reattach the file in this conversation to continue.");
+        return;
+      }
+      if (checkpoint.sideEffects.state === "uncertain" && !checkpoint.sideEffects.attemptRefs.length
+        && checkpointProducerHadNoEffects(input.goalId, checkpoint.invocationRunId)) {
+        // The producer turn failed before touching anything: not an effect question. The blocked-goal
+        // sweep resumes it through the ordinary resume path (no model observation).
+        const current = getLongRunByGoalId(input.goalId);
+        if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_producer_no_effects" });
         return;
       }
       if (checkpoint.sideEffects.state === "uncertain") {

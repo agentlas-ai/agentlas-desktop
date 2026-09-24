@@ -1,4 +1,4 @@
-import { isHostPreflightTool } from "../../shared/tool-activity";
+import { isHostPreflightTool, isHostSupervisorNotice } from "../../shared/tool-activity";
 import type { McpInvocationEvent } from "../../shared/types";
 import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
@@ -15,8 +15,10 @@ export function hasCallbackResultCoverage(kind: string): boolean { return RESULT
 /** Host capability/Goal notices lack provider operation identity, arguments and
  * typed outcome. A real provider operation sharing the display name still counts. */
 export function isEffectStatusOnlyTool(tool: {name:string;id?:unknown;args?:unknown;isError?:unknown}): boolean {
-  return (isHostPreflightTool(tool.name) || tool.name === "Goal")
-    && tool.id === undefined && tool.args === undefined && tool.isError === undefined;
+  if (tool.id !== undefined || tool.args !== undefined) return false;
+  // Supervisor notices may carry isError (an "UNVERIFIED" engine notice) and are still host-written.
+  if (isHostSupervisorNotice(tool.name)) return true;
+  return (isHostPreflightTool(tool.name) || tool.name === "Goal") && tool.isError === undefined;
 }
 /** Main-stamped preparation may close only with a complete, empty effect report.
  * It never supplies operation proof or substitutes for a root adapter run. */
@@ -93,6 +95,16 @@ export class InvocationEffectBoundaryTracker {
       outcome: prior?.outcome === "failed" || prior?.outcome === "unknown" ? prior.outcome : hasResult ? outcome : prior?.outcome ?? "pending" });
     if (!tool.id) this.uncertainties.add(`operation:${key}:identity-missing`);
     if (event.agentId || event.nodeId) this.uncertainties.add(`operation:${key}:nested-adapter-coverage-unconfirmed`);
+  }
+  /**
+   * Nothing could have left the machine: a result-covered adapter was selected and not one tool
+   * operation or adapter scope was observed (a pre-start refusal such as work_project_residency_busy,
+   * or a text-only failure). Such an interrupted attempt has no external effect to ask about.
+   */
+  observedNoOperations(): boolean {
+    return this.adapters.size > 0 && [...this.adapters].every((kind) => RESULT_COVERAGE.has(kind))
+      && this.operations.size === 0 && this.adapterScopes.size === 0 && this.observedTools === 0
+      && this.scienceCorrelations.size === 0;
   }
   recorded(event: McpInvocationEvent): void { if (event.kind === "tool-use" && event.tool && !isEffectStatusOnlyTool(event.tool)) this.durableTools++; }
   recordingFailed(): void { this.ledgerComplete = false; }

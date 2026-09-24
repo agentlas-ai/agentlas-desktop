@@ -5256,6 +5256,11 @@ ${effectiveUserPrompt}`;
       // The no-checkpoint fallback above is intentionally bounded and only
       // covers the period before a Goal checkpoint can carry that state.
       history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) ? [] : history,
+      // A Main-issued effect observation is one look, not a turn of this conversation. Resuming the
+      // chat's native session carried its whole accumulated context into every look (measured
+      // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
+      // session owner starts fresh and never replaces the conversation's stored session.
+      ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
       // A checkpoint successor is seeded from host-owned neutral state. Its
       // native owner is assigned only after the exact checkpoint is validated
       // for the selected runtime below.

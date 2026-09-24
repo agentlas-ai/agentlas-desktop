@@ -4,6 +4,7 @@ import { compileLongRunCheckpoint, hostEpisodeRoute, type LongRunTaskCheckpoint 
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
+import { getProject } from "../store/projects";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
 import { listAgentSurfaces } from "../store/agent-surfaces";
@@ -51,7 +52,12 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   if (getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND rowid > ? LIMIT 1").get(chat.id, cursor.cursor)
     || getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
       .get(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
-  const explicitCwd = getChatWorkingFolder(chat.id);
+  // The same Main-owned folder order the executor froze for the producer (service.ts executionCwd):
+  // saved chat folder, then the chat's Project folder. Reading only the chat folder refused every
+  // Project Work Goal once its checkpoint could be settled (isolated live run 2026-09-24:
+  // checkpoint_continuation_failed / checkpoint_workspace_changed right after turn one).
+  const explicitCwd = getChatWorkingFolder(chat.id)
+    ?? (chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null);
   const cwd = explicitCwd ?? (checkpoint.workspacePath === agentRunCwd() ? agentRunCwd() : null);
   if (!cwd || cwd !== checkpoint.workspacePath || !statSync(cwd).isDirectory()) throw new Error("checkpoint_workspace_changed");
   if (!same(checkpoint.capsule.plan, latestRuntimePlan(run.id))) throw new Error("checkpoint_plan_changed");
