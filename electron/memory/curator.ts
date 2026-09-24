@@ -8,6 +8,8 @@ import {
   appendSoulMemory,
 } from "./project-files";
 import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
+import { supersedeRestatedMemories } from "./graph";
+import { isAutomationLedgerChat } from "./automation-surface";
 import {
   beginMemoryProjectionWrite,
   commitMemoryProjectionWrites,
@@ -65,6 +67,12 @@ export interface CurationContext {
    * 어느 참여 에이전트의 agent_repo에도 귀속할 수 없다.
    */
   sourceProvenance?: "task-force-synthesis";
+  /**
+   * Host-known source surface. `automation-run` = an unattended automation
+   * turn. When absent it is derived from `chatId` (an automation_sessions
+   * ledger chat), never from the memory text.
+   */
+  sourceSurface?: "automation-run";
   /** Exact runtime/base context supplied only by real installed-agent runs. */
   experienceIntake?: {
     platform: string;
@@ -585,7 +593,43 @@ export function curateEvents(
       continue;
     }
 
-    const resolved = scopeForCandidate(ev, index, ctx, options);
+    // Unattended automation runs (2026-09-24). Nobody reviews these turns, and
+    // measured on the owner's store their decisions/procedures were the run's
+    // own tactical choices (hold, pause, quota met, keep a gate) written as
+    // portable agent_repo rules with empty evidence - the next run recalled and
+    // obeyed them. A run's own decision/procedure, or any unevidenced claim,
+    // stays in that run's session log; nothing from it crosses into agent_repo
+    // or user_identity. The surface is a host fact, not a reading of the text.
+    const unattended = ctx.sourceSurface === "automation-run" || isAutomationLedgerChat(ctx.chatId);
+    const hostObserved = (ev as RawMemoryEvent & { source?: string }).source === "host-observed";
+    if (unattended && !hostObserved && (
+      ev.memory_kind === "decision" || ev.memory_kind === "procedure"
+      || (EVIDENCE_SHAPE_REQUIRED.has(ev.memory_kind) && !hasWellShapedEvidence(ev.evidence_refs ?? []))
+    )) {
+      report.sessionOnly += 1;
+      const reason = ev.memory_kind === "decision" || ev.memory_kind === "procedure"
+        ? "policy-automation-run-own-choice"
+        : "policy-automation-run-unevidenced";
+      recordCandidateDecision({ options, index, event: ev, scope: "session", action: "session", reason });
+      if (ctx.projectPath) {
+        appendMemoryLog(ctx.projectPath, {
+          action: "session",
+          reason,
+          kind: ev.memory_kind,
+          content: ev.content,
+          source_provenance: "automation-run",
+          at: new Date().toISOString(),
+        });
+      }
+      continue;
+    }
+
+    const resolvedByPolicy = scopeForCandidate(ev, index, ctx, options);
+    const resolved = unattended && !hostObserved
+      && (resolvedByPolicy.scope === "agent_repo" || resolvedByPolicy.scope === "user_identity")
+      ? { ...resolvedByPolicy, scope: (ctx.projectPath ? "project" : "session") as MemoryScope,
+        reason: "policy-automation-run-narrowed" }
+      : resolvedByPolicy;
     const scope = resolved.scope;
     if (scope === "discard") {
       report.discarded += 1;
@@ -717,6 +761,13 @@ export function curateEvents(
       reason: resolved.reason,
       targetMemoryId: entry.id,
     });
+    // Latest wins for a restated rule under the same owner boundary. The old
+    // row is superseded (recoverable) with a `supersedes` edge as provenance.
+    try {
+      supersedeRestatedMemories(entry);
+    } catch (error) {
+      console.warn(`[memory] restatement supersede deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
     // similar_to graph edges are now projected inside insertMemoryEntry on every
     // insert path (curated turns, imports, terminal, mobile), so the curator no
     // longer links a second time — the projection is idempotent regardless.

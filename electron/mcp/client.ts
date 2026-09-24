@@ -170,6 +170,7 @@ import { stripAllMemoryEventBlocks } from "../memory/events";
 import {
   runSemanticMemoryReview,
 } from "../memory/semantic-curator";
+import { isAutomationLedgerChat } from "../memory/automation-surface";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
@@ -7068,6 +7069,7 @@ ${effectiveUserPrompt}`;
               signal,
               hasProject: Boolean(memoryReadPath),
               hasAgent: Boolean(agent.id),
+              ...(isAutomationLedgerChat(curationContext.chatId) ? { sourceSurface: "automation-run" as const } : {}),
             });
         const { cleanedText } = projectReadOnlyBoundary
           ? stripReplyMemoryEventsReadOnly(

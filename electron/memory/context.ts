@@ -7,6 +7,7 @@ import {
   listMemoryForContext,
   type MemoryEntry,
 } from "./store";
+import { automationLedgerChatIds, isAutomationLedgerChat } from "./automation-surface";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
 import {
   CAREER_GRAPH_CONFIG_FILE,
@@ -413,7 +414,43 @@ function summarizeCareerGraph(projectPath: string): string | null {
   }
 }
 
-function entryLines(entries: MemoryEntry[]): string {
+/**
+ * Recall provenance frame (2026-09-24). Two host facts decide a label; the
+ * memory text is never read for it:
+ *  - the memory was written from an unattended automation's ledger chat, or
+ *  - this recall feeds an unattended automation run, and the memory is an
+ *    agent-authored rule (decision/procedure outside user_identity).
+ * Measured on the owner's store: ~30 self-imposed hold/quota rules were
+ * injected before every automation node as bare `[procedure]` lines, which the
+ * run obeyed over the owner's declared growth targets. Labelled, they read as
+ * what they are; in automation recall they are also ranked lower.
+ */
+interface RecallFrame {
+  automationRecall: boolean;
+  ledgerChatIds: Set<string>;
+}
+
+function recallFrameFor(entries: MemoryEntry[], chatId: string | null | undefined): RecallFrame {
+  return {
+    automationRecall: isAutomationLedgerChat(chatId),
+    ledgerChatIds: automationLedgerChatIds(entries.map((entry) => entry.chatId)),
+  };
+}
+
+const AGENT_RULE_KINDS = new Set<string>(["decision", "procedure"]);
+
+function heuristicLabel(entry: MemoryEntry, frame: RecallFrame | undefined): string | null {
+  if (!frame) return null;
+  if (entry.chatId && frame.ledgerChatIds.has(entry.chatId)) {
+    return "from an unattended automation run - a self-imposed heuristic (hypothesis), not an owner rule";
+  }
+  if (frame.automationRecall && AGENT_RULE_KINDS.has(entry.kind) && entry.scope !== "user_identity") {
+    return "agent-learned heuristic (hypothesis); the owner's goal and instructions override it";
+  }
+  return null;
+}
+
+function entryLines(entries: MemoryEntry[], frame?: RecallFrame): string {
   return entries
     .map((e) => {
       const ctx = e.requestContext;
@@ -426,7 +463,8 @@ function entryLines(entries: MemoryEntry[]): string {
         parts.length > 0
           ? ` (context: ${parts.join("; ").slice(0, CONTEXT_MAX_CHARS)})`
           : "";
-      return `- [${e.kind}] ${e.content}${suffix}`;
+      const label = heuristicLabel(e, frame);
+      return `- [${e.kind}${label ? ` · ${label}` : ""}] ${e.content}${suffix}`;
     })
     .join("\n");
 }
@@ -440,7 +478,7 @@ function confidencePrior(confidence: MemoryEntry["confidence"]): number {
 }
 
 /** Scope/agent filtering happens in SQL before this ranking function. */
-function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): MemoryEntry[] {
+function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?: RecallFrame): MemoryEntry[] {
   const query = String(taskPrompt ?? "").trim();
   if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
   // English is the search/capsule surface; the original wording is a second
@@ -466,18 +504,20 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): Memor
     // Confidence is admissible evidence. Query-independent graph centrality is
     // not because popular nodes can overrule direct query evidence. Relations
     // remain stored and auditable only.
-    prior: confidencePrior(entry.confidence),
+    // A labelled heuristic is a recall-score input, not a gate: it can still
+    // be recalled, but an owner-stated or evidenced memory outranks it.
+    prior: confidencePrior(entry.confidence) * (heuristicLabel(entry, frame) ? 0.5 : 1),
     entry,
   }))).filter((result) =>
     result.lexicalScore > 0 || result.semanticEligible || result.item.entry.scope === "user_identity");
   if (ranked.length === 0) return [];
   const all = ranked.map((result) => result.item.entry);
-  const allText = entryLines(all);
+  const allText = entryLines(all, frame);
   if (approximateMemoryTokens(allText) <= MEMORY_SELECTED_MAX_APPROX_TOKENS) return all;
   const selected: MemoryEntry[] = [];
   for (const result of ranked) {
     if (selected.length >= MAX_ENTRIES) break;
-    const proposed = entryLines([...selected, result.item.entry]);
+    const proposed = entryLines([...selected, result.item.entry], frame);
     if (approximateMemoryTokens(proposed) > MEMORY_SELECTED_MAX_APPROX_TOKENS) continue;
     selected.push(result.item.entry);
   }
@@ -651,9 +691,10 @@ function selectSoulText(soul: string, taskPrompt: string | undefined, projectPat
 function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
   options: { projectId?: string | null; chatId?: string | null }): string[] {
   const entries = listMemoryForContext({ ...options, agentId }, MEMORY_CANDIDATE_LIMIT);
-  const selected = selectMemoryEntries(entries, taskPrompt);
+  const frame = recallFrameFor(entries, options.chatId);
+  const selected = selectMemoryEntries(entries, taskPrompt, frame);
   return selected.length > 0
-    ? [`### Curated memory (global)\n${entryLines(selected)}`]
+    ? [`### Curated memory (global)\n${entryLines(selected, frame)}`]
     : [];
 }
 
@@ -804,9 +845,10 @@ export async function buildMemoryContext(
       injected.push({ source: "code_map", text: contextSlice });
     }
     const entries = listMemoryForContext({ projectPath, projectId: options.projectId, agentId, chatId: options.chatId }, MEMORY_CANDIDATE_LIMIT);
-    const selectedEntries = selectMemoryEntries(entries, options.taskPrompt);
+    const frame = recallFrameFor(entries, options.chatId);
+    const selectedEntries = selectMemoryEntries(entries, options.taskPrompt, frame);
     if (selectedEntries.length > 0) {
-      const memorySection = `### Relevant curated memory\n${entryLines(selectedEntries)}`;
+      const memorySection = `### Relevant curated memory\n${entryLines(selectedEntries, frame)}`;
       sections.push(memorySection);
       injected.push({ source: "memory", text: memorySection });
     }
