@@ -117,6 +117,55 @@ The blueprint is a drafting constraint, not evidence. It may shape length and fl
 authorize a scientific claim. When a target journal is chosen later, recompute the blueprint
 against its verified profile rather than squeezing the old prose into a new word limit.
 
+## Turn comparable papers into an argument, not borrowed prose
+
+The project-specific, full-text SourceVersions and their eligibility receipts remain the
+authoritative comparables. Use them to learn how a reader is led from a question to a bounded
+answer; never copy their sentences, substitute their results for this study's results, or cite a
+paper merely because its structure was useful. A famous paper outside the study's field may be a
+`rhetorical-analogue-only` example, never a quantitative Blueprint comparable. Official journal
+instructions override the examples below for a named venue and article type.
+
+The following open articles and official author guides illustrate reusable moves, not a universal
+section order or evidence for a new project's claims:
+
+- Abbott et al., *Observation of Gravitational Waves from a Binary Black Hole Merger*,
+  *Physical Review Letters* 116, 061102 (2016), DOI
+  [10.1103/PhysRevLett.116.061102](https://doi.org/10.1103/PhysRevLett.116.061102):
+  the article separates the observation from detector validation and searches before interpreting
+  the source. Adapt the principle: expose how a result was measured, how alternatives were checked,
+  and which interpretation survives those checks.
+- Jumper et al., *Highly accurate protein structure prediction with AlphaFold*, *Nature* 596,
+  583–589 (2021), DOI
+  [10.1038/s41586-021-03819-2](https://doi.org/10.1038/s41586-021-03819-2):
+  the article moves from a defined prediction gap through method design, blind assessment,
+  additional validation, and conditions that limit accuracy. Adapt the principle: connect each
+  design choice to a test and state the regime in which the conclusion holds.
+- [Nature's formatting guide](https://www.nature.com/nature/for-authors/formatting-guide)
+  asks an Article summary to give context, rationale, main conclusion, and broader significance;
+  its Methods guidance asks for enough detail to interpret and replicate results.
+  [PLOS ONE's submission guide](https://journals.plos.org/plosone/s/submission-guidelines)
+  allows results and discussion to be separate or combined, and asks authors to relate results
+  to the hypothesis without overstating conclusions. These are venue examples, not automatic
+  submission rules for another journal.
+
+For each planned section, write an original reader path before the final prose pass: **question or
+gap → design or derivation and assumptions → exact observation or theorem step → independent check
+or counterargument → interpretation within scope → what remains unresolved**. Omit a move when it
+does not fit the article family, and give proof papers their own definitions, lemmas, proof
+dependencies, and unresolved cases. A paragraph must change what the reader can know; a heading,
+transition phrase, or citation pile does not do that by itself. Use a figure, table, or equation
+where it helps carry a precise claim, then explain in adjacent prose what the reader should infer
+and what the display cannot establish.
+
+Before assembly and again before the final manuscript version, walk the argument in both
+directions: every headline conclusion must trace back through a reported result, method, and exact
+project evidence; every major method or derivation must lead to a reported outcome or an explicit
+failure; every limitation must narrow a conclusion or define a follow-up test. Revise the weakest
+bridge in the actual section, preserving the immutable bindings and claim ledger. This is an
+editorial skill, not a truth gate: passing its prose review never replaces the host's Blueprint,
+scholarly-flow, numeric-coherence, or journal-validation receipts.
+
 ## Draft in passes
 
 Write the manuscript in passes so that completeness is inspectable:
