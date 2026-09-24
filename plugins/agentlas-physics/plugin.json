@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-physics",
   "name": "Agentlas Physics",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -123,7 +123,7 @@
       },
       {
         "path": "runtime/mcp-server.cjs",
-        "sha256": "ba01e33d6ccc18bb9ebf5406850f58e05a47790eb1b595a26e1f5a0605a94833",
+        "sha256": "63cb7a8af23e9d4b95994d8bdc91299cdc7214c39c34779d07a7334018e6f8fe",
         "bytes": 4098
       },
       {
@@ -163,8 +163,8 @@
       },
       {
         "path": "runtime/york-fit.cjs",
-        "sha256": "b903d6ec63f92fd5830353260b315dac290c064f695f6e30bf6d972fa194ff17",
-        "bytes": 20422
+        "sha256": "2489f4d77af8dc1e3d2a1c61ebe80905b377f495a1f84d2e66a473ca72e3e1ce",
+        "bytes": 21468
       },
       {
         "path": "schemas/lab-experiment.input.json",

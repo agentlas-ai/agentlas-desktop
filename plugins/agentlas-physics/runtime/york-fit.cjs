@@ -22,7 +22,15 @@ function normalizeInput(input) {
   const sigmaX = common.numericColumn(table, value.sigma_x_column, "physics-york-fit-sigma-x-column");
   const sigmaY = common.numericColumn(table, value.sigma_y_column, "physics-york-fit-sigma-y-column");
   if (value.correlation_column !== undefined && value.correlation !== undefined) throw new PhysicsError("physics-york-fit-correlation-conflict", "give either correlation_column or correlation, not both");
-  const correlationColumn = value.correlation_column === undefined ? null : common.numericColumn(table, value.correlation_column, "physics-york-fit-correlation-column");
+  // CSV has no type evidence for an entirely blank column, so it may be
+  // declared as string. Only this fully unreported optional mapping gets the
+  // same zero-correlation assumption as an omitted correlation column.
+  const mappedCorrelation = table.columns.find((column) => column.name === value.correlation_column);
+  const unreportedCorrelationColumn = value.correlation_column !== undefined && mappedCorrelation && table.rows.length > 0
+    && table.rows.every((row) => row[mappedCorrelation.index] === null);
+  const correlationColumn = value.correlation_column === undefined ? null : unreportedCorrelationColumn
+    ? { column: mappedCorrelation, values: table.rows.map((row) => row[mappedCorrelation.index]) }
+    : common.numericColumn(table, value.correlation_column, "physics-york-fit-correlation-column");
   const correlation = common.optionalFinite(value.correlation, -1, 1, "physics-york-fit-correlation", 0);
   const range = value.range === undefined ? null : (() => {
     const item = common.exactObject(value.range, ["min", "max"], "physics-york-fit-range");
@@ -37,7 +45,7 @@ function normalizeInput(input) {
     tolerance: common.optionalFinite(optionsInput.tolerance, 1e-15, 1e-3, "physics-york-fit-tolerance", 1e-12),
     curvePoints: common.optionalInteger(optionsInput.curve_points, 50, 2_000, "physics-york-fit-curve-points", 200),
   };
-  return { table, x, y, sigmaX, sigmaY, correlationColumn, correlation, range, options };
+  return { table, x, y, sigmaX, sigmaY, correlationColumn, unreportedCorrelationColumn, correlation, range, options };
 }
 
 // York 2004 iteration. Returns parameters, standard errors, covariance, and
@@ -129,7 +137,7 @@ function analyzeYorkFit(input) {
   const normalized = normalizeInput(input);
   const rowsAll = normalized.x.values.map((xi, index) => ({
     ordinal: index + 1, x: xi, y: normalized.y.values[index], sigmaX: normalized.sigmaX.values[index], sigmaY: normalized.sigmaY.values[index],
-    r: normalized.correlationColumn ? normalized.correlationColumn.values[index] : normalized.correlation,
+    r: normalized.unreportedCorrelationColumn ? 0 : normalized.correlationColumn ? normalized.correlationColumn.values[index] : normalized.correlation,
   }));
   const rows = rowsAll.filter((row) => normalized.range === null || (row.x >= normalized.range.min && row.x <= normalized.range.max));
   if (rows.length < 3) throw new PhysicsError("physics-york-fit-too-few-points", "at least three points are required inside the fit range");
@@ -141,6 +149,7 @@ function analyzeYorkFit(input) {
   const x = rows.map((row) => row.x); const y = rows.map((row) => row.y);
   const sigmaX = rows.map((row) => row.sigmaX); const sigmaY = rows.map((row) => row.sigmaY); const r = rows.map((row) => row.r);
   const warnings = [];
+  if (normalized.unreportedCorrelationColumn) warnings.push(`Correlation column "${normalized.correlationColumn.column.name}" has no reported values; r=0 was assumed for every point in the York fit.`);
   const york = yorkRegression(x, y, sigmaX, sigmaY, r, normalized.options);
   if (!york.converged) warnings.push(`York iteration stopped after ${york.iterations} iterations without meeting the tolerance; treat the slope and its error as provisional.`);
   const ndf = rows.length - 2;
@@ -243,6 +252,7 @@ function analyzeYorkFit(input) {
       title: normalized.table.title, xColumn: normalized.x.column.name, xUnit, yColumn: normalized.y.column.name, yUnit,
       sigmaXColumn: normalized.sigmaX.column.name, sigmaYColumn: normalized.sigmaY.column.name,
       correlationColumn: normalized.correlationColumn ? normalized.correlationColumn.column.name : null, correlation: normalized.correlationColumn ? null : normalized.correlation,
+      ...(normalized.unreportedCorrelationColumn ? { correlationAssumption: "mapped-all-null-assumed-zero" } : {}),
       range: normalized.range, pointCount: rows.length, excludedPointCount: rowsAll.length - rows.length, options: normalized.options,
     },
     summary: {
