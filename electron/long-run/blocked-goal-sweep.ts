@@ -27,6 +27,7 @@
  * 여전히 읽기 전용 관찰만 풀 수 있고, 옛 시도를 조용히 재실행하는 길은 없다. 실행 중인 시도·대기 구독·진행 중
  * 관찰·바쁜 대화는 그 주인이 다음 단계를 가지므로 다음 스윕으로 미룬다.
  */
+import { applyPendingOwnerGoalAmendments } from "./goal-owner-amendment";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { getDb } from "../store/db";
@@ -241,6 +242,17 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   if (qa) return cancel(run, qa, trigger);
   const workspaceGone = missingGoalWorkspace(run);
   if (workspaceGone) return cancel(run, workspaceGone, trigger);
+
+  // Owner target changes recorded while the Goal was mid-episode are applied
+  // at this stop, with the same revision+binding the Goal editor uses.
+  if (run.status === "blocked" || run.status === "paused") {
+    const amendment = applyPendingOwnerGoalAmendments(run.goalId);
+    if (amendment.applied) {
+      const latest = getLongRun(run.id);
+      if (!latest) return defer("owner_amendment_readback_failed");
+      run = latest;
+    }
+  }
 
   let epoch = 0;
   if (run.status !== "blocked") {
