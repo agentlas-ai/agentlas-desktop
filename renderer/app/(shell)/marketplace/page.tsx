@@ -568,7 +568,7 @@ function MarketplacePage() {
               <div className="hub-web-topbar-heading">
                 <div className="hub-web-topbar-title">Agent Hub</div>
                 <div className="hub-web-topbar-subtitle">
-                  {ko ? "프로젝트에 필요한 AI 동료·팀·플러그인을 찾고 고용하세요." : "Find and hire the AI talent, teams, and plugins your project needs."}
+                  {ko ? "프로젝트에 필요한 AI 동료·팀·플러그인을 찾아 팀에 합류시키세요." : "Find agents, teams, and plugins for your project and add them to your team."}
                 </div>
               </div>
               <div className="hub-web-topbar-actions" aria-label={ko ? "허브 계정 상태" : "Hub account state"}>
