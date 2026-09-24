@@ -12,7 +12,11 @@ import { parseScienceNativeFailureObservation, type ScienceNativeFailureObservat
 // These adapters forward a provider tool-result block or a completed Main tool
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
 // adapters have incomplete result coverage and cannot attest quiescence here.
-const RESULT_COVERAGE = new Set(["claude-code", "codex", "byok", "ollama", "lmstudio", "mlx", "agentlas-local"]);
+// Agentlas serving dispatches every tool call through runMainToolDispatch (the same
+// Main loop as agentlas-local) with the provider call id and isError. Without this
+// row every serving Goal turn ended "effects uncertain" and looped on observation
+// turns (isolated live run 2026-09-25, run_3ce32e25: blocked -> observe -> blocked).
+const RESULT_COVERAGE = new Set(["claude-code", "codex", "byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"]);
 /** Shared Main contract, not a provider-supplied no-tools attestation. */
 export function hasCallbackResultCoverage(kind: string): boolean { return RESULT_COVERAGE.has(kind); }
 /** Host capability/Goal notices lack provider operation identity, arguments and

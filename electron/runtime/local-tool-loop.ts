@@ -596,6 +596,12 @@ export async function runMainToolDispatch(
   approval.assertCurrent?.();
   if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, resolved);
   if (resolved.kind === "mcp") preparedMcpTransport(resolved.prepared, resolved.server);
+  // Start receipt: the call passed admission and approval and is about to leave Main.
+  // The effect-boundary reader requires start+result per operation (codex emits
+  // item.started the same way). Without it every host-loop Goal turn (serving,
+  // agentlas-local, BYOK) read "outcome-pending" and verification stayed inconclusive
+  // (isolated live run 2026-09-25, run_80dc1968: 12 inconclusive receipts).
+  events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
       import("../../shared/builtin-tools"),
