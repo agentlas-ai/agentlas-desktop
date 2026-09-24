@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-physics",
   "name": "Agentlas Physics",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -123,7 +123,7 @@
       },
       {
         "path": "runtime/mcp-server.cjs",
-        "sha256": "2a883ec17ce2c06a099ba0aeac55ed41e74687418b52af0abffd98fbf94594ce",
+        "sha256": "8e2395cf7d87b33d391db1f1a932dad139c4f97657bc0dfdd2fd39afd2f6fb4a",
         "bytes": 4098
       },
       {
@@ -188,13 +188,13 @@
       },
       {
         "path": "schemas/spectrum-fit.input.json",
-        "sha256": "4817d26151006590f221ddaefb22ae281233fe31c039af96ba3a0a73b1160294",
-        "bytes": 3705
+        "sha256": "0c54bff12012a5f242eb396923df5d3f8b1f40d5ac22744c25926e7ffb9fce2b",
+        "bytes": 3811
       },
       {
         "path": "schemas/tools.json",
-        "sha256": "61e18080d1c2251f47d0fb115820bdedd0c671905844f11d9ba3308af9a927bd",
-        "bytes": 65757
+        "sha256": "113cf3c26cd03d9efe6d8e681ab035cf1b18a563f5b36b95e3c23eaa908a596a",
+        "bytes": 65863
       },
       {
         "path": "schemas/uncertainty-propagation.input.json",
@@ -213,8 +213,8 @@
       },
       {
         "path": "skills/analysis/SKILL.md",
-        "sha256": "8b7bd61882c3fc244dbd9a63907dacd13ce1a6e66b38b994b7e9d9717958ec08",
-        "bytes": 1701
+        "sha256": "0c77b8f2bac8c21d1646e1b032b708934a141b73f00cb1ca8b366b2f415cfbb8",
+        "bytes": 1987
       },
       {
         "path": "skills/hepdata/SKILL.md",

@@ -376,7 +376,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "Optional numeric column with per-point standard uncertainty. In auto mode an entirely empty column falls back to Poisson with a warning; observed and missing values cannot be mixed. When this column is present, an explicit uncertainty_model must be column."
+            "description": "Optional numeric per-point uncertainty column. If every cell is empty, pass this column but omit uncertainty_model to use Poisson weighting with a warning. A populated column defaults to measured-column weighting; a partly empty column is rejected. With an explicit uncertainty_model, sigma_column is valid only for column, which requires no missing cells."
           },
           "uncertainty_model": {
             "type": "string",
@@ -385,7 +385,7 @@
               "poisson",
               "unit"
             ],
-            "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column for a populated sigma_column, otherwise Poisson. An entirely empty mapped sigma_column falls back only when this model is omitted."
+            "description": "column: use a complete sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Omit to use a populated sigma_column, or Poisson when sigma_column is absent or entirely empty. Do not set column for an empty sigma_column."
           },
           "range": {
             "type": "object",
