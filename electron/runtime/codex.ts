@@ -63,6 +63,7 @@ import {
 import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkforceInventory, waitForCodexWorkforceInventory } from "./codex-workforce";
 import { answerCodexMcpElicitation } from "./codex-elicitation";
 import { residencyDisabledFor } from "./claude-session";
+import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
 import {
   claimRuntimeSessionTurn,
   classifyCodexResumeFailure,
@@ -1273,10 +1274,13 @@ async function runCodexResidentTurn(input: {
   resumeThreadId: string | null;
   gapContext: string;
   mcpArgs: string[];
+  /** Vendor-surface overrides; part of the spawn args, so part of the pool key. */
+  surfaceArgs?: string[];
   appliedEffort: string | null;
   observeNativeFile: NativeFileProofObserver;
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  const surfaceArgs = input.surfaceArgs ?? [];
   const observeScienceTool = bindScienceNativeToolObserver(req);
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
@@ -1294,7 +1298,7 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...mcpArgs];
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
     chatId: req.approvalChatId ?? chatId,
@@ -2101,7 +2105,17 @@ export const runCodex: Runner = async (
   // must not be widened by provider-global config. This path uses one-shot
   // exec because app-server has no equivalent isolation flag.
   const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
-  const browserOnlyConfigArgs: string[] = [];
+  // Unattended and browser-only runs never reach Codex's own desktop/Chrome
+  // control plugins unless Main granted Computer Use (codex-desktop-surface.ts).
+  const desktopSurface = codexDesktopSurfaceArgs({
+    unattended: runReq.unattended === true,
+    browserOnly: runReq.browserOnly === true,
+    desktopControlGrant: runReq.desktopControlGrant === true,
+    env: runReq.env ?? process.env,
+    cwd: runReq.cwd ?? agentRunCwd(),
+  });
+  if (desktopSurface.receipt) events.onStatus(desktopSurface.receipt);
+  const browserOnlyConfigArgs: string[] = desktopSurface.args;
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -2216,6 +2230,7 @@ export const runCodex: Runner = async (
         resumeThreadId: resumeSessionId ?? null,
         gapContext,
         mcpArgs,
+        surfaceArgs: browserOnlyConfigArgs,
         appliedEffort,
         observeNativeFile,
       });

@@ -398,6 +398,11 @@ function schedulerExecutionPermission(_a: Automation): "read" | "write" {
  * 본 실행은 구형 `read` 행도 조회 도구를 쓸 수 있도록 런타임 write를 받지만,
  * optimizer가 그 행을 write로 재해석하면 실패 원인과 복구 권한이 달라진다.
  */
+/** The Runtime Doctor run uses exactly the tool surface the automation was configured with. */
+export function doctorToolMode(a: Pick<Automation, "toolMode">): NonNullable<Automation["toolMode"]> {
+  return a.toolMode ?? "auto";
+}
+
 function schedulerOptimizerPermission(a: Automation): "read" | "write" {
   return a.executionPermission === "read" ? "read" : automationRuntimePermission({ simulation: false });
 }
@@ -513,7 +518,10 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
         // 세션 대화에 내부 프롬프트("Private evidence …")가 그대로 노출된다.
         promptOrigin: "system" as const,
         permissions: schedulerOptimizerPermission(a),
-        toolMode: "auto" as const,
+        // Recovery acts on the automation's own surfaces. A hard-coded "auto" let
+        // the 2026-09-24 doctor run for a browser-mode automation drive the owner's
+        // real Chrome through Codex's Computer Use plugin. Inherit the owner's choice.
+        toolMode: doctorToolMode(a),
         hubMode: a.hubMode ?? "hub-allowed",
         // Recovery belongs to the failed automation. Without this pin the
         // optimizer silently used the global orchestrator (often Claude)

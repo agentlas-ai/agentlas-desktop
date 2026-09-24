@@ -5265,6 +5265,9 @@ ${effectiveUserPrompt}`;
       ...(planReadOnly ? { planMode: true as const } : {}),
       ...(req.simulation === true ? { simulation: true as const } : {}),
       ...(browserOnly ? { browserOnly: true as const } : {}),
+      // Only an explicit Computer Use selection lets an unattended run reach a
+      // runtime's own desktop-control plugins (codex-desktop-surface.ts).
+      ...(req.toolMode === "computer-use" ? { desktopControlGrant: true as const } : {}),
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
       ...(usesMobileDurableDecision(executionContext) ? { noSynchronousAsk: true as const } : {}),
