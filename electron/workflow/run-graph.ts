@@ -4532,6 +4532,10 @@ export async function runGraph(
   }
 
   const concurrency = Math.max(1, Math.floor(getAgentConcurrency()));
+  const graphNodeById = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  /** A runtime step of a browser-mode graph drives the one shared Agentlas Browser. */
+  const holdsSharedBrowser = (node: { type: string }): boolean =>
+    graphToolMode === "browser" && (node.type === "agent" || node.type === "action" || node.type === "output");
   for (;;) {
     if (runSignal.aborted) {
       ok = false;
@@ -4572,8 +4576,20 @@ export async function runGraph(
         && (ok || isCleanupNode(n.id)),
     );
     if (!ok && ready.length === 0 && running.size === 0) break;
-    const slots = Math.max(0, concurrency - running.size);
-    for (const node of ready.slice(0, slots)) {
+    // ★브라우저 모드 그래프의 실행 단계는 브라우저 하나(같은 프로필·같은 탭)를 함께 쓴다.
+    //   병렬로 띄우면 서로의 화면을 바꾼다 — 격리 후보 앱 E2E 2026-09-24(Threads 자동화):
+    //   병렬 measure 가 publish 의 작성창에서 "취소"를 눌러 publish 의 ref 가 사라졌고(Ref not
+    //   found ×4), measure 는 게시 전 상태를 측정했다. 그 단계들은 한 번에 하나만 돈다.
+    let sharedBrowserBusy = [...running.keys()].some((id) => {
+      const busy = graphNodeById.get(id);
+      return busy ? holdsSharedBrowser(busy) : false;
+    });
+    for (const node of ready) {
+      if (running.size >= concurrency) break;
+      if (holdsSharedBrowser(node)) {
+        if (sharedBrowserBusy) continue;
+        sharedBrowserBusy = true;
+      }
       status.set(node.id, "running");
       const p = runNode(node).finally(() => running.delete(node.id));
       running.set(node.id, p);
