@@ -25,7 +25,11 @@
  *   - An override for a plugin that is not installed is harmless.
  *   - `-c mcp_servers.<name>.enabled=false` for a server that the user config
  *     does NOT declare fails bootstrap ("invalid transport"), so user-level
- *     servers are disabled only when the user config actually declares them.
+ *     servers are disabled only when the user config actually declares them —
+ *     and never under `--ignore-user-config` (isolated runs): there the user
+ *     config is not loaded, so every such override is a transport-less server.
+ *     Dev-app E2E 2026-09-24 (browser-mode Threads automation, isolated exec):
+ *     "Error loading config.toml: invalid transport in `mcp_servers.computer-use`".
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -49,6 +53,8 @@ export interface CodexDesktopSurfaceInput {
   unattended?: boolean;
   browserOnly?: boolean;
   desktopControlGrant?: boolean;
+  /** The spawn passes `--ignore-user-config`: user-declared servers do not exist. */
+  userConfigIgnored?: boolean;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
 }
@@ -128,7 +134,7 @@ export function codexDesktopSurfaceArgs(input: CodexDesktopSurfaceInput): CodexD
   if (!codexDesktopSurfaceClosed(input)) return { args: [], receipt: null };
   const args: string[] = [];
   for (const plugin of CODEX_DESKTOP_CONTROL_PLUGINS) args.push("-c", `plugins.${plugin}.enabled=false`);
-  const servers = readUserConfigServers(codexHomeFor(input));
+  const servers = input.userConfigIgnored ? [] : readUserConfigServers(codexHomeFor(input));
   for (const server of servers) args.push("-c", `mcp_servers.${server}.enabled=false`);
   const reason = input.browserOnly ? "browser_only" : "unattended";
   return {
