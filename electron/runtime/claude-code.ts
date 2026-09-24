@@ -1,5 +1,5 @@
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
-import { claudeBrowserSurfaceArgs } from "./claude-browser-surface";
+import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 // Claude Code CLI — 감지 + 실호출.
@@ -1041,14 +1041,19 @@ const runClaudeTurn = async (
         "",
       ]
     : [];
-  // Claude Code's own shell, slash commands and plugins remain usable, but no
-  // run reaches a browser other than the Agentlas one (Claude in Chrome, user
-  // Playwright-style MCP servers) unless Main granted Computer Use
-  // (claude-browser-surface.ts). The untrustedNoTools path disables all tools.
+  // Claude Code's own shell, slash commands and plugins remain usable. The
+  // Agentlas browser comes first: while one is reachable (Main bound it, or the
+  // engine plugin's copy is enabled) outside browser servers are hidden; with
+  // none reachable they stay as the fallback. Claude in Chrome (the owner's real
+  // Chrome) needs a Computer Use grant (claude-browser-surface.ts). The
+  // untrustedNoTools path disables all tools.
   const browserSurface = claudeBrowserSurfaceArgs({
     desktopControlGrant: runReq.desktopControlGrant === true,
     untrustedNoTools: runReq.untrustedNoTools === true,
     hostAllowedTools: runReq.mcpAllowedTools ?? [],
+    engineBrowserEnabled: runReq.desktopControlGrant === true || runReq.untrustedNoTools === true
+      ? undefined
+      : claudeEngineBrowserEnabled({ env: runReq.env ?? process.env, cwd: runReq.cwd ?? agentRunCwd() }),
   });
   if (browserSurface.receipt) events.onStatus(browserSurface.receipt);
   const browserOnlyArgs: string[] = browserSurface.args;

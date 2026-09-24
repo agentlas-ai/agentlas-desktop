@@ -8,6 +8,8 @@ import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
+import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidates";
+import { capabilityPriorityGuidance } from "../../shared/capability-priority";
 import { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG, SURFACE_OPEN_FENCE, SURFACE_CLOSE_FENCE } from "../surface-emitter";
 import { selectModules, tokenize } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
@@ -1178,11 +1180,18 @@ export function wrapSystemPrompt(
     (surfaceGate !== "exclude" && (userPrompt === undefined || surfaceFastPathHit(userPrompt)));
 
   const nativeAbilities = runtimeNativeAbilitiesLine(nativeRuntimeKind);
+  // Owner 2026-09-24: Agentlas plugins first, outside equivalents only as the
+  // fallback (shared/capability-priority.ts). The runtime surfaces hide an
+  // outside equivalent where an Agentlas provider is reachable; this line tells
+  // the model the same order where both remain (for example an unbound turn).
+  let capabilityPriority = "";
+  try { capabilityPriority = capabilityPriorityGuidance(installedAgentlasCapabilityProviders()); } catch { capabilityPriority = ""; }
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
     responseLanguageGuide(locale, userPrompt),
     toolsLine,
     ...(nativeAbilities ? [nativeAbilities] : []),
+    ...(capabilityPriority ? [capabilityPriority] : []),
     "",
     ASK_PROTOCOL,
     "",
