@@ -46,6 +46,7 @@ import {
   transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
@@ -2900,6 +2901,22 @@ export class InvocationService {
             recordMcpInvocationEvent(runId, runReq, noticeEvent);
             this.publishRunEvent(record, { runId, chatId: chat.id, event: noticeEvent });
           }
+        }
+        // An owner message that changes an ongoing Goal's targets becomes a Goal
+        // revision (applied at the next stop). Asynchronous: never delays or
+        // refuses this turn; an unavailable judge records nothing.
+        const amendmentGoalId = projectionGoalId ?? boundGoal?.goalId ?? null;
+        if (localUserTurn && !runReq.planMode && !runReq.agentAppMode && !runWorkspaceBinding && !executionContext
+          && runReq.promptOrigin !== "system" && chat.kind === "user"
+          && ["one", "work"].includes(chat.originSurface ?? "") && amendmentGoalId) {
+          void reviewOwnerGoalMessage({ goalId: amendmentGoalId, chatId: chat.id, sourceMessageId }).then((review) => {
+            if (review.label !== "amends_goal") return;
+            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
+              goalId: amendmentGoalId, sourceMessageId, recorded: review.recorded,
+              applied: review.apply?.applied ?? false,
+              ...(review.apply?.applied ? { revision: review.apply.revision } : { deferredReason: review.apply?.reason ?? null }),
+            } });
+          });
         }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
