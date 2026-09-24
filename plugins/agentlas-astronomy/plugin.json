@@ -115,8 +115,8 @@
       },
       {
         "path": "runtime/astronomy.cjs",
-        "sha256": "e8817c7670b6a9d31b5327c1b547b5a2793f4f1f8deb4ddf814615050f15cf55",
-        "bytes": 89328
+        "sha256": "f69f572d5aed099f0de120e9e8feff20a13da6570d8188ef71e0e2027db2613a",
+        "bytes": 89478
       },
       {
         "path": "runtime/colour-magnitude.cjs",
@@ -140,8 +140,8 @@
       },
       {
         "path": "runtime/periodicity-depth.cjs",
-        "sha256": "20cbbf7ba9d10853da9c9738f2faa3492741af1c2832fa957279530f40c5e450",
-        "bytes": 34798
+        "sha256": "c11e704144c7b24218f74d1d02e7d36d402581aefaa39efcb8dda1ebdf105557",
+        "bytes": 34918
       },
       {
         "path": "runtime/rv-orbit.cjs",
@@ -155,8 +155,8 @@
       },
       {
         "path": "runtime/transit-search.cjs",
-        "sha256": "dc28235ecb7b8bd215d90ac6a8e4c194378a9d1962cdfb44265e80ea5b41f383",
-        "bytes": 31986
+        "sha256": "8092615239e72980e7978b5f2609b5f9745c8557bfc6350f30aa28b459ccd691",
+        "bytes": 32100
       },
       {
         "path": "schemas/analysis-tools.json",
