@@ -25,6 +25,7 @@ import type { ChatHostNotice } from "../../shared/types";
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
 import { modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
+import type { GoalPassStop } from "../long-run/goal-pass-stop";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -1513,6 +1514,8 @@ export interface McpInvocationResult {
    */
   goalWaitRequest?: ParsedGoalWait;
   goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
+  /** A failed goal pass stopped the loop with the goal still open (typed; see long-run/goal-pass-stop.ts). */
+  goalPassStop?: GoalPassStop;
   resultFolder?: string;
   /**
    * 커넥터 C38 — 이 호출에서 도구 중개가 **실제로** 어디까지 걸렸는가. 계획이 아니라
@@ -6142,8 +6145,12 @@ ${effectiveUserPrompt}`;
     /** Runaway guard for the marker-driven path, which has no ledger to consult. */
     let lastPassFingerprint = "";
     let identicalPassStreak = 0;
-    /** Set when a failed pass stopped the loop while leaving the goal open and resumable. */
-    let goalPassStop: { reason: string; retryAfterHint?: string } | null = null;
+    /**
+     * Set when a failed pass stopped the loop while leaving the goal open and resumable. Returned to the
+     * invocation service, which writes it into the long-run ledger with a scheduled retry
+     * (long-run/goal-pass-stop.ts). Before 2026-09-24 nothing read it: the reset time died here.
+     */
+    let goalPassStop: GoalPassStop | null = null;
     const needsAutomationRegistration = (text: string): boolean => hasAutomationRegistrationHandoff(text, {
       agentAppMode: req.agentAppMode === true, division: chat.kind === "division",
       sessionAutomationId: req.automationId, backgroundAutomation: executionContext?.source === "automation",
@@ -6329,7 +6336,18 @@ ${effectiveUserPrompt}`;
           pass -= 1;
           continue;
         }
-        goalPassStop = { reason: verdict.reason, ...(verdict.retryAfterHint ? { retryAfterHint: verdict.retryAfterHint } : {}) };
+        if (activeGoalId) {
+          const resetMs = result.failure.kind === "quota" ? parseRetryHint(verdict.retryAfterHint, Date.now()) : null;
+          goalPassStop = {
+            goalId: activeGoalId,
+            reason: verdict.reason,
+            action: verdict.action,
+            failureKind: result.failure.kind,
+            runtime: result.failure.runtime,
+            ...(verdict.retryAfterHint ? { retryAfterHint: verdict.retryAfterHint } : {}),
+            ...(resetMs !== null ? { retryAfterAt: new Date(resetMs).toISOString() } : {}),
+          };
+        }
         sink({
           kind: "notice",
           notice: {
@@ -7373,6 +7391,7 @@ ${effectiveUserPrompt}`;
           evidence: goalCompletion.evidence,
           goalId: activeGoalId,
         },
+        ...(goalPassStop ? { goalPassStop } : {}),
         resultFolder: resolvedResultFolder,
         workforcePrepareReceipt,
       };
@@ -7406,6 +7425,7 @@ ${effectiveUserPrompt}`;
         evidence: goalCompletion.evidence,
         goalId: activeGoalId,
       },
+      ...(goalPassStop ? { goalPassStop } : {}),
       resultFolder: resolvedResultFolder,
       workforcePrepareReceipt,
       // C38 — 계획이 아니라 **결과**를 돌려준다. 관문 파일을 만들어 놓고 실행이 다른

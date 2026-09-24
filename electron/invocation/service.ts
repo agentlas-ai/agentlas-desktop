@@ -10,6 +10,7 @@ import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
+import { parkGoalAfterPassStopWithPool } from "../long-run/goal-pass-stop";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
 import { InvocationEffectBoundaryTracker } from "./effect-boundary";
 import { readInvocationEffectBoundary } from "./effect-boundary-reader";
@@ -3187,6 +3188,21 @@ export class InvocationService {
         });
         // An effect observation owns no Goal semantics (see projectionGoalId).
         if (effectObservation) return;
+        /*
+         * A failed goal pass stopped the loop with the goal still open (quota, auth, refusal, exhausted
+         * transient). Its stop reason and reset time go into the long-run ledger with a scheduled retry;
+         * nothing else in this turn may claim completion or register a wait on top of it. Before
+         * 2026-09-24 the stop was set in the client and read nowhere, so the reset time died there.
+         */
+        if (result.goalPassStop && !executionContext && !controller.signal.aborted
+          && goalLongRun && result.goalPassStop.goalId === goalLongRun.goalId) {
+          lifetime.retain(parkGoalAfterPassStopWithPool({
+            stop: result.goalPassStop,
+            invocationRunId: runId,
+            chatId: chat.id,
+          }).then(() => undefined));
+          return;
+        }
         if (result.goalWaitRequest && !executionContext) {
           try {
             if (controller.signal.aborted || record.steeringInterruptRequested) return;
