@@ -2130,6 +2130,7 @@ export const runCodex: Runner = async (
     unattended: runReq.unattended === true,
     browserOnly: runReq.browserOnly === true,
     desktopControlGrant: runReq.desktopControlGrant === true,
+    userConfigIgnored: runReq.isolatedMcpConfig === true,
     env: runReq.env ?? process.env,
     cwd: runReq.cwd ?? agentRunCwd(),
   });
