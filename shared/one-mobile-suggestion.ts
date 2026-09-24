@@ -87,7 +87,9 @@ export interface OneMobileHubDerivativeScope {
   gates: {
     entitlement: "unknown";
     rights: "unknown";
+    /** V1 wire compatibility only; creator settlement is permanently closed. */
     economy: "unknown";
+    /** V1 wire compatibility only; public Hub sharing is free. */
     fee: "unknown";
   };
   privateSourceIncluded: false;

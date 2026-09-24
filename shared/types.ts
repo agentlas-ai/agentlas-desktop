@@ -6116,9 +6116,9 @@ export type RecExecChoice =
   | { kind: "pipeline"; stages?: RecStage[]; routerAgent?: RecRouterAgent }
   | { kind: "plain"; routerAgent?: RecRouterAgent };
 
-/** Agentlas Hub 크레딧 잔액 — GET /api/billing/credits 응답 형태.
- *  구독 계좌(A: 월 초기화 + 톱업 + 전송분)와 렌트수익 계좌(B: 적립 전용)를 분리해서 본다.
- *  `remainingCredits`=사용 가능(A), `earningsCredits`=이동 가능한 렌트수익(B). */
+/** Hosted AI 사용 잔액 — GET /api/billing/credits 응답 형태.
+ *  공개 Hub 에이전트 호출과 업로드는 무료다. earningsCredits는 폐쇄된
+ *  창작자 정산의 과거 읽기 전용 호환 필드다. */
 export interface HubCreditBalance {
   authenticated: boolean;
   plan?: string;
@@ -6131,7 +6131,7 @@ export interface HubCreditBalance {
   error?: string;
 }
 
-/** 렌트수익(B) → 구독(A) 일방 전송 결과. POST /api/billing/earnings/transfer. */
+/** 폐쇄된 창작자 정산 전송의 과거 IPC 응답형. 호출은 항상 거부된다. */
 export interface EarningsTransferResult {
   ok: boolean;
   moved?: number;

@@ -86,7 +86,6 @@ import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
-import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { getEngineToggles } from "../hephaestus/supervisor";
 import { listHubAgentBookmarks } from "../store/hub-bookmarks";
 import {
@@ -3322,9 +3321,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             noHub: optionalBoolean(params, "offline") ?? false,
             timeoutMs: 30_000,
           });
-          // 활성 장기대여 slug 는 호출 0크레딧 — 모바일 고지액도 데스크탑과 같은 규칙.
-          const leasedSlugs = await activeLeasedSlugs().catch(() => new Set<string>());
-          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(result.json, query, { leasedSlugs })), request.method);
+          // 공개 Hub 호출은 무료이므로 과거 유료 장기대여 상태를 조회하지 않는다.
+          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(result.json, query)), request.method);
         } catch {
           return asJsonValue(projectRouteRecommendation(normalizeRecommendation(null, query)), request.method);
         }

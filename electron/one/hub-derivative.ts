@@ -217,7 +217,7 @@ function generatedFiles(draftId: string): Array<{ path: string; bytes: Buffer }>
     "This generated scaffold is ready for explicit per-file public-content review.",
     "",
     "No private source file was copied into this draft. Memory, credentials, customer data, internal documents, raw Task context, private Experience, local paths, and secrets remain excluded.",
-    "Publishing is locked until entitlement, rights, live economy, fee terms, and a separate explicit publish approval are verified.",
+    "Publishing is locked until eligibility, rights, and separate explicit publish approval are verified. Public Hub sharing is free.",
     "",
   ].join("\n"), "utf8");
   const routingCard = Buffer.from(JSON.stringify({

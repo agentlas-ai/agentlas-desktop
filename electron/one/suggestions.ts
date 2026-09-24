@@ -550,12 +550,16 @@ function normalizeHub(value: unknown): OneHubDerivativeSignal | null {
   assertSafeId(value.publicSuitabilityRef, "signals.hubDerivative.publicSuitabilityRef");
   assertSafeId(value.sanitizedManifestRef, "signals.hubDerivative.sanitizedManifestRef");
   assertSafeId(value.rightsReviewRef, "signals.hubDerivative.rightsReviewRef");
-  if (!isRecord(value.economy)) throw new TypeError("signals.hubDerivative.economy must be an object");
-  assertOnlyKeys(value.economy, ["available", "policyRef", "feeScheduleRef", "settlementRuleRef"], "signals.hubDerivative.economy");
-  if (typeof value.economy.available !== "boolean") throw new TypeError("signals.hubDerivative.economy.available must be boolean");
-  assertSafeId(value.economy.policyRef, "signals.hubDerivative.economy.policyRef");
-  assertSafeId(value.economy.feeScheduleRef, "signals.hubDerivative.economy.feeScheduleRef");
-  assertSafeId(value.economy.settlementRuleRef, "signals.hubDerivative.economy.settlementRuleRef");
+  // Historical creator-commerce signals are validated for compatibility, then discarded.
+  // Hub publication is free and no longer depends on a fee schedule or settlement rule.
+  if (value.economy !== undefined) {
+    if (!isRecord(value.economy)) throw new TypeError("signals.hubDerivative.economy must be an object");
+    assertOnlyKeys(value.economy, ["available", "policyRef", "feeScheduleRef", "settlementRuleRef"], "signals.hubDerivative.economy");
+    if (typeof value.economy.available !== "boolean") throw new TypeError("signals.hubDerivative.economy.available must be boolean");
+    assertSafeId(value.economy.policyRef, "signals.hubDerivative.economy.policyRef");
+    assertSafeId(value.economy.feeScheduleRef, "signals.hubDerivative.economy.feeScheduleRef");
+    assertSafeId(value.economy.settlementRuleRef, "signals.hubDerivative.economy.settlementRuleRef");
+  }
   if (!Array.isArray(value.excludedPrivateCategories)) {
     throw new TypeError("signals.hubDerivative.excludedPrivateCategories must be an array");
   }
@@ -569,7 +573,6 @@ function normalizeHub(value: unknown): OneHubDerivativeSignal | null {
   if (
     !value.ownerVerified || !value.publicReleaseIntentConfirmed || !value.privateInputExcluded
     || value.publicSuitability !== "passed"
-    || !value.economy.available
   ) return null;
   return {
     privateSourceId: value.privateSourceId,
@@ -580,12 +583,6 @@ function normalizeHub(value: unknown): OneHubDerivativeSignal | null {
     publicSuitabilityRef: value.publicSuitabilityRef,
     sanitizedManifestRef: value.sanitizedManifestRef,
     rightsReviewRef: value.rightsReviewRef,
-    economy: {
-      available: true,
-      policyRef: value.economy.policyRef,
-      feeScheduleRef: value.economy.feeScheduleRef,
-      settlementRuleRef: value.economy.settlementRuleRef,
-    },
     excludedPrivateCategories: [...ONE_HUB_PRIVATE_EXCLUSIONS],
   };
 }
