@@ -529,6 +529,11 @@ export async function callConnectedModelDetailed(opts: {
   requireNoTools?: true;
   /** Let the configured orchestrator pool back up (or lead) an explicit pin. */
   pinFallback?: JudgmentPinFallback;
+  /**
+   * Structured callers decide whether a text is a usable answer. A rejected text counts as that
+   * candidate's failure and the next pool member is tried (goal shape judgment, 2026-09-24).
+   */
+  accept?: (text: string) => boolean;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   return callJudgmentModelDetailed(opts);
 }

@@ -19,6 +19,8 @@ import {
 } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { goalScopeCriterion } from "../../shared/goal-scope";
+import type { GoalPlanView } from "../../shared/goal-shape";
+import { goalPlanView } from "../long-run/goal-shaping";
 
 export interface GoalLedgerDecision {
   continue: boolean;
@@ -44,6 +46,8 @@ export interface GoalLedgerSnapshot {
   blockedReason: string | null;
   version: number;
   executionLocation: "desktop-local" | "web-hosted";
+  /** 골 구조 판단 결과(모양·현재 전술) — 읽기 모델. 판단 전이면 없음(2026-09-24 오너 최우선). */
+  plan?: GoalPlanView | null;
 }
 
 export interface GoalLedgerTask {
@@ -108,6 +112,7 @@ export async function getGoalLedgerGoal(
       blockedReason: run.blockedReason ?? null,
       version: run.version,
       executionLocation: run.executionLocation,
+      plan: goalPlanView(goalId),
     };
   } catch {
     return null;

@@ -65,6 +65,8 @@ import {
   type GoalLedgerSnapshot,
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
+import { applyGoalPlanMarkers, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
+import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   autoRouteStatus,
@@ -5296,6 +5298,15 @@ ${effectiveUserPrompt}`;
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
           turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           if (!executionContext) { turnContextParts.push(goalWaitProtocol()); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
+          /*
+           * 골 구조 판단(오너 최우선 2026-09-24): 이 목표 개정의 모양(단일 전술/전술 목록/대계-전략-전술 트리)이
+           * 없으면 이 턴을 시작하기 전에 정한다. 실패는 단일 전술 폴백 — 목표를 막지 않는다. 턴마다 바뀌는 절이라
+           * 세션 재사용 문맥(stable)에는 넣지 않는다.
+           */
+          const goalPlan = await ensureGoalShapeBeforeTurn({ goalId: activeGoalId, objective: activeGoal.objective, signal,
+            onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
+          }).catch((error: unknown) => { console.warn("[goal-plan] shape decision failed:", error instanceof Error ? error.message : error); return null; });
+          if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null }));
         }
       }
     }
@@ -6169,6 +6180,8 @@ ${effectiveUserPrompt}`;
       // settlement may accept it; neither completion nor another live pass wins.
       if (activeGoalId && !executionContext && parseGoalWaitIntent(result.text).request) break;
       const rawContinuation = stripStormbreakerContinueMarker(result.text);
+      // 전술·계획 표식은 이 패스에서 원장에 반영하고 본문에서 뗀다(패스 본문은 곧바로 영속된다).
+      rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null }).text;
       const passClaim = stripGoalCompleteMarker(rawContinuation.text);
       if (passClaim.claimed) {
         goalClaimSeen = true;
@@ -6291,14 +6304,15 @@ ${effectiveUserPrompt}`;
             previousOutput: result.text,
           })
         : buildStormbreakerContinuationPrompt(result.text, pass);
+      const planNote = activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
       activeRunnerReq = {
         ...runnerReq,
         // Remote Hub instructions stay at user authority. Reattach the exact
         // verified preamble for stateless BYOK passes without promoting it into
         // the local system prompt.
         userPrompt: explicitBorrowUserPreamble
-          ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}`
-          : continuationPrompt,
+          ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}${planNote ? `\n\n${planNote}` : ""}`
+          : `${continuationPrompt}${planNote ? `\n\n${planNote}` : ""}`,
         images: undefined,
       };
       result = await invokeCurrentRuntime(activeRunnerReq);
@@ -6353,6 +6367,7 @@ ${effectiveUserPrompt}`;
             ...(verdict.retryAfterHint ? { retryAfterHint: verdict.retryAfterHint } : {}),
             ...(resetMs !== null ? { retryAfterAt: new Date(resetMs).toISOString() } : {}),
           };
+          recordGoalPlanPassStop(activeGoalId, goalPassStopCause(goalPassStop), req.runId ?? null);
         }
         sink({
           kind: "notice",
@@ -6439,6 +6454,8 @@ ${effectiveUserPrompt}`;
     const goalWaitRequest = waitProposal.request;
     result = { ...result, text: waitProposal.text };
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
+    // 전술·계획 표식 회수도 모든 경로가 지나는 이 한 지점에서 한다(완료 선언과 같은 이유).
+    finalContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: finalContinuation.text, runId: req.runId ?? null }).text;
     // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
     // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
     // 그대로 나간다 — 제어 표식이 답변에 새는 계열의 결함을 새로 만드는 셈이다.
