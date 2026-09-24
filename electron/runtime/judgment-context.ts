@@ -18,3 +18,11 @@ export function bindInvocationJudgmentRuntime(selection: RuntimeSelection): void
 export function invocationJudgmentContext(): Readonly<InvocationJudgmentContext> | undefined {
   return contexts.getStore();
 }
+
+/**
+ * Run work that belongs to no invocation — a fire-and-forget review started from
+ * inside a turn must not inherit that turn's worker pin or abort signal.
+ */
+export function outsideInvocationJudgmentContext<T>(run: () => T): T {
+  return contexts.exit(run);
+}

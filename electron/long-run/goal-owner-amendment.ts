@@ -32,7 +32,13 @@ import {
   getLongRunByGoalId,
   unsettledLongRunAttemptCount,
 } from "../store/long-runs";
-import { judgeRequired, type RequiredJudgeSpec, type RequiredVerdict } from "../system-agents/judgment";
+import {
+  configuredOrchestratorJudgmentPolicy,
+  judgeRequired,
+  type RequiredJudgeSpec,
+  type RequiredVerdict,
+} from "../system-agents/judgment";
+import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 
 export const OWNER_GOAL_AMENDMENT_PENDING_KIND = "run.owner_goal_amendment_pending";
 export const OWNER_GOAL_AMENDMENT_APPLIED_KIND = "run.owner_goal_amendment_applied";
@@ -45,14 +51,44 @@ const OBJECTIVE_MAX = 12_000;
 
 type JudgeFn = (spec: RequiredJudgeSpec<AmendmentLabel>) => Promise<RequiredVerdict<AmendmentLabel>>;
 
-export async function classifyOwnerGoalAmendment(input: {
+/**
+ * Why a review ended the way it did — a machine code, never prose.
+ *  - amends_goal / steering / unknown: the judge answered with that label.
+ *  - judge_unavailable:<code>: the judge gave no label (runtime refused, timed out, pool changed…).
+ *  - skipped:<code>: the review never asked the judge.
+ */
+export type OwnerGoalAmendmentReviewCode = AmendmentLabel | `judge_unavailable:${string}` | `skipped:${string}`;
+
+export interface OwnerGoalAmendmentClassification {
+  label: AmendmentLabel;
+  reasonCode: OwnerGoalAmendmentReviewCode;
+}
+
+function judgeFailureCode(verdict: RequiredVerdict<AmendmentLabel>): string {
+  const raw = verdict.failureKind ?? (verdict.reason || "no_verdict");
+  return raw.replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80) || "no_verdict";
+}
+
+/**
+ * The review is fired from inside the owner's chat turn, so the invocation's
+ * async context is live and a bare judge call would inherit that turn's worker
+ * pin. Measured 2026-09-24 (dev copy of the owner's Threads goal): the turn ran
+ * on codex, the judge inherited the codex pin, codex cannot prove a tool-free
+ * run, and the judge refused before any attempt — every owner target
+ * restatement came back "unknown" and no revision was ever written, while the
+ * same question asked outside a turn answered amends_goal in 3.5s. The
+ * classification is a no-tools judgment owned by the configured orchestrator
+ * pool (like the goal shaper), never by whichever worker happens to run the turn.
+ */
+export async function classifyOwnerGoalAmendmentDetailed(input: {
   objective: string;
   message: string;
   signal?: AbortSignal;
   judgeFn?: JudgeFn;
-}): Promise<AmendmentLabel> {
-  if (!input.message.trim()) return "unknown";
+}): Promise<OwnerGoalAmendmentClassification> {
+  if (!input.message.trim()) return { label: "unknown", reasonCode: "skipped:empty_message" };
   try {
+    const selectionPolicy = input.judgeFn ? null : configuredOrchestratorJudgmentPolicy();
     const verdict = await (input.judgeFn ?? judgeRequired)({
       kind: "goal-owner-amendment-v1",
       question: "Does the owner's new message change this ongoing Goal's objective, numeric targets, deadline, scope or success condition, rather than only steering how the work is done?",
@@ -72,12 +108,24 @@ export async function classifyOwnerGoalAmendment(input: {
       requireNoTools: true,
       maxInputChars: null,
       timeoutMs: 45_000,
+      ...(selectionPolicy ? { selectionPolicy } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
-    return verdict.verdict && LABELS.includes(verdict.verdict) ? verdict.verdict : "unknown";
-  } catch {
-    return "unknown";
+    if (verdict.verdict && LABELS.includes(verdict.verdict)) return { label: verdict.verdict, reasonCode: verdict.verdict };
+    return { label: "unknown", reasonCode: `judge_unavailable:${judgeFailureCode(verdict)}` };
+  } catch (error) {
+    const code = error instanceof Error ? error.message.replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80) : "threw";
+    return { label: "unknown", reasonCode: `judge_unavailable:${code || "threw"}` };
   }
+}
+
+export async function classifyOwnerGoalAmendment(input: {
+  objective: string;
+  message: string;
+  signal?: AbortSignal;
+  judgeFn?: JudgeFn;
+}): Promise<AmendmentLabel> {
+  return (await classifyOwnerGoalAmendmentDetailed(input)).label;
 }
 
 function amendmentObjective(currentObjective: string, message: string, at: string): string {
@@ -182,34 +230,39 @@ export function applyPendingOwnerGoalAmendments(goalId: string): OwnerGoalAmendm
 
 /**
  * Fire-and-forget review of one owner turn in a Goal chat. Never blocks the
- * turn, never throws; an unavailable judge simply records nothing.
+ * turn, never throws. Every outcome carries a machine reasonCode so a review
+ * that was skipped or went unanswered is visible, not silent.
  */
 export function reviewOwnerGoalMessage(input: {
   goalId: string;
   chatId: string;
   sourceMessageId: string;
   judgeFn?: JudgeFn;
-}): Promise<{ label: AmendmentLabel; recorded: boolean; apply: OwnerGoalAmendmentApplyResult | null }> {
-  return (async () => {
+}): Promise<{ label: AmendmentLabel; reasonCode: OwnerGoalAmendmentReviewCode; recorded: boolean; apply: OwnerGoalAmendmentApplyResult | null }> {
+  const skipped = (code: string) => ({ label: "unknown" as const, reasonCode: `skipped:${code}` as const, recorded: false, apply: null });
+  // Detach from the owner's turn: its worker pin and abort signal are not this review's.
+  return outsideInvocationJudgmentContext(() => (async () => {
     const revision = getChatGoalRevision(input.goalId);
-    if (!revision || revision.chatId !== input.chatId || revision.lifecycle !== "ongoing") {
-      return { label: "unknown" as const, recorded: false, apply: null };
-    }
-    if (revision.sourceMessage.messageId === input.sourceMessageId) {
-      return { label: "unknown" as const, recorded: false, apply: null };
-    }
+    if (!revision) return skipped("no_goal_revision");
+    if (revision.chatId !== input.chatId) return skipped("goal_chat_mismatch");
+    if (revision.lifecycle !== "ongoing") return skipped("goal_not_ongoing");
+    if (revision.sourceMessage.messageId === input.sourceMessageId) return skipped("message_is_revision_source");
     const message = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?")
       .get(input.sourceMessageId) as { chat_id: string; role: string; text: string } | undefined;
-    if (!message || message.chat_id !== input.chatId || message.role !== "user") {
-      return { label: "unknown" as const, recorded: false, apply: null };
-    }
-    const label = await classifyOwnerGoalAmendment({
+    if (!message) return skipped("message_not_stored");
+    if (message.chat_id !== input.chatId || message.role !== "user") return skipped("message_not_owner_turn");
+    const { label, reasonCode } = await classifyOwnerGoalAmendmentDetailed({
       objective: revision.objective,
       message: message.text,
       ...(input.judgeFn ? { judgeFn: input.judgeFn } : {}),
     });
-    if (label !== "amends_goal") return { label, recorded: false, apply: null };
+    if (label !== "amends_goal") return { label, reasonCode, recorded: false, apply: null };
     const recorded = recordPendingOwnerGoalAmendment(input.goalId, input.sourceMessageId);
-    return { label, recorded, apply: applyPendingOwnerGoalAmendments(input.goalId) };
-  })().catch(() => ({ label: "unknown" as const, recorded: false, apply: null }));
+    return { label, reasonCode, recorded, apply: applyPendingOwnerGoalAmendments(input.goalId) };
+  })().catch((error: unknown) => ({
+    label: "unknown" as const,
+    reasonCode: `judge_unavailable:${error instanceof Error ? error.message.replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80) : "threw"}` as const,
+    recorded: false,
+    apply: null,
+  })));
 }
