@@ -16,6 +16,7 @@ import {
   adjudicateAutomationStrategyProposal,
   createAutomationStrategyProposalForRun,
   getAutomationStrategyGoalOrigin,
+  settleAutomationStrategyProposalBacklog,
   type AutomationStrategyProposalObservationV1,
 } from "./store/automation-strategy-proposals";
 import { getLatestAutomationStrategyRevision } from "./store/automation-strategy-revisions";
@@ -338,6 +339,22 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
       unavailable(input, "reflection_handoff_failed");
       console.error("[automation] strategy reflection handoff failed:", error);
     }
+  }
+
+  // One live proposal per automation (P0-5): retire older drafts and a live draft whose definition moved.
+  // Receipt-only; never changes the graph, schedule, Goal, or authority.
+  try {
+    const backlog = settleAutomationStrategyProposalBacklog(input.automationId);
+    if (backlog.superseded > 0 || backlog.staleResolved > 0) {
+      tryRecordRunEvent({
+        runId: input.sourceRunId,
+        kind: "automation_strategy_backlog_settled",
+        automationId: input.automationId,
+        payload: { liveProposalId: backlog.liveProposalId, superseded: backlog.superseded, staleResolved: backlog.staleResolved },
+      });
+    }
+  } catch (error) {
+    console.warn("[automation] strategy proposal backlog could not be settled:", error);
   }
 
   // A revision receipt proves Main changed the graph. This content-free event
