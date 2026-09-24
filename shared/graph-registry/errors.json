@@ -2,7 +2,7 @@
   "wire": "graph/1",
   "note": "오류 코드 단일 네임스페이스 (06 §8). 형식 = SCREAMING_SNAKE. 모든 엔트리는 cardKey 또는 verbatim:true 중 하나를 반드시 갖는다(GV-5). 커널이 여기 없는 코드를 내면 게이트 실패 — '코드 없는 failed 전이 = 커널 결함'의 형식화.",
   "foreignCodes": {
-    "rule": "Hub 서버 원문 코드(insufficient_credits 등 lowercase)는 번역·재포장 금지. source:'hub-server' 라벨과 함께 원문 그대로 통과.",
+    "rule": "Hub 서버 원문 코드(lowercase)는 번역·재포장 금지. source:'hub-server' 라벨과 함께 원문 그대로 통과. 과거 크레딧 오류 코드는 공개 Hub 무료 호출에 적용하지 않는다.",
     "status": "specified"
   },
   "errors": [

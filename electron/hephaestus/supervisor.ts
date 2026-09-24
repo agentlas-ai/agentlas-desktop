@@ -49,7 +49,7 @@ function load(): HephaestusSettings {
     };
   } catch {
     // ENOENT means a genuinely fresh install. A present but unreadable/corrupt
-    // file is an existing user's state, so paid/remote auto-engagement fails closed.
+    // file is an existing user's state, so remote auto-engagement fails closed.
     cache = fs.existsSync(file) ? { ...DEFAULTS, networkAuto: false } : { ...DEFAULTS };
   }
   return cache;
@@ -58,8 +58,8 @@ function load(): HephaestusSettings {
 function persist(next: HephaestusSettings): void {
   // A toggle shown as saved must survive restart. Updating the in-memory cache
   // after a swallowed disk failure made Settings return a successful receipt
-  // for a value that disappeared on relaunch (especially unsafe for paid Hub
-  // auto-hiring). Let the IPC reject and keep the prior cache instead.
+  // for a value that disappeared on relaunch. Let the IPC reject and keep
+  // the prior cache instead.
   fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), "utf8");
   cache = next;
 }

@@ -239,8 +239,7 @@ function ProjectPage() {
   // Tasks are the primary project surface. Keep the potentially long tool
   // roster collapsed by default so recent conversations remain above the fold.
   const [teamTreeOpen, setTeamTreeOpen] = useState(false);
-  // ── Hub 렌트/장기대여 상태 (오너 결정 2026-08-18: 24h 자동 리스 폐지) ──
-  // 렌트허용은 (projectId × slug) 데스크탑 로컬 저장, 대여는 서버 계정 상태.
+  // 공개 Hub 에이전트의 프로젝트별 자동 사용 동의. 기존 저장 키 이름은 유지한다.
   const [rentAllowedSlugs, setRentAllowedSlugs] = useState<Set<string>>(new Set());
   // 에이전트 픽커 검색 — 목록이 길어 이름/slug로 즉시 좁힌다(클라이언트 필터).
   const [rosterQuery, setRosterQuery] = useState("");
