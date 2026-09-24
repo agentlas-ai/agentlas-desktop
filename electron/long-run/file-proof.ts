@@ -6,7 +6,8 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { FILE_OBSERVATION_MAX_BYTES, observeWorkspaceFile, type FileObservation, type FileObservationAction } from "../../shared/file-observation";
 import { getDb } from "../store/db";
-import { getChatWorkingFolder } from "../store/chats";
+import { getChat, getChatWorkingFolder } from "../store/chats";
+import { getProject } from "../store/projects";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunAttemptGoalRevision } from "../store/long-runs";
 import { recordRunEvent } from "../store/run-events";
@@ -30,6 +31,12 @@ function toolReceipts(runId: string, chatId: string, toolId: string, toolName: s
   return start.toolName === toolName && result.toolName === toolName && typeof start.toolResultPreview !== "string"
     && typeof result.toolResultPreview === "string" && result.toolIsError === false ? rows : null;
 }
+function declaredWorkspace(chatId: string): string | null {
+  const explicit = getChatWorkingFolder(chatId);
+  if (explicit) return explicit;
+  const projectId = getChat(chatId)?.projectId;
+  return projectId ? getProject(projectId)?.folderPath ?? null : null;
+}
 function boundOwner(goalId: string, attemptId: string, runId: string, chatId: string) {
   const run = getLongRunByGoalId(goalId), goal = getChatGoalRevision(goalId);
   if (!run || !goal || run.rootChatId !== chatId || goal.chatId !== chatId || !["running", "verifying"].includes(run.status)) return null;
@@ -38,9 +45,14 @@ function boundOwner(goalId: string, attemptId: string, runId: string, chatId: st
     .get(attemptId, run.id, runId) as {id:string;workspace_binding_json:string;permission_profile:string}|undefined;
   if (!attempt || getLongRunAttemptGoalRevision(run.id, attempt.id) !== goal.revision) return null;
   const cwd = JSON.parse(attempt.workspace_binding_json).cwd;
-  if (!cwd || !getChatWorkingFolder(chatId)) return null;
+  // Same folder order the executor froze for the controller: saved chat folder, then the chat's Project
+  // folder. Reading only the chat folder meant a Project Work Goal could never record a file proof, so
+  // every file criterion came back inconclusive ("allowlist has no host refs") even for a byte-exact
+  // file (isolated live run 2026-09-24: 0 runtime_file_observed rows, verification_inconclusive_retry:N).
+  const declared = declaredWorkspace(chatId);
+  if (!cwd || !declared) return null;
   const root = fs.realpathSync(cwd);
-  if (root !== fs.realpathSync(getChatWorkingFolder(chatId)!)) return null;
+  if (root !== fs.realpathSync(declared)) return null;
   return { root, goalRevision: goal.revision, permission: attempt.permission_profile };
 }
 

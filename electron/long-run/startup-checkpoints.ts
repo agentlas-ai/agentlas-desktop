@@ -591,7 +591,9 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         refuse("chat_binding_changed"); continue;
       }
       if (dispatcher.activeChatIds().includes(chat.id)) { refuse("chat_busy"); continue; }
-      const explicitCwd = getChatWorkingFolder(chat.id);
+      // Executor order: saved chat folder, then Project folder (the same fix as continuation.ts, 68e6f94b).
+      const explicitCwd = getChatWorkingFolder(chat.id)
+        ?? (chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null);
       const cwd = explicitCwd ?? (checkpoint.workspacePath === agentRunCwd() ? agentRunCwd() : null);
       let workspaceOk = Boolean(cwd && cwd === checkpoint.workspacePath);
       try { workspaceOk = workspaceOk && statSync(cwd!).isDirectory(); } catch { workspaceOk = false; }
