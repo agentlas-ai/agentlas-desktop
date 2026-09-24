@@ -27,6 +27,6 @@ export interface MarketplaceSource {
   listBundles(): Promise<TeamBundle[]>;
   searchAgents(q: string): Promise<MarketplaceListing[]>;
   /** registry/firms가 설치 시 호출하는 manifest lookup */
-  getListingBySlug(slug: string): Promise<(SeedListingFull & MarketplaceListing) | null>;
+  getListingBySlug(slug: string, options?: { packageHash?: string }): Promise<(SeedListingFull & MarketplaceListing) | null>;
   getFirmBySlug(slug: string): Promise<FirmListing | null>;
 }

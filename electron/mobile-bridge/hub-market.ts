@@ -1,3 +1,4 @@
+import { isPublicSourceDescriptor } from "../marketplace/public-install";
 import { assertHubReleasePin, type HubReleasePin } from "../../shared/hub-release-pin";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "../../shared/types";
 import type {
@@ -82,6 +83,7 @@ function sameRelease(
 }
 
 function isOwnerAsset(listing: MarketplaceListing): boolean {
+  if (isPublicSourceDescriptor(listing)) return false;
   return listing.source === "agent-cloud-owner-restore"
     || listing.cloudPackage !== undefined
     || listing.cloudRegistration !== undefined
@@ -190,7 +192,7 @@ export class MobileHubMarketService {
       slug,
       callable: search?.callable === true || manifest?.callable === true,
       kind: search?.kind ?? manifest?.kind,
-      source: search?.source ?? manifest?.source,
+      source: manifest && isPublicSourceDescriptor(manifest) ? manifest.source : search?.source ?? manifest?.source,
       agentDefinitionId: manifestIdentity?.agentDefinitionId ?? searchIdentity?.agentDefinitionId,
       agentReleaseId: manifestIdentity?.agentReleaseId ?? searchIdentity?.agentReleaseId,
       packageHash: manifestIdentity?.packageHash ?? searchIdentity?.packageHash,
@@ -203,6 +205,9 @@ export class MobileHubMarketService {
       schemaVersion: 1,
       status: "ready",
       listing: projectListing(merged, rawManifest?.permissions),
+      sourceInstallAvailable: Boolean(manifest && isPublicSourceDescriptor(manifest)
+        && manifestIdentity && sameRelease(manifestIdentity, releaseIdentity(merged)!)
+        && manifest.cloudPackage?.packageHash === manifestIdentity.packageHash),
       checkedAt: this.checkedAt(),
     };
   }

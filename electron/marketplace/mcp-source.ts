@@ -1205,10 +1205,11 @@ export class McpSource implements MarketplaceSource {
 
   async getListingBySlug(
     slug: string,
+    options?: { packageHash?: string },
   ): Promise<(SeedListingFull & MarketplaceListing) | null> {
     return this.call<(SeedListingFull & MarketplaceListing) | null>(
       "marketplace.get_manifest",
-      { kind: "agent", slug },
+      { kind: "agent", slug, ...(options?.packageHash ? { packageHash: options.packageHash } : {}) },
     );
   }
 

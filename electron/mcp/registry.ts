@@ -1,4 +1,7 @@
 // 설치된 에이전트 레지스트리 — SQLite-backed. 다국어 + envRequirements 지원.
+import fs from "node:fs";
+import { parseHubReleasePin, type HubReleasePin } from "../../shared/hub-release-pin";
+import { requirePublicInstallDescriptor } from "../marketplace/public-install";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
@@ -188,6 +191,38 @@ export function setAgentLocalDisplayName(idValue: string, value: string): Instal
     .run(length === 0 ? null : normalized, id);
   emitDesktopStoreChange({ entity: "agent", id });
   return getAgentById(id)!;
+}
+
+/** Explicit public source install: no latest fallback, private restore or overwrite. */
+export async function installPublicHubRelease(input: {
+  slug: string; entityKind: "agent" | "team"; release: HubReleasePin;
+}): Promise<InstalledAgent> {
+  if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(input.slug) || isPrivateWebOnlyAgent({ slug: input.slug })) {
+    throw new Error("hub_source_install_unavailable");
+  }
+  const release = parseHubReleasePin(input.release);
+  const listing = requirePublicInstallDescriptor(
+    await getMarketSource().getListingBySlug(input.slug, { packageHash: release.packageHash }),
+    input.slug, input.entityKind, release,
+  );
+  // A Mobile install never replaces an owner's local/Cloud package or edits.
+  // This check and the synchronous commit have no await between them.
+  recoverCloudRegistryTransactions();
+  const existing = getDb().prepare("SELECT id FROM installed_agents WHERE slug = ?").get(input.slug);
+  if (existing) throw new Error("hub_install_local_conflict");
+  try {
+    fs.lstatSync(agentFolderPath(input.slug));
+    throw new Error("hub_install_local_conflict");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const installed = persistListing(input.slug, listing, "hub");
+  const binding = getInstalledAgentHubBinding(installed.id);
+  if (installed.packageHash !== release.packageHash || binding?.source !== "hub-install"
+    || binding.agentDefinitionId !== release.agentDefinitionId || binding.agentReleaseId !== release.agentReleaseId) {
+    throw new Error("hub_install_receipt_unavailable");
+  }
+  return installed;
 }
 
 export async function installAgent(slug: string): Promise<InstalledAgent> {
