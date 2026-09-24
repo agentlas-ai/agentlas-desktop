@@ -7,6 +7,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { failureMessage } from "@/lib/invocation-failure";
 import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-surface-status";
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
+import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import styles from "./OneGoalControls.module.css";
 
 type GoalAction = "pause" | "delete" | "resume" | "edit";
@@ -363,6 +364,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     </div>}
     {helpOpen && <div className={styles.help} role="dialog" data-goal-help="true" aria-label={ko ? "목표 상태 설명" : "Goal status explained"}>
       <p>{label}</p>
+      <GoalPlanSummary plan={goalPlanOf(view.context)} locale={locale} />
       {view.context?.acceptanceCriteria.length ? <ul className={styles.helpCriteria} aria-label={ko ? "성공 기준" : "Success criteria"}>
         {view.context.acceptanceCriteria.map((item, index) => <li key={index}>{item}</li>)}
       </ul> : null}

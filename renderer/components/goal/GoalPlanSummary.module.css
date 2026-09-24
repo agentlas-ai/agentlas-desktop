@@ -1,0 +1,15 @@
+.root { min-width: 0; max-width: 100%; margin: 0 0 6px; font-size: 11px; line-height: 1.5; }
+.line { display: block; min-width: 0; margin: 0; overflow-wrap: anywhere; word-break: break-word; }
+.shape { font-weight: 600; }
+.sep { color: var(--muted-deep); }
+.current { color: var(--ink); }
+.tree { margin-top: 4px; min-width: 0; }
+.tree > summary { cursor: pointer; color: var(--muted-deep); font-size: 10px; list-style: none; }
+.tree > summary::-webkit-details-marker { display: none; }
+.tree > summary::after { content: " ⌄"; }
+.mission { margin: 4px 0 2px; overflow-wrap: anywhere; }
+.krs, .strategies, .tactics { margin: 0; padding-left: 14px; min-width: 0; }
+.krs li, .strategies li, .tactics li { overflow-wrap: anywhere; word-break: break-word; }
+.krs { color: var(--muted-deep); }
+.tactics { color: var(--muted-deep); }
+.strategies li[data-status="retired"], .tactics li[data-status="retired"] { text-decoration: line-through; opacity: 0.7; }
