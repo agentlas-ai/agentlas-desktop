@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.41 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Automations that a Goal conversation updated can improve their own strategy again. When you
+  gave that ongoing Goal full permission, strategy changes are applied instead of waiting
+  forever; when your decision is really needed, it now appears for you to confirm.
+- An unattended automation run no longer turns its own choices (holding, pausing, a limit it set
+  for itself) into lasting rules. Such remembered rules are shown to later runs as heuristics
+  that your goal overrides, and a restated rule replaces its older version.
+- Each automation run now starts from recorded facts about recent runs instead of the previous
+  runs' own summaries, and a run that held back while there was work to do is no longer counted
+  as done. The outcome check also sees the Goal the automation works for.
+- Checks that confirm whether an earlier step went through are read even when the model answers
+  in a chat style, and a step that was only looking when the app restarted simply runs again.
+- When you change a Goal's targets in its conversation, the Goal itself is updated at its next
+  pause, so later checks and strategy use your new targets.
+- Browser import: the "Source" label no longer overlaps the selector.
+
 ## 1.2.40 — 2026-09-24
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
