@@ -21,6 +21,11 @@ import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { isOneSteeringInterruption } from "../../shared/one-auto-recovery";
+import {
+  PERSISTENCE_DECISION_EVENT_KIND,
+  parsePersistenceDecisionPayload,
+  type PersistenceDecisionPayload,
+} from "../../shared/persistence-policy";
 import { classifyToolFailure } from "../../shared/tool-failure";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -1281,6 +1286,53 @@ export function tryRecordRunEvent(input: RecordRunEventInput): void {
   } catch {
     /* ledger failures must never break the user run */
   }
+}
+
+/**
+ * 지속 정책 결정 영수증(`persistence_decision`) — 실패·보류 뒤 호스트가 고른 다음 수.
+ * 평평한 칸만 싣는다(중첩 객체는 safePayload 가 문자열로 접는다). 산문은 없다.
+ * 다음 실행·스윕·측정이 같은 사실을 읽는다(shared/persistence-policy.ts).
+ */
+export function recordPersistenceDecisionEvent(input: {
+  runId: string;
+  automationId?: string | null;
+  chatId?: string | null;
+  payload: PersistenceDecisionPayload;
+}): void {
+  tryRecordRunEvent({
+    runId: input.runId,
+    kind: PERSISTENCE_DECISION_EVENT_KIND,
+    ...(input.automationId ? { automationId: input.automationId } : {}),
+    ...(input.chatId ? { chatId: input.chatId } : {}),
+    payload: { ...input.payload },
+  });
+}
+
+/** 한 자동화(또는 대화)의 지속 결정, 오래된 것부터. `sinceIso` 이후만(마지막 진전 이후를 자르는 것은 호출자). */
+export function listPersistenceDecisionEvents(scope: {
+  automationId?: string;
+  chatId?: string;
+  sinceIso?: string | null;
+  limit?: number;
+}): Array<{ ts: string; runId: string; payload: PersistenceDecisionPayload }> {
+  const clauses = ["kind = ?"];
+  const params: unknown[] = [PERSISTENCE_DECISION_EVENT_KIND];
+  if (scope.automationId) { clauses.push("automation_id = ?"); params.push(scope.automationId); }
+  if (scope.chatId) { clauses.push("chat_id = ?"); params.push(scope.chatId); }
+  if (!scope.automationId && !scope.chatId) return [];
+  if (scope.sinceIso) { clauses.push("ts > ?"); params.push(scope.sinceIso); }
+  const limit = Math.max(1, Math.min(200, scope.limit ?? 50));
+  const rows = getDb().prepare(
+    `SELECT ts, run_id, payload_json FROM run_events WHERE ${clauses.join(" AND ")} ORDER BY ts DESC, rowid DESC LIMIT ${limit}`,
+  ).all(...params) as Array<{ ts: string; run_id: string; payload_json: string | null }>;
+  const out: Array<{ ts: string; runId: string; payload: PersistenceDecisionPayload }> = [];
+  for (const row of rows.reverse()) {
+    let parsed: unknown = null;
+    try { parsed = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { parsed = null; }
+    const payload = parsePersistenceDecisionPayload(parsed);
+    if (payload) out.push({ ts: row.ts, runId: row.run_id, payload });
+  }
+  return out;
 }
 
 export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
