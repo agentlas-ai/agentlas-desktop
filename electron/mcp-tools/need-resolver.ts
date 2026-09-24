@@ -41,6 +41,11 @@ export interface McpNeedCandidate {
    * never install a tool, raise a key prompt, or change the browser host binding.
    */
   fallbackEligible?: boolean;
+  /**
+   * Published by Agentlas (a built-in or Agentlas-published plugin). Wins over an
+   * outside entry for the same capability (shared/capability-priority.ts).
+   */
+  agentlas?: boolean;
 }
 
 export interface ResolvedMcpNeeds {
@@ -101,7 +106,7 @@ export const MCP_NEED_JUDGMENT_QUESTION =
 export const MCP_NEED_JUDGMENT_GUIDANCE = [
   "Name a tool ONLY when the task cannot be completed without it.",
   "Mentioning a topic is not a need: a task that says 'research'/'조사'/'검색' while posting to a site does not need a web-search tool, and a task that mentions an issue or a commit does not need the GitHub tool.",
-  "Prefer a 'hub' entry over a 'local' one when both cover the same capability.",
+  "When an entry marked 'Agentlas' and another entry cover the same capability, prefer the Agentlas one; otherwise prefer a 'hub' entry over a 'local' one.",
   "Judge the whole Goal objective and every acceptance criterion when a Goal contract is supplied; the latest task text may only be one implementation step.",
   "Treat a native browser as available only when the runtime capability context explicitly says available. Unknown or unavailable means you must not assume the runtime has its own browser, UI capture, or interaction channel.",
   "Even an available native browser satisfies a criterion only when it can produce the required evidence on the same target surface; availability alone does not prove Desktop can observe that surface.",
@@ -175,7 +180,7 @@ export async function resolveMcpNeeds(input: {
   const inventory = candidates
     .map(
       (candidate) =>
-        `- ${candidate.id} (${candidate.origin}${candidate.kind === "skill-plugin" ? ", skill plugin" : ""}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
+        `- ${candidate.id} (${candidate.origin}${candidate.agentlas ? ", Agentlas" : ""}${candidate.kind === "skill-plugin" ? ", skill plugin" : ""}${candidate.needsCredential ? ", needs credential" : ""}): ${candidate.name} — ${candidate.description}`,
     )
     .join("\n");
 
@@ -294,9 +299,11 @@ export function preferHub(candidates: McpNeedCandidate[]): McpNeedCandidate[] {
   for (const candidate of candidates) {
     const key = candidate.name.trim().toLowerCase();
     const existing = byName.get(key);
-    if (!existing || (existing.origin === "local" && candidate.origin === "hub")) {
-      byName.set(key, candidate);
-    }
+    // Agentlas-published wins the same capability; between equals the Hub entry wins.
+    const better = !existing
+      || (candidate.agentlas === true && existing.agentlas !== true)
+      || (Boolean(candidate.agentlas) === Boolean(existing.agentlas) && existing.origin === "local" && candidate.origin === "hub");
+    if (better) byName.set(key, candidate);
   }
   return [...byName.values()].sort((a, b) => (a.origin === b.origin ? 0 : a.origin === "hub" ? -1 : 1));
 }

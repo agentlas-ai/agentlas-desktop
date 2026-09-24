@@ -10,7 +10,7 @@ import {
 } from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
-import { supersededByLivePeer } from "../plugins/builtin";
+import { pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
@@ -669,6 +669,10 @@ export async function autoSelectMcpTools(input: {
   }
 
   const pluginToolIds = new Set(pluginCandidates.flatMap((plugin) => plugin.toolIds));
+  // Capability priority (owner 2026-09-24): built-in and Agentlas-published providers
+  // are marked so the judge and the dedupe prefer them over an outside equivalent.
+  const agentlasToolIds = new Set(pluginCandidates.filter((plugin) => plugin.agentlas).flatMap((plugin) => plugin.toolIds));
+  const isAgentlasTool = (id: string): boolean => agentlasToolIds.has(id) || pluginSlugForToolId(id) !== null;
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
@@ -689,6 +693,7 @@ export async function autoSelectMcpTools(input: {
       description: entry.descriptionEn || entry.description,
       origin: "local" as const,
       needsCredential,
+      ...(isAgentlasTool(entry.id) ? { agentlas: true } : {}),
       // A tool shipped by an installed plugin is the owner's own choice; the
       // deterministic fallback may attach it when it is credential-free.
       ...(!needsCredential && pluginToolIds.has(entry.id) ? { fallbackEligible: true } : {}),
@@ -743,6 +748,7 @@ export async function autoSelectMcpTools(input: {
       origin: "local" as const,
       kind: "skill-plugin" as const,
       fallbackEligible: true,
+      ...(plugin.agentlas ? { agentlas: true } : {}),
     }));
 
   // ONE judgment call decides the whole optional tool set — Hub entries offered first.
@@ -781,7 +787,11 @@ export async function autoSelectMcpTools(input: {
       && candidate.id !== "agentlas-browser" && candidate.id !== "cua-driver" && candidate.id !== "playwright");
     const hits = rankByLocalRelevance(query, eligible.map((candidate) => {
       const slug = pluginSlugFromCandidateId(candidate.id);
-      return { id: candidate.id, text: (slug && pluginBySlug.get(slug)?.searchText) || `${candidate.name}\n${candidate.description}` };
+      return {
+        id: candidate.id,
+        text: (slug && pluginBySlug.get(slug)?.searchText) || `${candidate.name}\n${candidate.description}`,
+        agentlas: candidate.agentlas === true,
+      };
     }));
     for (const hit of hits) { neededIds.add(hit.id); fallbackIds.push(hit.id); }
     if (hits.length > 0) selectionSource = "local-relevance";

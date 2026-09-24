@@ -19,6 +19,7 @@ import {
   lexicalOverlap,
   MODEL2VEC_HYBRID_NAME,
 } from "../memory/local-embedding";
+import { agentlasFirst, isAgentlasPublisher, type AgentlasCapabilityProvider } from "../../shared/capability-priority";
 
 /** Judge label prefix for a skill/tool plugin — never collides with an MCP catalog id. */
 export const PLUGIN_CANDIDATE_PREFIX = "plugin:";
@@ -36,6 +37,10 @@ export interface InstalledPluginCandidate {
   /** implicit:"never" plugins are only reachable by explicit mention. */
   implicit: "never" | "router" | "always";
   mention: string;
+  /** Published by Agentlas (`publisher.name`) — ranked first among equally relevant candidates. */
+  agentlas: boolean;
+  /** Declared capability classes of the plugin's tools (`provides.tools[].capability`). */
+  toolCapabilities: { toolId: string; capability: string }[];
 }
 
 const SLUG = /^[a-z0-9][a-z0-9-]{1,63}$/u;
@@ -73,6 +78,11 @@ export function readPluginCandidate(directory: string): InstalledPluginCandidate
     const skills = provides.skills && typeof provides.skills === "object" ? provides.skills : null;
     const tools: any[] = Array.isArray(provides.tools) ? provides.tools : [];
     const toolIds = tools.map((tool) => str(tool?.id, 128)).filter((id) => /^[a-z0-9][a-z0-9_-]{1,127}$/u.test(id));
+    const toolCapabilities = tools.flatMap((tool) => {
+      const toolId = str(tool?.id, 128);
+      const capability = str(tool?.capability, 64).toLowerCase();
+      return toolIds.includes(toolId) && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(capability) ? [{ toolId, capability }] : [];
+    });
     if (!skills && toolIds.length === 0) return null;
     let routerDescription = "";
     if (skills) {
@@ -120,6 +130,8 @@ export function readPluginCandidate(directory: string): InstalledPluginCandidate
       toolIds,
       implicit: implicitRaw === "never" || implicitRaw === "always" ? implicitRaw : "router",
       mention: str(manifest.invocation?.mention, 64) || `@${slug}`,
+      agentlas: isAgentlasPublisher(manifest.publisher),
+      toolCapabilities,
     };
   } catch {
     return null;
@@ -165,6 +177,8 @@ export function pluginSlugFromCandidateId(id: string): string | null {
 export interface RelevanceItem {
   id: string;
   text: string;
+  /** Agentlas-published: wins a tie against an equally relevant outside item (capability-priority). */
+  agentlas?: boolean;
 }
 
 export interface RelevanceHit {
@@ -216,13 +230,14 @@ export function rankByLocalRelevance(query: string, items: readonly RelevanceIte
       try { semantic = cosineSimilarity(queryVector, autoLocalEmbedding(text).vector); } catch { semantic = 0; }
     }
     const score = Math.max(lexical >= LEXICAL_MIN ? lexical : 0, semantic >= SEMANTIC_MIN ? semantic - SEMANTIC_MIN + LEXICAL_MIN : 0);
-    return { id: item.id, score, lexical, semantic };
+    return { id: item.id, score, lexical, semantic, agentlas: item.agentlas === true };
   }).filter((hit) => hit.score > 0);
   const best = Math.max(0, ...scored.map((hit) => hit.score));
   return scored
     .filter((hit) => hit.score >= best * RELATIVE_FLOOR)
-    .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
-    .slice(0, limit);
+    .sort((left, right) => right.score - left.score || agentlasFirst(left, right) || left.id.localeCompare(right.id))
+    .slice(0, limit)
+    .map(({ agentlas: _agentlas, ...hit }) => hit);
 }
 
 const PLUGIN_LOOKUP_TOOL = /(resolve[_-]?plugins|tool[_-]?search|search[_-]?plugins|marketplace[_.-]?list[_-]?plugins)/iu;
@@ -255,4 +270,16 @@ export function pluginSlugsNamedInToolEvent(
     if (inFolder || named) found.push(plugin.slug);
   }
   return found.slice(0, 8);
+}
+
+/**
+ * Agentlas-published tool providers installed on this machine, by declared
+ * capability — the input of the model's capability-priority guidance. Built from
+ * manifests only, so a new Agentlas plugin joins by being installed.
+ */
+export function installedAgentlasCapabilityProviders(root = pluginCandidatesRoot()): AgentlasCapabilityProvider[] {
+  return listInstalledPluginCandidates(root)
+    .filter((plugin) => plugin.agentlas)
+    .flatMap((plugin) => plugin.toolCapabilities.map(({ toolId, capability }) => ({ capability, toolId })))
+    .sort((left, right) => left.capability.localeCompare(right.capability) || left.toolId.localeCompare(right.toolId));
 }
