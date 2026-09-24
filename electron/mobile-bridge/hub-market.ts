@@ -102,7 +102,8 @@ function isPublicInstallCandidate(listing: MarketplaceListing): boolean {
   if (isOwnerAsset(listing)) return false;
   if (listing.entityKind && listing.entityKind !== "agent" && listing.entityKind !== "team") return false;
   return isPublicSourceDescriptor(listing)
-    || (listing.source === "hub-index" && listing.kind === "install-only");
+    || (listing.source === "hub-index" && listing.kind === "install-only"
+      && typeof listing.packageHash === "string" && /^[a-f0-9]{64}$/iu.test(listing.packageHash));
 }
 
 function projectListing(
