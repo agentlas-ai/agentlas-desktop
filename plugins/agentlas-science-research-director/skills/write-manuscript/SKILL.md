@@ -141,6 +141,15 @@ section order or evidence for a new project's claims:
   the article moves from a defined prediction gap through method design, blind assessment,
   additional validation, and conditions that limit accuracy. Adapt the principle: connect each
   design choice to a test and state the regime in which the conclusion holds.
+- Perelman, [*The entropy formula for the Ricci flow and its geometric applications*](https://arxiv.org/abs/math/0211159)
+  (2002): the paper develops a functional and derives monotonicity results before their geometric
+  applications, and distinguishes established results from a hoped-for claim it could not confirm.
+  For a theoretical paper, make definitions, assumptions, lemma dependencies, and the exact scope
+  of each theorem visible; mark an incomplete proof or open case rather than bridging it with prose.
+- Vaswani et al., [*Attention Is All You Need*](https://arxiv.org/abs/1706.03762)
+  (2017): the paper motivates an architectural choice, specifies the model and training conditions,
+  then compares measured outcomes and model variations. For a methods paper, connect each design
+  choice to a reproducible test, a relevant baseline, and an ablation or alternative explanation.
 - [Nature's formatting guide](https://www.nature.com/nature/for-authors/formatting-guide)
   asks an Article summary to give context, rationale, main conclusion, and broader significance;
   its Methods guidance asks for enough detail to interpret and replicate results.
@@ -165,6 +174,17 @@ failure; every limitation must narrow a conclusion or define a follow-up test. R
 bridge in the actual section, preserving the immutable bindings and claim ledger. This is an
 editorial skill, not a truth gate: passing its prose review never replaces the host's Blueprint,
 scholarly-flow, numeric-coherence, or journal-validation receipts.
+
+At that final pass, use the argument pattern that fits the *project's* article family and exact
+Blueprint. For an empirical claim, follow question → prespecified design → measured result →
+sensitivity or competing explanation → bounded interpretation. For a method, follow problem →
+design choice → reproducible procedure → baseline and variation tests → failure regime. For a
+theorem, follow definitions and assumptions → dependency graph of lemmas → proved conclusion →
+counterexample search or unproved cases. For a review, follow search and inclusion scope →
+contrasting bodies of evidence → synthesis → uncertainty. These are editorial checks, not a
+template that licenses missing experiments or proof steps. Do not insert a landmark article's
+claims, citations, wording, or numbers into the project's manuscript unless that article is
+independently committed as relevant project evidence and its claim is supported by exact spans.
 
 ## Draft in passes
 
