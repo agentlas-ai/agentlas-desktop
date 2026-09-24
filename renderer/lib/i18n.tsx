@@ -44,7 +44,7 @@ const dict = {
     "sidebar.library": "앱",
     "sidebar.apps": "앱",
     "sidebar.apps_installed": "설치된 Apps",
-    "sidebar.apps_store": "마켓플레이스",
+    "sidebar.apps_store": "에이전트 허브",
     "sidebar.apps_vault": "전역 Env",
     "sidebar.apps_engines": "플러그인",
     "sidebar.studio": "에이전트 앱",
@@ -58,7 +58,7 @@ const dict = {
     "sidebar.assets": "생성 자산",
     "sidebar.tools": "생성 도구",
     "sidebar.mcps": "외부 도구",
-    "sidebar.marketplace": "마켓플레이스",
+    "sidebar.marketplace": "에이전트 허브",
     "sidebar.settings": "설정",
     "sidebar.archive": "보관함",
     "sidebar.empty_chats": "대화를 시작하면 여기 쌓여요",
@@ -99,8 +99,8 @@ const dict = {
     "nav.agent_upload": "에이전트 업로드",
     "nav.oberon": "오베론",
     "nav.trex": "티렉스",
-    "nav.group.hub": "마켓",
-    "nav.agent_hub": "에이전트 마켓",
+    "nav.group.hub": "허브",
+    "nav.agent_hub": "에이전트 허브",
     "nav.prompts": "프롬프트",
     "nav.hub_regular_agents": "일반 에이전트",
     "nav.hub_visual_agents": "비주얼 에이전트",
@@ -157,7 +157,7 @@ const dict = {
     "org.action.remove_group": "그룹 전체 제거",
     "org.action.clear": "전체 제거",
     "org.cloud_only.title": "서버 클라우드에 있는 에이전트 — 클라우드에서 관리",
-    "org.hub_bookmark.title": "Hub 북마크 — Marketplace에서 관리",
+    "org.hub_bookmark.title": "허브 북마크 — 에이전트 허브에서 관리",
 
     // Telegram Connect
 
@@ -271,17 +271,17 @@ const dict = {
     "onb.tour.automations.title": "자동화",
     "onb.tour.automations.desc": "정기 실행되는 에이전트 작업. 지금은 UI 미리보기입니다.",
     "onb.tour.library.title": "앱",
-    "onb.tour.library.desc": "설치된 Apps, 전역 Env, Plugins(MCP)를 관리하고, 에이전트는 마켓플레이스에서 설치합니다.",
+    "onb.tour.library.desc": "설치된 Apps, 전역 Env, Plugins(MCP)를 관리하고, 공개 에이전트는 에이전트 허브에서 무료로 받아옵니다.",
     "onb.tour.settings.title": "설정",
     "onb.tour.settings.desc": "LLM 연결, API 키 추가/변경. 좌측 하단 톱니바퀴 또는 ⌘,",
     "onb.tour.shortcuts.title": "단축키",
     "onb.tour.shortcuts.desc": "⌘↵ 메시지 보내기 · ⌘[ 사이드바 접기 · ⌘N 새 채팅",
     "onb.done.title": "준비 완료",
-    "onb.done.desc": "다음 화면에서 마켓플레이스를 열고 첫 에이전트나 회사를 설치하세요.",
+    "onb.done.desc": "다음 화면에서 에이전트 허브를 열고 첫 에이전트나 팀을 받아오세요.",
     "onb.done.personas.before": "추천 페르소나:",
     "onb.done.personas.after": "등이 준비돼 있어요.",
 
-    // Marketplace
+    // Agent Hub (legacy marketplace route keys)
     "market.title.before": "원하는 방식으로",
     "market.title.after": "를 활용하세요",
     "market.search.firms": "회사 검색",
@@ -320,7 +320,7 @@ const dict = {
     "home.placeholder": "에이전트에게 할 일을 적어 주세요…",
     "home.send": "보내기",
     "home.starting": "시작 중…",
-    "home.market_link": "마켓플레이스",
+    "home.market_link": "에이전트 허브",
 
     // ChatInput
     "chatinput.placeholder": "에이전트에게 할 일을 적어 주세요 — Enter 전송 · Shift+Enter 줄바꿈 · 이미지 드래그",
@@ -677,7 +677,7 @@ const dict = {
     "auto.field.prompt.hint": "예약 실행 때 사용자 입력으로 들어갈 텍스트",
     "auto.target.firm": "회사",
     "auto.target.agent": "개별 에이전트",
-    "auto.empty_firms": "설치된 회사가 없습니다. 마켓플레이스 → 회사 탭에서 설치하세요.",
+    "auto.empty_firms": "설치된 회사가 없습니다. 에이전트 허브에서 팀을 찾아 설치하세요.",
     "auto.empty_agents": "설치된 에이전트가 없습니다.",
     "auto.detail.firm_label": "회사 (CEO 위임)",
     "auto.detail.agent_label": "에이전트",
@@ -919,11 +919,11 @@ const dict = {
     "cloud.ready": "등록 준비 완료",
     "cloud.blocked": "차단됨",
     "cloud.registered": "등록됨",
-    "cloud.open_market": "마켓 열기",
+    "cloud.open_market": "에이전트 허브 열기",
 
     // Library
-    "library.agents.subtitle": "설치된 에이전트입니다. 마켓플레이스나 로컬 폴더에서 추가할 수 있습니다.",
-    "library.agents.add": "마켓플레이스",
+    "library.agents.subtitle": "설치된 에이전트입니다. 에이전트 허브나 로컬 폴더에서 추가할 수 있습니다.",
+    "library.agents.add": "에이전트 허브",
     "library.agents.import_local": "로컬 폴더",
     "library.agents.import_local_hint": "기존 에이전트/팀/App 폴더를 분석해 추가 (Claude/Codex/Gemini 자동 감지)",
     "library.agents.import_cloud": "클라우드 Apps",
@@ -1169,7 +1169,7 @@ const dict = {
     "account.sign_out": "로그아웃",
     "account.signed_in": "계정",
     "account.required.title": "로그인이 필요합니다",
-    "account.required.body": "마켓에서 에이전트를 가져오려면 먼저 Agentlas 계정으로 로그인하세요.",
+    "account.required.body": "에이전트 허브에서 에이전트를 받으려면 먼저 Agentlas 계정으로 로그인하세요.",
 
     // Workspace panel
     "workspace.title": "워크스페이스",
@@ -2232,7 +2232,7 @@ const dict = {
     "sidebar.library": "Apps",
     "sidebar.apps": "Apps",
     "sidebar.apps_installed": "Installed Apps",
-    "sidebar.apps_store": "Marketplace",
+    "sidebar.apps_store": "Agent Hub",
     "sidebar.apps_vault": "Global Env",
     "sidebar.apps_engines": "Plugins",
     "sidebar.studio": "Agent Apps",
@@ -2246,7 +2246,7 @@ const dict = {
     "sidebar.assets": "Generated assets",
     "sidebar.tools": "Generated tools",
     "sidebar.mcps": "External tools",
-    "sidebar.marketplace": "Marketplace",
+    "sidebar.marketplace": "Agent Hub",
     "sidebar.settings": "Settings",
     "sidebar.archive": "Archived",
     "sidebar.empty_chats": "Your chats will appear here",
@@ -2345,7 +2345,7 @@ const dict = {
     "org.action.remove_group": "Remove all in group",
     "org.action.clear": "Clear",
     "org.cloud_only.title": "On your server cloud — manage in Cloud",
-    "org.hub_bookmark.title": "Hub bookmark — manage in Marketplace",
+    "org.hub_bookmark.title": "Hub bookmark — manage in Agent Hub",
 
     // Telegram Connect
 
@@ -2459,17 +2459,17 @@ const dict = {
     "onb.tour.automations.title": "Automations",
     "onb.tour.automations.desc": "Scheduled agent work. This is a UI preview for now.",
     "onb.tour.library.title": "Apps",
-    "onb.tour.library.desc": "Manage installed Apps, Global Env, and Plugins (MCP); install agents from the Marketplace.",
+    "onb.tour.library.desc": "Manage installed Apps, Global Env, and Plugins (MCP); install public agents from the free Agent Hub.",
     "onb.tour.settings.title": "Settings",
     "onb.tour.settings.desc": "Connect LLMs and add or rotate API keys from the lower-left gear or ⌘,",
     "onb.tour.shortcuts.title": "Shortcuts",
     "onb.tour.shortcuts.desc": "⌘↵ send message · ⌘[ collapse sidebar · ⌘N new chat",
     "onb.done.title": "All set",
-    "onb.done.desc": "Open the Marketplace on the next screen and install your first agent or firm.",
+    "onb.done.desc": "Open Agent Hub on the next screen and install your first agent or team.",
     "onb.done.personas.before": "Recommended personas:",
     "onb.done.personas.after": "and more are ready.",
 
-    // Marketplace
+    // Agent Hub (legacy marketplace route keys)
     "market.title.before": "Use",
     "market.title.after": " your way",
     "market.search.firms": "Search firms",
@@ -2508,7 +2508,7 @@ const dict = {
     "home.placeholder": "Tell your agent what to do…",
     "home.send": "Send",
     "home.starting": "Starting…",
-    "home.market_link": "Marketplace",
+    "home.market_link": "Agent Hub",
 
     // ChatInput
     "chatinput.placeholder": "Tell your agent what to do — Enter to send · Shift+Enter for newline · drag images",
@@ -2865,7 +2865,7 @@ const dict = {
     "auto.field.prompt.hint": "Text that takes the place of user input on each run",
     "auto.target.firm": "Firm",
     "auto.target.agent": "Individual agent",
-    "auto.empty_firms": "No firm installed. Install one from Marketplace → Firms.",
+    "auto.empty_firms": "No firm installed. Find and install a team in Agent Hub.",
     "auto.empty_agents": "No agents installed.",
     "auto.detail.firm_label": "Firm (delegates to CEO)",
     "auto.detail.agent_label": "Agent",
@@ -3107,11 +3107,11 @@ const dict = {
     "cloud.ready": "Ready to publish",
     "cloud.blocked": "Blocked",
     "cloud.registered": "Registered",
-    "cloud.open_market": "Open marketplace",
+    "cloud.open_market": "Open Agent Hub",
 
     // Library
-    "library.agents.subtitle": "Installed agents. Add more from the Marketplace or a local folder.",
-    "library.agents.add": "Marketplace",
+    "library.agents.subtitle": "Installed agents. Add more from Agent Hub or a local folder.",
+    "library.agents.add": "Agent Hub",
     "library.agents.import_local": "Local folder",
     "library.agents.import_local_hint": "Analyze an existing agent/team/App folder and add it (auto-detects Claude/Codex/Antigravity)",
     "library.agents.import_cloud": "Cloud Apps",
@@ -3357,7 +3357,7 @@ const dict = {
     "account.sign_out": "Sign out",
     "account.signed_in": "Account",
     "account.required.title": "Sign-in required",
-    "account.required.body": "Sign in with your Agentlas account to install agents from the marketplace.",
+    "account.required.body": "Sign in with your Agentlas account to install agents from Agent Hub.",
 
     // Workspace panel
     "workspace.title": "Workspace",

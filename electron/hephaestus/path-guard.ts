@@ -74,7 +74,7 @@ export async function confirmUpload(
 ): Promise<boolean> {
   const ko = locale === "ko";
   const destLabel = ko
-    ? (destination === "marketplace" ? "Agentlas Hub (공개 마켓플레이스)" : "Agentlas Cloud (비공개 링크)")
+    ? (destination === "marketplace" ? "Agentlas Hub (공개 에이전트 허브)" : "Agentlas Cloud (비공개 링크)")
     : (destination === "marketplace" ? "Agentlas Hub (public marketplace)" : "Agentlas Cloud (private link)");
   const opts = ko
     ? {

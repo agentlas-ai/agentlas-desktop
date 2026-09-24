@@ -3690,9 +3690,8 @@ export function registerIpcHandlers(): void {
     packageAndReviewCloudAgent(resolveCloudAgentPackageRequest(input)),
   );
 
-  // Pricing is a separate call from publishing on purpose: the agent is already
-  // on the Hub by the time prices are set, so a pricing failure leaves a live
-  // free listing rather than a failed publish.
+  // Compatibility only: Hub pricing and settlement are permanently closed.
+  // Older clients receive a retirement refusal and cannot read or set a rate.
   ipcMain.handle("cloudAgents:readPrices", async (_e, slug: string) => readAgentPrices(String(slug || "")));
   ipcMain.handle(
     "cloudAgents:setPrices",

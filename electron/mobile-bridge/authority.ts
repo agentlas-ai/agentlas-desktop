@@ -3512,10 +3512,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         };
         return asJsonValue(published, request.method);
       }
-      // Pricing is deliberately a separate call from publishing: by the time it
-      // runs the agent is already live on the Hub, so a pricing failure leaves
-      // a live free listing rather than a failed publish. Server bounds and
-      // rejections come back inside `refusal` with the server's own numbers.
+      // Legacy price RPC stays only to refuse older Mobile clients. Publishing
+      // is free, and cloudAgentActions.setHubPrices always returns retirement.
       case "cloud.setHubPrices": {
         const params = guardedParams(request, ["slug", "prices", "idempotencyKey"]);
         const slug = requiredIdentifier(params, "slug", RUN_ID_RE);

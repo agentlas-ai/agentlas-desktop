@@ -45,7 +45,7 @@ export function MenuBridge() {
             "⌘[  Toggle sidebar",
             "⌘,  Settings",
             "⌘↵  Send message",
-            "⇧⌘M  Marketplace",
+            "⇧⌘M  Agent Hub",
             "⇧⌘L  Apps",
             "Esc  Close popover",
           ].join("\n"),
