@@ -1,5 +1,5 @@
 "use client";
-// 허브 소개 페이지 — agentlas.cloud/p/<slug> 를 앱 안에 그대로 띄운다.
+// 허브 카드의 Agent Space — agentlas.cloud/p/<slug> 를 앱 안에 그대로 띄운다.
 //
 // 소개는 읽기 전용이라 데스크탑 IPC가 필요 없다. 그래서 다시 그리지 않고 원본을
 // 임베드한다 — 웹에서 소개를 고치면 여기도 그날 바뀐다(손 동기화 없음).
@@ -65,7 +65,7 @@ function HubProfileEmbedPage() {
   useEffect(() => {
     const api = ipc();
     if (!api?.marketplace?.openProfileView) {
-      setError(ko ? "이 빌드에서는 소개 페이지를 열 수 없습니다." : "This build cannot open the profile view.");
+      setError(ko ? "이 빌드에서는 에이전트 스페이스를 열 수 없습니다." : "This build cannot open Agent Space.");
       return;
     }
     if (!slug) {
@@ -78,8 +78,8 @@ function HubProfileEmbedPage() {
     const failed = () => {
       if (cancelled) return;
       setError(ko
-        ? "소개 페이지를 불러오지 못했습니다. 네트워크를 확인해 주세요."
-        : "The profile page could not be loaded. Check your connection.");
+        ? "에이전트 스페이스를 불러오지 못했습니다. 네트워크를 확인해 주세요."
+        : "Agent Space could not be loaded. Check your connection.");
     };
     void serialProfileIpc(() => api.marketplace.openProfileView({ slug, bounds, locale }))
       .then((result) => {
@@ -206,7 +206,7 @@ function HubProfileEmbedPage() {
           </div>
         ) : !opened ? (
           <div style={{ padding: 32, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-            {ko ? "소개를 불러오는 중입니다…" : "Loading the profile…"}
+            {ko ? "에이전트 스페이스를 불러오는 중입니다…" : "Loading Agent Space…"}
           </div>
         ) : null}
       </div>

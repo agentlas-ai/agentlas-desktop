@@ -1165,7 +1165,7 @@ function AgentCard({
               type="button"
               className="portal-card-title hub-card-title hub-card-title-link"
               onClick={onOpenProfile}
-              title={ko ? "소개 페이지 열기" : "Open the profile page"}
+              title={ko ? "에이전트 스페이스 열기" : "Open Agent Space"}
             >
               {loc.name}
             </button>
