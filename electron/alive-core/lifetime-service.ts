@@ -21,6 +21,10 @@ export interface AliveLifetimeServiceOptions {
   clock?: () => number;
   /** Host admission just before a wake is reserved; a returned code is a wait, never a failed wake. */
   admission?: (agent: AliveAgent, nowMs: number) => string | null;
+  /** Synchronous gate for pending autonomous actions, including crash recovery. */
+  actionAdmission?: () => string | null;
+  /** A wake may settle between heartbeats; refresh its action gate before dispatch. */
+  refreshActionAdmission?: () => Promise<string | null>;
   /**
    * Minimum spacing between model wakes when nothing meaningful changed (review-due, periodic, decision timer).
    * The host escalates it with state.unchangedReviews (e.g. 5m → 15m → 60m); a salience change always wakes.
@@ -44,7 +48,16 @@ export class AliveLifetimeService {
     this.clock = options.clock ?? Date.now;
     this.unsubscribe = runtime.onSettled((receipt) => {
       const nowMs = this.clock();
-      if (this.store.settle(receipt, nowMs)) this.dispatchActions(nowMs);
+      if (!this.store.settle(receipt, nowMs)) return;
+      if (!this.options.refreshActionAdmission) {
+        this.dispatchActions(nowMs);
+        return;
+      }
+      // Settlement is an independent event path. A heartbeat's earlier plan
+      // check must not authorize its proposed action after a downgrade.
+      void this.options.refreshActionAdmission().then((reason) => {
+        if (reason === null && this.accepting) this.dispatchActions(this.clock());
+      }).catch(() => { /* Unknown entitlement keeps the action reserved. */ });
     });
   }
   close(): void { this.accepting = false; this.unsubscribe(); }
@@ -62,6 +75,7 @@ export class AliveLifetimeService {
       && !(agent.budget.tokenLimit !== null && (agent.budget.tokensUsed >= agent.budget.tokenLimit || agent.state.usageUnknown === true));
   }
   private dispatchActions(nowMs: number): void {
+    if (this.options.actionAdmission?.()) return;
     for (const reserved of this.store.pendingActions()) {
       const portFor = () => this.store.attachments(reserved.agentId)
         .find((attachment) => attachment.attachmentId === reserved.proposal.attachmentId && attachment.status === "attached");
