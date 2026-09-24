@@ -212,8 +212,13 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   const status: AliveStatus = state.enabled ? state.status : "off";
   const conflict = surface === "work" ? state.conflict : undefined;
   const blockedByGoal = state.needsGoal && !state.enabled;
-  const orchestrators = state.modelOrder.filter((entry) => entry.role === "orchestrator");
-  const workers = state.modelOrder.filter((entry) => entry.role === "worker");
+  // 순서는 오케스트레이터 멤버 → 워커 멤버. "지금" 표시는 사슬 순서상 첫 current 하나만 —
+  // 백엔드가 둘 이상을 current 로 보내면(계약 위반) 첫 것만 강조하고 나머지는 무시한다.
+  const ordered = [
+    ...state.modelOrder.filter((entry) => entry.role === "orchestrator"),
+    ...state.modelOrder.filter((entry) => entry.role === "worker"),
+  ];
+  const currentIndex = ordered.findIndex((entry) => entry.current);
   const limit = state.budget.tokenLimit;
   const used = Math.max(0, state.budget.tokensUsed || 0);
   const ratio = limit && limit > 0 ? Math.min(1, used / limit) : 0;
@@ -264,35 +269,46 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   const triggerLabel = `AGI · ${statusLabel(status, ko)}`;
   const switchDisabled = pending || blockedByGoal || Boolean(conflict && !state.enabled);
 
-  const chain = (entries: AliveModelOrderItem[], role: "orchestrator" | "worker") => (
-    <div className={styles.lane} data-alive-lane={role}>
-      <span className={styles.laneTag} title={role === "orchestrator" ? (ko ? "오케스트레이터" : "Orchestrator") : (ko ? "워커" : "Worker")}>
-        {role === "orchestrator" ? <IconBrain size={13} aria-hidden="true" /> : <IconUsers size={13} aria-hidden="true" />}
-        <span className={styles.srOnly}>{role === "orchestrator" ? (ko ? "오케스트레이터" : "Orchestrator") : (ko ? "워커" : "Worker")}</span>
-      </span>
-      <ol className={styles.chain} aria-label={role === "orchestrator" ? (ko ? "오케스트레이터 예비 순서" : "Orchestrator fallback order") : (ko ? "워커 예비 순서" : "Worker fallback order")}>
-        {entries.length === 0 ? (
-          <li className={styles.chainEmpty}>{ko ? "설정 없음" : "Not set"}</li>
-        ) : entries.map((entry, index) => (
-          <li key={`${entry.runtimeId}:${entry.model}:${index}`} className={styles.chainItem}>
+  const roleName = (role: "orchestrator" | "worker") => role === "orchestrator"
+    ? (ko ? "오케스트레이터" : "Orchestrator")
+    : (ko ? "워커" : "Worker");
+  /*
+   * 한 줄의 사슬 — Alive 는 한 번에 한 모델로만 돈다. 순서는 오케스트레이터 멤버 다음 워커 멤버로
+   * 이어지는 하나의 예비 순서라, 두 줄로 나누지 않고 역할이 바뀌는 자리에 아이콘 표지만 둔다.
+   */
+  const renderChain = () => (
+    <ol className={styles.chain} aria-label={ko ? "모델 예비 순서" : "Model fallback order"} data-alive-chain="true">
+      {ordered.length === 0 ? (
+        <li className={styles.chainEmpty}>{ko ? "대시보드에 모델 순서가 없습니다" : "No model order in the dashboard"}</li>
+      ) : ordered.map((entry, index) => {
+        const isCurrent = index === currentIndex;
+        const roleStarts = index === 0 || ordered[index - 1].role !== entry.role;
+        return (
+          <li key={`${entry.role}:${entry.runtimeId}:${entry.model}:${index}`} className={styles.chainItem} data-alive-role={entry.role}>
             {index > 0 && <span className={styles.chainArrow} aria-hidden="true">›</span>}
+            {roleStarts && (
+              <span className={styles.roleMark} title={roleName(entry.role)} data-alive-role-mark={entry.role}>
+                {entry.role === "orchestrator" ? <IconBrain size={12} aria-hidden="true" /> : <IconUsers size={12} aria-hidden="true" />}
+                <span className={styles.srOnly}>{roleName(entry.role)}</span>
+              </span>
+            )}
             <span
               className={styles.modelChip}
-              data-current={entry.current ? "true" : undefined}
+              data-current={isCurrent ? "true" : undefined}
               data-exhausted={entry.exhausted ? "true" : undefined}
-              title={`${entry.label}${entry.current ? (ko ? " · 지금 사용 중" : " · in use now") : ""}${entry.exhausted ? (ko ? " · 한도 소진" : " · exhausted") : ""}`}
+              title={`${roleName(entry.role)} · ${entry.label}${isCurrent ? (ko ? " · 지금 사용 중" : " · in use now") : ""}${entry.exhausted ? (ko ? " · 한도 소진" : " · exhausted") : ""}`}
             >
-              {entry.current && <span className={styles.modelDot} aria-hidden="true" />}
+              {isCurrent && <span className={styles.modelDot} aria-hidden="true" />}
               <span className={styles.modelName}>{entry.label}</span>
               <span className={styles.srOnly}>
-                {entry.current ? (ko ? " (지금 사용 중)" : " (in use now)") : ""}
+                {isCurrent ? (ko ? " (지금 사용 중)" : " (in use now)") : ""}
                 {entry.exhausted ? (ko ? " (한도 소진)" : " (exhausted)") : ""}
               </span>
             </span>
           </li>
-        ))}
-      </ol>
-    </div>
+        );
+      })}
+    </ol>
   );
 
   const popover = open ? (
@@ -386,8 +402,7 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
       )}
 
       <div className={styles.section}>
-        {chain(orchestrators, "orchestrator")}
-        {chain(workers, "worker")}
+        {renderChain()}
         <p className={styles.caption}>{ko ? "작성창 모델 대신 대시보드 순서를 씁니다" : "Uses the dashboard order, not the composer model"}</p>
       </div>
 

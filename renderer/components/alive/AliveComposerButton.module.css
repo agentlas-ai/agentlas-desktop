@@ -188,18 +188,13 @@
   min-width: 0;
 }
 
-/* 예비 순서 사슬: [역할 아이콘] 칩 › 칩 › 칩 — 지금 쓰는 칩은 테두리+점, 소진된 칩은 흐리게+취소선. */
-.lane {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: start;
-  gap: 6px;
-  min-width: 0;
-}
-.laneTag {
+/* 예비 순서 사슬(한 줄로 이어짐): [오케 표지] 칩 › 칩 › [워커 표지] 칩 › 칩 — 지금 쓰는 칩 하나만 테두리+점,
+   소진된 칩은 점선·흐림·취소선. 역할이 바뀌는 자리에만 작은 아이콘 표지. */
+.roleMark {
   height: 22px;
-  display: grid;
+  display: inline-grid;
   place-items: center;
+  padding: 0 3px 0 1px;
   color: var(--muted-deep);
 }
 .chain {
@@ -268,7 +263,6 @@
 
 .caption {
   margin: 0;
-  padding-left: 24px;
   color: var(--muted-deep);
   font-size: 10px;
   line-height: 1.35;
