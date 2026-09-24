@@ -1,4 +1,4 @@
-// 구독/충전 CTA — 웹 결제 페이지(https://agentlas.cloud/pricing)를 외부 브라우저로 연다.
+// 구독 CTA — 웹 요금제 페이지(https://agentlas.cloud/pricing)를 외부 브라우저로 연다.
 // 데스크탑 셸에서 window.open(_blank)은 electron/main.ts의 setWindowOpenHandler가
 // shell.openExternal로 넘긴다(ChatRightPanel·WorkbenchPanel과 동일 패턴).
 // 프롬프트 저장소 정책(2026-07): 유료 구독=무제한 열람+저장, 무료=프롬프트당 맛보기 1회.

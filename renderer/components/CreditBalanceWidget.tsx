@@ -12,7 +12,7 @@ import { openPricing } from "./UpgradeCta";
 import type { HubCreditBalance } from "@/lib/types";
 
 const POLL_MS = 60_000;
-/** 구독 잔액이 이 값 미만이면 충전/구독 CTA 노출. */
+/** 구독 잔액이 이 값 미만이면 구독 플랜 CTA 노출. */
 const LOW_BALANCE_THRESHOLD = 50;
 
 export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean }) {
@@ -36,7 +36,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
       );
       // 조회 실패는 "잔액 0"이 아니라 "잔액 모름"이다. billing.ts는 5xx/타임아웃에
       // {authenticated:true, error} 만 돌려주므로(숫자 없음) 그대로 담으면 마지막 정상
-      // 잔액이 지워져 5,000 크레딧 사용자가 "0 크레딧 + 충전 CTA"를 보게 된다.
+      // 잔액이 지워져 5,000 크레딧 사용자가 "0 크레딧 + 구독 CTA"를 보게 된다.
       // 로그인 상태이면서 숫자가 없는 응답은 폐기하고 직전 값을 유지한다.
       // (error 유무가 아니라 "숫자가 있느냐"로 판정 — 200인데 필드가 빠진 스키마 드리프트도 같은 구멍이다.)
       setBal((prev) =>
@@ -84,7 +84,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   });
 
   // 미로그인이거나 아직 로딩 전이면 숨김. 첫 조회부터 실패해 유지할 직전 값조차 없는
-  // 경우(=숫자 없음)도 숨김 — 모름을 0으로 메꾸면 "0 크레딧 · 충전하세요" 오탐이 난다.
+  // 경우(=숫자 없음)도 숨김 — 모름을 0으로 메꾸면 "0 크레딧 · 구독하세요" 오탐이 난다.
   if (!bal || !bal.authenticated || typeof bal.remainingCredits !== "number") return null;
 
   const remaining = bal.remainingCredits;
@@ -133,7 +133,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
         <button
           type="button"
           onClick={openPricing}
-          title={ko ? "충전/구독 페이지 열기" : "Open top-up / subscription page"}
+          title={ko ? "구독 플랜 보기" : "View subscription plans"}
           style={{
             display: "block",
             width: "100%",
@@ -149,7 +149,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             cursor: "pointer",
           }}
         >
-          {ko ? "크레딧이 얼마 없어요 · 충전/구독 →" : "Low credits · Top up / Subscribe →"}
+          {ko ? "AI 사용 잔액이 적어요 · 구독 플랜 보기 →" : "Low AI usage balance · View plans →"}
         </button>
       )}
 
