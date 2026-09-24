@@ -27,7 +27,7 @@
  * 여전히 읽기 전용 관찰만 풀 수 있고, 옛 시도를 조용히 재실행하는 길은 없다. 실행 중인 시도·대기 구독·진행 중
  * 관찰·바쁜 대화는 그 주인이 다음 단계를 가지므로 다음 스윕으로 미룬다.
  */
-import { applyPendingOwnerGoalAmendments } from "./goal-owner-amendment";
+import { applyPendingOwnerGoalAmendments, OWNER_GOAL_AMENDMENT_PENDING_KIND } from "./goal-owner-amendment";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { getDb } from "../store/db";
@@ -244,9 +244,11 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   if (workspaceGone) return cancel(run, workspaceGone, trigger);
 
   // Owner target changes recorded while the Goal was mid-episode are applied
-  // at this stop, with the same revision+binding the Goal editor uses.
-  if (run.status === "blocked" || run.status === "paused") {
-    const amendment = applyPendingOwnerGoalAmendments(run.goalId);
+  // at this stop, with the same revision+binding the Goal editor uses. A run
+  // parked in waiting_tool is at a stop too when no turn is live in its chat.
+  const chatLive = Boolean(run.rootChatId && dispatcher.activeChatIds().includes(run.rootChatId));
+  if (run.status === "blocked" || run.status === "paused" || (run.status === "waiting_tool" && !chatLive)) {
+    const amendment = applyPendingOwnerGoalAmendments(run.goalId, { noLiveTurn: !chatLive });
     if (amendment.applied) {
       const latest = getLongRun(run.id);
       if (!latest) return defer("owner_amendment_readback_failed");
@@ -373,8 +375,8 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
       AND surface IN ('one','work') AND execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
       AND (status = 'blocked'
         OR (status = 'paused' AND pause_reason IN ('runtime_unavailable','app_closed','crash_recovery'))
-        OR (status = 'waiting_tool' AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind = ?)))
-      ORDER BY id LIMIT 100`).all(afterId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as Array<{ id: string }>;
+        OR (status = 'waiting_tool' AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind IN (?, ?))))
+      ORDER BY id LIMIT 100`).all(afterId, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string }>;
     if (!rows.length) break;
     for (const { id } of rows) {
       afterId = id;
