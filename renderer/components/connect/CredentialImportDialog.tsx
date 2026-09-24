@@ -343,7 +343,7 @@ export function CredentialImportDialog({
             <div className="cid-source-row">
               <label htmlFor="cid-profile">{ko ? "원본" : "Source"}</label>
               <div className="cid-select-wrap">
-                <select id="cid-profile" value={profileId ?? ""} disabled={importingNow || profiles.length === 0} onChange={(event) => { setProfileId(event.target.value); setConsented(false); }}>
+                <select id="cid-profile" title={(() => { const p = profiles.find((item) => item.id === profileId); return p ? `${p.browser} · ${p.displayName}` : undefined; })()} value={profileId ?? ""} disabled={importingNow || profiles.length === 0} onChange={(event) => { setProfileId(event.target.value); setConsented(false); }}>
                   {profiles.length === 0 && <option value="">{scanning ? (ko ? "브라우저를 찾는 중…" : "Finding browsers…") : (ko ? "프로필 없음" : "No profile found")}</option>}
                   {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.browser} · {profile.displayName}</option>)}
                 </select>
@@ -628,10 +628,13 @@ export function CredentialImportDialog({
         .cid-close:hover { color: #171a1e; }
         .cid-close:disabled { opacity: .45; cursor: default; }
         .cid-body, .cid-result-body { overflow-y: auto; min-height: 0; padding: 17px 25px 0; }
-        .cid-source-row { display: grid; grid-template-columns: 35px minmax(0, 1fr); align-items: center; gap: 10px; }
-        .cid-source-row label { color: #898e95; font-size: 15px; }
+        /* ★라벨 칸은 글자 폭으로(auto) 잡는다. 35px 고정이었을 때 영어 "Source"(15px, 약 47px)가
+           칸을 넘어 셀렉트 테두리 밑으로 파고들었다(실측 2026-09-24, 650px 폭 겹침 2px·간격 0).
+           한국어 "원본"(약 26px)만 들어가던 폭이다. 긴 프로필 이름은 셀렉트 안에서 말줄임. */
+        .cid-source-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
+        .cid-source-row label { color: #898e95; font-size: 15px; white-space: nowrap; }
         .cid-select-wrap { position: relative; min-width: 0; }
-        .cid-select-wrap select { appearance: none; display: block; width: 100%; height: 36px; padding: 0 36px 0 13px; border: 1px solid #e0e2e7; border-radius: 10px; outline: none; background: #fff; color: #333940; font: inherit; font-size: 15px; cursor: pointer; }
+        .cid-select-wrap select { appearance: none; display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 36px; padding: 0 36px 0 13px; border: 1px solid #e0e2e7; border-radius: 10px; outline: none; background: #fff; color: #333940; font: inherit; font-size: 15px; cursor: pointer; }
         .cid-select-wrap select:focus-visible { outline: 2px solid #326fc3; outline-offset: 1px; }
         .cid-select-wrap select:disabled { opacity: .62; cursor: default; }
         .cid-select-wrap :global(svg) { position: absolute; right: 13px; top: 10px; pointer-events: none; color: #747a82; }
