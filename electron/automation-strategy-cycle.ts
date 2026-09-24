@@ -165,6 +165,7 @@ function readRecentRunProgress(automationId: string): AutomationStrategyReflecti
         outcome: fact.outcome,
         actionCalls: fact.actionCalls,
         observationCalls: fact.observationCalls,
+        outwardEffects: fact.outwardEffects,
       })),
     };
   } catch {

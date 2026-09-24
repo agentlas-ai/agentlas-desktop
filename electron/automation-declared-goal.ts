@@ -17,15 +17,33 @@ import type { DeclaredAutomationGoal } from "./automation-result";
 
 const GOAL_TEXT_MAX = 1_800;
 
+function owningGoalRevision(a: Pick<Automation, "id" | "goalId">) {
+  const goalId = readCurrentGoalAutomationBinding(a.id)?.goalId
+    ?? a.goalId
+    ?? getAutomationStrategyGoalOrigin(a.id)?.goalId
+    ?? null;
+  return goalId ? getChatGoalRevision(goalId) : null;
+}
+
+/**
+ * Is this automation one episode of an ongoing Goal (retained until the owner stops it)? Machine
+ * field only (the revision's lifecycle), resolved exactly as the judge's declared goal is. An ongoing
+ * Goal is never "met" by one run, so an accepted run with no outward effect is a hold
+ * (persistence-ledger.ts). Unreadable → false: the stricter rule never applies by guess.
+ */
+export function automationServesOngoingGoal(a: Pick<Automation, "id" | "goalId">): boolean {
+  try {
+    return owningGoalRevision(a)?.lifecycle === "ongoing";
+  } catch {
+    return false;
+  }
+}
+
 export function declaredGoalForAutomation(a: Pick<Automation, "id" | "name" | "goal" | "goalId">): DeclaredAutomationGoal {
   const saved = String(a.goal ?? "").trim();
   if (saved) return { name: a.name ?? null, goal: saved };
   try {
-    const goalId = readCurrentGoalAutomationBinding(a.id)?.goalId
-      ?? a.goalId
-      ?? getAutomationStrategyGoalOrigin(a.id)?.goalId
-      ?? null;
-    const revision = goalId ? getChatGoalRevision(goalId) : null;
+    const revision = owningGoalRevision(a);
     if (!revision) return { name: a.name ?? null, goal: null };
     const lifecycle = revision.lifecycle === "ongoing"
       ? "ongoing (retained until the owner stops it; each run is one episode toward it)"

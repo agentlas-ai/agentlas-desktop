@@ -122,12 +122,12 @@ import {
 import { recordAutomationRecovery } from "./automation-recovery";
 import { buildAutomationContinuityCapsulePrompt } from "./automation-progress-facts";
 import {
-  automationRunActionCalls,
+  automationRunOutwardEffects,
   automationRunSettlementCause,
   decideAndRecordAutomationPersistence,
 } from "./persistence-ledger";
 import { runtimeCooldownForSelection } from "./runtime/runtime-cooldown";
-import { declaredGoalForAutomation } from "./automation-declared-goal";
+import { automationServesOngoingGoal, declaredGoalForAutomation } from "./automation-declared-goal";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -1633,23 +1633,25 @@ async function runOne(
       }
     }
     // ── 지속 정책(P0-2): 보류는 성공이 아니다 ────────────────────────────────
-    // 끝까지 돌았는데 바깥을 바꾼 호출이 0이고 판정이 목표 미충족으로 본 실행(자기 보류), 또는 도구 없이
+    // 끝까지 돌았는데 바깥 효과가 0이고 판정이 목표 미충족으로 본 실행(자기 보류), 또는 도구 없이
     // 했다고 주장한 실행은 호스트 사실로 원인을 걸고 다음 수를 원장에 남긴다. 다음 실행이 그 수를 소비한다:
     // replan 은 계획 캡슐의 호스트 지시로, switch_runtime 은 실행 계획의 1회 핸드오프로(저장된 핀은 그대로).
     // 실측 f7a61706: 19회 중 15회가 스스로 고른 무변경 보류였고 판정은 이를 수용·판정 불가로 받았다.
     if (runLedgerRecorded && !parentMissing && !leaseOwnershipLost && !opts?.dryRun && currentRunId
       && !controller.signal.aborted) {
       try {
-        const actionCalls = automationRunActionCalls(currentRunId);
+        // 바깥 효과(게시·전송·외부 쓰기·산출물 파일)만 진전이다 — 자기 메모 수정·셸·탐색은 활동일 뿐.
+        const outwardEffects = automationRunOutwardEffects(currentRunId);
         // 둘 다 호스트가 쓴 표식이다: 판정 reasonCode, 또는 그래프 커널의 노드 실패 코드.
         const claimedWithoutTools = runReasonCode === "claimed_without_tools"
           || (machineError ?? "").startsWith("[claimed_without_tools]")
           || (machineError ?? "").includes("NODE_CLAIMED_WITHOUT_TOOLS");
-        const cause = actionCalls === null ? null : automationRunSettlementCause({
+        const cause = outwardEffects === null ? null : automationRunSettlementCause({
           completed: runCompleted,
           outcome: runOutcome,
           reasonCode: claimedWithoutTools ? "claimed_without_tools" : runReasonCode,
-          actionCalls,
+          outwardEffects,
+          ongoingGoal: automationServesOngoingGoal(a),
         });
         if (cause) {
           const ranOn = a.runtimeSelection;
