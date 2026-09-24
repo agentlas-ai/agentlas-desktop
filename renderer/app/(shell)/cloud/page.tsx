@@ -16,6 +16,7 @@ import {
   getCloudUploadServerSnapshot,
   getCloudUploadSnapshot,
   setCloudUploadPurposeAnswer,
+  setCloudUploadPublicSourceConsent,
   setCloudUploadRegisteredKey,
   setCloudUploadResult,
   setCloudUploadRootGrant,
@@ -81,7 +82,7 @@ export default function CloudAgentPublishPage() {
     getCloudUploadSnapshot,
     getCloudUploadServerSnapshot,
   );
-  const { rootGrant, registeredKey, running, result, purposeAnswer, progressStage, progressDetail, startedAt } = session;
+  const { rootGrant, registeredKey, running, result, purposeAnswer, publicSourceConsent, progressStage, progressDetail, startedAt } = session;
   const [registeredOptions, setRegisteredOptions] = useState<CloudAgentRegisteredUploadOption[]>([]);
   // 시계는 UploadProgressPanel 안의 ElapsedClock 리프가 스스로 돈다 —
   // 1,000줄 페이지를 초당 리렌더시키지 않는다.
@@ -129,6 +130,7 @@ export default function CloudAgentPublishPage() {
           ? await api.cloudAgents.publishRegisteredPublic({
               target: selectedRegistered.target,
               progressId,
+              publicSourceConsent,
               ...(answer?.trim() ? { purposeAnswer: answer.trim() } : {}),
               ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
             })
@@ -141,6 +143,7 @@ export default function CloudAgentPublishPage() {
           ? await api.cloudAgents.publishPublic({
               rootGrant: rootGrant!,
               progressId,
+              publicSourceConsent,
               ...(answer?.trim() ? { purposeAnswer: answer.trim() } : {}),
             })
           : await api.cloudAgents.savePrivate({ rootGrant: rootGrant!, progressId });
@@ -291,6 +294,19 @@ export default function CloudAgentPublishPage() {
             </span>
             <IconFileUp size={14} />
           </button>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 9, color: "var(--ink)", fontSize: 12, lineHeight: 1.5 }}>
+            <input
+              type="checkbox"
+              checked={publicSourceConsent}
+              disabled={Boolean(running)}
+              onChange={(event) => setCloudUploadPublicSourceConsent(event.target.checked)}
+              style={{ marginTop: 2 }}
+            />
+            <span>{ko
+              ? "공개 업로드에서 소스 파일도 공개합니다. 선택하면 정리·검사된 공개용 사본의 읽을 수 있는 파일을 Agent Space에서 누구나 볼 수 있습니다. 원본 agentlas.json과 비공개 Agent Cloud의 공개 설정은 바뀌지 않습니다."
+              : "Also share source files on public upload. Anyone can browse readable files from the cleaned, scanned public copy in Agent Space. The original agentlas.json and private Agent Cloud visibility stay unchanged."}</span>
+          </label>
 
           <div style={actionGrid}>
             <CloudAction
@@ -767,6 +783,22 @@ function classifyUploadFailure(
   const baseTitle = ko ? "저장 또는 발행 중단" : "Save or publish stopped";
   const jsonError = json && typeof json.error === "string" ? json.error : "";
   const signal = [error ?? "", stderr, jsonError].join("\n").toLowerCase();
+
+  if (signal.includes("public_source_manifest_")) {
+    return {
+      explained: true,
+      title: ko ? "소스 공개용 설정을 확인하세요" : "Check the source-sharing manifest",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "공개용 패키지의 agentlas.json에 소스 공개 설정을 적용하지 못했습니다. 아무 파일도 업로드되지 않았습니다."
+          : "Source sharing could not be applied to agentlas.json in the public package. No files were uploaded.",
+        remediation: ko
+          ? "agentlas.json을 확인한 뒤 다시 시도하거나, 소스 공개 선택을 해제하고 호출용 패키지로 발행하세요."
+          : "Check agentlas.json and retry, or clear source sharing to publish a call-only package.",
+      },
+    };
+  }
 
   // ★ 중복과 포크는 "수리"할 대상이 아니라 그대로 알려야 하는 거절이다 (오너 지시
   //   2026-08-18). 이 셋 모두 generic 분기로 떨어져 HTTP 상태와 JSON 원문이

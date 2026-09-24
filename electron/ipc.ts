@@ -3651,6 +3651,7 @@ export function registerIpcHandlers(): void {
       reviewMode: input.reviewMode,
       notes: input.notes,
       purposeAnswer: input.purposeAnswer,
+      publicSourceConsent: input.publicSourceConsent === true,
       ...(input.confirmOverwrite ? { confirmOverwrite: true } : {}),
     }, cloudPublishProgressOptions(event, input.progressId));
   });

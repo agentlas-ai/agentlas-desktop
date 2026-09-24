@@ -4025,6 +4025,8 @@ export interface CloudAgentPackageRequest {
   preferPackageSlug?: boolean;
   /** Defaults to owner-private Agent Cloud storage. Use marketplace only for an explicit public Hub publish. */
   visibility?: CloudAgentVisibility;
+  /** Explicit author consent to expose the cleaned public package source in Agent Space Files. Never applies to private saves. */
+  publicSourceConsent?: boolean;
   /** true packages and reviews locally but does not call agentlas.cloud. */
   dryRun?: boolean;
   /** static-only is free; local-runtime uses the submitter's active CLI/BYOK/local runtime. */
@@ -4100,6 +4102,8 @@ export interface CloudAgentRegisteredPublishRequest extends CloudAgentRegistered
   reviewMode?: CloudAgentReviewMode;
   notes?: string;
   purposeAnswer?: string;
+  /** Explicit author consent to expose the cleaned public package source in Agent Space Files. */
+  publicSourceConsent?: boolean;
 }
 
 /** Ordered, machine-readable phases of one Agent Cloud / Hub upload. */
