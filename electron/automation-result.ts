@@ -46,6 +46,15 @@ export interface AutomationJudgeReceipt {
  * 실행은 계속 자동화 핀으로 돈다(이 값은 판정만 정한다).
  */
 export const AUTOMATION_JUDGE_PIN_FALLBACK = "pool_then_pin" as const;
+/**
+ * Whole budget for one unattended outcome/failure judgment (pool member, then
+ * the pin). The shared 45s default splits into ~22.5s per attempt, and a Codex
+ * judge turn (CLI spawn + reasoning) measures ~20-25s: production 1.2.40
+ * 2026-09-24 03:00Z gpt-6-luna succeeded at 22,496ms, and the candidate-app E2E
+ * the same morning timed out both attempts at ~22,500ms, leaving the run
+ * "unjudged". Nobody waits on this background call, so both attempts get room.
+ */
+export const AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS = 120_000;
 
 function judgeReceiptOf(verdict: Pick<RequiredVerdict<string>, "verdict" | "runtimeReceipt" | "attempts">): AutomationJudgeReceipt | undefined {
   const attempts = (verdict.attempts ?? []).map((attempt) => ({
@@ -327,6 +336,7 @@ export async function classifyAutomationOutcome(
     ].join(" "),
     locale,
     scanSecrets: true,
+    timeoutMs: AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS,
     ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection, pinFallback: AUTOMATION_JUDGE_PIN_FALLBACK } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
@@ -383,6 +393,7 @@ export async function classifyAutomationFailure(
     ].join(" "),
     locale,
     scanSecrets: true,
+    timeoutMs: AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS,
     ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection, pinFallback: AUTOMATION_JUDGE_PIN_FALLBACK } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
