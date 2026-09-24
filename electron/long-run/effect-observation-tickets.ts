@@ -19,6 +19,9 @@ export interface EffectObservationTicket {
   readonly surface: string;
   /** "attempts": uncertain worker attempts; "boundary": no attempt rows, only an unsealed last invocation. */
   readonly kind: "attempts" | "boundary";
+  /** The interrupted work touched a web page or a browser tool: the look needs the Agentlas browser.
+   * Otherwise it looks with read built-ins only (no MCP tool schemas in its context). */
+  readonly needsBrowser?: boolean;
   readonly dispatcher: EffectObservationDispatcher;
 }
 

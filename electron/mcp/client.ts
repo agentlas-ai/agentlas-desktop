@@ -111,6 +111,7 @@ import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cl
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { hasPermissionEscalationMarker, stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
+import { EFFECT_OBSERVATION_SYSTEM_PROMPT } from "../../shared/effect-observation";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { getFirm, listFirms } from "../store/firms";
@@ -5430,6 +5431,27 @@ ${effectiveUserPrompt}`;
         return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts);
       })() : "";
       const runtimeTurnContext = [turnContext, checkpointContext].filter(Boolean).join("\n\n");
+      if (effectObservationRun && runtime.kind === "claude-code") {
+        // One read-only look: its own tiny system prompt, no persona/history/turn context. The observation
+        // prompt (userPrompt) carries the goal, targets, rules and the verdict marker contract.
+        return {
+          ...runnerReq,
+          systemPrompt: EFFECT_OBSERVATION_SYSTEM_PROMPT,
+          turnContext: undefined,
+          turnContextStable: undefined,
+          history: [],
+          minimalObservation: true as const,
+          // A local effect (file, folder) is looked at with read built-ins only; the browser server's tool
+          // schemas are loaded only when the interrupted work used a browser or a web page.
+          ...(effectObservationTicket(req.runId)?.needsBrowser === false
+            ? { mcpConfigPath: undefined, mcpAllowedTools: [] } : {}),
+          userPrompt,
+          backendLabel: runtimePicked.label,
+          model: runtime.model ?? undefined,
+          longContext: false,
+          effort: runtime.effort ?? undefined,
+        };
+      }
       return {
         ...runnerReq,
         ...(continuationSession ? { runtimeSessionOwnerId: continuationSession.ownerId,

@@ -392,8 +392,10 @@ export function maybeDispatchEffectObservation(
   appendLongRunEvent({ runId: run.id, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
     payload: { action: "dispatched", observationDigest: digest, observationInvocationRunId: observationRunId,
       attemptIds: targetIds, targetKind: kind, trigger: trigger.slice(0, 80), permission: "read" } });
+  const needsBrowser = targets.some((target) => attemptActivity(target.invocationRunId)
+    .some((line) => /browser|https?:\/\//i.test(line)));
   const ticket: EffectObservationTicket = Object.freeze({ observationRunId, goalId, longRunId: run.id, chatId,
-    attemptIds: Object.freeze([...targetIds]), digest, surface: run.surface, kind, dispatcher });
+    attemptIds: Object.freeze([...targetIds]), digest, surface: run.surface, kind, needsBrowser, dispatcher });
   registerEffectObservationTicket(ticket);
   markGoalObserving(goalId, true);
   say(chatId, observationRunId, "이전 작업이 반영됐는지 확인하는 중…", "Checking whether the earlier action went through…");

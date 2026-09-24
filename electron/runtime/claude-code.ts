@@ -835,7 +835,9 @@ const runClaudeTurn = async (
     try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
   }
 
-  const systemPrompt = wrapSystemPrompt(
+  // A minimal observation carries its own complete prompt: none of the Agentlas header, skills and
+  // protocols (~33 KB) that wrapSystemPrompt adds for conversation turns.
+  const systemPrompt = runReq.minimalObservation && !runReq.untrustedNoTools ? runReq.systemPrompt : wrapSystemPrompt(
     runReq.systemPrompt,
     runReq.locale,
     runReq.permission,
@@ -907,7 +909,8 @@ const runClaudeTurn = async (
       : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
-    : systemPrompt) + readOnlyToolNotice + writeSandboxNotice + (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale));
+    : systemPrompt) + (runReq.minimalObservation ? ""
+      : readOnlyToolNotice + writeSandboxNotice + (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale)));
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -981,6 +984,21 @@ const runClaudeTurn = async (
       throw createUntrustedRuntimeFailure();
     }
   }
+  // A minimal observation keeps only the Agentlas browser server from Main's config: every other
+  // server's tool schemas are context the look does not need (measured: ~50k of a 57k look).
+  if (runReq.minimalObservation && !runReq.untrustedNoTools && agentAppMcpConfigArg) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(agentAppMcpConfigArg, "utf8")) as { mcpServers?: Record<string, unknown> };
+      const servers = Object.fromEntries(Object.entries(parsed.mcpServers ?? {}).filter(([name]) => name === "agentlas-browser"));
+      const slim = path.join(os.tmpdir(), `agentlas-observation-mcp-${process.pid}-${crypto.randomUUID()}.json`);
+      await fs.writeFile(slim, JSON.stringify({ mcpServers: servers }), { encoding: "utf8", mode: 0o600 });
+      const previousCleanup = cleanupAgentAppMcpConfig;
+      cleanupAgentAppMcpConfig = () => { previousCleanup(); void fs.unlink(slim).catch(() => {}); };
+      agentAppMcpConfigArg = slim;
+    } catch {
+      agentAppMcpConfigArg = undefined; // unreadable config: look with the read built-ins only
+    }
+  }
   const mcpArgs = agentAppMcpConfigArg && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
     ? ["--mcp-config", agentAppMcpConfigArg]
     : [];
@@ -1040,6 +1058,13 @@ const runClaudeTurn = async (
         "--tools",
         "",
       ]
+    : [];
+  // A Main-issued effect observation looks only: read built-ins, the Main-selected MCP config and
+  // nothing from the user's CLI setup (settings, plugins, CLAUDE.md). ~6k tokens per look instead of
+  // the full conversation context (isolated measurement 2026-09-24).
+  const minimalObservationArgs = runReq.minimalObservation && !runReq.untrustedNoTools
+    ? ["--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Glob,Grep,LS",
+        "--disable-slash-commands", "--no-session-persistence"]
     : [];
   // Claude Code's own shell, slash commands and plugins remain usable. The
   // Agentlas browser comes first: while one is reachable (Main bound it, or the
@@ -1106,6 +1131,8 @@ const runClaudeTurn = async (
   const systemPromptFileFlag = runReq.untrustedNoTools
     ? "--system-prompt-file"
     : "--append-system-prompt-file";
+  // A minimal observation replaces the prompt too (its own 5 sentences are the whole prompt).
+  const promptFileFlag = runReq.minimalObservation ? "--system-prompt-file" : systemPromptFileFlag;
   // --fork-session 제거(2026-08-18 실측): fork는 재개 스폰마다 요청 프리픽스를 바꿔
   // 세션 캐시를 영원히 못 잇게 한다(fork 재개 3턴 연속 write 8.6K+ vs no-fork 3턴째
   // write 360). `-p` 재개는 fork 없이도 매 스폰 새 세션 파일을 만들므로(D실측: 재개마다
@@ -1125,6 +1152,7 @@ const runClaudeTurn = async (
           ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...minimalObservationArgs,
           ...browserOnlyArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
@@ -1133,7 +1161,7 @@ const runClaudeTurn = async (
         ]
       : [
           "-p",
-          systemPromptFileFlag,
+          promptFileFlag,
           sysPromptFile,
           "--output-format",
           "stream-json",
@@ -1144,6 +1172,7 @@ const runClaudeTurn = async (
           ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...minimalObservationArgs,
           ...browserOnlyArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
@@ -1178,6 +1207,8 @@ const runClaudeTurn = async (
     // A per-run tool grant dies with its turn; a process that carries it cannot serve the next one.
     !runReq.ephemeralToolGrant &&
     !runReq.singleUse &&
+    // One look; nothing to keep warm.
+    !runReq.minimalObservation &&
     // A pooled process does not repeat system/init for each turn. This
     // Workforce call needs fresh native observations; existing pools stay intact.
     !hostAuthorityWorkforce &&

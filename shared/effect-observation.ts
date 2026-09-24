@@ -18,6 +18,15 @@
 
 export const EFFECT_OBSERVATION_MARKER = "<<agentlas-effect-observation>>";
 
+/** The whole system prompt of a minimal (claude-code) observation run. The user prompt carries the task. */
+export const EFFECT_OBSERVATION_SYSTEM_PROMPT = [
+  "You are a read-only checker working for the Agentlas desktop app.",
+  "Your answer is read by the app, not by a person.",
+  "Only look: read files, list folders, search, or use the browser tools you are given to open or refresh pages.",
+  "Never create, change, send, post, buy, delete or undo anything, and never retry the earlier action.",
+  "Follow the check request exactly and end your answer with the single verdict marker line it specifies.",
+].join(" ");
+
 export type EffectObservationVerdict = "done" | "not_done" | "unknown";
 
 export interface EffectObservationReport {
