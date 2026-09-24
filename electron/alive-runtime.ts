@@ -42,22 +42,19 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
 const SHA256 = /^[a-f0-9]{64}$/i;
 const AGENT_ID = builtinAgentId(ALIVE_CONTROLLER_SLUG);
 
-/** Shared with electron/alive-organisms (One/Work lives); behavior unchanged for Science. */
-export function runtimeChatId(agentId: string): string {
+function runtimeChatId(agentId: string): string {
   const hex = createHash("sha256").update(`agentlas:alive-runtime-chat:v1:${agentId}`, "utf8").digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-/** Shared with electron/alive-organisms (One/Work lives); behavior unchanged for Science. */
-export function isAliveChat(chatId: string): boolean {
+function isAliveChat(chatId: string): boolean {
   const chat = getChat(chatId);
   if (!chat || chat.kind !== "division" || chat.originSurface !== "work" || chat.agentId !== AGENT_ID) return false;
   const match = /^⟦alive⟧([a-f0-9-]+)$/i.exec(chat.title);
   return Boolean(match && UUID.test(match[1]!) && runtimeChatId(match[1]!) === chatId);
 }
 
-/** Shared with electron/alive-organisms (One/Work lives); behavior unchanged for Science. */
-export function ensureRuntimeChat(agentId: string): string {
+function ensureRuntimeChat(agentId: string): string {
   if (!UUID.test(agentId)) throw new Error("alive-agent-id-invalid");
   const installed = getDb().prepare("SELECT id FROM installed_agents WHERE id=? AND slug=? AND builtin=1")
     .get(AGENT_ID, ALIVE_CONTROLLER_SLUG) as { id: string } | undefined;
@@ -123,8 +120,7 @@ export function parseAliveDecision(text: string): AliveRuntimeReceipt["decision"
   } };
 }
 
-/** Shared with electron/alive-organisms (One/Work lives); behavior unchanged for Science. */
-export function finalResult(runId: string, chatId: string): { text: string; tokensUsed?: number } | null {
+function finalResult(runId: string, chatId: string): { text: string; tokensUsed?: number } | null {
   const rows = getDb().prepare(`SELECT e.payload_json AS payloadJson, m.text AS text
     FROM run_events e JOIN chat_messages m
       ON m.id=json_extract(e.payload_json,'$.durableMessageId') AND m.chat_id=e.chat_id AND m.role='assistant'
@@ -140,8 +136,7 @@ export function finalResult(runId: string, chatId: string): { text: string; toke
   return { text: rows[0]!.text, ...(tokensUsed === undefined ? {} : { tokensUsed }) };
 }
 
-/** Shared with electron/alive-organisms (One/Work lives); behavior unchanged for Science. */
-export function measuredWakeUsage(runId: string, chatId: string): { attempts: boolean; tokensUsed?: number } {
+function measuredWakeUsage(runId: string, chatId: string): { attempts: boolean; tokensUsed?: number } {
   const rows = getDb().prepare(`SELECT kind, payload_json AS payloadJson FROM run_events
     WHERE run_id=? AND chat_id=? AND kind IN ('alive_provider_attempt_started','alive_provider_usage_observed')
     ORDER BY seq`).all(runId, chatId) as Array<{ kind: string; payloadJson: string }>;

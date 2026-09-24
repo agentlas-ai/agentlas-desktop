@@ -13,10 +13,10 @@ import { continueGoalForAlive } from "../long-run/blocked-goal-sweep";
 import { registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
 import { listPendingToolApprovals } from "../runtime/tool-approval";
 import { invocationService } from "../invocation/service";
-import { ensureRuntimeChat, finalResult, isAliveChat, measuredWakeUsage, runtimeChatId } from "../alive-runtime";
+import { pickRunner } from "../runtime/selection";
+import { noteRuntimeFailure } from "../runtime/runtime-cooldown";
 import { desktopAliveClock } from "../alive-clock";
 import { ALIVE_CONTROLLER_SLUG, builtinAgentId } from "../architecture/manifest";
-import { currentUiLocale } from "../ui-locale";
 import { cachedAliveModelOrder, refreshAliveModelOrder } from "./model-order";
 import { AliveHostError, AliveOrganismHost, parseAliveSurfaceChat, parseAliveTokenLimit, type AliveHostDeps } from "./host";
 import type { GoalPlaygroundDeps, GoalRunView } from "./goal-playground";
@@ -80,16 +80,10 @@ export function startAliveOrganisms(): AliveOrganismHost {
     clock: desktopAliveClock,
     intervalMs: aliveOrganismTickMs(),
     playground: playgroundDeps,
-    runtime: {
-      ensureRuntimeChat, runtimeChatId, isAliveChat, finalResult, measuredWakeUsage,
-      locale: () => currentUiLocale(),
-      invocation: {
-        start: (request, workspace, context) => invocationService.start(request, workspace, context),
-        cancel: (runId) => { invocationService.cancel(runId); },
-        receipt: (runId) => invocationService.receipt(runId),
-        activeRunIds: () => invocationService.activeRunIds(),
-        onSettled: (listener) => invocationService.onSettled((event) => listener({ receipt: event.receipt })),
-      },
+    light: {
+      pickRunner: (status) => pickRunner(status),
+      // Quota/auth marks the member cooling, so the next wake falls down the pool order.
+      noteFailure: (status, failure) => { noteRuntimeFailure(status, failure); },
     },
     projectName: (projectId) => getProject(projectId)?.name ?? null,
     controllerInstalled: () => Boolean(getDb().prepare("SELECT id FROM installed_agents WHERE id=? AND slug=? AND builtin=1")

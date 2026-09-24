@@ -21,6 +21,11 @@ export interface AliveLifetimeServiceOptions {
   clock?: () => number;
   /** Host admission just before a wake is reserved; a returned code is a wait, never a failed wake. */
   admission?: (agent: AliveAgent, nowMs: number) => string | null;
+  /**
+   * Minimum spacing between model wakes when nothing meaningful changed (review-due, periodic, decision timer).
+   * The host escalates it with state.unchangedReviews (e.g. 5m → 15m → 60m); a salience change always wakes.
+   */
+  reviewFloorMs?: (agent: AliveAgent) => number;
 }
 
 /** Agent time belongs to the host clock, and survives the completion or removal of a playground. */
@@ -208,6 +213,10 @@ export class AliveLifetimeService {
       const due = typeof agent.state.nextWakeAtMs === "number" && nowMs >= agent.state.nextWakeAtMs
         || periodicPausedReview || actionRetryDue || runtimeBindingChanged || grantChanged;
       if (!changed && !due) { beats.push(this.wait(agent, "agent.resting", nowMs)); continue; }
+      const floorMs = this.options.reviewFloorMs?.(agent) ?? 0;
+      const lastReviewStatus = (agent.state.lastReview as { status?: unknown } | undefined)?.status;
+      if (!changed && floorMs > 0 && lastReviewStatus === "completed" && typeof agent.state.lastReviewAtMs === "number"
+        && nowMs - agent.state.lastReviewAtMs < floorMs) { beats.push(this.wait(agent, "agent.resting", nowMs)); continue; }
       if (agent.runtimeBinding === null || agent.runtimeBinding === undefined) { beats.push(this.wait(agent, "runtime.selection-unavailable", nowMs)); continue; }
       const admissionCode = this.options.admission?.(agent, nowMs) ?? null;
       if (admissionCode) { beats.push(this.wait(agent, admissionCode, nowMs)); continue; }
@@ -223,8 +232,9 @@ export class AliveLifetimeService {
         this.store.settle({ runId: wakeId, status: "cancelled", tokensUsed: 0, errorCode: "wake.admission-changed" }, nowMs);
         beats.push({ agentId: agent.agentId, outcome: "wait", reasonCode: "wake.admission-changed" }); continue;
       }
+      const unchangedReviews = changed ? 0 : Math.min(1_000, Number(current.state.unchangedReviews ?? 0) + 1);
       this.store.update(agent.agentId, { state: { ...current.state, lastObservationSha: observationSha,
-        lastActionWorldSha: actionWorldSha, nextWakeAtMs: null, reviewPending: true, lastWaitCode: null } }, nowMs);
+        lastActionWorldSha: actionWorldSha, nextWakeAtMs: null, reviewPending: true, lastWaitCode: null, unchangedReviews } }, nowMs);
       const actionKinds = canContinue
         ? [...new Set(observations.filter(continuable).flatMap(({ attachment }) => aliveActionKindsForDomain(attachment.domain)))].sort()
         : [];

@@ -33,6 +33,8 @@ export interface AliveModelOrderEntry {
   skipCode: string | null;
   /** Exact selection when usable; null otherwise. */
   selection: RuntimeSelection | null;
+  /** The live runtime (with the resolved model) the light wake runner is picked from; null when not usable. */
+  status: RuntimeStatus | null;
 }
 
 const sameSeat = (a: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model" | "acpAgentId">,
@@ -77,7 +79,8 @@ export function buildAliveModelOrder(input: {
       else if (input.exact && !input.exact(selection)) skipCode = "pool.member-binding-inexact";
       out.push({ role, position, runtimeId: wanted.kind === "acp" && wanted.acpAgentId ? `acp:${wanted.acpAgentId}` : wanted.kind,
         model, label: (wanted.label ?? selection?.label ?? wanted.kind).toString().slice(0, 120),
-        exhausted: skipCode !== null, skipCode, selection: skipCode ? null : selection });
+        exhausted: skipCode !== null, skipCode, selection: skipCode ? null : selection,
+        status: skipCode || !live || !selection ? null : { ...live, model: selection.model } });
     });
   }
   return out;
@@ -119,13 +122,13 @@ export function cachedAliveModelOrder(): AliveModelOrderEntry[] { return cached?
 
 /** NEW resolver (pool → exact selection). The first usable entry in owner order, or null. */
 export function aliveSelectionFromPool(entries: AliveModelOrderEntry[] = cachedAliveModelOrder()):
-  { selection: RuntimeSelection; record: AliveWakeRuntimeRecord } | null {
+  { selection: RuntimeSelection; status: RuntimeStatus; record: AliveWakeRuntimeRecord } | null {
   for (const entry of entries) {
-    if (entry.exhausted || !entry.selection) continue;
+    if (entry.exhausted || !entry.selection || !entry.status) continue;
     const selection = entry.selection;
     // buildAliveModelOrder already admitted this selection through the exact binding check.
     if (!selection.model || !selection.source) continue;
-    return { selection, record: { role: entry.role, position: entry.position, kind: selection.kind,
+    return { selection, status: entry.status, record: { role: entry.role, position: entry.position, kind: selection.kind,
       backend: selection.backend ?? null, model: selection.model, label: entry.label } };
   }
   return null;
