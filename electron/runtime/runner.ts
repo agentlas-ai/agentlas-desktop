@@ -223,6 +223,13 @@ export interface RunnerRequest {
    * `agentId`.
    */
   runtimeSessionOwnerId?: string;
+  /**
+   * Main-issued read-only effect observation (claude-code): one look, not a conversation turn. The
+   * runner replaces the system prompt instead of appending to the user's CLI setup, loads no user or
+   * project settings/plugins, keeps only the read built-ins, and does not persist a session.
+   * Measured 2026-09-24: 150-500k input tokens per look with the full One/Work context.
+   */
+  minimalObservation?: boolean;
   /** Firm/resolved-org node identity used only to map runtime lifecycle events back to the UI tree. */
   orchestrationAgentId?: string;
   /**
