@@ -229,6 +229,26 @@ export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["tool
   return gate.runtime === "codex" || gate.readOnlyObservation === true;
 }
 
+/**
+ * Whether a codex write/full run binds agentlas-browser through the Main proxy
+ * with the vendor approval layer pre-approved. `codex exec` has approval_policy
+ * "never" and no interactive approval loop, so it refused every agentlas-browser
+ * tool without readOnlyHint — browser_navigate, browser_tabs, browser_cua_repl —
+ * with "MCP tool call requires approval, but approval policy is never", even for
+ * an automation the owner configured as tool_mode=browser + write (production
+ * 1.2.40, Threads automation f7a61706, runs 02:00Z/02:15Z 2026-09-24). Nobody can
+ * answer that refusal. Main's proxy becomes the one gate instead: the runtime
+ * tool arbiter (saved deny rules, permission level, simulation) and the browser
+ * launcher's own always-ask actions (payment, unsafe code) still apply to every
+ * call. Plan runs keep their stricter Plan policy; read runs keep the read-only
+ * profile above.
+ */
+export function agentlasBrowserCodexMainGated(gate: McpConfigBuildOptions["toolGate"]): boolean {
+  if (!gate || gate.planMode || gate.runtime !== "codex") return false;
+  const permission = gate.permission ?? "read";
+  return permission === "write" || permission === "full";
+}
+
 export interface BrowserApprovalScope {
   surface: "one" | "work" | "science";
   chatId: string;
@@ -950,6 +970,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,
           browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly);
         if (browserReadOnly && !proxied) throw new Error("browser-read-only-gate-unavailable");
+        const browserCodexMainGated = s.catalogId === "agentlas-browser" && agentlasBrowserCodexMainGated(opts?.toolGate);
+        if (browserCodexMainGated && !proxied) throw new Error("browser-main-gate-unavailable");
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
@@ -958,7 +980,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // External stdio MCPs launch through the least-privilege wrapper. The
         // child gets OS necessities and only its own mapped credentials, never
         // LLM auth or another MCP's opaque alias.
-        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly ? proxied : null;
+        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly || browserCodexMainGated ? proxied : null;
         pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexLaunch?.command ?? process.execPath));
         pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexLaunch?.args ?? wrapperArgs));
         pushCodexConfig(
@@ -977,6 +999,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           for (const tool of READ_ONLY_BROWSER_TOOLS) {
             pushCodexConfig(codexConfigArgs, key, `tools.${tool}.approval_mode`, tomlString("approve"));
           }
+        }
+        if (browserCodexMainGated && codexLaunch) {
+          // Server-wide vendor pre-approval (codex-cli 0.156.1 `default_tools_approval_mode`,
+          // probed: the same write-sandbox call is refused without it and reaches the
+          // server with it). Safe only because codexLaunch is the Main proxy: every
+          // call still passes the Main arbiter and the browser launcher's approval gate.
+          pushCodexConfig(codexConfigArgs, key, "default_tools_approval_mode", tomlString("approve"));
         }
       }
     } else if (s.url) {
