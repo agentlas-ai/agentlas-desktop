@@ -12,6 +12,7 @@ import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, shell } from "e
 import { admitMainInvocation, admitMainAutomation } from "./runtime/scheduled-root-context";
 import { developmentEffectsSuppressed, developmentIpcBoundary } from "./development-effect-policy";
 import { copyImageSource, saveImageSource } from "./media/image-actions";
+import { authorizeSourceSharingInCleanCopy } from "./hephaestus/source-consent";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
 import { createHash, randomUUID } from "node:crypto";
@@ -7119,7 +7120,7 @@ export function registerIpcHandlers(): void {
     "hephaestus:publish",
     async (
       event,
-      input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en"; progressId?: string },
+      input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; publicSourceConsent?: boolean; locale?: "ko" | "en"; progressId?: string },
     ) => {
       const locale = input.locale ?? "en";
       let folder: string;
@@ -7168,6 +7169,25 @@ export function registerIpcHandlers(): void {
           };
         }
         try {
+          if (input.visibility === "marketplace" && input.publicSourceConsent === true) {
+            // Source permission is written only into autofixForPublish's
+            // throwaway copy. The author's working folder and private Cloud
+            // package retain their original license.
+            try {
+              authorizeSourceSharingInCleanCopy(autofix.packageFolder, folder);
+            } catch {
+              return {
+                ok: false,
+                exitCode: null,
+                json: null,
+                stdout: "",
+                stderr: "",
+                error: locale === "ko"
+                  ? "공개용 사본의 agentlas.json이 없어 소스 공개 설정을 적용하지 못했습니다. 원본 폴더는 변경되지 않았습니다."
+                  : "The cleaned public package needs a valid agentlas.json for source sharing. The original folder was not changed.",
+              };
+            }
+          }
           return await hepPublish(autofix.packageFolder, input.visibility, {
             dryRun: input.dryRun,
             ...corePublishOptions(event, input.progressId),

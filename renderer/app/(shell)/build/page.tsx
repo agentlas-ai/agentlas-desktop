@@ -231,6 +231,7 @@ export default function BuildPage() {
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [publicSourceConsent, setPublicSourceConsent] = useState(false);
   const [folderMsg, setFolderMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
@@ -248,6 +249,8 @@ export default function BuildPage() {
   // (메뉴 이동은 모듈 스토어가 이미 지키므로 여기 대상이 아니다.)
   useEffect(() => { void reattachRunningBuild(); }, []);
   const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
+  // Source disclosure belongs to one completed Build, not the next package.
+  useEffect(() => { setPublicSourceConsent(false); }, [result]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
@@ -498,7 +501,7 @@ export default function BuildPage() {
     if (!target || !scope) return;
     setActionMsg(ko ? "공개 Hub에 제출 중…" : "Submitting to the public Hub…");
     try {
-      const res = await ipc()?.hephaestus.publish({ folder: target, scope, visibility: "marketplace" });
+      const res = await ipc()?.hephaestus.publish({ folder: target, scope, visibility: "marketplace", publicSourceConsent });
       const raw = res?.error ?? res?.stderr ?? "";
       setActionMsg(
         res?.ok
@@ -1100,6 +1103,12 @@ export default function BuildPage() {
               </div>
               <div className="build-upload-choice">
                 <div className="build-upload-choice-label">{ko ? "공개 배포는 별도 선택" : "Public distribution is a separate choice"}</div>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 10, fontSize: 12, lineHeight: 1.5 }}>
+                  <input type="checkbox" checked={publicSourceConsent} onChange={(event) => setPublicSourceConsent(event.target.checked)} style={{ marginTop: 2 }} />
+                  <span>{ko
+                    ? "Agent Space에서 공개용 패키지의 읽을 수 있는 소스 파일을 볼 수 있도록 허용합니다. 원본 빌드 폴더는 변경되지 않습니다."
+                    : "Allow readable source files from the public package to appear in Agent Space. The original build folder stays unchanged."}</span>
+                </label>
                 <div className="build-upload-choice-grid build-upload-choice-grid-single">
                   <button onClick={() => void uploadToPublicHub()} className="build-upload-option titlebar-nodrag">
                     <strong>{ko ? "허브 (공개)" : "Hub (public)"}</strong>
