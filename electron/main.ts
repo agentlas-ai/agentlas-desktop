@@ -2228,6 +2228,43 @@ app.whenReady().then(async () => {
     if (error) throw new Error("science-project-folder-open-failed");
     return { opened: true };
   });
+  // Owner request 2026-09-24: a Data Table opens in the person's own spreadsheet app (Excel, Numbers, LibreOffice),
+  // not only in the in-app grid. The exact current version is written as a UTF-8 (BOM) CSV copy and handed to the OS.
+  ipcMain.handle("science:artifacts:openTableExternally", async (event, envelope: unknown) => {
+    const documentId = assertScienceProjectDocument(event, envelope);
+    const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
+    if (active !== true) throw new Error("science-table-open-user-gesture-required");
+    if (assertScienceProjectDocument(event, envelope) !== documentId) throw new Error("science-table-open-document-changed");
+    const record = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown; artifactId?: unknown } : {};
+    if (typeof record.projectId !== "string" || typeof record.artifactId !== "string") throw new Error("science-table-open-input-invalid");
+    const artifact = scienceStore().getArtifactForProject(record.projectId, record.artifactId);
+    const payload = artifact?.version?.payload as { schema?: unknown; title?: unknown; columns?: unknown; rows?: unknown } | undefined;
+    if (!artifact || !payload || payload.schema !== "agentlas.science-table/v1" || !Array.isArray(payload.columns) || !Array.isArray(payload.rows)) {
+      throw new Error("science-table-open-not-a-table");
+    }
+    const columns = (payload.columns as Array<Record<string, unknown>>).map((column) => ({
+      key: String(column?.id ?? column?.name ?? ""), label: String(column?.label ?? column?.name ?? column?.id ?? "") }));
+    const cell = (value: unknown): string => {
+      if (value === null || value === undefined) return "";
+      let text = typeof value === "object" ? JSON.stringify(value) : String(value);
+      // A spreadsheet runs a cell that starts like a formula; keep such text as text.
+      if (typeof value === "string" && /^[\s]*[=+@-]/u.test(text)) text = `'${text}`;
+      return /[",\r\n]/u.test(text) || text !== text.trim() ? `"${text.replace(/"/gu, '""')}"` : text;
+    };
+    const lines = [columns.map((column) => cell(column.label)).join(",")];
+    for (const row of payload.rows as unknown[]) {
+      lines.push(columns.map((column, index) => cell(Array.isArray(row) ? row[index] : (row as Record<string, unknown> | null)?.[column.key])).join(","));
+    }
+    const title = String(payload.title || artifact.title || "table").replace(/[^\p{L}\p{N} ._-]+/gu, "_").trim().slice(0, 80) || "table";
+    const dir = path.join(app.getPath("userData"), "science-table-exports", record.projectId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${title} v${artifact.version.version}.csv`);
+    fs.writeFileSync(file, `\uFEFF${lines.join("\r\n")}\r\n`, "utf8");
+    const error = await shell.openPath(file);
+    // No app registered for .csv: show the file so the person can choose one.
+    if (error) { shell.showItemInFolder(file); return { opened: false, revealed: true, file }; }
+    return { opened: true, file };
+  });
   ipcMain.handle("science:projects:get", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
