@@ -58,10 +58,29 @@ export function isOneSteeringInterruption(
 /** Automatic retries after the original attempt. Three attempts total. */
 export const ONE_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 
+/**
+ * The only reasons One may hand a run back to the person (owner direction 2026-09-24: "ask a human only at
+ * true boundaries"). A bare "needs a person" is not a label any more — the judge must name the boundary,
+ * and that name is the machine-readable reason code (docs/2026-09-24-PLAN-persistent-autonomy-foundation.md
+ * P0-6, G5). Anything else is One's own problem to route around.
+ */
+export const ONE_RECOVERY_BOUNDARY_LABELS = [
+  "needs_person_payment",
+  "needs_person_credential",
+  "needs_person_security_consent",
+  "needs_person_purpose",
+] as const;
+
+export type OneRecoveryBoundaryLabel = (typeof ONE_RECOVERY_BOUNDARY_LABELS)[number];
+
+export function isOneRecoveryBoundaryLabel(label: string): label is OneRecoveryBoundaryLabel {
+  return (ONE_RECOVERY_BOUNDARY_LABELS as readonly string[]).includes(label);
+}
+
 /** What the judge may conclude about a run that did not finish. */
 export const ONE_RECOVERY_LABELS = [
   "retry_different_approach",
-  "needs_person",
+  ...ONE_RECOVERY_BOUNDARY_LABELS,
   "unsafe_to_repeat",
   "will_not_succeed",
 ] as const;
@@ -72,17 +91,37 @@ export type OneRecoveryLabel = (typeof ONE_RECOVERY_LABELS)[number];
 export const ONE_RECOVERY_OUTCOME_LABELS = [
   "verified_original_outcome",
   "retry_different_approach",
-  "needs_person",
+  ...ONE_RECOVERY_BOUNDARY_LABELS,
   "will_not_succeed",
 ] as const;
 
 export type OneRecoveryOutcomeLabel = (typeof ONE_RECOVERY_OUTCOME_LABELS)[number];
 
 /**
- * Fail-closed unavailable decision. When the model is unavailable the honest move is to hand
- * the run back to the person, never to retry something that might act twice.
+ * Legacy label-mapping default, kept so older callers that still hand in the bare label map to the same stop.
+ * Main no longer uses it as a default: an unavailable judge is decided from host facts
+ * (`oneRecoveryHostFactDecision`), and a bare "needs_person" without a boundary name is downgraded the same
+ * way (2026-09-24, P0-6). Before that change this default handed every judge outage to the person.
  */
-export const ONE_RECOVERY_UNAVAILABLE_DECISION: OneRecoveryLabel = "needs_person";
+export const ONE_RECOVERY_UNAVAILABLE_DECISION = "needs_person" as const;
+
+/**
+ * Host facts, not a judge, decide when no semantic verdict names a boundary. Only reached after the form gate
+ * admitted an explicitly read-only run, so a further attempt is itself read-only and cannot duplicate an
+ * outside effect: with zero acting calls it is another route; with acting calls recorded (a mislabelled
+ * read-only tool) it is an observation of what actually happened first. Bounded by the attempt budget.
+ */
+export function oneRecoveryHostFactDecision(input: {
+  actingCalls: number;
+  attemptsSpent: number;
+  maxAttempts?: number;
+}): { decision: OneAutoRecoveryDecision; approach: "retry_different_route" | "observe_first" } {
+  const approach = input.actingCalls > 0 ? "observe_first" as const : "retry_different_route" as const;
+  if (input.attemptsSpent >= (input.maxAttempts ?? ONE_AUTO_RECOVERY_MAX_ATTEMPTS)) {
+    return { decision: { retry: false, reason: "exhausted" }, approach };
+  }
+  return { decision: { retry: true, attempt: input.attemptsSpent + 1 }, approach };
+}
 
 export type OneAutoRecoveryStop =
   | "settled"
@@ -158,7 +197,8 @@ export function oneAutoRecoveryFormGate(input: {
   return null;
 }
 
-/** Maps a judged label onto the final decision. */
+/** Maps a judged label onto the final decision. A boundary label stops for the person; so does any unknown
+ * label here (pure mapping stays fail-closed — Main downgrades a bare needs_person before it gets here). */
 export function oneAutoRecoveryFromLabel(
   label: OneRecoveryLabel,
   attemptsSpent: number,

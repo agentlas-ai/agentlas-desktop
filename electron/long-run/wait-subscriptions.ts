@@ -573,9 +573,11 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           sourceEventId: `stall-replan:${wait.waitId}`, payload: { waitId: wait.waitId,
             checkpointId: checkpoint.checkpointId, goalRevision: wait.goalRevision,
             progressKey: wait.recoveryProgressKey, action: proposal.action,
+            // A person is asked only at a named boundary; a bare needs_person was downgraded to wait_backoff.
+            boundary: proposal.boundary ?? null, downgradedFrom: proposal.downgradedFrom ?? null,
             runtimeReceipt: proposal.runtimeReceipt } });
-        if (proposal.action === "needs_person") {
-          next.state = "blocked"; next.wakeReason = "stall_replan_needs_person"; next.nextCheckAt = null;
+        if (proposal.action === "needs_person" && proposal.boundary) {
+          next.state = "blocked"; next.wakeReason = `stall_replan_needs_person:${proposal.boundary}`; next.nextCheckAt = null;
           persist(next);
           transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason });
           notice = next;
