@@ -2796,9 +2796,8 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
     const counts = used !== null && limit !== null ? ` (${used} of ${limit} used)` : "";
     return new OwnerCloudActionError(
       "cloud_agent_limit_reached",
-      // "크레딧이 모자란 건가?"가 이 문장을 읽는 사람의 첫 질문이다 — 업로드는
-      // 크레딧을 쓰지 않으므로 먼저 그렇게 말한다.
-      `Uploading does not spend credits. Your plan's Agent Cloud seats are full${counts}, `
+      // Uploads are free; this refusal is only about private Cloud agent seats.
+      `Uploading is free. Your plan's Agent Cloud seats are full${counts}, `
       + "and nothing was uploaded. Delete a cloud agent you no longer need, or move to a larger plan.",
       { retryable: false, actionState: "not-committed" },
     );
@@ -2861,7 +2860,7 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
   if (status === 402 || code === "cloud_agent_limit_reached") {
     return new OwnerCloudActionError(
       "cloud_agent_limit_reached",
-      "Uploading does not spend credits. Your plan's Agent Cloud seats are full, and nothing was "
+      "Uploading is free. Your plan's Agent Cloud seats are full, and nothing was "
       + "uploaded. Delete a cloud agent you no longer need, or move to a larger plan.",
       { retryable: false, actionState: "not-committed" },
     );

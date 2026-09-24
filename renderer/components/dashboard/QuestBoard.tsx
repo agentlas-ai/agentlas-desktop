@@ -1,5 +1,5 @@
 // 대시보드 "퀘스트" 보드 — 온보딩 플로우 대체. 신규 유저가 앱 핵심 동선(빌드·채용·자동화·허브)을
-// 미션 형태로 밟게 하고, 완료 시 Hub 크레딧을 지급한다(웹 /api/quests 프록시, ipc().quests).
+// 미션 형태로 밟게 하고, 완료 시 호스팅 AI 사용 크레딧을 지급한다(웹 /api/quests 프록시, ipc().quests).
 //   · server 검증 퀘스트: 로컬에서 절대 막지 않는다 — 클레임하면 서버가 판정.
 //   · client-attested 퀘스트: 값싼 로컬 증거(IPC)로 "완료 가능"을 미리 표시하고,
 //     증거가 없으면 확인 다이얼로그를 거쳐 클레임 허용(서버가 워크스페이스당 1회만 수락).
@@ -198,7 +198,7 @@ export function QuestBoard() {
         if (exactCompletedQuestClaim(res, q.id, claimIntentId)) {
           clearQuestClaimIntent(workspaceId, q.id, claimIntentId);
           const credits = res.rewardCredits;
-          showCelebrate(ko ? `+${credits} 크레딧 지급 완료!` : `+${credits} credits added!`);
+          showCelebrate(ko ? `호스팅 AI 사용 크레딧 +${credits}` : `+${credits} hosted AI usage credits`);
           // 크레딧 위젯 갱신 힌트(리스너가 생기면 즉시 반영; 현재는 60초 폴링이 따라잡는다).
           try {
             window.dispatchEvent(new CustomEvent("agentlas:credits-refresh"));
@@ -507,7 +507,7 @@ function QuestRow({
             flexShrink: 0,
           }}
         >
-          +{quest.rewardCredits}cr
+          +{quest.rewardCredits} {ko ? "AI 사용 크레딧" : "AI usage credits"}
         </span>
       </div>
       <div style={{ fontSize: 11, lineHeight: 1.45, color: "var(--dash-muted)" }}>{desc}</div>
@@ -593,7 +593,7 @@ function UnauthedBody({
                 {ko ? q.titleKo : q.titleEn}
               </span>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--amber-deep)", whiteSpace: "nowrap" }}>
-                +{q.rewardCredits}cr
+                +{q.rewardCredits} {ko ? "AI 사용 크레딧" : "AI usage credits"}
               </span>
             </div>
           ))}
