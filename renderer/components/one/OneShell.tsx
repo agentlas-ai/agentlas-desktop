@@ -1562,6 +1562,9 @@ export function OneShell() {
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  // 확인 영수증(예: 목표 모델 변경 예약)은 오류가 아니다 — 같은 알림 줄을 쓰되 빨간 오류 색으로
+  // 그리지 않는다. 문장이 바뀌면(다른 알림이 덮으면) 자동으로 원래 색으로 돌아간다.
+  const infoActionNoticeRef = useRef<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -4196,13 +4199,15 @@ export function OneShell() {
         ));
         if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
         acknowledgedSelection = receipt;
-        setActionNotice(goalHandoff
+        const selectionNotice = goalHandoff
           ? (appLocale === "ko"
             ? "이 지속 목표의 다음 안전한 실행에 모델 변경을 예약했습니다. 현재 실행과 별도 자동화 모델은 바뀌지 않습니다. 실제 적용 여부는 목표 상태에서 확인할 수 있습니다."
             : "Model change is queued for this ongoing Goal's next safe run. The current run and separate automations are unchanged. Check the Goal status for actual application.")
           : (appLocale === "ko"
             ? "이 대화의 다음 새 메시지 모델만 변경했습니다. 기존 Goal의 자동 재개 모델과 별도 자동화는 바뀌지 않습니다."
-            : "Only this conversation's next new-message model changed. The existing Goal continuation and separate automations are unchanged."));
+            : "Only this conversation's next new-message model changed. The existing Goal continuation and separate automations are unchanged.");
+        infoActionNoticeRef.current = selectionNotice;
+        setActionNotice(selectionNotice);
         acknowledgedRuntime = withOneRuntimeSelection(
           { ...receiptRuntime, active: true },
           receipt.model ?? receiptRuntime.model ?? null,
@@ -7493,7 +7498,7 @@ export function OneShell() {
                         바로 그 판정으로 센다. */}
                     {activeTaskforce && <small data-one-taskforce-count="true">{appLocale === "ko"
                       ? `One 포함 ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}명`
-                      : `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)} members incl. One`}</small>}
+                      : `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)} ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) === 1 ? "member" : "members"} incl. One`}</small>}
                   </span>
                 </div>
                 {activeTaskforce && <button
@@ -8192,10 +8197,14 @@ export function OneShell() {
                   : `${receipt.steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed; review the record before deciding on a new instruction.`}
               </p>
             )}
-            {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true">{actionNotice}</p>}
-            {visibleUncertainAdmission && <div className={styles.steeringQueue} role="status" data-one-uncertain-admission="true">
+            {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone={actionNotice === infoActionNoticeRef.current ? "info" : undefined}>{actionNotice}</p>}
+            {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
+                서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
+                단추 묶음이 다음 줄로 내려간다 — 단추끼리는 절대 겹치지 않는다. */}
+            {visibleUncertainAdmission && <div className={`${styles.steeringQueue} ${styles.admissionCard}`} role="status" data-one-uncertain-admission="true">
               <strong>{appLocale === "ko" ? "이전 요청의 접수 여부를 확인 중입니다. 같은 요청을 다시 보내지 마세요." : "Admission of the previous request is unknown. Do not resend it."}</strong>
-              <button type="button" onClick={() => {
+              <div className={styles.admissionActions}>
+              <button type="button" className={styles.admissionAction} onClick={() => {
                 const pending = visibleUncertainAdmission;
                 const api = ipc();
                 if (!api) {
@@ -8270,7 +8279,7 @@ export function OneShell() {
                   setActionNotice(appLocale === "ko" ? "원래 요청의 실행 기록을 확인했습니다. 재전송하지 않았습니다." : "The original run was found. Nothing was resent.");
                 }).catch(() => setActionNotice(appLocale === "ko" ? "접수 여부를 아직 확인할 수 없습니다. 재전송하지 않았습니다." : "Admission cannot be checked yet. Nothing was resent."));
               }}>{appLocale === "ko" ? "접수 확인" : "Check admission"}</button>
-              <button type="button" onClick={() => {
+              <button type="button" className={styles.admissionAction} onClick={() => {
                 const api = ipc();
                 if (!api) {
                   setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 중지를 요청하지 못했습니다." : "Desktop is unavailable; Stop could not be requested.");
@@ -8282,6 +8291,7 @@ export function OneShell() {
                     : appLocale === "ko" ? "아직 실행 중인 호출을 찾지 못했습니다. 접수 여부는 계속 불확실하며 새 요청은 보내지 않았습니다." : "No active run was found yet. Admission remains uncertain; no new request was sent.");
                 }).catch(() => setActionNotice(appLocale === "ko" ? "중지 요청을 확인하지 못했습니다. 접수 여부를 다시 확인해 주세요." : "Stop could not be confirmed. Check admission again."));
               }}>{appLocale === "ko" ? "원래 요청 중지" : "Stop original run"}</button>
+              </div>
             </div>}
             {turnAgentIds.length > 0 && (
               <details className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>

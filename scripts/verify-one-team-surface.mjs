@@ -233,7 +233,12 @@ assert.match(oneShell, /effectiveTaskForceTargets\.length \? \{ taskForceTargets
 // portraits, and copy. Closing the left rail must move its reveal control out
 // of the macOS traffic-light area, while the three header portraits remain
 // distinct instead of colliding with one another or the title.
-assert.match(oneShellStyles, /\.taskToolbar\s*\{[\s\S]*?grid-template-columns:\s*auto auto minmax\(0, 1fr\) auto auto/);
+// 2026-09-24: 6칸 grid 는 사이드바가 열려 비어 있는 앞 두 칸의 간격(24px)까지 먹어 440px 대화 열에서
+// 제목이 일찍 잘렸다. 계약은 "제목 칸만 늘고 줄며(min-width 0) 조작 단추는 제 크기를 지킨다"이다 —
+// flex 는 display:none 자식의 간격을 세지 않는다. 실측 하네스: scripts/qa-one-chat-narrow.cjs.
+assert.match(oneShellStyles, /\.taskToolbar\s*\{[^}]*display:\s*flex/);
+assert.match(oneShellStyles, /\.taskToolbarIdentity\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-width:\s*0/);
+assert.doesNotMatch(oneShellStyles, /\.taskToolbar\s*\{[^}]*grid-template-columns/);
 // 1.0.31: 결과 레일 토글은 툴바에 남는다 — 닫힌 레일을 다시 여는 유일한 손잡이다.
 assert.match(oneShell, /결과 패널 열기[\s\S]{0,400}?presentRichOutputRail\(\)/);
 assert.match(oneShellStyles, /data-rail-collapsed="true"\]\s+\.taskToolbar\s*\{[\s\S]*?padding-left:\s*76px/);

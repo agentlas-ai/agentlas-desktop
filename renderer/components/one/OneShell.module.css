@@ -668,16 +668,19 @@
   background: var(--paper);
 }
 
+/* 가로 flex 다. 예전 6칸 grid 는 사이드바가 열려 앞 두 칸(사이드바 단추·구분선)이 display:none
+   이어도 빈 칸 사이 간격 24px 을 그대로 먹어, 결과 패널을 연 440px 대화 열에서 제목이
+   "Thread Mar…" 로 일찍 잘렸다(오너 1.2.41). flex 는 사라진 자식의 간격을 세지 않는다. */
 .taskToolbar {
   position: relative;
   height: 64px;
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+  display: flex;
   align-items: center;
   gap: 12px;
   padding: 0 20px;
   color: var(--ink-soft);
   user-select: none;
+  container: one-task-toolbar / inline-size;
 }
 
 /* With the left rail closed this control lives in the macOS title bar. Keep
@@ -747,7 +750,7 @@
 .body[data-rail-open="true"] .sidebarRevealButton { display: none !important; }
 
 .taskToolbarIdentity {
-  grid-column: 3;
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   align-self: stretch;
@@ -822,7 +825,6 @@
 .taskforceToolbarPortraits img { pointer-events: none; user-select: none; -webkit-user-drag: none; }
 
 .taskToolbar > .taskforceMembersButton {
-  grid-column: 4;
   width: auto;
   min-width: 44px;
   display: inline-flex;
@@ -836,14 +838,23 @@
   font-weight: 650;
 }
 
-.taskToolbar > .taskToolbarOutputToggle {
-  grid-column: 5;
+/* 좁은 대화 열: 얼굴 겹침을 좁히고 아이콘 단추를 아이콘 크기로 — 제목 자리를 먼저 준다.
+   아주 좁으면(모바일 360) 얼굴은 빼고 인원 단추가 구성원을 말한다. */
+@container one-task-toolbar (max-width: 520px) {
+  .taskToolbarIdentity { gap: 8px; }
+  .taskforceToolbarPortraits { width: 66px; min-width: 66px; flex-basis: 66px; }
+  .taskforceToolbarPortraits > span:nth-child(2) { left: 18px; }
+  .taskforceToolbarPortraits > span:nth-child(3) { left: 36px; }
+  .taskToolbarIdentity ~ button { min-width: 36px; padding: 0 8px; }
+}
+@container one-task-toolbar (max-width: 340px) {
+  .taskforceToolbarPortraits { display: none !important; }
 }
 
 .taskToolbar > .taskforceMembersButton:hover,
 .taskToolbar > .taskforceMembersButton:focus-visible { border-color: var(--muted); background: var(--paper-3); }
 
-.taskToolbarMenu { position: relative; grid-column: 6; }
+.taskToolbarMenu { position: relative; flex: 0 0 auto; }
 
 .taskToolbarMenuPopover {
   position: absolute;
@@ -1884,6 +1895,46 @@
   white-space: nowrap;
 }
 
+/* 접수 확인 카드: 문장 + 단추 묶음. 자리가 모자라면 단추 묶음이 통째로 다음 줄로. */
+.steeringQueue.admissionCard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
+}
+.steeringQueue.admissionCard strong {
+  flex: 1 1 200px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.4;
+  white-space: normal;
+}
+.admissionActions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.admissionAction {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.admissionAction:hover,
+.admissionAction:focus-visible { background: var(--paper-3); outline: none; }
+
 .steeringDraft {
   width: min(var(--one-composer-width, 720px), 100%);
   min-height: 42px;
@@ -2034,6 +2085,12 @@
   color: var(--danger);
   font-size: 10px;
   line-height: 1.45;
+}
+/* 확인 영수증(모델 변경 예약 등)은 오류가 아니다 — 같은 자리, 중립 색. */
+.attachmentError[data-tone="info"] {
+  border-color: var(--paper-edge);
+  background: var(--paper-2);
+  color: var(--ink-soft);
 }
 
 .oneMemoryUseOnceChip {
@@ -2289,8 +2346,15 @@
   gap: 2px;
   overflow-x: auto;
   scrollbar-width: none;
+  container: one-composer-tools / inline-size;
 }
 .composerTools::-webkit-scrollbar { display: none; }
+/* 좁은 작성창(결과 패널을 연 440px 대화 열): 칩의 꺾쇠를 빼고 여백을 줄여 글자 자리를 먼저
+   돌려준다 — 모델 이름이 "g…" 로 뭉개지기 전에 장식부터 뺀다. 칩은 눌러서 여는 그대로다. */
+@container one-composer-tools (max-width: 420px) {
+  .composerChip { gap: 4px; padding: 0 6px; }
+  .composerChip > svg:last-child { display: none; }
+}
 
 .composerActions {
   grid-area: actions;
@@ -2335,6 +2399,12 @@
   font-weight: 520;
   cursor: pointer;
 }
+/* 글자 칩은 줄어들며 말줄임한다. 예전엔 전부 flex:0 0 auto 라 좁은 대화 열에서 권한 칩이
+   숨은 가로 스크롤 밖으로 밀려 "Full acces" 로 말줄임 없이 잘렸다(오너 1.2.41).
+   모델 이름이 가장 먼저 줄고(가중 3), 아이콘·꺾쇠는 남는다(span 만 min-width 0). */
+.composerChip { flex: 0 1 auto; min-width: 0; }
+.composerChip[data-one-composer-trigger="model"] { flex-shrink: 3; }
+.composerChip > svg { flex: 0 0 auto; }
 
 .composerChip:hover,
 .composerChip:focus-visible,
@@ -2354,7 +2424,7 @@
   background: var(--paper-3);
   outline: 3px solid rgba(23, 26, 28, .12);
 }
-.composerChip span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composerChip span { min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composerChip:disabled,
 .composerQuickMode:disabled { color: var(--muted); cursor: default; }
 .composerQuickMode { width: 34px; padding: 0; }
