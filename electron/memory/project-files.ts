@@ -51,7 +51,6 @@ import {
   ONTOLOGY_SOURCE_MANIFEST_FILE,
   PROJECT_CREDENTIALS_DIR,
   PROJECT_CREDENTIALS_README_FILE,
-  PROJECT_ENV_EXAMPLE_FILE,
   PROJECT_MEMORY_DIR,
   PROJECT_SIGNING_DIR,
   PROJECT_SOUL_FILE,
@@ -789,50 +788,6 @@ function localCredentialsMapSkeleton(projectPath: string, projectName: string, n
   );
 }
 
-function envExampleTemplate(): string {
-  return `# Agentlas local project environment.
-# Copy this file to .env and fill real values only on this machine.
-
-# File-path style for tools that expect a local JSON credential file.
-SUPPLY_JSON_KEY=${PROJECT_SIGNING_DIR}/google-play.json
-
-# Inline JSON style for tools that support reading a credential directly from env.
-GOOGLE_PLAY_SERVICE_ACCOUNT_JSON=
-`;
-}
-
-function signingReadmeTemplate(): string {
-  return `# ${PROJECT_SIGNING_DIR}/
-
-Put release signing material here when this project needs local deploy or store
-automation. This folder is ignored by git except for this README.
-
-Examples:
-
-- Google Play release JSON used by SUPPLY_JSON_KEY
-- Apple signing certificates or provisioning profiles
-- Notarization or release upload keys
-
-Do not commit files from this folder.
-`;
-}
-
-function credentialsReadmeTemplate(): string {
-  return `# ${PROJECT_CREDENTIALS_DIR}/
-
-Put app or service configuration files here when this project needs local runtime
-access. This folder is ignored by git except for this README.
-
-Examples:
-
-- Android google-services.json
-- iOS GoogleService-Info.plist
-- provider config files used only by this local project
-
-Do not commit files from this folder.
-`;
-}
-
 // Everything Agentlas writes into a user's project that describes THEM rather
 // than the product: their directory layout, their code index, their project
 // memory, their work log. These are per-machine outputs of features each user
@@ -909,37 +864,30 @@ ${AGENTLAS_PRIVATE_PROJECT_STATE_IGNORE.join("\n")}
   );
 }
 
+/**
+ * Project-local credential *index* only — never secret-bearing folders.
+ *
+ * ★Measured 2026-09-24 (isolated goal-shape E2E): a read-only One turn left
+ * `credentials/`, `signing/` and a Google Play `.env.example` in the scratch
+ * project. Nothing asked for them: reading the project ontology status (One
+ * workspace projection at run start, the project detail screen) reaches
+ * ensureProjectMemory, which used to scaffold these folders into every folder
+ * it touched. Folders named for signing keys and credentials invite people and
+ * agents to drop secrets into a user's working tree, and a store-specific env
+ * template is a guess about a project nobody described. The Desktop fallback
+ * bootstrap already refuses to create them (test-project-bootstrap-desktop).
+ * The Core `project ensure` templates (env.example / signing / credentials
+ * READMEs) are a separate writer owned by Agentlas-OS and need the same fix there.
+ *
+ * So provisioning writes only the private `.agentlas/` map and the protective
+ * ignore block (which keeps secrets out of git if the person later creates
+ * those folders themselves). Creating secret-bearing folders in a user's
+ * project requires an explicit request by the person, not a side effect.
+ * Contract: scripts/test-project-memory-no-secret-scaffold.cjs
+ */
 function ensureLocalCredentialStore(identity: ProjectFsIdentity, projectName: string, now: string): void {
   const projectPath = identity.root;
   const dir = projectMemoryDir(projectPath);
-  const signingDir = path.join(projectPath, PROJECT_SIGNING_DIR);
-  const credentialsDir = path.join(projectPath, PROJECT_CREDENTIALS_DIR);
-  ensureRealProjectDirectory(identity, signingDir, "The project signing directory");
-  ensureRealProjectDirectory(identity, credentialsDir, "The project credentials directory");
-
-  const envExample = path.join(projectPath, PROJECT_ENV_EXAMPLE_FILE);
-  createPrivateProjectFileIfMissing(
-    identity,
-    envExample,
-    envExampleTemplate(),
-    "The project environment example",
-  );
-
-  const signingReadme = path.join(signingDir, PROJECT_CREDENTIALS_README_FILE);
-  createPrivateProjectFileIfMissing(
-    identity,
-    signingReadme,
-    signingReadmeTemplate(),
-    "The signing directory README",
-  );
-
-  const credentialsReadme = path.join(credentialsDir, PROJECT_CREDENTIALS_README_FILE);
-  createPrivateProjectFileIfMissing(
-    identity,
-    credentialsReadme,
-    credentialsReadmeTemplate(),
-    "The credentials directory README",
-  );
 
   const localCredentialsMap = path.join(dir, LOCAL_CREDENTIALS_MAP_FILE);
   createPrivateProjectFileIfMissing(
@@ -1006,8 +954,6 @@ function projectProvisionDirectories(projectRoot: string): string[] {
   const memoryRoot = path.join(projectRoot, PROJECT_MEMORY_DIR);
   return [
     memoryRoot,
-    path.join(projectRoot, PROJECT_SIGNING_DIR),
-    path.join(projectRoot, PROJECT_CREDENTIALS_DIR),
     path.join(memoryRoot, ONTOLOGY_INBOX_DIR),
     path.join(memoryRoot, PROJECT_PM_DIR),
     path.join(memoryRoot, CAREER_GRAPH_INBOX_DIR),
@@ -1040,9 +986,6 @@ function projectProvisionFiles(projectRoot: string): string[] {
   ];
   return [
     path.join(projectRoot, ".gitignore"),
-    path.join(projectRoot, PROJECT_ENV_EXAMPLE_FILE),
-    path.join(projectRoot, PROJECT_SIGNING_DIR, PROJECT_CREDENTIALS_README_FILE),
-    path.join(projectRoot, PROJECT_CREDENTIALS_DIR, PROJECT_CREDENTIALS_README_FILE),
     ...memoryFiles.map((fileName) => path.join(memoryRoot, fileName)),
     path.join(memoryRoot, ONTOLOGY_INBOX_DIR, PROJECT_ONTOLOGY_INDEX_FILE),
   ];
