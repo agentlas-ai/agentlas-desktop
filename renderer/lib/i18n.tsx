@@ -2288,7 +2288,7 @@ const dict = {
     "nav.oberon": "Oberon",
     "nav.trex": "T-rex",
     "nav.group.hub": "Hub",
-    "nav.agent_hub": "Agent market",
+    "nav.agent_hub": "Agent Hub",
     "nav.prompts": "Prompts",
     "nav.hub_regular_agents": "Regular agents",
     "nav.hub_visual_agents": "Visual agents",
