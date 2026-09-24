@@ -223,7 +223,7 @@ export function installDesktopScienceHost(): void {
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
       reconcileScienceBoundary: async (input) => {
         return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) },
-          { hostLost: (runId) => invocationService.receipt(runId)?.status === "interrupted" });
+          { hostLost: (runId) => { const receipt = invocationService.receipt(runId); return receipt === null || receipt.status === "interrupted"; } });
       },
       ...{ inspectLegacyForwardRecoveryBoundary: async (input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">) =>
         inspectLegacyForwardRecoveryBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) }) },

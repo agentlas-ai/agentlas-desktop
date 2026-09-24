@@ -165,7 +165,7 @@ export function installDaemonScienceHost(input: {
       } },
       registerMcpPreparedConfig: registerPrepared,
       reconcileScienceBoundary: boundary => reconcileScienceBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) },
-        { hostLost: (runId) => invocationService.receipt(runId)?.status === "interrupted" }),
+        { hostLost: (runId) => { const receipt = invocationService.receipt(runId); return receipt === null || receipt.status === "interrupted"; } }),
       inspectLegacyForwardRecoveryBoundary: boundary => inspectLegacyForwardRecoveryBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) }),
     },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
