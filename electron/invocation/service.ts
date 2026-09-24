@@ -2905,19 +2905,36 @@ export class InvocationService {
         }
         // An owner message that changes an ongoing Goal's targets becomes a Goal
         // revision (applied at the next stop). Asynchronous: never delays or
-        // refuses this turn; an unavailable judge records nothing.
+        // refuses this turn. Every review — answered, unanswered or skipped —
+        // leaves a machine reasonCode in the run ledger; silence was how the
+        // owner's target restatements disappeared (2026-09-24).
         const amendmentGoalId = projectionGoalId ?? boundGoal?.goalId ?? null;
-        if (localUserTurn && !runReq.planMode && !runReq.agentAppMode && !runWorkspaceBinding && !executionContext
-          && runReq.promptOrigin !== "system" && chat.kind === "user"
-          && ["one", "work"].includes(chat.originSurface ?? "") && amendmentGoalId) {
-          void reviewOwnerGoalMessage({ goalId: amendmentGoalId, chatId: chat.id, sourceMessageId }).then((review) => {
-            if (review.label !== "amends_goal") return;
+        if (amendmentGoalId && chat.kind === "user" && ["one", "work"].includes(chat.originSurface ?? "")
+          && runReq.promptOrigin !== "system") {
+          const notReviewed = !localUserTurn ? "not_local_user_turn"
+            : runReq.planMode ? "plan_mode"
+              : runReq.agentAppMode ? "agent_app_mode"
+                : runWorkspaceBinding ? "workspace_binding"
+                  : executionContext ? "execution_context"
+                    : null;
+          if (notReviewed) {
             tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
-              goalId: amendmentGoalId, sourceMessageId, recorded: review.recorded,
-              applied: review.apply?.applied ?? false,
-              ...(review.apply?.applied ? { revision: review.apply.revision } : { deferredReason: review.apply?.reason ?? null }),
+              goalId: amendmentGoalId, sourceMessageId, reasonCode: `skipped:${notReviewed}`, recorded: false, applied: false,
             } });
-          });
+          } else {
+            void reviewOwnerGoalMessage({ goalId: amendmentGoalId, chatId: chat.id, sourceMessageId }).then((review) => {
+              if (review.reasonCode.startsWith("judge_unavailable:")) {
+                console.warn(`[goal-amendment] review unanswered goal=${amendmentGoalId} reason=${review.reasonCode}`);
+              }
+              tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
+                goalId: amendmentGoalId, sourceMessageId, label: review.label, reasonCode: review.reasonCode,
+                recorded: review.recorded,
+                applied: review.apply?.applied ?? false,
+                ...(review.apply?.applied ? { revision: review.apply.revision }
+                  : review.apply ? { deferredReason: review.apply.reason } : {}),
+              } });
+            });
+          }
         }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
