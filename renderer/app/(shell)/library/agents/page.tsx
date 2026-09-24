@@ -4560,7 +4560,7 @@ function BorrowedAgentDetailView({
           </p>
         </div>
         <span style={{ padding: "4px 8px", borderRadius: 999, border: "1px solid var(--accent)", color: "var(--accent)", fontSize: 10, fontWeight: 750 }}>
-          {profile.entityKind === "team" ? (locale === "ko" ? "대여 팀" : "Borrowed team") : (locale === "ko" ? "대여 에이전트" : "Borrowed agent")}
+          {profile.entityKind === "team" ? (locale === "ko" ? "Hub 팀" : "Hub team") : (locale === "ko" ? "Hub 에이전트" : "Hub agent")}
         </span>
       </header>
 
