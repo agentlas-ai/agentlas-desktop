@@ -8006,6 +8006,13 @@ export interface AgentlasIpc {
     concurrencyInfo: () => Promise<AgentConcurrencyInfo>;
     setConcurrency: (value: number) => Promise<AgentConcurrencyInfo>;
   };
+  /** One/Work Alive (AGI toggle). Main owns the lives; see shared/alive.ts. */
+  alive: {
+    getState: (input: import("./alive").AliveGetStateInput) => Promise<import("./alive").AliveState>;
+    /** Throws `[agentlas:code=alive-goal-required]` when the chat has no Goal yet. */
+    setEnabled: (input: import("./alive").AliveSetEnabledInput) => Promise<import("./alive").AliveState>;
+    setTokenLimit: (input: import("./alive").AliveSetTokenLimitInput) => Promise<import("./alive").AliveState>;
+  };
   automations: {
     list: () => Promise<Automation[]>;
     get: (id: string) => Promise<Automation | null>;

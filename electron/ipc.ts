@@ -503,6 +503,7 @@ import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
 import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
+import { registerAliveIpc } from "./alive-organisms";
 import { noteOwnerAutomationPinEdit } from "./automation-runtime-provenance";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
@@ -1550,6 +1551,8 @@ export function registerIpcHandlers(): void {
   registerWorkStartIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAnnotationIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerAutomationStrategyIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  // One/Work Alive (AGI toggle): Main-owned lives; the renderer only reads state and flips the owner controls.
+  registerAliveIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;
   subscribePluginBuilderProgress((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
