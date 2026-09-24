@@ -57,7 +57,7 @@ export async function dispatchSciencePublicationCommand(
     if ((pdfSelection && input.pdfFallback !== "forbid") || (input.pdfFallback !== undefined && input.pdfFallback !== "forbid")) {
       throw new Error("publication_pdf_fallback_forbidden");
     }
-    const options: RenderOptions = {
+    const options: RenderOptions & { previewReferencePdf?: boolean } = {
       ...(pdfSelection ? { pdfEngine: pdfSelection.engine, ...(pdfSelection.engine === "pdflatex" ? { pdfProfile: pdfSelection.profile } : {}) } : {}),
       ...(input.pdfFallback === "forbid" ? { pdfFallback: "forbid" as const } : {}),
       outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as NonNullable<RenderOptions>["outputs"] : ["html"],
@@ -68,6 +68,7 @@ export async function dispatchSciencePublicationCommand(
       expectedJournalProfileVersion: typeof input.expectedJournalProfileVersion === "number" ? input.expectedJournalProfileVersion : undefined,
       expectedJournalProfileContentSha256: typeof input.expectedJournalProfileContentSha256 === "string" ? input.expectedJournalProfileContentSha256 : undefined,
       ...(input.columnCount === 1 || input.columnCount === 2 ? { columnCount: input.columnCount } : {}),
+      ...(input.previewReferencePdf === true ? { previewReferencePdf: true } : {}),
       metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as NonNullable<RenderOptions>["metadata"] : null,
     };
     const projectId = typeof input.projectId === "string" ? input.projectId : "";
