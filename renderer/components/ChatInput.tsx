@@ -7,6 +7,8 @@
 //
 // 모드 토글은 V0 UI만 (실제 동작은 V1): plan/goal/permission이 invocation payload로 전달.
 "use client";
+import { GoalPlanSummary } from "@/components/goal/GoalPlanSummary";
+import type { GoalPlanView } from "../../shared/goal-shape";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -316,6 +318,7 @@ function ChatInputComponent({
   onToggleGoal,
   progressLabel,
   goalCriteria,
+  goalPlan,
   goalRunStatus,
   goalPauseReason,
   goalBlockedReason,
@@ -373,6 +376,8 @@ function ChatInputComponent({
   progressLabel?: string;
   /** Host-owned success contract. Steering never changes this list. */
   goalCriteria?: string[];
+  /** Main-owned goal shape decision (single tactic / list / mission tree) and the current tactic. */
+  goalPlan?: GoalPlanView | null;
   /** Durable Desktop long-run state. Paused runs require an explicit resume. */
   goalRunStatus?: string;
   goalPauseReason?: string | null;
@@ -1502,6 +1507,7 @@ function ChatInputComponent({
         <ComposerGoalBar
           label={progressLabel}
           criteria={goalCriteria}
+          plan={goalPlan}
           runStatus={goalRunStatus}
           pauseReason={goalPauseReason}
           blockedReason={goalBlockedReason}
@@ -2103,6 +2109,7 @@ function ChatInputComponent({
 function ComposerGoalBar({
   label,
   criteria,
+  plan,
   runStatus,
   pauseReason,
   blockedReason,
@@ -2114,6 +2121,7 @@ function ComposerGoalBar({
 }: {
   label?: string;
   criteria?: string[];
+  plan?: GoalPlanView | null;
   runStatus?: string;
   pauseReason?: string | null;
   /** 막힌 이유 — 저장소에는 있는데 화면까지 오지 않던 값이다. */
@@ -2262,6 +2270,7 @@ function ComposerGoalBar({
         <IconTrash size={12} />
       </button>
     </div>
+    {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} />}
     {editing && <form className="chat-composer-goal-editor" onSubmit={(event) => {
       event.preventDefault();
       if (!editable || saving || !draft.trim() || !onEdit) return;

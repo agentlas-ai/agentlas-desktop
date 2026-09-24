@@ -1,5 +1,6 @@
 "use client";
 
+import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
@@ -6920,6 +6921,7 @@ function ChatPage() {
           onToggleGoal={handleToggleGoal}
           progressLabel={goalContext?.objective}
           goalCriteria={goalContext?.acceptanceCriteria}
+          goalPlan={goalPlanOf(goalContext)}
           goalRunStatus={goalContext?.runStatus}
           goalPauseReason={goalContext?.pauseReason}
           goalBlockedReason={goalContext?.blockedReason}
