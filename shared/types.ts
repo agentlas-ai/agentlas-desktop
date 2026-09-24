@@ -4847,6 +4847,12 @@ export interface McpInvocationEvent {
    * it before ledger or UI publication; model-authored ids are never accepted.
    */
   durableAssistantMessageIdForVerification?: string;
+  /**
+   * Main-internal: the runtime's raw final text carried the permission-escalation marker line.
+   * The universal client sink derives the final text from the durable copy, where that line is
+   * already stripped, so the marker itself never reaches InvocationService. Stripped before publication.
+   */
+  permissionEscalationMarkerForVerification?: boolean;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
    *  이후 추가분만 담는다. IPC 페이로드를 O(전체)→O(증분)으로 줄인다. 리플레이/폴백 이벤트는
    *  여전히 text를 쓴다. */

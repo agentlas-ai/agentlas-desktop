@@ -111,7 +111,7 @@ import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { ExperienceCloudHttpClient } from "../experience/cloud";
 import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cloud-roster";
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
-import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
+import { hasPermissionEscalationMarker, stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
@@ -1874,9 +1874,13 @@ async function runMcpInvocationInContext(
           });
         }
       }
+      // The display text below comes from the durable copy, which has the escalation marker line
+      // stripped. Carry the fact (never the line) so Main can still offer the approval chip.
+      const rawEscalation = typeof ev.text === "string" && hasPermissionEscalationMarker(ev.text);
       ev = {
         ...ev,
         text: hygiene.text,
+        ...(rawEscalation ? { permissionEscalationMarkerForVerification: true } : {}),
         durableTextForVerification: ev.durableTextForVerification ?? hygiene.durableText,
         userDecisionRequest: hygiene.userDecisionRequest
           ? {
