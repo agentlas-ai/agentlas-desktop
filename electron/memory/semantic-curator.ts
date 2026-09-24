@@ -23,6 +23,8 @@ export interface SemanticReviewContext {
   hasProject: boolean;
   hasAgent: boolean;
   sourceProvenance?: "task-force-synthesis";
+  /** Host-known surface; an unattended automation turn has no human reviewer. */
+  sourceSurface?: "automation-run";
 }
 
 export interface SemanticCurationOptions {
@@ -42,7 +44,11 @@ Each decision must contain candidate_index, disposition (accept|session|discard|
 resolved_scope (user_identity|team_memory|project|agent_repo|session|discard), and a
 short stable reason_code. Use user_identity only for a high-confidence stable operator
 fact/preference/decision/procedure. Use project for project-specific state. Use
-agent_repo only for portable agent-specific learning. Do not invent candidates, quote
+agent_repo only for portable agent-specific learning. A candidate that records a
+run's own tactical choice - holding or pausing work, a quota or limit the agent set for
+itself, a waiting window, keeping a gate closed - is session (reason_code
+own-tactical-choice), never a portable procedure: the next run must decide again from
+the owner's goal. Do not invent candidates, quote
 transcripts, or include paths, credentials, IDs, or explanations outside JSON.`;
 
 function safeReason(value: unknown): string {
@@ -86,6 +92,7 @@ export function buildSemanticCurationRequest(
         project_bound: context.hasProject,
         agent_bound: context.hasAgent,
         source_provenance: context.sourceProvenance ?? "single-agent-turn",
+        ...(context.sourceSurface ? { source_surface: context.sourceSurface } : {}),
       },
       candidates,
     }),
@@ -155,12 +162,14 @@ export async function runSemanticMemoryReview(input: {
   hasProject: boolean;
   hasAgent: boolean;
   sourceProvenance?: "task-force-synthesis";
+  sourceSurface?: "automation-run";
 }): Promise<SemanticCurationOptions> {
   const parsed = parseMemoryEvents(input.replyText);
   const request = buildSemanticCurationRequest(parsed.events, {
     hasProject: input.hasProject,
     hasAgent: input.hasAgent,
     sourceProvenance: input.sourceProvenance,
+    ...(input.sourceSurface ? { sourceSurface: input.sourceSurface } : {}),
   });
   if (request.reviewableIndices.length === 0) return {};
   try {

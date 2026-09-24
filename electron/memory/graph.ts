@@ -70,3 +70,67 @@ export function linkMemoryEntryBySimilarity(entry: MemoryEntry): number {
 export function countMemoryRelationEdges(): number {
   return Number((getDb().prepare("SELECT COUNT(*) AS n FROM memory_relation_edges").get() as { n: number }).n);
 }
+
+/**
+ * Latest-wins for restated rules (2026-09-24).
+ *
+ * The owner's store held the same agent rule several times over (vector score
+ * 1.0, all live) plus older and newer versions of one rule side by side, and
+ * recall injected all of them - an older "hold" rule kept outvoting the newer
+ * wording. When a new decision/procedure/fact is admitted, a live memory of the
+ * same kind under the exact same owner boundary that it restates (vector score
+ * at or above RESTATEMENT_MIN_SCORE, older than the new one) is superseded -
+ * never deleted - and a `supersedes` edge records which memory replaced it and
+ * with what score. The threshold is deliberately high: complementary rules in
+ * one topic measured 0.74-0.82 and must both stay live.
+ */
+const RESTATEMENT_MIN_SCORE = 0.9;
+const RESTATEMENT_KINDS = new Set(["decision", "procedure", "fact"]);
+
+export function supersedeRestatedMemories(entry: MemoryEntry): string[] {
+  if (!RESTATEMENT_KINDS.has(entry.kind)) return [];
+  const ownerScopeKey = memoryOwnerScopeKey(entry);
+  if (!ownerScopeKey) return [];
+  const candidates = listMemoryRelationCandidates(entry)
+    .filter((candidate) => candidate.kind === entry.kind && candidate.createdAt <= entry.createdAt);
+  if (candidates.length === 0) return [];
+  const restated = rankHybridLocal(entry.content, candidates.map((candidate) => ({
+    id: candidate.id,
+    text: candidate.content,
+    embedding: candidate.embedding.vector,
+    candidate,
+  })))
+    .filter((result) => result.semanticEligible && result.vectorScore >= RESTATEMENT_MIN_SCORE)
+    .slice(0, 8);
+  if (restated.length === 0) return [];
+  const now = new Date().toISOString();
+  const edge = getDb().prepare(
+    `INSERT OR IGNORE INTO memory_relation_edges (
+       relation_id, from_memory_id, to_memory_id, relation_type, score,
+       owner_scope_key, embedding_model, embedding_adapter,
+       embedding_model_sha256, created_at
+     ) VALUES (?, ?, ?, 'supersedes', ?, ?, ?, ?, ?, ?)`,
+  );
+  const retire = getDb().prepare(
+    "UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL",
+  );
+  const superseded: string[] = [];
+  getDb().transaction(() => {
+    for (const result of restated) {
+      const old = result.item.candidate;
+      edge.run(
+        `mre_${randomUUID()}`,
+        entry.id,
+        old.id,
+        Math.max(-1, Math.min(1, result.vectorScore)),
+        ownerScopeKey,
+        entry.embedding.model,
+        entry.embedding.adapter,
+        entry.embedding.modelSha256,
+        now,
+      );
+      if (retire.run(now, old.id).changes === 1) superseded.push(old.id);
+    }
+  })();
+  return superseded;
+}
