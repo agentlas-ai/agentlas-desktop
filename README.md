@@ -62,6 +62,24 @@
   <img alt="Agentlas Desktop running a CEO agent over a live org chart" src="docs/screenshot.png" width="960">
 </p>
 
+## Agent Hub and billing
+
+The Agent Hub contract in this source is free: publishing, finding, installing,
+and calling public agents do not set an agent price, debit a Hub-call credit,
+or create creator earnings. Agentlas does not offer agent sales, paid leases,
+or creator settlement. Agent Cloud is the owner's private package library;
+publishing to the public Hub is a separate choice.
+
+Agentlas subscriptions and any hosted-AI allowance are separate from public
+Hub calls. Your own model provider may charge for model usage. Earlier credit
+purchases and their refund rights remain available for historical account
+reconciliation; ending new sales does not erase those records.
+
+The dated release log below records what older versions shipped, including
+features that have since been retired. It is not a current price list or a
+promise that the installed app has received these source changes. Use the
+published release and the installed version to check delivery.
+
 ## Release log
 
 - **2026-09-22 · v1.2.33 — Science 자율 연구 및 장기 실행 연결 수정** — 진행 중인 연구의 도구 호출·근거 반영·원고 작성과 장기 작업 복귀를 개선하고 Agentlas Science 0.1.34를 고정합니다. Source readiness does not prove a public installer or installed update; the Releases page stays the authority. This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
