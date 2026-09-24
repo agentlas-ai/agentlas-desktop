@@ -7651,6 +7651,10 @@ button[data-toggle-state="on"] {
   .chat-input-tools-left .chat-input-chip-label {
     display: none;
   }
+  /* 글자를 숨긴 칩은 꺾쇠도 뺀다 — 아이콘만 남겨 AGI 단추 자리를 돌려준다(One 작성창과 같은 규칙). */
+  .chat-input-tools-left .chat-input-chip > svg:last-child {
+    display: none;
+  }
   .chat-input-chip,
   .chat-input-model-chip {
     max-width: 44px;
