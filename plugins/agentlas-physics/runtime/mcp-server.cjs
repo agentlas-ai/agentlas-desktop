@@ -39,7 +39,7 @@ async function callTool(name, args) {
 }
 
 async function handle(message) {
-  if (message.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-physics", version: "0.3.4" } };
+  if (message.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-physics", version: "0.3.5" } };
   if (message.method === "tools/list") return { tools: toolCatalog.tools };
   if (message.method === "tools/call") return callTool(message.params?.name, message.params?.arguments ?? {});
   if (message.method?.startsWith("notifications/")) return null;

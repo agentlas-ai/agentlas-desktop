@@ -3,8 +3,8 @@
   "properties": {
     "x_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column of the parent dataset used as the abscissa (energy, wavelength, channel)." },
     "y_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column with the measured counts or intensity." },
-    "sigma_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column with the per-point standard uncertainty; only valid with uncertainty_model \"column\"." },
-    "uncertainty_model": { "type": "string", "enum": ["column", "poisson", "unit"], "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column when sigma_column is given, else poisson." },
+    "sigma_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Optional numeric column with per-point standard uncertainty. In auto mode an entirely empty column falls back to Poisson with a warning; observed and missing values cannot be mixed. When this column is present, an explicit uncertainty_model must be column." },
+    "uncertainty_model": { "type": "string", "enum": ["column", "poisson", "unit"], "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column for a populated sigma_column, otherwise Poisson. An entirely empty mapped sigma_column falls back only when this model is omitted." },
     "range": {
       "type": "object",
       "properties": { "min": { "type": "number" }, "max": { "type": "number" } },

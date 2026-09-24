@@ -376,7 +376,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "Numeric column with the per-point standard uncertainty; only valid with uncertainty_model \"column\"."
+            "description": "Optional numeric column with per-point standard uncertainty. In auto mode an entirely empty column falls back to Poisson with a warning; observed and missing values cannot be mixed. When this column is present, an explicit uncertainty_model must be column."
           },
           "uncertainty_model": {
             "type": "string",
@@ -385,7 +385,7 @@
               "poisson",
               "unit"
             ],
-            "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column when sigma_column is given, else poisson."
+            "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column for a populated sigma_column, otherwise Poisson. An entirely empty mapped sigma_column falls back only when this model is omitted."
           },
           "range": {
             "type": "object",

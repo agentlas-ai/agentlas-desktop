@@ -209,12 +209,23 @@ function normalizeInput(input) {
   const table = common.verifiedScienceTable(value.table);
   const x = common.numericColumn(table, value.x_column, "physics-spectrum-fit-x-column");
   const y = common.numericColumn(table, value.y_column, "physics-spectrum-fit-y-column");
-  const uncertaintyModel = value.uncertainty_model === undefined ? (value.sigma_column === undefined ? "poisson" : "column") : common.enumText(value.uncertainty_model, ["column", "poisson", "unit"], "physics-spectrum-fit-uncertainty-model");
+  const requestedUncertaintyModel = value.uncertainty_model === undefined ? null : common.enumText(value.uncertainty_model, ["column", "poisson", "unit"], "physics-spectrum-fit-uncertainty-model");
+  if (requestedUncertaintyModel && requestedUncertaintyModel !== "column" && value.sigma_column !== undefined) {
+    throw new PhysicsError("physics-spectrum-fit-sigma-column-conflict", "sigma_column is only valid with uncertainty_model \"column\"");
+  }
+  // An optional column preserved by an import can be entirely empty. In auto mode
+  // that is no measured uncertainty, so use the existing Poisson model and say so.
+  // Never mix measured and inferred uncertainties or override an explicit model.
+  const mappedSigma = value.sigma_column === undefined ? null : common.numericColumn(table, value.sigma_column, "physics-spectrum-fit-sigma-column", { allowMissing: true });
+  const emptySigmaColumn = mappedSigma !== null && mappedSigma.values.every((entry) => entry === null);
+  const uncertaintyModel = requestedUncertaintyModel ?? (mappedSigma && !emptySigmaColumn ? "column" : "poisson");
   let sigma = null;
   if (uncertaintyModel === "column") {
-    if (value.sigma_column === undefined) throw new PhysicsError("physics-spectrum-fit-sigma-column-required", "uncertainty_model \"column\" requires sigma_column");
-    sigma = common.numericColumn(table, value.sigma_column, "physics-spectrum-fit-sigma-column");
-  } else if (value.sigma_column !== undefined) throw new PhysicsError("physics-spectrum-fit-sigma-column-conflict", "sigma_column is only valid with uncertainty_model \"column\"");
+    if (!mappedSigma) throw new PhysicsError("physics-spectrum-fit-sigma-column-required", "uncertainty_model \"column\" requires sigma_column");
+    if (mappedSigma.values.some((entry) => entry === null)) throw new PhysicsError("physics-spectrum-fit-sigma-column-missing-values", `Column "${mappedSigma.column.name}" contains missing cells; drop or fill them explicitly before analysis`);
+    sigma = mappedSigma;
+  }
+  const emptySigmaFallback = requestedUncertaintyModel === null && emptySigmaColumn;
   const range = value.range === undefined ? null : (() => {
     const item = common.exactObject(value.range, ["min", "max"], "physics-spectrum-fit-range");
     const min = common.finite(item.min, -Number.MAX_VALUE, Number.MAX_VALUE, "physics-spectrum-fit-range-min");
@@ -271,7 +282,7 @@ function normalizeInput(input) {
     jacobian: optionsInput.jacobian === undefined ? "analytic" : common.enumText(optionsInput.jacobian, ["analytic", "numeric"], "physics-spectrum-fit-jacobian"),
     curvePoints: common.optionalInteger(optionsInput.curve_points, 50, 2_000, "physics-spectrum-fit-curve-points", 400),
   };
-  return { table, x, y, sigma, uncertaintyModel, range, peaks, background: { kind: backgroundKind, degree, parameterNames: backgroundParameterNames, initial: backgroundInitial, fixed: backgroundFixed }, options };
+  return { table, x, y, sigma, sigmaColumn: mappedSigma?.column.name ?? null, uncertaintyModel, emptySigmaFallback, range, peaks, background: { kind: backgroundKind, degree, parameterNames: backgroundParameterNames, initial: backgroundInitial, fixed: backgroundFixed }, options };
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +451,7 @@ function analyzeSpectrumFit(input) {
   const rows = rowsAll.filter((row) => normalized.range === null || (row.x >= normalized.range.min && row.x <= normalized.range.max));
   if (rows.length < 3) throw new PhysicsError("physics-spectrum-fit-too-few-points", "at least three points are required inside the fit range");
   const warnings = [];
+  if (normalized.emptySigmaFallback) warnings.push(`The mapped uncertainty column "${normalized.sigmaColumn}" is entirely empty; using Poisson uncertainties instead.`);
   const sigma = rows.map((row) => {
     if (normalized.uncertaintyModel === "column") {
       if (!(row.sigmaRaw > 0)) throw new PhysicsError("physics-spectrum-fit-sigma-nonpositive", `point ${row.ordinal} has a non-positive uncertainty`);
@@ -593,7 +605,7 @@ function analyzeSpectrumFit(input) {
     },
     input: {
       title: normalized.table.title, xColumn: normalized.x.column.name, xUnit: normalized.x.column.unit, yColumn: normalized.y.column.name, yUnit: normalized.y.column.unit,
-      uncertaintyModel: normalized.uncertaintyModel, range: normalized.range, pointCount: rows.length, excludedPointCount: rowsAll.length - rows.length,
+      sigmaColumn: normalized.sigmaColumn, uncertaintyModel: normalized.uncertaintyModel, range: normalized.range, pointCount: rows.length, excludedPointCount: rowsAll.length - rows.length,
       peaks: normalized.peaks.map((peak) => ({ label: peak.label, shape: peak.shape, parameters: SHAPES[peak.shape].parameters, initial: peak.initial, fixed: peak.fixed, bounds: peak.bounds, description: SHAPES[peak.shape].describe })),
       background: { kind: normalized.background.kind, degree: normalized.background.degree, parameters: normalized.background.parameterNames, initial: normalized.background.initial, fixed: normalized.background.fixed },
       options: normalized.options,
@@ -610,7 +622,7 @@ function analyzeSpectrumFit(input) {
     tables: { points: pointsTable, peaks: peaksTable },
     figure: common.figureReceipt(spec),
     boundaries: [
-      "Chi-square (Neyman) fit with the caller-declared uncertainty model; for low-count spectra a Poisson likelihood fit would be more appropriate.",
+      "Chi-square (Neyman) fit with the recorded uncertainty model; for low-count spectra a Poisson likelihood fit would be more appropriate.",
       "Covariance is the inverse normal matrix at the solution (absolute σ). The scaled column multiplies errors by √(max(1, χ²/ndf)) for the curve_fit(absolute_sigma=False) convention.",
       "Bounds are enforced by projection; a parameter reported at-bound has no valid symmetric error.",
       "Voigt FWHM uses the Olivero–Longbothum approximation (≈0.02 % accuracy); Crystal Ball analytic area is not reported (numeric area in range is).",

@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-physics",
   "name": "Agentlas Physics",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -123,7 +123,7 @@
       },
       {
         "path": "runtime/mcp-server.cjs",
-        "sha256": "1ceba32a52aac6582f0b3bb9eb30446d8230736feb4607c75734ce95d73fb68d",
+        "sha256": "2a883ec17ce2c06a099ba0aeac55ed41e74687418b52af0abffd98fbf94594ce",
         "bytes": 4098
       },
       {
@@ -148,8 +148,8 @@
       },
       {
         "path": "runtime/spectrum-fit.cjs",
-        "sha256": "a9aa5fe8fe11dc026d21960345159d91ce08b448b2070c7455beca918711dc41",
-        "bytes": 40390
+        "sha256": "01e616818ef942ca810695000f60b7a04a4940ee11d092aeb65bbae9033b05bb",
+        "bytes": 41568
       },
       {
         "path": "runtime/uncertainty-propagation.cjs",
@@ -188,13 +188,13 @@
       },
       {
         "path": "schemas/spectrum-fit.input.json",
-        "sha256": "be3c6874089e73c1a7fa109dcd17995aedf5b766b2d073140a00f86c7bcf4e37",
-        "bytes": 3461
+        "sha256": "4817d26151006590f221ddaefb22ae281233fe31c039af96ba3a0a73b1160294",
+        "bytes": 3705
       },
       {
         "path": "schemas/tools.json",
-        "sha256": "7759f31c7ab2df518680cfa9e3b6fcbb6045b07c2ebb5582090c5136cbd50a35",
-        "bytes": 65513
+        "sha256": "61e18080d1c2251f47d0fb115820bdedd0c671905844f11d9ba3308af9a927bd",
+        "bytes": 65757
       },
       {
         "path": "schemas/uncertainty-propagation.input.json",
