@@ -101,6 +101,7 @@ import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { rolePriorityRuntimes } from "./runtime/selection";
 import { planAutomationRuntimeForRun } from "./automation-runtime-provenance";
+import { planRecoveryRuntime, type RecoveryRuntimePlan } from "./automation-runtime-plan";
 import {
   AUTOMATION_NO_PROGRESS_LOOP,
   createNoProgressGuard,
@@ -486,7 +487,84 @@ function appendAutomationFailureNotice(
 }
 
 /** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
-function handleAutomationFailure(a: Automation, error: string, failedRunId?: string | null): void {
+/**
+ * "복원됨"은 복구 런의 말이 아니라 호스트의 읽기 전용 탐침이 확인해야 복구다 (P0-4, A4).
+ * 실측 2026-09-24: 복구 런이 02:03·04:03·07:03 세 번 "세션 복원됨"이라 답했지만 매번 바로 다음 실행이 같은 곳에서
+ * 막혔다. 탐침은 실패한 실행이 돈 런타임에 도구 없이 한 줄을 묻는다 — 답이 오면 그 런타임은 지금 쓸 수 있다.
+ * 확인이 안 되면 그 사실을 원장에 적고, 지속 정책이 다음 실행의 수를 고른다(인증이면 런타임 전환 등).
+ * 이 함수는 던지지 않는다 — 탐침 실패가 복구 런 실패로 보고되면 안 된다.
+ */
+const RESTORE_PROBE_TIMEOUT_MS = 60_000;
+async function confirmOptimizerRestore(input: {
+  automation: Automation;
+  doctorRunId: string;
+  failedRunId: string | null | undefined;
+  chatId: string;
+}): Promise<boolean> {
+  const probed = input.automation.runtimeSelection;
+  let confirmed = false;
+  let failureKind: string | null = null;
+  try {
+    if (probed) {
+      const { callConnectedModelDetailed } = await import("./system-agents/judgment");
+      const reply = await callConnectedModelDetailed({
+        systemPrompt: "Runtime availability check. Do not use tools. Reply with the single word READY.",
+        input: "READY?",
+        runtimeSelection: probed,
+        requireNoTools: true,
+        timeoutMs: RESTORE_PROBE_TIMEOUT_MS,
+      });
+      confirmed = Boolean(reply.text?.trim()) && !reply.failure;
+      failureKind = reply.failure?.kind ?? (confirmed ? null : "empty");
+    } else {
+      failureKind = "no_runtime_selection";
+    }
+  } catch (error) {
+    failureKind = "probe_threw";
+    console.warn("[automation] restore probe failed:", error);
+  }
+  tryRecordRunEvent({
+    runId: input.doctorRunId,
+    kind: "system_optimizer_restore_probe",
+    automationId: input.automation.id,
+    payload: {
+      confirmed,
+      probeFailureKind: failureKind,
+      runtimeKind: probed?.kind ?? null,
+      runtimeBackend: probed?.backend ?? null,
+      runtimeModel: probed?.model ?? null,
+      failedRunId: input.failedRunId ?? null,
+      readOnly: true,
+    },
+  });
+  if (!confirmed && input.failedRunId) {
+    try {
+      const cause = failureKind === "quota" ? { kind: "quota" as const, retryAfterAt: null }
+        : failureKind === "auth" ? { kind: "auth" as const }
+        : { kind: "runtime_unavailable" as const };
+      const pool = rolePriorityRuntimes(await detectRuntimes(), "worker");
+      const switchableRuntimes = pool.filter((runtime) =>
+        (runtime.backend ?? null) !== (probed?.backend ?? null)
+        && !runtimeCooldownForSelection(selectionForRuntime(runtime))).length;
+      const latest = getAutomation(input.automation.id);
+      decideAndRecordAutomationPersistence({
+        automation: { id: input.automation.id, enabled: latest?.enabled ?? input.automation.enabled },
+        runId: input.failedRunId,
+        cause,
+        switchableRuntimes,
+      });
+      appendChatMessage(input.chatId, "system", L(
+        "복구 시도 뒤 호스트 확인에서 이 자동화의 실행 모델이 아직 응답하지 않았습니다. 복구된 것으로 세지 않았고, 다음 실행은 다른 방법으로 이어갑니다.",
+        "After the recovery attempt, the host check found this automation's runtime still not answering. It was not counted as restored; the next run continues another way.",
+      ));
+    } catch (error) {
+      console.warn("[automation] restore probe follow-up failed:", error);
+    }
+  }
+  return confirmed;
+}
+
+async function handleAutomationFailure(a: Automation, error: string, failedRunId?: string | null): Promise<void> {
   let streak = 1;
   try {
     streak = Math.max(1, countConsecutiveFailures(a.id));
@@ -508,6 +586,16 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
       lastOptimizerRunAt.set(a.id, Date.now());
       const optimizerController = new AbortController();
       optimizerControllers.set(a.id, optimizerController);
+      let recoveryRuntime: RecoveryRuntimePlan = { selection: a.runtimeSelection, switched: false, reason: "no_alternative" };
+      try {
+        recoveryRuntime = planRecoveryRuntime({
+          failing: a.runtimeSelection,
+          workerPool: rolePriorityRuntimes(await detectRuntimes(), "worker"),
+          cooling: (selection) => runtimeCooldownForSelection(selection),
+        });
+      } catch (planError) {
+        console.warn("[automation] recovery runtime plan unavailable:", planError);
+      }
       const prompt = buildSystemOptimizerPrompt({
         automationName: a.name,
         errorMessage: error,
@@ -529,16 +617,28 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
         // real Chrome through Codex's Computer Use plugin. Inherit the owner's choice.
         toolMode: doctorToolMode(a),
         hubMode: a.hubMode ?? "hub-allowed",
-        // Recovery belongs to the failed automation. Without this pin the
-        // optimizer silently used the global orchestrator (often Claude)
-        // even when the automation itself was fixed to Antigravity.
-        runtimeSelection: a.runtimeSelection,
+        // Recovery starts on a different member of the owner's worker pool than the run that failed
+        // (P0-4). Pinning it to the failed runtime made 4 of 10 recovery runs on 2026-09-24 die with the
+        // original error (503 capacity, transport busy, usage limit). The pool order is the owner's own;
+        // with no other member it falls back to the failed runtime rather than not recovering.
+        runtimeSelection: recoveryRuntime.selection,
       };
       tryRecordRunEvent({
         runId,
         kind: "system_optimizer_started",
         automationId: a.id,
-        payload: { streak, paused: false },
+        payload: {
+          streak,
+          paused: false,
+          failedKind: a.runtimeSelection?.kind ?? null,
+          failedBackend: a.runtimeSelection?.backend ?? null,
+          recoveryKind: recoveryRuntime.selection?.kind ?? null,
+          recoveryBackend: recoveryRuntime.selection?.backend ?? null,
+          recoveryModel: recoveryRuntime.selection?.model ?? null,
+          recoverySwitched: recoveryRuntime.switched,
+          recoveryRuntimeReason: recoveryRuntime.reason,
+          failedRunId: failedRunId ?? null,
+        },
       });
       let removeAbortListener = () => {};
       const abortGate = new Promise<never>((_resolve, reject) => {
@@ -574,6 +674,10 @@ function handleAutomationFailure(a: Automation, error: string, failedRunId?: str
         ),
       ));
       void Promise.race([optimizerRun, abortGate])
+        .then(async () => {
+          // The recovery run's own "restored" is a claim. Count it only after a read-only host probe.
+          await confirmOptimizerRestore({ automation: a, doctorRunId: runId, failedRunId, chatId: chat.chat.id });
+        })
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
           // 복구 시도가 죽은 사실은 콘솔에만 남으면 없는 것과 같다. 원래 자동화
@@ -1617,7 +1721,10 @@ async function runOne(
       !requiresGraphReconciliation(machineError ?? runError)
     ) {
       try {
-        handleAutomationFailure(a, runError ?? "unknown error", currentRunId);
+        handleAutomationFailure(a, runError ?? "unknown error", currentRunId).catch((err) => {
+          // Not awaited: the recovery run is background work and must not hold this run's settlement.
+          console.error("[automation] handleAutomationFailure failed:", err);
+        });
       } catch (err) {
         console.error("[automation] handleAutomationFailure failed:", err);
       }
