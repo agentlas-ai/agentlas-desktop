@@ -1764,7 +1764,13 @@ function goalRevisionIsCurrent(run: LongRunRecord): boolean {
 /** Apply a user-authored revision only after work has stopped. Old tasks and
  * receipts remain audit records; none count toward the new contract.
  */
-export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number): LongRunRecord {
+/**
+ * `allowIdleWaiting`: the caller has checked that nothing is in flight for this Goal (no running/uncertain
+ * attempt — re-checked here —, no effect observation, no live turn in its chat). A run parked in waiting_tool
+ * for a scheduled retry or wait is then at a turn boundary as much as a paused one: the next dispatched turn
+ * reads the bound revision.
+ */
+export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number, opts?: { allowIdleWaiting?: boolean }): LongRunRecord {
   const db = getDb();
   db.transaction(() => {
     const run = getLongRun(runId);
@@ -1775,7 +1781,9 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
     const binding = getLongRunGoalRevisionBinding(runId);
     if (binding?.revision === goal.revision) return;
     if (run.version !== expectedVersion) throw new Error("long_run_goal_binding_version_conflict");
-    if (!["draft", "queued", "paused", "blocked", "waiting_user"].includes(run.status)) throw new Error("long_run_goal_binding_requires_stop");
+    const stops = opts?.allowIdleWaiting ? ["draft", "queued", "paused", "blocked", "waiting_user", "waiting_tool"]
+      : ["draft", "queued", "paused", "blocked", "waiting_user"];
+    if (!stops.includes(run.status)) throw new Error("long_run_goal_binding_requires_stop");
     const active = db.prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
       .get(runId) as { n: number };
     if (active.n > 0) throw new Error("long_run_goal_binding_attempt_unsettled");

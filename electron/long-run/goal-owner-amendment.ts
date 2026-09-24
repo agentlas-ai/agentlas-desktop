@@ -39,6 +39,7 @@ import {
   type RequiredVerdict,
 } from "../system-agents/judgment";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
+import { isGoalObserving } from "./effect-observation-tickets";
 
 export const OWNER_GOAL_AMENDMENT_PENDING_KIND = "run.owner_goal_amendment_pending";
 export const OWNER_GOAL_AMENDMENT_APPLIED_KIND = "run.owner_goal_amendment_applied";
@@ -176,15 +177,29 @@ export type OwnerGoalAmendmentApplyResult =
  * if the run is at a stop the Goal editor could also bind at. Idempotent: a
  * message already recorded as a revision source is replayed, not duplicated.
  */
-export function applyPendingOwnerGoalAmendments(goalId: string): OwnerGoalAmendmentApplyResult {
+export function applyPendingOwnerGoalAmendments(
+  goalId: string,
+  opts?: {
+    /**
+     * The caller (the periodic sweep) has checked that no turn is live in the Goal's chat. Then a run
+     * parked in waiting_tool — a scheduled retry, an observe retry hours away, a wait — is at a turn
+     * boundary: the owner's restated target applies now instead of when that timer fires. Measured
+     * 2026-09-24: the Threads Goal sat in waiting_tool until an observe retry 3.5 h later, so a recorded
+     * amendment (not_at_stop:waiting_tool) would have waited all that time.
+     */
+    noLiveTurn?: boolean;
+  },
+): OwnerGoalAmendmentApplyResult {
   const run = getLongRunByGoalId(goalId);
   if (!run || !run.rootChatId) return { applied: false, reason: "no_long_run" };
   const pending = pendingSourceIds(run.id);
   if (pending.length === 0) return { applied: false, reason: "none_pending" };
   const contract = getChatGoalContract(goalId);
   if (!contract || !["active", "blocked"].includes(contract.status)) return { applied: false, reason: "goal_not_active" };
-  if (!BINDABLE_STATUSES.has(run.status)) return { applied: false, reason: `not_at_stop:${run.status}` };
+  const idleWaiting = run.status === "waiting_tool" && opts?.noLiveTurn === true;
+  if (!BINDABLE_STATUSES.has(run.status) && !idleWaiting) return { applied: false, reason: `not_at_stop:${run.status}` };
   if (unsettledLongRunAttemptCount(run.id) > 0) return { applied: false, reason: "attempt_unsettled" };
+  if (idleWaiting && isGoalObserving(goalId)) return { applied: false, reason: "observation_in_flight" };
   try {
     return getDb().transaction((): OwnerGoalAmendmentApplyResult => {
       const applied: string[] = [];
@@ -220,7 +235,7 @@ export function applyPendingOwnerGoalAmendments(goalId: string): OwnerGoalAmendm
       if (applied.length === 0) return { applied: false, reason: "no_valid_source" };
       const latest = getLongRun(run.id);
       if (!latest) throw new Error("goal_amendment_run_missing");
-      bindCurrentGoalRevisionToLongRun(latest.id, latest.version);
+      bindCurrentGoalRevisionToLongRun(latest.id, latest.version, idleWaiting ? { allowIdleWaiting: true } : undefined);
       return { applied: true, revision: revisionNumber, sourceMessageIds: applied };
     })();
   } catch (error) {
