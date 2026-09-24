@@ -3298,7 +3298,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const slug = requiredBoundedString(params, "slug", 160);
         const entityKind = requiredEnum(params, "entityKind", ["agent", "team"] as const);
         const release = parseHubReleasePin(params.release);
-        await this.hubMarket.requireCurrentRelease(slug, entityKind, release);
+        await this.hubMarket.requireCurrentRelease(slug, entityKind, release, "install");
         const installed = await installPublicHubRelease({ slug, entityKind, release });
         this.scheduleSnapshotUpdated();
         return asJsonValue({ schemaVersion: 1, authoritativeHostRef: this.options.hostIdentity.hostId,

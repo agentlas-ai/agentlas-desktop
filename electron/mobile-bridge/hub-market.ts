@@ -98,6 +98,13 @@ function isPublicCallableAgent(listing: MarketplaceListing): boolean {
   return listing.callable === true && (liveSource || listing.kind === "cloud-callable");
 }
 
+function isPublicInstallCandidate(listing: MarketplaceListing): boolean {
+  if (isOwnerAsset(listing)) return false;
+  if (listing.entityKind && listing.entityKind !== "agent" && listing.entityKind !== "team") return false;
+  return isPublicSourceDescriptor(listing)
+    || (listing.source === "hub-index" && listing.kind === "install-only");
+}
+
 function projectListing(
   listing: MarketplaceListing,
   declaredPermissions: unknown = (listing as MarketplaceListing & Record<string, unknown>).permissions,
@@ -143,7 +150,7 @@ export class MobileHubMarketService {
     const seen = new Set<string>();
     const items: MobileBridgeHubMarketListingDto[] = [];
     for (const row of rows) {
-      if (!isPublicCallableAgent(row)) continue;
+      if (!isPublicCallableAgent(row) && !isPublicInstallCandidate(row)) continue;
       const projected = projectListing(row);
       const key = `${projected.entityKind}:${projected.slug.toLowerCase()}`;
       if (!projected.slug || seen.has(key)) continue;
@@ -173,7 +180,8 @@ export class MobileHubMarketService {
       this.deps.source.getListingBySlug(slug),
       this.deps.source.searchAgents(slug),
     ]);
-    const search = searchRows.find((row) => safeText(row.slug, 160).toLowerCase() === slug && isPublicCallableAgent(row)) ?? null;
+    const search = searchRows.find((row) => safeText(row.slug, 160).toLowerCase() === slug
+      && (isPublicCallableAgent(row) || isPublicInstallCandidate(row))) ?? null;
     if (!manifest && !search) {
       const online = (await this.deps.sourceStatus()).online === true;
       return { schemaVersion: 1, status: online ? "not-found" : "unavailable", listing: null, checkedAt: this.checkedAt() };
@@ -197,7 +205,10 @@ export class MobileHubMarketService {
       agentReleaseId: manifestIdentity?.agentReleaseId ?? searchIdentity?.agentReleaseId,
       packageHash: manifestIdentity?.packageHash ?? searchIdentity?.packageHash,
     } as MarketplaceListing;
-    if (!isPublicCallableAgent(merged)) {
+    const sourceInstallAvailable = Boolean(manifest && isPublicSourceDescriptor(manifest)
+      && manifestIdentity && sameRelease(manifestIdentity, releaseIdentity(merged)!)
+      && manifest.cloudPackage?.packageHash === manifestIdentity.packageHash);
+    if (!isPublicCallableAgent(merged) && !sourceInstallAvailable) {
       return { schemaVersion: 1, status: "unavailable", listing: null, checkedAt: this.checkedAt() };
     }
     const rawManifest = manifest as (DetailedListing & Record<string, unknown>) | null;
@@ -205,17 +216,23 @@ export class MobileHubMarketService {
       schemaVersion: 1,
       status: "ready",
       listing: projectListing(merged, rawManifest?.permissions),
-      sourceInstallAvailable: Boolean(manifest && isPublicSourceDescriptor(manifest)
-        && manifestIdentity && sameRelease(manifestIdentity, releaseIdentity(merged)!)
-        && manifest.cloudPackage?.packageHash === manifestIdentity.packageHash),
+      sourceInstallAvailable,
       checkedAt: this.checkedAt(),
     };
   }
 
-  async requireCurrentRelease(slug: string, entityKind: "agent" | "team", release: HubReleasePin): Promise<void> {
+  async requireCurrentRelease(
+    slug: string,
+    entityKind: "agent" | "team",
+    release: HubReleasePin,
+    action: "invoke" | "install" = "invoke",
+  ): Promise<void> {
     const detail = await this.detail(slug);
     if (detail.status !== "ready" || !detail.listing || detail.listing.entityKind !== entityKind
-      || detail.listing.slug !== slug || !detail.listing.callable) throw new Error("hub_public_release_unavailable");
+      || detail.listing.slug !== slug
+      || (action === "install" ? !detail.sourceInstallAvailable : !detail.listing.callable)) {
+      throw new Error("hub_public_release_unavailable");
+    }
     assertHubReleasePin(release, detail.listing.release);
     const status = await this.deps.sourceStatus();
     if (!status.online || status.usingFallback) throw new Error("hub_public_source_unavailable");
