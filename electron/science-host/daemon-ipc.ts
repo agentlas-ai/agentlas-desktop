@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
 import type { DaemonScienceCommand, DaemonScienceEvent } from "../daemon/science-service";
-import type { ScienceDaemonClient } from "./daemon-client";
+import { ScienceDaemonClientError, type ScienceDaemonClient } from "./daemon-client";
 import { registerScienceMathHandlers } from "./math-ipc";
 import { registerSciencePublicationIpc, SCIENCE_PUBLICATION_IPC_CHANNELS } from "./publication-ipc";
 
@@ -389,7 +389,17 @@ export function registerScienceDaemonExecutionIpc(options: {
     const payload = input(envelope), watched = scope(payload), viewer = viewerFor(event);
     watch(viewer, watched);
     await connectForIntent(event, envelope, action === "start");
-    return dispatch(`composer.${action}`, action === "attach" ? watched : payload, true);
+    try {
+      return await dispatch(`composer.${action}`, action === "attach" ? watched : payload, true);
+    } catch (error) {
+      // Only this store refusal proves that the existing message was already bound.
+      // Keep every other remote failure as a transport failure with uncertain effects.
+      if (action === "start" && error instanceof ScienceDaemonClientError
+        && error.failure.remoteSourceCode === "science-user-message-already-used") {
+        throw Object.assign(new Error(error.failure.remoteSourceCode), { code: error.failure.remoteSourceCode });
+      }
+      throw error;
+    }
   });
   for (const [channel, op] of [
     ["steer", "composer.steer"], ["reconcileSteering", "composer.reconcile"], ["steering", "composer.steering"],

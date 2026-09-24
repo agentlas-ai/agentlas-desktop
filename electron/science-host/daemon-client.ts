@@ -6,6 +6,7 @@ import { ensureDaemonRunning, type EnsureDaemonOptions } from "../daemon/app-lau
 import { canonicalDaemonPath, daemonControlSocketPath, resolveDaemonServiceIdentity } from "../daemon/service-identity";
 import type { InstallIdentity } from "../install-identity";
 import type { DaemonScienceCommand, DaemonScienceEvent, DaemonScienceStatus } from "../daemon/science-service";
+import { isIpcErrorCode } from "../../shared/ipc-error-code";
 
 export interface ScienceDaemonClientOptions extends EnsureDaemonOptions {
   /** Actual opened GUI store, after the migration/admission barrier. Never guessed. */
@@ -36,6 +37,7 @@ export interface ScienceDaemonClientFailure {
   transportCode?: string;
   remoteCode?: number;
   remoteMessage?: string;
+  remoteSourceCode?: string;
 }
 
 /** Transport state is machine-readable; remote prose is never parsed for causes. */
@@ -77,7 +79,7 @@ const MAX_REPLY_BYTES = 32 * 1024 * 1024;
 const STATES = new Set(["idle", "starting", "disabled", "ready", "closing", "closed", "failed"]);
 
 function failure(code: string, phase: ScienceDaemonClientFailure["phase"], outcome: ScienceDaemonClientFailure["outcome"],
-  details: Partial<Pick<ScienceDaemonClientFailure, "transportCode" | "remoteCode" | "remoteMessage">> = {}): ScienceDaemonClientError {
+  details: Partial<Pick<ScienceDaemonClientFailure, "transportCode" | "remoteCode" | "remoteMessage" | "remoteSourceCode">> = {}): ScienceDaemonClientError {
   return new ScienceDaemonClientError({ schema: "agentlas.science-daemon-client-error.v1", code, phase, outcome, ...details });
 }
 
@@ -206,6 +208,8 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
             done(failure("science_daemon_remote_rejected", "remote", "rejected", {
               ...(typeof remote.code === "number" ? { remoteCode: remote.code } : {}),
               ...(typeof remote.message === "string" ? { remoteMessage: remote.message.slice(0, 2_000) } : {}),
+              ...(isIpcErrorCode(record(remote.data)?.sourceCode)
+                ? { remoteSourceCode: record(remote.data)?.sourceCode as string } : {}),
             }));
           } else if (Object.prototype.hasOwnProperty.call(message, "result")) {
             if (stream) {

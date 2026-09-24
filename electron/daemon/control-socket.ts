@@ -19,6 +19,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isIpcErrorCode } from "../../shared/ipc-error-code";
 
 export interface ControlSocketRequest {
   id: string | number;
@@ -207,7 +208,12 @@ export async function startControlSocket(
             if (!socket.destroyed) socket.write(
               jsonLine({
                 id: request.id,
-                error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
+                error: {
+                  code: -32000,
+                  message: error instanceof Error ? error.message : String(error),
+                  ...(isIpcErrorCode((error as { code?: unknown } | null)?.code)
+                    ? { data: { sourceCode: (error as { code: string }).code } } : {}),
+                },
               }),
             );
           }
