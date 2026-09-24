@@ -6041,7 +6041,7 @@ export type RecSource = "local" | "cloud" | "hub";
 export type OrchestrationTarget =
   | { source: "local"; entityKind: "agent"; agentId: string }
   | { source: "local"; entityKind: "team"; firmId: string }
-  | { source: "cloud" | "hub"; entityKind: "agent" | "team"; slug: string };
+  | { source: "cloud" | "hub"; entityKind: "agent" | "team"; slug: string; release?: import("./hub-release-pin").HubReleasePin };
 export interface RecAgent {
   id: string;
   name: string;

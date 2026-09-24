@@ -1,3 +1,4 @@
+import { parseHubReleasePin } from "../../shared/hub-release-pin";
 import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
 import { randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
@@ -299,7 +300,7 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   /** Hephaestus build runner adapter. Same injection rule as cloudAgentActions. */
   buildActions?: MobileBridgeBuildActions;
   /** Public Hub read adapter. Tests inject fixtures; production reuses Desktop's Hub and lease authorities. */
-  hubMarket?: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview">;
+  hubMarket?: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview" | "requireCurrentRelease">;
   /**
    * Desktop-owned terminal authority. Production injects the persistent
    * terminal controller (PTY capability is implementation-specific); tests may
@@ -1645,7 +1646,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly onError: (error: Error) => void;
   private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
   private readonly buildActions: MobileBridgeBuildActions;
-  private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview">;
+  private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview" | "requireCurrentRelease">;
   private readonly visualSessions: MobileVisualSessionManager;
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
@@ -3286,9 +3287,38 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "hub.detail": {
         const params = guardedParams(request, ["slug"]);
         return asJsonValue(
-          await this.hubMarket.detail(requiredBoundedString(params, "slug", 160)),
+          { ...(await this.hubMarket.detail(requiredBoundedString(params, "slug", 160))), invokeSupported: true },
           request.method,
         );
+      }
+      case "hub.invoke": {
+        assertMobileOneDeviceAuthority(context);
+        if (!request.idempotencyKey) throw new TypeError("hub.invoke requires an idempotencyKey");
+        const params = guardedParams(request, ["slug", "entityKind", "release", "userPrompt"]);
+        const slug = requiredBoundedString(params, "slug", 160);
+        const entityKind = requiredEnum(params, "entityKind", ["agent", "team"] as const);
+        const release = parseHubReleasePin(params.release);
+        const userPrompt = requiredText(params, "userPrompt", 20_000);
+        if (!userPrompt.trim()) throw new TypeError("Hub invocation requires a request");
+        await this.hubMarket.requireCurrentRelease(slug, entityKind, release);
+        // Free Hub sharing has no lease or wallet mutation. Execution uses the
+        // connected Desktop runtime and its normal read-only permission ceiling.
+        const chat = createChat({ title: userPrompt.trim().slice(0, 80), originSurface: "work" });
+        let result;
+        try {
+          result = invocationService.start({
+            chatId: chat.id, userPrompt, permissions: "read",
+            taskForceTargets: [{ source: "hub", entityKind, slug, release }],
+          }, captureInvocationWorkspaceBinding(getChatWorkingFolder(chat.id)), { source: "mobile" });
+        } catch (error) {
+          removeChat(chat.id);
+          throw error;
+        }
+        // MobileBridgeServer persists this exact response under device + action
+        // key before acknowledging it; uncertain deliveries never start again.
+        this.scheduleSnapshotUpdated(chat.id);
+        return asJsonValue({ schemaVersion: 1, authoritativeHostRef: this.options.hostIdentity.hostId,
+          chatId: chat.id, runId: result.runId, slug, entityKind, release, status: "accepted" }, request.method);
       }
       case "hub.leasePreview": {
         const params = guardedParams(request, ["slug"]);

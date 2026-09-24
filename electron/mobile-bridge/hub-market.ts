@@ -1,3 +1,4 @@
+import { assertHubReleasePin, type HubReleasePin } from "../../shared/hub-release-pin";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "../../shared/types";
 import type {
   MobileBridgeHubLeasePreviewDto,
@@ -204,6 +205,15 @@ export class MobileHubMarketService {
       listing: projectListing(merged, rawManifest?.permissions),
       checkedAt: this.checkedAt(),
     };
+  }
+
+  async requireCurrentRelease(slug: string, entityKind: "agent" | "team", release: HubReleasePin): Promise<void> {
+    const detail = await this.detail(slug);
+    if (detail.status !== "ready" || !detail.listing || detail.listing.entityKind !== entityKind
+      || detail.listing.slug !== slug || !detail.listing.callable) throw new Error("hub_public_release_unavailable");
+    assertHubReleasePin(release, detail.listing.release);
+    const status = await this.deps.sourceStatus();
+    if (!status.online || status.usingFallback) throw new Error("hub_public_source_unavailable");
   }
 
   async leasePreview(slug: string): Promise<MobileBridgeHubLeasePreviewDto> {
