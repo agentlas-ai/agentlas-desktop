@@ -409,13 +409,13 @@ async function startStudioInner(): Promise<StudioStartResult> {
   // 외부 로컬 프로세스/브라우저 CSRF 는 토큰+Origin 게이트로 거부한다.
   const requestToken = crypto.randomBytes(32).toString("hex");
   activeRequestToken = requestToken;
-  // 데스크탑 임베드는 사용자 본인 머신에서 본인 엔진으로 돈다 → 크레딧 게이트 없이 무료 동작
-  // (런처 계약: STUDIO_CREDITS=off 또는 owner 는 free). STUDIO_CREDITS 가 이미 설정돼 있으면 존중.
+  // The bundled Studio is a free local agent flow. The old session-credit
+  // setting is retired; an inherited environment must not re-enable it.
   const env = withPythonCacheBoundary(withCliPath({
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
-    STUDIO_CREDITS: "off",
     ...process.env,
+    STUDIO_CREDITS: "off",
     HEPHAESTUS_PYTHON: py.python,
     STUDIO_REQUEST_TOKEN: requestToken,
   }));
