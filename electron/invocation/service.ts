@@ -2061,15 +2061,22 @@ export class InvocationService {
       try {
         const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
         const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq), runReq.permissions);
+        /*
+         * Bind the chat BEFORE the ledger row is created: ensureGoalLongRun finds its root chat through
+         * chats.goal_id. Binding afterwards created a long run with rootChatId null, and the first usage
+         * receipt then failed long_run_usage_anchor_mismatch, killing the turn as
+         * mcp-runtime-config-unavailable (isolated live run 2026-09-24, goalMode Work chat without a task).
+         */
+        if (objective) setChatGoalBinding(chat.id, projectionGoalId);
         if (!objective || !ensureGoalLedgerGoal({
           goalId: projectionGoalId,
           objective,
           acceptanceCriteria,
           projectDir: executionCwd,
         })) {
+          if (objective && getChat(chat.id)?.goalId === projectionGoalId) setChatGoalBinding(chat.id, null);
           projectionGoalId = null;
         } else {
-          setChatGoalBinding(chat.id, projectionGoalId);
           /*
            * ★대화에 목표 번호만 찍고 계약을 안 만들면, 그 목표는 영영 못 닫는다.
            *
