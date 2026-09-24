@@ -4837,8 +4837,8 @@ export function OneShell() {
   }, [refreshAll, router, startRun]);
 
   /*
-   * Bringing in outside help can borrow paid Hub agents, so it is the one
-   * decision One must not make for the user. Everything behind it already
+   * Bringing in outside help changes the team and the public agent used, so
+   * One asks the user before proceeding. Everything behind it already
    * exists — Main runs `confirmed_external_workforce` end to end — but nothing
    * ever asked, so the automatic path quietly continued alone instead and an
    * explicit request dead-ended as `one-team-preflight-required`.
