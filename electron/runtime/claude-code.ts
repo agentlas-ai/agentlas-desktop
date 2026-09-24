@@ -1,4 +1,5 @@
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
+import { claudeBrowserSurfaceArgs } from "./claude-browser-surface";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 // Claude Code CLI — 감지 + 실호출.
@@ -1040,10 +1041,17 @@ const runClaudeTurn = async (
         "",
       ]
     : [];
-  // Browser turns still expose Agentlas' approval-gated MCP bridge, while
-  // Claude Code's own browser, shell, slash commands, and plugins remain
-  // usable. Only the explicit untrustedNoTools path below disables tools.
-  const browserOnlyArgs: string[] = [];
+  // Claude Code's own shell, slash commands and plugins remain usable, but no
+  // run reaches a browser other than the Agentlas one (Claude in Chrome, user
+  // Playwright-style MCP servers) unless Main granted Computer Use
+  // (claude-browser-surface.ts). The untrustedNoTools path disables all tools.
+  const browserSurface = claudeBrowserSurfaceArgs({
+    desktopControlGrant: runReq.desktopControlGrant === true,
+    untrustedNoTools: runReq.untrustedNoTools === true,
+    hostAllowedTools: runReq.mcpAllowedTools ?? [],
+  });
+  if (browserSurface.receipt) events.onStatus(browserSurface.receipt);
+  const browserOnlyArgs: string[] = browserSurface.args;
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
