@@ -466,6 +466,7 @@ function analyzeLightCurvePeriodicityDepth(input) {
   ]);
   const valueTitle = base.settings.valueUnit ? `Observed value (${base.settings.valueUnit})` : "Observed value";
   const yScale = common.measurementScale(base.settings.valueKind);
+  const periodScale = { type: "log", domain: [base.settings.minimumPeriodDays, base.settings.maximumPeriodDays], nice: false };
   const buildFigure = (provenance) => common.publicationFigure(
     `${base.settings.targetId}: GLS periodogram with Baluev false-alarm levels and two-harmonic fold`,
     `Two-panel figure. Upper panel: generalized Lomb-Scargle power over ${base.periodogram.length} trial periods with ${thresholds.length} Baluev false-alarm thresholds and the refined period ${refinedPeriod} days marked. Lower panel: ${points.length} observations folded at the refined period with single- and two-harmonic model curves.`,
@@ -478,12 +479,12 @@ function analyzeLightCurvePeriodicityDepth(input) {
           layer: [
             { data: { values: base.periodogram.filter((row) => row.power !== null).map((row) => ({ periodDays: row.periodDays, power: row.power })) },
               mark: { type: "line", color: "#255C99", strokeWidth: 1.6, clip: true },
-              encoding: { x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: { type: "log" } }, y: { field: "power", type: "quantitative", title: "GLS power", scale: { domain: [0, 1] } } } },
+              encoding: { x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: periodScale }, y: { field: "power", type: "quantitative", title: "GLS power", scale: { domain: [0, 1] } } } },
             { data: { values: thresholds.filter((row) => row.powerThreshold !== null).map((row) => ({ power: row.powerThreshold, label: `FAP ${row.falseAlarmProbability}` })) },
               mark: { type: "rule", color: "#9CA3AF", strokeDash: [6, 4], strokeWidth: 1 },
               encoding: { y: { field: "power", type: "quantitative" }, tooltip: [{ field: "label", type: "nominal", title: "Threshold" }, { field: "power", type: "quantitative", title: "Power", format: ".4f" }] } },
             { data: { values: [{ periodDays: refinedPeriod }] }, mark: { type: "rule", color: "#C2415D", strokeWidth: 1.5 },
-              encoding: { x: { field: "periodDays", type: "quantitative", scale: { type: "log" } } } },
+              encoding: { x: { field: "periodDays", type: "quantitative", scale: periodScale } } },
           ],
         },
         {

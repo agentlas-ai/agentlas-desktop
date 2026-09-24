@@ -1362,9 +1362,10 @@ function measurementScale(valueKind, extra) {
   return { zero: false, nice: true, ...(valueKind === "magnitude" ? { reverse: true } : {}), ...(extra ?? {}) };
 }
 
-function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPeak, metadata, provenance) {
+function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPeak, metadata, periodRange, provenance) {
   const valueTitle = metadata.valueUnit ? `Observed value (${metadata.valueUnit})` : "Observed value";
   const yScale = measurementScale(metadata.valueKind);
+  const periodScale = { type: "log", domain: periodRange, nice: false };
   return {
     schema: "agentlas.astronomy.light-curve-publication-figure/v1",
     rendererId: "vega-lite",
@@ -1384,7 +1385,7 @@ function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPea
               data: { values: periodogram.filter((row) => row.power !== null) },
               mark: { type: "line", color: "#255C99", strokeWidth: 1.8, clip: true },
               encoding: {
-                x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: { type: "log" } },
+                x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: periodScale },
                 y: { field: "power", type: "quantitative", title: "Standard GLS power", scale: { domain: [0, 1] } },
                 tooltip: [
                   { field: "periodDays", type: "quantitative", title: "Period (day)", format: ".8g" },
@@ -1397,14 +1398,14 @@ function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPea
               data: { values: periodogram },
               mark: { type: "line", color: "#9CA3AF", strokeDash: [5, 4], strokeWidth: 1.2, opacity: 0.8, clip: true },
               encoding: {
-                x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: { type: "log" } },
+                x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: periodScale },
                 y: { field: "windowPower", type: "quantitative", title: "Standard GLS power", scale: { domain: [0, 1] } },
               },
             },
             {
               data: { values: [{ periodDays: bestPeak.periodDays }] },
               mark: { type: "rule", color: "#C2415D", strokeWidth: 1.5 },
-              encoding: { x: { field: "periodDays", type: "quantitative", scale: { type: "log" } } },
+              encoding: { x: { field: "periodDays", type: "quantitative", scale: periodScale } },
             },
           ],
         },
@@ -1635,7 +1636,8 @@ function analyzeLightCurvePeriodicity(input) {
     peaksTableSha256,
     periodogramTableSha256,
   };
-  const figure = lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPeak, metadata, figureProvenance);
+  const figure = lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPeak, metadata,
+    [normalizedInput.minimumPeriodDays, normalizedInput.maximumPeriodDays], figureProvenance);
   const figureSha256 = sha256(canonicalJson(figure));
   const summary = {
     inputRows: rows.length,

@@ -422,6 +422,7 @@ function searchLightCurveTransitsBls(input) {
   // The transit is a fraction of a percent of the flux. On a zero-anchored axis it is a smudge
   // on a flat line -- the detection stops being visible in the figure that reports it.
   const foldedScale = common.measurementScale(normalized.valueKind);
+  const periodScale = { type: "log", domain: [normalized.minimumPeriodDays, normalized.maximumPeriodDays], nice: false };
   const buildFigure = (provenance) => common.publicationFigure(
     `${normalized.targetId}: BLS spectrum and folded transit`,
     `Two-panel figure. Upper panel: BLS signal residue over ${valid.length} trial periods with the best period ${bestPeriod} days marked (SDE ${sde === null ? "not computed" : sde.toPrecision(4)}). Lower panel: ${points.length} observations folded on the best period, centred on mid-transit, with the fitted box model.`,
@@ -434,9 +435,9 @@ function searchLightCurveTransitsBls(input) {
           layer: [
             { data: { values: valid.map((row) => ({ periodDays: row.periodDays, signalResidue: row.signalResidue })) },
               mark: { type: "line", color: "#255C99", strokeWidth: 1.5, clip: true },
-              encoding: { x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: { type: "log" } }, y: { field: "signalResidue", type: "quantitative", title: "BLS signal residue" } } },
+              encoding: { x: { field: "periodDays", type: "quantitative", title: "Trial period (day)", scale: periodScale }, y: { field: "signalResidue", type: "quantitative", title: "BLS signal residue" } } },
             { data: { values: [{ periodDays: bestPeriod }] }, mark: { type: "rule", color: "#C2415D", strokeWidth: 1.5 },
-              encoding: { x: { field: "periodDays", type: "quantitative", scale: { type: "log" } } } },
+              encoding: { x: { field: "periodDays", type: "quantitative", scale: periodScale } } },
           ],
         },
         {
