@@ -206,6 +206,7 @@ export function buildEffectObservationPrompt(input: {
   const ids = JSON.stringify(input.attempts.map((attempt) => attempt.id));
   return `[Effect check — read-only]
 The earlier work on this goal was interrupted, and the app does not know whether the following action(s) already took effect in the outside world. Before anyone is asked, go and look.
+This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences about what you saw, then the marker line below as the very last line of your answer.
 
 Goal: ${input.objective.slice(0, 1_200)}
 
@@ -217,7 +218,7 @@ Rules for this check:
 - Only look: open or refresh the relevant page in the browser, list recent posts / messages / orders / files, read logs or the working folder, or read this app's own state (for example the registered automations and their schedules).
 - Decide from what you actually see, not from what should have happened.
 
-End your answer with exactly one final line (no code fence), covering all attempts above in one verdict:
+End your answer with exactly one final line, starting with the marker (no code fence, no prefix), covering all attempts above in one verdict:
 ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the URL or short text you saw"}
 - "done": you saw that the result exists (for example the post is on the profile).
 - "not_done": you clearly saw it does not exist (the list is visible and the item is absent).
@@ -628,6 +629,7 @@ export function buildAutomationEffectObservationPrompt(plan: AutomationObservati
     ? `,"outputs":{"node:<id>":"exact produced text, only if you saw it"}` : "";
   return `[Effect check — read-only]
 A scheduled automation ("${(automation.name ?? "").slice(0, 120)}") was interrupted, and the app does not know whether the following step(s) already took effect in the outside world. Before anyone is asked, go and look.
+This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences about what you saw, then the marker line below as the very last line of your answer.
 ${automation.goal ? `Automation goal: ${String(automation.goal).slice(0, 600)}\n` : ""}
 Target(s):
 ${[...steps, ...attempts].join("\n")}
@@ -637,7 +639,7 @@ Rules for this check:
 - Only look: open or refresh the relevant page in the browser (this automation's own browser profile), list recent posts / messages / orders / files, read logs.
 - Decide from what you actually see, not from what should have happened.
 
-End your answer with exactly one final line (no code fence), covering all targets above in one verdict:
+End your answer with exactly one final line, starting with the marker (no code fence, no prefix), covering all targets above in one verdict:
 ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the URL or short text you saw"${outputsHint}}
 - "done": you saw that the result exists. "not_done": you clearly saw it does not exist. "unknown": anything else, or the targets differ. Unknown is always acceptable; a wrong "done" or "not_done" is not.`;
 }

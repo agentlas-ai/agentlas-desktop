@@ -34,7 +34,7 @@ import {
   updateAutomation,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { appendChatMessage, clearChatGoalBindingByGoalId, listChatMessages } from "./store/chats";
+import { appendChatMessage, clearChatGoalBindingByGoalId } from "./store/chats";
 import { completeChatGoalContract, getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
 import {
   closeOpenGoalLedgerTasks,
@@ -119,7 +119,8 @@ import {
   type AutomationFailureContext,
 } from "./automation-strategy";
 import { recordAutomationRecovery } from "./automation-recovery";
-import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "./automation-continuity";
+import { buildAutomationContinuityCapsulePrompt } from "./automation-progress-facts";
+import { declaredGoalForAutomation } from "./automation-declared-goal";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -275,19 +276,8 @@ function buildAutomationContinuityPrompt(chatId: string, prompt: string, strateg
   // 전략 진화 지시문(실패 스트릭이 있을 때만 비어 있지 않음)은 프롬프트 바로 앞에 붙는다 —
   // 재시도가 동일 방법을 그대로 반복하는 구조적 결함의 수리(run-graph 경로와 동일 계약).
   const effectivePrompt = strategyDirective ? `${strategyDirective}\n\n${prompt}` : prompt;
-  const prior = listChatMessages(chatId, 12)
-    .filter((message) => message.role === "assistant" || message.role === "system")
-    .slice(-4)
-    .map((message) => `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`);
-  if (prior.length === 0) return effectivePrompt;
-  return [
-    AUTOMATION_CONTINUITY_OPEN,
-    "This is the same durable automation session. Continue from these prior outcomes; do not restart setup or create a new CLI/session unless an explicit lifecycle error requires it.",
-    ...prior,
-    AUTOMATION_CONTINUITY_CLOSE,
-    "",
-    effectivePrompt,
-  ].join("\n");
+  // 호스트가 센 사실 + 최신 서술 1개(run-graph 와 같은 한 벌) — 이전 실행의 자세가 관성이 되지 않게.
+  return buildAutomationContinuityCapsulePrompt(chatId, effectivePrompt);
 }
 
 // ── 실패 처리 정책(2026-07-08) ─────────────────────────────────────────────
@@ -1063,7 +1053,7 @@ async function runOne(
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
           ...(runRecord.steps.length > 0 ? { runRecord } : {}),
           // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
-          declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
+          declaredGoal: declaredGoalForAutomation(a),
         });
         recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
         if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
@@ -1253,7 +1243,7 @@ async function runOne(
         const classified = await classifyAutomationOutcome(output, {
           runtimeSelection: a.runtimeSelection,
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
-          declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
+          declaredGoal: declaredGoalForAutomation(a),
         });
         recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
         if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
