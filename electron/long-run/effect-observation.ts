@@ -111,10 +111,67 @@ export function isEffectUncertainBlockReason(reason: string | null | undefined):
  * 앱이 스스로 다시 볼 시각(백오프)을 원장에 적고(scheduleBlockedGoalRetry), 그 시각에 스윕이 새 관찰
  * 회차(epoch)로 다시 본다. 옛 시도를 조용히 재실행하는 길은 여전히 없다 — 재개는 관찰의 판정으로만 열린다.
  */
-function scheduleObservationRetry(longRunId: string, detail: string): void {
+/**
+ * 같은 시도 묶음을 몇 번까지 모델로 볼 것인가 — 오너 실측 2026-09-24.
+ *
+ * 관찰 한 번은 전체 모델 실행(격리 앱 176k~500k 입력 토큰)인데, 모름으로 끝나면 백오프(5분→…→6시간)로
+ * 끝없이 다시 봤다(설치본 1.2.41: 26/26 모름, 개발 사본: 29/29). 세 번 봐도 모르면 자동 재관찰을 멈추고
+ * 기계 코드(effect_observation_exhausted)와 함께 오너에게 넘긴다 — 막다른 길이 아니다: 목표 칩의 이어가기(인지 후 재개)는
+ * "먼저 읽기 전용으로 확인하고, 확인 전엔 반복하지 말 것" 지시로 이어지고, 대화에 한 문장을 보내도 이어진다.
+ */
+export const MAX_INCONCLUSIVE_OBSERVATIONS = 3;
+export const EFFECT_OBSERVATION_EXHAUSTED = "effect_observation_exhausted";
+
+/** Inconclusive looks already spent on exactly this target set (every epoch counts). Only looks whose
+ * verdict was read from the runner's raw final text count — the looks before that fix could never
+ * return a verdict, and an upgraded install must still get its readable looks. */
+export function inconclusiveObservationCount(longRunId: string, targetIds: readonly string[]): number {
+  const ids = JSON.stringify([...targetIds].sort());
+  const rows = getDb().prepare(
+    `SELECT d.payload_json AS dispatched FROM long_run_events AS i
+       JOIN long_run_events AS d ON d.run_id = i.run_id AND d.kind = i.kind
+        AND json_extract(d.payload_json, '$.action') = 'dispatched'
+        AND json_extract(d.payload_json, '$.observationDigest') = json_extract(i.payload_json, '$.observationDigest')
+      WHERE i.run_id = ? AND i.kind = ? AND json_extract(i.payload_json, '$.action') = 'inconclusive'
+        AND json_extract(i.payload_json, '$.markerSource') = 'runner-final'`,
+  ).all(longRunId, EFFECT_OBSERVATION_EVENT_KIND) as Array<{ dispatched: string }>;
+  let count = 0;
+  for (const row of rows) {
+    try {
+      const attemptIds = (JSON.parse(row.dispatched) as { attemptIds?: unknown }).attemptIds;
+      if (Array.isArray(attemptIds) && JSON.stringify([...attemptIds].map(String).sort()) === ids) count += 1;
+    } catch { /* unreadable receipt is not counted */ }
+  }
+  return count;
+}
+
+function observationExhausted(longRunId: string, targetIds: readonly string[]): boolean {
+  return Boolean(getDb().prepare(
+    `SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = ?
+       AND json_extract(payload_json, '$.action') = ? AND json_extract(payload_json, '$.targetSet') = ? LIMIT 1`,
+  ).get(longRunId, EFFECT_OBSERVATION_EVENT_KIND, "exhausted", JSON.stringify([...targetIds].sort())));
+}
+
+/** Returns true when the cap was reached and the automatic re-observation was stopped (owner-visible). */
+function stopObservingWhenExhausted(longRunId: string, targetIds: readonly string[], detail: string): boolean {
+  try {
+    if (inconclusiveObservationCount(longRunId, targetIds) < MAX_INCONCLUSIVE_OBSERVATIONS) return false;
+    if (observationExhausted(longRunId, targetIds)) return true;
+    appendLongRunEvent({ runId: longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
+      payload: { action: "exhausted", code: EFFECT_OBSERVATION_EXHAUSTED, targetSet: JSON.stringify([...targetIds].sort()),
+        looks: MAX_INCONCLUSIVE_OBSERVATIONS, lastReason: detail.slice(0, 120) } });
+    return true;
+  } catch (error) {
+    console.warn("[effect-observation] exhaustion receipt failed:", error);
+    return false;
+  }
+}
+
+function scheduleObservationRetry(longRunId: string, detail: string, targetIds?: readonly string[]): void {
   try {
     const current = getLongRun(longRunId);
     if (!current || current.status !== "blocked" || current.surface === "science") return;
+    if (targetIds && stopObservingWhenExhausted(longRunId, targetIds, detail)) return;
     const slot = nextBlockedGoalRetrySlot(current.id);
     scheduleBlockedGoalRetry({ runId: current.id, expectedVersion: current.version, kind: "observe",
       fromReason: current.blockedReason, retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail,
@@ -225,6 +282,12 @@ ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the 
 - "unknown": you could not see it, the attempts differ, or you are not sure. Unknown is always acceptable; a wrong "done" or "not_done" is not.`;
 }
 
+function sayExhausted(chatId: string, runId: string): void {
+  say(chatId, runId,
+    `이전 작업이 반영됐는지 ${MAX_INCONCLUSIVE_OBSERVATIONS}번 직접 확인했지만 판단할 수 없어, 자동 재확인을 멈췄어요(${EFFECT_OBSERVATION_EXHAUSTED}). 결과를 직접 확인하신 뒤 목표 칩에서 이어가기를 누르거나 이 대화에 한 문장을 보내면, 반복하기 전에 먼저 확인하도록 이어서 진행합니다.`,
+    `I checked ${MAX_INCONCLUSIVE_OBSERVATIONS} times but could not tell whether the earlier action went through, so automatic re-checks stopped (${EFFECT_OBSERVATION_EXHAUSTED}). Check the result, then press Continue on the goal chip or send one sentence here; the goal resumes and verifies before repeating anything.`);
+}
+
 function say(chatId: string, runId: string, ko: string, en: string): void {
   try {
     appendChatMessage(chatId, "assistant", currentUiLocale() === "ko" ? ko : en, { hostNotice: { purpose: "goal-continuation", runId } });
@@ -316,6 +379,7 @@ export function maybeDispatchEffectObservation(
     targets = [{ id: `invocation:${last.run_id}`, taskTitle: run.objective.slice(0, 240), taskObjective: "", invocationRunId: last.run_id }];
   }
   const targetIds = targets.map((target) => target.id);
+  if (observationExhausted(run.id, targetIds)) return { status: "skipped", reason: EFFECT_OBSERVATION_EXHAUSTED };
   const digest = effectObservationDigest(run.id, targetIds, epoch);
   if (alreadyObserved(run.id, digest)) return { status: "skipped", reason: "already_observed" };
   const observationRunId = randomUUID();
@@ -350,13 +414,17 @@ function recordInconclusive(ticket: EffectObservationTicket, reason: string,
   copy: "unknown" | "not_started" | { observed: "done" | "not_done" } = "unknown"): void {
   try {
     appendLongRunEvent({ runId: ticket.longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
-      payload: { action: "inconclusive", observationDigest: ticket.digest,
+      payload: { action: "inconclusive", observationDigest: ticket.digest, markerSource: "runner-final",
         observationInvocationRunId: ticket.observationRunId, reason,
         ...(typeof copy === "object" ? { observedVerdict: copy.observed } : {}) } });
   } catch (error) {
     console.warn("[effect-observation] inconclusive receipt failed:", error);
   }
-  scheduleObservationRetry(ticket.longRunId, reason);
+  scheduleObservationRetry(ticket.longRunId, reason, ticket.attemptIds);
+  if (observationExhausted(ticket.longRunId, ticket.attemptIds)) {
+    sayExhausted(ticket.chatId, ticket.observationRunId);
+    return;
+  }
   const retryKo = "잠시 뒤 앱이 스스로 다시 확인하고, 확인되는 대로 이어갑니다.";
   const retryEn = "The app will look again shortly on its own and continue as soon as it can tell.";
   if (copy === "not_started") {
@@ -725,9 +793,14 @@ function completeAutomationEffectObservation(input: {
     if (plan.goal) {
       try {
         appendLongRunEvent({ runId: plan.goal.longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
-          payload: { action: "inconclusive", observationDigest: plan.digest, observationInvocationRunId: observationRunId, reason } });
+          payload: { action: "inconclusive", observationDigest: plan.digest, observationInvocationRunId: observationRunId, reason,
+            markerSource: "runner-final" } });
       } catch { /* the automation receipt above is the durable record */ }
-      scheduleObservationRetry(plan.goal.longRunId, reason);
+      scheduleObservationRetry(plan.goal.longRunId, reason, plan.goal.attempts.map((attempt) => attempt.id));
+      if (observationExhausted(plan.goal.longRunId, plan.goal.attempts.map((attempt) => attempt.id)) && plan.goal.chatId) {
+        sayExhausted(plan.goal.chatId, observationRunId);
+        return { outcome: "fallback", reason: EFFECT_OBSERVATION_EXHAUSTED };
+      }
     }
     sayGoal(plan, observationRunId,
       observed

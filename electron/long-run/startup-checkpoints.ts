@@ -6,6 +6,7 @@ import type { InstructionSnapshot } from "../../shared/runtime-instructions";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle } from "../invocation/legacy-goal-lifecycle";
 import { appendChatMessage, getChat, getChatWorkingFolder } from "../store/chats";
+import { getProject } from "../store/projects";
 import { getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { currentUiLocale } from "../ui-locale";
 import { getDb } from "../store/db";
@@ -251,7 +252,10 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
   if (!attemptRuntime || !workerRuntime || !sameJson(attemptRuntime, workerRuntime)) startupReplayRefusal("runtime_binding_changed");
 
   const workspacePath = workerWorkspace(producer.workspace_binding_json);
-  const currentWorkspace = getChatWorkingFolder(chat.id) ?? agentRunCwd();
+  // Same folder order as the executor (saved chat folder, then Project folder, then agentRunCwd):
+  // a Project Work Goal was refused as workspace_changed on every restart.
+  const currentWorkspace = getChatWorkingFolder(chat.id)
+    ?? (chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null) ?? agentRunCwd();
   if (!workspacePath || !currentWorkspace || workspacePath !== currentWorkspace) startupReplayRefusal("workspace_changed");
   try { if (!statSync(workspacePath).isDirectory()) startupReplayRefusal("workspace_changed"); }
   catch { startupReplayRefusal("workspace_changed"); }

@@ -45,7 +45,7 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
-import { isEffectUncertainBlockReason, maybeDispatchEffectObservation } from "./effect-observation";
+import { EFFECT_OBSERVATION_EXHAUSTED, isEffectUncertainBlockReason, maybeDispatchEffectObservation } from "./effect-observation";
 import { isGoalObserving, type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 
@@ -300,6 +300,9 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       return { runId: run.id, fromReason: run.blockedReason, action: "retry_scheduled", detail: observed.reason };
     }
     if (TRANSIENT_OBSERVATION_SKIPS.has(observed.reason)) return defer(observed.reason);
+    // The observation cap was reached and the owner was told (effect-observation.ts): no more model looks
+    // and no retry notices — the owner's Continue/one sentence is the way out, not another schedule.
+    if (observed.reason === EFFECT_OBSERVATION_EXHAUSTED) return defer(observed.reason);
     if (observed.reason === "chat_binding_changed") return cancel(current, "goal_chat_binding_missing", trigger);
     if (observed.reason !== "no_uncertain_attempts" && observed.reason !== "not_blocked_on_uncertain_effects") {
       return scheduleRetry(current, "observe", observed.reason, trigger, { effectUncertain: true });
