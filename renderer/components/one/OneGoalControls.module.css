@@ -31,3 +31,12 @@
 .reviewActions .reviewPrimary { background: var(--ink); color: var(--paper); }
 .reviewActions .reviewPrimary:hover { opacity: 0.85; background: var(--ink); }
 @media (max-width: 480px) { .criteria { display: none; } .bar { gap: 4px; } }
+/* Goal model change queued: a quiet pending pill (indeterminate ring), details on demand. */
+.root .modelChip { gap: 5px; min-height: 22px; height: 22px; padding: 0 8px 0 6px; border: 1px solid var(--paper-edge); border-radius: 999px; background: var(--paper-2); color: var(--muted-deep); font-size: 10.5px; white-space: nowrap; }
+.root .modelChip[aria-expanded="true"] { color: var(--ink); border-color: var(--muted-deep); }
+.modelSpinner { box-sizing: border-box; flex: 0 0 auto; width: 10px; height: 10px; border: 1.5px solid var(--paper-edge); border-top-color: var(--ink-soft); border-radius: 50%; animation: modelSpin 0.9s linear infinite; }
+@keyframes modelSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .modelSpinner { animation: none; width: 7px; height: 7px; border: 0; background: var(--ink-soft); } }
+.modelNoteHint { color: var(--muted-deep); }
+.root { container-type: inline-size; }
+@container (max-width: 470px) { .root .modelChip { padding: 0 6px; } .modelChipText { display: none; } }

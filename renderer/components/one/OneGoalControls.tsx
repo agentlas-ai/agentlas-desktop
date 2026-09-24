@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalResumeConfirmation, GoalResumeReview, GoalRuntimeSelectionReceipt } from "../../../shared/types";
 import { IconEdit, IconTarget, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -161,14 +161,29 @@ export function createOneGoalControlSession(input: {
     dispose: () => { live = false; ++readGeneration; ++actionGeneration; } };
 }
 
-export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConfirmedModel, helpContent }: {
+/** A queued Goal model change is visible until the durable handoff reports
+ * `applied`, or the latest confirmed run already used the requested model. */
+export function goalModelChangePending(input: {
+  ongoing: boolean; handoff: GoalRuntimeSelectionReceipt | null; lastConfirmedModel?: string | null;
+}): boolean {
+  const { handoff } = input;
+  if (!input.ongoing || !handoff || handoff.state === "applied") return false;
+  return !(handoff.requested.model && input.lastConfirmedModel === handoff.requested.model);
+}
+
+export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConfirmedModel, helpContent, handoffRequestKey }: {
   chatId: string; locale: "ko" | "en"; isCurrent: () => boolean; onDeleted: () => void;
+  /** Bumped by the composer after Main acknowledges a Goal model handoff. */
+  handoffRequestKey?: number;
   /** From the latest durable invocation final, never the composer default. */
   lastConfirmedModel?: string | null;
   helpContent?: ReactNode;
 }) {
   const [view, setView] = useState<GoalView>({ goalId: null, context: null, continuity: null, handoff: null, observedAt: null, pending: null, error: null, errorKind: null, refreshing: false, review: null });
   const [helpOpen, setHelpOpen] = useState(false);
+  const [modelNoteOpen, setModelNoteOpen] = useState(false);
+  const modelChipRef = useRef<HTMLButtonElement>(null);
+  const modelNoteId = useId();
   const rootRef = useRef<HTMLElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -211,6 +226,25 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     refresh();
     return () => { disposed = true; owner.dispose(); unsubscribe?.(); clearTimeout(timer); clearInterval(poll); session.current = null; };
   }, [chatId]);
+  // The composer's acknowledgement is not a Goal observation: re-read the
+  // durable handoff so the pending chip reflects Main, not the click.
+  useEffect(() => {
+    if (handoffRequestKey) void session.current?.refresh();
+  }, [handoffRequestKey]);
+  useEffect(() => {
+    if (!modelNoteOpen) return;
+    const onPointer = (event: PointerEvent) => {
+      if (rootRef.current && event.target instanceof Node && !rootRef.current.contains(event.target)) setModelNoteOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setModelNoteOpen(false);
+      modelChipRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onPointer); document.removeEventListener("keydown", onKey); };
+  }, [modelNoteOpen]);
   useEffect(() => {
     if (view.review) setHelpOpen(false);
   }, [view.review?.attemptSetDigest]);
@@ -312,6 +346,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : surface.state === "failed" ? (ko ? "실패" : "Failed")
     : surface.state === "cancelled" ? (ko ? "종료" : "Stopped")
     : (ko ? "상태 확인 중" : "Checking status");
+  const modelPending = goalModelChangePending({ ongoing, handoff: view.handoff, lastConfirmedModel });
+  const pendingModel = view.handoff?.requested.model ?? view.handoff?.requested.kind ?? null;
   const review = view.review;
   const closeReview = () => { session.current?.closeReview(); };
   // One sentence per state. Attempt IDs, timestamps and tool previews stay in
@@ -341,6 +377,15 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       <IconTarget size={13} />
       <strong>{ongoing ? (ko ? "지속 목표" : "Ongoing goal") : (ko ? "목표" : "Goal")}</strong>
       <span className={styles.label} title={label} role="status">{shortStatus}</span>
+      {modelPending && <button type="button" ref={modelChipRef} className={styles.modelChip} data-goal-model-pending="true"
+        aria-expanded={modelNoteOpen} aria-controls={modelNoteId} aria-describedby={modelNoteOpen ? modelNoteId : undefined}
+        aria-label={ko ? "모델 변경 대기 — 설명 보기" : "Model change pending — show details"}
+        onClick={() => { setHelpOpen(false); setModelNoteOpen((open) => !open); }}
+        onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) { setHelpOpen(false); setModelNoteOpen(true); } }}
+        onBlur={(event) => { if (!(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) setModelNoteOpen(false); }}>
+        <span className={styles.modelSpinner} aria-hidden="true" />
+        <span className={styles.modelChipText}>{ko ? "모델 변경 대기" : "Model change pending"}</span>
+      </button>}
       {pausable && <button type="button" aria-label={ko ? "목표 일시정지" : "Pause goal"}
         onClick={() => { void session.current?.act("pause"); }}>{ko ? "일시정지" : "Pause"}</button>}
       {resumable && <button type="button" disabled={view.pending === "resume" || !view.context?.version}
@@ -360,7 +405,14 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>
       <button type="button" className={styles.helpButton} aria-label={ko ? "목표 상태 도움말" : "Goal status help"}
-        aria-haspopup="dialog" aria-expanded={helpOpen} onClick={() => setHelpOpen((open) => !open)}>?</button>
+        aria-haspopup="dialog" aria-expanded={helpOpen} onClick={() => { setModelNoteOpen(false); setHelpOpen((open) => !open); }}>?</button>
+    </div>}
+    {modelPending && modelNoteOpen && <div id={modelNoteId} className={styles.help} role="tooltip" data-goal-model-note="true">
+      <p><strong>{ko ? "모델 변경 대기 중" : "Model change pending"}</strong>{pendingModel ? ` · ${pendingModel}` : ""}</p>
+      <p>{ko
+        ? "이 목표의 다음 안전한 실행부터 새 모델이 적용됩니다. 지금 실행은 그대로 끝나고, 이 목표가 만든 자동화도 다음 실행부터 따라갑니다(직접 모델을 지정한 자동화는 그대로)."
+        : "The new model applies from this Goal's next safe run. The current run finishes as is, and automations this Goal created follow from their next run (automations with a model you set yourself stay unchanged)."}</p>
+      <p className={styles.modelNoteHint}>{ko ? "적용되면 이 표시는 사라집니다." : "This chip disappears once the change is applied."}</p>
     </div>}
     {helpOpen && <div className={styles.help} role="dialog" data-goal-help="true" aria-label={ko ? "목표 상태 설명" : "Goal status explained"}>
       <p>{label}</p>

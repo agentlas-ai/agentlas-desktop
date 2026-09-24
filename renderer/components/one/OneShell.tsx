@@ -1565,6 +1565,9 @@ export function OneShell() {
   // 확인 영수증(예: 목표 모델 변경 예약)은 오류가 아니다 — 같은 알림 줄을 쓰되 빨간 오류 색으로
   // 그리지 않는다. 문장이 바뀌면(다른 알림이 덮으면) 자동으로 원래 색으로 돌아간다.
   const infoActionNoticeRef = useRef<string | null>(null);
+  // Bumped when Main acknowledges a Goal model handoff; the Goal bar re-reads
+  // the durable handoff and shows a pending chip instead of a boxed notice.
+  const [goalHandoffRequestKey, setGoalHandoffRequestKey] = useState(0);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -4199,15 +4202,19 @@ export function OneShell() {
         ));
         if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
         acknowledgedSelection = receipt;
-        const selectionNotice = goalHandoff
-          ? (appLocale === "ko"
-            ? "이 지속 목표의 다음 안전한 실행에 모델 변경을 예약했습니다. 현재 실행과 별도 자동화 모델은 바뀌지 않습니다. 실제 적용 여부는 목표 상태에서 확인할 수 있습니다."
-            : "Model change is queued for this ongoing Goal's next safe run. The current run and separate automations are unchanged. Check the Goal status for actual application.")
-          : (appLocale === "ko"
-            ? "이 대화의 다음 새 메시지 모델만 변경했습니다. 기존 Goal의 자동 재개 모델과 별도 자동화는 바뀌지 않습니다."
-            : "Only this conversation's next new-message model changed. The existing Goal continuation and separate automations are unchanged.");
-        infoActionNoticeRef.current = selectionNotice;
-        setActionNotice(selectionNotice);
+        if (goalHandoff) {
+          // A queued Goal change is a pending state, not an alert: the Goal bar
+          // shows it as a chip (details on demand) until Main reports applied.
+          infoActionNoticeRef.current = null;
+          setActionNotice(null);
+          setGoalHandoffRequestKey((key) => key + 1);
+        } else {
+          const selectionNotice = appLocale === "ko"
+            ? "이 대화의 다음 새 메시지부터 새 모델을 씁니다. 이 대화에서 만든 자동화도 다음 실행부터 따라갑니다(직접 모델을 지정한 자동화는 그대로)."
+            : "This conversation's next new message uses the new model. Automations created in this chat follow from their next run (automations with a model you set yourself stay unchanged).";
+          infoActionNoticeRef.current = selectionNotice;
+          setActionNotice(selectionNotice);
+        }
         acknowledgedRuntime = withOneRuntimeSelection(
           { ...receiptRuntime, active: true },
           receipt.model ?? receiptRuntime.model ?? null,
@@ -8148,6 +8155,7 @@ export function OneShell() {
               chatId={activeThreadChatId}
               locale={appLocale === "ko" ? "ko" : "en"}
               lastConfirmedModel={receipt?.chatId === activeThreadChatId ? receipt.model : null}
+              handoffRequestKey={goalHandoffRequestKey}
               helpContent={<>
                 <AutomationMonitorStrip key={activeThreadChatId} chatId={activeThreadChatId} locale={appLocale} />
                 <ContinuityStatus chatId={activeThreadChatId} locale={appLocale} />
