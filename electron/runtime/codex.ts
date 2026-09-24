@@ -63,6 +63,13 @@ import {
 import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkforceInventory, waitForCodexWorkforceInventory } from "./codex-workforce";
 import { answerCodexMcpElicitation } from "./codex-elicitation";
 import { residencyDisabledFor } from "./claude-session";
+import {
+  claimRuntimeSessionTurn,
+  classifyCodexResumeFailure,
+  freshSessionReplacesStored,
+  unattendedFreshSessionStatus,
+  type UnattendedFreshSessionReason,
+} from "./unattended-session-turns";
 import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
 import type { AcpSessionLease } from "./acp-session-pool";
 import { generateImage } from "../multimodal/image";
@@ -445,6 +452,12 @@ interface CodexRunResult {
   observedUsage?: { inputTokens: number; outputTokens: number };
   /** 스트림 표식(또는 exit0 휴리스틱)이 말한 실패 — 있으면 text는 답이 아니다. */
   failure?: RunnerFailure;
+  /**
+   * The CLI emitted any stream event past `thread.started` (a turn, an item, a
+   * tool). False means the process ended before the model ran — nothing it could
+   * have done externally, so an unattended resume failure may continue fresh.
+   */
+  turnStarted: boolean;
 }
 
 /**
@@ -616,6 +629,7 @@ function runCodexProcess(
     let stderr = "";
     let lastEmit = 0;
     let turnCompleted = false;
+    let turnStarted = false;
     // Newer Codex runtimes send native tool calls as response items instead of
     // the older `item.started` / `item.completed` command events. Dropping that
     // envelope made a real file edit look like a two-event "thought + final"
@@ -736,6 +750,7 @@ function runCodexProcess(
       };
       usage?: { output_tokens?: number; input_tokens?: number; cached_input_tokens?: number };
     }): void => {
+      if (typeof ev.type === "string" && ev.type !== "thread.started") turnStarted = true;
       const payload = record(ev.payload);
       if (ev.type === "response_item" && payload?.type === "custom_tool_call") {
         const rawName = nonEmptyText(payload.name);
@@ -1032,6 +1047,7 @@ function runCodexProcess(
         ...(reportedCachedInputTokens != null ? { reportedCachedInputTokens } : {}),
         ...(observedUsage ? { observedUsage } : {}),
         ...(runnerFailure ? { failure: runnerFailure } : {}),
+        turnStarted,
       });
     });
   });
@@ -2128,7 +2144,23 @@ export const runCodex: Runner = async (
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
       : null;
-  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  /*
+   * Unattended parallel branches share one ledger chat and therefore one stored
+   * thread; codex admits one writer per thread. A sibling that finds the stored
+   * thread held by another in-flight turn runs fresh instead of attempting the
+   * resume that codex would refuse (unattended-session-turns.ts).
+   */
+  const sessionTurn = claimRuntimeSessionTurn({
+    kind: KIND,
+    sessionId: runReq.runtimeSessionId ? null : storedSessionId,
+    unattended: runReq.unattended,
+  });
+  try {
+  let freshReason: UnattendedFreshSessionReason | null = sessionTurn.contended ? "parallel_turn" : null;
+  if (freshReason) events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
+  const resumeSessionId = runReq.runtimeSessionId ?? (freshReason ? null : storedSessionId);
+  /** Whether this turn's session may be written back as the chat's durable session. */
+  const persistSession = (): boolean => !freshReason || freshSessionReplacesStored(freshReason);
   /*
    * 이 실행의 누적 카운터 기준선. 세 갈래다:
    *   새 세션        → 0 (이번 턴이 곧 전부)
@@ -2159,6 +2191,7 @@ export const runCodex: Runner = async (
    * 이 턴을 한 번 처리한다 — 사용자 화면에는 아무 차이도 남지 않아야 한다.
    */
   if (
+    !freshReason &&
     codexAppServerSupported() &&
     !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
     !runReq.untrustedNoTools &&
@@ -2172,18 +2205,30 @@ export const runCodex: Runner = async (
     const gapContext = !runReq.runtimeSessionId && storedSessionId && existing
       ? renderGapContext(unseenHistoryGap(runReq.history, existing.updatedAt), runReq.locale)
       : "";
-    const attempt = await runCodexResidentTurn({
-      bin,
-      req: runReq,
-      events,
-      chatId: runReq.chatId,
-      fingerprint,
-      resumeThreadId: resumeSessionId ?? null,
-      gapContext,
-      mcpArgs,
-      appliedEffort,
-      observeNativeFile,
-    });
+    let attempt: Awaited<ReturnType<typeof runCodexResidentTurn>> = {};
+    try {
+      attempt = await runCodexResidentTurn({
+        bin,
+        req: runReq,
+        events,
+        chatId: runReq.chatId,
+        fingerprint,
+        resumeThreadId: resumeSessionId ?? null,
+        gapContext,
+        mcpArgs,
+        appliedEffort,
+        observeNativeFile,
+      });
+    } catch (err) {
+      // thread/resume is refused before any turn starts. An unattended run
+      // continues in a fresh one-shot session instead of stopping for a human.
+      if (!runReq.unattended || runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
+      freshReason = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
+      events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
+      if (freshSessionReplacesStored(freshReason)) {
+        clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+      }
+    }
     if (attempt.result) return attempt.result;
   }
   if (runReq.workforceRuntimeToolGrant) throw new Error("workforce_codex_observation_no_exec_fallback");
@@ -2216,7 +2261,7 @@ export const runCodex: Runner = async (
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
-  if (canResume) {
+  if (canResume && !freshReason) {
     const resumePerm = resumePermissionArgs(runReq.permission, runReq.approvalsReviewer);
     const args = [
       "exec",
@@ -2254,13 +2299,13 @@ export const runCodex: Runner = async (
     );
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
-      if (runReq.chatId && fingerprint && r.threadId) {
+      if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
       }
       throw abortReasonError(runReq);
     }
     if (r.code === 0) {
-      if (runReq.chatId && fingerprint && r.threadId) {
+      if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
         if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
           events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
         }
@@ -2287,10 +2332,32 @@ export const runCodex: Runner = async (
     }
     events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}`);
     if (runReq.unattended) {
-      throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
+      // A turn that started may already have acted; replaying it in a fresh
+      // session could repeat an external action. Report what the turn said.
+      if (r.turnStarted) {
+        if (r.failure) {
+          return {
+            text: r.text.trim(),
+            failure: r.failure,
+            sessionId: r.threadId ?? resumeSessionId,
+            tokens: r.tokens,
+            ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
+            appliedEffort,
+          };
+        }
+        throw new Error(`codex CLI exit ${r.code} after the resumed turn started; not replaying it in a fresh session${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
+      }
+      // Nothing ran. Continue in a fresh session; the automation prompt already
+      // carries the host-recorded continuity capsule, so no human is asked.
+      freshReason = classifyCodexResumeFailure(r.stderr);
+      events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
+      if (runReq.chatId && freshSessionReplacesStored(freshReason)) {
+        clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+      }
+    } else if (runReq.chatId) {
+      // Interactive chat may recover with the full durable history after an explicit receipt.
+      clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
     }
-    // Interactive chat may recover with the full durable history after an explicit receipt.
-    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
@@ -2309,13 +2376,13 @@ export const runCodex: Runner = async (
   ];
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
   if (runReq.signal?.aborted) {
-    if (runReq.chatId && fingerprint && created.threadId) {
+    if (runReq.chatId && fingerprint && created.threadId && persistSession()) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
     }
     throw abortReasonError(runReq);
   }
   if (created.code === 0) {
-    if (runReq.chatId && fingerprint && created.threadId) {
+    if (runReq.chatId && fingerprint && created.threadId && persistSession()) {
       if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
@@ -2346,6 +2413,9 @@ export const runCodex: Runner = async (
   throw new Error(
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,
   );
+  } finally {
+    sessionTurn.release();
+  }
 };
 
 /**
