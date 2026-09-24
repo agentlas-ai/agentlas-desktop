@@ -1946,7 +1946,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "free_fall: positive distance uncertainties; when absent errors are scaled from scatter"
+            "description": "free_fall: positive distance uncertainties; an entirely null mapped column is treated as unreported and errors are scaled from scatter; partially missing or invalid values reject"
           },
           "length_column": {
             "type": "string",
@@ -1964,7 +1964,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "pendulum: positive period uncertainties"
+            "description": "pendulum: positive period uncertainties; an entirely null mapped column is unreported and errors are scaled from scatter; partial missing values reject"
           },
           "amplitude_deg": {
             "type": "number",
@@ -1976,7 +1976,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "pendulum: per-point amplitude column in degrees [0, 180)"
+            "description": "pendulum: per-point amplitude column in degrees [0, 180); an entirely null mapped column uses amplitude_deg if given, otherwise the small-angle approximation; partial missing values reject"
           },
           "voltage_column": {
             "type": "string",
@@ -1994,13 +1994,13 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "ohms_law: positive voltage uncertainties"
+            "description": "ohms_law: positive voltage uncertainties; an entirely null mapped column is unreported; partial missing values reject"
           },
           "sigma_current_column": {
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
-            "description": "ohms_law: positive current uncertainties, folded into an effective voltage uncertainty with the fitted R"
+            "description": "ohms_law: positive current uncertainties, folded into an effective voltage uncertainty with the fitted R; an entirely null mapped column is unreported; partial missing values reject"
           },
           "model": {
             "type": "string",

@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-physics",
   "name": "Agentlas Physics",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -118,12 +118,12 @@
       },
       {
         "path": "runtime/lab-checkers.cjs",
-        "sha256": "1bd9df464fe1ed3cfd837021df45e4d1dd71370b5fe9dd9fabadec268d150014",
-        "bytes": 33977
+        "sha256": "a3b3b37cfd7d118b5fded621aafea079e33bd5412ba9a2ea239585b579e37760",
+        "bytes": 34893
       },
       {
         "path": "runtime/mcp-server.cjs",
-        "sha256": "63cb7a8af23e9d4b95994d8bdc91299cdc7214c39c34779d07a7334018e6f8fe",
+        "sha256": "1ceba32a52aac6582f0b3bb9eb30446d8230736feb4607c75734ce95d73fb68d",
         "bytes": 4098
       },
       {
@@ -193,8 +193,8 @@
       },
       {
         "path": "schemas/tools.json",
-        "sha256": "ab40cf69a302f7a69e16457c79d2b720f3ad910d1f4834583c1d059bcaf6ff1d",
-        "bytes": 65023
+        "sha256": "7759f31c7ab2df518680cfa9e3b6fcbb6045b07c2ebb5582090c5136cbd50a35",
+        "bytes": 65513
       },
       {
         "path": "schemas/uncertainty-propagation.input.json",

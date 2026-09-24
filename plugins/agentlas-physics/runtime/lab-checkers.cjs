@@ -120,8 +120,14 @@ function localGravity(latitudeDeg, altitudeM) {
   return 9.780327 * (1 + 0.0053024 * s * s - 0.0000058 * s2 * s2) - 3.086e-6 * altitudeM;
 }
 
-function optionalColumn(table, name, label) {
-  return name === undefined ? null : common.numericColumn(table, name, label);
+function optionalColumn(table, name, label, fallback, unreportedColumns) {
+  if (name === undefined) return null;
+  const column = table.columns.find((entry) => entry.name === name);
+  if (column && table.rows.length > 0 && table.rows.every((row) => row[column.index] === null)) {
+    unreportedColumns.push({ name: column.name, fallback });
+    return null;
+  }
+  return common.numericColumn(table, name, label);
 }
 
 function comparison(value, error, reference) {
@@ -160,27 +166,27 @@ function normalizeInput(input) {
     const reference = common.optionalFinite(value.reference_g, 0.1, 100, "physics-lab-reference-g", STANDARD_GRAVITY);
     return { value: reference, source: value.reference_g === undefined ? "standard gravity g_n = 9.80665 m/s² (conventional)" : "caller-declared reference", latitude: null, altitude: null };
   })();
-  const out = { experiment, table, options, referenceGravity };
+  const out = { experiment, table, options, referenceGravity, unreportedOptionalColumns: [] };
   if (experiment === "free_fall") {
     if ((value.height_column === undefined) === (value.distance_column === undefined)) throw new PhysicsError("physics-lab-free-fall-distance-column-required", "give exactly one of height_column or distance_column");
     out.time = common.numericColumn(table, value.time_column, "physics-lab-time-column");
     out.distance = common.numericColumn(table, value.height_column ?? value.distance_column, "physics-lab-distance-column");
     out.distanceColumnKind = value.height_column === undefined ? "distance" : "height";
-    out.sigma = optionalColumn(table, value.sigma_column, "physics-lab-sigma-column");
+    out.sigma = optionalColumn(table, value.sigma_column, "physics-lab-sigma-column", "scatter-scaled uncertainty", out.unreportedOptionalColumns);
     out.model = value.model === undefined ? "with_initial_velocity" : common.enumText(value.model, ["half_g_t_squared", "with_initial_velocity", "full"], "physics-lab-free-fall-model");
   } else if (experiment === "pendulum") {
     out.length = common.numericColumn(table, value.length_column, "physics-lab-length-column");
     out.period = common.numericColumn(table, value.period_column, "physics-lab-period-column");
-    out.sigmaPeriod = optionalColumn(table, value.sigma_period_column, "physics-lab-sigma-period-column");
-    if (value.amplitude_deg !== undefined && value.amplitude_column !== undefined) throw new PhysicsError("physics-lab-amplitude-conflict", "give either amplitude_deg or amplitude_column, not both");
+    out.sigmaPeriod = optionalColumn(table, value.sigma_period_column, "physics-lab-sigma-period-column", "scatter-scaled uncertainty", out.unreportedOptionalColumns);
+    out.amplitudeColumn = optionalColumn(table, value.amplitude_column, "physics-lab-amplitude-column", value.amplitude_deg === undefined ? "small-angle approximation (0°)" : "declared amplitude_deg", out.unreportedOptionalColumns);
+    if (value.amplitude_deg !== undefined && out.amplitudeColumn !== null) throw new PhysicsError("physics-lab-amplitude-conflict", "give either amplitude_deg or amplitude_column, not both");
     out.amplitudeDeg = value.amplitude_deg === undefined ? null : common.finite(value.amplitude_deg, 0, 179, "physics-lab-amplitude-deg");
-    out.amplitudeColumn = optionalColumn(table, value.amplitude_column, "physics-lab-amplitude-column");
     out.model = value.model === undefined ? "through_origin" : common.enumText(value.model, ["through_origin", "with_intercept"], "physics-lab-pendulum-model");
   } else {
     out.voltage = common.numericColumn(table, value.voltage_column, "physics-lab-voltage-column");
     out.current = common.numericColumn(table, value.current_column, "physics-lab-current-column");
-    out.sigmaVoltage = optionalColumn(table, value.sigma_voltage_column, "physics-lab-sigma-voltage-column");
-    out.sigmaCurrent = optionalColumn(table, value.sigma_current_column, "physics-lab-sigma-current-column");
+    out.sigmaVoltage = optionalColumn(table, value.sigma_voltage_column, "physics-lab-sigma-voltage-column", "no declared voltage uncertainty", out.unreportedOptionalColumns);
+    out.sigmaCurrent = optionalColumn(table, value.sigma_current_column, "physics-lab-sigma-current-column", "no current-uncertainty folding", out.unreportedOptionalColumns);
     out.model = value.model === undefined ? "with_intercept" : common.enumText(value.model, ["through_origin", "with_intercept"], "physics-lab-ohms-law-model");
     out.referenceResistance = value.reference_resistance === undefined ? null : common.finite(value.reference_resistance, Number.MIN_VALUE, 1e12, "physics-lab-reference-resistance");
   }
@@ -317,6 +323,7 @@ function analyzeLabExperiment(input) {
   if (n.table.rows.length < minimumPoints) throw new PhysicsError("physics-lab-too-few-points", `${n.experiment} with model ${n.model} needs at least ${minimumPoints} points`);
   const r = runner(n);
   const warnings = [];
+  for (const column of n.unreportedOptionalColumns) warnings.push(`Mapped optional column "${column.name}" is entirely unreported; using ${column.fallback}.`);
   const fit = r.fit;
   const ordinals = r.x.map((_, i) => i + 1);
   const order = ordinals.map((o) => o - 1).sort((a, b) => r.x[a] - r.x[b]);
@@ -418,6 +425,7 @@ function analyzeLabExperiment(input) {
     input: {
       experiment: n.experiment, title: n.table.title, model: n.model, pointCount: n.table.rows.length,
       columns: { x: r.xLabel, xUnit: r.xUnit, y: r.yLabel, yUnit: r.yUnit }, declaredSigma: fit.hasSigma,
+      unreportedOptionalColumns: n.unreportedOptionalColumns,
       reference: n.experiment === "ohms_law" ? { resistance: n.referenceResistance } : n.referenceGravity,
       ...(n.experiment === "pendulum" ? { amplitudeDeg: n.amplitudeDeg, amplitudeColumn: n.amplitudeColumn ? n.amplitudeColumn.column.name : null } : {}),
       ...(n.experiment === "free_fall" ? { distanceColumnKind: n.distanceColumnKind } : {}),
