@@ -6127,7 +6127,7 @@ export interface HubCreditBalance {
   authenticated: boolean;
   plan?: string;
   /** Server-owned feature access. Missing data never grants a feature. */
-  entitlements?: { aliveAgent?: boolean };
+  entitlements?: { aliveAgent?: boolean; projectAgents?: number };
   usedCredits?: number;
   planCreditLimit?: number;
   topUpCredits?: number;

@@ -42,6 +42,34 @@ export async function checkAliveAgentAccess(): Promise<AliveAgentAccess> {
   return balance.entitlements.aliveAgent ? "allowed" : "alive-plan-required";
 }
 
+/** A short-lived, single-use result from the server, never supplied by renderer input. */
+export interface ProjectAgentLimitGrant {
+  readonly limit: number;
+  readonly checkedAtMs: number;
+}
+
+const projectAgentGrants = new WeakSet<ProjectAgentLimitGrant>();
+const PROJECT_AGENT_GRANT_MAX_AGE_MS = 10_000;
+
+export async function getFreshProjectAgentLimitGrant(): Promise<ProjectAgentLimitGrant> {
+  const balance = await getBillingCredits();
+  if (!balance.authenticated) throw new Error("[agentlas:code=project-agent-sign-in-required] Sign in to add project agents or teams.");
+  const limit = balance.entitlements?.projectAgents;
+  if (balance.error || !Number.isSafeInteger(limit) || limit === undefined || limit < 0 || limit > 32) {
+    throw new Error("[agentlas:code=project-agent-entitlement-unavailable] Could not verify the project agent limit. Check your connection and try again.");
+  }
+  const grant = Object.freeze({ limit, checkedAtMs: Date.now() });
+  projectAgentGrants.add(grant);
+  return grant;
+}
+
+/** A store mutation consumes the grant so later writes must read the server again. */
+export function consumeProjectAgentLimitGrant(grant: ProjectAgentLimitGrant | undefined): number | null {
+  if (!grant || !projectAgentGrants.has(grant)) return null;
+  projectAgentGrants.delete(grant);
+  return Date.now() - grant.checkedAtMs <= PROJECT_AGENT_GRANT_MAX_AGE_MS ? grant.limit : null;
+}
+
 /** Legacy IPC method stays typed for older renderers but can never transfer. */
 export async function transferEarnings(_credits: number): Promise<EarningsTransferResult> {
   return { ok: false, error: "marketplace_settlement_retired" };

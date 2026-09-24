@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { saveApiKey, setEnvVar } from "../secrets/vault";
 import { createProject } from "../store/projects";
+import { getFreshProjectAgentLimitGrant } from "../billing";
 import { createAutomation } from "../store/automations";
 import { currentUiLocale } from "../ui-locale";
 import {
@@ -227,8 +228,49 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
     };
   }
 
-  // ── 1) 에이전트(페르소나) ────────────────────────────────
-  const agent = upsertAgent(src, overwrite);
+  // Importing a new or overwritten persona also creates a staffed project.
+  // Refuse a known plan/auth failure before changing the local agent or vault.
+  const existingAgent = getDb().prepare("SELECT id FROM installed_agents WHERE slug = ?")
+    .get(slugFor(src.kind)) as { id: string } | undefined;
+  const projectAgentGrant = !existingAgent || overwrite
+    ? await getFreshProjectAgentLimitGrant()
+    : undefined;
+  if (projectAgentGrant && projectAgentGrant.limit < 1) {
+    throw new Error("[agentlas:code=project-agent-limit-reached] Your plan does not allow agents in a project.");
+  }
+
+  // ── 1) 에이전트(페르소나) + 프로젝트 ─────────────────────
+  // Keep the server grant next to the write. If it expires or project creation
+  // fails, the agent insert/overwrite rolls back before vault writes begin.
+  const { agent, projectId } = getDb().transaction(() => {
+    const agent = upsertAgent(src, overwrite);
+    let projectId: string | null = null;
+    if (!agent.skipped) {
+      const memoryNote =
+        src.memoryFiles.length > 0
+          ? `\n\n${src.label} 메모리 ${src.memoryFiles.length}개를 ${src.rootPath} 에서 발견. ` +
+            `워킹 폴더로 연결하면 에이전트가 참조할 수 있습니다.`
+          : "";
+      const project = createProject({
+        name: uiText(`${src.label} 마이그레이션`, `${src.label} migration`),
+        sourceType: "local",
+        agentPool: [{
+          entityKind: "agent",
+          targetId: agent.id,
+          agentId: agent.id,
+          firmId: null,
+          controllerAgentId: null,
+          source: "local",
+          releaseId: null,
+          nameSnapshot: src.label,
+        }],
+        systemPrompt:
+          `${src.label}에서 가져온 어시스턴트입니다. 원본 설정: ${src.rootPath}` + memoryNote,
+      }, { projectAgentGrant });
+      projectId = project.id;
+    }
+    return { agent, projectId };
+  })();
   if (agent.skipped) {
     warnings.push(
       ko
@@ -252,33 +294,6 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
       promptTemplate: job.promptTemplate,
     });
     automationsImported += 1;
-  }
-
-  // ── 4) 메모리/워크스페이스 → 프로젝트 컨텍스트 ───────────
-  let projectId: string | null = null;
-  if (!agent.skipped) {
-    const memoryNote =
-      src.memoryFiles.length > 0
-        ? `\n\n${src.label} 메모리 ${src.memoryFiles.length}개를 ${src.rootPath} 에서 발견. ` +
-          `워킹 폴더로 연결하면 에이전트가 참조할 수 있습니다.`
-        : "";
-    const project = createProject({
-      name: uiText(`${src.label} 마이그레이션`, `${src.label} migration`),
-      sourceType: "local",
-      agentPool: [{
-        entityKind: "agent",
-        targetId: agent.id,
-        agentId: agent.id,
-        firmId: null,
-        controllerAgentId: null,
-        source: "local",
-        releaseId: null,
-        nameSnapshot: src.label,
-      }],
-      systemPrompt:
-        `${src.label}에서 가져온 어시스턴트입니다. 원본 설정: ${src.rootPath}` + memoryNote,
-    });
-    projectId = project.id;
   }
 
   return {

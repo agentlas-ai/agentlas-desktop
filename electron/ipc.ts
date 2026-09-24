@@ -332,7 +332,7 @@ import {
   signOut,
 } from "./auth";
 import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
-import { getBillingCredits, transferEarnings } from "./billing";
+import { getBillingCredits, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
   getHubPrompt,
@@ -432,6 +432,7 @@ import {
   createProject,
   getProject,
   listProjects,
+  projectPoolAddsMembers,
   removeProject,
   updateProject,
 } from "./store/projects";
@@ -4181,7 +4182,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("projects:list", () => listProjects());
   ipcMain.handle(
     "projects:createFromWorkspace",
-    (_e, input: { chatId: string; name: string; agentPool?: ProjectAgentPoolMember[] }) => {
+    async (_e, input: { chatId: string; name: string; agentPool?: ProjectAgentPoolMember[] }) => {
       const chatId = typeof input?.chatId === "string" ? input.chatId.trim() : "";
       const name = typeof input?.name === "string" ? input.name.trim() : "";
       if (!chatId || !name) throw new TypeError("A chat and project name are required.");
@@ -4196,13 +4197,15 @@ export function registerIpcHandlers(): void {
       );
       if (existing) return existing;
 
+      const projectAgentGrant = projectPoolAddsMembers([], input.agentPool)
+        ? await getFreshProjectAgentLimitGrant() : undefined;
       const created = createProject({
         name,
         sourceType: "local",
         sourceRef: null,
         agentPool: input.agentPool ?? [],
         folderPath,
-      });
+      }, { projectAgentGrant });
       void seedProjectMapInBackground(folderPath, name);
       return created;
     },
@@ -4213,8 +4216,10 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "projects:create",
-    (_e, input: ExplicitProjectCreateInput) => {
-      const project = createProjectFromExplicitSave(input);
+    async (_e, input: ExplicitProjectCreateInput) => {
+      const projectAgentGrant = projectPoolAddsMembers([], input?.agentPool)
+        ? await getFreshProjectAgentLimitGrant() : undefined;
+      const project = createProjectFromExplicitSave(input, { projectAgentGrant });
       // Seed .agentlas as soon as the folder is known so the first turn already
       // has a project map. Runs in the background: creation must not block on it.
       if (project.folderPath) void seedProjectMapInBackground(project.folderPath, input.name);
@@ -4223,11 +4228,16 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "projects:update",
-    (
+    async (
       _e,
       id: string,
       patch: ExplicitProjectUpdatePatch,
-    ) => updateProjectFromExplicitSave(id, patch),
+    ) => {
+      const existing = getProject(id);
+      const projectAgentGrant = existing && projectPoolAddsMembers(existing.agentPool, patch?.agentPool)
+        ? await getFreshProjectAgentLimitGrant() : undefined;
+      return updateProjectFromExplicitSave(id, patch, { projectAgentGrant });
+    },
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
   ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>

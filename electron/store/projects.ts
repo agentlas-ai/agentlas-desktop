@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
-import { projectPoolMemberReferences } from "../../shared/project-agent-pool";
+import { PROJECT_AGENT_POOL_MAX, projectPoolMemberKey, projectPoolMemberReferences } from "../../shared/project-agent-pool";
+import { consumeProjectAgentLimitGrant, type ProjectAgentLimitGrant } from "../billing";
 import type { Project, ProjectAgentPoolMember, ProjectSourceType } from "../../shared/types";
 
 interface ProjectRow {
@@ -104,6 +105,8 @@ interface ProjectMutationOptions {
   managedProjectsRoot?: string;
   /** Only the explicit projects:update save boundary may request allocation. */
   allocateManagedEmptyFolder?: boolean;
+  /** Main-only result of a fresh server entitlement check; consumed on addition. */
+  projectAgentGrant?: ProjectAgentLimitGrant;
 }
 
 function toProject(row: ProjectRow): Project {
@@ -169,7 +172,7 @@ function normalizeProjectAgentPoolMember(value: unknown): ProjectAgentPoolMember
 function normalizeAgentPool(value: ProjectAgentPoolMember[] | undefined): ProjectAgentPoolMember[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
-  return value.flatMap((item) => {
+  const normalized = value.flatMap((item) => {
     const member = normalizeProjectAgentPoolMember(item);
     return member ? [member] : [];
   }).filter((member) => {
@@ -177,7 +180,29 @@ function normalizeAgentPool(value: ProjectAgentPoolMember[] | undefined): Projec
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 32);
+  });
+  if (normalized.length > PROJECT_AGENT_POOL_MAX) {
+    throw new Error(`[agentlas:code=project-agent-safety-limit] A project supports at most ${PROJECT_AGENT_POOL_MAX} agents and teams.`);
+  }
+  return normalized;
+}
+
+/** Identity changes count as additions; removal, reordering, and metadata edits do not. */
+export function projectPoolAddsMembers(previous: ProjectAgentPoolMember[], requested: ProjectAgentPoolMember[] | undefined): boolean {
+  if (requested === undefined) return false;
+  const before = new Set(previous.map(projectPoolMemberKey));
+  return normalizeAgentPool(requested).some((member) => !before.has(projectPoolMemberKey(member)));
+}
+
+function assertProjectPoolCapacity(previous: ProjectAgentPoolMember[], next: ProjectAgentPoolMember[], grant?: ProjectAgentLimitGrant): void {
+  if (!projectPoolAddsMembers(previous, next)) return;
+  const limit = consumeProjectAgentLimitGrant(grant);
+  if (limit === null) {
+    throw new Error("[agentlas:code=project-agent-entitlement-unavailable] Verify your plan before adding project agents or teams.");
+  }
+  if (next.length > limit) {
+    throw new Error(`[agentlas:code=project-agent-limit-reached] Your plan allows ${limit} agents and teams per project (${next.length} selected).`);
+  }
 }
 
 export function listProjects(): Project[] {
@@ -207,6 +232,8 @@ export function createProject(input: {
   const name = input.name.trim() || "New project";
   const sourceType = normalizedPersistedProjectSourceType(input.sourceType);
   if (sourceType === "empty" && input.folderPath) throw new Error("empty_project_folder_must_be_managed");
+  const agentPool = normalizeAgentPool(input.agentPool);
+  assertProjectPoolCapacity([], agentPool, options.projectAgentGrant);
   let createdFolderPath: string | null = null;
   const folderPath = sourceType === "empty"
     ? (createdFolderPath = createManagedEmptyProjectDirectory(id, name, options.managedProjectsRoot))
@@ -221,7 +248,7 @@ export function createProject(input: {
         id,
         name,
         input.systemPrompt?.trim() || null,
-        JSON.stringify(normalizeAgentPool(input.agentPool)),
+        JSON.stringify(agentPool),
         sourceType,
         normalizedSourceRef(sourceType, input.sourceRef),
         folderPath,
@@ -250,6 +277,8 @@ export function updateProject(
   const now = new Date().toISOString();
   const existing = getProject(id);
   if (!existing) throw new Error(`Project not found: ${id}`);
+  const agentPool = patch.agentPool === undefined ? existing.agentPool : normalizeAgentPool(patch.agentPool);
+  assertProjectPoolCapacity(existing.agentPool, agentPool, options.projectAgentGrant);
 
   const sourceType = patch.sourceType === undefined
     ? existing.sourceType
@@ -286,7 +315,7 @@ export function updateProject(
       patch.name ?? existing.name,
       patch.systemPrompt === undefined ? existing.systemPrompt : patch.systemPrompt,
       // undefined preserves the pool; [] is an intentional full removal.
-      JSON.stringify(patch.agentPool === undefined ? existing.agentPool : normalizeAgentPool(patch.agentPool)),
+      JSON.stringify(agentPool),
       sourceType,
       sourceRef,
       folderPath,

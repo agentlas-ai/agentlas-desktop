@@ -5,6 +5,7 @@ import type {
   ProjectSourceType,
 } from "../../shared/types";
 import { pathFromGrant } from "../fs/access";
+import type { ProjectAgentLimitGrant } from "../billing";
 import {
   createProject,
   getProject,
@@ -28,6 +29,7 @@ export type ExplicitProjectUpdatePatch =
 interface ExplicitProjectSaveOptions {
   /** Private verification seam; never populated from renderer IPC. */
   managedProjectsRoot?: string;
+  projectAgentGrant?: ProjectAgentLimitGrant;
 }
 
 function owns(value: object, key: PropertyKey): boolean {
@@ -80,7 +82,7 @@ export function createProjectFromExplicitSave(
     sourceType,
     sourceRef: typeof rawInput.sourceRef === "string" ? rawInput.sourceRef : null,
     folderPath,
-  }, { managedProjectsRoot: options.managedProjectsRoot });
+  }, { managedProjectsRoot: options.managedProjectsRoot, projectAgentGrant: options.projectAgentGrant });
 }
 
 /** Main-only explicit create/save boundary used by projects:update. */
@@ -126,5 +128,6 @@ export function updateProjectFromExplicitSave(
   return updateProject(id, patch, {
     managedProjectsRoot: options.managedProjectsRoot,
     allocateManagedEmptyFolder: owns(rawPatch, "sourceType") && sourceType === "empty",
+    projectAgentGrant: options.projectAgentGrant,
   });
 }

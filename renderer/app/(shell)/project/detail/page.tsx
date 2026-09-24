@@ -37,6 +37,7 @@ import {
   buildProjectHubRecommendationJudgmentSpec,
   buildProjectHubRecommendations,
   isUserFacingProjectPoolMember,
+  projectAgentLimitMessage,
   projectPoolMemberKey,
   type ProjectHubRecommendation,
   type ProjectRosterCandidate,
@@ -685,9 +686,9 @@ function ProjectPage() {
       setEditingTeam(false);
       setRecoveryPending(false);
     } catch (error) {
-      setTeamSaveError(locale === "ko"
+      setTeamSaveError(projectAgentLimitMessage(error, locale === "ko") ?? (locale === "ko"
         ? `프로젝트 도구를 저장하지 못했습니다: ${detailForUser(error)}`
-        : `Could not save project tools: ${detailForUser(error)}`);
+        : `Could not save project tools: ${detailForUser(error)}`));
     }
   }
 

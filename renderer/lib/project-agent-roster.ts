@@ -1,6 +1,7 @@
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { pickLocalized, type Locale } from "@/lib/i18n";
+import { ipcErrorCode } from "@/lib/invocation-failure";
 import { redactSecrets } from "@shared/secret-patterns";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "@shared/project-hub-recommendation";
 import {
@@ -67,6 +68,22 @@ export interface ProjectHubRecommendation {
 // The pool key and the user-facing predicate are shared with the Mobile Bridge
 // authority so both staffing surfaces accept exactly the same agents.
 export { isUserFacingProjectAgent, projectPoolMemberKey };
+
+/** Main rejects staffing changes with stable codes after Electron IPC wraps errors. */
+export function projectAgentLimitMessage(error: unknown, ko: boolean): string | null {
+  switch (ipcErrorCode(error)) {
+    case "project-agent-sign-in-required":
+      return ko ? "프로젝트에 에이전트나 팀을 추가하려면 로그인해 주세요." : "Sign in to add agents or teams to this project.";
+    case "project-agent-entitlement-unavailable":
+      return ko ? "요금제의 프로젝트 에이전트 한도를 확인할 수 없습니다. 연결을 확인하고 다시 시도해 주세요." : "Could not verify your plan's project agent limit. Check your connection and try again.";
+    case "project-agent-limit-reached":
+      return ko ? "현재 요금제의 프로젝트 에이전트·팀 한도를 초과했습니다. 일부를 제거하거나 요금제를 변경해 주세요." : "This exceeds your plan's project agent and team limit. Remove some members or change plans.";
+    case "project-agent-safety-limit":
+      return ko ? "프로젝트에는 에이전트와 팀을 합쳐 최대 32개까지 저장할 수 있습니다." : "A project can store at most 32 agents and teams in total.";
+    default:
+      return null;
+  }
+}
 
 export function isUserFacingProjectPoolMember(
   member: ProjectAgentPoolMember,
