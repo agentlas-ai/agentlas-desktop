@@ -9,7 +9,24 @@
 .tree > summary::after { content: " ⌄"; }
 .mission { margin: 4px 0 2px; overflow-wrap: anywhere; }
 .krs, .strategies, .tactics { margin: 0; padding-left: 14px; min-width: 0; }
+/* Strategies and tactics carry their own status mark (✓ – • ○); a list bullet would double it. */
+.strategies, .tactics { list-style: none; padding-left: 10px; }
 .krs li, .strategies li, .tactics li { overflow-wrap: anywhere; word-break: break-word; }
 .krs { color: var(--muted-deep); }
 .tactics { color: var(--muted-deep); }
 .strategies li[data-status="retired"], .tactics li[data-status="retired"] { text-decoration: line-through; opacity: 0.7; }
+/* Work composer: the plan continues the goal tab above the composer instead of floating between tab and composer. */
+.composerTab {
+  width: 100%;
+  margin: 0 0 -1px;
+  padding: 2px 10px 6px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge));
+  border-top: 0;
+  border-bottom-color: color-mix(in srgb, var(--paper-edge) 58%, transparent);
+  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
+  color: var(--muted-deep);
+  font-size: 10.5px;
+}
+/* An opened tree must not push the conversation off screen: it scrolls within a bounded height. */
+.composerTab .tree[open] { max-height: min(38vh, 320px); overflow-y: auto; }

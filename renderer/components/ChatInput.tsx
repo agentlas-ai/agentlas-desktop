@@ -2182,7 +2182,7 @@ function ComposerGoalBar({
         <IconTrash size={12} />
       </button>
     </div>
-    {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} />}
+    {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} variant="composer-tab" />}
     {editing && <form className="chat-composer-goal-editor" onSubmit={(event) => {
       event.preventDefault();
       if (!editable || saving || !draft.trim() || !onEdit) return;

@@ -21,14 +21,19 @@ const STATUS_MARK: Record<string, string> = { done: "✓", retired: "–", activ
  * 골 구조 판단 결과 — 모양과 지금 전술을 한 줄로, 트리면 접힌 작은 트리.
  * Main 읽기 모델(GoalPlanView)만 그린다. 좁은 폭: 모든 글은 줄바꿈되고 가로로 넘치지 않는다.
  */
-export function GoalPlanSummary({ plan, locale }: { plan: GoalPlanView | null | undefined; locale: "ko" | "en" }) {
+export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
+  plan: GoalPlanView | null | undefined;
+  locale: "ko" | "en";
+  /** "composer-tab": continues the Work composer goal tab (same border/background, attached to the composer). */
+  variant?: "inline" | "composer-tab";
+}) {
   if (!plan) return null;
   const ko = locale === "ko";
   const shape = SHAPE_LABEL[plan.shape][ko ? "ko" : "en"];
   const current = plan.currentTactic
     ? `${plan.currentTactic.id} ${plan.currentTactic.description}`
     : (ko ? "계획된 전술 완료 · 기준 확인 중" : "All planned tactics done · checking criteria");
-  return <div className={styles.root} data-goal-plan={plan.shape} data-goal-plan-fallback={plan.fallback ? "true" : "false"}>
+  return <div className={variant === "composer-tab" ? `${styles.root} ${styles.composerTab}` : styles.root} data-goal-plan={plan.shape} data-goal-plan-fallback={plan.fallback ? "true" : "false"}>
     <p className={styles.line}>
       <span className={styles.shape}>{ko ? "구조" : "Plan"}: {shape}{plan.fallback ? (ko ? " (임시)" : " (provisional)") : ""}</span>
       <span className={styles.sep} aria-hidden="true"> · </span>
