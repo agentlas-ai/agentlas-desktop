@@ -44,6 +44,8 @@ const ESTIMATE_FILE_CAP = 400;
  */
 export interface MobileBridgeUploadOptions {
   confirmOverwrite?: boolean;
+  /** Explicit owner opt-in for read-only Agent Space Files on this release. */
+  publicSourceConsent?: boolean;
 }
 
 export interface MobileBridgeCloudAgentActions {
@@ -154,6 +156,7 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
         ...source,
         visibility: "marketplace",
         reviewMode: "static-only",
+        publicSourceConsent: options?.publicSourceConsent === true,
         ...(options?.confirmOverwrite ? { confirmOverwrite: true } : {}),
       });
       // 새 Hub 등록도 선반 프로젝션을 바꾼다 — delete와 같은 캐시 규칙.
