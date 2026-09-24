@@ -796,8 +796,8 @@ function ProjectPage() {
     setHubRecommendationAttaching(recommendation.candidate.key);
     let addedBookmark = false;
     try {
-      // Selection is free and durable. Paid Hub entitlement remains enforced
-      // later by the invocation/lease path when the project actually runs it.
+      // Selection and Hub invocation are free. The project keeps a durable
+      // reference to the public release without a paid entitlement.
       // Hub project members resolve back to a callable slug through the bookmark
       // store after reopen, so an unbookmarked result is bookmarked as part of
       // this explicit attach action. Keep a successful bookmark when the local

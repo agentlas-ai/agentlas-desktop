@@ -297,9 +297,9 @@ function tourConfigForPath(pathname: string): TourConfig | null {
         {
           target: "dashboard.hub",
           titleKo: "Hub 연결 상태",
-          bodyKo: "빌리거나 설치한 Hub 에이전트의 흐름을 봅니다. 연결이 끊기면 가짜 목록을 채우지 않고 끊긴 상태 그대로 보여줍니다.",
+          bodyKo: "사용하거나 설치한 Hub 에이전트의 흐름을 봅니다. 연결이 끊기면 가짜 목록을 채우지 않고 끊긴 상태 그대로 보여줍니다.",
           titleEn: "Hub status",
-          bodyEn: "Track the Hub agents you borrow or install. If Hub drops, you see that — never a fake fallback list.",
+          bodyEn: "Track the Hub agents you use or install. If Hub drops, you see that — never a fake fallback list.",
         },
       ],
     };

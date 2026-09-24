@@ -3877,8 +3877,8 @@ function ExperiencePanel({
   const requestPublicVerification = async () => {
     if (!selectedPack) return;
     const confirmed = window.confirm(ko
-      ? "구매자에게 보일 칩 이름과 좋아지는 점을 Hub에 등록할까요? 원본 기억은 전송하지 않습니다."
-      : "Submit the buyer-facing chip name and benefits to Hub? Original memory is not sent.");
+      ? "다른 사용자에게 보일 칩 이름과 좋아지는 점을 Hub에 등록할까요? 원본 기억은 전송하지 않습니다."
+      : "Submit the public chip name and benefits to Hub? Original memory is not sent.");
     if (!confirmed) return;
     setBusy(true);
     setError("");
@@ -3911,8 +3911,8 @@ function ExperiencePanel({
       setOperationalInstructions(selected.map((candidate) => candidate.summary.trim()).filter(Boolean).join("\n"));
     }
     showToast(ko
-      ? "선택한 경험에서 구매자용 소개 초안을 채웠습니다. 개인정보가 없는 표현으로 다듬어 주세요."
-      : "Filled buyer-facing copy from the selected experience. Review it for clear, non-personal wording.");
+      ? "선택한 경험에서 공개용 소개 초안을 채웠습니다. 개인정보가 없는 표현으로 다듬어 주세요."
+      : "Filled public copy from the selected experience. Review it for clear, non-personal wording.");
   };
 
   const saveOperationalPublicProjection = async () => {
@@ -3936,7 +3936,7 @@ function ExperiencePanel({
       onChanged();
       showToast(saved.privacyIssueCodes.length > 0
         ? (ko ? "초안은 저장됐지만 공개 안전 검사를 통과하지 못했습니다." : "Draft saved, but it did not pass the public-safety scan.")
-        : (ko ? "구매자에게 보일 소개를 저장했습니다." : "Saved the buyer-facing copy."));
+        : (ko ? "다른 사용자에게 보일 소개를 저장했습니다." : "Saved the public copy."));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -3959,7 +3959,7 @@ function ExperiencePanel({
       });
       setOperationalPublicProjections([confirmed]);
       onChanged();
-      showToast(ko ? "개인정보가 없는 구매자용 소개임을 확인했습니다." : "Confirmed that the buyer-facing copy contains no personal information.");
+      showToast(ko ? "개인정보가 없는 공개용 소개임을 확인했습니다." : "Confirmed that the public copy contains no personal information.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -4368,14 +4368,14 @@ function ExperiencePanel({
 
               <div data-testid="operational-public-projection" style={{ marginTop: 14, padding: 12, borderRadius: 14, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 88%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 60%, transparent)" }}>
                 <div style={{ marginBottom: 10 }}>
-                  <strong style={{ display: "block", fontSize: 13 }}>{ko ? "판매 페이지에 보일 소개" : "What buyers will see"}</strong>
+                  <strong style={{ display: "block", fontSize: 13 }}>{ko ? "공개 페이지에 보일 소개" : "What others will see"}</strong>
                   <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
                     {ko
-                      ? "칩 내용을 바탕으로 초안을 만든 뒤, 구매자가 얻는 효과만 직접 다듬어 확인하세요. 원본 대화와 파일은 공개되지 않습니다."
-                      : "Start with a draft based on the chip, then review only the benefits buyers receive. Original conversations and files stay private."}
+                      ? "칩 내용을 바탕으로 초안을 만든 뒤, 다른 사용자가 얻는 효과만 직접 다듬어 확인하세요. 원본 대화와 파일은 공개되지 않습니다."
+                      : "Start with a draft based on the chip, then review only the benefits others receive. Original conversations and files stay private."}
                   </span>
                 </div>
-                <div aria-label={ko ? "구매자용 소개 준비 단계" : "Buyer-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
+                <div aria-label={ko ? "공개용 소개 준비 단계" : "Public-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
                   {[
                     { icon: <IconCheck size={13} />, label: ko ? "경험 고르기" : "Choose experience", done: operationalSourceIds.length > 0 },
                     { icon: <IconEdit size={13} />, label: ko ? "효과 적기" : "Describe benefits", done: Boolean(operationalProjection) },
@@ -4390,7 +4390,7 @@ function ExperiencePanel({
                 <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
                   <label style={{ display: "grid", gap: 5, minWidth: 0 }}>
                     <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "칩 이름" : "Chip name"}</span>
-                    <input aria-label={ko ? "구매자에게 보일 칩 이름" : "Buyer-facing chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={{ ...tasteInputStyle, width: "100%", minWidth: 0 }} />
+                    <input aria-label={ko ? "공개할 칩 이름" : "Public chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={{ ...tasteInputStyle, width: "100%", minWidth: 0 }} />
                   </label>
                   <label style={{ display: "grid", gap: 5, minWidth: 0 }}>
                     <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "장착하면 좋아지는 점" : "What improves after attachment"}</span>
@@ -4431,7 +4431,7 @@ function ExperiencePanel({
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div>
                     <strong style={{ display: "block", fontSize: 13 }}>{ko ? "Hub에 올리기" : "Publish to Hub"}</strong>
-                    <span style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5 }}>{ko ? "원본 기억은 보내지 않고, 내가 확인한 칩 이름과 효과만 전송합니다. 공개 등록 후 Hub에서 판매 가격을 정합니다." : "Only the chip name and benefits you approved are sent; raw memory stays local. Set the selling price on Hub after listing."}</span>
+                    <span style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5 }}>{ko ? "원본 기억은 보내지 않고, 내가 확인한 칩 이름과 효과만 공개합니다. Hub에서는 무료로 공유됩니다." : "Only the chip name and benefits you approved are shared; raw memory stays local. It is shared for free on Hub."}</span>
                   </div>
                   {!selectedPack.baseAgentReleaseId && <Link href="/cloud" style={{ color: "var(--accent)", fontSize: 11.5, fontWeight: 700 }}>{ko ? "먼저 에이전트 연결하기 →" : "Connect the agent first →"}</Link>}
                 </div>
@@ -4473,14 +4473,14 @@ function ExperiencePanel({
                     <strong>{cloudStateLabel(latestCloud.state)}</strong>
                     <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>
                       {latestCloud.state === "public-active"
-                        ? (ko ? "구매자에게 공개됐습니다. Hub의 내 보관함에서 판매 가격을 정할 수 있습니다." : "It is public to buyers. Set the selling price from your Hub library.")
+                        ? (ko ? "Hub 커뮤니티에 무료로 공개됐습니다." : "It is publicly available for free in the Hub community.")
                         : latestCloud.state === "verification-requested" || latestCloud.state === "verification-pending"
-                          ? (ko ? "개인정보와 공개 가능 여부를 확인하고 있습니다. 아직 구매자에게 보이지 않습니다." : "Privacy and listing safety are being checked. Buyers cannot see it yet.")
+                          ? (ko ? "개인정보와 공개 가능 여부를 확인하고 있습니다. 아직 다른 사용자에게 보이지 않습니다." : "Privacy and listing safety are being checked. Other users cannot see it yet.")
                         : latestCloud.state === "conflict"
                           ? latestCloud.errorCode === "private_base_visibility_mismatch"
                             ? (ko
-                              ? "이 경험을 판매하려면 먼저 원본 에이전트를 Hub에 공개 등록해야 합니다. 비공개 저장은 이미 완료됐습니다."
-                              : "Publish the base agent to Hub before selling this experience. Its private save is already complete.")
+                              ? "이 경험을 공개하려면 먼저 원본 에이전트를 Hub에 공개 등록해야 합니다. 비공개 저장은 이미 완료됐습니다."
+                              : "Publish the base agent to Hub before sharing this experience. Its private save is already complete.")
                             : (ko ? "로컬 자료는 그대로입니다. Hub 상태를 다시 확인한 뒤 재시도하세요." : "Local material is intact. Refresh the Hub status before retrying.")
                           : latestCloud.errorMessage || (ko ? "Hub에 안전하게 저장되었습니다." : "Saved safely to Hub.")}
                     </span>
@@ -5803,8 +5803,8 @@ function AgentDetailView({
                   </summary>
                   <p style={{ margin: 0, padding: "10px 12px 12px", borderTop: "1px solid var(--paper-edge)", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.55 }}>
                     {locale === "ko"
-                      ? "에이전트가 실제 작업에서 배운 해결법을 이 Mac에 비공개로 모아 둔 것입니다. 내가 고른 항목만 개인정보 검사를 거쳐 Hub에 등록할 수 있으며, 자동 업로드·구매·장착되지 않습니다."
-                      : "These are solutions the agent learned from real work and kept privately on this Mac. Only items you select can be privacy-checked and listed on Hub; nothing is uploaded, purchased, or attached automatically."}
+                      ? "에이전트가 실제 작업에서 배운 해결법을 이 Mac에 비공개로 모아 둔 것입니다. 내가 고른 항목만 개인정보 검사를 거쳐 Hub에 무료로 공개할 수 있으며, 자동 업로드·장착되지 않습니다."
+                      : "These are solutions the agent learned from real work and kept privately on this Mac. Only items you select can be privacy-checked and shared for free on Hub; nothing is uploaded or attached automatically."}
                   </p>
                 </details>
               </section>

@@ -29,7 +29,6 @@ import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target"
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
 import type { ChatFileDraft } from "@/lib/chat-files";
-import { openPricing } from "@/components/UpgradeCta";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -279,17 +278,13 @@ interface BottomQuestionOption {
   shortcut: string;
 }
 
-/** 자동 라우팅이 유일하게 멈춰 서는 두 게이트 — 크레딧 부족(paywall) / 적합 에이전트 없음(build). */
+/** 자동 라우팅이 멈추는 경우: 적합 에이전트가 없어 빌드를 제안한다. */
 interface AutoRouteGate {
-  kind: "paywall" | "build";
+  kind: "build";
   text: string;
   opts: SendOptions;
   routerAgent?: RecRouterAgent;
-  /** paywall: 필요/보유 크레딧. partialCost=true 면 needed 는 확정액이 아니라 하한이다. */
-  needed?: number;
-  have?: number | null;
-  partialCost?: boolean;
-  /** build: 엔진이 준 사유. */
+  /** 엔진이 준 사유. */
   reason?: string;
 }
 
@@ -331,7 +326,6 @@ function ChatInputComponent({
   activeChatId = null,
   placeholder,
   projectOrchestration = false,
-  activeProjectId = null,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** Button-only session actions. They are never represented as chat commands. */
@@ -397,7 +391,7 @@ function ChatInputComponent({
   placeholder?: string;
   /** Project Work owns staffing automatically; legacy execution modes are not composer choices here. */
   projectOrchestration?: boolean;
-  /** Owning project — gates the per-project 렌트허용 policy for hub auto-hire. */
+  /** Owning project, retained for callers that also use project orchestration. */
   activeProjectId?: string | null;
 }) {
   const { t, locale } = useT();
@@ -481,10 +475,7 @@ function ChatInputComponent({
   const [showStormWarning, setShowStormWarning] = useState(false);
   // 자동 라우팅(알아서 에이전트 부르기) — 묻지 않고 바로 라우팅한다(codex hep-network 동작과 동일).
   const [autoRouting, setAutoRouting] = useState(false);
-  // 호출 전 비용 고지 — 허브 에이전트 유료 자동 고용 직전에만 잠깐 뜬다.
-  // 크레딧 = 대여(리스) 비용이지 최종 성공 보장이 아니라는 걸 숨기지 않는다.
-  // partial=true 면 credits 는 알려진 단가만 더한 하한 — 총액인 척 표기하면 안 된다.
-  // 게이트 바텀시트 — 유일하게 묻는 두 경우: 크레딧 부족(paywall) / 적합 에이전트 없음(build 제안).
+  // 게이트 바텀시트는 적합 에이전트가 없을 때 빌드 제안을 표시한다.
   const [gateSheet, setGateSheet] = useState<AutoRouteGate | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
@@ -943,32 +934,18 @@ function ChatInputComponent({
       setGateSheet({ kind: "build", text, opts, reason: preview.buildReason, routerAgent: preview.routerAgent });
       return;
     }
-    // 3) 프로젝트 렌트 정책(오너 결정 2026-08-18, 작업당 과금) — 렌트허용이 꺼진 Hub
-    //    에이전트는 이 프로젝트의 자동 고용 후보에서 제외한다. 활성 장기대여(선불,
-    //    호출 0크레딧)는 항상 후보로 남는다. 프로젝트가 없는 채팅은 기존 동작 유지.
-    let effectivePreview = preview;
-    // 남은 Hub 고용 전원이 명시 허용(토글 ON) 또는 활성 대여일 때만 매 전송 고지를
-    // 생략한다 — 크레딧 부족 페이월이 유일한 개입으로 남는다.
-    if (activeProjectId && preview.agents.some((a) => a.source === "hub")) {
-      const allowedSlugs = new Set(
-        ((await ipc()?.projects.listRentAllowed(activeProjectId).catch(() => [])) ?? [])
-          .map((slug) => slug.toLowerCase()),
-      );
-      if (activeChatIdRef.current !== chatIdAtStart) return;
-      const agents = preview.agents.filter((agent) =>
-        agent.source !== "hub" || agent.leased === true || allowedSlugs.has(agent.id.toLowerCase()));
-      effectivePreview = { ...preview, agents, totalEstCredits: 0, totalEstCreditsPartial: false };
-    }
-    // 4) 저신뢰 에스컬레이션 + 허브 후보/clarify → 선고용 금지, LLM 재랭킹 경로로 즉시 전송.
-    const hubAgents = effectivePreview.agents.filter((a) => a.source !== "local");
-    if (effectivePreview.routerAgent && (effectivePreview.mode === "clarify" || hubAgents.length > 0)) {
-      onRecommendExecute?.({ kind: "plain", routerAgent: effectivePreview.routerAgent }, text, opts);
+    // Hub agents are free to select and invoke; the retired project rent policy
+    // must not silently remove a public agent from the routing preview.
+    // 저신뢰 에스컬레이션 + 허브 후보/clarify → LLM 재랭킹 경로로 즉시 전송.
+    const hubAgents = preview.agents.filter((a) => a.source !== "local");
+    if (preview.routerAgent && (preview.mode === "clarify" || hubAgents.length > 0)) {
+      onRecommendExecute?.({ kind: "plain", routerAgent: preview.routerAgent }, text, opts);
       finishComposerAfterSend();
       return;
     }
     // Hub invocation pricing was retired. Provider token usage and subscription
     // accounting remain separate from this free agent-selection path.
-    execAutoChoice(effectivePreview, text, opts, engineToggles);
+    execAutoChoice(preview, text, opts, engineToggles);
   }
 
   /** 게이트 시트에서 "그냥/에이전트 없이 보내기" — 고용 없이 원문 전송. */
@@ -1377,8 +1354,7 @@ function ChatInputComponent({
           {t("chatinput.autoroute.routing")}
         </div>
       )}
-      {/* 호출 전 비용 고지 — 유료 허브 고용이 나갈 때만 잠깐. 대여 비용≠성공 보장을 명시 */}
-      {/* 게이트 시트 — 크레딧 부족(paywall)·적합 에이전트 없음(build 제안)일 때만 */}
+      {/* 게이트 시트 — 적합 에이전트가 없을 때 빌드 제안 */}
       {gateSheet && (
         <AutoRouteGateSheet
           gate={gateSheet}
@@ -2506,8 +2482,7 @@ function BottomQuestionSheet({
 
 // ── 자동 라우팅 게이트 시트 ─────────────────────────────
 // 자동 라우팅은 원칙적으로 묻지 않는다. 유일한 예외 둘:
-//   paywall — 허브 고용 비용이 잔액을 넘을 때(크레딧 없을 때만 페이월).
-//   build   — 라우팅할 적합 에이전트가 정말 없을 때(에이전트 빌드 제안).
+// 라우팅할 적합 에이전트가 정말 없을 때 에이전트 빌드를 제안한다.
 function AutoRouteGateSheet({
   gate,
   onPlain,
@@ -2521,13 +2496,8 @@ function AutoRouteGateSheet({
   onClose: () => void;
   t: TFunction;
 }) {
-  const isPaywall = gate.kind === "paywall";
-  const title = isPaywall ? t("chatinput.autoroute.paywall_title") : t("chatinput.autoroute.build_title");
-  // 단가 미상 Hub 행이 섞이면 needed 는 확정 필요액이 아니라 하한 — "필요 Ncr" 로 못 박지 않고
-  // "최소 필요" 로 표기하고 실청구가 더 클 수 있음을 같이 알린다(고지액 < 실청구액 방지).
-  const desc = isPaywall
-    ? `${t("chatinput.autoroute.paywall_desc")} — ${t(gate.partialCost ? "chatinput.autoroute.paywall_needed_min" : "chatinput.autoroute.paywall_needed")} ${gate.needed ?? 0}cr · ${t("chatinput.autoroute.paywall_have")} ${gate.have ?? 0}cr${gate.partialCost ? ` · ${t("chatinput.autoroute.cost_partial")}` : ""}`
-    : gate.reason || t("chatinput.autoroute.build_desc");
+  const title = t("chatinput.autoroute.build_title");
+  const desc = gate.reason || t("chatinput.autoroute.build_desc");
   const buttonBase: React.CSSProperties = {
     padding: "6px 12px",
     borderRadius: 8,
@@ -2574,11 +2544,11 @@ function AutoRouteGateSheet({
             color: "var(--muted-deep)",
           }}
         >
-          {isPaywall ? t("chatinput.autoroute.paywall_skip") : t("chatinput.autoroute.build_skip")}
+          {t("chatinput.autoroute.build_skip")}
         </button>
         <button
           type="button"
-          onClick={isPaywall ? openPricing : onBuild}
+          onClick={onBuild}
           style={{
             ...buttonBase,
             border: "1px solid var(--accent)",
@@ -2587,7 +2557,7 @@ function AutoRouteGateSheet({
             fontWeight: 700,
           }}
         >
-          {isPaywall ? t("chatinput.autoroute.paywall_cta") : t("chatinput.autoroute.build_cta")}
+          {t("chatinput.autoroute.build_cta")}
         </button>
       </div>
     </section>

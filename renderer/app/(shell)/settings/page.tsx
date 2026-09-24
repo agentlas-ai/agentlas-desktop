@@ -1624,8 +1624,8 @@ function MemoryDiagnosticsPanel() {
       setToggleNotice(ko ? "Hub 자동 고용 설정을 저장하고 다시 확인했습니다." : "Automatic Hub hiring was saved and verified.");
     } catch {
       setToggleNotice(ko
-        ? "유료 Hub 자동 고용의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복해서 누르지 말고 설정을 다시 열어 확인해 주세요."
-        : "The final paid Hub auto-hiring state could not be verified. This screen was not changed. Do not repeat the action; reopen Settings to check it.");
+        ? "Hub 자동 호출의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 설정을 다시 열어 확인해 주세요."
+        : "The final automatic Hub use state could not be verified. This screen was not changed. Reopen Settings to check it.");
     } finally {
       setToggleBusy(null);
     }
@@ -1720,8 +1720,8 @@ function MemoryDiagnosticsPanel() {
           </div>
           <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
             {ko
-              ? "설치된 에이전트로 부족할 때 공개 Hub 에서 사람을 빌립니다 — 크레딧이 나갑니다."
-              : "Borrows people from the public Hub when installed agents fall short — this spends credits."}
+              ? "설치된 에이전트로 부족할 때 공개 Hub 에이전트를 무료로 사용합니다."
+              : "Uses public Hub agents for free when installed agents fall short."}
           </div>
         </div>
         <button onClick={() => void toggleNetworkAuto()} style={{ ...btnStyle, minWidth: 64 }} disabled={networkAuto == null || toggleBusy !== null}>
