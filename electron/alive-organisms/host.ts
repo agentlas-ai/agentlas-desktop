@@ -17,6 +17,7 @@
 import type Database from "better-sqlite3";
 import type { AliveAgent, AliveAttachment, AliveClockPort, AliveWakeRuntimeRecord } from "../alive-core/contracts";
 import type { RuntimeStatus } from "../../shared/types";
+import type { AliveAgentAccess } from "../billing";
 import { AliveLifetimeStore, aliveStableId } from "../alive-core/lifetime-store";
 import { AliveLifetimeService } from "../alive-core/lifetime-service";
 import { GoalAlivePlayground, attachedGoalId, type GoalPlaygroundDeps } from "./goal-playground";
@@ -49,6 +50,7 @@ export interface AliveHostDeps {
   controllerInstalled(): boolean;
   refreshModelOrder(facts: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]>;
   cachedModelOrder(): AliveModelOrderEntry[];
+  checkPlanAccess(): Promise<AliveAgentAccess>;
   emit(event: AliveChangedEvent): void;
   registerShutdown?(stop: () => void): void;
 }
@@ -62,7 +64,8 @@ const WORK_KEY = (projectId: string) => `alive:work-project:v1:${projectId}`;
 const ONE_KEY = (goalId: string) => `alive:one-goal:v1:${goalId}`;
 const ID = /^[A-Za-z0-9._:-]{1,200}$/;
 const BLOCKED_WAITS = new Set(["model.order-exhausted", "runtime.selection-unavailable", "playground.observation-unavailable",
-  "runtime.read-tools-unsupported", "grant.deadline-spent", "action.backoff"]);
+  "runtime.read-tools-unsupported", "grant.deadline-spent", "action.backoff",
+  "alive-sign-in-required", "alive-plan-required", "alive-entitlement-unavailable"]);
 
 function ensureLivesSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS alive_organism_lives (
@@ -87,6 +90,8 @@ export class AliveOrganismHost {
   private running = false;
   private unsubscribeSettled: Array<() => void> = [];
   private readonly light: LightWakeRunner;
+  private planAccess: AliveAgentAccess = "alive-entitlement-unavailable";
+  private accessRefresh: Promise<AliveAgentAccess> | null = null;
 
   constructor(private readonly deps: AliveHostDeps) {
     AliveLifetimeStore.ensureSchema(deps.db);
@@ -104,7 +109,9 @@ export class AliveOrganismHost {
       const service = new AliveLifetimeService(store, runtime, new Map([[kind, playground]]), {
         clock: deps.now,
         // No member can run now: a visible wait, re-checked every beat (cooldowns expire on their own).
-        admission: () => aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
+        admission: () => this.planAccess !== "allowed"
+          ? this.planAccess
+          : aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
         // Nothing changed: never every beat. 5m → 15m → 60m between unchanged reviews; a salience change wakes now.
         actionSpacingMs: deps.actionSpacingMs ?? ALIVE_ACTION_SPACING_MS,
         reviewFloorMs: (agent) => floors[Math.min(floors.length - 1, Math.max(0, Number(agent.state.unchangedReviews ?? 0)))] ?? 0,
@@ -152,6 +159,20 @@ export class AliveOrganismHost {
 
   isRunning(): boolean { return this.running; }
 
+  /** Share overlapping reads, then fetch again for each later enable or beat. */
+  refreshPlanAccess(): Promise<AliveAgentAccess> {
+    if (this.accessRefresh) return this.accessRefresh;
+    const pending = Promise.resolve().then(() => this.deps.checkPlanAccess())
+      .catch((): AliveAgentAccess => "alive-entitlement-unavailable")
+      .then((access) => {
+        this.planAccess = access;
+        return access;
+      })
+      .finally(() => { this.accessRefresh = null; });
+    this.accessRefresh = pending;
+    return pending;
+  }
+
   /** One organism beat: refresh the pool order, heartbeat, end finished One lives, broadcast changes. */
   async beat(kind: AliveOrganism): Promise<void> {
     const organism = this.organisms[kind];
@@ -159,6 +180,9 @@ export class AliveOrganismHost {
     organism.beating = true;
     try {
       try { await this.deps.refreshModelOrder((status) => this.light.facts(status)); } catch { /* the last cached order stays authoritative */ }
+      if (!this.running) return;
+      // A prior grant never authorizes a new wake after a downgrade.
+      await this.refreshPlanAccess();
       if (!this.running) return;
       // A One life ends with its Goal: suspend before the heartbeat so a finished Goal costs no model turn.
       if (kind === "one") this.suspendFinishedOneLives();
@@ -189,7 +213,7 @@ export class AliveOrganismHost {
   private lifeDigest(organism: Organism, agent: AliveAgent): string {
     const attachment = organism.store.attachments(agent.agentId).find((row) => row.status === "attached");
     const active = organism.store.activeWakes().find((wake) => wake.agentId === agent.agentId);
-    return JSON.stringify([agent.status, agent.controlEpoch, agent.state.lastWaitCode ?? null, agent.budget,
+    return JSON.stringify([this.planAccess, agent.status, agent.controlEpoch, agent.state.lastWaitCode ?? null, agent.budget,
       agent.state.usageUnknown ?? null, attachment?.attachmentId ?? null, active?.wakeId ?? null,
       (agent.state.lastReview as { runId?: string } | undefined)?.runId ?? null]);
   }
@@ -268,6 +292,7 @@ export class AliveOrganismHost {
   private statusOf(organism: Organism, agent: AliveAgent): { status: AliveStatus; code?: string } {
     if (organism.store.activeWakes().some((wake) => wake.agentId === agent.agentId)) return { status: "running", code: "wake.active" };
     if (organism.store.pendingActions().some((action) => action.agentId === agent.agentId)) return { status: "running", code: "action.pending" };
+    if (this.planAccess !== "allowed") return { status: "blocked", code: this.planAccess };
     const code = typeof agent.state.lastWaitCode === "string" ? agent.state.lastWaitCode : undefined;
     if (agent.budget.tokenLimit !== null && agent.budget.tokensUsed >= agent.budget.tokenLimit) return { status: "tokens-spent", code: "grant.tokens-spent" };
     if (agent.budget.tokenLimit !== null && agent.state.usageUnknown === true) return { status: "usage-unknown", code: "grant.usage-unavailable" };
@@ -284,6 +309,7 @@ export class AliveOrganismHost {
     const organism = this.organisms[surface];
     const resolved = this.scopeFor(surface, chatId);
     const base: AliveState = { available: resolved.available, ...(resolved.reasonCode ? { reasonCode: resolved.reasonCode } : {}),
+      ...(this.planAccess !== "allowed" ? { accessReasonCode: this.planAccess } : {}),
       enabled: false, scope: resolved.scope, needsGoal: resolved.needsGoal, status: "off",
       budget: { tokenLimit: null, tokensUsed: 0 }, modelOrder: this.modelOrder(organism, resolved.agentId) };
     if (!resolved.available || !resolved.agentId) return base;
@@ -328,6 +354,7 @@ export class AliveOrganismHost {
       this.emitChanges(surface, resolved.agentId);
       return this.getState(surface, chatId);
     }
+    if (this.planAccess !== "allowed") throw new AliveHostError(this.planAccess);
     if (resolved.needsGoal || !resolved.goalId || !resolved.agentId || !resolved.key || !resolved.scopeId) {
       throw new AliveHostError("alive-goal-required", "Start a goal in this chat first.");
     }

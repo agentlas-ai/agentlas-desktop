@@ -26,6 +26,8 @@ export interface AliveState {
   available: boolean;
   /** Machine code when unavailable (e.g. alive-work-project-required, alive-controller-not-installed). */
   reasonCode?: string;
+  /** Server entitlement check; absence/unknown never permits a new wake. */
+  accessReasonCode?: "alive-sign-in-required" | "alive-plan-required" | "alive-entitlement-unavailable";
   enabled: boolean;
   scope: { kind: "one-goal" | "work-project"; id: string; label: string } | null;
   /** No Goal in this chat yet: enabling returns alive-goal-required ("start a goal first"). */

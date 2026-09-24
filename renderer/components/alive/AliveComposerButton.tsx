@@ -77,6 +77,9 @@ function statusLabel(status: AliveStatus, ko: boolean): string {
 function errorMessage(code: string | null, ko: boolean): string {
   if (code === "alive-goal-required") return ko ? "먼저 목표를 시작하세요." : "Start a goal first.";
   if (code === "alive-project-conflict") return ko ? "이 프로젝트의 다른 대화에서 이미 실행 중입니다." : "Already running in another chat of this project.";
+  if (code === "alive-sign-in-required") return ko ? "Alive Agent를 쓰려면 Agentlas 계정으로 로그인하세요." : "Sign in to your Agentlas account to use Alive Agent.";
+  if (code === "alive-plan-required") return ko ? "현재 요금제에서는 Alive Agent를 사용할 수 없습니다. 요금제를 확인하세요." : "Alive Agent is unavailable on your current plan. Review your plan.";
+  if (code === "alive-entitlement-unavailable") return ko ? "Alive Agent 사용 권한을 확인할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요." : "Could not verify Alive Agent access. Check your connection and try again.";
   return ko ? "바꾸지 못했습니다. 잠시 후 다시 시도하세요." : "Couldn't update. Try again in a moment.";
 }
 
@@ -267,7 +270,8 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   };
 
   const triggerLabel = `AGI · ${statusLabel(status, ko)}`;
-  const switchDisabled = pending || blockedByGoal || Boolean(conflict && !state.enabled);
+  const switchDisabled = pending || blockedByGoal || Boolean(conflict && !state.enabled)
+    || Boolean(state.accessReasonCode && !state.enabled);
 
   const roleName = (role: "orchestrator" | "worker") => role === "orchestrator"
     ? (ko ? "오케스트레이터" : "Orchestrator")
@@ -362,13 +366,18 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
             : (ko ? "이 대화에 목표가 있어야 켤 수 있습니다." : "This chat needs a goal before it can run.")}
         </p>
       )}
+      {state.accessReasonCode && (
+        <p className={styles.hint} data-alive-hint="plan-access" role="status">
+          {errorMessage(state.accessReasonCode, ko)}
+        </p>
+      )}
       {conflict && (
         <div className={styles.conflict} data-alive-conflict="true">
           <span className={styles.conflictText}>
             {ko ? "실행 중: " : "Running in "}
             <strong title={conflict.title}>{conflict.title}</strong>
           </span>
-          <button type="button" className={styles.quiet} onClick={moveHere} disabled={pending}>
+          <button type="button" className={styles.quiet} onClick={moveHere} disabled={pending || Boolean(state.accessReasonCode)}>
             {ko ? "여기로 옮기기" : "Move here"}
           </button>
         </div>

@@ -16,6 +16,7 @@ import { invocationService } from "../invocation/service";
 import { pickRunner } from "../runtime/selection";
 import { noteRuntimeFailure } from "../runtime/runtime-cooldown";
 import { desktopAliveClock } from "../alive-clock";
+import { checkAliveAgentAccess } from "../billing";
 import { ALIVE_CONTROLLER_SLUG, builtinAgentId } from "../architecture/manifest";
 import { cachedAliveModelOrder, refreshAliveModelOrder } from "./model-order";
 import { runAliveServingDecision } from "./serving-wake";
@@ -94,6 +95,7 @@ export function startAliveOrganisms(): AliveOrganismHost {
       .get(builtinAgentId(ALIVE_CONTROLLER_SLUG), ALIVE_CONTROLLER_SLUG)),
     refreshModelOrder: (facts) => refreshAliveModelOrder(Date.now(), facts),
     cachedModelOrder: cachedAliveModelOrder,
+    checkPlanAccess: checkAliveAgentAccess,
     emit: broadcast,
     registerShutdown: (stop) => {
       registerAppRuntimeParticipant("alive-organisms", { closeAdmission: stop, interrupt: stop, isSettled: () => true });
@@ -115,17 +117,20 @@ function requireHost(): AliveOrganismHost {
 }
 
 export function registerAliveIpc(deps: { ipc: Pick<IpcMain, "handle">; assertTrustedSender: (event: IpcMainInvokeEvent) => unknown }): void {
-  deps.ipc.handle("alive:getState", (event, input: unknown): AliveState => {
+  deps.ipc.handle("alive:getState", async (event, input: unknown): Promise<AliveState> => {
     deps.assertTrustedSender(event);
     const row = parseAliveSurfaceChat(input, ["surface", "chatId"]);
     if (!host || !host.isRunning()) return offState("alive-host-not-running");
+    await host.refreshPlanAccess();
     return host.getState(row.surface as AliveSurface, row.chatId as string);
   });
-  deps.ipc.handle("alive:setEnabled", (event, input: unknown): AliveState => {
+  deps.ipc.handle("alive:setEnabled", async (event, input: unknown): Promise<AliveState> => {
     deps.assertTrustedSender(event);
     const row = parseAliveSurfaceChat(input, ["surface", "chatId", "enabled", "tokenLimit", "moveFrom"]);
     if (typeof row.enabled !== "boolean" || (row.moveFrom !== undefined && typeof row.moveFrom !== "boolean")) throw new AliveHostError("alive-input-invalid");
-    return requireHost().setEnabled({ surface: row.surface as AliveSurface, chatId: row.chatId as string, enabled: row.enabled,
+    const target = requireHost();
+    if (row.enabled) await target.refreshPlanAccess();
+    return target.setEnabled({ surface: row.surface as AliveSurface, chatId: row.chatId as string, enabled: row.enabled,
       ...(row.tokenLimit !== undefined ? { tokenLimit: parseAliveTokenLimit(row.tokenLimit) } : {}),
       ...(row.moveFrom === true ? { moveFrom: true } : {}) });
   });
