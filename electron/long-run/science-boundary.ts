@@ -14,12 +14,23 @@ export interface ScienceRuntimeBoundary {
 }
 /** Read-only observer. Main validates canonical Science identity; Science owns
  * steering and successor dispatch. The anchor is a real invocation receipt. */
-export async function reconcileScienceBoundary(input: ScienceRuntimeBoundaryInput): Promise<ScienceRuntimeBoundary> {
+export async function reconcileScienceBoundary(input: ScienceRuntimeBoundaryInput,
+  options: { hostLost?: (invocationRunId: string) => boolean } = {}): Promise<ScienceRuntimeBoundary> {
   for (const value of Object.values(input)) if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error("science_runtime_boundary_identity_invalid");
   let boundary;
   try { boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId,
     expectedChatId: input.expectedRuntimeChatId, expectedSource: "science" }); }
   catch (error) { throw new Error(error instanceof Error ? error.message.replace("runtime_effect_boundary_", "science_runtime_boundary_") : "science_runtime_boundary_unavailable"); }
+  // A run whose host died mid-turn has no terminal ledger row, so the reader calls it non-terminal forever, while the
+  // receipt ledger already projects it as interrupted and Science settled the turn that way. Science's forward-only
+  // recovery accepts only a terminal boundary, so a killed turn could never recover on its own (live QA 2026-09-24:
+  // 43 minutes on science.alive.host-boundary-unsettled until a person pressed Continue). When no live owner exists,
+  // the run is terminal and its effects stay uncertain: nothing is inferred to be safe, only a forward successor opens.
+  if (!boundary.terminal && options.hostLost?.(input.invocationRunId) === true) {
+    return { schema: "agentlas.science-runtime-boundary.v1", invocationRunId: input.invocationRunId, checkpointId: null,
+      terminal: true, effects: "uncertain", artifactRefs: boundary.artifactRefs, sourceRefs: boundary.sourceRefs,
+      pendingEffectRefs: [...new Set([...boundary.pendingEffectRefs, `invocation:${input.invocationRunId}:host-lost`])].sort() };
+  }
   const digest = boundary.snapshotDigest ? createHash("sha256").update(JSON.stringify({ input, snapshotDigest: boundary.snapshotDigest })).digest("hex") : null;
   return { schema: "agentlas.science-runtime-boundary.v1", invocationRunId: input.invocationRunId,
     checkpointId: digest ? `invocation-boundary:${boundary.terminalEventId}:${digest}` : null,

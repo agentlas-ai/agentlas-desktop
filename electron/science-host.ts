@@ -216,7 +216,8 @@ export function installDesktopScienceHost(): void {
       criterionReview: scienceCriterionReviewHost,
       registerMcpPreparedConfig: registerScienceMcpPreparedConfig,
       reconcileScienceBoundary: async (input) => {
-        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) });
+        return reconcileScienceBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) },
+          { hostLost: (runId) => invocationService.receipt(runId)?.status === "interrupted" });
       },
       ...{ inspectLegacyForwardRecoveryBoundary: async (input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">) =>
         inspectLegacyForwardRecoveryBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) }) },
