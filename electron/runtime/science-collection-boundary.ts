@@ -6,8 +6,10 @@ export const SCIENCE_COLLECTION_TOOLS: readonly string[] = Object.freeze([
   "list_project_evidence", "record_source_evidence", "read_existing_source_text",
 ]);
 const backends = new Set(["anthropic", "openai", "google", "upstage", "custom", "glm", "kimi", "deepseek", "minimax", "xai", "openrouter"]);
+const localRuntimes = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);
 export function supportsScienceCollectionRuntime(selection: { kind?: string; backend?: string | null; model?: string | null } | null): boolean {
-  return !!selection && selection.kind === "byok" && backends.has(selection.backend ?? "")
+  return !!selection && (selection.kind === "byok" && backends.has(selection.backend ?? "")
+    || localRuntimes.has(selection.kind ?? ""))
     && typeof selection.model === "string" && selection.model.trim().length > 0;
 }
 export function assertScienceCollectionRuntimeSelection(actual: { kind: string; backend?: string | null; model?: string | null; source?: string | null; effort?: string | null }, expected: { kind: string; backend?: string | null; model?: string | null; source?: string | null; effort?: string | null } | undefined): void {

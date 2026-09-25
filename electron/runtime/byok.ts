@@ -397,12 +397,18 @@ async function runAnthropicMessages(
       }
     }
 
+    if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
+      throw new Error("science_collection_tool_frame_invalid");
+    }
     if (stopReason !== "tool_use" || pendingToolUse.size === 0) {
       reachedAnswer = true;
       break;
     }
 
     const orderedToolUse = [...pendingToolUse.entries()].sort((a, b) => a[0] - b[0]);
+    if (req.scienceCollectionCapability && orderedToolUse.some(([, entry]) => !entry.id || !entry.name)) {
+      throw new Error("science_collection_tool_frame_invalid");
+    }
     toolTurnsTaken += 1;
     const progress = trackToolTurnProgress(
       toolProgress,
@@ -422,6 +428,7 @@ async function runAnthropicMessages(
       try {
         input = entry.json ? (JSON.parse(entry.json) as Record<string, unknown>) : {};
       } catch {
+        if (req.scienceCollectionCapability) throw new Error("science_collection_tool_frame_invalid");
         input = {};
       }
       assistantContent.push({ type: "tool_use", id: entry.id, name: entry.name, input });
@@ -792,6 +799,7 @@ export const runGoogleByok: Runner = async (
     if (!resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
       // A Workforce grant is for this advertised inventory. A tools-free retry
       // would make any later success evidence describe a different invocation.
+      if (req.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
       if (broker) throw new Error("workforce_broker_tool_protocol_unsupported");
       includeTools = false;
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
@@ -859,6 +867,7 @@ export const runGoogleByok: Runner = async (
           });
         }
       } catch (err) {
+        if (req.scienceCollectionCapability) throw err;
         if (err instanceof Error && err.message.startsWith("workforce_broker_")) throw err;
         // Provider keep-alives and malformed non-tool chunks carry no dispatch
         // authority, so ignore them just as the previous text-only adapter did.
