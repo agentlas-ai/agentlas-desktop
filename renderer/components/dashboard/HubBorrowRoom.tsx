@@ -145,7 +145,7 @@ export function HubBorrowRoom() {
   return (
     <div className="dashboard-module hub-borrow">
       <div className="dashboard-module-head">
-        <span>{ko ? "허브 · 빌려쓰기" : "Hub · borrow"}</span>
+        <span>{ko ? "에이전트 허브 · 탐색" : "Agent Hub · explore"}</span>
         <span className="hub-borrow-source" data-online={online ? "true" : "false"}>
           {online ? (ko ? "게시자 온라인" : "publishers online") : ko ? "오프라인" : "offline"}
         </span>

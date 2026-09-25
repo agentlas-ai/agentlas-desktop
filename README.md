@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Build the agent you need, borrow a public Hub specialist, and run it through a supported LLM and computer you choose.<br>
+  Build the agent you need, use a public Hub specialist for free, and run it through a supported LLM and computer you choose.<br>
   Agentlas Desktop is the primary local GUI runtime: model calls, tool use, file access, and credentials stay under that host's permissions.
 </p>
 

@@ -22,7 +22,7 @@ function isWebSurface(): boolean {
 function memberStatus(member: OneOrgMember | undefined, locale: "ko" | "en"): string {
   if (!member) return locale === "ko" ? "삭제되었거나 찾을 수 없음" : "Deleted or unavailable";
   if (member.archivedAt) return locale === "ko" ? "조직에서 보관됨" : "Archived from the organisation";
-  if (member.statusKind === "locked") return locale === "ko" ? "대여 종료 또는 실행 불가" : "Lease ended or unavailable";
+  if (member.statusKind === "locked") return locale === "ko" ? "실행 불가" : "Unavailable";
   if (member.statusKind === "failed") return locale === "ko" ? "오류 · 확인 필요" : "Error · review needed";
   if (member.statusKind === "working") return locale === "ko" ? "작업 중" : "Working";
   return locale === "ko" ? member.statusLine : member.statusLineEn;
