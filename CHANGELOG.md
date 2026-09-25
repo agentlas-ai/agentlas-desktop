@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.2.43 — 2026-09-25
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- AGI in One and Work: an AGI button next to "+" in the composer turns on an orchestrator for the
+  conversation's Goal. It follows the model order from your dashboard pool (Agentlas AI included),
+  shows that order as one chain, respects a token limit you set, and wakes with a short
+  decision-only call instead of a full turn. It never passes your own stop or an approval, and it
+  is available on plans that include it.
+- Goal completion now rolls up from the AI's own breakdown: sub-goals, then strategies, then the
+  final goal. When a condition names a file, the app reads that file itself in the Goal's folders,
+  so the proof no longer depends on which tool wrote it. A request that finishes in one turn stays a
+  normal turn; only multi-turn work becomes a Goal, and an automatic Goal retries at most twice.
+- A Goal turn that ends without saying it is done now always moves on: it is verified, its next step
+  is scheduled, or it stops with a named reason. A turn that asked you a question waits for your
+  answer and continues when you reply. A deleted Goal's identity is never reused, so a new Goal in
+  the same conversation always starts fresh.
+- A Goal you paused stays paused until you resume it — sweeps, restarts, re-checks and AGI do not
+  cross that line — and pressing Resume takes effect at once. A Goal interrupted when the app
+  closed continues from its checkpoint at the next start.
+- Agentlas AI (credits) now gets the same tools and Goal contracts as the CLI runtimes in One and
+  Work: Goals verify and finish on it, files it writes appear in the result panel, a browser page
+  stays open across tool calls, and long instructions are no longer refused as too large before
+  sending. An attempt whose result is unknown is not replayed automatically.
+- Observation checks run in a minimal read-only mode on every runtime and use far fewer tokens.
+- Automations count progress only by real outside effects. A follow, like or repost counts only if
+  the page shows the change afterwards, a failed tool step keeps its reason, and a run left
+  ambiguous after its graph changed is reconciled from its sealed checkpoint so schedules keep
+  running.
+- The Agentlas engine tools now start in every run, and the bundled engine marks its read-only
+  tools as read-only, so Work no longer stops to ask approval for them. New projects no longer get
+  `signing/`, `credentials/` or `.env.example` folders. Computer use, workspace preview and browser
+  skill read tools no longer fail in Codex write and automation runs.
+- Agent Hub is free: paid Hub flows, rental and lease wording, Hub price labels and one-time credit
+  top-up prompts are gone. Hub cards open an Agent Space, publishers can opt in to source browsing,
+  and exact public releases can be installed or called from a paired phone. Project agent pools
+  follow the limits of your plan.
+- AI credits in the sidebar show as a small horizontal energy bar.
+- The first message in a One seat conversation runs on the model shown in its composer.
+- Science (host side): a Science turn whose app closed mid-run can recover forward on its own, a
+  Data Table can open in your spreadsheet app, and Agentlas AI is admitted for Science turns. The
+  bundled Science service is unchanged.
+
 ## 1.2.42 — 2026-09-25
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
