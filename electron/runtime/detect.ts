@@ -1,6 +1,7 @@
 // CLI 자동 감지 통합 + 활성 백엔드 선택 상태 관리.
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
+import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
@@ -178,7 +179,7 @@ function cliModelOf(
   backend?: RuntimeBackend,
 ): string | undefined {
   const candidate =
-    active?.kind === kind && (!backend || active.backend === backend)
+    active?.kind === kind && (!backend || canonicalRuntimeBackend(active.kind, active.backend) === backend)
       ? active.model
       : recallRuntimeSelection(kind, backend)?.model;
   return candidate || undefined;
@@ -1066,7 +1067,9 @@ export async function resolveRolePoolPicks(): Promise<
   return picks;
 }
 
-export async function setActiveRuntime(selection: RuntimeSelection): Promise<RuntimeStatus[]> {
+export async function setActiveRuntime(input: RuntimeSelection): Promise<RuntimeStatus[]> {
+  const backend = canonicalRuntimeBackend(input.kind, input.backend);
+  const selection: RuntimeSelection = backend ? { ...input, backend } : input;
   const role = selection.role ?? "orchestrator";
   setModelRole({ ...selection, role });
   if (role === "orchestrator") {
