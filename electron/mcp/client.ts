@@ -2191,10 +2191,10 @@ async function runMcpInvocationInContext(
       ? [
           "[Agentlas One 실행 경계]",
           oneTeamExecutionPolicy === "confirmed_existing_roster"
-            ? "Main이 확정한 기존 설치 로스터만 사용하세요. 다른 에이전트나 팀을 검색·대여·채용하거나 결제를 시도하지 마세요."
+            ? "Main이 확정한 기존 설치 로스터만 사용하세요. 다른 에이전트나 팀을 검색하거나 추가하지 마세요."
             : oneTeamExecutionPolicy === "confirmed_external_workforce"
               ? "사용자가 이 요청에 필요한 Hub Workforce 편성과 실행을 확인했습니다. Hub가 검증하고 고정한 정확한 릴리스만 사용하고, 대체 후보를 조용히 끼워 넣지 마세요."
-              : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색·대여·채용하거나 결제를 시도하지 마세요.",
+              : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색하거나 추가하지 마세요.",
           "최종 답변에 '사용 에이전트:', '사용 스킬:' 같은 라우팅 보고를 쓰지 말고 사용자에게 필요한 답부터 바로 시작하세요.",
           "이 경계를 넓혀야 한다면 실행하지 말고 One에서 새 팀 검토가 필요하다고 알리세요.",
           `조사·비교·일정·문서·미디어처럼 구조화할 수 있는 최종 결과는 긴 평문으로 끝내지 말고, 검증한 사실과 출처를 담은 정확히 하나의 기계 판독 Surface를 답변 맨 끝에 ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} 형식으로 반환하세요. "Agentlas Surface"라는 Markdown 제목이나 가짜 표로 대신하지 마세요. 비교는 data.table·widgets.table/source-matrix, 날짜별 일정은 data.timeline·widgets.timeline, 좌표가 확인된 이동 경로는 data.routes·widgets.map, 예산은 data.pricing의 currency·limit·items(label, amount, verificationStatus), 실제로 만든 파일만 data.artifacts를 사용하세요. 좌표·금액·파일을 추측해 채우지 마세요.`,
@@ -2207,10 +2207,10 @@ async function runMcpInvocationInContext(
       : [
           "[Agentlas One execution boundary]",
           oneTeamExecutionPolicy === "confirmed_existing_roster"
-            ? "Use only the exact existing installed roster confirmed by Main. Do not search for, borrow, recruit, or pay any other agent or team."
+            ? "Use only the exact existing installed roster confirmed by Main. Do not search for or add another agent or team."
             : oneTeamExecutionPolicy === "confirmed_external_workforce"
               ? "The user confirmed Hub Workforce selection and execution for this request. Use only the exact releases validated and pinned by Hub, and never silently substitute another candidate."
-              : "This is a single-agent run. Do not search for, borrow, recruit, or pay any other agent or team.",
+              : "This is a single-agent run. Do not search for or add another agent or team.",
           "Never include routing reports such as 'Agents used:' or 'Skills used:' in the final answer. Start directly with the answer the user needs.",
           "If the boundary is insufficient, stop and say that a new One team review is required.",
           `For a structured final result such as research, comparison, schedule, document, or media work, do not end with a long plain-text answer. Return exactly one machine-readable Surface at the very end in the form ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE}. Do not substitute a Markdown heading named "Agentlas Surface" or a fake text table. Use data.table with widgets.table/source-matrix for comparisons, data.timeline with widgets.timeline for dated plans, data.routes with widgets.map only for verified coordinates, data.pricing with currency, limit, and items(label, amount, verificationStatus) for budgets, and data.artifacts only for files that were actually created. Never invent coordinates, prices, or files to fill a Surface.`,
