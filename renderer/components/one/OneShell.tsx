@@ -177,6 +177,7 @@ import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
+import { OneFirstRequestCards, oneFirstRequestCardsEntry, type OneFirstRequestCard } from "./OneFirstRequestCards";
 import { OneGrowthCard } from "./OneGrowthCard";
 import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
@@ -6587,6 +6588,32 @@ export function OneShell() {
   const visibleSelectedConfirmation = selectedConfirmation?.sourceMessageId === dismissedDecisionId
     ? null
     : selectedConfirmation;
+  // One 첫 요청 카드(PLAN §5) — 홈·새 One 세션·단톡방이 같은 판정 하나를 쓴다.
+  const firstRequestEntry = oneFirstRequestCardsEntry({
+    hasSelectedTask: Boolean(selected),
+    hasConversation: Boolean(conversation),
+    messageCount: messages.length,
+    busy: workBusy,
+    preparing: Boolean(teamPreflight || preflightPrompt),
+    isGroupRoom: Boolean(activeTaskforce),
+    isOneSession: activeOneSelected,
+    sessionUnavailable: activeDirectSessionUnavailable || activeSeatDissolved || activeSeatEmpty,
+  });
+  // 보내지 않는다 — 입력창에 채우고 초점만 옮긴다. 고쳐서 보내는 것은 사람이다.
+  const insertFirstRequestPrompt = (card: OneFirstRequestCard) => {
+    setComposer(card.prompt);
+    window.requestAnimationFrame(() => {
+      const input = composerInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  };
+  // 첫 화면에서 좌석 붙이기 — 조직도의 기존 추가 시트(로컬/Cloud/Hub → materialize → 좌석)를 그대로 연다.
+  const openSeatAttachFromHome = () => {
+    setRailMode("organisation");
+    setAgentPickerRequest((current) => ({ token: (current?.token ?? 0) + 1, source: "my" }));
+  };
   const selectedSuggestion = useMemo(() => {
     if (!selected || !oneSuggestions || selected.canonicalStatus !== "completed") return null;
     return oneSuggestions.suggestions.find((suggestion) =>
@@ -7620,6 +7647,14 @@ export function OneShell() {
                     <span className={styles.homeMessageAuthor}>One</span>
                     <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
                   </section>
+                  {firstRequestEntry === "home" && (
+                    <OneFirstRequestCards
+                      locale={appLocale}
+                      entry="home"
+                      onInsert={insertFirstRequestPrompt}
+                      onAttachSeat={openSeatAttachFromHome}
+                    />
+                  )}
                   {homeMemoryMapOpen && (
                     <section className={styles.homeMemoryMapPanel} aria-label={appLocale === "ko" ? "One 기억 지도" : "One memory map"}>
                       <OneMemoryMap snapshot={oneMemoryMap ?? EMPTY_ONE_MEMORY_MAP} locale={appLocale} />
@@ -7840,6 +7875,9 @@ export function OneShell() {
                     />
                   )}
                   {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
+                  {(firstRequestEntry === "session" || firstRequestEntry === "group") && (
+                    <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} onInsert={insertFirstRequestPrompt} />
+                  )}
                   {workBusy && !preflightPrompt && !liveWorkAnchorMessageId && (
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (

@@ -1,0 +1,100 @@
+/*
+ * 기존 One 토큰만 쓴다(--paper-2·--paper-edge·--shadow-1·--radius-md·--ink).
+ * 새 시안의 색·간격·그림자를 가져오지 않는다(PLAN §5, 오너 2026-09-25).
+ * 제목은 한 줄 — 단어 중간·글자 하나 줄바꿈 금지(keep-all + nowrap).
+ */
+.root {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.cards {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-md);
+  background: var(--paper-2);
+  box-shadow: var(--shadow-1);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+
+.card > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.card > strong {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.card:hover,
+.card:focus-visible {
+  border-color: var(--paper-edge-strong);
+  background: var(--paper-3);
+  box-shadow: var(--shadow-2);
+  outline: none;
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted-deep);
+  font-size: 10.5px;
+  word-break: keep-all;
+}
+
+.seatLink {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  word-break: keep-all;
+  cursor: pointer;
+}
+
+.seatLink:hover,
+.seatLink:focus-visible {
+  background: var(--paper-3);
+  color: var(--ink);
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: none; }
+}
