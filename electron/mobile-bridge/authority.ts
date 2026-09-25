@@ -3499,9 +3499,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // slug_identity_conflict, … — return their sentence verbatim; anything
       // else stays a generic authority error so no local path can leak.
       case "agents.cloudPublishHub": {
-        const params = guardedParams(request, ["agentLocalId", "idempotencyKey", "confirmOverwrite"]);
+        const params = guardedParams(request, ["agentLocalId", "idempotencyKey", "confirmOverwrite", "publicSourceConsent"]);
         const agentLocalId = requiredIdentifier(params, "agentLocalId");
         const confirmOverwrite = optionalBoolean(params, "confirmOverwrite") === true;
+        const publicSourceConsent = optionalBoolean(params, "publicSourceConsent") === true;
         this.consumeWriteIdempotencyKey(request, params);
         const option = this.registeredUploadOptionForAgent(agentLocalId);
         const sessionRefusal = this.cloudSessionRefusal();
@@ -3510,7 +3511,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         try {
           result = await this.cloudAgentActions.publishRegisteredHub(
             option.target,
-            confirmOverwrite ? { confirmOverwrite: true } : undefined,
+            confirmOverwrite || publicSourceConsent ? {
+              ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
+              ...(publicSourceConsent ? { publicSourceConsent: true } : {}),
+            } : undefined,
           );
         } catch (error) {
           const refusal = this.cloudRefusalOf(error);
