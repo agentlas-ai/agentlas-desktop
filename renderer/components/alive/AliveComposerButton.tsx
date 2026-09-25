@@ -298,6 +298,13 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
     navigate("/dashboard#runtime-roles");
   };
 
+  /*
+   * 한도는 켜기 전에도 정할 수 있다(1.2.43 E2E: 끈 상태에서 프리셋을 누르면 "Turn AGI on first" 거절).
+   * 설정을 먼저 고르고 스위치로 시작하는 흐름 — 비활성 단추는 이유를 말해 주지 못한다(Smashing Magazine
+   * "Usability Pitfalls of Disabled Buttons", 2021). 고른 값은 이 대화의 스위치가 만들 삶에 저장돼 켤 때 적용된다.
+   * 삶이 붙을 곳 자체가 없을 때(One 대화에 목표 없음)만 스위치와 같은 이유로 함께 막는다 — 그 이유는 위 안내문이 말한다.
+   */
+  const limitDisabled = pending || !state.scope;
   const triggerLabel = `AGI · ${statusLabel(status, ko)}`;
   const switchDisabled = pending || blockedByGoal || Boolean(conflict && !state.enabled)
     || Boolean(state.accessReasonCode && !state.enabled);
@@ -454,7 +461,7 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
       <div className={styles.section}>
         <div className={styles.budgetHead}>
           <span id={`${popoverId}-limit`}>{ko ? "토큰 한도" : "Token limit"}</span>
-          <span className={styles.budgetValue}>
+          <span className={styles.budgetValue} data-alive-limit-value="true">
             {compactTokens(used)} / {limit ? compactTokens(limit) : (ko ? "무제한" : "No limit")}
           </span>
         </div>
@@ -477,7 +484,8 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
               type="button"
               className={styles.preset}
               aria-pressed={limit === preset}
-              disabled={pending}
+              disabled={limitDisabled}
+              data-alive-preset={preset ?? "none"}
               onClick={() => setLimit(preset)}
             >
               {preset === null ? "∞" : compactTokens(preset)}
@@ -497,11 +505,16 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
               onKeyDown={(event) => {
                 if (event.key === "Enter") { event.preventDefault(); commitDraft(); }
               }}
-              disabled={pending}
+              disabled={limitDisabled}
             />
             <span aria-hidden="true">M</span>
           </label>
         </div>
+        {state.tokenLimitAppliesOnEnable && state.scope && (
+          <p className={styles.caption} data-alive-hint="limit-on-enable">
+            {ko ? "AGI를 켜면 이 한도로 시작합니다" : "AGI starts with this limit when turned on"}
+          </p>
+        )}
       </div>
 
       {error && <p className={styles.error} role="alert">{error}</p>}

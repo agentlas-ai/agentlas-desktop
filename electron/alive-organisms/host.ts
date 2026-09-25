@@ -73,6 +73,13 @@ function ensureLivesSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS alive_organism_lives (
     agent_id TEXT PRIMARY KEY, organism TEXT NOT NULL CHECK(organism IN ('work','one')),
     life_key TEXT NOT NULL UNIQUE, scope_id TEXT NOT NULL, created_at_ms INTEGER NOT NULL)`);
+  /*
+   * The owner's token grant chosen BEFORE the life exists (1.2.43 E2E: the AGI popover presets answered
+   * "Turn AGI on first"). Keyed by the life key the grant is for (Work project / One goal); consumed when that
+   * life is created. token_limit NULL = no limit, so presence of the row is what "chosen" means.
+   */
+  db.exec(`CREATE TABLE IF NOT EXISTS alive_pending_grants (
+    life_key TEXT PRIMARY KEY, token_limit INTEGER, updated_at_ms INTEGER NOT NULL)`);
 }
 
 interface Organism {
@@ -350,10 +357,17 @@ export class AliveOrganismHost {
     const base: AliveState = { available: resolved.available, ...(resolved.reasonCode ? { reasonCode: resolved.reasonCode } : {}),
       ...(this.planAccess !== "allowed" ? { accessReasonCode: this.planAccess } : {}),
       enabled: false, scope: resolved.scope, needsGoal: resolved.needsGoal, status: "off",
-      budget: { tokenLimit: null, tokensUsed: 0 }, modelOrder: this.modelOrder(organism, resolved.agentId) };
+      // Before any life exists the budget shown is the default grant a life would start with — never a pressed "no limit".
+      budget: { tokenLimit: ALIVE_DEFAULT_TOKEN_LIMIT, tokensUsed: 0 }, modelOrder: this.modelOrder(organism, resolved.agentId) };
     if (!resolved.available || !resolved.agentId) return base;
     const agent = organism.store.get(resolved.agentId);
-    if (!agent) return base;
+    if (!agent) {
+      // No life yet: show the grant that turning AGI on will use (the owner's pending choice, else the default).
+      const pending = resolved.key ? this.pendingGrant(resolved.key) : undefined;
+      base.budget = { tokenLimit: pending === undefined ? ALIVE_DEFAULT_TOKEN_LIMIT : pending, tokensUsed: 0 };
+      base.tokenLimitAppliesOnEnable = true;
+      return base;
+    }
     base.budget = { tokenLimit: agent.budget.tokenLimit, tokensUsed: agent.budget.tokensUsed };
     const attachment = organism.store.attachments(agent.agentId).find((row) => row.status === "attached");
     const attachedChat = typeof attachment?.scope.chatId === "string" ? attachment.scope.chatId : null;
@@ -397,7 +411,8 @@ export class AliveOrganismHost {
     if (resolved.needsGoal || !resolved.goalId || !resolved.agentId || !resolved.key || !resolved.scopeId) {
       throw new AliveHostError("alive-goal-required", "Start a goal in this chat first.");
     }
-    const tokenLimit = input.tokenLimit === undefined ? undefined : input.tokenLimit;
+    const pendingLimit = this.pendingGrant(resolved.key);
+    const tokenLimit = input.tokenLimit !== undefined ? input.tokenLimit : pendingLimit;
     const agentId = resolved.agentId;
     const existing = organism.store.get(agentId);
     const current = existing ? organism.store.attachments(agentId).find((row) => row.status === "attached") : undefined;
@@ -414,6 +429,7 @@ export class AliveOrganismHost {
           budget: { tokenLimit: tokenLimit === undefined ? ALIVE_DEFAULT_TOKEN_LIMIT : tokenLimit, tokensUsed: 0, deadlineMs: null } }, nowMs);
         this.deps.db.prepare("INSERT INTO alive_organism_lives(agent_id,organism,life_key,scope_id,created_at_ms) VALUES (?,?,?,?,?) ON CONFLICT(agent_id) DO NOTHING")
           .run(agentId, surface, resolved.key, resolved.scopeId, nowMs);
+        if (pendingLimit !== undefined) organism.store.event(agentId, "grant.token-limit-changed", { tokenLimit, source: "pending-before-enable" }, nowMs);
         this.lives.set(agentId, surface);
       } else {
         if (tokenLimit !== undefined) {
@@ -422,6 +438,7 @@ export class AliveOrganismHost {
         }
         organism.store.setEnabled(agentId, true, "owner.enabled", nowMs);
       }
+      this.deps.db.prepare("DELETE FROM alive_pending_grants WHERE life_key=?").run(resolved.key);
       for (const row of organism.store.attachments(agentId)) {
         if (row.status === "attached" && row.attachmentId !== attachment.attachmentId) {
           organism.store.attach({ ...row, status: "detached" }, nowMs);
@@ -440,7 +457,19 @@ export class AliveOrganismHost {
     const resolved = this.scopeFor(input.surface, input.chatId);
     if (!resolved.available) throw new AliveHostError(resolved.reasonCode ?? "alive-unavailable");
     const agent = resolved.agentId ? organism.store.get(resolved.agentId) : null;
-    if (!agent) throw new AliveHostError("alive-life-missing", "Turn AGI on first.");
+    if (!agent) {
+      /*
+       * Owner sets the grant before turning AGI on (settings first, then the switch). The choice is stored for the
+       * life this chat's switch will create and applied at creation. With no life key yet (One chat without a goal)
+       * there is nothing it could apply to: same code as the switch, and the popover disables both with that reason.
+       */
+      if (!resolved.key || !resolved.agentId) throw new AliveHostError("alive-goal-required", "Start a goal in this chat first.");
+      this.deps.db.prepare(`INSERT INTO alive_pending_grants(life_key,token_limit,updated_at_ms) VALUES (?,?,?)
+        ON CONFLICT(life_key) DO UPDATE SET token_limit=excluded.token_limit, updated_at_ms=excluded.updated_at_ms`)
+        .run(resolved.key, input.tokenLimit, this.deps.now());
+      this.emitChanges(input.surface, resolved.agentId);
+      return this.getState(input.surface, input.chatId);
+    }
     const attachment = organism.store.attachments(agent.agentId).find((row) => row.status === "attached");
     if (input.surface === "work" && attachment && attachment.scope.chatId !== input.chatId) throw new AliveHostError("alive-attached-elsewhere");
     organism.store.update(agent.agentId, { budget: { ...agent.budget, tokenLimit: input.tokenLimit } }, this.deps.now());
@@ -450,6 +479,12 @@ export class AliveOrganismHost {
     this.emitChanges(input.surface, agent.agentId);
     if (this.running) setImmediate(() => { void this.beat(input.surface); });
     return this.getState(input.surface, input.chatId);
+  }
+
+  /** The owner's grant chosen before the life existed; undefined = none chosen (null = no limit). */
+  private pendingGrant(lifeKey: string): number | null | undefined {
+    const row = this.deps.db.prepare("SELECT token_limit FROM alive_pending_grants WHERE life_key=?").get(lifeKey) as { token_limit: number | null } | undefined;
+    return row ? row.token_limit : undefined;
   }
 
   /** Test/diagnostic view of one organism's store. */

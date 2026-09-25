@@ -36,6 +36,8 @@ export interface AliveState {
   /** Machine wait/failure code behind the status (e.g. grant.tokens-spent, goal.owner-stopped, model.order-exhausted). */
   statusReasonCode?: string;
   budget: { tokenLimit: number | null; tokensUsed: number };
+  /** No life yet: budget.tokenLimit is the grant that turning AGI on will use (the owner may change it first). */
+  tokenLimitAppliesOnEnable?: boolean;
   modelOrder: AliveModelOrderItem[];
   /** Work only: this project's Alive life is attached to another chat. setEnabled with moveFrom=true moves it here. */
   conflict?: { chatId: string; title: string };
