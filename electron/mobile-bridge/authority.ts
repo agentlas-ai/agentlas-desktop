@@ -2323,7 +2323,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           const releaseId = optionalIdentifier(entry, "releaseId", 200) ?? null;
           let member: ProjectAgentPoolMember;
           if (source === "local") {
-            if (entityKind === "team") {
+            // An older local member can remain in a project after its installed
+            // agent or team disappears. The phone may keep or remove that exact
+            // saved identity without needing the old installation to resolve.
+            const bound = project.agentPool.find((candidate) => candidate.source === source
+              && candidate.entityKind === entityKind
+              && candidate.targetId === targetId
+              && candidate.releaseId === releaseId);
+            if (bound) {
+              member = bound;
+            } else if (entityKind === "team") {
               const firmId = optionalIdentifier(entry, "firmId", 200) ?? targetId;
               const firm = getFirm(firmId);
               if (!firm) throw new Error("That team is not installed on this Desktop");
