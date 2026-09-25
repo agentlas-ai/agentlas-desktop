@@ -1546,11 +1546,7 @@ function MemoryDiagnosticsPanel() {
   const ko = locale !== "en";
   const [dreaming, setDreaming] = useState<{ enabled: boolean; lastRunAt: string | null; running: boolean } | null>(null);
   const [supervisor, setSupervisor] = useState<boolean | null>(null);
-  /*
-   * 유료 Hub 자동고용. 기본이 켜짐인데 앱 어디에도 끄는 스위치가 없었다
-   * (감사 2026-08-25: 값을 읽어 쓰기는 하는데 바꾸는 곳이 0). 돈이 나가는
-   * 자동 동작에는 끄는 길이 있어야 한다.
-   */
+  // 공개 Hub 에이전트의 무료 자동 사용 설정. 기존 network 토글 API를 유지한다.
   const [networkAuto, setNetworkAuto] = useState<boolean | null>(null);
   const [toggleBusy, setToggleBusy] = useState<"dreaming" | "supervisor" | "network" | null>(null);
   const [toggleNotice, setToggleNotice] = useState<string | null>(null);
@@ -1621,7 +1617,7 @@ function MemoryDiagnosticsPanel() {
       const readback = await api.hephaestus.getEngineToggles();
       if (readback?.networkAuto !== requested) throw new Error("network_toggle_readback_mismatch");
       setNetworkAuto(readback.networkAuto);
-      setToggleNotice(ko ? "Hub 자동 고용 설정을 저장하고 다시 확인했습니다." : "Automatic Hub hiring was saved and verified.");
+      setToggleNotice(ko ? "Hub 자동 사용 설정을 저장하고 다시 확인했습니다." : "Automatic Hub use was saved and verified.");
     } catch {
       setToggleNotice(ko
         ? "Hub 자동 호출의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 설정을 다시 열어 확인해 주세요."
@@ -1716,7 +1712,7 @@ function MemoryDiagnosticsPanel() {
       <div style={rowStyle}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>
-            {ko ? "밖에서 전문가 자동 고용" : "Hire outside specialists automatically"}
+            {ko ? "공개 Hub 에이전트 자동 사용" : "Use public Hub agents automatically"}
           </div>
           <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
             {ko
