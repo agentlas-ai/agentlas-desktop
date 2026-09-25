@@ -4937,12 +4937,23 @@ ${effectiveUserPrompt}`;
         const installed = member.entityKind === "agent" && member.agentId ? getAgentById(member.agentId) : null;
         const firm = member.entityKind === "team" && member.firmId ? getFirm(member.firmId) : null;
         const label = installed?.name || firm?.name || member.nameSnapshot;
-        return `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
+        // 원격 행은 표시 이름과 불투명한 revision 토큰만 적혀 있어, 오케스트레이터가 부를
+        // 정확한 이름(slug)을 짐작하거나 Workforce 검색으로 다시 찾아야 했다 — 모델이 운 좋게
+        // "cloud:growth-hacker" 를 맞히면 돌고, 못 맞히면 정확한 식별자를 못 받아 실패했다.
+        // 저장된 targetId 가 곧 소스 안의 식별자이므로 그대로 호출 핸들로 준다.
+        const remoteHandle = !installed && !firm && (member.source === "cloud" || member.source === "hub")
+          && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(member.targetId) && !/^agd_/i.test(member.targetId)
+          ? `${member.source}:${member.targetId}`
+          : null;
+        return remoteHandle
+          ? `- ${label} [${member.entityKind}; ${member.source}; call handle ${remoteHandle}; release ${member.releaseId ?? "latest"}]`
+          : `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
         systemPrompt = `${systemPrompt}\n\n## Project tool pool\n${pool}\n` +
           `You are the task orchestrator for this project and own decomposition, staffing, execution, and verification. ` +
           `The saved rows are unordered reusable tools, not session owners or a mandatory chain. Use suitable project tools first. ` +
+          `A row with a call handle is a remote Agentlas agent: call it directly with the Hephaestus call tool (hephaestus_call, agents set to that exact handle); do not search, recruit, or rename it to find it again. ` +
           `When a WorkOrder has a genuine capability or tool gap, use the available Agentlas Workforce/Hephaestus tools ` +
           `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
           `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +

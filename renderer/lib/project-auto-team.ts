@@ -85,9 +85,12 @@ export function candidateInPool(candidate: ProjectRosterCandidate, pool: Project
 
 function runnableOf(candidate: ProjectRosterCandidate): AutoTeamRunnable {
   if (candidate.installed) return "ready";
-  // Cloud 는 내 자산이라 접근은 확실하고 설치만 남는다. Hub 공개 행은 첫 실행 때
-  // 준비·접근이 실제로 확인되기 전까지 "확인 필요"다.
-  return candidate.source === "cloud" ? "install_on_first_run" : "access_unverified";
+  // 내 Cloud 의 호출형(cloud-callable) 행은 설치 없이 실행 때마다 정확한 릴리스를 준비해
+  // 바로 돈다(실측 2026-09-26: 솔로 턴 hephaestus_call cloud:growth-hacker, 목표 턴
+  // "프로젝트 지정 1명으로 편성" 둘 다 완주). 설치형(install-only) Cloud 행만 준비가 남는다.
+  // Hub 공개 행은 첫 실행 때 접근이 실제로 확인되기 전까지 "확인 필요"다.
+  if (candidate.source === "cloud") return candidate.remoteCallable === false ? "install_on_first_run" : "ready";
+  return "access_unverified";
 }
 
 export function buildAutoTeamMenu(

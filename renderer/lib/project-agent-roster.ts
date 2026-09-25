@@ -31,6 +31,8 @@ export interface ProjectRosterCandidate {
   callable: boolean;
   /** Equivalent source-native ids (for Hub, slug and definition id). */
   identityAliases?: string[];
+  /** Remote rows only: the catalog row itself says it runs by call (not install-only). */
+  remoteCallable?: boolean;
   blockedReason?: string;
 }
 
@@ -293,6 +295,7 @@ function remoteProjectCandidate(
     identityAliases: [listing.slug, listing.agentDefinitionId]
       .map((value) => String(value ?? "").trim().toLowerCase())
       .filter(Boolean),
+    remoteCallable: listing.callable !== false && listing.kind !== "install-only",
     blockedReason: hasIdentity
       ? undefined
       : (locale === "ko" ? "이 목록 행에는 식별자가 없습니다." : "This catalog row carries no identity."),
