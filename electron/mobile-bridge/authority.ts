@@ -742,14 +742,14 @@ function boundedRedactedText(value: string, maxBytes: number): string {
 }
 
 /**
- * Hub credit balance for the phone — same main-process source as Desktop's own
+ * Hosted AI usage allowance for the phone — same main-process source as Desktop's own
  * CreditBalanceWidget (billing.getCredits → GET /api/billing/credits), cached
  * with the same 60s window the renderer uses (ipc-cache "billing.getCredits").
  * Mobile polls piggyback on snapshot activity, so without this cache every
- * snapshot tick would hit the Hub over the network.
+ * snapshot tick would query the billing endpoint over the network.
  *
  * The projection is deliberately honest about "unknown": when the host is
- * signed in but the Hub fetch failed (no numeric balance), `available` is
+ * signed in but the billing fetch failed (no numeric allowance), `available` is
  * omitted instead of being zero-filled — the phone keeps its last known value,
  * exactly like the Desktop widget does.
  */
