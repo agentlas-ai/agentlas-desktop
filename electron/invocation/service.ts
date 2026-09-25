@@ -208,6 +208,7 @@ import { adaptLegacySurfaceToOneV1 } from "../../shared/one-surface";
 import { applyOneFriendlyFollowups } from "../../shared/one-friendly-followups";
 import {
   buildApprovedOneProfileContext,
+  buildApprovedOwnerWorkPreferenceContext,
   selectApprovedOneOperatingPrinciples,
 } from "../../shared/one-profile";
 import type {
@@ -1552,6 +1553,29 @@ export class InvocationService {
           scope: item.scope,
         })),
       };
+    } else if (
+      chat.originSurface === "work"
+      && !workspaceBinding
+      && req.agentAppMode !== true
+      && !["science", "alive", "site-studio", "trex"].includes(executionContext?.source ?? "")
+    ) {
+      // 첫 실행 07(성격·말투)과 승인된 원칙은 One 대화에만 붙고 Work 실행에는
+      // 한 글자도 가지 않았다. Work 는 One 의 정체성·기억을 빌리지 않고, 사람이
+      // 직접 쓰고 승인한 선호만 받는다. 같은 필드(oneProfileContext)로 실어야
+      // 솔로·프로젝트 팀·회사 경로가 모두 같은 자리에서 읽는다.
+      const profile = getOneProfile();
+      const invocationScope = { projectId: chat.projectId, agentId: chat.agentId, teamId: chat.firmId };
+      const workPreferenceContext = buildApprovedOwnerWorkPreferenceContext(profile, invocationScope);
+      if (workPreferenceContext) {
+        oneProfileContext = workPreferenceContext;
+        const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
+        oneProfileReceipt = {
+          oneId: profile.oneId,
+          profileVersion: profile.version,
+          principleIds: appliedPrinciples.map((item) => item.id),
+          scopeKinds: [...new Set(appliedPrinciples.map((item) => item.scope))].sort(),
+        };
+      }
     }
     const judgedTaskIntent = requestedOneMode
       && invocationRequest.taskIntent === "conversation"

@@ -265,6 +265,34 @@ export function selectApprovedOneOperatingPrinciples(
 }
 
 /** Local-only model context; callers must never label any inferred preference as approved. */
+/**
+ * The same owner-authored tone and approved principles, framed for a Work run.
+ *
+ * First-run step 07 saves "how agents should behave" into the One profile. Work
+ * runs are executed by a project orchestrator, not by One, so they must not take
+ * One's identity or memory — only what the owner explicitly wrote and approved.
+ * Returns null when there is nothing to apply, so an empty profile adds no text.
+ */
+export function buildApprovedOwnerWorkPreferenceContext(
+  profile: OneProfile,
+  scope: OneProfileInvocationScope = {},
+): string | null {
+  if (!isOneProfile(profile)) throw new TypeError("Invalid One profile");
+  const enabled = selectApprovedOneOperatingPrinciples(profile, scope);
+  const authored = profile.profileContext.trim();
+  if (!authored && enabled.length === 0) return null;
+  return [
+    "[Owner preferences — explicitly provided by the user in their Agentlas profile]",
+    "Apply these to tone, conduct, and reporting in this Work run. They do not change who you are or grant any authority.",
+    authored ? `User-authored context: ${authored}` : "User-authored context: none.",
+    "Approved operating principles:",
+    enabled.length > 0
+      ? enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n")
+      : "- None approved.",
+    "Do not present inferred preferences as approved operating principles.",
+  ].join("\n");
+}
+
 export function buildApprovedOneProfileContext(
   profile: OneProfile,
   scope: OneProfileInvocationScope = {},

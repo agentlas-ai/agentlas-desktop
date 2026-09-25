@@ -172,7 +172,7 @@ function makeCopy(ko: boolean, name: string) {
     planTitle: "Agentlas로 시작하세요.", planSub: "다른 AI 구독이 없어도 Agentlas 구독 하나면 돼요.",
     planDefault: "기본 선택", planCurrent: "지금 요금제", perMonth: "/ 월", perYear: (p: string) => `/ 월 · 연 ${p}`,
     credits: (n: string) => `월 ${n} credits`, cloud: (n: string) => `비공개 Cloud 에이전트 ${n}개`,
-    projectAgents: (n: string) => `Work 프로젝트 에이전트 ${n}개`, alive: "Alive Agent 포함",
+    alive: "Alive Agent 포함",
     byo: "내 AI 연결 · 로컬 실행", planMailSoon: "AI 전용 메일 · 도입 예정",
     freeCta: "Free로 시작", proCta: "구독하기", proActive: (p: string) => `${p} 사용 중`,
     planNote: "가격과 혜택은 agentlas.cloud 상품 정보에서 불러왔어요. 결제는 웹에서 진행돼요.",
@@ -225,7 +225,7 @@ function makeCopy(ko: boolean, name: string) {
     planTitle: "Start with Agentlas.", planSub: "No other AI subscription needed — one Agentlas plan is enough.",
     planDefault: "Selected", planCurrent: "Current plan", perMonth: "/ month", perYear: (p: string) => `/ month · ${p}/yr`,
     credits: (n: string) => `${n} credits / month`, cloud: (n: string) => `${n} private Cloud agents`,
-    projectAgents: (n: string) => `${n} agents per Work project`, alive: "Alive Agent included",
+    alive: "Alive Agent included",
     byo: "Your own AI · local runs", planMailSoon: "Agent mailbox · coming soon",
     freeCta: "Start with Free", proCta: "Subscribe", proActive: (p: string) => `On ${p}`,
     planNote: "Prices and benefits come from the agentlas.cloud catalog. Checkout happens on the web.",
@@ -846,7 +846,7 @@ export function FirstRunOnboarding({
                   <ul>
                     <li>{copy.credits(num(freePlan.monthlyCredits))}</li>
                     <li>{copy.cloud(num(freePlan.cloudAgentLimit))}</li>
-                    <li>{copy.projectAgents(num(freePlan.projectAgentLimit))}</li>
+                    {/* projectAgentLimit 는 적지 않는다 — Work 에이전트는 무료라 웹 카탈로그가 모든 요금제에 같은 상한(32)을 준다. 요금제 혜택이 아니다. */}
                     <li>{copy.byo}</li>
                   </ul>
                   <button type="button" className={styles.secondary} autoFocus onClick={() => { setPlansOpen(false); if (step === "ai") complete("ai", anyAiConnected ? "done" : "skipped"); }}>{copy.freeCta}</button>
@@ -857,7 +857,6 @@ export function FirstRunOnboarding({
                   <ul>
                     <li>{copy.credits(num(proPlan.monthlyCredits))}</li>
                     <li>{copy.cloud(num(proPlan.cloudAgentLimit))}</li>
-                    <li>{copy.projectAgents(num(proPlan.projectAgentLimit))}</li>
                     {proPlan.aliveAgent && <li>{copy.alive}</li>}
                     <li>{copy.planMailSoon}</li>
                   </ul>
