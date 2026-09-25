@@ -348,7 +348,9 @@ function ProjectPage() {
       }
       const userFacingPool = (Array.isArray(p.agentPool) ? p.agentPool : [])
         .filter((member) => isUserFacingProjectPoolMember(member, ag));
-      setProject({ ...p, agentPool: userFacingPool });
+      // Keep the complete saved pool in state. The editor shows only
+      // user-facing members, but saving it must preserve older hidden roles.
+      setProject(p);
       setNoteDraft(p.systemPrompt ?? "");
       // Older projects and imported fixtures can predate the ordered pool.
       // Keep that state explicit and empty instead of inventing a controller.
@@ -679,10 +681,14 @@ function ProjectPage() {
     if (!project) return;
     setTeamSaveError("");
     try {
-      const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
-      // 읽기 경로(refresh)와 같은 필터를 건다 — 저장 직후엔 main 이 돌려준 원본 풀을 그대로 두어
-      // 배경/비공개 HQ 칸이 카드로 되살아났다(2026-09-13 조사: "지운 행이 돌아온다").
-      setProject({ ...updated, agentPool: (updated.agentPool ?? []).filter((member) => isUserFacingProjectPoolMember(member, agents)) });
+      let visibleIndex = 0;
+      const savedPool = project.agentPool.flatMap((member) => {
+        if (!isUserFacingProjectPoolMember(member, agents)) return [member];
+        return visibleIndex < agentPoolDraft.length ? [agentPoolDraft[visibleIndex++]] : [];
+      });
+      savedPool.push(...agentPoolDraft.slice(visibleIndex));
+      const updated = await api.projects.update(project.id, { agentPool: savedPool });
+      setProject(updated);
       setEditingTeam(false);
       setRecoveryPending(false);
     } catch (error) {
@@ -814,7 +820,7 @@ function ProjectPage() {
       }
       const updated = await api.projects.update(project.id, { agentPool: appended.members });
       setProject(updated);
-      setAgentPoolDraft(updated.agentPool);
+      setAgentPoolDraft(updated.agentPool.filter((member) => isUserFacingProjectPoolMember(member, agents)));
       setTeamTreeOpen(true);
       setRecoveryPending(false);
       setHubRecommendationNotice(locale === "ko"
@@ -1309,7 +1315,7 @@ function ProjectPage() {
             </div>}
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "도구 저장" : "Save tools"}</button>
-              <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setTeamSaveError(""); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
+              <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool.filter((member) => isUserFacingProjectPoolMember(member, agents))); setTeamSaveError(""); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
             </div> : null}
             {teamSaveError ? <div role="alert" style={{ marginTop: 10, color: "var(--danger)", fontSize: 12, lineHeight: 1.5 }}>{teamSaveError}</div> : null}
           </div>

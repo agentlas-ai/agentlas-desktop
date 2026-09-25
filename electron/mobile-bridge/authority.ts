@@ -2297,7 +2297,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
         const requested = params.members;
         if (!Array.isArray(requested)) throw new TypeError("members must be an array");
-        if (requested.length > PROJECT_AGENT_POOL_MAX) {
+        // Existing over-limit pools remain editable from Mobile so an owner can
+        // keep or remove members without losing the rest of the saved roster.
+        if (requested.length > Math.max(project.agentPool.length, PROJECT_AGENT_POOL_MAX)) {
           throw new Error(`A project stages at most ${PROJECT_AGENT_POOL_MAX} agents`);
         }
 
