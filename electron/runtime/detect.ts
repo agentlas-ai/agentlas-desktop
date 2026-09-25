@@ -332,24 +332,27 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   }
 
   const requestGeneration = detectGeneration;
-  const flight = detectRuntimesUncached();
+  /*
+   * 모델 미지정("엔진 설정 사용") 실행에서 실제로 쓰인 모델을 각 런타임에 실어 보낸다.
+   * 레지스트리는 main 에만 있고 그 행은 렌더러가 만들기 때문에, 여기서 붙이지 않으면
+   * 기본값으로 쓰는 사람은 실제 모델을 영영 못 본다(QA 실측 2026-09-08).
+   * ★장식은 비행(flight) 안에서 한다 — 예전엔 처음 부른 쪽만 장식하고, 진행 중 비행에
+   *   합류한 동시 호출자는 cliDefaultModel·observedDefaultModel 이 빠진 목록을 받았다
+   *   (Alive 격리 실측 2026-09-24: 두 생명체가 동시에 감지 → 기본 모델 "opus"가 번갈아 사라짐).
+   */
+  const flight = detectRuntimesUncached().then((raw) => markSignedOutRuntimes(raw).map((runtime) => {
+    const observed = resolvedCliModelAlias(runtime.kind, "");
+    const configured = cliConfiguredDefaultModel(runtime.kind);
+    return {
+      ...runtime,
+      ...(observed ? { observedDefaultModel: observed } : {}),
+      ...(configured ? { cliDefaultModel: configured } : {}),
+    };
+  }));
   detectInFlight = flight;
   detectInFlightGeneration = requestGeneration;
   try {
-    /*
-     * 모델 미지정("엔진 설정 사용") 실행에서 실제로 쓰인 모델을 각 런타임에 실어 보낸다.
-     * 레지스트리는 main 에만 있고 그 행은 렌더러가 만들기 때문에, 여기서 붙이지 않으면
-     * 기본값으로 쓰는 사람은 실제 모델을 영영 못 본다(QA 실측 2026-09-08).
-     */
-    const list = markSignedOutRuntimes(await flight).map((runtime) => {
-      const observed = resolvedCliModelAlias(runtime.kind, "");
-      const configured = cliConfiguredDefaultModel(runtime.kind);
-      return {
-        ...runtime,
-        ...(observed ? { observedDefaultModel: observed } : {}),
-        ...(configured ? { cliDefaultModel: configured } : {}),
-      };
-    });
+    const list = await flight;
     // A runtime update/store change may have invalidated this probe while it
     // was running. Let its caller finish, but never make that old generation
     // the source for a later dashboard read.

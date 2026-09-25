@@ -270,7 +270,8 @@ export class AliveLifetimeStore {
     const measured = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
     const rows = this.db.prepare(`SELECT wake_id, receipt_json FROM alive_wakes WHERE agent_id=?
       AND status IN ('completed','failed','cancelled','interrupted') AND receipt_json IS NOT NULL`).all(agentId) as Row[];
-    const unknown = rows.filter((row) => { try { return !measured(JSON.parse(row.receipt_json).tokensUsed); } catch { return true; } });
+    // A receipt the owner already acknowledged as unmeasurable (acknowledgeUnknownUsage) is not waited on again.
+    const unknown = rows.filter((row) => { try { const r = JSON.parse(row.receipt_json); return !measured(r.tokensUsed) && typeof r.usageAcknowledgedAtMs !== "number"; } catch { return true; } });
     if (!unknown.length) return false;
     const recovered: Array<{ wakeId: string; receipt: Record<string, unknown>; tokensUsed: number }> = [];
     for (const row of unknown) {
@@ -290,6 +291,33 @@ export class AliveLifetimeStore {
       this.event(agentId, "usage.recovered", { wakeIds: recovered.map((item) => item.wakeId), tokensUsed }, nowMs);
     })();
     return true;
+  }
+  /**
+   * The owner's way out of a permanently unknown charge (desktop addition; Science keeps its own rule).
+   * A wake killed after its provider attempt started (crash, force quit) can never report usage, so
+   * recoverUnknownUsage alone would keep a token-bounded life waiting forever. Only an explicit owner
+   * re-grant (setting the token limit) calls this: those exact wakes are stamped acknowledged (their charge
+   * stays unknown and is never invented), the flag clears, and the event records which wakes were waived.
+   */
+  acknowledgeUnknownUsage(agentId: string, nowMs: number): string[] {
+    const agent = this.get(agentId);
+    if (!agent || agent.state.usageUnknown !== true) return [];
+    const measured = (value: unknown): boolean => Number.isSafeInteger(value) && Number(value) >= 0;
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT wake_id, receipt_json FROM alive_wakes WHERE agent_id=?
+        AND status IN ('completed','failed','cancelled','interrupted') AND receipt_json IS NOT NULL`).all(agentId) as Row[];
+      const waived: string[] = [];
+      for (const row of rows) {
+        let receipt: Record<string, unknown>;
+        try { receipt = JSON.parse(row.receipt_json); } catch { receipt = { runId: row.wake_id }; }
+        if (measured(receipt.tokensUsed) || typeof receipt.usageAcknowledgedAtMs === "number") continue;
+        this.db.prepare("UPDATE alive_wakes SET receipt_json=? WHERE wake_id=?").run(JSON.stringify({ ...receipt, usageAcknowledgedAtMs: nowMs }), row.wake_id);
+        waived.push(row.wake_id);
+      }
+      this.update(agentId, { state: { ...agent.state, usageUnknown: false } }, nowMs);
+      this.event(agentId, "usage.unknown-acknowledged", { wakeIds: waived }, nowMs);
+      return waived;
+    })();
   }
   settle(receipt: AliveRuntimeReceipt, nowMs: number): boolean {
     if (!["completed", "failed", "cancelled", "interrupted"].includes(receipt.status)) return false;

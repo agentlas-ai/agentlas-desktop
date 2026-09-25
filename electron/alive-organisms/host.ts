@@ -360,6 +360,8 @@ export class AliveOrganismHost {
     if (input.surface === "work" && attachment && attachment.scope.chatId !== input.chatId) throw new AliveHostError("alive-attached-elsewhere");
     organism.store.update(agent.agentId, { budget: { ...agent.budget, tokenLimit: input.tokenLimit } }, this.deps.now());
     organism.store.event(agent.agentId, "grant.token-limit-changed", { tokenLimit: input.tokenLimit }, this.deps.now());
+    // An owner re-grant is the way out of usage-unknown: wakes that can never report usage are acknowledged.
+    organism.store.acknowledgeUnknownUsage(agent.agentId, this.deps.now());
     this.emitChanges(input.surface, agent.agentId);
     if (this.running) setImmediate(() => { void this.beat(input.surface); });
     return this.getState(input.surface, input.chatId);
