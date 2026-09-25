@@ -4418,7 +4418,8 @@ app.whenReady().then(async () => {
   }
   // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives
   // resume on their own; wakes the previous process lost are reconciled on the first beat (hostLost).
-  if (!developmentEffectsSuppressed()) {
+  // AGENTLAS_ALIVE_ORGANISMS=off is an operator kill switch (lives stay durable and resume when it is removed).
+  if (!developmentEffectsSuppressed() && process.env.AGENTLAS_ALIVE_ORGANISMS !== "off") {
     try {
       const { startAliveOrganisms } = await import("./alive-organisms");
       startAliveOrganisms();

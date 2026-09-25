@@ -19,7 +19,8 @@ import type { AliveAgent, AliveAttachment, AliveClockPort, AliveWakeRuntimeRecor
 import { AliveLifetimeStore, aliveStableId } from "../alive-core/lifetime-store";
 import { AliveLifetimeService } from "../alive-core/lifetime-service";
 import { GoalAlivePlayground, attachedGoalId, type GoalPlaygroundDeps } from "./goal-playground";
-import { GoalAliveRuntime, type GoalRuntimeDeps } from "./goal-runtime";
+import { GoalAliveRuntime } from "./goal-runtime";
+import { LightWakeRunner, type LightWakeDeps } from "./light-wake";
 import { ALIVE_POOL_RUNTIME_POLICY, aliveSelectionFromPool, type AliveModelOrderEntry } from "./model-order";
 import { ALIVE_DEFAULT_TOKEN_LIMIT, ALIVE_MAX_TOKEN_LIMIT, type AliveChangedEvent, type AliveModelOrderItem,
   type AliveSetEnabledInput, type AliveSetTokenLimitInput, type AliveState, type AliveStatus, type AliveSurface } from "../../shared/alive";
@@ -37,7 +38,10 @@ export interface AliveHostDeps {
   clock: AliveClockPort;
   intervalMs: number;
   playground: GoalPlaygroundDeps;
-  runtime: Omit<GoalRuntimeDeps, "organism" | "processStartedAtMs" | "resolveSelection">;
+  /** The light decision-only runner's edges (runtime runner pick, cooldown note, timeout). */
+  light: Pick<LightWakeDeps, "pickRunner" | "noteFailure" | "timeoutMs">;
+  /** Minimum spacing between unchanged-world wakes, escalating by consecutive unchanged reviews. */
+  reviewFloorsMs?: readonly number[];
   projectName(projectId: string): string | null;
   controllerInstalled(): boolean;
   refreshModelOrder(): Promise<AliveModelOrderEntry[]>;
@@ -45,6 +49,9 @@ export interface AliveHostDeps {
   emit(event: AliveChangedEvent): void;
   registerShutdown?(stop: () => void): void;
 }
+
+/** Spacing between model wakes while the observed world is unchanged. */
+export const ALIVE_REVIEW_FLOORS_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000] as const;
 
 const WORK_KEY = (projectId: string) => `alive:work-project:v1:${projectId}`;
 const ONE_KEY = (goalId: string) => `alive:one-goal:v1:${goalId}`;
@@ -74,6 +81,7 @@ export class AliveOrganismHost {
   private readonly organisms: Record<AliveOrganism, Organism>;
   private running = false;
   private unsubscribeSettled: Array<() => void> = [];
+  private readonly light: LightWakeRunner;
 
   constructor(private readonly deps: AliveHostDeps) {
     AliveLifetimeStore.ensureSchema(deps.db);
@@ -81,15 +89,19 @@ export class AliveOrganismHost {
     for (const row of deps.db.prepare("SELECT agent_id, organism FROM alive_organism_lives").all() as Array<{ agent_id: string; organism: AliveOrganism }>) {
       this.lives.set(row.agent_id, row.organism);
     }
+    this.light = new LightWakeRunner({ ...deps.light, db: deps.db, processStartedAtMs: deps.processStartedAtMs, now: deps.now });
+    const floors = deps.reviewFloorsMs ?? ALIVE_REVIEW_FLOORS_MS;
     const build = (kind: AliveOrganism): Organism => {
       const store = new AliveLifetimeStore(deps.db, { initializeSchema: false, agentScope: (agentId) => this.lives.get(agentId) === kind });
       const playground = new GoalAlivePlayground(kind, deps.db, deps.playground);
-      const runtime = new GoalAliveRuntime(store, { ...deps.runtime, organism: kind, processStartedAtMs: deps.processStartedAtMs,
-        resolveSelection: () => aliveSelectionFromPool(deps.cachedModelOrder()) });
+      const runtime = new GoalAliveRuntime(store, { organism: kind, processStartedAtMs: deps.processStartedAtMs, now: deps.now,
+        light: this.light, resolveSelection: () => aliveSelectionFromPool(deps.cachedModelOrder()) });
       const service = new AliveLifetimeService(store, runtime, new Map([[kind, playground]]), {
         clock: deps.now,
         // No member can run now: a visible wait, re-checked every beat (cooldowns expire on their own).
         admission: () => aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
+        // Nothing changed: never every beat. 5m → 15m → 60m between unchanged reviews; a salience change wakes now.
+        reviewFloorMs: (agent) => floors[Math.min(floors.length - 1, Math.max(0, Number(agent.state.unchangedReviews ?? 0)))] ?? 0,
       });
       return { kind, store, playground, runtime, service, releaseClock: null, beating: false, digests: new Map() };
     };
@@ -121,6 +133,7 @@ export class AliveOrganismHost {
   stop(): void {
     if (!this.running) return;
     this.running = false;
+    this.light.cancelAll();
     for (const organism of Object.values(this.organisms)) {
       organism.service.close();
       try { organism.releaseClock?.(); } catch { /* clock already released */ }
