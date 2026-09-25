@@ -6,6 +6,7 @@ import { collectCurrentExecutionProofs } from "./execution-proof";
 import { ensureCriterionProofContracts, ensureNodeProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, GOAL_VERIFICATION_MODEL_TIMEOUT_MS,
   type CriterionProofContract, type NodeProofContract } from "./criterion-proof";
 import { readGoalPlan } from "../store/goal-plans";
+import { hostFileObservationStillHolds, recordHostFileObservations } from "./host-file-observation";
 import { decompositionLeaves, rollUpDecomposition, type DecompositionLeaf } from "../../shared/goal-rollup";
 import { withVerificationAccounting } from "./accounting-context";
 import { createVerificationSession } from "./verification-effects";
@@ -1168,8 +1169,16 @@ export async function verifyGoalCompletionClaim(input: {
     const OUTCOME_INDEX = 0;
     const allContracts: CriterionProofContract[] = [...proofContracts, ...nodeContracts];
     const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
-    const fileProofs = fileProofInput && allContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
+    const needsFileProof = allContracts.some(contract => contract.requiredProofKind === "file");
+    const toolFileProofs = fileProofInput && allContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
       ? currentBuiltinFileProofs(fileProofInput) : [];
+    // The host reads the files the goal's own conditions name — proof no longer depends on which tool wrote them.
+    const hostFileObservations = needsFileProof && fileProofInput && run.rootChatId
+      ? recordHostFileObservations({ longRunId: run.id, chatId: run.rootChatId, verifierAttemptId: attempt.attemptId,
+          texts: [...run.acceptanceCriteria, ...leaves.map(leaf => leaf.text)] }) : [];
+    const fileProofs = [...toolFileProofs, ...hostFileObservations.flatMap(observation => (observation.inRunWindow
+      ? (["read", "write", "edit"] as const) : (["read"] as const)).map(action => ({ ref: observation.ref,
+        relativePath: observation.relativePath, action, sha256: observation.sha256, bytes: observation.bytes })))];
     const downloadRead = fileProofInput && allContracts.some(contract => contract.requiredProofKind === "download")
       ? await currentBrowserDownloadProofs({...fileProofInput,signal:controller.signal}) : {proofs:[],reasonCode:null};
     const downloadProofs = downloadRead.proofs;
@@ -1207,7 +1216,7 @@ export async function verifyGoalCompletionClaim(input: {
           "failed_unknown",
           "inconclusive",
         ],
-        input: `CURRENT HOST COMPLETED EXECUTIONS (recent selected subset, not exhaustive): ${JSON.stringify(executionProofs)}\nCURRENT HOST COMPLETED DOWNLOADS: ${JSON.stringify(downloadProofs)}\nCURRENT HOST FILE OBSERVATIONS (action is immutable): ${JSON.stringify(fileProofs)}\n` + observation + `\nPINNED PROOF CONTRACTS BY ITEM (cannot be lowered): ${JSON.stringify(judgeItems.map(({id,contract})=>({item:id,requiredProofKind:contract?.requiredProofKind,requiredFileAction:contract?.requiredFileAction,hostScopePermission:contract?.hostScopePermission,notApplicableReason:contract?.notApplicableReason})))}`,
+        input: `CURRENT HOST COMPLETED EXECUTIONS (recent selected subset, not exhaustive): ${JSON.stringify(executionProofs)}\nCURRENT HOST COMPLETED DOWNLOADS: ${JSON.stringify(downloadProofs)}\nCURRENT HOST FILE OBSERVATIONS (action is immutable): ${JSON.stringify(toolFileProofs)}\nFILES THE HOST READ ITSELF (named by the goal's conditions; inRunWindow = changed during this goal's run, so it counts as this goal's write/edit; preview = the file's leading text for content checks; cite the ref): ${JSON.stringify(hostFileObservations.map(({ ref, relativePath, bytes, sha256, mtime, inRunWindow, preview }) => ({ ref, relativePath, bytes, sha256, mtime, inRunWindow, preview })))}\n` + observation + `\nPINNED PROOF CONTRACTS BY ITEM (cannot be lowered): ${JSON.stringify(judgeItems.map(({id,contract})=>({item:id,requiredProofKind:contract?.requiredProofKind,requiredFileAction:contract?.requiredFileAction,hostScopePermission:contract?.hostScopePermission,notApplicableReason:contract?.notApplicableReason})))}`,
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
@@ -1235,7 +1244,7 @@ export async function verifyGoalCompletionClaim(input: {
     const noProofReason = (contract: CriterionProofContract | undefined): string => contract
       ? `No current host proof satisfies the pinned requirement (${contract.requiredProofKind}${contract.requiredProofKind === "download" && downloadRead.reasonCode ? `: ${downloadRead.reasonCode}` : ""}).`
         + (contract.requiredProofKind === "file"
-          ? ` A host file proof is recorded only for the file tools (${contract.requiredFileAction === "read" ? "Read" : "Write or Edit"}); shell redirection leaves none. ${contract.requiredFileAction === "read" ? "Read the file with the Read tool." : "Write the exact final content again with the Write tool (idempotent), then read it back."}`
+          ? " The host reads files named in the goal's conditions inside the goal's folders; name the exact file path in the work and make sure it exists there with the required content."
           : "")
       : `Durable verification evidence is unavailable (${durableEvidence.reason}).`;
     const judgedById = new Map(judgeItems.map((item, index) => [item.id, judgments?.[index] ?? null]));
@@ -1310,6 +1319,11 @@ export async function verifyGoalCompletionClaim(input: {
         settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: verificationSession?.effectState()??"none", errorCode: "verification_boundary_changed"});
         return null;
       }
+    }
+    const chosenHostFiles = hostFileObservations.filter(observation => (judgments ?? []).some(row => (row.evidenceRefs ?? []).includes(observation.ref)));
+    if (run.rootChatId && chosenHostFiles.some(observation => !hostFileObservationStillHolds(observation, run.rootChatId!, run.id))) {
+      settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:verificationSession?.effectState()??"none",errorCode:"verification_file_changed"});
+      return null;
     }
     const chosenFileRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("file-proof:")));
     if (chosenFileRefs.size) {
