@@ -1022,6 +1022,30 @@ export function upsertLongRunDomainBinding(input: {
   return binding;
 }
 
+/*
+ * ★Owner stop is a boundary (owner 2026-09-25). A goal the owner/user paused stays paused until the owner
+ * resumes it. Before this, a pause landed as a ledger fact only: pausing a `blocked` goal changed nothing,
+ * and the blocked-goal sweep, the effect-observation resume and the app-closed restart path resumed it —
+ * isolated live run 2026-09-25 (run_80dc1968 / run_8df1afec) kept spending after two user pauses.
+ *
+ * The hold is read from the ledger, not from status alone, so a later host re-park (app_closed pause,
+ * retry wait) cannot launder it: the latest user pause is held until a later owner resume
+ * (user_control resume_with_message / command resume, or a user-actor transition back to queued/running).
+ */
+export const LONG_RUN_OWNER_HOLD_CODE = "long_run_owner_paused";
+
+export function longRunOwnerHold(runId: string): boolean {
+  const row = getDb().prepare(`SELECT
+      (SELECT MAX(seq) FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user'
+        AND (json_extract(payload_json, '$.action') = 'pause' OR json_extract(payload_json, '$.command') = 'pause')) AS paused,
+      (SELECT MAX(seq) FROM long_run_events WHERE run_id = ? AND (
+        (kind = 'run.user_control' AND actor_kind = 'user'
+          AND (json_extract(payload_json, '$.action') = 'resume_with_message' OR json_extract(payload_json, '$.command') = 'resume'))
+        OR (kind = 'run.status_changed' AND actor_kind = 'user' AND json_extract(payload_json, '$.to') IN ('queued', 'running')))) AS released`)
+    .get(runId, runId) as { paused: number | null; released: number | null } | undefined;
+  return typeof row?.paused === "number" && (typeof row.released !== "number" || row.paused > row.released);
+}
+
 export function transitionLongRun(input: {
   runId: string;
   to: LongRunStatus;
@@ -1042,6 +1066,11 @@ export function transitionLongRun(input: {
   }
   assertLongRunTransition(current.status, input.to);
   if (current.status === input.to) return current;
+  // Only the owner lifts an owner hold; every host/worker path that would start the goal again stops here.
+  if ((input.actorKind ?? "host") !== "user" && ["queued", "running", "waiting_tool"].includes(input.to)
+    && ["paused", "blocked", "waiting_tool"].includes(current.status) && longRunOwnerHold(current.id)) {
+    throw new Error(LONG_RUN_OWNER_HOLD_CODE);
+  }
   const now = new Date().toISOString();
   if (input.expectedVersion != null && current.version !== input.expectedVersion) {
     throw new Error("long_run_transition_version_conflict");
@@ -1195,6 +1224,7 @@ export function scheduleBlockedGoalRetry(input: {
   effectUncertain: boolean;
   appInstanceId?: string | null;
 }): LongRunRecord {
+  if (longRunOwnerHold(input.runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(input.runId);
@@ -1240,6 +1270,7 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now()): { ret
 
 /** The retry came due: put back the exact blocker it stood in for, so the same (observation/resume) decision runs again. */
 export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number): LongRunRecord {
+  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(runId);

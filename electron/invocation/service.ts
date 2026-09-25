@@ -3862,8 +3862,8 @@ export class InvocationService {
                 current = transitionLongRun({ runId: current.id, to: "cancelling", actorKind: "user", reason: "user", expectedVersion: current.version });
               }
               transitionLongRun({ runId: current.id, to: "cancelled", actorKind: "user", reason: "user", expectedVersion: current.version });
-            } else if (!["paused", "blocked", "cancelling"].includes(current.status)) {
-              if (["draft", "queued"].includes(current.status)) {
+            } else if (!["paused", "cancelling"].includes(current.status)) {
+              if (["draft", "queued", "blocked"].includes(current.status)) {
                 transitionLongRun({ runId: current.id, to: "paused", actorKind: "user", reason: "user", expectedVersion: current.version });
               } else {
                 current = transitionLongRun({ runId: current.id, to: "pausing", actorKind: "user", reason: "user", expectedVersion: current.version });

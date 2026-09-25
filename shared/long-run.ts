@@ -109,7 +109,8 @@ const LONG_RUN_TRANSITIONS: Readonly<Record<LongRunStatus, ReadonlySet<LongRunSt
   verifying: new Set(["running", "pausing", "blocked", "completed", "failed", "cancelling"]),
   pausing: new Set(["paused", "failed", "cancelling"]),
   paused: new Set(["queued", "cancelling", "cancelled"]),
-  blocked: new Set(["queued", "cancelling", "cancelled"]),
+  // blocked → paused: an owner pause of a stopped goal must be a state, not only a ledger note.
+  blocked: new Set(["queued", "paused", "cancelling", "cancelled"]),
   completed: new Set(),
   failed: new Set(),
   cancelling: new Set(["cancelled", "failed"]),
