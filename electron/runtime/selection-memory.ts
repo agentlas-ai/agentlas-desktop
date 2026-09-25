@@ -1,5 +1,6 @@
 import type { RuntimeBackend, RuntimeKind } from "../../shared/types";
 import { getDb } from "../store/db";
+import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 
 export interface RememberedRuntimeSelection {
   model: string | null;
@@ -10,7 +11,7 @@ export function runtimeSelectionMemoryKey(
   kind: RuntimeKind,
   backend: RuntimeBackend | null | undefined,
 ): string {
-  return `runtime_selection:${kind}:${backend ?? "none"}`;
+  return `runtime_selection:${kind}:${canonicalRuntimeBackend(kind, backend) || "none"}`;
 }
 
 /** Per-runtime choice that survives A→B→A switches and CLI path updates. */
