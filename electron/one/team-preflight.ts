@@ -368,15 +368,14 @@ function inputScopes(chat: Chat): OneTeamPreflightRole["inputScopes"] {
 
 function permissionScopes(
   permission: OneTeamPreflightPermission,
-  /* Hub borrow 는 크레딧을 쓴다 — 그 역할에 "결제 없음"을 적으면 거짓말이다.
-   * 모집(recruitment)은 여전히 없다: 사람이 이미 앉힌 좌석만 부른다. */
-  hubBorrow = false,
 ): OneTeamPreflightRole["permissionScopes"] {
   return [
     "workspace.read",
     ...(permission === "write" ? ["workspace.write" as const] : []),
     "external.recruitment.denied",
-    ...(hubBorrow ? [] : ["external.payment.denied" as const]),
+    // Public Hub invocation is free after marketplace settlement retirement.
+    // A call-only Hub seat does not grant authority for an external payment.
+    "external.payment.denied",
   ];
 }
 
@@ -431,7 +430,7 @@ function roleFromCandidate(
       releaseRef: candidate.packageHash,
     },
     inputScopes: inputScopes(chat),
-    permissionScopes: permissionScopes(permission, candidate.source === "hub-borrow"),
+    permissionScopes: permissionScopes(permission),
     expectedOutput: coordinator
       ? "One integrated result with each specialist contribution and unresolved items identified."
       : `${specialistPrefix}${boundedSpecialistScope || "the installed specialist's declared scope"}${specialistSuffix}`,
@@ -443,7 +442,7 @@ function roleFromCandidate(
  * 사람이 이름을 대서 부른 팀원의 자격.
  *
  * 자동 후보 목록(eligibleRosterSpecialists)은 팀을 뺀다 — 아무도 지목하지
- * 않았는데 팀 하나를 통째로 부르면 범위와 비용이 사람 모르게 커진다.
+ * 않았는데 팀 하나를 통째로 부르면 실행 범위가 사람 모르게 커진다.
  * 그러나 사람이 단톡방에 앉히거나 이번 턴에 지목한 팀은 다르다. 그것을 같은
  * 규칙으로 걸렀기 때문에, 3명짜리 방에서 팀원이 한 번도 불리지 않고 One 만
  * 답했다(오너 지적 2026-08-24 "팀은 당연히 부르는 거고").
@@ -457,7 +456,7 @@ function roleFromCandidate(
  * 답했다(실측: 좌석 2명 모두 `call_only`, 제안 `solo_started`, 대상 0개).
  * 아래 exactInstalledRoster 가 이 좌석을 로컬 대상이 아니라 hub 대상으로
  * 만든다. 자동 선발(eligibleRosterSpecialists)에서는 여전히 제외한다 —
- * 아무도 지목하지 않았는데 유료 Hub 호출을 켜면 비용이 사람 모르게 커진다.
+ * 아무도 지목하지 않았는데 Hub 호출을 켜면 실행 범위가 사람 모르게 커진다.
  */
 function eligibleExplicitMember(installed: InstalledAgent, coordinatorId: string): boolean {
   return installed.id !== coordinatorId
@@ -1175,9 +1174,8 @@ export async function prepareOneTeamPreflight(
    * 있으면 그들로 간다. 못 온 사람은 사유와 함께 제안에 실어 보여 준다.
    */
   const canConfirmTeam = roster.roles.length >= 2;
-  // 사람이 앉힌 좌석 중 Hub borrow 가 하나라도 있으면 이 실행은 크레딧을 쓴다.
-  // 카드가 "비용 없음"이라고 말하면 안 된다.
-  const rosterBorrowsFromHub = roster.targets.some((target) => target.source === "hub");
+  // Public Hub role selection and invocation are free. Runtime model usage is
+  // still disclosed separately as unknown until the selected provider runs.
   // When the installed roster cannot cover the work, external staffing is the
   // remaining route — not a dead end. Main already implements that run end to
   // end (`confirmed_external_workforce` + `hub-first`); this is the door that
@@ -1230,7 +1228,7 @@ export async function prepareOneTeamPreflight(
       complexityReasons: reasons,
       roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
       cost: {
-        hubBorrowing: canConfirmTeam && !rosterBorrowsFromHub ? "none" : "unknown",
+        hubBorrowing: "none",
         runtimeUsage: "unknown",
         currency: null,
         authoritativeQuoteRef: null,

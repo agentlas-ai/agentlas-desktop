@@ -911,7 +911,7 @@ function ChatInputComponent({
    * 자동 라우팅 — routeOnly 미리보기를 받아 묻지 않고 바로 실행한다(codex hep-network 동작).
    *  - 엔진이 저신뢰 에스컬레이션(routerAgent)을 붙인 허브 후보는 키워드 랭킹 노이즈일 수 있어
    *    선고용하지 않는다: routerAgent만 실어 보내 메인 LLM이 의도 기반으로 재랭킹·차용하게 한다.
-   *  - 크레딧 부족일 때만 paywall, 적합 에이전트가 정말 없을 때만 build 제안 시트를 띄운다.
+   *  - 공개 Hub 호출은 무료다. 적합 에이전트가 정말 없을 때만 build 제안 시트를 띄운다.
    */
   async function autoRouteAndSend(text: string) {
     if (!onRecommendPreview) return;
