@@ -471,7 +471,11 @@ function initializeInstallIdentity(): InstallIdentity {
       allowQaOverride: !app.isPackaged,
     });
     configureInstallIdentity(identity);
-    configureDevelopmentEffectPolicy({ packaged: app.isPackaged, identity });
+    const candidateQaUserDataDir = configureDevelopmentEffectPolicy({
+      packaged: app.isPackaged,
+      identity,
+      localCandidateUserDataDir: process.env.AGENTLAS_LOCAL_CANDIDATE_USER_DATA_DIR,
+    });
     const effectsSuppressed = developmentEffectsSuppressed();
     if (effectsSuppressed && process.argv.some((arg) => arg === "--graph-surface" || arg === "--headless-automations")) {
       throw new Error("development_effect_policy_refused: headless entry");
@@ -480,13 +484,23 @@ function initializeInstallIdentity(): InstallIdentity {
     // name Agentlas, Electron's default userData path, and its Keychain
     // service. Only non-official identities receive an explicit namespace.
     app.setName(identity.appName);
-    const userDataDir = identity.userDataOverride
+    const userDataDir = candidateQaUserDataDir ?? identity.userDataOverride
       ?? (identity.channel === "local-candidate" || identity.channel === "dev"
         ? path.join(app.getPath("appData"), identity.userDataNamespace)
         : null);
     if (userDataDir) {
       fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
       app.setPath("userData", userDataDir);
+    }
+    if (candidateQaUserDataDir) {
+      // Electron can cache these independently of userData. Keep Chromium,
+      // diagnostics and native crash output inside the same disposable root.
+      app.setPath("sessionData", candidateQaUserDataDir);
+      app.setAppLogsPath(path.join(candidateQaUserDataDir, "logs"));
+      const crashDumps = path.join(candidateQaUserDataDir, "crash-dumps");
+      fs.mkdirSync(crashDumps, { mode: 0o700 });
+      app.setPath("crashDumps", crashDumps);
+      app.commandLine.appendSwitch("disable-background-networking");
     }
     if (identity.channel === "dev") {
       console.info("[Agentlas-Dev] 별도의 개발 프로필을 사용합니다. 공식 Agentlas의 로그인과 데이터는 기존 프로필에 그대로 보존됩니다. 개발 프로필은 처음에는 비어 있을 수 있습니다.");
