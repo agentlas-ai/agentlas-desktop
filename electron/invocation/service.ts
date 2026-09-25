@@ -2058,6 +2058,15 @@ export class InvocationService {
         taskId: canonicalTask?.id ?? null,
         chatId: chat.id,
       });
+      /*
+       * The project-derived id is the workforce roster's continuity key, not a per-conversation Goal.
+       * A second goalMode chat in the same project re-used the first chat's long run (rootChatId = the
+       * first chat), so pausing from the second chat failed goal_control_scope_mismatch (isolated live
+       * run 2026-09-25). Same rule as chats:setGoalMode: a new Goal whose derived id already has a run
+       * owned by another conversation gets its own id.
+       */
+      const priorGoalRun = getLongRunByGoalId(projectionGoalId);
+      if (priorGoalRun && priorGoalRun.rootChatId !== chat.id) projectionGoalId = `goal:desktop:${randomUUID()}`;
       try {
         const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
         const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq), runReq.permissions);
