@@ -1,9 +1,5 @@
 {
   "note": "이미 낡아 있던 게이트 원장. 새 항목이 생기면 커밋이 거부된다 — 코드를 바꿨으면 그 게이트도 같은 커밋에서 고쳐라. 줄이는 것만 환영.",
   "generatedFrom": "node scripts/verify-gate-freshness.mjs --update-baseline",
-  "entries": [
-    "STALE-ANCHOR|scripts/test-hub-bookmark-ux.cjs|(?:일 · |계속 사용 · )\\$\\{offer\\.credits\\.toLocaleString\\(\\)\\} 크레딧",
-    "STALE-ANCHOR|scripts/test-hub-bookmark-ux.cjs|작업당 \\$\\{perCallCredits\\} 크레딧",
-    "STALE-ANCHOR|scripts/verify-one-hub-derivative-ui.cjs|Publishing access, your right to publish, credit availability, and fees still need review|게시 권한·내가 올릴 권리·크레딧 기능·수수료는 아직 확인이 필요합니다"
-  ]
+  "entries": []
 }
