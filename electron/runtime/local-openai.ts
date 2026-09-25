@@ -90,12 +90,12 @@ export function makeLocalOpenAiRunner(
       contextWindow !== undefined ? "managed-local" : undefined,
       req.surfaceGate === "exclude" ? "exclude" : surfaceGate,
     );
-    const systemContent = wrapped();
+    const systemContent = req.minimalObservation ? req.systemPrompt : wrapped();
     // Managed local only: when the keyword-gated Surface protocol is what pushes the
     // request over the measured context, the loop may retry once with the same prompt
     // minus that optional host documentation. User text, history, agent instructions
     // and tool schemas are never trimmed; a forced Surface pass has no fallback.
-    const systemPromptFallback = contextWindow !== undefined && req.forceSurface !== true
+    const systemPromptFallback = !req.minimalObservation && contextWindow !== undefined && req.forceSurface !== true
       ? (() => { const compact = wrapped("exclude"); return compact !== systemContent ? compact : undefined; })()
       : undefined;
     const messages: ChatMessage[] = [{ role: "system", content: systemContent }];

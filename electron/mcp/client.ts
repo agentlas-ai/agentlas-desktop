@@ -2617,7 +2617,11 @@ ${effectiveUserPrompt}`;
   const aliveRuntimePinned = executionContext?.source === "alive" && Boolean(req.runtimeSelection);
   // Main-only checkpoint dispatch retains its exact producer binding. A model
   // handoff requires a separate validated boundary, not the recovery pool.
-  const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(req.runtimeSelection);
+  // An effect observation also starts as a goal-continuation run and now carries the Goal's exact runtime (2a85294b),
+  // but it is one look, not a checkpoint successor: treating it as one demanded a checkpoint it never has
+  // (checkpoint_dispatch_context_missing on every codex/serving look, live 2026-09-25).
+  const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(req.runtimeSelection)
+    && !effectObservationTicket(req.runId);
   // One's composer selection is the controller's first runtime for both One
   // chat and One Work/graph runs. A normal Library assignment remains the
   // default for other surfaces; One only leaves its pin after a typed runtime
@@ -5458,7 +5462,9 @@ ${effectiveUserPrompt}`;
         return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts);
       })() : "";
       const runtimeTurnContext = [turnContext, checkpointContext].filter(Boolean).join("\n\n");
-      if (effectObservationRun && runtime.kind === "claude-code") {
+      // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
+      // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
+      if (effectObservationRun) {
         // One read-only look: its own tiny system prompt, no persona/history/turn context. The observation
         // prompt (userPrompt) carries the goal, targets, rules and the verdict marker contract.
         return {
@@ -5471,7 +5477,7 @@ ${effectiveUserPrompt}`;
           // A local effect (file, folder) is looked at with read built-ins only; the browser server's tool
           // schemas are loaded only when the interrupted work used a browser or a web page.
           ...(effectObservationTicket(req.runId)?.needsBrowser === false
-            ? { mcpConfigPath: undefined, mcpAllowedTools: [] } : {}),
+            ? { mcpConfigPath: undefined, mcpAllowedTools: [], mcpCodexConfigArgs: [] } : {}),
           userPrompt,
           backendLabel: runtimePicked.label,
           model: runtime.model ?? undefined,

@@ -2040,6 +2040,60 @@ async function runCodexResidentTurn(input: {
   }
 }
 
+/**
+ * Codex features switched off for a Main-issued effect observation. `-c features.<name>=false` (not `--disable`) so a
+ * name a newer/older CLI does not know is ignored instead of failing the run. Each removes tool schemas or context the
+ * look does not need (measured 2026-09-25, codex 0.156.1).
+ */
+const OBSERVATION_DISABLED_CODEX_FEATURES = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation",
+  "goals", "in_app_browser", "chronicle", "multi_agent", "memories", "plugins", "skill_search", "tool_suggest", "sleep_tool",
+  "workspace_dependencies", "worktrees", "view_image", "realtime_conversation", "mentions_v2"] as const;
+
+/**
+ * One read-only look for a Main-issued effect observation on codex (routed 2026-09-25): production goals pinned to codex
+ * paid ~1.17M input tokens per look (the One prompt, history and the resumed chat thread) — 28 looks ~33M tokens in 72h.
+ * Here: a fresh ephemeral exec in a private CODEX_HOME that holds only a link to the account's auth (no user AGENTS.md,
+ * config, plugins, memories or skills), the observation's own short instructions as the model instructions, the
+ * project doc off, read-only sandbox, only Main's browser MCP server when the look needs it, and no session resume or
+ * persistence. Measured: ~22k input tokens for a two-step file look (vs ~44k for a bare exec with the user's setup).
+ */
+async function runCodexMinimalObservation(bin: string, req: RunnerRequest, events: RunnerEvents,
+  observeNativeFile: ReturnType<typeof bindNativeFileProofObserver>): Promise<RunnerResult> {
+  const realHome = req.env?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-codex-observation-"));
+  try {
+    await fs.symlink(path.join(realHome, "auth.json"), path.join(home, "auth.json")).catch(() => {});
+    const instructions = path.join(home, "observation-instructions.md");
+    await fs.writeFile(instructions, req.systemPrompt, { encoding: "utf8", mode: 0o600 });
+    // Only Main's browser server survives (the client already drops MCP when the look needs no browser).
+    const browserOnlyMcp: string[] = [];
+    const source = req.mcpCodexConfigArgs ?? [];
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] === "-c" && /^mcp_servers\.(?:"agentlas-browser"|agentlas-browser)\./.test(source[index + 1] ?? "")) {
+        browserOnlyMcp.push("-c", source[index + 1]); index += 1;
+      }
+    }
+    const args = [
+      "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
+      "-c", "project_doc_max_bytes=0", "-c", `model_instructions_file=${JSON.stringify(instructions)}`,
+      "-c", 'web_search="disabled"', "-c", "include_apply_patch_tool=false",
+      ...OBSERVATION_DISABLED_CODEX_FEATURES.flatMap((name) => ["-c", `features.${name}=false`]),
+      ...browserOnlyMcp,
+      ...(req.model ? ["--model", req.model] : []),
+      "-",
+    ];
+    events.onStatus(`[runtime-session] observation kind=${KIND}`);
+    const run = await runCodexProcess(bin, args, req.userPrompt, { ...req, env: { ...(req.env ?? process.env), CODEX_HOME: home } },
+      events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
+    if (req.signal?.aborted) throw abortReasonError(req);
+    if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
+    return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
+      ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
+  } finally {
+    await fs.rm(home, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -2097,6 +2151,7 @@ export const runCodex: Runner = async (
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
   }
+  if (req.minimalObservation && !req.untrustedNoTools) return runCodexMinimalObservation(bin, req, events, observeNativeFile);
 
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
