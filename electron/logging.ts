@@ -342,6 +342,25 @@ export function initFileLogging(): string | null {
   }
 }
 
+/**
+ * Appends one synchronous line to launches.log beside main.log. main.log is shared by every instance of an
+ * install identity and its lines carry no pid, so lifecycle records that must be attributable to one
+ * process (why it quit, its exit code) go here with the pid, next to that process's startup record.
+ */
+export function appendLaunchTrace(kind: string, payload: Record<string, unknown>): boolean {
+  if (!activeLogPath) return false;
+  try {
+    fs.appendFileSync(
+      path.join(path.dirname(activeLogPath), LAUNCH_TRACE_FILE),
+      `${new Date().toISOString()} [${kind}] ${JSON.stringify({ pid: process.pid, ...payload })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Absolute path of the active log file, or null when file logging is off. */
 export function mainLogFilePath(): string | null {
   return activeLogPath;

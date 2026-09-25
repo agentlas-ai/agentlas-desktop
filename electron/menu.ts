@@ -5,6 +5,7 @@
 import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { checkSafely as updaterCheck, getUpdaterState } from "./updater";
 import { credentialRecoveryMenuItems } from "./secrets/recovery-menu";
+import { noteQuitIntent } from "./quit-reason";
 
 const WEB_BASE = "https://agentlas.cloud";
 
@@ -213,7 +214,15 @@ export function buildAppMenu(
               { role: "hideOthers" as const },
               { role: "unhide" as const },
               { type: "separator" as const },
-              { role: "quit" as const },
+              {
+                // role:"quit" 대신 명시 항목 — 메뉴·Cmd-Q 종료를 로그에서 외부 종료 요청(Dock·AppleEvent)과 가른다.
+                label: locale === "ko" ? `${app.getName()} 종료` : `Quit ${app.getName()}`,
+                accelerator: "Command+Q",
+                click: () => {
+                  noteQuitIntent("menu-quit");
+                  app.quit();
+                },
+              },
             ],
           },
         ]

@@ -149,6 +149,7 @@
     "qa:file-viewers": "npm run build:electron && cross-env NEXT_PUBLIC_AGENTLAS_QA_SURFACES=1 npm run build:renderer && node scripts/qa-file-viewers-electron.cjs",
     "test:store-isolation": "node scripts/store-isolation-contract.mjs",
     "test:stdio-epipe-guard": "tsc -p electron/tsconfig.json && node scripts/stdio-epipe-guard-contract.cjs",
+    "test:quit-reason": "node scripts/test-quit-reason.cjs",
     "test:science-skills-menu": "node scripts/skills-menu-stays-small-contract.cjs",
     "test:runtime-fallback-exhaustion": "tsc -p electron/tsconfig.json && node scripts/runtime-fallback-pool-exhaustion-contract.cjs",
     "test:runtime-invocation-breaker": "tsc -p electron/tsconfig.json && node scripts/runtime-invocation-breaker-contract.cjs",

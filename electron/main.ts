@@ -121,6 +121,7 @@ import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, installStdioErrorGuard, mainLogFilePath } from "./logging";
+import { installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
@@ -311,6 +312,7 @@ if (app.isPackaged && process.argv.slice(1).some((arg) =>
   arg === "-e" || arg === "--eval" || arg === "-p" || arg === "--print"
   || arg.startsWith("--eval=") || arg.startsWith("--print="))) {
   console.error("[startup] node-helper-requires-run-as-node");
+  recordImmediateExit("startup-refused", 78, { stage: "node-helper-requires-run-as-node" });
   app.exit(78);
 }
 
@@ -514,6 +516,7 @@ function initializeInstallIdentity(): InstallIdentity {
     // Fail before any protected storage, store migration, or updater access.
     // Do not print a path or package payload from an untrusted bundle.
     console.error("[install-identity] startup refused", error instanceof Error ? error.message : "unknown error");
+    recordImmediateExit("startup-refused", 78, { stage: "install-identity" });
     app.exit(78);
     throw error;
   }
@@ -567,6 +570,22 @@ function applyDockIcon(): void {
   // permanent false warning in the shipped log, which teaches everyone to
   // ignore startup warnings.
   if (app.isPackaged) return;
+  /*
+   * Every unpackaged instance shows up in the Dock as "Electron". 2026-09-25 a remote-desktop user chose Quit from
+   * one such Dock menu and ended an isolated E2E app (pid 96164) instead of the instance they meant (macOS log:
+   * DockHelper "perform action for menu item" -> Electron[96164] "Handling Quit AppleEvent"). Name the instance in
+   * its Dock menu, directly above the system Quit item, so the choice is visible before it is made.
+   */
+  try {
+    const cdpPort = process.argv.find((arg) => arg.startsWith("--remote-debugging-port="))?.split("=")[1];
+    const userData = app.getPath("userData");
+    app.dock.setMenu(Menu.buildFromTemplate([
+      { label: `${installIdentity.appName} · pid ${process.pid}${cdpPort ? ` · CDP ${cdpPort}` : ""}`, enabled: false },
+      { label: `${path.basename(path.dirname(userData))}/${path.basename(userData)}`, enabled: false },
+    ]));
+  } catch (err) {
+    console.warn("[dock] identity menu not set:", err);
+  }
   // dist/electron/main.js → ../../build-resources/icon-1024.png
   const iconPath = path.join(__dirname, "../../build-resources/icon-1024.png");
   try {
@@ -825,6 +844,7 @@ const singleInstanceLockPromise = initialSingleInstanceLock
           // this owner exits so the replacement can complete native startup.
           if (process.platform === "darwin") {
             traceUpdaterStartup("single-instance-lock-relaunch-after-retry");
+            recordImmediateExit("relaunch", 0, { stage: "single-instance-lock-retry" });
             app.relaunch();
             app.exit(0);
             return;
@@ -854,6 +874,7 @@ void singleInstanceLockPromise.then((acquired) => {
   if (acquired) return;
   traceUpdaterStartup("single-instance-lock-rejected");
   console.info("[agentlas] another instance owns the single-instance lock; exiting");
+  recordImmediateExit("single-instance-rejected", 0);
   app.exit(0);
 });
 
@@ -1192,7 +1213,10 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
 
 app.on("window-all-closed", () => {
   // macOS first — 마지막 윈도우가 닫혀도 dock에 남아있는 게 표준
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin") {
+    noteQuitIntent("window-all-closed");
+    app.quit();
+  }
 });
 
 app.on("activate", () => {
@@ -1420,12 +1444,16 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
   },
   install: installDownloadedUpdate,
   relaunch: () => app.relaunch(),
-  quit: () => app.quit(),
+  quit: () => {
+    noteQuitIntent("update-install");
+    app.quit();
+  },
   subscribe: onUpdaterStateChange,
   shouldInstallOnQuit: () => !developmentEffectsSuppressed() && !systemShutdownInProgress && invocationService.activeChatIds().length === 0,
   logger: console,
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
+  noteQuitIntent("update-install", { stage: "native-handoff" });
   automaticQuitInstaller.authorizeNativeQuit();
   // The replacement can be launched by NSIS/AppImageUpdater before this
   // process has fully exited. Hand over the lock only after the native updater
@@ -1436,6 +1464,7 @@ electronAutoUpdater.on("before-quit-for-update", () => {
 function forceQuitAfterContinuity(reason: string): void {
   quitCleanupDeadlineTimer = null;
   console.error(`[shutdown] ${reason}; forcing process exit after continuity deadlines`);
+  recordImmediateExit("cleanup-deadline", 0, { reason });
   // Long-run and Science each had their bounded opportunity to checkpoint.
   // An OS credential prompt or native worker must not leave an invisible
   // Main process and defunct helpers alive indefinitely after Quit.
@@ -1494,6 +1523,8 @@ function armMacNativeExitWatchdog(): boolean {
 // windows. On macOS, a native credential lookup can outlive every visible
 // window and prevent `will-quit` from being reached at all.
 app.on("before-quit", () => {
+  // First: say why this process is quitting, before any cleanup can hang or be cut off (see quit-reason.ts).
+  recordQuitStarted();
   if (automaticQuitInstaller.quitDisposition() === "ordinary") {
     armQuitCleanupDeadline();
   } else {
@@ -1603,19 +1634,24 @@ app.whenReady().then(async () => {
         "[runtime-seal] official packaged runtime boundary failed; refusing to start",
         error instanceof Error ? error.message : "unknown error",
       );
+      recordImmediateExit("startup-refused", 78, { stage: "runtime-seal" });
       app.exit(78);
       return;
     }
   }
+  // Every quit path from here on is attributable: signals are received with their name (see quit-reason.ts).
+  installQuitSignalHandlers();
   if (process.platform !== "win32") {
     powerMonitor.on("shutdown", () => {
       // Never turn an operating-system shutdown into an application relaunch.
       systemShutdownInProgress = true;
+      noteSystemShutdown(true);
       if (systemShutdownResetTimer) clearTimeout(systemShutdownResetTimer);
       // macOS can cancel shutdown because another app refuses it. If Agentlas
       // remains alive, do not permanently disable later normal-quit installs.
       systemShutdownResetTimer = setTimeout(() => {
         systemShutdownInProgress = false;
+        noteSystemShutdown(false);
         systemShutdownResetTimer = null;
       }, 120_000);
       systemShutdownResetTimer.unref();
@@ -1653,6 +1689,7 @@ app.whenReady().then(async () => {
       serveGraphSurfaceOverStdio();
     } catch (err) {
       console.error("[graph-surface] failed:", err);
+      noteQuitIntent("headless-done", { surface: "graph-surface", failed: true });
       app.quit();
     }
     return;
@@ -1666,6 +1703,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.error("[headless-automations] legacy launcher cleanup failed:", err);
     } finally {
+      noteQuitIntent("headless-done", { surface: "headless-automations" });
       app.quit();
     }
     return;
@@ -4231,11 +4269,14 @@ app.whenReady().then(async () => {
   // and must be re-armed. Without this the auto-repair would fire exactly once
   // in the app's lifetime and then stay disabled by its own leftover marker.
   noteHealthyStartup();
+  // Startup re-installs a native default for termination signals after whenReady; take them back (quit-reason.ts).
+  rearmQuitSignalHandlers();
   traceUpdaterStartup("healthy-startup");
 }).catch(async (error) => {
   traceUpdaterStartup("startup-promise-rejected");
   if (developmentEffectsSuppressed()) {
     console.error("[main] development startup failed", error);
+    recordImmediateExit("startup-failed", 1, { stage: startupStage });
     app.exit(1);
     return;
   }
@@ -4248,6 +4289,7 @@ app.whenReady().then(async () => {
   if (handled) return;
   if (lastStartupNavigationFailure && lastStartupNavigationFailure.kind !== "unexpected") {
     console.warn(`[startup][${lastStartupNavigationFailure.kind}] renderer startup boundary stopped`);
+    recordImmediateExit("startup-failed", 1, { stage: "renderer-startup-boundary" });
     app.exit(1);
     return;
   }
@@ -4259,6 +4301,7 @@ app.whenReady().then(async () => {
       present: presentStartupRecovery,
       retry: async () => {
         await initializeDesktopStore();
+        recordImmediateExit("relaunch", 0, { stage: "startup-recovery-retry" });
         app.relaunch();
         app.exit(0);
       },
@@ -4268,6 +4311,7 @@ app.whenReady().then(async () => {
     // alive instead of turning an operational-store failure into a dead app.
     return;
   }
+  recordImmediateExit("startup-failed", 1, { stage: startupStage });
   app.exit(1);
 });
 
@@ -4282,7 +4326,7 @@ function resolveMenuLocale(pref?: string): "ko" | "en" {
 function applyAppMenu(locale: "ko" | "en"): void {
   if (developmentEffectsSuppressed()) {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: app.getName(), submenu: [{ role: "hide" }, { role: "quit" }] },
+      { label: app.getName(), submenu: [{ role: "hide" }, { label: `Quit ${app.getName()}`, accelerator: "Command+Q", click: () => { noteQuitIntent("menu-quit"); app.quit(); } }] },
       { role: "editMenu" },
       { role: "viewMenu" },
       { role: "windowMenu" },
