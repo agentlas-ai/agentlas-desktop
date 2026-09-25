@@ -105,7 +105,7 @@ function* startupCheckpointCandidates(): Generator<NonNullable<ReturnType<typeof
   // of OFFSET, because a successful recovery changes each row's status.
   while (true) {
     const ids = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
-      AND execution_location='desktop-local' AND host_owner_kind='desktop' AND surface<>'science'
+      AND execution_location='desktop-local' AND surface<>'science'
       AND ((status='paused' AND pause_reason IN ('app_closed','crash_recovery'))
         OR (status='blocked' AND blocked_reason='checkpoint_continuation_failed'))
       ORDER BY id LIMIT 500`)
@@ -482,7 +482,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
   for (const candidate of startupCheckpointCandidates()) {
     const failedBeforeContinuation = candidate.status === "blocked"
       && candidate.blockedReason === "checkpoint_continuation_failed";
-    if (candidate.surface === "science" || candidate.hostOwnerKind !== "desktop"
+    if (candidate.surface === "science"
       || !(failedBeforeContinuation || (candidate.status === "paused"
         && ["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")))) continue;
     // Pending subscriptions restore observation, not ordinary inference.

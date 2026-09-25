@@ -392,7 +392,7 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   try { assertDesktopLongRunAdmissionOpen(); } catch { return deferred("desktop_long_run_admission_closed"); }
   const run = getLongRun(runId);
   if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
-    || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
+    || run.executionLocation !== "desktop-local") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
   if (longRunOwnerHold(run.id)) return deferred(LONG_RUN_OWNER_HOLD_CODE, run.blockedReason);
   const budget = { dispatches: 0 };
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
@@ -412,7 +412,13 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   if (run.rootChatId && dispatcher.activeChatIds().includes(run.rootChatId)) return deferred("chat_busy");
   if (getLongRunAttemptReview(run.id).attempts.some((attempt) => attempt.state === "running")) return deferred("attempt_running");
   const chat = run.rootChatId ? getChat(run.rootChatId) : null;
-  if (!chat || chat.goalId !== run.goalId || !getChatGoalRevision(run.goalId)) return deferred("alive_goal_binding_missing");
+  if (!chat || chat.goalId !== run.goalId) return deferred("alive_goal_binding_missing");
+  if (!getChatGoalRevision(run.goalId)) {
+    if (!adoptExplicitGoalGrant(run.goalId)) return deferred("goal_owner_grant_unrecorded");
+    const adopted = getLongRun(run.id);
+    if (!adopted) return deferred("alive_goal_state_changed");
+    return resume(adopted, dispatcher, "alive");
+  }
   return resume(run, dispatcher, "alive");
 }
 

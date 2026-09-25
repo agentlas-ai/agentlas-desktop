@@ -18,6 +18,31 @@ import { rolePriorityRuntimes, runtimeForOwnerSelection } from "../runtime/selec
 import { getResolvedModelRole, listModelRoleMembers } from "../store/model-roles";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
 import type { AliveWakeRuntimeRecord } from "../alive-core/contracts";
+import { cliModels, resolvedCliModelAlias } from "../../shared/models";
+import { agentlasServingLabel, isAgentlasServingModel } from "../../shared/agentlas-serving";
+
+/** Same names the dashboard RuntimeControl shows (its RUNTIME_LABEL); acp/byok carry their own label. */
+const RUNTIME_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code", codex: "Codex", antigravity: "Antigravity", kimi: "Kimi Code", grok: "Grok",
+  cursor: "Cursor Agent", byok: "BYOK API", ollama: "Ollama", lmstudio: "LM Studio", mlx: "MLX",
+  "agentlas-local": "Agentlas Local", agentlas: "Agentlas",
+};
+
+/**
+ * "Claude Code · Opus 5.5": runtime name, then the model's catalog label (shared/models cliModels) with the
+ * generation the runtime itself reported for that alias (resolvedCliModelAlias — read from a real run, never
+ * written here). Serving tiers use their own label ("Agentlas Light").
+ */
+export function aliveModelDisplayLabel(kind: string, model: string, runtimeLabel?: string | null): string {
+  if (kind === "agentlas" && isAgentlasServingModel(model)) return agentlasServingLabel(model, "en");
+  const name = (kind === "acp" || kind === "byok") && runtimeLabel ? runtimeLabel : RUNTIME_NAMES[kind] ?? runtimeLabel ?? kind;
+  if (!model) return name;
+  const catalog = cliModels(kind).find((option) => option.id === model)?.label;
+  const resolved = resolvedCliModelAlias(kind, model);
+  const generation = resolved ? /(\d+)[-.](\d+)(?!.*\d[-.]\d)/.exec(resolved.replace(/\[.*\]$/, "")) : null;
+  const modelLabel = catalog ? `${catalog}${generation ? ` ${generation[1]}.${generation[2]}` : ""}` : model;
+  return `${name} · ${modelLabel}`;
+}
 
 /** Stored as alive_agents.runtime_binding_json: a policy, stable across wakes. */
 export const ALIVE_POOL_RUNTIME_POLICY = Object.freeze({ kind: "pool", order: "orchestrator>worker", v: 1 });
@@ -82,7 +107,7 @@ export function buildAliveModelOrder(input: {
       else if (live && input.facts?.(live).includes("cannot-judge")) skipCode = "pool.member-no-tools-unsupported";
       else if (live && input.facts?.(live).includes("usage-unmeasured")) skipCode = "pool.member-usage-unmeasured";
       out.push({ role, position, runtimeId: wanted.kind === "acp" && wanted.acpAgentId ? `acp:${wanted.acpAgentId}` : wanted.kind,
-        model, label: (wanted.label ?? selection?.label ?? wanted.kind).toString().slice(0, 120),
+        model, label: aliveModelDisplayLabel(wanted.kind, model, wanted.label ?? selection?.label ?? null).slice(0, 120),
         exhausted: skipCode !== null, skipCode, selection: skipCode ? null : selection,
         status: skipCode || !live || !selection ? null : { ...live, model: selection.model } });
     });
