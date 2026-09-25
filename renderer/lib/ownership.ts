@@ -63,7 +63,7 @@ export function classifyAgent(
   };
 }
 
-/** 허브에서 빌려쓰는(호출형) 게스트. 로컬에 파일이 없고 게시자 가용성에 종속된다. */
+/** 공개 Hub의 호출형 게스트. 내부 borrowed 분류는 소유권 구분용이며 유료 대여가 아니다. */
 export function borrowedInfo(
   input: { publisher?: string; available?: boolean },
   locale: "ko" | "en" = "en",
@@ -73,7 +73,7 @@ export function borrowedInfo(
   return {
     klass: "borrowed",
     owned: false,
-    label: ko ? "빌린 게스트" : "Borrowed guest",
+    label: ko ? "공개 Hub 게스트" : "Public Hub guest",
     origin: ko
       ? (available
           ? `원격 게스트 — 호출만 함${input.publisher ? ` · 게시자 ${input.publisher}` : ""}`
