@@ -8499,6 +8499,8 @@ export interface AgentlasIpc {
       scope: FsReadScope;
       visibility: HephaestusUploadVisibility;
       dryRun?: boolean;
+      /** Explicit author consent to show public package source in Agent Space Files. */
+      publicSourceConsent?: boolean;
     }) => Promise<HephaestusCommandResult>;
     /** 업로드 전 패키징 + 정적 검토 리포트. */
     package: (input: { folder: string; scope: FsReadScope; visibility?: HephaestusUploadVisibility }) => Promise<HephaestusCommandResult>;
