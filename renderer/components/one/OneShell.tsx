@@ -8703,7 +8703,8 @@ export function OneShell() {
                   </button>
                   <AliveComposerButton
                     surface="one"
-                    chatId={selectedConversationId}
+                    /* 목표 대화는 ?task=… 로 열린다 — 주소의 chat 이 아니라 지금 보이는 대화의 id 를 쓴다. */
+                    chatId={activeThreadChatId}
                     locale={appLocale}
                     triggerClassName={styles.attachmentButton}
                     disabled={composerSettingsBlocked}

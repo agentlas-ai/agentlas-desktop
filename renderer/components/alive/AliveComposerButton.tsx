@@ -132,12 +132,41 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
     void refresh();
   }, [refresh, chatId]);
 
+  /*
+   * 다시 읽는 때: alive:changed(켜기·한도·옮기기) + 목표·대화 변경(실측 2026-09-25: One 목표를 끝내도
+   * alive:changed 가 오지 않아 단추가 "대기 중"에 남았다) + 화면 복귀 + 켜져 있을 때 30초 박동.
+   * 목표·대화 변경은 몰려 오므로 한 번으로 묶는다.
+   */
   useEffect(() => {
-    const off = ipcEvents()?.onAliveChanged?.((event) => {
+    const events = ipcEvents();
+    let timer: number | null = null;
+    const soon = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; void refresh(); }, 400);
+    };
+    const offAlive = events?.onAliveChanged?.((event) => {
       if (!event || event.surface === surface) void refresh();
     });
-    return () => off?.();
+    const offStore = events?.onStoreChanged?.((change) => {
+      if (["chat", "long-run", "task"].includes(change.entity)) soon();
+    });
+    const onVisible = () => { if (document.visibilityState === "visible") void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      offAlive?.();
+      offStore?.();
+      document.removeEventListener("visibilitychange", onVisible);
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, [refresh, surface]);
+  const enabledNow = Boolean(state?.enabled);
+  useEffect(() => {
+    if (!enabledNow) return;
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 30_000);
+    return () => window.clearInterval(poll);
+  }, [enabledNow, refresh]);
   useEffect(() => setPortalHost(document.body), []);
 
   useEffect(() => {
@@ -369,6 +398,13 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
       {state.accessReasonCode && (
         <p className={styles.hint} data-alive-hint="plan-access" role="status">
           {errorMessage(state.accessReasonCode, ko)}
+        </p>
+      )}
+      {state.enabled && state.needsGoal && (
+        <p className={styles.hint} data-alive-hint="goal-ended">
+          {surface === "one"
+            ? (ko ? "목표가 끝나 쉬고 있습니다. 새 목표를 시작하면 이어갑니다." : "Paused: the goal ended. Start a new goal to continue.")
+            : (ko ? "이 대화의 목표가 없어 기다리는 중입니다. 목표가 생기면 이어갑니다." : "Waiting: this chat has no goal. It continues once there is one.")}
         </p>
       )}
       {conflict && (
