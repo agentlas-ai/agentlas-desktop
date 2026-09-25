@@ -88,6 +88,11 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   if (!bal || !bal.authenticated || typeof bal.remainingCredits !== "number") return null;
 
   const remaining = bal.remainingCredits;
+  // Energy = remaining over this period's allowance (plan + top-ups); a missing allowance shows a full bar, never an empty one.
+  const limit = typeof bal.limitCredits === "number" && bal.limitCredits > 0 ? bal.limitCredits
+    : typeof bal.planCreditLimit === "number" && bal.planCreditLimit > 0 ? bal.planCreditLimit : 0;
+  const energy = limit ? Math.min(1, Math.max(0, remaining / limit)) : remaining > 0 ? 1 : 0;
+  const energyColor = energy > 0.3 ? "linear-gradient(90deg, #34C77B, #1FA463)" : energy > 0.1 ? "linear-gradient(90deg, #F5B544, #E0921A)" : "linear-gradient(90deg, #F2706A, #D9443B)";
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
       <button
@@ -101,7 +106,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
           alignItems: "center",
           gap: 8,
           width: "100%",
-          padding: collapsed ? "6px 4px" : "6px 8px",
+          padding: collapsed ? "8px 4px" : "8px 10px",
           background: open ? "var(--fill-1)" : "transparent",
           border: "none",
           borderRadius: 10,
@@ -112,20 +117,26 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
           justifyContent: collapsed ? "center" : "flex-start",
         }}
       >
-        <span
-          aria-hidden="true"
-          style={{ width: 7, height: 7, borderRadius: 999, background: "var(--green-deep)", flexShrink: 0 }}
-        />
-        {!collapsed && (
-          <>
-            <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {remaining.toLocaleString()}
+        {/* Owner 2026-09-25: the remaining balance as a small horizontal energy bar, the number smaller than the bar. */}
+        <span style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%", minWidth: 0 }}>
+          {!collapsed && (
+            <span style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6, fontSize: 10.5, lineHeight: 1 }}>
+              <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 크레딧" : "AI credits"}</span>
+              <span style={{ color: "var(--muted-deep)", fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}</span>
             </span>
-            <span style={{ color: "var(--muted-deep)", flex: 1, minWidth: 0 }}>
-              {ko ? "AI 크레딧" : "AI credits"}
-            </span>
-          </>
-        )}
+          )}
+          <span
+            role="meter"
+            aria-label={ko ? "AI 크레딧 잔여" : "AI credits remaining"}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(energy * 100)}
+            aria-valuetext={`${remaining.toLocaleString()}${limit ? ` / ${limit.toLocaleString()}` : ""}`}
+            style={{ display: "block", width: collapsed ? 24 : "100%", height: 4, margin: collapsed ? "0 auto" : 0, borderRadius: 999, background: "var(--fill-2, rgba(0,0,0,0.08))", overflow: "hidden" }}
+          >
+            <span style={{ display: "block", width: `${Math.max(energy > 0 ? 3 : 0, Math.round(energy * 100))}%`, height: "100%", borderRadius: 999, background: energyColor, transition: "width 400ms ease" }} />
+          </span>
+        </span>
       </button>
 
       {/* 잔액 부족 CTA — 웹 결제 페이지(agentlas.cloud/pricing)를 외부 브라우저로 연다. */}
@@ -173,7 +184,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
             <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 사용 잔액" : "AI usage balance"}</span>
-            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}</strong>
+            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}{limit ? <span style={{ color: "var(--muted-deep)", fontWeight: 500 }}> / {limit.toLocaleString()}</span> : null}</strong>
           </div>
           <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", lineHeight: 1.45 }}>
             {ko ? "공개 Hub 에이전트는 무료로 공유·호출됩니다." : "Public Hub agents are free to share and invoke."}
