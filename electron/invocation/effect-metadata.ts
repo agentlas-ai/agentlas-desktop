@@ -1,6 +1,7 @@
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
 import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { parseScienceToolCorrelation } from "./science-failure-settlement";
+import { parseScienceNativeFailureObservation } from "./science-native-failure";
 
 export const EFFECT_METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const fail = (): never => { throw new Error("runtime-effect-metadata-invalid"); };
@@ -43,6 +44,12 @@ function admission(value: unknown, runId: string, completed: boolean): AdapterEf
     ...(completed ? { report: v.report === null ? null : report(v.report) } : {}) };
 }
 export function parseEffectMetadata(kind: string, value: unknown, runId: string): Record<string, unknown> | null {
+  if (kind === "runtime_science_native_failure_observed") {
+    const v = object(value, ["observation", "conflictingObservation"]);
+    const observation = parseScienceNativeFailureObservation(v.observation);
+    if (observation.binding.invocationRunId !== runId) return fail();
+    return { observation, conflictingObservation: bool(v.conflictingObservation) };
+  }
   if (kind === "runtime_science_tool_correlation") {
     const binding = parseScienceToolCorrelation(value);
     if (binding.invocationRunId !== runId) return fail();

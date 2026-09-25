@@ -5,6 +5,8 @@ import { recordRunEvent } from "../store/run-events";
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
 import { boundEffectBoundary } from "./effect-metadata";
 import { verifyScienceFailureSettlement, type ScienceToolCorrelation } from "./science-failure-settlement";
+import { createHash } from "node:crypto";
+import { parseScienceNativeFailureObservation, type ScienceNativeFailureObservation } from "./science-native-failure";
 
 // These adapters forward a provider tool-result block or a completed Main tool
 // dispatch with an explicit isError boolean. ACP/Antigravity and unknown
@@ -51,6 +53,7 @@ export class InvocationEffectBoundaryTracker {
   private durableTools = 0;
   private readonly adapterScopes = new Map<string, AdapterEffectAdmission & { report: AdapterEffectReport | null }>();
   private readonly scienceCorrelations = new Map<string, ScienceToolCorrelation>();
+  private readonly scienceFailureObservations = new Map<string, Set<string>>();
   constructor(private readonly runId: string, private readonly chatId: string) {}
   nativeScienceTool(binding: ScienceToolCorrelation): void {
     if (binding.invocationRunId !== this.runId || binding.chatId !== this.chatId) { this.uncertainties.add("science-native-binding-mismatch"); return; }
@@ -63,6 +66,25 @@ export class InvocationEffectBoundaryTracker {
     try { recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_science_tool_correlation",
       sourceEventId: `science-native:${this.runId}:${binding.providerToolId}`, payload: { ...binding } }); }
     catch { this.recordingFailed(); }
+  }
+  nativeScienceFailure(value: ScienceNativeFailureObservation): void {
+    try {
+      const observation = parseScienceNativeFailureObservation(value);
+      const binding = observation.binding;
+      const correlation = this.scienceCorrelations.get(binding.providerToolId);
+      if (binding.invocationRunId !== this.runId || binding.chatId !== this.chatId || !correlation
+        || Object.keys(correlation).some(key => correlation[key as keyof ScienceToolCorrelation] !== binding[key as keyof ScienceToolCorrelation])) return;
+      const digest = createHash("sha256").update(JSON.stringify(observation)).digest("hex");
+      const seen = this.scienceFailureObservations.get(binding.providerToolId) ?? new Set<string>();
+      if (seen.has(digest)) return;
+      // Preserve conflicting observations as separate immutable rows. These
+      // receipts never add settledFailureIds or change effect classification.
+      recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_science_native_failure_observed",
+        sourceEventId: `science-native-failure:${binding.providerToolId}:${digest}`, evidencePhase: "observed",
+        payload: { observation, conflictingObservation: seen.size > 0 } });
+      seen.add(digest);
+      this.scienceFailureObservations.set(binding.providerToolId, seen);
+    } catch { this.recordingFailed(); }
   }
   adapterStarted(admission: AdapterEffectAdmission): void {
     if (this.adapterScopes.has(admission.scopeId)) { this.uncertainties.add("adapter-scope-duplicate"); return; }

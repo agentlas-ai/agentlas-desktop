@@ -77,7 +77,7 @@ import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { bindNativeFileProofObserver } from "../long-run/file-proof";
-import { bindScienceNativeToolObserver } from "../invocation/adapter-effect-context";
+import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver } from "../invocation/adapter-effect-context";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -603,6 +603,7 @@ function runCodexProcess(
   observeNativeFile: NativeFileProofObserver,
 ): Promise<CodexRunResult> {
   const observeScienceTool = bindScienceNativeToolObserver(req);
+  const observeScienceFailure = bindScienceNativeFailureObserver(req);
   const reportedOutputTokenBaseline = usageBaseline.output;
   return new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
@@ -857,6 +858,7 @@ function runCodexProcess(
         closeThinking();
         const item = ev.item!;
         observeScienceTool(item);
+        if (ev.type === "item.completed") observeScienceFailure(item, "item.completed");
         const nativeFileChange = ["fileChange", "FileChange", "file_change"].includes(item.type ?? "");
         // `codex exec --json` serializes MCP calls as snake_case
         // `mcp_tool_call` items. Their executable identity lives in
@@ -1293,6 +1295,7 @@ async function runCodexResidentTurn(input: {
   const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
   const surfaceArgs = input.surfaceArgs ?? [];
   const observeScienceTool = bindScienceNativeToolObserver(req);
+  const observeScienceFailure = bindScienceNativeFailureObserver(req);
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
@@ -1492,6 +1495,7 @@ async function runCodexResidentTurn(input: {
       case "item/completed": {
         const item = params?.item;
         observeScienceTool(item);
+        observeScienceFailure(item, "item/completed");
         if (item?.type === "agentMessage") {
           closeThinking();
           const id = String(item.id ?? "");

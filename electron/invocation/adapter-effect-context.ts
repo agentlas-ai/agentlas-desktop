@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { captureScienceToolCorrelation, type ScienceToolCorrelation } from "./science-failure-settlement";
+import { captureScienceNativeFailureObservation, type ScienceNativeFailureObservation } from "./science-native-failure";
 
 export interface AdapterEffectReport {
   schemaVersion: "agentlas.adapter-effect-coverage.v1";
@@ -23,6 +24,7 @@ interface Scope {
   runId: string; chatId: string; rootAgentId: string | null;
   source?: string;
   nativeScienceTool?: (binding: ScienceToolCorrelation) => void;
+  nativeScienceFailure?: (observation: ScienceNativeFailureObservation) => void;
   purpose?: "preparation";
   begin: (admission: AdapterEffectAdmission) => void;
   finish: (scopeId: string, report: AdapterEffectReport) => void;
@@ -38,6 +40,18 @@ export function bindScienceNativeToolObserver(input: { chatId?: string; agentId?
   return item => {
     const binding = captureScienceToolCorrelation(scope.runId, scope.chatId, item);
     if (binding) scope.nativeScienceTool?.(binding);
+  };
+}
+
+/** Bind once in Main's dispatch scope, before any provider/UI truncation. */
+export function bindScienceNativeFailureObserver(input: { chatId?: string; agentId?: string }):
+  (item: unknown, completionKind: ScienceNativeFailureObservation["completionKind"]) => void {
+  const scope = context.getStore();
+  if (!scope || scope.source !== "science" || scope.purpose === "preparation" || !scope.rootAgentId
+    || input.chatId !== scope.chatId || input.agentId !== scope.rootAgentId) return () => {};
+  return (item, completionKind) => {
+    const observation = captureScienceNativeFailureObservation(scope.runId, scope.chatId, item, completionKind);
+    if (observation) scope.nativeScienceFailure?.(observation);
   };
 }
 
