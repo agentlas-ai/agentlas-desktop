@@ -1007,9 +1007,7 @@ function classifyUploadFailure(
       },
     };
   }
-  // ★ 업로드는 크레딧을 쓰지 않는다. 막히는 건 요금제의 "Cloud에 둘 수 있는
-  //   에이전트 수"(자리)이지 사용량 과금이 아니다. 이전 문구는 "크레딧 또는 사용량"
-  //   이라 유저에게 올릴 때마다 돈이 나가는 것처럼 읽혔다.
+  // Uploads are free; a full plan's private Cloud agent seats can still block storage.
   if (signal.includes("cloud_agent_limit_reached")) {
     return {
       explained: true,
@@ -1017,8 +1015,8 @@ function classifyUploadFailure(
       issue: {
         severity: "warning",
         message: ko
-          ? "업로드에 크레딧이 들지는 않습니다. 요금제에서 Cloud에 보관할 수 있는 에이전트 수가 다 찼을 뿐이고, 아무것도 올라가지 않았습니다."
-          : "Uploading does not spend credits. Your plan's limit on how many agents can live in your Cloud is full, and nothing was uploaded.",
+          ? "업로드는 무료입니다. 요금제에서 Cloud에 보관할 수 있는 에이전트 수가 다 찼고, 아무것도 올라가지 않았습니다."
+          : "Uploading is free. Your plan's Cloud agent storage limit is full, and nothing was uploaded.",
         remediation: ko
           ? "쓰지 않는 Cloud 에이전트를 지우거나 요금제를 올린 뒤 다시 올리세요."
           : "Delete a Cloud agent you no longer need, or move to a larger plan, then upload again.",

@@ -145,10 +145,6 @@ function fmtLogTime(at: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function buildLocalBillingLabel(ko: boolean): string {
-  return ko ? "빌드 0크레딧" : "Build 0 credits";
-}
-
 function cloudUploadStageLabel(stage: CloudAgentPublishStage, detail: string, ko: boolean): string {
   const labels: Record<CloudAgentPublishStage, [string, string]> = {
     starting: ["Cloud 저장 준비 중", "Preparing Cloud save"],
@@ -203,8 +199,8 @@ function friendlyHephaestusMessage(raw: string, ko: boolean): string {
   }
   if (lower.includes("credit")) {
     return ko
-      ? "업로드에는 크레딧이 들지 않습니다. 이전 서버 응답이 표시되었습니다. 새로고침한 뒤 다시 시도하세요."
-      : "Uploading does not spend credits. Refresh and retry after this outdated server response.";
+      ? "에이전트 업로드는 무료입니다. 이전 서버 응답이 표시되었습니다. 새로고침한 뒤 다시 시도하세요."
+      : "Agent uploads are free. Refresh and retry after this outdated server response.";
   }
   if (lower.includes("unauthorized") || lower.includes("not logged") || lower.includes("sign in") || /\b401\b/.test(lower)) {
     return ko
@@ -724,7 +720,6 @@ export default function BuildPage() {
                       </span>
                       <strong>{ko ? m.label : m.labelEn}</strong>
                       <span className="build-mode-desc">{ko ? m.desc : m.descEn}</span>
-                      <span className="build-mode-price">{buildLocalBillingLabel(ko)}</span>
                       <span className="build-mode-check" aria-hidden="true">
                         <IconCheck size={12} />
                       </span>
@@ -888,8 +883,8 @@ export default function BuildPage() {
               )}
               <p className="build-autoadd-hint">
                 {ko
-                  ? "데스크톱 Build와 공개 Hub 에이전트 사용에는 Agentlas 크레딧이 들지 않습니다. 모델 실행은 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용합니다."
-                  : "Desktop Build and public Hub agent use do not spend Agentlas credits. Model execution uses Claude Code/Codex/Antigravity/BYOK/Agentlas Local on this computer."}
+                  ? "데스크톱 Build와 공개 Hub 에이전트 사용은 무료입니다. 모델 실행은 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용합니다."
+                  : "Desktop Build and public Hub agent use are free. Model execution uses Claude Code/Codex/Antigravity/BYOK/Agentlas Local on this computer."}
               </p>
             </div>
 
