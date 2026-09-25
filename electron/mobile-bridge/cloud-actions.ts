@@ -71,7 +71,7 @@ export interface MobileBridgeCloudAgentActions {
     target: CloudAgentRegisteredTarget,
     options?: MobileBridgeUploadOptions,
   ): Promise<CloudAgentPackageResult>;
-  /** The authenticated `/api/account/rates` client Desktop pricing already uses. */
+  /** Legacy bridge compatibility: always refuses because Hub pricing is retired. */
   setHubPrices(input: { slug: string; patch: AgentPricePatch }): Promise<SetAgentPricesResult>;
   deleteMyAgent(slug: string): Promise<CloudAgentDeleteResult>;
 }

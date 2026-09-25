@@ -689,7 +689,7 @@ function MarketplacePage() {
             )}
           </div>
 
-          <div className="hub-market-toolbar" aria-label={ko ? "마켓 필터" : "Market filters"}>
+          <div className="hub-market-toolbar" aria-label={ko ? "허브 필터" : "Hub filters"}>
             <div className="hub-market-filters" role="group" aria-label={ko ? "인재 유형" : "Talent type"}>
               {(([
                 ["all", ko ? "전체" : "All"],

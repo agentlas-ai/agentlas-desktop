@@ -1959,10 +1959,8 @@ export const MOBILE_BRIDGE_HUB_PRICE_KINDS = ["RENT", "INGEST", "FORK"] as const
 export type MobileBridgeHubPriceKind = (typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number];
 
 /**
- * Result of the authenticated `/api/account/rates` pricing patch for an
- * already-published Hub listing. A pricing failure is never a failed publish:
- * the listing stays live (and free) exactly like Desktop's own pricing flow.
- * Server bounds/rejections travel inside `refusal` with the server's numbers.
+ * Legacy pricing response shape for installed Mobile clients. New Hub releases
+ * are free, and the Desktop bridge returns a retirement refusal for this RPC.
  */
 export interface MobileBridgeHubPricesDto {
   ok: true;
