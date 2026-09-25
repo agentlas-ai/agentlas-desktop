@@ -25,6 +25,13 @@ export interface GoalIntakeDecision {
   commitment: "now" | "later" | "uncertain";
   /** New judged execution decisions supply this; absent legacy decisions are finite. */
   lifecycle?: GoalLifecycle;
+  /**
+   * Owner decision 2026-09-25: a finite request the assistant can finish in this one reply
+   * ("single") stays an ordinary turn with ordinary run receipts — no long-run, controller,
+   * verifier or sweep. Only "multi" (needs more than one turn, has an outward effect, or has
+   * acceptance criteria beyond the reply) becomes a Goal. Absent = legacy decision (treated as multi).
+   */
+  turnScope?: "single" | "multi";
 }
 
 export interface GoalCriterion {
@@ -107,7 +114,8 @@ function validateAmendment(amendment: GoalAmendment | undefined): void {
 export function admitsAutomaticGoal(source: GoalSourceMessage, decision: GoalIntakeDecision): boolean {
   validateSource(source);
   resolveGoalLifecycle(decision.lifecycle);
-  return decision.messageId === source.messageId && decision.intent === "execute" && decision.commitment === "now";
+  return decision.messageId === source.messageId && decision.intent === "execute" && decision.commitment === "now"
+    && decision.turnScope !== "single";
 }
 
 export function createAutomaticGoalRevision(input: {

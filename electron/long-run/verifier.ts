@@ -1,3 +1,4 @@
+import { AUTOMATIC_GOAL_RETRY_CAP, automaticGoalRetryCount, isAutomaticGoal } from "./auto-goal-retry-cap";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
@@ -1321,10 +1322,15 @@ export async function verifyGoalCompletionClaim(input: {
       : 0;
     const hasRepairableFailure = checkpointVerdicts.some((verdict) => verdict.verdict === "failed"
       && verdict.recoveryClass === "repairable");
-    const retryLimit = hasRepairableFailure ? REPAIRABLE_FAILURE_STREAK_LIMIT : INCONCLUSIVE_RETRY_LIMIT;
+    // System-admitted Goals share one host-continuation budget (auto-goal-retry-cap.ts); at the cap the
+    // verifier blocks and the sweep settles with evidence or asks the owner once.
+    const automatic = isAutomaticGoal(run);
+    const retryLimit = automatic ? AUTOMATIC_GOAL_RETRY_CAP
+      : hasRepairableFailure ? REPAIRABLE_FAILURE_STREAK_LIMIT : INCONCLUSIVE_RETRY_LIMIT;
+    const automaticRetries = automatic ? automaticGoalRetryCount(run.id) : 0;
     let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts,
-      retriesSoFar: recoveryEpoch.inconclusiveRetries, retryLimit,
-      recoveryStreak });
+      retriesSoFar: Math.max(recoveryEpoch.inconclusiveRetries, automaticRetries), retryLimit,
+      recoveryStreak: automatic ? Math.max(recoveryStreak, automaticRetries) : recoveryStreak });
     if (settlement === "cycle_completed") disposition = "cycle_completed";
     if (!completed && disposition !== "cycle_completed") {
       const current = getLongRunByGoalId(input.goalId);
