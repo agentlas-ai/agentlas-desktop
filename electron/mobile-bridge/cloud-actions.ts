@@ -17,11 +17,6 @@ import { randomUUID } from "node:crypto";
 import { getSessionCookieHeader } from "../auth";
 import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
-import {
-  setAgentPrices,
-  type AgentPricePatch,
-  type SetAgentPricesResult,
-} from "../cloud-agents/pricing";
 import type {
   CloudAgentDeleteResult,
   CloudAgentPackageResult,
@@ -71,8 +66,6 @@ export interface MobileBridgeCloudAgentActions {
     target: CloudAgentRegisteredTarget,
     options?: MobileBridgeUploadOptions,
   ): Promise<CloudAgentPackageResult>;
-  /** Legacy bridge compatibility: always refuses because Hub pricing is retired. */
-  setHubPrices(input: { slug: string; patch: AgentPricePatch }): Promise<SetAgentPricesResult>;
   deleteMyAgent(slug: string): Promise<CloudAgentDeleteResult>;
 }
 
@@ -167,7 +160,6 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
       if (result.status === "registered") invalidateMyAgentsCache();
       return result;
     },
-    setHubPrices: async (input) => setAgentPrices({ slug: input.slug, patch: input.patch }),
     // 선반을 바꿨으면 캐시도 같이 바뀌어야 한다. 무효화하지 않으면 방금 지운
     // 에이전트가 최대 5분 동안 폰의 Cloud 탭에 그대로 남는다.
     deleteMyAgent: async (slug) => {

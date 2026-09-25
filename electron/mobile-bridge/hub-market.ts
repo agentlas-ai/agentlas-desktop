@@ -11,7 +11,6 @@ import type {
 } from "../../shared/mobile-bridge";
 import { getSource, refreshSourceStatus } from "../marketplace";
 import type { MarketplaceSource, SeedListingFull } from "../marketplace/source";
-import { getAgentLeaseQuote, type AgentLeaseQuote } from "../cloud-agents/leases";
 
 const SEARCH_LIMIT_MAX = 30;
 const TEXT_MAX = 512;
@@ -23,7 +22,6 @@ type DetailedListing = SeedListingFull & MarketplaceListing;
 export interface MobileHubMarketServiceDependencies {
   source: Pick<MarketplaceSource, "searchAgents" | "getListingBySlug">;
   sourceStatus: () => Promise<Pick<MarketplaceSourceStatus, "online" | "usingFallback">>;
-  leaseQuote: (slug: string) => Promise<AgentLeaseQuote>;
   now?: () => Date;
 }
 
@@ -239,47 +237,16 @@ export class MobileHubMarketService {
     if (!status.online || status.usingFallback) throw new Error("hub_public_source_unavailable");
   }
 
-  async leasePreview(slug: string): Promise<MobileBridgeHubLeasePreviewDto> {
-    const detail = await this.detail(slug);
-    const listing = detail.listing;
-    if (!listing) {
-      return {
-        schemaVersion: 1,
-        status: "unavailable",
-        listing: null,
-        lease: null,
-        checkedAt: detail.checkedAt,
-        explicitConfirmationRequired: true,
-        purchaseAuthorized: false,
-      };
-    }
-    if (!listing.release || listing.entityKind !== "agent") {
-      return {
-        schemaVersion: 1,
-        status: "exact-release-required",
-        listing,
-        lease: null,
-        checkedAt: this.checkedAt(),
-        explicitConfirmationRequired: true,
-        purchaseAuthorized: false,
-      };
-    }
-    const quote = await this.deps.leaseQuote(listing.slug);
+  async leasePreview(_slug: string): Promise<MobileBridgeHubLeasePreviewDto> {
+    // Older Mobile clients may still ask for a lease quote. Do not consult a
+    // provider or expose a paid offer: public Hub use no longer has a lease.
     return {
       schemaVersion: 1,
-      status: quote.ok ? "ready" : "unavailable",
-      listing,
-      lease: {
-        offered: quote.leaseOffered === true,
-        active: quote.active === true,
-        perDayCredits: safeFinite(quote.perDayCredits, 0, 1_000_000),
-        leasedUntil: safeNullableText(quote.leasedUntil, 80),
-        code: safeNullableText(quote.code, 80),
-      },
+      status: "unavailable",
+      listing: null,
+      lease: null,
       checkedAt: this.checkedAt(),
       explicitConfirmationRequired: true,
-      // The existing quote endpoint has no immutable quote ID or quote expiry.
-      // This read receipt must never be accepted as purchase authorization.
       purchaseAuthorized: false,
     };
   }
@@ -289,6 +256,5 @@ export function createDesktopMobileHubMarketService(): MobileHubMarketService {
   return new MobileHubMarketService({
     source: getSource(),
     sourceStatus: () => refreshSourceStatus(false),
-    leaseQuote: getAgentLeaseQuote,
   });
 }
