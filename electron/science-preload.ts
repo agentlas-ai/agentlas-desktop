@@ -294,6 +294,16 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   claimLedgers: Object.freeze({
     getForManuscript: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:claimLedgers:getForManuscript", { extensionId, projectId, manuscriptId }),
   }),
+  styles: Object.freeze({
+    list: () => ipcRenderer.invoke("science:styles:list", { extensionId, input: {} }),
+    import: () => ipcRenderer.invoke("science:styles:import", { extensionId, input: {} }),
+    rename: (input: unknown) => ipcRenderer.invoke("science:styles:rename", { extensionId, input }),
+    delete: (input: unknown) => ipcRenderer.invoke("science:styles:delete", { extensionId, input }),
+    applyToProject: (input: unknown) => ipcRenderer.invoke("science:styles:applyToProject", { extensionId, input }),
+    samplePreview: (input: unknown) => ipcRenderer.invoke("science:styles:samplePreview", { extensionId, input }),
+    openForEditing: (input: unknown) => ipcRenderer.invoke("science:styles:openForEditing", { extensionId, input }),
+    saveEdited: (input: unknown) => ipcRenderer.invoke("science:styles:saveEdited", { extensionId, input }),
+  }),
   journals: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:journals:list", { extensionId, projectId }),
     inspectOfficialGuidelines: (input: unknown) => ipcRenderer.invoke("science:journals:inspectOfficialGuidelines", { extensionId, input }),

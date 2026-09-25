@@ -45,6 +45,7 @@ import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { registerSciencePublicationIpc } from "./science-host/publication-ipc";
+import { inProcessScienceStyleLibraryClient, registerScienceStyleLibraryIpc } from "./science-host/style-library-ipc";
 import { installDesktopScienceHost, registerDesktopScienceResearcherQuestionUi } from "./science-host";
 import { projectScienceLoopLongRun } from "./long-run/science-projection";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
@@ -3650,6 +3651,7 @@ app.whenReady().then(async () => {
     });
   });
   registerSciencePublicationIpc({ ipc: ipcMain, assertScienceSender });
+  registerScienceStyleLibraryIpc({ ipc: ipcMain, client: inProcessScienceStyleLibraryClient(), assertScienceSender: (event, envelope, permission) => assertScienceSender(event, envelope, permission) });
   ipcMain.handle("science:manuscripts:list", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
