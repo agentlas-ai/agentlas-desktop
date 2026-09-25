@@ -31,8 +31,8 @@ const REVIEW_FALLBACKS: Record<ReviewFallbackKey, Record<Locale, string>> = {
   "one.rev.hub.not_published": { ko: "아직 게시 안 됨", en: "Not published" },
   "one.rev.gate.needs_review": { ko: "확인 필요", en: "Needs review" },
   "one.rev.hub.publish_lock": {
-    ko: "위 네 가지와 최종 포함 내용을 모두 확인하고 다시 승인하기 전에는 게시할 수 없습니다. 수익은 보장되지 않습니다.",
-    en: "Publishing stays unavailable until all four items and the final contents are reviewed and approved again. Earnings are not guaranteed.",
+    ko: "게시 권한·게시 권리와 최종 포함 파일을 확인하고 직접 승인하기 전에는 공개되지 않습니다.",
+    en: "The draft stays private until you review publishing access, your rights, and the final included files, then approve publication.",
   },
 };
 
@@ -275,11 +275,9 @@ export function OneSuggestionReviewHandoffBanner({
           <span>{reviewCopy(locale, "one.rev.hub.not_published")}</span>
         </div>
         <dl className={styles.gates} aria-label={tFor(locale, "one.rev.hub.gates_aria")}>
-          {(["entitlement", "rights", "economy", "fee"] as const).map((gate) => <div key={gate}>
+          {(["entitlement", "rights"] as const).map((gate) => <div key={gate}>
             <dt>{gate === "entitlement" ? tFor(locale, "one.rev.gate.entitlement")
-              : gate === "rights" ? tFor(locale, "one.rev.gate.rights")
-                : gate === "economy" ? tFor(locale, "one.rev.gate.economy")
-                  : tFor(locale, "one.rev.gate.fee")}</dt>
+              : tFor(locale, "one.rev.gate.rights")}</dt>
             <dd>{reviewCopy(locale, "one.rev.gate.needs_review")}</dd>
           </div>)}
         </dl>
