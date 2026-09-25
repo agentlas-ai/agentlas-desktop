@@ -70,10 +70,13 @@ function errorResult(message) {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+
 const tools = [
   {
     name: "get_current_time",
     description: "Get the current time in one IANA timezone.",
+    annotations: READ_ONLY,
     inputSchema: {
       type: "object",
       properties: { timezone: { type: "string", maxLength: 160 } },
@@ -84,6 +87,7 @@ const tools = [
   {
     name: "convert_time",
     description: "Convert today's HH:MM wall-clock time between two IANA timezones.",
+    annotations: READ_ONLY,
     inputSchema: {
       type: "object",
       properties: {
@@ -173,6 +177,14 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
+// Both tools carry MCP readOnlyHint (READ_ONLY above; kept terse because the
+// source rides in argv). codex exec runs every write/automation turn with
+// approval_policy "never" and refused each unannotated call before the server saw
+// it: "MCP tool call requires approval, but approval policy is never" (Threads
+// automation 2026-09-24 14:14Z/19:11Z, 2026-09-25 00:03Z; probed on codex-cli
+// 0.156.1 — same source without the hint failed, with it completed).
+// Contract: scripts/system-time-tools-are-read-only-contract.cjs.
+//
 // Keep the audited server in the signed Main bundle and launch it from an
 // in-memory compressed payload. A pathname under ~/.agentlas (or even a
 // packaged resource) can be replaced after validation but before the child
