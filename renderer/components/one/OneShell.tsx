@@ -9374,7 +9374,7 @@ function oneTeamMemberUnavailableText(
   switch (reason) {
     case "not_installed": return "It is not installed on this machine.";
     case "source_missing": return "Its source folder is gone, so there is nothing to run.";
-    case "call_only": return "It is a borrowed Hub seat and was not carried into this run.";
+    case "call_only": return "This public Hub agent is call-only and was not carried into this run.";
     case "hidden": return "It is hidden, so it cannot be called.";
     default: return "It could not be called on this turn.";
   }
