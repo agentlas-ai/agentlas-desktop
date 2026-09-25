@@ -759,7 +759,6 @@ const MOBILE_BRIDGE_CREDITS_TTL_MS = 60_000;
 interface MobileBridgeCreditsProjection {
   authenticated: boolean;
   available?: number;
-  earnings?: number;
 }
 let mobileBridgeCreditsCache: { fetchedAt: number; value: MobileBridgeCreditsProjection } | null =
   null;
@@ -774,10 +773,6 @@ async function getMobileBridgeCredits(): Promise<MobileBridgeCreditsProjection> 
     const value: MobileBridgeCreditsProjection = { authenticated: balance.authenticated === true };
     if (typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits)) {
       value.available = Math.max(0, Math.floor(balance.remainingCredits));
-      value.earnings =
-        typeof balance.earningsCredits === "number" && Number.isFinite(balance.earningsCredits)
-          ? Math.max(0, Math.floor(balance.earningsCredits))
-          : 0;
     }
     mobileBridgeCreditsCache = { fetchedAt: Date.now(), value };
     return value;

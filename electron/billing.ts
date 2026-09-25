@@ -22,7 +22,11 @@ export async function getBillingCredits(): Promise<HubCreditBalance> {
     // 계정 칩도 같은 틱에 로그아웃 상태로 내려간다.
     if (res.status === 401) return { authenticated: false };
     if (!res.ok) return { authenticated: true, error: `http_${res.status}` };
-    return (await res.json()) as HubCreditBalance;
+    const balance = (await res.json()) as HubCreditBalance;
+    // The server may still include a historic creator wallet. Never project it
+    // into current Desktop or paired Mobile clients after settlement closure.
+    delete balance.earningsCredits;
+    return balance;
   } catch {
     return { authenticated: true, error: "network" };
   }

@@ -1067,6 +1067,7 @@ function AgentCard({
   const builtIn = plugin && isDesktopCatalogListing(listing);
   // 기본 도구는 manifestUrl이 비어 있다 — 빈 주소로 창을 여는 버튼을 만들지 않는다.
   const websiteUrl = plugin ? (listing.homepage || listing.manifestUrl || null) : null;
+  const cardOpensSpace = entityKind === "single" || entityKind === "multi";
   const cardLabel = entityClassLabel(entityKind, locale);
   const verificationFacts = hubVerificationFacts(listing, locale);
   /*
@@ -1095,7 +1096,30 @@ function AgentCard({
       : null,
   ].filter((fact): fact is string => Boolean(fact));
   return (
-    <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
+    <div
+      className="card portal-entity-card hub-entity-card"
+      data-entity-kind={entityKind}
+      data-opens-space={cardOpensSpace ? "true" : undefined}
+      role={cardOpensSpace ? "link" : undefined}
+      tabIndex={cardOpensSpace ? 0 : undefined}
+      aria-label={cardOpensSpace
+        ? (ko ? `${loc.name} 에이전트 스페이스 열기` : `Open ${loc.name} Agent Space`)
+        : undefined}
+      onClick={(event) => {
+        if (!cardOpensSpace) return;
+        // Action buttons keep their own behavior; only the card's passive area opens Agent Space.
+        const interactive = event.target instanceof Element
+          ? event.target.closest("button, a, input, select, textarea, [role='button'], [role='link']")
+          : null;
+        if (interactive && interactive !== event.currentTarget) return;
+        onOpenProfile();
+      }}
+      onKeyDown={(event) => {
+        if (!cardOpensSpace || event.target !== event.currentTarget || event.key !== "Enter") return;
+        event.preventDefault();
+        onOpenProfile();
+      }}
+    >
       <EntityKindIcon kind={entityKind} locale={locale} className="hub-card-kind-icon" />
       <div className="hub-card-availability" data-callable={callable ? "true" : "false"}>
         <span className="hub-card-availability-dot" aria-hidden="true" />
@@ -1177,7 +1201,7 @@ function AgentCard({
             <RdTag
               dashed
               title={callable
-                ? (ko ? "Hub 사용권을 보유했다는 뜻이 아니라, 이 Mac에 같은 이름으로 가져온 로컬 에이전트가 있다는 뜻입니다." : "A same-name local agent exists on this Mac; this does not prove Hub access.")
+                ? (ko ? "이 Mac에 같은 이름의 로컬 에이전트가 있다는 뜻이며, 공개 Hub 에이전트의 호출 가능 여부와는 별개입니다." : "A same-name local agent exists on this Mac; its presence does not determine whether the public Hub agent can be called.")
                 : undefined}
             >
               {callable
