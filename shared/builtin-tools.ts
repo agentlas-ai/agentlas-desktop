@@ -337,7 +337,10 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       const existed = fs.existsSync(file);
       writeUtf8File(file, content);
       const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "write", content);
-      return { content: `${existed ? "overwrote" : "created"} ${file} (${Buffer.byteLength(content, "utf8")} bytes)`, ...(fileObservation ? { fileObservation } : {}) };
+      // The written file is this run's artifact, as claude's Write and codex's file
+      // change already are (their runners bind the path). Without it a host-loop run
+      // (serving/BYOK/local) that wrote a file left the result rail empty.
+      return { content: `${existed ? "overwrote" : "created"} ${file} (${Buffer.byteLength(content, "utf8")} bytes)`, artifactPaths: [file], ...(fileObservation ? { fileObservation } : {}) };
     },
   },
   {
@@ -372,7 +375,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         : src.replace(oldString, newString);
       writeUtf8File(file, out);
       const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "edit", out);
-      return { content: `edited ${file} (${count} replacement${count > 1 ? "s" : ""})`, ...(fileObservation ? { fileObservation } : {}) };
+      return { content: `edited ${file} (${count} replacement${count > 1 ? "s" : ""})`, artifactPaths: [file], ...(fileObservation ? { fileObservation } : {}) };
     },
   },
   {
