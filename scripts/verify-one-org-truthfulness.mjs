@@ -33,9 +33,12 @@ assert.match(
 assert.doesNotMatch(service, /statusLine: change\.state === "running" \? "지금 작업 중"/, "the hardcoded Korean residency status line must not come back");
 
 // 문구는 두 언어 대칭 — 한쪽만 있으면 다른 언어 사용자는 아무 말도 못 본다.
-for (const [ko, en] of [["지금 작업 중", "Working now"], ["최근 작업 완료", "Recently completed"], ["실패 · 확인 필요", "Failed · review needed"], ["크레딧 부족", "Out of credits"]]) {
+// 73600705 (2026-09-25) 이 One Team 상태에서 크레딧 전용 문구를 의도적으로 없앴다(유료 Hub 흐름 폐지) — 그 쌍은 더 이상 요구하지 않고,
+// 되살아나지 않는지만 본다.
+for (const [ko, en] of [["지금 작업 중", "Working now"], ["최근 작업 완료", "Recently completed"], ["실패 · 확인 필요", "Failed · review needed"]]) {
   assert.ok(service.includes(ko) && service.includes(en), `both locales must exist for the org status line: ${ko} / ${en}`);
 }
+assert.doesNotMatch(service, /"크레딧 부족"|"Out of credits"/, "the retired credit-specific One Team status line must not come back");
 // 내부 오류 코드를 사용자 문장에 붙이지 않는다.
 assert.doesNotMatch(service, /실패 · \$\{receipt\.errorCode/, "an internal error code must not be pasted into a user-facing status line");
 
