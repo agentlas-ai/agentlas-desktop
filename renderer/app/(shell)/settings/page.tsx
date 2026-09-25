@@ -33,6 +33,7 @@ import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
+import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -468,6 +469,7 @@ export default function SettingsPage() {
         <UpdatePanel />
         <ScienceExtensionPanel />
         <MobileBridgePanel />
+        <AgentMailPanel locale={locale} />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>

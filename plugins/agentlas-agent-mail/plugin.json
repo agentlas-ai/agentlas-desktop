@@ -1,0 +1,47 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-agent-mail",
+  "name": "Agentlas Agent Mail",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.cloud" },
+  "surface": {
+    "displayName": "Agent Mail",
+    "displayNameKo": "에이전트 메일",
+    "tagline": "Your agent's own email address",
+    "taglineKo": "에이전트 전용 메일 주소",
+    "description": "Read and send email from the agent's own address, within the plan's monthly recipient allowance.",
+    "descriptionKo": "에이전트 전용 주소로 메일을 읽고 보냅니다. 요금제의 월 수신자 한도 안에서 동작합니다.",
+    "category": "communication",
+    "brandColor": "#0F766E",
+    "defaultPrompts": ["내 에이전트 메일함에 새 메일 있는지 확인해줘"]
+  },
+  "invocation": { "mention": "@agent-mail", "implicit": "always", "standalone": false },
+  "provides": {
+    "tools": [
+      {
+        "id": "agent-mail",
+        "capability": "agent-mail",
+        "kind": "builtin",
+        "resolver": "agent-mail",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "에이전트 메일",
+          "nameEn": "Agent Mail",
+          "description": "에이전트 전용 주소로 메일을 읽고 보냅니다.",
+          "descriptionEn": "Read and send email from the agent's own address.",
+          "category": "communication",
+          "brandColor": "#0F766E",
+          "mark": "AM"
+        },
+        "hostChannels": [
+          { "id": "control", "env": "AGENTLAS_AGENT_MAIL_CONTROL_FILE", "mode": "read-only" }
+        ]
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
+  "state": { "files": [], "assets": false }
+}

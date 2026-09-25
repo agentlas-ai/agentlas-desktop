@@ -38,6 +38,9 @@ import { registerBrowserApprovalAuthority } from "../browser/approval-authority"
 import { WORKSPACE_PREVIEW_CONTROL_ENV, type WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { createWorkspacePreviewCapability, removeWorkspacePreviewCapabilityForConfig } from "../workspace-preview/control-server";
 import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-server";
+import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
+import { createAgentMailCapability, removeAgentMailCapability } from "../agent-mail/control-server";
+import { agentMailToolsOffered } from "../agent-mail/client";
 import {
   isAuthenticComputerUseMcpLaunch,
   isCanonicalComputerUseMcpServer,
@@ -357,7 +360,7 @@ const OPERATIONAL_KEYS = [
   "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_BROWSER_AUTONOMY", "AGENTLAS_BROWSER_APPROVAL_AUTHORITY",
   "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
   "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT",
-  "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
+  "AGENTLAS_COMPUTER_USE_CONTROL_FILE", "AGENTLAS_AGENT_MAIL_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 // The Hephaestus engine launch (resolveHephaestusStdioLaunch) is python -c <bootstrap> that reads
@@ -710,6 +713,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServerIds: string[] = [];
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let workspacePreviewCapabilityCleanup: (() => void) | undefined;
+  const agentMailCapabilityCleanup: Array<() => void> = [];
   const proxyHandles: string[] = [];
   const residentProxyHandles: string[] = [];
   const activatedResidentProxyHandles = new Set<string>();
@@ -729,6 +733,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       else cancelMcpProxyLaunchPreparation(handle);
     }
     for (const revoke of browserAuthorityCleanup) revoke();
+    for (const revoke of agentMailCapabilityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
       if (ownsFile) {
         try { fs.rmSync(configPath, { force: true }); } catch { /* Authority is already revoked. */ }
@@ -789,6 +794,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // A preview capability is never global: Main must bind it to this run's
       // task, authorized cwd, and explicit owner-full grant before the MCP child
       // can see the tool. A worker's write permission alone cannot spawn a shell.
+      continue;
+    }
+    if (s.catalogId === "agent-mail" && (!callerChatId || !agentMailToolsOffered() || !isAuthenticAgentMailMcpLaunch(s.command, s.args ?? []))) {
+      // Agent mail is offered only to an owner-started chat run, only when the
+      // signed-in owner has an active agent mail address (last server answer),
+      // and only for the exact inline launch shipped by this build.
       continue;
     }
     if (s.catalogId === "workspace-preview" && !isAuthenticWorkspacePreviewMcpLaunch(s.command, s.args ?? [])) {
@@ -899,6 +910,20 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           continue;
         }
       }
+      if (s.catalogId === "agent-mail") {
+        try {
+          const capabilityConfigKey = opts?.configKey ?? key;
+          const capability = await createAgentMailCapability(
+            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read" },
+            capabilityConfigKey,
+          );
+          agentMailCapabilityCleanup.push(() => removeAgentMailCapability(capabilityConfigKey, capability.binding.capabilityId));
+          builtInEnv = { [AGENT_MAIL_CONTROL_ENV]: capability.path };
+        } catch (error) {
+          console.warn("[agent-mail] capability unavailable:", error);
+          continue;
+        }
+      }
       if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
         const launch = await resolveHephaestusStdioLaunch("agentlas_cloud", ["mcp", "serve"]);
         if (!launch) continue;
@@ -929,7 +954,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         aliases.length === 0 &&
         (isAuthenticSystemTimeMcpLaunch(command, args)
           || isAuthenticComputerUseMcpLaunch(command, args)
-          || isAuthenticWorkspacePreviewMcpLaunch(command, args))
+          || isAuthenticWorkspacePreviewMcpLaunch(command, args)
+          || isAuthenticAgentMailMcpLaunch(command, args))
       ) {
         // The keyless built-in already has an exact, compressed in-memory
         // launch contract. Bypass the mutable per-run wrapper so no pathname is

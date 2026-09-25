@@ -17,6 +17,7 @@ import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher
 import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 import { systemTimeMcpLaunchArgs } from "../mcp-tools/system-time-server";
 import { workspacePreviewMcpLaunchArgs } from "../workspace-preview/mcp-server";
+import { agentMailMcpLaunchArgs } from "../agent-mail/mcp-server";
 
 interface PluginManifest {
   slug: string;
@@ -35,6 +36,7 @@ export const BUILTIN_PLUGIN_MANIFEST_PATHS = [
   "../../plugins/agentlas-computer-use/plugin.json",
   "../../plugins/agentlas-time/plugin.json",
   "../../plugins/agentlas-workspace-preview/plugin.json",
+  "../../plugins/agentlas-agent-mail/plugin.json",
   "../../plugins/flint-chart/plugin.json",
 ] as const;
 
@@ -114,6 +116,7 @@ const RESOLVERS: Record<string, () => { command: string; args: string[] }> = {
   "computer-use": () => ({ command: process.execPath, args: computerUseMcpLaunchArgs() }),
   "system-time": () => ({ command: process.execPath, args: systemTimeMcpLaunchArgs() }),
   "workspace-preview": () => ({ command: process.execPath, args: workspacePreviewMcpLaunchArgs() }),
+  "agent-mail": () => ({ command: process.execPath, args: agentMailMcpLaunchArgs() }),
 };
 
 interface PluginToolSurface {

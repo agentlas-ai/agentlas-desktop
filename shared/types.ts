@@ -6857,6 +6857,8 @@ export interface RunAlertSettings {
 }
 
 export interface AgentlasIpc {
+  /** Agent mail (One's own address) — server-owned entitlement and mailbox. */
+  agentMail: import("./agent-mail").AgentMailIpc;
   browserUi: import("./browser-ui").BrowserUiAPI;
   browserAnnotation: import("./browser-annotation").BrowserAnnotationAPI;
   browserAutofill: import("./browser-autofill").BrowserAutofillAPI;

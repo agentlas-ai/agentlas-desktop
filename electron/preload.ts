@@ -310,6 +310,14 @@ const api: AgentlasIpc = {
     getPlans: () => ipcRenderer.invoke("billing:getPlans"),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
   },
+  agentMail: {
+    status: () => ipcRenderer.invoke("agentMail:status"),
+    issue: (input) => ipcRenderer.invoke("agentMail:issue", input ?? {}),
+    list: (input) => ipcRenderer.invoke("agentMail:list", input ?? {}),
+    get: (id) => ipcRenderer.invoke("agentMail:get", id),
+    send: (input) => ipcRenderer.invoke("agentMail:send", input),
+    remove: (id) => ipcRenderer.invoke("agentMail:remove", id),
+  },
   promptHub: {
     list: (params?: { q?: string; category?: string }) => ipcRenderer.invoke("promptHub:list", params),
     get: (slug: string) => ipcRenderer.invoke("promptHub:get", slug),

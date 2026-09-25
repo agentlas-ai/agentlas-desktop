@@ -32,6 +32,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-science-statistics": ["README.md", "bin", "coverage-manifest.json", "figure-catalog.json", "matlab-parity-manifest.json", "plugin.json", "runtime", "skills"],
   "agentlas-time": ["plugin.json"],
   "agentlas-workspace-preview": ["plugin.json"],
+  "agentlas-agent-mail": ["plugin.json"],
   design: ["README.md", "assets", "plugin.json", "references", "skills"],
   "flint-chart": ["plugin.json", "skills"],
   "plugin-make": ["README.md", "assets", "plugin.json", "skills"],

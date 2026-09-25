@@ -506,6 +506,7 @@ import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
 import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
+import { registerAgentMailIpc } from "./agent-mail/ipc";
 import { registerAliveIpc } from "./alive-organisms";
 import { noteOwnerAutomationPinEdit } from "./automation-runtime-provenance";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
@@ -1554,6 +1555,8 @@ export function registerIpcHandlers(): void {
   registerWorkStartIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAnnotationIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerAutomationStrategyIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  // 에이전트 전용 메일(웹 /api/agent-mail/*). 세션 쿠키는 main 에만 있다.
+  registerAgentMailIpc(ipcMain);
   // One/Work Alive (AGI toggle): Main-owned lives; the renderer only reads state and flips the owner controls.
   registerAliveIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;
