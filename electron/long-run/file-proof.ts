@@ -12,6 +12,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunAttemptGoalRevision } from "../store/long-runs";
 import { recordRunEvent } from "../store/run-events";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
+import { preparedMcpBindings } from "../mcp-tools/prepared-transport";
 
 interface Scope {
   runId: string; chatId: string; agentId: string | null; signal: AbortSignal;
@@ -21,6 +22,18 @@ const contexts = new AsyncLocalStorage<Scope>();
 export function withBuiltinFileProofContext<T>(scope: Scope, action: () => T): T { return contexts.run(scope, action); }
 const schemaVersion = "agentlas.builtin-file-proof.v1";
 const nativeSchemaVersion = "agentlas.native-file-proof.v1";
+const mcpSchemaVersion = "agentlas.mcp-file-proof.v1";
+/*
+ * MCP file tools whose effect Main can observe exactly like a builtin write: the official
+ * filesystem server (catalog id "filesystem", @modelcontextprotocol/server-filesystem). Identity
+ * is the sealed prepared binding's catalog id, never a tool name the model or a config key chose.
+ * Before this, a Goal that wrote through this server (any runtime; measured on Agentlas serving
+ * 2026-09-25, run d6716f25: mcp__filesystem__write_file) had no host file proof, so every file
+ * criterion stayed inconclusive.
+ */
+const MCP_FILE_ACTIONS: Record<string, Record<string, FileObservationAction>> = {
+  filesystem: { write_file: "write", edit_file: "edit", read_text_file: "read", read_file: "read" },
+};
 const actionForTool: Record<string, FileObservationAction> = { read_file: "read", write_file: "write", edit_file: "edit" };
 interface Event { id: string; seq: number; kind: string; payload_json: string }
 function toolReceipts(runId: string, chatId: string, toolId: string, toolName: string) {
@@ -87,12 +100,14 @@ export function beginBuiltinFileProof(input: {chatId?:string;agentId?:string;cwd
 
 function nativeActionAllowed(kind: string, toolName: string, action: FileObservationAction): boolean {
   if (!["read", "write", "edit"].includes(action)) return false;
-  return kind === "claude-code"
+  return kind === "mcp" ? admittedMcpToolNames.has(toolName) : kind === "claude-code"
     ? ({ Read: "read", Write: "write", Edit: "edit" } as Record<string, string>)[toolName] === action
     : kind === "codex" && toolName === "apply_patch" && (action === "write" || action === "edit");
 }
 
 function nativeRuntimeBound(attemptId: string, runId: string, runtimeKind: string): boolean {
+  // An MCP file tool is identified by Main's sealed binding, not by the runtime that called it.
+  if (runtimeKind === "mcp") return true;
   const row = getDb().prepare(`SELECT runtime_selection_json FROM long_run_worker_attempts
     WHERE id=? AND invocation_run_id=?`).get(attemptId, runId) as {runtime_selection_json:string}|undefined;
   if (!row) return false;
@@ -111,8 +126,10 @@ function nativeRuntimeBound(attemptId: string, runId: string, runtimeKind: strin
  * Candidates are authorized before observation. Neither stdout paths, generic
  * MCP results, completion-only events nor model-provided hashes are admitted. */
 export function beginNativeFileProof(input: {
-  runtimeKind: "claude-code" | "codex"; chatId?: string; cwd?: string; permission?: string;
+  runtimeKind: "claude-code" | "codex" | "mcp"; chatId?: string; cwd?: string; permission?: string;
   toolId: string; toolName: string; filePath: string; action: FileObservationAction; expectedText?: string;
+  /** Present only on candidates minted by mcpFileProofCandidate. */
+  mcp?: { catalogId: string; serverToolName: string };
 }) {
   const scope = contexts.getStore();
   if (!scope || scope.signal.aborted || input.chatId !== scope.chatId || !input.toolId || input.toolId.length > 700
@@ -148,7 +165,8 @@ export function beginNativeFileProof(input: {
     if (!before && (fs.existsSync(target) || input.action !== "write")) return null;
     if (input.expectedText !== undefined && (typeof input.expectedText !== "string"
       || Buffer.byteLength(input.expectedText, "utf8") > FILE_OBSERVATION_MAX_BYTES)) return null;
-    if (input.runtimeKind === "claude-code" && input.action === "write" && input.expectedText === undefined) return null;
+    if ((input.runtimeKind === "claude-code" || input.runtimeKind === "mcp") && input.action === "write" && input.expectedText === undefined) return null;
+    if (input.runtimeKind === "mcp" && (!input.mcp || !mintedMcpCandidates.has(input))) return null;
     const startRows = getDb().prepare(`SELECT id,seq,payload_json FROM run_events WHERE run_id=? AND chat_id=?
       AND kind='mcp_tool-use' AND json_extract(payload_json,'$.toolId')=? ORDER BY seq`)
       .all(scope.runId, scope.chatId, input.toolId) as Event[];
@@ -174,13 +192,55 @@ export function beginNativeFileProof(input: {
         const pathKey = createHash("sha256").update(relativePath).digest("hex");
         recordRunEvent({ runId: scope.runId, chatId: scope.chatId, kind: "runtime_file_observed",
           sourceEventId: `native-file:${receipts[1].id}:${pathKey}`,
-          payload: { schemaVersion: nativeSchemaVersion, ...observation, runtimeKind: input.runtimeKind,
+          payload: { schemaVersion: input.runtimeKind === "mcp" ? mcpSchemaVersion : nativeSchemaVersion, ...observation, runtimeKind: input.runtimeKind,
+            ...(input.mcp ? { mcpCatalogId: input.mcp.catalogId, mcpServerToolName: input.mcp.serverToolName } : {}),
             goalId: owner.goalId, goalRevision: bound.goalRevision, attemptId: owner.attemptId,
             toolId: input.toolId, toolName: input.toolName, startEventId: receipts[0].id, resultEventId: receipts[1].id,
             beforeSha256: before?.sha256 ?? null } });
       } catch { /* Observation failure must not interrupt the user's file work. */ }
     } };
   } catch { return null; }
+}
+
+const mintedMcpCandidates = new WeakSet<object>();
+/** Display tool names admitted by a minted MCP candidate ("mcp__<key>__<tool>", "<key>.<tool>", or the host-loop name). */
+const admittedMcpToolNames = new Set<string>();
+
+/**
+ * Candidate for an MCP file tool call, for every runtime: host-loop runtimes pass the resolved
+ * binding's catalog id; CLI adapters pass their prepared config path + config key and the catalog
+ * id is read from Main's seal. Paths are then admitted by the same scoped checks as native proofs.
+ */
+export function mcpFileProofCandidate(input: {
+  toolId: string | undefined; toolName: string; serverToolName: string; args: unknown;
+  chatId?: string; cwd?: string; permission?: string;
+  catalogId?: string | null; mcpConfigPath?: string; configKey?: string;
+}): Parameters<typeof beginNativeFileProof>[0] | null {
+  let rawArgs = input.args;
+  if (typeof rawArgs === "string") { try { rawArgs = JSON.parse(rawArgs); } catch { return null; } }
+  if (!input.toolId || !rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) return null;
+  let catalogId = input.catalogId ?? null;
+  if (!catalogId && input.mcpConfigPath && input.configKey) {
+    try { catalogId = preparedMcpBindings(input.mcpConfigPath).find((binding) => binding.configKey === input.configKey)?.server.catalogId ?? null; }
+    catch { return null; }
+  }
+  const action = catalogId ? MCP_FILE_ACTIONS[catalogId]?.[input.serverToolName] : undefined;
+  if (!catalogId || !action) return null;
+  const args = rawArgs as Record<string, unknown>;
+  if (typeof args.path !== "string") return null;
+  let expectedText: string | undefined;
+  if (action === "write") {
+    if (typeof args.content !== "string") return null;
+    expectedText = args.content;
+  } else if (action === "edit") {
+    if (!Array.isArray(args.edits) || args.edits.length < 1 || args.dryRun === true) return null;
+  } else if (args.head !== undefined || args.tail !== undefined) return null;
+  const candidate = { runtimeKind: "mcp" as const, chatId: input.chatId, cwd: input.cwd, permission: input.permission,
+    toolId: input.toolId, toolName: input.toolName, filePath: args.path, action,
+    ...(expectedText !== undefined ? { expectedText } : {}), mcp: { catalogId, serverToolName: input.serverToolName } };
+  mintedMcpCandidates.add(candidate);
+  admittedMcpToolNames.add(input.toolName);
+  return candidate;
 }
 
 /** Resident CLI transports can outlive an invocation. Capture the new Main
@@ -220,7 +280,9 @@ export function currentBuiltinFileProofs(input: {goalId:string;invocationRunId:s
     const data = JSON.parse(row.payload_json);
     if (row.seq >= terminal.seq) continue;
     const builtin = data.schemaVersion === schemaVersion && actionForTool[data.builtinName] === data.action;
-    const native = data.schemaVersion === nativeSchemaVersion && nativeActionAllowed(data.runtimeKind, data.toolName, data.action);
+    const native = (data.schemaVersion === nativeSchemaVersion && nativeActionAllowed(data.runtimeKind, data.toolName, data.action))
+      || (data.schemaVersion === mcpSchemaVersion && data.runtimeKind === "mcp"
+        && MCP_FILE_ACTIONS[data.mcpCatalogId]?.[data.mcpServerToolName] === data.action);
     if ((!builtin && !native) || data.goalId !== input.goalId || data.goalRevision !== input.goalRevision
       || typeof data.attemptId !== "string") continue;
     const correlation = decodeRuntimeEvidence(data.runtimeEvidence)?.correlation;

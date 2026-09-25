@@ -1,7 +1,7 @@
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
-import { beginBuiltinFileProof } from "../long-run/file-proof";
+import { beginBuiltinFileProof, beginNativeFileProof, mcpFileProofCandidate } from "../long-run/file-proof";
 import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE_COLLECTION_TOOLS } from "./science-collection-boundary";
 // OpenAI 호환 로컬/자체호스트 러너(Ollama, LM Studio, MLX) 공용 채팅+도구호출 루프.
 //
@@ -472,12 +472,17 @@ export async function runMainToolDispatch(
     if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, byName.get(call.toolName));
     if (call.toolName === CODE_MODE_TOOL) {
       if (broker) throw new Error("code_mode_broker_not_supported");
+      // Start receipt for the host-owned wrapper operation (see the dispatch start below).
+      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       const result = await runMainCodeMode(byName, call.arguments, events, approval, runMainToolDispatch);
       events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       return result;
     }
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
+      // Menu listing/preparation is a host operation too; the effect reader needs start + result
+      // (live 2026-09-25, run 3834da2a: three agentlas_tools_* results alone kept the boundary pending).
+      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       return { content: menu.content, visionMessage: null, isError: false };
     }
@@ -670,6 +675,11 @@ export async function runMainToolDispatch(
       import("../mcp-tools/client"),
       import("../media/capture-artifacts"),
     ]);
+    // Same host file proof as builtin writes, for MCP file tools Main can identify by catalog.
+    const mcpFileCandidate = mcpFileProofCandidate({ toolId: eventCallId, toolName: call.toolName,
+      serverToolName: resolved.serverToolName, args, catalogId: resolved.server.catalogId,
+      chatId: approval.chatId, cwd: approval.cwd, permission: approval.permission });
+    const mcpFileProof = mcpFileCandidate ? beginNativeFileProof(mcpFileCandidate) : null;
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
@@ -691,6 +701,7 @@ export async function runMainToolDispatch(
       result.isError,
       capturePaths.length > 0 ? capturePaths : undefined,
     );
+    if (!result.isError) mcpFileProof?.complete();
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, result.isError ? "failed" : "succeeded");
