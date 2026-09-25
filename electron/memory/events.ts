@@ -125,7 +125,11 @@ export function parseMemoryEvents(text: string): ParsedMemory {
     // exact private memory-ticket envelope at the end of an otherwise normal
     // reply. Recognize that closed schema instead of leaking its JSON into the
     // user conversation. Ordinary visible JSON is untouched.
-    const tailFence = text.match(/(?:^|\n)```json\s*([\s\S]*?)```\s*$/i);
+    // The fence's info string is not trusted either: serving (agentlas-light, parity QA
+    // 2026-09-25) ended a Korean reply with "```Memory Events\n{…envelope…}" and never
+    // closed the fence, so the whole ticket was shown to the user. Accept any info string
+    // and a fence left open at the very end; the closed schema check below still decides.
+    const tailFence = text.match(/(?:^|\n)```[^\n`]*\n\s*(\{[\s\S]*?\})\s*(?:```)?\s*$/);
     if (tailFence && tailFence.index != null) {
       try {
         const data = JSON.parse(tailFence[1].trim()) as Record<string, unknown>;
