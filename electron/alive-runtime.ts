@@ -181,7 +181,11 @@ function aliveReceipt(receipt: InvocationRunReceipt | null): AliveRuntimeReceipt
   const final = receipt.status === "completed" ? finalResult(receipt.runId, receipt.chatId) : null;
   const decision = final ? parseAliveDecision(final.text) : undefined;
   const measured = measuredWakeUsage(receipt.runId, receipt.chatId);
-  const tokensUsed = measured.attempts ? measured.tokensUsed : final?.tokensUsed;
+  // No provider attempt marker on a run that did not complete means it failed before any provider was dispatched
+  // (client.ts records the marker before every selected provider call): a known zero, not an unknown charge. Reporting
+  // it as unknown set Science's usageUnknown, which never clears, so one pre-dispatch failure -- a Science tool home
+  // that could not be prepared after an app restart -- left a token-bounded Alive agent waiting forever (2026-09-24).
+  const tokensUsed = measured.attempts ? measured.tokensUsed : receipt.status === "completed" ? final?.tokensUsed : 0;
   return { runId: receipt.runId, status: receipt.status,
     ...(tokensUsed === undefined ? {} : { tokensUsed }),
     ...(final?.text ? { finalText: final.text.slice(0, 4_096) } : {}),
