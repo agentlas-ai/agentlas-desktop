@@ -328,6 +328,9 @@ export interface MainToolLoopContext {
   approval: LocalToolApprovalContext;
 }
 
+/** Run-scoped MCP connections, keyed by the run's own tool map (never shared across runs). */
+const mcpToolCallSessions = new WeakMap<Map<string, ResolvedTool>, import("../mcp-tools/client").McpToolCallSession>();
+
 export async function prepareMainToolLoop(
   req: RunnerRequest,
   runtimeKind: string,
@@ -379,6 +382,13 @@ export async function prepareMainToolLoop(
       || SCIENCE_COLLECTION_TOOLS.some((name) => !admitted.includes(name))) {
       throw new Error("science_collection_tool_inventory_incomplete");
     }
+  }
+  // One MCP connection per server for this run (see createMcpToolCallSession):
+  // a stateful server — the Agentlas browser's page above all — keeps its state
+  // between this loop's tool calls exactly as it does under a CLI runtime.
+  if ([...byName.values()].some((tool) => tool.kind === "mcp")) {
+    const { createMcpToolCallSession } = await import("../mcp-tools/client");
+    mcpToolCallSessions.set(byName, createMcpToolCallSession({ signal: req.signal }));
   }
   return {
     tools,
@@ -683,6 +693,7 @@ export async function runMainToolDispatch(
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
+      session: mcpToolCallSessions.get(byName),
     });
     if (!result) throw new Error("mcp_tool_result_unavailable");
     const text = result?.text ?? "";
