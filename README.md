@@ -1571,7 +1571,7 @@ A complete tour of what ships today.
   Model Context Protocol.
 - **Operator-published Apps.** Agentlas operators publish App source/bundles to a
   private GitHub repo, GitHub Release, or object storage; `agentlas.cloud` keeps the
-  MongoDB marketplace index, permissions, manifest, and version metadata. MongoDB is
+  MongoDB public Hub index, permissions, manifest, and version metadata. MongoDB is
   not the blob store for full app bundles.
 - **Chat-generated Apps.** Turn on **Apps Generate** beside the Goal control in chat
   and describe the tool you want. The built-in Agentlas App Builder routes the task
@@ -1583,7 +1583,7 @@ A complete tour of what ships today.
 - **Package security grades.** Hub listings show the current package scan grade,
   not a creator reputation or user rating; sideloading unvetted agents is
   gated.
-- **Hub-only catalog.** If the network or cloud is down, the marketplace shows an
+- **Hub-only catalog.** If the network or cloud is down, the Agent Hub shows an
   empty/error state instead of local hardcoded agents, so stale demo listings never
   masquerade as live Hub results.
 
