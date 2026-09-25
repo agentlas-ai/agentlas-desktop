@@ -84,7 +84,7 @@ function prepareContext(
   return {
     model,
     recent,
-    system: wrapSystemPrompt(
+    system: req.minimalObservation ? req.systemPrompt : wrapSystemPrompt(
       req.systemPrompt,
       req.locale,
       req.permission,

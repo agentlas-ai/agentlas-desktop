@@ -381,7 +381,19 @@ export async function prepareMainToolLoop(
   //   (list→prepare→call 세 홉)는 큰 모델용 간접층인데, 격리 앱 실측(Qwen3-4B, 2026-09-13)에서 모델이
   //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
   //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
-  const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local";
+  // A Main-issued effect observation looks only: read built-ins and Main's browser server, offered directly (no code
+  // mode or lazy menu). Every other server's schemas are context the look does not need (routed 2026-09-25).
+  if (req.minimalObservation && !collection) {
+    for (let index = eagerTools.length - 1; index >= 0; index -= 1) {
+      const resolved = byName.get(eagerTools[index].function.name);
+      if (resolved?.kind === "mcp" && resolved.serverConfigKey !== "agentlas-browser") {
+        byName.delete(eagerTools[index].function.name);
+        eagerTools.splice(index, 1);
+      }
+    }
+  }
+  const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local"
+    && !req.minimalObservation;
   const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, indirectToolSurface);
   if (collection) {
     const admitted = [...byName.values()].filter((tool) => tool.kind === "mcp")

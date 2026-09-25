@@ -68,7 +68,8 @@ function imageTokenEstimate(req: RunnerRequest): number {
 }
 
 function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number): { turns: ServingTurn[]; system: string } | null {
-  const wrapped = wrapSystemPrompt(
+  // A Main-issued effect observation carries its own complete prompt (no Agentlas header/skills).
+  const wrapped = req.minimalObservation ? req.systemPrompt : wrapSystemPrompt(
       req.systemPrompt,
       req.locale,
       req.permission,
