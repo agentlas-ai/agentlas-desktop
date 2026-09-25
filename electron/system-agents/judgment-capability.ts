@@ -49,7 +49,11 @@ export function inspectJudgmentCapability(
   if (selection.kind === "byok"
     || selection.kind === "lmstudio"
     || selection.kind === "mlx"
-    || selection.kind === "agentlas-local") {
+    || selection.kind === "agentlas-local"
+    // Agentlas serving: untrustedNoTools skips the tool loop entirely — no `tools`
+    // field reaches /api/one/serving/chat and nothing is dispatched
+    // (electron/runtime/agentlas-serving.ts, `!req.untrustedNoTools && ...`).
+    || selection.kind === "agentlas") {
     return {
       schemaVersion: "agentlas.judgment-capability.v1",
       requirement: "no_tools",
