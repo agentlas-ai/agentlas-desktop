@@ -54,6 +54,7 @@ import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentConcurrency } from "../store/concurrency";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
+import { classifyToolFailure } from "../../shared/tool-failure";
 import { hasAutomationGraphTerminalClose } from "../store/graph-terminal-close";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
@@ -3909,6 +3910,16 @@ export async function runGraph(
                     toolId: ev.tool.id,
                     toolIsError: ev.tool.isError,
                     toolArgs: ev.tool.args,
+                    // A failed call keeps its reason, like the chat path
+                    // (store/run-events.ts). Without it the Threads automation's
+                    // codex refusal ("MCP tool call requires approval, but approval
+                    // policy is never", 2026-09-24/25) was a bare toolIsError:true.
+                    // Success rows stay as before: completion proofs read a
+                    // result preview only from the chat path.
+                    ...(ev.tool.isError ? {
+                      toolResultPreview: typeof ev.tool.result === "string" ? ev.tool.result : undefined,
+                      toolFailureCode: classifyToolFailure({ explicitCode: ev.tool.failureCode, result: ev.tool.result, status: ev.status }),
+                    } : {}),
                   },
                 });
               }
