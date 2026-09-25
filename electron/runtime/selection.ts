@@ -507,6 +507,10 @@ export function rolePriorityRuntimes(
     exclude?: RuntimeStatus[];
   } = {},
 ): RuntimeStatus[] {
+  // The serving provider may already have generated billable tokens. An
+  // unresolved settlement must stop this invocation, not replay the prompt on
+  // another configured runtime.
+  if (options.failure?.providerCode === "serving_reconciliation_required") return [];
   // The managed local runner has not processed these images. Team/controller
   // recovery must not forward them to another provider as an outage retry.
   if (options.failure?.kind === "unsupported"
