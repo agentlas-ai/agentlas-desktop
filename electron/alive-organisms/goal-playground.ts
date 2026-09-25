@@ -41,6 +41,8 @@ export interface GoalPlaygroundDeps {
   chat(chatId: string): GoalChatView | null;
   runForGoal(goalId: string): GoalRunView | null;
   goalRevision(goalId: string): number | null;
+  /** A Goal without a stored revision whose owner grant is recorded (explicit goal-mode turn) can be adopted. */
+  explicitGrantRecorded(goalId: string): boolean;
   chatBusy(chatId: string): boolean;
   pendingApproval(chatId: string): boolean;
   /** Host-scheduled retry slot (blocked-goal sweep) or wait-subscription check time: the next safe run. */
@@ -116,6 +118,9 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     else if (run.status === "draft") { work = "none"; blockedBy = "goal.draft"; }
     else if (RUNNING.has(run.status)) work = "running";
     else work = "none";
+    // A stopped Goal with no stored revision and no recorded owner grant (defined by IPC, never run) cannot be
+    // continued by anyone but the owner's next message: say so instead of proposing a doomed continue.
+    if (work === "paused" && !blockedBy && revision === null && !this.deps.explicitGrantRecorded(goalId)) blockedBy = "goal.owner-grant-missing";
     if (work !== "terminal" && this.deps.chatBusy(chat.id)) work = "running";
     if (work !== "terminal" && this.deps.pendingApproval(chat.id)) blockedBy = "goal.approval-pending";
     const world = { goalId, runId: run.id, status: run.status, pauseReason: run.pauseReason, blockedReason: run.blockedReason };

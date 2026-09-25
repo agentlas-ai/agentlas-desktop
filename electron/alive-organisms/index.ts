@@ -5,11 +5,13 @@
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
+import { onDesktopStoreChange } from "../store/change-bus";
 import { getProject } from "../store/projects";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, pendingBlockedGoalRetry } from "../store/long-runs";
 import { latestGoalWaitSubscription } from "../long-run/wait-subscriptions";
 import { continueGoalForAlive } from "../long-run/blocked-goal-sweep";
+import { findExplicitGoalGrant } from "../long-run/explicit-goal-authority";
 import { registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
 import { listPendingToolApprovals } from "../runtime/tool-approval";
 import { invocationService } from "../invocation/service";
@@ -43,6 +45,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
   },
   runForGoal: runView,
   goalRevision: (goalId) => getChatGoalRevision(goalId)?.revision ?? null,
+  explicitGrantRecorded: (goalId) => Boolean(findExplicitGoalGrant(getDb(), goalId)),
   chatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
   pendingApproval: (chatId) => listPendingToolApprovals().some((request) => request.chatId === chatId),
   nextSafeRunAt: (run) => {
@@ -97,6 +100,9 @@ export function startAliveOrganisms(): AliveOrganismHost {
     cachedModelOrder: cachedAliveModelOrder,
     checkPlanAccess: checkAliveAgentAccess,
     emit: broadcast,
+    onGoalStoreChanged: (listener) => onDesktopStoreChange((change) => {
+      if (change.entity === "long-run" || change.entity === "chat") listener();
+    }),
     registerShutdown: (stop) => {
       registerAppRuntimeParticipant("alive-organisms", { closeAdmission: stop, interrupt: stop, isSettled: () => true });
     },

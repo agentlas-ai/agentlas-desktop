@@ -53,6 +53,8 @@ export interface AliveHostDeps {
   checkPlanAccess(): Promise<AliveAgentAccess>;
   emit(event: AliveChangedEvent): void;
   registerShutdown?(stop: () => void): void;
+  /** Goal/chat store changes (goal deleted, ended, cancelled, rebound). Returns an unsubscribe. */
+  onGoalStoreChanged?(listener: () => void): () => void;
 }
 
 /** No wake for this long after an action the goal accepted. */
@@ -139,6 +141,19 @@ export class AliveOrganismHost {
     for (const kind of ["work", "one"] as const) {
       this.unsubscribeSettled.push(this.organisms[kind].runtime.onSettled(() => { setImmediate(() => this.emitChanges(kind)); }));
     }
+    // A Goal that ends, is deleted or cancelled between beats: re-beat soon (suspends a finished One life) and
+    // tell the screens now. Debounced — the store can emit several changes for one owner action.
+    if (this.deps.onGoalStoreChanged) {
+      let pending: ReturnType<typeof setTimeout> | null = null;
+      this.unsubscribeSettled.push(this.deps.onGoalStoreChanged(() => {
+        if (pending || !this.running) return;
+        pending = setTimeout(() => {
+          pending = null;
+          for (const kind of ["work", "one"] as const) void this.beat(kind);
+        }, 750);
+        pending.unref?.();
+      }));
+    }
     this.deps.registerShutdown?.(() => this.stop());
     for (const kind of ["work", "one"] as const) void this.beat(kind);
   }
@@ -210,15 +225,34 @@ export class AliveOrganismHost {
       try { terminal = organism.playground.observe(attachment, this.deps.now()).work === "terminal"; } catch { terminal = false; }
       if (terminal && !organism.store.activeWakes().some((wake) => wake.agentId === agent.agentId)
         && !organism.store.pendingActions().some((action) => action.agentId === agent.agentId)) {
-        organism.store.setEnabled(agent.agentId, false, "attachment.goal-terminal", this.deps.now());
+        this.suspendLife(organism, agent.agentId, "attachment.goal-terminal");
       }
+    }
+  }
+
+  /** Suspend and replace the stale wait code (e.g. playground.owns-work) with the reason the life stopped. */
+  private suspendLife(organism: Organism, agentId: string, reasonCode: string): void {
+    const nowMs = this.deps.now();
+    organism.store.setEnabled(agentId, false, reasonCode, nowMs);
+    const current = organism.store.get(agentId);
+    if (current && current.state.lastWaitCode !== reasonCode) {
+      organism.store.update(agentId, { state: { ...current.state, lastWaitCode: reasonCode, reviewPending: false } }, nowMs);
     }
   }
 
   private lifeDigest(organism: Organism, agent: AliveAgent): string {
     const attachment = organism.store.attachments(agent.agentId).find((row) => row.status === "attached");
     const active = organism.store.activeWakes().find((wake) => wake.agentId === agent.agentId);
-    return JSON.stringify([this.planAccess, agent.status, agent.controlEpoch, agent.state.lastWaitCode ?? null, agent.budget,
+    // The attached Goal's own state (deleted, ended, cancelled, needs a goal) changes what the composer shows.
+    let goal: unknown = null;
+    if (attachment) {
+      try {
+        const seen = organism.playground.observe(attachment, this.deps.now());
+        goal = [seen.work, seen.blockedBy ?? null, (seen.salience as { goalId?: unknown; status?: unknown } | undefined)?.goalId ?? null,
+          (seen.salience as { status?: unknown } | undefined)?.status ?? null];
+      } catch { goal = "unobservable"; }
+    }
+    return JSON.stringify([this.planAccess, goal, agent.status, agent.controlEpoch, agent.state.lastWaitCode ?? null, agent.budget,
       agent.state.usageUnknown ?? null, attachment?.attachmentId ?? null, active?.wakeId ?? null,
       (agent.state.lastReview as { runId?: string } | undefined)?.runId ?? null]);
   }
@@ -351,7 +385,7 @@ export class AliveOrganismHost {
       const agent = organism.store.get(resolved.agentId);
       const attachment = agent ? organism.store.attachments(agent.agentId).find((row) => row.status === "attached") : undefined;
       if (agent && (surface === "one" || attachment?.scope.chatId === chatId)) {
-        organism.store.setEnabled(agent.agentId, false, "owner.disabled", nowMs);
+        this.suspendLife(organism, agent.agentId, "owner.disabled");
         for (const wake of organism.store.activeWakes().filter((row) => row.agentId === agent.agentId)) {
           try { organism.runtime.cancel(wake.wakeId); } catch { /* the next reconcile cancels by epoch */ }
         }
