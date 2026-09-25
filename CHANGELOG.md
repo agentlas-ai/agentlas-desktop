@@ -1,5 +1,257 @@
 # Changelog
 
+## 1.2.43 — 2026-09-25
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- AGI in One and Work: an AGI button next to "+" in the composer turns on an orchestrator for the
+  conversation's Goal. It follows the model order from your dashboard pool (Agentlas AI included),
+  shows that order as one chain, respects a token limit you set, and wakes with a short
+  decision-only call instead of a full turn. It never passes your own stop or an approval, and it
+  is available on plans that include it.
+- Goal completion now rolls up from the AI's own breakdown: sub-goals, then strategies, then the
+  final goal. When a condition names a file, the app reads that file itself in the Goal's folders,
+  so the proof no longer depends on which tool wrote it. A request that finishes in one turn stays a
+  normal turn; only multi-turn work becomes a Goal, and an automatic Goal retries at most twice.
+- A Goal turn that ends without saying it is done now always moves on: it is verified, its next step
+  is scheduled, or it stops with a named reason. A turn that asked you a question waits for your
+  answer and continues when you reply. A deleted Goal's identity is never reused, so a new Goal in
+  the same conversation always starts fresh.
+- A Goal you paused stays paused until you resume it — sweeps, restarts, re-checks and AGI do not
+  cross that line — and pressing Resume takes effect at once. A Goal interrupted when the app
+  closed continues from its checkpoint at the next start.
+- Agentlas AI (credits) now gets the same tools and Goal contracts as the CLI runtimes in One and
+  Work: Goals verify and finish on it, files it writes appear in the result panel, a browser page
+  stays open across tool calls, and long instructions are no longer refused as too large before
+  sending. An attempt whose result is unknown is not replayed automatically.
+- Observation checks run in a minimal read-only mode on every runtime and use far fewer tokens.
+- Automations count progress only by real outside effects. A follow, like or repost counts only if
+  the page shows the change afterwards, a failed tool step keeps its reason, and a run left
+  ambiguous after its graph changed is reconciled from its sealed checkpoint so schedules keep
+  running.
+- The Agentlas engine tools now start in every run, and the bundled engine marks its read-only
+  tools as read-only, so Work no longer stops to ask approval for them. New projects no longer get
+  `signing/`, `credentials/` or `.env.example` folders. Computer use, workspace preview and browser
+  skill read tools no longer fail in Codex write and automation runs.
+- Agent Hub is free: paid Hub flows, rental and lease wording, Hub price labels and one-time credit
+  top-up prompts are gone. Hub cards open an Agent Space, publishers can opt in to source browsing,
+  and exact public releases can be installed or called from a paired phone. Project agent pools
+  follow the limits of your plan.
+- AI credits in the sidebar show as a small horizontal energy bar.
+- The first message in a One seat conversation runs on the model shown in its composer.
+- Science (host side): a Science turn whose app closed mid-run can recover forward on its own, a
+  Data Table can open in your spreadsheet app, and Agentlas AI is admitted for Science turns. The
+  bundled Science service is unchanged.
+
+## 1.2.42 — 2026-09-25
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- A goal now decides its structure before any work starts: one tactic, a list of tactics, or a
+  final goal with strategic goals and sub-goals under it. Each goal turn works on the current
+  sub-goal instead of the whole plan. The goal help in One and the goal bar in Work show that structure
+  and the current tactic in one line, with a small folded tree when there is one.
+- Goals and automations keep going after a setback. After a failure or a hold the run chose for
+  itself, the app picks the next move in one place (plan again, or try another model in your
+  pool) and records why. A run that held back without doing anything no longer counts as done.
+  A recovery run uses a different model from the one that failed, and a model counts as
+  restored only after a read-only check answers. A goal turn stopped by a usage limit continues
+  by itself shortly after the limit resets. A stop by the inactivity watchdog is no longer
+  recorded as your stop, and recovery is no longer skipped because of it. Strategy proposals no
+  longer pile up: each automation keeps one live proposal, and older drafts are replaced.
+- Goals no longer stall after their first turn. A Goal whose earlier work might have changed the
+  outside world is checked with one short read-only look that now returns a readable verdict,
+  instead of an endless re-check that never concluded; the check is capped and uses far fewer
+  tokens.
+- When you restate a Goal's target in its conversation (for example "10,000 followers and
+  1,000,000 views in 30 days"), it becomes a new Goal revision at the next turn boundary, even
+  while the Goal is waiting, and the plan is rebuilt with those numbers and the daily pace they
+  need.
+- The "needs full access" chip appears again when a read-only turn asks for more permission.
+- Two Goals in one Work project no longer resume and fail every minute with the same notice; the
+  waiting Goal resumes when the other one finishes.
+- A project Work Goal that made the right files is now verified against the project folder, and a
+  Goal started from a message without a task no longer fails on its first turn.
+- Unattended browser automations now open the site before judging it. The dedicated Agentlas
+  browser starts with no page open, and a run that only looked at that empty first page used to
+  report "the account surface is blank" and hold every step; the browser now says the page is
+  empty because nothing was opened yet and that the site should be opened first.
+- Strategy reflection no longer fails as "input too large" when a saved orchestrator model is not
+  installed where it was recorded; only models that can actually answer set the size limit.
+- Browser automations on Codex no longer stop at "browser access approval required", and a first
+  step no longer fails with "invalid transport" in isolated runs.
+- An image an automation just made can be uploaded by its browser step, and browser steps in one
+  graph take turns on the shared browser instead of closing each other's composer.
+- Parallel steps no longer stop with "restore the session"; a step that failed before starting
+  continues on a new session.
+- The outcome check has time to try a second model before a run is left unjudged.
+- Runtime Doctor repair runs for a browser-only automation stay in the automation's own browser
+  and never drive your personal Chrome. Agents now use the Agentlas browser first; other browser
+  tools (Claude's Chrome extension, a Playwright server from your own settings, Codex's bundled
+  browser plugins) are used only as a fallback.
+- In One's narrow chat column (with the result panel open), the intake card buttons, permission
+  chip, header title, and scheduled report no longer overlap, get cut off, or show machine text.
+  A model change waiting for the goal's next turn now shows as a small "pending" chip with an
+  explanation on click, instead of a warning box.
+- A Goal you start with the Goal chip in Work is no longer cancelled the first time the app
+  restarts mid-turn: its recorded goal-mode turn is kept as its permission, and after checking
+  what already happened it continues. A Goal with no recorded grant is kept for your next message
+  instead of being cancelled.
+- The goal structure view now says "Final goal · Strategic goals · Sub-goals".
+- The built-in time tool no longer fails in every Codex automation run.
+- Resuming a Claude session that has no saved conversation now starts a fresh session instead of
+  failing as a model error.
+- Preparing memory for a project no longer creates `signing/`, `credentials/`, or `.env.example`
+  in your project folder.
+
+## 1.2.41 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Automations that a Goal conversation updated can improve their own strategy again. When you
+  gave that ongoing Goal full permission, strategy changes are applied instead of waiting
+  forever; when your decision is really needed, it now appears for you to confirm.
+- An unattended automation run no longer turns its own choices (holding, pausing, a limit it set
+  for itself) into lasting rules. Such remembered rules are shown to later runs as heuristics
+  that your goal overrides, and a restated rule replaces its older version.
+- Each automation run now starts from recorded facts about recent runs instead of the previous
+  runs' own summaries, and a run that held back while there was work to do is no longer counted
+  as done. The outcome check also sees the Goal the automation works for.
+- Checks that confirm whether an earlier step went through are read even when the model answers
+  in a chat style, and a step that was only looking when the app restarted simply runs again.
+- When you change a Goal's targets in its conversation, the Goal itself is updated at its next
+  pause, so later checks and strategy use your new targets.
+- Browser import: the "Source" label no longer overlaps the selector.
+
+## 1.2.40 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Automations that an assistant created now run on the model you use today — the model of the
+  conversation they report to, or your Worker default — instead of the model that happened to
+  be selected when they were created. A model you picked yourself for an automation is kept.
+  When that model is at its usage limit, or keeps getting stuck, one run moves to another
+  model from your Worker list; your choice is not changed.
+- An automation that keeps repeating the same page lookups or visits without doing anything
+  now stops with a clear reason instead of reporting success.
+- Browser lookups for element references (such as `e826`) are turned back with a hint to use
+  the reference directly, and a failed outcome check no longer waits on the automation's own
+  model: your Orchestrator models judge first.
+- Replies and automation reports to you stay in your app language even when the task says
+  content must be written in another language.
+
+## 1.2.39 — 2026-09-24
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Goals can look before they continue: checks that confirm an earlier step now refresh the
+  page in a read-only browser that Agentlas enforces (no clicks, typing, or uploads), also
+  for conversations that are not open and on Codex. If the page cannot be seen, the reason
+  is recorded and the check runs again on its own.
+- Requests between the app window and Agentlas no longer fail because an optional field
+  was empty, and refusals now carry their reason to the screen with a specific next step.
+- Work: starting a task, changing the model, or resuming a Goal no longer fails for ACP
+  runtimes or when "Default" is chosen. Automations refuse an invalid runtime choice when
+  saved instead of failing on every run.
+- Your own API keys: models the app does not know are no longer refused before sending.
+
+## 1.2.38 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- One: messages in team and task conversations with a chosen model were refused with
+  "One team preflight refused the current binding" since 1.2.33. They are accepted again.
+- One and Work: a message sent while a Goal is running now joins that Goal as new direction
+  instead of being handed back to the composer. If team staffing cannot be decided, the
+  message still goes through the ordinary One route. Remaining refusals say which check
+  failed and what to do.
+
+## 1.2.37 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Plugins: every installed plugin — tool plugins and skill plugins alike — is now matched to
+  the task on each One and Work turn from its own description, and a chosen plugin brings its
+  full guide and its tools together. If the matcher does not answer, a local relevance
+  ranking still picks relevant installed plugins instead of none. A plugin the model finds
+  during a turn is attached on the next turn; plugins that are not installed still need
+  your approval.
+- Images: images made by Codex, Antigravity, or Agentlas are copied into the task's
+  `assets` folder and their path is given to the model, so they can be uploaded or attached.
+  Codex may use its own image generation. Each runtime is told what it can do itself.
+- Work: long-running Work Goals now replan when stuck, move to another connected model on
+  usage limits, and verify each cycle, the same as One.
+
+## 1.2.36 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- One and Work: a Goal no longer stays blocked. When the result of an earlier step is
+  uncertain, Agentlas looks for itself with one read-only check and then continues, redoes
+  the step, or checks again later on its own. Model or usage failures move to another
+  connected model or retry on a schedule. Goals end only when completed, or cancelled with
+  the reason recorded. Blocked Goals left by earlier versions are cleared the first time
+  this version starts.
+- Automations: holds on an automation, and Goals that an automation continues, are checked
+  directly before asking you anything.
+- Memory: memories are now kept in English for search, with the original wording kept and
+  shown to you. On first start, memories saved in other languages are translated gradually
+  in the background (a daily cap, only while the app is idle), using a local model or a
+  signed-in Claude Code; if neither is available the original stays and is still found.
+  Forgetting a memory forgets both versions.
+- Memory: adding to a project's memory file no longer rewrites the whole file.
+
+## 1.2.35 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Windows: connecting Claude Code, Codex, or Grok now downloads the vendor's official
+  Windows executable directly — no npm, no bundled Node, no `.cmd` launcher — verified
+  against a SHA-512 pinned in this release. Downloads use the system network stack (system
+  proxy and Windows certificate store), fall back to a mirror, resume interrupted
+  transfers, and retry; the npm path remains only as a fallback.
+- Windows: launchers written by Agentlas no longer break when the Windows user name is not
+  ASCII. `cmd.exe` reads `.cmd` files in the console code page, so paths are now written
+  relative to `%USERPROFILE%` / `%LOCALAPPDATA%`.
+- Windows: the login window opens even where PowerShell is unavailable or blocked by policy.
+- First-run connect shows "Getting ready… first time only" while installing and "Log in in
+  the window that opened" while waiting for login.
+- One: an ongoing Goal is shown as one compact line below the conversation instead of a
+  stack of panels over it; details live behind a small (?) popover.
+- One: resuming a Goal after interrupted work is one sentence and one button. It never
+  replays the interrupted attempts, and it is no longer refused when the Goal has a linked
+  automation, when an attempt has no recorded activity, or when there were more than 20.
+- One: Goals keep observing through verifier outages, quota exhaustion, wait-registration
+  failures, and transient database locks instead of stopping as blocked; Graph automations
+  resume after proven read-only failures and hand safe quota failures to another provider.
+
+## 1.2.34 — 2026-09-23
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Windows: connecting a provider no longer dead-ends when Agentlas cannot copy its bundled
+  Node executable out of the app folder. That copy exists only so an already-installed CLI
+  keeps working if the portable app is deleted — it is not required to install one — so a
+  blocked copy now falls back to the bundled executable that already passed checksum
+  verification, and the next launch retries the copy.
+- Windows: the install path also tries `%LOCALAPPDATA%` when the user profile location
+  cannot be written, and records the failing errno locally, so diagnosing a failed install
+  no longer depends on the person reading an error string back to us.
+- The npm install step now retries twice before giving up, so one momentary registry or
+  network fault does not cost a first connection.
+- A failed install no longer tells the person to reinstall Agentlas Desktop. That advice
+  never fixed this class of failure.
+
 ## 1.2.33 — 2026-09-22
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
