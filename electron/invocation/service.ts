@@ -3394,11 +3394,15 @@ export class InvocationService {
          * a completion claim (7 in-turn cycles, last one asking the owner a question) stayed status=running with no live
          * attempt: the client queued a hidden every-10m continuation and nothing on the host side scheduled anything.
          */
-        if (!completionClaim?.claimed && !record.automaticGoalId && goalControllerAttemptId && goalLongRun
-          && goalLongRun.surface !== "science" && !controller.signal.aborted && !executionContext) {
-          const turnGoalId = goalLongRun.goalId;
+        /*
+         * Automatic Goals too (1.2.43 E2E, serving One automatic goal run_2e5f7bbd): a turn that ended on a typed
+         * agentlas-ask question has no completion claim (pendingQuestion suppresses it) and stayed running with no attempt.
+         */
+        const turnEndGoalId = record.automaticGoalId ?? (goalControllerAttemptId ? goalLongRun?.goalId : undefined);
+        if (!completionClaim?.claimed && turnEndGoalId && !controller.signal.aborted && !executionContext) {
+          const turnGoalId = turnEndGoalId;
           const current = getLongRunByGoalId(turnGoalId);
-          if (current?.status === "running" && !unsettledLongRunAttemptCount(current.id)) {
+          if (current && current.surface !== "science" && current.status === "running" && !unsettledLongRunAttemptCount(current.id)) {
             if (record.pendingQuestion) {
               // The turn asked the owner; the question card is the way out and answering resumes the Goal.
               transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "goal_owner_answer_required" });
