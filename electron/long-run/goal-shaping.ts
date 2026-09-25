@@ -32,6 +32,7 @@ import {
   type GoalPlanView,
 } from "../../shared/goal-shape";
 import { missionPace, type MissionPace } from "../../shared/mission-pace";
+import type { RuntimeSelection } from "../../shared/types";
 import { decidePersistenceMove, isPersistenceBoundaryKind, type FailureCause, type PersistenceAttempt } from "../../shared/persistence-policy";
 import {
   goalPlanTacticPayload,
@@ -68,8 +69,9 @@ export function goalShapeSystemPrompt(): string {
     "- chaotic: something is broken or urgent right now; act first to stabilise.",
     "Step 2 — choose the SIMPLEST shape that can work (decompose only as needed; when in doubt pick the simpler shape):",
     "- single_tactic for clear and chaotic problems: exactly one tactic.",
-    "- tactic_list for complicated problems: 2-8 ordered tactics.",
-    "- mission_tree for complex problems: mission -> strategies (2-4 parallel hypotheses) -> tactics.",
+    "- tactic_list for complicated problems: as many ordered tactics as the work needs.",
+    "- mission_tree for complex problems: mission -> strategies (as many parallel hypotheses as are worth running now) -> tactics.",
+    "- The tactics' done_when conditions ARE the goal's completion checklist: the goal is achieved exactly when every tactic's done_when (and every key result) is met — nothing more, nothing missing (WBS 100% rule). Write each done_when as something a checker can observe (a file, a page, a command result, a number); a claim that cannot be observed must be restated as something observable.",
     "",
     "Rules:",
     "- Every tactic has an id (t1, t2, ...), a concrete description, and done_when: an observable post-condition that proves it is finished. kind is one_off, or recurring for a repeated action (e.g. a daily post).",
@@ -113,13 +115,19 @@ export async function judgeGoalShape(input: {
   callModel?: GoalShapeModelCall;
   /** 계약·실측용: 풀 정책을 주입(없으면 설정된 오케스트레이터 풀). */
   selectionPolicy?: ReturnType<typeof configuredOrchestratorJudgmentPolicy>;
+  /**
+   * The runtime this Goal's turn is about to use. With no configured orchestrator judgment pool the plan is
+   * decided on it (no tools) instead of falling back to a single generic tactic: goal completion now rolls up
+   * from this decomposition (shared/goal-rollup.ts), so an unshaped Goal would never get its own checklist.
+   */
+  runtimeSelection?: RuntimeSelection;
 }): Promise<GoalShapeJudgment> {
   const started = Date.now();
   const fail = (reason: string, extra: Partial<GoalShapeJudgment> = {}): GoalShapeJudgment => ({
     ok: false, plan: null, notes: [], reason, rawText: null, runtimeReceipt: null, attempts: [], elapsedMs: Date.now() - started, ...extra,
   });
   const policy = input.selectionPolicy === undefined ? configuredOrchestratorJudgmentPolicy() : input.selectionPolicy;
-  if (!policy && !input.callModel) return fail("goal_shape_judgment_pool_unconfigured");
+  if (!policy && !input.callModel && !input.runtimeSelection) return fail("goal_shape_judgment_pool_unconfigured");
   const payload = JSON.stringify({
     now: input.createdAt,
     goal_objective: input.objective,
@@ -134,7 +142,7 @@ export async function judgeGoalShape(input: {
       input: payload,
       timeoutMs: input.timeoutMs ?? GOAL_SHAPE_TIMEOUT_MS,
       signal: input.signal,
-      ...(policy ? { selectionPolicy: policy } : {}),
+      ...(policy ? { selectionPolicy: policy } : input.runtimeSelection ? { runtimeSelection: input.runtimeSelection } : {}),
       requireNoTools: true,
       accept: (text: string) => validateGoalShape(parseGoalShapeDraft(text), input.ownerText, input.createdAt).ok,
     });
@@ -190,6 +198,7 @@ export async function ensureGoalShapeBeforeTurn(input: {
   nowMs?: number;
   callModel?: GoalShapeModelCall;
   selectionPolicy?: ReturnType<typeof configuredOrchestratorJudgmentPolicy>;
+  runtimeSelection?: RuntimeSelection;
   onJudging?: () => void;
 }): Promise<LiveGoalPlan | null> {
   const run = getLongRunByGoalId(input.goalId);
@@ -217,7 +226,7 @@ export async function ensureGoalShapeBeforeTurn(input: {
   if (!trigger) return existing;
   input.onJudging?.();
   const judgment = await judgeGoalShape({ objective: input.objective, ownerText, createdAt, priorFacts, signal: input.signal,
-    callModel: input.callModel, selectionPolicy: input.selectionPolicy });
+    callModel: input.callModel, selectionPolicy: input.selectionPolicy, runtimeSelection: input.runtimeSelection });
   if (judgment.ok && judgment.plan) {
     return saveGoalPlan({ goalId: input.goalId, revision, plan: judgment.plan, fallback: false,
       receipt: { ...judgmentReceipt(judgment, trigger), ownerText: ownerText.slice(0, 2000), rawText: judgment.rawText }, createdAt });
