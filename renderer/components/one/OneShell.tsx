@@ -9374,7 +9374,7 @@ function oneTeamMemberUnavailableText(
     switch (reason) {
       case "not_installed": return "이 기기에 설치되어 있지 않습니다.";
       case "source_missing": return "원본 폴더가 사라져 실행할 파일이 없습니다.";
-      case "call_only": return "허브에서 빌려 쓰는 좌석이라 이번 실행에 실리지 않았습니다.";
+      case "call_only": return "공개 Hub 에이전트는 호출 전용이어서 이번 실행에 포함되지 않았습니다.";
       case "hidden": return "숨김 상태라 부를 수 없습니다.";
       default: return "이번 턴에는 부를 수 없었습니다.";
     }
