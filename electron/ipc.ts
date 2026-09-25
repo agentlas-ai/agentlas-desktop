@@ -1,6 +1,7 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
+import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { matchesGoalResumeReview } from "../shared/goal-resume-review";
@@ -4564,6 +4565,20 @@ export function registerIpcHandlers(): void {
     if (isGoalObserving(chat.goalId)) {
       const checking = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
       return checking ? { ...checking, effectObservation: "checking" as const } : checking;
+    }
+    // An explicit (goal-chip) Goal carries its grant in its recorded goal-mode turn. Adopt it on this click (the same
+    // helper the blocked-goal sweep uses) instead of refusing until the next sweep. Adopting appends one ledger
+    // event, so the version the owner confirmed advances by exactly that write; carry the confirmation along.
+    const beforeAdoption = getLongRunByGoalId(chat.goalId);
+    if (beforeAdoption && beforeAdoption.version === expectedVersion && !getChatGoalRevision(chat.goalId)
+      && adoptExplicitGoalGrant(chat.goalId)) {
+      const adopted = getLongRunByGoalId(chat.goalId);
+      if (adopted) {
+        if (submittedConfirmation && submittedConfirmation.version === expectedVersion) {
+          submittedConfirmation = { ...submittedConfirmation, version: adopted.version };
+        }
+        expectedVersion = adopted.version;
+      }
     }
     const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
