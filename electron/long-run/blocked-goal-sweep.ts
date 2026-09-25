@@ -31,6 +31,7 @@ import { applyPendingOwnerGoalAmendments, OWNER_GOAL_AMENDMENT_PENDING_KIND } fr
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { getDb } from "../store/db";
+import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
 import { appendChatMessage, getChat, getChatWorkingFolder, setChatContinuousMode, setChatGoalBinding } from "../store/chats";
 import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
@@ -267,6 +268,18 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   const workspaceGone = missingGoalWorkspace(run);
   if (workspaceGone) return cancel(run, workspaceGone, trigger);
 
+  // An explicit (goal-chip) Goal carries its owner grant in its recorded goal-mode turn, not in a stored revision.
+  // Every resume path (effect observation, this sweep, the owner's Resume) needs the revision, so adopt it at the
+  // first stop the sweep sees — before any observation is dispatched, because adopting appends a ledger event and
+  // advances the run version that those paths fence on. No recorded turn → kept as is (never cancelled for it).
+  if (["blocked", "paused", "waiting_tool"].includes(run.status) && !getChatGoalRevision(run.goalId)) {
+    if (adoptExplicitGoalGrant(run.goalId)) {
+      const adopted = getLongRun(run.id);
+      if (!adopted) return defer("explicit_goal_adoption_readback_failed");
+      run = adopted;
+    }
+  }
+
   // Owner target changes recorded while the Goal was mid-episode are applied
   // at this stop, with the same revision+binding the Goal editor uses. A run
   // parked in waiting_tool is at a stop too when no turn is live in its chat.
@@ -343,9 +356,11 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   // 2. Effects are settled (or absent): continue the goal itself.
   const chat = run.rootChatId ? getChat(run.rootChatId) : null;
   if (!chat || chat.goalId !== run.goalId) return cancel(run, "goal_chat_binding_missing", trigger);
-  // No stored Goal revision means no recorded permission grant to resume under (legacy explicit Goals).
-  // The host never invents authority; asking for a new grant is the consent surface, not a stopped Goal.
-  if (!getChatGoalRevision(run.goalId)) return cancel(run, "goal_authority_missing", trigger);
+  // It used to be cancelled here (goal_authority_missing) the first time it stopped — including a real owner Goal
+  // paused by quitting mid-turn (reproduced 2026-09-25). An explicit Goal's grant was adopted above; one with no
+  // recorded goal-mode turn (defined by IPC only) is kept as it is: the host never invents authority, and never
+  // cancels an owner-defined Goal for lacking one — the owner's next message grants it.
+  if (!getChatGoalRevision(run.goalId)) return defer("goal_owner_grant_unrecorded");
   if (budget.dispatches >= BLOCKED_GOAL_SWEEP_MAX_DISPATCHES) return defer("dispatch_budget");
   budget.dispatches += 1;
   return resume(run, dispatcher, trigger);
