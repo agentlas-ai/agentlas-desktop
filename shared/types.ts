@@ -6126,6 +6126,8 @@ export type RecExecChoice =
 export interface HubCreditBalance {
   authenticated: boolean;
   plan?: string;
+  /** Server-owned feature access. Missing data never grants a feature. */
+  entitlements?: { aliveAgent?: boolean };
   usedCredits?: number;
   planCreditLimit?: number;
   topUpCredits?: number;

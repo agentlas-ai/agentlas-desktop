@@ -32,6 +32,16 @@ export async function getBillingCredits(): Promise<HubCreditBalance> {
   }
 }
 
+export type AliveAgentAccess = "allowed" | "alive-sign-in-required" | "alive-plan-required" | "alive-entitlement-unavailable";
+
+/** Fresh Main-side check for both enabling a life and admitting its next wake. */
+export async function checkAliveAgentAccess(): Promise<AliveAgentAccess> {
+  const balance = await getBillingCredits();
+  if (!balance.authenticated) return "alive-sign-in-required";
+  if (balance.error || typeof balance.entitlements?.aliveAgent !== "boolean") return "alive-entitlement-unavailable";
+  return balance.entitlements.aliveAgent ? "allowed" : "alive-plan-required";
+}
+
 /** Legacy IPC method stays typed for older renderers but can never transfer. */
 export async function transferEarnings(_credits: number): Promise<EarningsTransferResult> {
   return { ok: false, error: "marketplace_settlement_retired" };
