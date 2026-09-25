@@ -126,6 +126,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "hub.borrowable.list",
   "hub.search",
   "hub.detail",
+  "hub.invoke",
   "hub.leasePreview",
   "billing.credits",
   "hephaestus.engineToggles",
@@ -148,6 +149,7 @@ export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "device.revokeSelf",
+  "hub.invoke",
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
@@ -1932,6 +1934,8 @@ export interface MobileBridgeHubMarketSearchDto {
 }
 
 export interface MobileBridgeHubMarketDetailDto {
+  /** Explicit protocol support; older hosts omit this and Mobile keeps the action hidden. */
+  invokeSupported?: boolean;
   schemaVersion: 1;
   status: "ready" | "not-found" | "unavailable" | "identity-conflict";
   listing: MobileBridgeHubMarketListingDto | null;
@@ -3175,6 +3179,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalInteger(params, "limit", 1, 30),
           )
         : "hub.search accepts only query and limit";
+    case "hub.invoke": {
+      if (!hasOnlyKeys(params, ["slug", "entityKind", "release", "userPrompt"])) return "hub.invoke contains unsupported fields";
+      const release = params.release;
+      if (!isRecord(release) || !hasOnlyKeys(release, ["agentDefinitionId", "agentReleaseId", "packageHash"])) return "hub.invoke requires an exact release";
+      return firstError(requiredString(params, "slug", 160), validateEnum(params, "entityKind", ["agent", "team"], false),
+        requiredText(params, "userPrompt", 20_000), requiredString(release, "agentDefinitionId", 160),
+        requiredString(release, "agentReleaseId", 160),
+        typeof release.packageHash === "string" && /^[a-f0-9]{64}$/.test(release.packageHash) ? null : "Invalid Hub package hash");
+    }
     case "hub.detail":
     case "hub.leasePreview":
       return hasOnlyKeys(params, ["slug"])

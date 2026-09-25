@@ -24,6 +24,7 @@ import type { ChatHostNotice } from "../../shared/types";
 import fs from "node:fs";
 import { modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
 import type { GoalPassStop } from "../long-run/goal-pass-stop";
+import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-release-pin";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -1102,7 +1103,9 @@ function requireOrchestrationTargets(value: unknown): OrchestrationTarget[] {
       typeof target.slug === "string" &&
       target.slug.trim()
     ) {
-      return { source, entityKind, slug: target.slug.trim() };
+      return { source, entityKind, slug: target.slug.trim(),
+        ...(target.release === undefined ? {} : { release: parseHubReleasePin(target.release) }),
+      };
     }
     throw new Error(`Invalid task-force target at index ${index}.`);
   });
@@ -1173,13 +1176,16 @@ async function buildStructuredTaskForceSpecs(input: {
     }
     // Exact Core selector keeps scope + entity kind + slug through Hub lookup.
     const ref = `${target.source}/${target.entityKind}/${target.slug}`;
-    const res = await hepCall(ref, [input.prompt], { project: input.project ?? ".", signal: input.signal });
+    const res = await hepCall(ref, [input.prompt], { project: input.project ?? ".", signal: input.signal, version: target.release?.packageHash });
     const [remote] = requireBorrowedAgentSpecs([target.slug], res.json ?? null, {
       locale: input.locale,
       transportOk: res.ok,
       transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
     });
     if (!remote) throw new BorrowedAgentUnavailableError([target.slug], ["missing_directive"], input.locale);
+    // A public card selection authorizes only this exact release. The server hash
+    // gate and this complete identity check both run before any worker starts.
+    if (target.release) assertHubReleasePin(target.release, remote);
     if (!remote.entityKind || remote.entityKind !== target.entityKind) {
       throw new BorrowedAgentUnavailableError(
         [target.slug],
