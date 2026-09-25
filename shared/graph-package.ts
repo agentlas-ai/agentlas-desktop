@@ -195,7 +195,7 @@ export interface GraphPackage {
     modelPolicy: { binding: "runner-primary" };
     permissionsSummary: {
       mutationNodes: Array<{ nodeId: string; label: string }>;
-      leasedAgents: string[];
+      hubAgents: string[];
     };
     scrubReport: { rulesVersion: string; scrubbedAt: string; findings: GraphScrubFinding[] };
     integrity: { graphDigest: string; manifestDigest: string | null };
@@ -300,7 +300,7 @@ export function buildGraphPackage(input: {
     // 받는 사람이 설치 전에 알아야 하는 것 — 무엇이 바깥으로 나가는가.
     permissionsSummary: {
       mutationNodes,
-      leasedAgents: dependencies.agents.filter((d) => d.source === "hub").map((d) => d.slug),
+      hubAgents: dependencies.agents.filter((d) => d.source === "hub").map((d) => d.slug),
     },
     scrubReport: { rulesVersion: "scrub/1.0", scrubbedAt: nowIso, findings },
     integrity: { graphDigest: "", manifestDigest: null },
