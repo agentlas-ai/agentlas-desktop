@@ -250,6 +250,7 @@ import {
   effortForSelectedModel,
   pickActive,
   pickRunner,
+  pinnedRuntimeCredentialOrModelUnavailable,
   rolePriorityRuntimes,
   selectInvocationRuntime,
 } from "../runtime/selection";
@@ -2640,13 +2641,9 @@ ${effectiveUserPrompt}`;
     && req.agentAppMode !== true;
   let runtimeChoice = runtimeResolution.choice;
   if ((scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned) && runtimeChoice) {
-    const selected = runtimeChoice.active;
-    const modelListIsAuthoritative = ["ollama", "lmstudio", "mlx"].includes(selected.kind)
-      || selected.modelDiscovery?.status === "ok";
-    // A failed discovery may retain the last good model list. Its stale flag
-    // does not prove the pinned model cannot run; let the exact runtime try.
-    if (selected.credentialAccess?.status === "unavailable"
-      || (modelListIsAuthoritative && req.runtimeSelection?.model && !selected.availableModels?.includes(req.runtimeSelection.model))) {
+    // The selection policy knows which model lists can prove an exact pin is
+    // absent. CLI picker catalogs can omit valid aliases or hidden models.
+    if (pinnedRuntimeCredentialOrModelUnavailable(runtimeChoice.active)) {
       runtimeChoice = null;
     }
   }
