@@ -360,6 +360,12 @@ const OPERATIONAL_KEYS = [
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+// The Hephaestus engine launch (resolveHephaestusStdioLaunch) is python -c <bootstrap> that reads
+// HEPHAESTUS_RUNTIME_ROOT. Without these the child died with KeyError before initialize
+// (isolated live run 2026-09-25: every hephaestus-network bridge "upstream_transport_closed",
+// so host-loop runtimes never had Workforce tools). Forwarded only for that launch.
+const HEPHAESTUS_LAUNCH_KEYS = ["HEPHAESTUS_RUNTIME_ROOT", "PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING",
+  "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME"];
 let mapping;
 try {
   mapping = JSON.parse(process.argv[3] || "{}");
@@ -379,6 +385,13 @@ for (const key of OPERATIONAL_KEYS) {
   const actual = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === key);
   const value = actual ? process.env[actual] : undefined;
   if (typeof value === "string" && value.length > 0) env[key] = value;
+}
+if (typeof process.env.HEPHAESTUS_RUNTIME_ROOT === "string" && process.env.HEPHAESTUS_RUNTIME_ROOT.length > 0
+  && process.env.PYTHONPATH === process.env.HEPHAESTUS_RUNTIME_ROOT) {
+  for (const key of HEPHAESTUS_LAUNCH_KEYS) {
+    const value = process.env[key];
+    if (typeof value === "string" && value.length > 0) env[key] = value;
+  }
 }
 for (const key of PROXY_KEYS) {
   const actual = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === key);
