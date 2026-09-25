@@ -856,6 +856,30 @@ async function persistSession(value: string): Promise<AuthSession> {
 }
 
 /** 마켓플레이스 fetch에 첨부할 cookie 헤더 값 — 미로그인이면 null. */
+/**
+ * The signed-in session, handed by Main to the background daemon (owner 2026-09-25: Science could not use Agentlas
+ * serving). Science lists its models and runs its turns in the daemon, a pure-Node process with no safeStorage, so it
+ * can never restore the session itself: getSessionCookieHeader() was always null there, Agentlas serving never appeared
+ * in the Science model picker, and a serving turn would have had no credential. Main pushes exactly what it holds, over
+ * the daemon's authenticated control socket, whenever the session is restored or invalidated.
+ */
+export interface HostSessionHandoff { cookieValue: string; userId?: string; workspaceId?: string; expiresAt?: number }
+export function sessionForDaemonHandoff(): HostSessionHandoff | null {
+  if (!getSessionCookieHeader() || !_cache) return null;
+  return { cookieValue: _cache.cookieValue, userId: _cache.userId, workspaceId: _cache.workspaceId, expiresAt: _cache.expiresAt };
+}
+/** Daemon only: adopt (or clear, with null) the session Main handed over. */
+export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boolean {
+  if (process.env.ELECTRON_RUN_AS_NODE !== "1") throw new Error("auth-session-handoff-daemon-only");
+  if (session === null) { _cache = null; return false; }
+  if (typeof session.cookieValue !== "string" || !session.cookieValue || session.cookieValue.length > 16_384 || /[\s;]/.test(session.cookieValue)) {
+    throw new Error("auth-session-handoff-invalid");
+  }
+  if (session.expiresAt !== undefined && (!Number.isFinite(session.expiresAt) || session.expiresAt < Date.now())) { _cache = null; return false; }
+  _cache = { cookieValue: session.cookieValue, userId: session.userId, workspaceId: session.workspaceId, expiresAt: session.expiresAt };
+  return true;
+}
+
 export function getSessionCookieHeader(): string | null {
   if (developmentEffectsSuppressed()) return null;
   if (!_cache) return null;
