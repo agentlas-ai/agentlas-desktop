@@ -61,6 +61,7 @@ export interface CloudUploadState {
   rootGrant: FsPathGrant | null;
   registeredKey: string;
   purposeAnswer: string;
+  publicSourceConsent: boolean;
   running: CloudUploadVisibility | null;
   result: CloudUploadResult | null;
   /** 이 실행을 식별한다. 버려진 실행의 늦은 이벤트가 현재 화면을 몰지 못하게 한다. */
@@ -74,6 +75,7 @@ const initial: CloudUploadState = {
   rootGrant: null,
   registeredKey: "",
   purposeAnswer: "",
+  publicSourceConsent: false,
   running: null,
   result: null,
   progressId: "",
@@ -123,17 +125,23 @@ export function getCloudUploadServerSnapshot(): CloudUploadState {
 }
 
 export function setCloudUploadRootGrant(grant: FsPathGrant | null): void {
-  state = { ...state, rootGrant: grant, registeredKey: "", result: null, purposeAnswer: "" };
+  state = { ...state, rootGrant: grant, registeredKey: "", result: null, purposeAnswer: "", publicSourceConsent: false };
   emit();
 }
 
 export function setCloudUploadRegisteredKey(key: string): void {
-  state = { ...state, registeredKey: key, rootGrant: null, result: null, purposeAnswer: "" };
+  state = { ...state, registeredKey: key, rootGrant: null, result: null, purposeAnswer: "", publicSourceConsent: false };
   emit();
 }
 
 export function setCloudUploadPurposeAnswer(answer: string): void {
   state = { ...state, purposeAnswer: answer };
+  emit();
+}
+
+export function setCloudUploadPublicSourceConsent(consent: boolean): void {
+  if (state.running) return;
+  state = { ...state, publicSourceConsent: consent };
   emit();
 }
 

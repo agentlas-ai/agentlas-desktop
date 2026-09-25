@@ -1015,6 +1015,13 @@ export async function packageAndReviewCloudAgent(
     if (routingCard.finding) scan.findings.push(routingCard.finding);
     careerGraphCard = readPublicCareerGraphCard(snapshot, visibility, scan.findings);
     replacePublicCareerCardWithSanitizedSnapshot(scan, careerGraphCard);
+    if (input.publicSourceConsent === true && authorizePublicSourceDisclosure(scan)) {
+      remediationActions.push({
+        file: "agentlas.json",
+        action: "rewritten",
+        detail: "author-approved source sharing for Agent Space Files in the cleaned public package",
+      });
+    }
   }
   const finalSnapshot = packageSnapshot(scan.included);
   const name = readName(finalSnapshot, path.basename(rootPath));
@@ -2070,6 +2077,46 @@ function replacePublicCareerCardWithSanitizedSnapshot(
     scan.files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "text", included: true });
     scan.files.sort((a, b) => comparePaths(a.path, b.path));
   }
+}
+
+/**
+ * Author consent changes only the captured, cleaned Hub package. The original
+ * folder and private Agent Cloud copy are never rewritten or made public.
+ * An older call-only release remains closed until its author republishes it.
+ */
+function authorizePublicSourceDisclosure(scan: StaticScanResult): boolean {
+  const rel = "agentlas.json";
+  const index = scan.included.findIndex((file) => file.path === rel);
+  if (index < 0) throw new Error("public_source_manifest_missing: Source sharing requires agentlas.json in the public package.");
+  const current = scan.included[index];
+  let parsed: Record<string, unknown>;
+  try {
+    const candidate: unknown = JSON.parse(decodePackagedContent(current).toString("utf8"));
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("invalid object");
+    parsed = candidate as Record<string, unknown>;
+  } catch {
+    throw new Error("public_source_manifest_invalid: agentlas.json must be a valid JSON object before source sharing.");
+  }
+  if (parsed.license === "source-download-allowed") return false;
+  const bytes = Buffer.from(`${JSON.stringify({ ...parsed, license: "source-download-allowed" }, null, 2)}\n`, "utf8");
+  if (bytes.length > MAX_FILE_BYTES || scan.totalBytes - current.bytes + bytes.length > MAX_TOTAL_BYTES) {
+    throw new Error("public_source_manifest_too_large: The source-sharing manifest exceeds package limits.");
+  }
+  const digest = sha256(bytes);
+  scan.included[index] = {
+    path: rel,
+    bytes: bytes.length,
+    sha256: digest,
+    executable: current.executable,
+    ...encodePackagedContent(bytes),
+  };
+  scan.totalBytes += bytes.length - current.bytes;
+  const fileRecord = scan.files.find((file) => file.path === rel);
+  if (fileRecord) {
+    fileRecord.bytes = bytes.length;
+    fileRecord.sha256 = digest;
+  }
+  return true;
 }
 
 function sanitizePublicCareerGraph(parsed: Record<string, unknown>): CloudAgentPublicCareerGraph {
