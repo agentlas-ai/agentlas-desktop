@@ -1090,6 +1090,23 @@ export async function judgeRequired<V extends string>(
     locale: spec.locale,
     requireNoTools: spec.requireNoTools,
     accept: (text) => parseVerdict<V>(text, spec.labels) !== null,
+    /*
+     * The same output contract the batch judge carries. Without it a CLI judge sees the
+     * judged text as the task: every automatic-goal intake on claude-code/codex answered
+     * the user's request instead of classifying it ("PARITY-OK", "I need write access …
+     * [[NEEDS-FULL-ACCESS]]") and was dropped as invalid_output, so no CLI turn could ever
+     * become a Goal, while serving classified the same messages (parity QA 2026-09-25).
+     * claude enforces it with --json-schema, codex with --output-schema, serving by
+     * constrained decoding; parseVerdict still tolerates prose around the object.
+     */
+    outputSchema: { name: "agentlas_judgment_verdict", schema: {
+      type: "object", additionalProperties: false, required: ["verdict", "confidence", "reason"],
+      properties: {
+        verdict: { type: "string", enum: [...spec.labels] },
+        confidence: { type: "number" },
+        reason: { type: "string" },
+      },
+    } },
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
     ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
     ...(spec.pinFallback ? { pinFallback: spec.pinFallback } : {}),
