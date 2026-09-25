@@ -4,9 +4,8 @@
  * The general serving runner (runtime/agentlas-serving.ts, owned by the One/Work serving work) wraps the
  * system prompt with the chat harness and has no structured-output or usage channel. A controller wake needs
  * neither the harness nor tools: this sends the controller's own system prompt and one compact observation,
- * asks the server for the strict decision schema (`responseFormat`, ignored by a server that predates it — the
- * host parser stays the authority either way), and reads the provider-measured usage from the `done` frame when
- * the server reports it. No usage in the frame = unmeasured (never estimated): the light runner then learns
+ * asks the server for the strict decision schema (`outputSchema`, web 0dc08fde — the host parser stays the authority
+ * either way), and reads the provider-measured usage from the `done` frame ({usage:{inputTokens,outputTokens}}). No usage in the frame = unmeasured (never estimated): the light runner then learns
  * "usage-unmeasured" for this runtime and the pool skips it for token-bounded lives.
  */
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
@@ -53,7 +52,8 @@ export const runAliveServingDecision: Runner = async (req, _events): Promise<Run
     body: JSON.stringify({
       model, system: req.systemPrompt, messages: [{ role: "user", text: req.userPrompt }],
       maxTokens: Math.max(256, Math.min(req.maxOutputTokens ?? 600, 1_000)),
-      ...(req.outputSchema ? { responseFormat: { name: req.outputSchema.name, schema: req.outputSchema.schema } } : {}),
+      // The route (web 0dc08fde) constrains decoding with text.format json_schema from `outputSchema`.
+      ...(req.outputSchema ? { outputSchema: { name: req.outputSchema.name, schema: req.outputSchema.schema } } : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   });

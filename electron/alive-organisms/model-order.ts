@@ -14,8 +14,8 @@
  */
 import type { RuntimeRole, RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { detectRuntimes } from "../runtime/detect";
-import { rolePriorityRuntimes } from "../runtime/selection";
-import { listModelRoleMembers } from "../store/model-roles";
+import { rolePriorityRuntimes, runtimeForOwnerSelection } from "../runtime/selection";
+import { getResolvedModelRole, listModelRoleMembers } from "../store/model-roles";
 import { captureLongRunRuntimeSelection } from "../long-run/exact-runtime-binding";
 import type { AliveWakeRuntimeRecord } from "../alive-core/contracts";
 
@@ -91,13 +91,24 @@ export function buildAliveModelOrder(input: {
 }
 
 /**
- * An unconfigured (legacy) store has no pool rows; execution then uses the active orchestrator runtime
- * (rolePriorityRuntimes' legacy branch). Alive follows the same rule instead of never waking.
+ * An unconfigured store has no pool rows. Execution then runs the owner's active orchestrator — the dashboard's
+ * resolved orchestrator selection, which may be an Agentlas serving tier (R5 2026-09-25: a serving-only owner saw
+ * Claude Code as Alive's only model, because the fallback read detection's `active` flag, which marks CLI runtimes
+ * only). Use that resolved selection, gated the same way as a pool member (runtimeForOwnerSelection: credential,
+ * cooldown, model, quota); with no resolved selection keep the legacy active runtime.
  */
 export function legacyMembers(members: Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>>,
-  usable: Record<"orchestrator" | "worker", RuntimeStatus[]>): Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>> {
-  if (members.orchestrator.length > 0) return members;
-  return { ...members, orchestrator: usable.orchestrator.map((runtime) => ({ selection: statusSelection(runtime) })) };
+  usable: Record<"orchestrator" | "worker", RuntimeStatus[]>,
+  resolved?: { selection: RuntimeSelection; live: RuntimeStatus | null } | null): {
+    members: Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>>;
+    usable: Record<"orchestrator" | "worker", RuntimeStatus[]>;
+  } {
+  if (members.orchestrator.length > 0) return { members, usable };
+  if (resolved) {
+    return { members: { ...members, orchestrator: [{ selection: resolved.selection }] },
+      usable: { ...usable, orchestrator: resolved.live ? [resolved.live] : [] } };
+  }
+  return { members: { ...members, orchestrator: usable.orchestrator.map((runtime) => ({ selection: statusSelection(runtime) })) }, usable };
 }
 
 let cached: { atMs: number; entries: AliveModelOrderEntry[] } | null = null;
@@ -118,7 +129,13 @@ export async function refreshAliveModelOrder(nowMs = Date.now(),
     orchestrator: rolePriorityRuntimes(detected, "orchestrator"),
     worker: members.worker.length ? rolePriorityRuntimes(detected, "worker") : [],
   };
-  const entries = buildAliveModelOrder({ members: legacyMembers(members, usable), usable, exact: exactOk, ...(facts ? { facts } : {}) });
+  let resolved: { selection: RuntimeSelection; live: RuntimeStatus | null } | null = null;
+  if (members.orchestrator.length === 0) {
+    const role = getResolvedModelRole("orchestrator" as RuntimeRole);
+    if (role?.selection) resolved = { selection: role.selection, live: runtimeForOwnerSelection(detected, role.selection) };
+  }
+  const plan = legacyMembers(members, usable, resolved);
+  const entries = buildAliveModelOrder({ members: plan.members, usable: plan.usable, exact: exactOk, ...(facts ? { facts } : {}) });
   cached = { atMs: nowMs, entries };
   return entries;
 }
