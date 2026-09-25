@@ -67,7 +67,7 @@ import {
   getCommittedQuestionContinuation,
 } from "../confirm";
 import { deriveGoalAcceptanceCriteria, ensureGoalLedgerGoal } from "../mcp/goal-ledger";
-import { resolveDesktopWorkforceGoalId } from "../mcp/workforce-goal-continuity";
+import { boundGoalIsTerminal, freshGoalIdForChat, resolveDesktopWorkforceGoalId } from "../mcp/workforce-goal-continuity";
 import {
   invocationWorkspaceBindingsEqual,
   isRemoteInvocationWorkspaceBindingSource,
@@ -2047,6 +2047,11 @@ export class InvocationService {
     // Goal; it is not a Goal cycle. It must not bind a controller attempt, claim
     // completion, register waits or run the verifier on that Goal.
     let projectionGoalId = effectObservation ? null : chat.goalId;
+    // A goal-mode turn in a chat still bound to an ENDED Goal starts a new Goal instead of attaching to the ended one.
+    if (projectionGoalId && runReq.goalMode && !executionContext && boundGoalIsTerminal(projectionGoalId)) {
+      setChatGoalBinding(chat.id, null);
+      projectionGoalId = null;
+    }
     let effectObservationParsed: ParsedEffectObservation | null = null;
     let effectObservationFailed = false;
     const effectObservationDeadline = effectObservation
@@ -2066,8 +2071,7 @@ export class InvocationService {
        * run 2026-09-25). Same rule as chats:setGoalMode: a new Goal whose derived id already has a run
        * owned by another conversation gets its own id.
        */
-      const priorGoalRun = getLongRunByGoalId(projectionGoalId);
-      if (priorGoalRun && priorGoalRun.rootChatId !== chat.id) projectionGoalId = `goal:desktop:${randomUUID()}`;
+      projectionGoalId = freshGoalIdForChat(projectionGoalId, chat.id);
       try {
         const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
         const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq), runReq.permissions);

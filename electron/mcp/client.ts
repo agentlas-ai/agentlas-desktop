@@ -141,6 +141,7 @@ import {
 import {
   bindDesktopWorkforceGoal,
   resolveDesktopWorkforceGoalId,
+  freshGoalIdForChat,
   loadDesktopWorkforceGoal,
   recordDesktopWorkforceTurn,
   type DesktopWorkforceRuntimePlan,
@@ -5220,7 +5221,7 @@ ${effectiveUserPrompt}`;
     if (!scienceRecovery && !req.agentAppMode && chat.kind !== "division" && !effectObservationRun) {
       activeGoalId = getChatGoalId(chat.id);
       if (!activeGoalId && req.goalMode && canWrite) {
-        activeGoalId = durableWorkforceGoalId;
+        activeGoalId = freshGoalIdForChat(durableWorkforceGoalId, chat.id);
         try {
           setChatGoalBinding(chat.id, activeGoalId);
         } catch {
