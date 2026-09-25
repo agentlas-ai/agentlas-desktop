@@ -30,7 +30,7 @@ import {
   type JudgmentCapabilityReceipt,
 } from "./judgment-capability";
 import type { RuntimeLocale } from "../runtime/status-i18n";
-import type { RunnerFailure, RunnerFailureKind } from "../runtime/runner";
+import type { RunnerFailure, RunnerFailureKind, RunnerRequest } from "../runtime/runner";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 
@@ -534,6 +534,8 @@ export async function callConnectedModelDetailed(opts: {
    * candidate's failure and the next pool member is tried (goal shape judgment, 2026-09-24).
    */
   accept?: (text: string) => boolean;
+  /** Final-answer contract enforced by runtimes that can (CLI flags, response_format, serving text.format). */
+  outputSchema?: RunnerRequest["outputSchema"];
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   return callJudgmentModelDetailed(opts);
 }
@@ -563,6 +565,8 @@ async function callJudgmentModelDetailed(opts: {
    *   accept가 false를 내면 그 런타임은 실패로 치고 다음 후보로 넘어간다.
    */
   accept?: (text: string) => boolean;
+  /** Final-answer contract enforced by runtimes that can; others get the runner's instruction floor. */
+  outputSchema?: RunnerRequest["outputSchema"];
   /**
    * ★**짓는 일**은 판정이 아니다 — 이 통로를 열면 조회 도구와 이미 동의된 MCP 가 함께 간다.
    *
@@ -822,6 +826,7 @@ async function callJudgmentModelDetailed(opts: {
             // contract; neither path is detached from the host effect ledger.
             untrustedNoTools: requiresNoTools,
             surfaceGate: "exclude",
+            ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
@@ -903,6 +908,7 @@ async function callJudgmentModelDetailed(opts: {
               permission: "read",
               untrustedNoTools: requiresNoTools,
               surfaceGate: "exclude",
+              ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
             judgmentOnly: !opts.authoring,
@@ -1138,7 +1144,14 @@ async function judgeRequiredBatchOnce<V extends string>(
   const parse = (text: string): Array<{ id: string; verdict: V; confidence: number; reason: string; evidenceRefs?: string[] }> | null => {
     try {
       const body = text.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```$/, "");
-      const value = JSON.parse(body);
+      // Tolerate prose around the one JSON object (measured: agentlas-light, run_80dc1968
+      // invalid_output). The object itself is still validated field by field below.
+      let value: any;
+      try { value = JSON.parse(body); } catch {
+        const start = body.indexOf("{"), end = body.lastIndexOf("}");
+        if (start < 0 || end <= start) return null;
+        value = JSON.parse(body.slice(start, end + 1));
+      }
       if (!value || typeof value !== "object" || Array.isArray(value)
         || Object.keys(value).length !== 1 || !Array.isArray(value.items) || value.items.length !== ids.size) return null;
       const seen = new Set<string>();
@@ -1176,6 +1189,20 @@ async function judgeRequiredBatchOnce<V extends string>(
     locale: spec.locale,
     requireNoTools: spec.requireNoTools,
     accept: (text) => parse(text) !== null,
+    outputSchema: { name: "agentlas_criteria_batch_verdicts", schema: {
+      type: "object", additionalProperties: false, required: ["items"],
+      properties: { items: { type: "array", items: {
+        type: "object", additionalProperties: false,
+        required: ["id", "verdict", "confidence", "reason", ...(spec.evidenceRefsByItem ? ["evidenceRefs"] : [])],
+        properties: {
+          id: { type: "string", enum: spec.items.map((item) => item.id) },
+          verdict: { type: "string", enum: [...spec.labels] },
+          confidence: { type: "number" },
+          reason: { type: "string" },
+          ...(spec.evidenceRefsByItem ? { evidenceRefs: { type: "array", items: { type: "string" } } } : {}),
+        },
+      } } },
+    } },
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
     ...(spec.selectionPolicy ? { selectionPolicy: spec.selectionPolicy } : {}),
   });

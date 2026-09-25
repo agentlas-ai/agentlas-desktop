@@ -68,7 +68,7 @@ import {
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
-import { bindNativeFileProofObserver } from "../long-run/file-proof";
+import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
  * tool_result. Admit only exact paths from known mutation tools; Main still
@@ -173,6 +173,22 @@ export function claudeNativeFileProofCandidate(
   if (toolName === "Edit" && typeof input.old_string === "string" && typeof input.new_string === "string"
     && input.old_string !== input.new_string) return { ...base, action: "edit" };
   return null;
+}
+
+/** MCP file tools arrive as `mcp__<configKey>__<tool>`; Main's sealed config names the server. */
+export function claudeMcpFileProofCandidate(
+  toolId: string | undefined,
+  toolName: string,
+  rawInput: unknown,
+  runReq: Pick<RunnerRequest, "chatId" | "cwd" | "permission" | "mcpConfigPath">,
+): NativeFileProofInput | null {
+  if (!toolName.startsWith("mcp__") || !runReq.mcpConfigPath) return null;
+  const rest = toolName.slice(5);
+  const split = rest.indexOf("__");
+  if (split < 1) return null;
+  return mcpFileProofCandidate({ toolId, toolName, serverToolName: rest.slice(split + 2), args: rawInput,
+    chatId: runReq.chatId, cwd: runReq.cwd, permission: runReq.permission,
+    mcpConfigPath: runReq.mcpConfigPath, configKey: rest.slice(0, split) });
 }
 
 const CLAUDE_WORKSPACE_SANDBOX_SETTINGS = {
@@ -1874,7 +1890,8 @@ const runClaudeTurn = async (
               false,
             );
             if (block.id) {
-              const candidate = claudeNativeFileProofCandidate(block.id, block.name, block.input, runReq);
+              const candidate = claudeNativeFileProofCandidate(block.id, block.name, block.input, runReq)
+                ?? claudeMcpFileProofCandidate(block.id, block.name, block.input, runReq);
               const ticket = candidate ? observeNativeFile(candidate) : null;
               if (ticket) nativeFileProofById.set(block.id, ticket);
             }

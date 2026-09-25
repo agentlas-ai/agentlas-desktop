@@ -76,7 +76,7 @@ import type { AcpSessionLease } from "./acp-session-pool";
 import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
-import { bindNativeFileProofObserver } from "../long-run/file-proof";
+import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
 import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver } from "../invocation/adapter-effect-context";
 import {
   defaultRuntimeToolPermission,
@@ -946,7 +946,12 @@ function runCodexProcess(
           artifactPaths,
         );
         if (ev.type === "item.started" && item.id) {
-          const tickets = codexNativeFileProofCandidates(item.id, item, req)
+          const mcpCandidate = item.type === "mcp_tool_call" && item.server && item.tool
+            ? mcpFileProofCandidate({ toolId: item.id, toolName, serverToolName: item.tool,
+              args: item.arguments ?? item.args ?? item.input, chatId: req.chatId, cwd: req.cwd,
+              permission: req.permission, mcpConfigPath: req.mcpConfigPath, configKey: item.server })
+            : null;
+          const tickets = [...codexNativeFileProofCandidates(item.id, item, req), ...(mcpCandidate ? [mcpCandidate] : [])]
             .map((candidate) => observeNativeFile(candidate))
             .filter((ticket): ticket is NativeFileProofTicket => Boolean(ticket));
           if (tickets.length > 0 && !nativeFileProofById.has(item.id)) nativeFileProofById.set(item.id, tickets);
