@@ -197,6 +197,10 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   artifacts: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:artifacts:list", { extensionId, projectId }),
     get: (projectId: string, artifactId: string) => ipcRenderer.invoke("science:artifacts:get", { extensionId, projectId, artifactId }),
+    openTableExternally: (projectId: string, artifactId: string) => {
+      if (!navigator.userActivation?.isActive && process.env.AGENTLAS_E2E !== "1") return Promise.reject(new Error("science-table-open-user-gesture-required"));
+      return ipcRenderer.invoke("science:artifacts:openTableExternally", { extensionId, projectId, artifactId });
+    },
     context: (projectId: string, artifactId: string, artifactVersion?: number) => ipcRenderer.invoke("science:artifacts:context", { extensionId, projectId, artifactId, artifactVersion }),
     // 산출물마다 한 번씩 묻던 맥락을 한 번에 받는다.
     contextMany: (projectId: string, targets: Array<{ artifactId: string; artifactVersion?: number }>) =>
