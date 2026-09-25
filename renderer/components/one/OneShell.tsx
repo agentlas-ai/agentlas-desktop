@@ -231,6 +231,7 @@ import {
   type OneComposerPluginOption,
   type OnePermissionMode,
 } from "./OneComposerControls";
+import { AliveComposerButton } from "@/components/alive/AliveComposerButton";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
@@ -8700,6 +8701,13 @@ export function OneShell() {
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
+                  <AliveComposerButton
+                    surface="one"
+                    chatId={selectedConversationId}
+                    locale={appLocale}
+                    triggerClassName={styles.attachmentButton}
+                    disabled={composerSettingsBlocked}
+                  />
                   {(oneRuntimeInventory.length > 0 || oneRuntime?.model) && (
                     <button
                       type="button"

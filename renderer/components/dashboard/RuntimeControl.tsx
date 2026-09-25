@@ -1187,6 +1187,7 @@ export function RuntimeControl() {
   const localInstalled = (localModelSnapshot?.modelInstallations.length ?? 0) > 0;
   return (
     <div
+      id="runtime-roles"
       className="dashboard-module dashboard-runtime-control"
       data-busy={busy ? "true" : "false"}
     >

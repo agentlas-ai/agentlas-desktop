@@ -11,6 +11,7 @@ import { GoalPlanSummary } from "@/components/goal/GoalPlanSummary";
 import type { GoalPlanView } from "../../shared/goal-shape";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
+import { AliveComposerButton } from "./alive/AliveComposerButton";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ImageAttachment,
@@ -1711,6 +1712,15 @@ function ChatInputComponent({
             >
               <IconPlus size={15} />
             </button>
+
+            {/* AGI(Alive) — "+" 와 같은 모양의 작은 단추. 좁은 작성창에서 글자 칩이 먼저 줄도록 칩들보다 앞에 둔다. */}
+            <AliveComposerButton
+              surface="work"
+              chatId={activeChatId}
+              locale={locale === "ko" ? "ko" : "en"}
+              triggerStyle={toolBtnStyle}
+              disabled={disabled}
+            />
 
             {/* 활성 실행 모드는 하나의 상태 그룹으로 묶는다. 설정은 + 메뉴에서 찾고,
                 이곳에서는 현재 켜진 모드를 확인하거나 바로 끌 수 있다. */}
