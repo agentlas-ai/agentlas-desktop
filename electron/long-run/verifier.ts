@@ -49,6 +49,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
+import { couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 import { registerOngoingGoalCycle } from "./wait-subscriptions";
 import { observeOngoingOneGoalProgress } from "./goal-progress";
 
@@ -849,6 +850,35 @@ interface RecoveryDecision {
   requiredActor: "user" | "external" | null;
 }
 
+/** Code or build-target paths (source files and build manifests). */
+const CODE_EFFECT_PATH = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|swift|c|cc|cpp|cxx|h|hpp|cs|rb|php|scala|sh|vue|svelte|dart|m|mm|sql)\b|(?:^|[\/\s"'])(?:package\.json|tsconfig[\w.-]*\.json|Cargo\.toml|pyproject\.toml|setup\.py|go\.mod|Makefile|CMakeLists\.txt|build\.gradle(?:\.kts)?|pom\.xml|Gemfile|requirements[\w.-]*\.txt)\b/i;
+
+/**
+ * Whether a Goal's own controller turns touched code or build targets. A conditional criterion the
+ * classifier recorded as not_applicable ("relevant tests/builds for changed code") becomes applicable
+ * again when this is true. Reads the recorded arguments of every call that could change the outside
+ * world (file writers and shells); a mention of a code path there only ever makes verification stricter.
+ */
+export function goalCodeEffectPaths(longRunId: string): string[] {
+  const rows = getDb().prepare(`SELECT e.payload_json FROM run_events AS e
+    WHERE e.kind = 'mcp_tool-use' AND json_extract(e.payload_json, '$.toolArgs') IS NOT NULL
+      AND e.run_id IN (SELECT a.invocation_run_id FROM long_run_worker_attempts AS a
+        JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+        WHERE a.run_id = ? AND w.role = 'controller' AND a.invocation_run_id IS NOT NULL)
+    ORDER BY e.rowid LIMIT 2000`).all(longRunId) as Array<{ payload_json: string }>;
+  const paths = new Set<string>();
+  for (const row of rows) {
+    try {
+      const data = JSON.parse(row.payload_json) as { toolName?: unknown; toolArgs?: unknown };
+      if (typeof data.toolName !== "string" || !couldHaveChangedTheOutsideWorld(data.toolName)) continue;
+      const args = typeof data.toolArgs === "string" ? data.toolArgs : JSON.stringify(data.toolArgs ?? "");
+      const match = CODE_EFFECT_PATH.exec(args);
+      if (match) paths.add(match[0].trim().slice(0, 120));
+    } catch { /* unreadable arguments are not evidence either way */ }
+  }
+  return [...paths].slice(0, 8);
+}
+
 type JudgedCriterion = CheckpointCriterion & {
   judgmentRuntimeReceipt?: JudgmentRuntimeReceipt;
 };
@@ -1140,6 +1170,19 @@ export async function verifyGoalCompletionClaim(input: {
           reasonCode:error instanceof Error && error.message.startsWith("criterion_proof_") ? error.message : "criterion_proof_unavailable"}});
       }
     }
+    /*
+     * Owner decision 2026-09-25: a conditional criterion the request cannot produce (for example "tests,
+     * type checks and builds for changed paths" on a text-file Goal) is recorded not_applicable by the
+     * classifier and does not block completion. It becomes applicable again — requiring executed
+     * build/test proof — as soon as the Goal's actual turns touched code or build targets.
+     */
+    const pinnedProofContracts = proofContracts;
+    const codeEffectPaths = pinnedProofContracts.some(contract => contract.requiredProofKind === "not_applicable")
+      ? goalCodeEffectPaths(run.id) : [];
+    if (codeEffectPaths.length) {
+      proofContracts = pinnedProofContracts.map(contract => contract.requiredProofKind === "not_applicable"
+        ? { ...contract, requiredProofKind: "execution" as const } : contract);
+    }
     const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
     const fileProofs = fileProofInput && proofContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
       ? currentBuiltinFileProofs(fileProofInput) : [];
@@ -1234,6 +1277,18 @@ export async function verifyGoalCompletionClaim(input: {
           requiredActor: null,
           judgmentRuntimeReceipt: undefined,
         }));
+    for (const verdict of verdicts) {
+      const pinned = pinnedProofContracts[verdict.criterionIndex];
+      if (pinned?.requiredProofKind !== "not_applicable") continue;
+      if (codeEffectPaths.length) {
+        if (verdict.verdict !== "passed") verdict.reason = `This conditional criterion became applicable: the goal's turns touched code or build targets (${codeEffectPaths.join(", ")}). Run the relevant tests/type checks/build so the host records the execution, then report the result. ${verdict.reason}`;
+        continue;
+      }
+      // Not applicable to what this request asks for — recorded reason, no proof demanded.
+      Object.assign(verdict, { verdict: "passed" as const, recoveryClass: "unknown" as const, prerequisiteCode: null,
+        requiredActor: null, nextAction: null,
+        reason: `Not applicable: ${pinned.notApplicableReason ?? "conditional criterion not requested"} (recorded classification ${pinned.ref}).` });
+    }
     const chosenDownloadRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("download-proof:")));
     if (chosenDownloadRefs.size) {
       const current = fileProofInput ? await currentBrowserDownloadProofs({...fileProofInput,signal:controller.signal}) : {proofs:[],reasonCode:"download_proof_scope_missing"};
