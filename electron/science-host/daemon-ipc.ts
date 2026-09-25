@@ -5,6 +5,7 @@ import type { DaemonScienceCommand, DaemonScienceEvent } from "../daemon/science
 import { ScienceDaemonClientError, type ScienceDaemonClient } from "./daemon-client";
 import { registerScienceMathHandlers } from "./math-ipc";
 import { registerSciencePublicationIpc, SCIENCE_PUBLICATION_IPC_CHANNELS } from "./publication-ipc";
+import { registerScienceStyleLibraryIpc, SCIENCE_STYLE_LIBRARY_IPC_CHANNELS } from "./style-library-ipc";
 
 type Row = Record<string, unknown>;
 type Scope = { projectId: string; conversationId: string };
@@ -51,7 +52,7 @@ const CORE_CHANNELS = [
 
 /** Main removes its old handlers for exactly this set before registering once. */
 export const SCIENCE_DAEMON_EXECUTION_IPC_CHANNELS: readonly string[] = [
-  ...CORE_CHANNELS, "science:math:command", "science:math:cancel", ...SCIENCE_PUBLICATION_IPC_CHANNELS,
+  ...CORE_CHANNELS, "science:math:command", "science:math:cancel", ...SCIENCE_PUBLICATION_IPC_CHANNELS, ...SCIENCE_STYLE_LIBRARY_IPC_CHANNELS,
 ];
 
 function row(value: unknown): Row | null {
@@ -463,6 +464,7 @@ export function registerScienceDaemonExecutionIpc(options: {
   });
   registerScienceMathHandlers({ ipcMain, client, assertScienceSender: (event, envelope) => admit(event, envelope, "science:projects") });
   registerSciencePublicationIpc({ ipc: ipcMain, client, assertScienceSender: (event, envelope, permission) => admit(event, envelope, permission) });
+  registerScienceStyleLibraryIpc({ ipc: ipcMain, client, assertScienceSender: (event, envelope, permission) => admit(event, envelope, permission) });
   return { reconnect, close() {
     if (closed) return;
     closed = true;

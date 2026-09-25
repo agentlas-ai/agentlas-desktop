@@ -43,7 +43,13 @@ export type DaemonScienceCommand =
   | { op: "loops.events"; input: { projectId: string; loopSessionId: string; afterSequence?: number; limit?: number } }
   | { op: "projects.list" }
   | { op: "autostart.hasRecoverableScienceWork" }
-  | { op: "conversations.list"; input: { projectId: string } };
+  | { op: "conversations.list"; input: { projectId: string } }
+  | { op: "styles.list" }
+  | { op: "styles.import"; input: { bytesBase64: string; fileName: string; name?: string } }
+  | { op: "styles.rename"; input: { sha256: string; name: string } }
+  | { op: "styles.delete" | "styles.saveEdited"; input: { sha256: string } }
+  | { op: "styles.applyToProject"; input: { sha256: string; projectId: string } }
+  | { op: "styles.samplePreview" | "styles.openForEditing"; input: { sha256: string; lang: "ko" | "en" } };
 
 export interface DaemonScienceStatus {
   schema: "agentlas.science-daemon-status.v1";
@@ -457,6 +463,16 @@ export function createDaemonScienceService(options: {
       case "journal.confirmJournalIdentity": case "journal.confirmHumanAttestation":
       case "journal.createSubmissionExport": case "journal.validate":
         return dispatchSciencePublicationCommand(api, store, command, assertExecution);
+      case "styles.list": case "styles.import": case "styles.rename": case "styles.delete":
+      case "styles.applyToProject": case "styles.samplePreview": case "styles.openForEditing": case "styles.saveEdited": {
+        // A Science build without the style library answers with an update request, never a crash.
+        const provider = (api as unknown as { scienceStyleLibrary?: () => Record<string, (input?: unknown) => unknown> }).scienceStyleLibrary;
+        if (!provider) throw new Error("science-style-library-update-required");
+        const library = provider();
+        if (command.op === "styles.applyToProject" && !store.getProject(command.input.projectId)) throw new Error("science-project-not-found");
+        const method = command.op.slice("styles.".length);
+        return "input" in command ? library[method]!(command.input) : library[method]!();
+      }
       case "math.command":
       case "math.cancel": {
         const provider = (api as unknown as { scienceMathWorkspace?: () => MathWorkspace }).scienceMathWorkspace;
