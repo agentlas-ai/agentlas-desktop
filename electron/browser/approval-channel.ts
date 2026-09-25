@@ -8,6 +8,9 @@ import { userDataDir } from "../runtime-paths";
 
 export const BROWSER_APPROVAL_FILE_ENV = "AGENTLAS_BROWSER_APPROVAL_FILE";
 
+/** Durable action name of a launcher-verified one-click engagement (follow/like/repost/subscribe). */
+export const BROWSER_SOCIAL_ENGAGE_ACTION = "social-engage";
+
 export function browserApprovalInfoPath(userDataPath = userDataDir()): string {
   return path.join(userDataPath, "browser", "approval.json");
 }

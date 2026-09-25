@@ -21,6 +21,7 @@ import type { PersistenceDecisionPayload } from "../shared/persistence-policy";
 import { latestAutomationPersistenceDecision } from "./persistence-ledger";
 import { summarizeOutwardEffects, type OutwardEffectKind, type OutwardToolCall } from "./outward-effect";
 import { userDataPath } from "./runtime-paths";
+import { BROWSER_SOCIAL_ENGAGE_ACTION } from "./browser/approval-channel";
 
 /**
  * Browser operations that only look. This is a *progress* signal (did the run
@@ -83,11 +84,38 @@ export function defaultAgentScratchRoots(): string[] {
   try { return [userDataPath("agent-cwd")]; } catch { return []; }
 }
 
+/**
+ * One-click engagements (follow/like/repost/subscribe) the browser launcher verified by a real
+ * post-click state change (browser_action_logs, action "social-engage", result "changed"), bound to
+ * this run by its chats and its event time window. The launcher is the only place that sees the
+ * post-click page: automation ledgers keep no tool results for codex runs.
+ */
+export function verifiedSocialEngagementsForRun(runId: string): number {
+  try {
+    const span = getDb().prepare(
+      `SELECT MIN(ts) AS first, MAX(ts) AS last FROM run_events WHERE run_id = ?`,
+    ).get(runId) as { first: string | null; last: string | null } | undefined;
+    if (!span?.first || !span.last) return 0;
+    const chats = (getDb().prepare(
+      "SELECT DISTINCT chat_id FROM run_events WHERE run_id = ? AND chat_id IS NOT NULL",
+    ).all(runId) as Array<{ chat_id: string }>).map((row) => row.chat_id);
+    if (chats.length === 0) return 0;
+    const row = getDb().prepare(
+      `SELECT COUNT(*) AS n FROM browser_action_logs
+        WHERE action = ? AND result = 'changed' AND ts >= ? AND ts <= ?
+          AND json_extract(meta, '$.chatId') IN (${chats.map(() => "?").join(",")})`,
+    ).get(BROWSER_SOCIAL_ENGAGE_ACTION, span.first, span.last, ...chats) as { n: number } | undefined;
+    return row?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Host receipts only: distinct acting vs observation-only tool calls of one run, plus its outward effects. */
 export function automationRunToolCounts(runId: string, opts: { scratchRoots?: string[] } = {}): AutomationRunToolCounts {
   const rows = getDb().prepare(
-    "SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 800",
-  ).all(runId) as Array<{ payload_json: string | null }>;
+    "SELECT node_id, payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 800",
+  ).all(runId) as Array<{ node_id: string | null; payload_json: string | null }>;
   const calls = new Map<string, OutwardToolCall>();
   let actionCalls = 0;
   let observationCalls = 0;
@@ -98,7 +126,9 @@ export function automationRunToolCounts(runId: string, opts: { scratchRoots?: st
     const name = typeof payload?.toolName === "string" ? payload.toolName.trim() : "";
     if (!name || isHostPreflightTool(name)) return;
     // A request and its completion share one tool id; count the call once.
-    const key = typeof payload?.toolId === "string" && payload.toolId ? `${name}\0${payload.toolId}` : `${name}\0#${index}`;
+    // Codex tool ids (item_13) restart per graph node, so the node is part of the call identity.
+    const key = typeof payload?.toolId === "string" && payload.toolId
+      ? `${row.node_id ?? ""}\0${name}\0${payload.toolId}` : `${name}\0#${index}`;
     const evidence = payload?.runtimeEvidence as { phase?: unknown } | undefined;
     const failed = payload?.toolIsError === true || evidence?.phase === "failed";
     const existing = calls.get(key);
@@ -117,7 +147,9 @@ export function automationRunToolCounts(runId: string, opts: { scratchRoots?: st
     }
   });
   const scratchRoots = opts.scratchRoots ?? defaultAgentScratchRoots();
-  const outward = summarizeOutwardEffects([...calls.values()], { scratchRoots, cwd: scratchRoots[0] ?? null });
+  const outward = summarizeOutwardEffects([...calls.values()], {
+    scratchRoots, cwd: scratchRoots[0] ?? null, verifiedSocialEngagements: verifiedSocialEngagementsForRun(runId),
+  });
   return {
     actionCalls,
     observationCalls,

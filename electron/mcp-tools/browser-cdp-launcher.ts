@@ -1577,6 +1577,64 @@ function classifyAction(name, args, currentUrl = '') {
 }
 `;
 
+/**
+ * Companion to the approval classifier: one-click social engagement (follow, like, repost,
+ * subscribe) — an outward effect for growth goals that the approval gate deliberately does not
+ * gate (a like must not open an approval sheet). It reuses the classifier's own intentText and
+ * PAY/DELETE patterns, and never changes classifyAction's answer.
+ *
+ * Intent alone is not an effect: the launcher stamps the clicked element, reads its
+ * accessibility state (aria-pressed/checked, aria-label, descendant labels, visible text) before
+ * and after the click, and reports the engagement only when that state actually changed
+ * (Follow → Following, aria-pressed false → true, 좋아요 → 좋아요 취소). Measured 2026-09-24:
+ * the automation ledger keeps no tool results for codex runs, so the launcher is the only place
+ * that can see the post-click state.
+ */
+export const BROWSER_SOCIAL_ENGAGE_SOURCE = String.raw`
+const SOCIAL_ENGAGE_RE = /(\bfollow\b(?![\s-]?up)|\blike\b|\brepost\b|\bretweet\b|\bsubscribe\b|\bupvote\b|팔로우|좋아요|리포스트|재게시|구독|フォロー|いいね|リポスト|チャンネル登録|关注|点赞|转发|订阅|\bseguir\b|me gusta|suscrib|\bs'abonner\b|j'aime|abonnieren|gefällt mir)/i;
+const SOCIAL_UNDO_RE = /(unfollow|unlike|undo|\bfollowing\b|\bsubscribed\b|\bliked\b|언팔|팔로잉|취소|解除|取消|フォロー中|dejar de|ne plus)/i;
+
+function socialEngageIntent(name, args) {
+  if (name !== 'browser_click') return null;
+  const control = intentText(name, args && typeof args === 'object' ? args : {}, '');
+  if (!control || SOCIAL_UNDO_RE.test(control)) return null;
+  // Payment/delete keep their own class. send/publish words are not excluded: element descriptions are
+  // prose ("Like button on the post"), and the post-click state check is what decides the effect.
+  if (PAY_RE.test(control) || DELETE_RE.test(control)) return null;
+  const match = control.match(SOCIAL_ENGAGE_RE);
+  return match ? match[1].toLowerCase() : null;
+}
+
+const ENGAGE_STATE_BODY = "const labels = Array.from(el.querySelectorAll('[aria-label]')).slice(0, 4).map((n) => n.getAttribute('aria-label')).join('|');"
+  + "return { found: true, pressed: el.getAttribute('aria-pressed'), checked: el.getAttribute('aria-checked'), label: el.getAttribute('aria-label'), inner: labels, text: String(el.innerText || el.textContent || '').trim().slice(0, 80) };";
+
+function engageStampFunction(nonce) {
+  return '(el) => { el.setAttribute("data-agentlas-engage", ' + JSON.stringify(nonce) + '); ' + ENGAGE_STATE_BODY + ' }';
+}
+
+function engageReadFunction(nonce) {
+  return '() => { const el = document.querySelector(\'[data-agentlas-engage=' + JSON.stringify(nonce) + ']\'); if (!el) return { found: false }; el.removeAttribute("data-agentlas-engage"); ' + ENGAGE_STATE_BODY + ' }';
+}
+
+/** Parse browser_evaluate's "### Result" block. */
+function engageStateFromResult(reply) {
+  const content = reply && reply.result && !reply.result.isError && Array.isArray(reply.result.content) ? reply.result.content : null;
+  if (!content) return null;
+  const text = content.filter((item) => item && item.type === 'text').map((item) => String(item.text || '')).join('\n');
+  const at = text.indexOf('### Result');
+  const body = (at >= 0 ? text.slice(at + 10) : text).split('\n### ')[0].trim();
+  try {
+    const value = JSON.parse(body);
+    return value && typeof value === 'object' && value.found === true ? value : null;
+  } catch (e) { return null; }
+}
+
+function socialEngageChanged(before, after) {
+  if (!before || !after || before.found !== true || after.found !== true) return false;
+  return ['pressed', 'checked', 'label', 'inner', 'text'].some((key) => (before[key] ?? null) !== (after[key] ?? null));
+}
+`;
+
 /** CDP 현재 페이지와 명시적 navigate 목적지 중 승인 사이트로 쓸 권위 URL을 고르는 순수 헬퍼. */
 export const BROWSER_APPROVAL_CONTEXT_SOURCE = String.raw`
 function extractCdpPageUrl(pages) {
@@ -2781,6 +2839,7 @@ async function ensureChrome() {
 
 // ── 승인 게이트 ──────────────────────────────────────────────────
 ${BROWSER_APPROVAL_CLASSIFIER_SOURCE}
+${BROWSER_SOCIAL_ENGAGE_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
 ${BROWSER_FIND_GUIDANCE_SOURCE}
 function readCdpPageUrl() {
@@ -2797,6 +2856,19 @@ function readCdpPageUrl() {
 }
 function readApprovalInfo() {
   try { if (!APPROVAL_FILE || !path.isAbsolute(APPROVAL_FILE) || !fs.existsSync(APPROVAL_FILE)) return null; return JSON.parse(fs.readFileSync(APPROVAL_FILE, 'utf8')); } catch (e) { return null; }
+}
+// Host receipt for a verified one-click engagement. Best effort, bounded; never blocks the click result
+// for more than 3s. Main binds it to the run's chat through the same opaque authority as approvals.
+function reportSocialEngage(report) {
+  return new Promise((resolve) => {
+    const info = readApprovalInfo();
+    if (!info || !info.port) { resolve(false); return; }
+    const payload = JSON.stringify({ ...report, authority: process.env.AGENTLAS_BROWSER_APPROVAL_AUTHORITY });
+    const req = http.request({ host: '127.0.0.1', port: info.port, path: '/effect', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 3000 }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode === 200)); });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.write(payload); req.end();
+  });
 }
 function browserApprovalFailure(denied) {
               const code = denied === 'approval-expired' ? 'approval_expired'
@@ -2970,6 +3042,7 @@ async function main() {
   const recording = [];            // 이 세션에서 성공한 액션 시퀀스
   const pending = new Map();       // client 원본 tools/call: id -> {name, args}
   const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
+  const engageHooks = new Map();   // client click id -> post-click state check (social engage)
   ${BROWSER_GATE_LIFECYCLE_SOURCE}
   const gateLifecycle = createGateLifecycle();
   let currentUrl = '';
@@ -3076,6 +3149,36 @@ async function main() {
     waiters.set(id, (value) => { signal?.removeEventListener('abort', cancel); resolve(value); });
     forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: normalizeToolArguments(name, args) } }));
   });
+
+  const callChildWithin = (name, args, ms) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    return callChild(name, args, controller.signal).finally(() => clearTimeout(timer));
+  };
+  // One-click engagement: record the control's state, click, re-read the same element, and report
+  // only a real state change. A failed stamp or read leaves the click itself untouched.
+  const forwardVerifiedSocialClick = async (msg, forwardedLine, name, args, intent) => {
+    const nonce = 'ae-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    let before = null;
+    if (typeof args.target === 'string' && args.target) {
+      try {
+        before = engageStateFromResult(await callChildWithin('browser_evaluate',
+          { element: String(args.element || 'engagement control'), target: args.target, function: engageStampFunction(nonce) }, 5000));
+      } catch (e) { before = null; }
+    }
+    engageHooks.set(msg.id, async (reply) => {
+      let after = null;
+      if (before && !reply.error && !(reply.result && reply.result.isError)) {
+        await new Promise((r) => setTimeout(r, 400));
+        try { after = engageStateFromResult(await callChildWithin('browser_evaluate', { function: engageReadFunction(nonce) }, 5000)); } catch (e) { after = null; }
+      }
+      const verified = socialEngageChanged(before, after);
+      let site = ''; try { site = new URL(await readCdpPageUrl()).host; } catch (e) { site = ''; }
+      await reportSocialEngage({ site, intent, verified, before, after });
+    });
+    pending.set(msg.id, { name, arguments: args });
+    forwardRaw(forwardedLine);
+  };
 
   let unifiedCuaEngine = null;
   let unifiedCuaEnginePromise = null;
@@ -3311,6 +3414,8 @@ async function main() {
               writeClient({ jsonrpc: '2.0', id: msg.id, result: browserApprovalFailure(denied) }); return;
             }
             if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
+            const engageIntent = socialEngageIntent(name, args);
+            if (engageIntent) { void forwardVerifiedSocialClick(msg, forwardedLine, name, args, engageIntent); return; }
             if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
             forwardRaw(forwardedLine);
           }).catch((error) => {
@@ -3338,6 +3443,11 @@ async function main() {
       const call = pending.get(msg.id); pending.delete(msg.id);
       const isErr = msg.result && msg.result.isError;
       if (!isErr && !msg.error) recording.push(call);
+    }
+    if (msg && msg.id != null && engageHooks.has(msg.id)) {
+      const hook = engageHooks.get(msg.id); engageHooks.delete(msg.id);
+      void Promise.resolve().then(() => hook(msg)).catch(() => {}).finally(() => writeOutput(line));
+      return;
     }
     if (msg && msg.id != null && msg.result && Array.isArray(msg.result.content)) {
       const guided = withBlankPageGuidance(msg.result);
