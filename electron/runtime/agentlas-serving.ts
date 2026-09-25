@@ -26,13 +26,9 @@ import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { prepareMainToolLoop, runMainToolDispatch, trackToolTurnProgress } from "./local-tool-loop";
+import { prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
-// Match the bounded local/BYOK provider loops. Context and credit admission
-// normally stop a run earlier; this remains a final nonconvergence circuit.
-const MAX_TOOL_EXCHANGES = 200;
-const MAX_SERVING_TOOLS = 300;
 const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /** 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다. */
@@ -143,7 +139,7 @@ type ServingToolCall = { id: string; name: string; input: Record<string, unknown
 type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }> };
 
 function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): ServingToolCall[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_SERVING_TOOLS) throw new Error("invalid_serving_tool_frame");
+  if (!Array.isArray(value) || value.length < 1) throw new Error("invalid_serving_tool_frame");
   const ids = new Set<string>();
   return value.map((raw: unknown) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
@@ -166,7 +162,7 @@ async function runAgentlasServingWithTools(
   cookie: string,
 ): Promise<RunnerResult> {
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
-  if (tools.length < 1 || tools.length > MAX_SERVING_TOOLS) throw new Error("science_tool_inventory_unavailable");
+  if (tools.length < 1) throw new Error("science_tool_inventory_unavailable");
   const originalByAlias = new Map<string, string>();
   const definitions = tools.map((tool) => {
     const original = tool.function.name;
@@ -181,9 +177,11 @@ async function runAgentlasServingWithTools(
   const admitted = new Set(originalByAlias.keys());
   const toolExchanges: ServingToolExchange[] = [];
   const seenCallIds = new Set<string>();
-  let progress = { signature: "", identicalTurns: 0 };
+  let previousToolOutcomeDigest = "";
+  let identicalToolOutcomes = 0;
   let accumulatedText = "";
-  for (let turn = 0; turn <= MAX_TOOL_EXCHANGES; turn += 1) {
+  for (;;) {
+    req.signal?.throwIfAborted();
     const requestBody = JSON.stringify({ model, system: context.system, messages: context.turns, maxTokens: outputReserve,
       toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges });
     // The serving tier exposes a conservative 128k window. Count the full
@@ -238,16 +236,11 @@ async function runAgentlasServingWithTools(
       events.onPartial(accumulatedText);
       return { text: accumulatedText };
     }
-    if (turn === MAX_TOOL_EXCHANGES) break;
     const calls = servingToolCalls(done.toolUses, admitted);
     for (const call of calls) {
       if (seenCallIds.has(call.id)) throw new Error("invalid_serving_tool_frame");
       seenCallIds.add(call.id);
     }
-    const nextProgress = trackToolTurnProgress(progress,
-      calls.map((call) => ({ name: call.name, arguments: JSON.stringify(call.input) })));
-    progress = { signature: nextProgress.signature, identicalTurns: nextProgress.identicalTurns };
-    if (nextProgress.stalled) throw new Error("agentlas_serving_tool_loop_stalled");
     const results: ServingToolExchange["results"] = [];
     for (const call of calls) {
       const result = await runMainToolDispatch(byName,
@@ -255,11 +248,18 @@ async function runAgentlasServingWithTools(
         events, approval, broker);
       results.push({ id: call.id, text: result.content.slice(0, MAX_TOOL_RESULT_CHARS), isError: result.isError });
     }
+    // Call IDs change on every provider round and cannot prove progress. An
+    // identical structured call set with identical observable results can.
+    const outcomeDigest = createHash("sha256").update(JSON.stringify({
+      calls: calls.map((call) => ({ name: call.name, input: call.input })),
+      results: results.map((result) => ({ text: result.text, isError: result.isError })),
+    })).digest("hex");
+    identicalToolOutcomes = outcomeDigest === previousToolOutcomeDigest ? identicalToolOutcomes + 1 : 0;
+    previousToolOutcomeDigest = outcomeDigest;
+    if (identicalToolOutcomes >= 3) throw new Error("agentlas_serving_tool_loop_stalled");
     toolExchanges.push({ text, calls, results });
     accumulatedText += text;
   }
-  return { text: accumulatedText, failure: { kind: "exit", runtime: "agentlas", source: "marker",
-    message: "Agentlas serving tool loop did not reach a final answer." } };
 }
 
 export const runAgentlasServing: Runner = async (req, events): Promise<RunnerResult> => {
