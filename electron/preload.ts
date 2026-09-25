@@ -307,6 +307,7 @@ const api: AgentlasIpc = {
   },
   billing: {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),
+    getPlans: () => ipcRenderer.invoke("billing:getPlans"),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
   },
   promptHub: {

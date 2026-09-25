@@ -334,7 +334,7 @@ import {
   signOut,
 } from "./auth";
 import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
-import { getBillingCredits, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
+import { getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
   getHubPrompt,
@@ -2749,6 +2749,7 @@ export function registerIpcHandlers(): void {
 
   // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
   ipcMain.handle("billing:getCredits", () => getBillingCredits());
+  ipcMain.handle("billing:getPlans", () => getBillingPlans());
   ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
 
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────

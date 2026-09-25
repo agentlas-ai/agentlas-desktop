@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { personalizeOneText, useOnePersonaName } from "@/lib/one-persona-name";
 import { IconCheck, IconClose, IconPlus, IconUsers } from "@/components/Icon";
 import type { OneOrgMember, OneOrgState } from "@shared/one-org";
 import type { OneTaskforce } from "@shared/one-taskforces";
@@ -69,6 +70,7 @@ export function OneTaskforceRail({
   /** One 이 고른 캐릭터 — 화면마다 다른 얼굴을 보여 주지 않기 위해 함께 내려온다. */
   oneAvatarIcon?: string;
 }) {
+  const onePersonaName = useOnePersonaName();
   const ko = locale === "ko";
   return <section className={styles.rail} aria-label={ko ? "태스크포스" : "Taskforces"}>
     <header className={styles.railHeader}>
@@ -81,7 +83,7 @@ export function OneTaskforceRail({
     <div className={styles.railList}>
       {taskforces.length === 0 && <button type="button" className={styles.emptyRow} onClick={onCreate}>
         <span className={styles.emptyIcon}><IconUsers size={15} /></span>
-        <span><strong>{locale === "ko" ? "새 태스크포스" : "New Taskforce"}</strong><small>{locale === "ko" ? "One과 동료들의 그룹 대화" : "A group chat with One and staff"}</small></span>
+        <span><strong>{locale === "ko" ? "새 태스크포스" : "New Taskforce"}</strong><small>{personalizeOneText(locale === "ko" ? "One과 동료들의 그룹 대화" : "A group chat with One and staff", onePersonaName, locale)}</small></span>
       </button>}
       {taskforces.map((taskforce) => {
         const unavailable = taskforce.memberAgentIds.filter((id) => memberUnavailable(memberFor(org, id))).length;
@@ -139,6 +141,7 @@ export function OneTaskforceDialog({
   onRemove: (input: { id: string; expectedRevision: number }) => Promise<void>;
   oneAvatarIcon?: string;
 }) {
+  const onePersonaName = useOnePersonaName();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -239,8 +242,8 @@ export function OneTaskforceDialog({
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">
-          <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
-          <span><strong>One</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
+          <OneAgentPortrait status="quiet" label={onePersonaName} tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
+          <span><strong>{onePersonaName}</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
           <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
         </div>
         {rows.map((member) => {

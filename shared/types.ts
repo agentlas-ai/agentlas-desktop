@@ -6133,7 +6133,7 @@ export interface HubCreditBalance {
   authenticated: boolean;
   plan?: string;
   /** Server-owned feature access. Missing data never grants a feature. */
-  entitlements?: { aliveAgent?: boolean; projectAgents?: number };
+  entitlements?: { aliveAgent?: boolean; projectAgents?: number; mailbox?: HubMailboxEntitlement };
   usedCredits?: number;
   planCreditLimit?: number;
   topUpCredits?: number;
@@ -6142,6 +6142,40 @@ export interface HubCreditBalance {
   earningsCredits?: number;
   error?: string;
 }
+
+/**
+ * Agent-only mailbox entitlement. Not served yet (2026-09-25: no mail backend).
+ * Clients feature-detect it: absence means "coming soon", never "connected".
+ */
+export interface HubMailboxEntitlement {
+  read?: boolean;
+  send?: boolean;
+  /** Issued address. Missing = not issued; a UI must never invent one. */
+  address?: string | null;
+  monthlyRecipientLimit?: number;
+  usedThisMonth?: number;
+  remainingThisMonth?: number;
+  periodStart?: string;
+  periodEnd?: string;
+}
+
+/** One public plan from the deployed web catalog (GET /api/billing/catalog). */
+export interface BillingPlanOffer {
+  id: string;
+  name: string;
+  currency: "USD";
+  priceMonthly: number;
+  priceAnnual: number;
+  monthlyCredits: number;
+  cloudAgentLimit: number;
+  projectAgentLimit: number;
+  aliveAgent: boolean;
+  highlighted: boolean;
+}
+
+export type BillingPlanCatalog =
+  | { ok: true; plans: BillingPlanOffer[]; fetchedAt: number }
+  | { ok: false; error: "network" | "http" | "invalid" };
 
 /** 폐쇄된 창작자 정산 전송의 과거 IPC 응답형. 호출은 항상 거부된다. */
 export interface EarningsTransferResult {
@@ -7112,6 +7146,8 @@ export interface AgentlasIpc {
   /** Hosted AI 사용 잔액. 과거 창작자 수익 전송 메서드는 폐쇄된 IPC 호환용으로만 남는다. */
   billing: {
     getCredits: () => Promise<HubCreditBalance>;
+    /** Public plan catalog from the deployed web. Optional on older preloads. */
+    getPlans?: () => Promise<BillingPlanCatalog>;
     transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
   };
   /** 프롬프트 저장소 — 웹 프롬프트 카탈로그 탐색/열람/맛보기/저장(북마크). Hub 메뉴와 동형. */

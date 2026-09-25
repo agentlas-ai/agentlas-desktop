@@ -5,6 +5,7 @@ import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
+import { useOnePersonaName } from "@/lib/one-persona-name";
 import styles from "./OneOrgChart.module.css";
 import {
   IconApps,
@@ -169,6 +170,7 @@ export function OneOrgChart({
   onOpenConversation?: (id: string) => void;
   onOpenHistory?: (item: OneOrgSearchItem) => void;
 }) {
+  const onePersonaName = useOnePersonaName();
   const ko = locale === "ko";
   const [addOpen, setAddOpen] = useState(false);
   const [addTab, setAddTab] = useState<"my" | "cloud" | "hub">("my");
@@ -534,7 +536,8 @@ export function OneOrgChart({
       >
         <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
         <div className={styles.rowCopy}>
-          <strong>One</strong>
+          {/* 사람에게 보이는 호칭은 첫 설정/프로필에서 정한 이름. "One" 은 역할 이름으로만 남는다. */}
+          <strong>{onePersonaName}</strong>
           {/*
             * ★이 줄은 **어떤 창 크기에서도 늘 잘렸다** (실측 2026-09-08):
             *   1440px 창에서도 100px 자리에 128px 를 요구했고, 1024px 에서는 72px 자리였다.

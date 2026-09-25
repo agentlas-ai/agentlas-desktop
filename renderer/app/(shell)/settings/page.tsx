@@ -1,5 +1,6 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
+import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
@@ -509,6 +510,50 @@ export default function SettingsPage() {
               </button>
             );
           })}
+        </div>
+
+        {/* 첫 설정 다시 열기 — 새 설치에서만 스스로 뜨는 첫 설정(이름·Chrome·AI·말투·메일)을
+            기존 사용자와 건너뛴 사람이 여기서 연다(Raycast "Show Onboarding" 과 같은 자리). */}
+        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+          {locale === "ko" ? "첫 설정" : "First-time setup"}
+        </h2>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "12px 14px",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+            border: "1px solid var(--paper-edge)",
+            boxShadow: "var(--shadow-1)",
+            wordBreak: "keep-all",
+          }}
+        >
+          <span style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>
+            {locale === "ko"
+              ? "에이전트 이름, Chrome 연결, AI 연결, 성격과 말투를 다시 설정해요."
+              : "Set your agent's name, Chrome, AI connections, and tone again."}
+          </span>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new Event(FIRST_RUN_OPEN_EVENT))}
+            style={{
+              flex: "0 0 auto",
+              whiteSpace: "nowrap",
+              padding: "8px 14px",
+              borderRadius: "var(--radius-sm)",
+              fontSize: 12.5,
+              fontWeight: 600,
+              background: "var(--black)",
+              color: "var(--white)",
+              border: 0,
+              cursor: "pointer",
+            }}
+          >
+            {locale === "ko" ? "첫 설정 다시 열기" : "Run setup again"}
+          </button>
         </div>
 
         {/* 엔진 파일 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 직접 고친다.

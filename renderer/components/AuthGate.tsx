@@ -7,7 +7,8 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
-import { Landing } from "./Landing";
+import { FirstRunLogin } from "./first-run/FirstRunLogin";
+import { FirstRunGate } from "./first-run/FirstRunOnboarding";
 import { useT } from "@/lib/i18n";
 import { LoadingEstimate } from "./LoadingEstimate";
 
@@ -87,9 +88,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
+  // 2026-09-25 첫 실행 개편: 로그인(01) → 첫 설정(02–08) → One. 첫 설정은 새로 설치한
+  // 계정에서만 스스로 열리고, 기존 사용자는 설정에서 다시 열 수 있다(FirstRunGate).
   if (!session.signedIn) {
-    return <Landing onSignedIn={setSession} />;
+    return <FirstRunLogin onSignedIn={setSession} />;
   }
 
-  return <>{children}</>;
+  return <FirstRunGate session={session}>{children}</FirstRunGate>;
 }

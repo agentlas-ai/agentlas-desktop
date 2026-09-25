@@ -15,9 +15,18 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { ipc } from "./ipc";
+import {
+  DEFAULT_ONE_NAME,
+  ONE_PERSONA_KEYS,
+  getOnePersonaName,
+  personalizeOneText,
+  startOnePersonaNameSync,
+  subscribeOnePersonaName,
+} from "./one-persona-name";
 
 export type Locale = "ko" | "en";
 export type LocalePref = Locale | "system";
@@ -4500,6 +4509,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // One 의 사람에게 보이는 호칭 — 첫 설정 02 단계/프로필에서 정한 이름. 바뀌면 t 가 새로 만들어져
+  // 소비자가 다시 그린다. 제품 이름 "One" 은 ONE_PERSONA_KEYS 밖의 문장에 그대로 남는다.
+  const personaName = useSyncExternalStore(subscribeOnePersonaName, getOnePersonaName, () => DEFAULT_ONE_NAME);
+  useEffect(() => { startOnePersonaNameSync(); }, []);
+
   const t = useCallback(
     (key: DictKey, vars?: Record<string, string | number>) => {
       // per-key 폴백은 en(기본 언어). 어떤 키가 현재 로케일에 없으면 영어로 떨어지고,
@@ -4508,9 +4522,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         (dict[locale] as Record<string, string>)[key] ??
         (dict.en as Record<string, string>)[key] ??
         key;
-      return interpolate(raw, vars);
+      const text = interpolate(raw, vars);
+      return ONE_PERSONA_KEYS.has(key) ? personalizeOneText(text, personaName, locale) : text;
     },
-    [locale],
+    [locale, personaName],
   );
 
   // locale이 확정(_ready)되기 전에는 텍스트를 그리지 않는다 — OS 언어를 IPC로 받기 전에는
@@ -4563,7 +4578,8 @@ export function tFor(locale: Locale, key: DictKey, vars?: Record<string, string 
     (dict[locale] as Record<string, string>)[key] ??
     (dict.en as Record<string, string>)[key] ??
     key;
-  return interpolate(raw, vars);
+  const text = interpolate(raw, vars);
+  return ONE_PERSONA_KEYS.has(key) ? personalizeOneText(text, getOnePersonaName(), locale) : text;
 }
 
 /** 다국어 시드 객체에서 현재 locale에 맞는 표시 이름·태그라인을 뽑는 헬퍼.

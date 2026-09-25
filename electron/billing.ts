@@ -2,7 +2,7 @@
 // 과거 Hub 렌트 수익 전송은 마켓플레이스 정산 영구 폐쇄로 비활성화한다.
 // 인증은 auth.ts의 세션 쿠키를 사용한다.
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "./auth";
-import type { EarningsTransferResult, HubCreditBalance } from "../shared/types";
+import type { BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance } from "../shared/types";
 
 const TIMEOUT_MS = 8000;
 
@@ -29,6 +29,42 @@ export async function getBillingCredits(): Promise<HubCreditBalance> {
     return balance;
   } catch {
     return { authenticated: true, error: "network" };
+  }
+}
+
+function isPlanOffer(value: unknown): value is BillingPlanOffer {
+  if (!value || typeof value !== "object") return false;
+  const plan = value as Record<string, unknown>;
+  const count = (key: string) => typeof plan[key] === "number" && Number.isFinite(plan[key]) && (plan[key] as number) >= 0;
+  return typeof plan.id === "string" && /^[a-z]{2,16}$/.test(plan.id)
+    && typeof plan.name === "string" && plan.name.length > 0 && plan.name.length <= 40
+    && plan.currency === "USD"
+    && count("priceMonthly") && count("priceAnnual") && count("monthlyCredits")
+    && count("cloudAgentLimit") && count("projectAgentLimit")
+    && typeof plan.aliveAgent === "boolean" && typeof plan.highlighted === "boolean";
+}
+
+/**
+ * GET /api/billing/catalog — the deployed web's public plan catalog. No session
+ * is needed; prices and allowances come from the server's own plan table so the
+ * Desktop never hardcodes them. A missing or malformed response is an error the
+ * UI must show as "could not load", never a guessed price.
+ */
+export async function getBillingPlans(): Promise<BillingPlanCatalog> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${webBaseUrl()}/api/billing/catalog`, { signal: controller.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) return { ok: false, error: "http" };
+    const body = (await res.json()) as { schemaVersion?: unknown; plans?: unknown };
+    if (body.schemaVersion !== 1 || !Array.isArray(body.plans) || body.plans.length === 0 || !body.plans.every(isPlanOffer)) {
+      return { ok: false, error: "invalid" };
+    }
+    return { ok: true, plans: body.plans.map((plan) => ({ ...plan })), fetchedAt: Date.now() };
+  } catch {
+    return { ok: false, error: "network" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
