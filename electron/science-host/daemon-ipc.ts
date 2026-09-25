@@ -3,6 +3,7 @@ import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
 import type { DaemonScienceCommand, DaemonScienceEvent } from "../daemon/science-service";
 import { ScienceDaemonClientError, type ScienceDaemonClient } from "./daemon-client";
+import { onAuthSessionInvalidated, onAuthSessionRestored, sessionForDaemonHandoff } from "../auth";
 import { registerScienceMathHandlers } from "./math-ipc";
 import { registerSciencePublicationIpc, SCIENCE_PUBLICATION_IPC_CHANNELS } from "./publication-ipc";
 import { registerScienceStyleLibraryIpc, SCIENCE_STYLE_LIBRARY_IPC_CHANNELS } from "./style-library-ipc";
@@ -91,6 +92,9 @@ export function registerScienceDaemonExecutionIpc(options: {
   onConnectionState?(state: ScienceDaemonObservation): void;
 }): ScienceDaemonExecutionIpc {
   const { ipcMain, client } = options;
+  const handOverSession = () => {
+    void client.command({ op: "runtime.adoptSession", input: { session: sessionForDaemonHandoff() } }).catch(() => { /* daemon not ready: the next restore or reconnect retries */ });
+  };
   const viewers = new Map<number, Viewer>();
   let closed = false;
   let unsubscribe: (() => void) | null = null;
@@ -331,6 +335,7 @@ export function registerScienceDaemonExecutionIpc(options: {
     connecting = (async () => {
       const status = await client.status();
       if (status.state !== "ready") return report(observation(false, "science_daemon_science_unavailable"));
+      handOverSession();
       if (closed || !viewers.size || generation !== attempt) return observation(false);
       const stop = await client.subscribe(event => {
         if (generation === attempt && event.ownerEpoch === status.ownerEpoch) onEvent(event);
@@ -465,9 +470,15 @@ export function registerScienceDaemonExecutionIpc(options: {
   registerScienceMathHandlers({ ipcMain, client, assertScienceSender: (event, envelope) => admit(event, envelope, "science:projects") });
   registerSciencePublicationIpc({ ipc: ipcMain, client, assertScienceSender: (event, envelope, permission) => admit(event, envelope, permission) });
   registerScienceStyleLibraryIpc({ ipc: ipcMain, client, assertScienceSender: (event, envelope, permission) => admit(event, envelope, permission) });
+  // Science lists models and runs turns in the daemon, which cannot restore the session itself; hand it over now and on
+  // every restore/invalidation so Agentlas serving (credits) is available to Science like it is to Work.
+  handOverSession();
+  const stopSessionRestored = onAuthSessionRestored(() => handOverSession());
+  const stopSessionInvalidated = onAuthSessionInvalidated(() => handOverSession());
   return { reconnect, close() {
     if (closed) return;
     closed = true;
+    stopSessionRestored(); stopSessionInvalidated();
     release();
     for (const viewer of [...viewers.values()]) remove(viewer);
     for (const channel of SCIENCE_DAEMON_EXECUTION_IPC_CHANNELS) ipcMain.removeHandler(channel);

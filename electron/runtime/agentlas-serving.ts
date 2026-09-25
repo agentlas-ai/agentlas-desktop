@@ -22,7 +22,18 @@ import {
   agentlasServingModel,
   isAgentlasServingModel,
 } from "../../shared/agentlas-serving";
-import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
+import { compactHistoryToBudget } from "./compact";
+
+/**
+ * Admission estimate for the serving tier: UTF-8 bytes / 2.5. One token per byte (estimateTransportTokens) is a true upper
+ * bound but ~3.5x English text, so the Science Research Director's 134 KB contract (~38k real tokens) alone read as 134k
+ * against the 128k window and every Science turn on Agentlas serving was refused before sending (owner 2026-09-25: "can't
+ * Science use Agentlas credits?"). Bytes / 2.5 still over-counts English by ~1.4-1.6x and bounds Korean (3 bytes, ~1-1.3
+ * tokens per syllable); the server remains the final judge of its own window. History compaction keeps its byte budget.
+ */
+function servingAdmissionTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, "utf8") / 2.5);
+}
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
@@ -89,7 +100,7 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
   // one ordinary screenshot's base64 alone is larger than the whole 128k window,
   // so counting it as text refused every image turn before it was sent.
   let budget = AGENTLAS_SERVING_CONTEXT_WINDOW
-    - estimateTransportTokens(JSON.stringify({ system, current: req.userPrompt }))
+    - servingAdmissionTokens(JSON.stringify({ system, current: req.userPrompt }))
     - imageTokenEstimate(req)
     - outputReserve - 256;
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -103,7 +114,7 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       else turns.unshift({ role: "user", text: compacted.digest });
     }
     turns.push({ role: "user", text: req.userPrompt });
-    const estimated = estimateTransportTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
+    const estimated = servingAdmissionTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
       + imageTokenEstimate(req);
     if (estimated + outputReserve <= AGENTLAS_SERVING_CONTEXT_WINDOW) {
       if (compacted.digest) {
@@ -329,7 +340,7 @@ async function runAgentlasServingWithTools(
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
-    if (estimateTransportTokens(JSON.stringify(textPayload)) + imageTokenEstimate(req) + outputReserve + 256
+    if (servingAdmissionTokens(JSON.stringify(textPayload)) + imageTokenEstimate(req) + outputReserve + 256
       > AGENTLAS_SERVING_CONTEXT_WINDOW) {
       return { text: accumulatedText, failure: { kind: "refused", runtime: "agentlas", source: "marker",
         providerCode: "model_context_capacity_exceeded",

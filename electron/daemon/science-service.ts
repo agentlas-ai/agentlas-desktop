@@ -44,6 +44,7 @@ export type DaemonScienceCommand =
   | { op: "projects.list" }
   | { op: "autostart.hasRecoverableScienceWork" }
   | { op: "conversations.list"; input: { projectId: string } }
+  | { op: "runtime.adoptSession"; input: { session: { cookieValue: string; userId?: string; workspaceId?: string; expiresAt?: number } | null } }
   | { op: "styles.list" }
   | { op: "styles.import"; input: { bytesBase64: string; fileName: string; name?: string } }
   | { op: "styles.rename"; input: { sha256: string; name: string } }
@@ -463,6 +464,13 @@ export function createDaemonScienceService(options: {
       case "journal.confirmJournalIdentity": case "journal.confirmHumanAttestation":
       case "journal.createSubmissionExport": case "journal.validate":
         return dispatchSciencePublicationCommand(api, store, command, assertExecution);
+      case "runtime.adoptSession": {
+        // Main hands over the signed-in session so Agentlas serving is listed and usable for Science (auth.ts).
+        const auth = await import("../auth");
+        const adopted = auth.adoptHostSessionHandoff(command.input.session);
+        (await import("../runtime/detect")).clearDetectCache();
+        return { adopted };
+      }
       case "styles.list": case "styles.import": case "styles.rename": case "styles.delete":
       case "styles.applyToProject": case "styles.samplePreview": case "styles.openForEditing": case "styles.saveEdited": {
         // A Science build without the style library answers with an update request, never a crash.
