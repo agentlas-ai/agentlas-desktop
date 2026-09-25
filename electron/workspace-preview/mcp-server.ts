@@ -44,9 +44,9 @@ const text = (value) => ({ content: [{ type: "text", text: JSON.stringify(value)
 const error = (message) => ({ content: [{ type: "text", text: message }], isError: true });
 const tools = [
   { name: "start_preview", description: "Start or reuse a Main-owned project preview. Use only for a long-lived local development server; expected_url must be loopback.", inputSchema: { type: "object", properties: { command: { type: "string", minLength: 1, maxLength: 4000 }, expected_url: { type: "string", maxLength: 2000 } }, required: ["command"], additionalProperties: false } },
-  { name: "status_preview", description: "Check a project preview process and its loopback URL health.", inputSchema: { type: "object", properties: { preview_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["preview_id"], additionalProperties: false } },
+  { name: "status_preview", annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, description: "Check a project preview process and its loopback URL health.", inputSchema: { type: "object", properties: { preview_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["preview_id"], additionalProperties: false } },
   { name: "stop_preview", description: "Stop a project preview owned by this task.", inputSchema: { type: "object", properties: { preview_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["preview_id"], additionalProperties: false } },
-  { name: "list_previews", description: "List live project previews owned by this task.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "list_previews", annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, description: "List live project previews owned by this task.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
 ];
 function handle(requestValue) {
   if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-workspace-preview", version: "1.0.0" } };
