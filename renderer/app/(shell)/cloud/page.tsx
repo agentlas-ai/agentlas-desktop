@@ -311,8 +311,8 @@ export default function CloudAgentPublishPage() {
             <CloudAction
               title={ko ? "Agentlas Hub 공개 발행" : "Public Agentlas Hub publish"}
               description={ko
-                ? "다른 사용자가 찾고 빌릴 수 있게 공개합니다. 공개 품질 검토와 유효한 라우팅 카드가 필요합니다."
-                : "Makes the agent discoverable and borrowable. Public quality review and a valid routing card are required."}
+                ? "다른 사용자가 찾아 무료로 사용할 수 있게 공개합니다. 소스 공개를 허용한 패키지는 Agent Space의 Files 탭에서도 볼 수 있습니다."
+                : "Makes the agent discoverable and free to use. Packages that permit source sharing can also be browsed in Agent Space Files."}
               buttonLabel={ko ? "Hub에 공개 발행" : "Publish publicly to Hub"}
               busyLabel={ko ? "공개 검사 후 발행 중..." : "Reviewing and publishing..."}
               busy={running === "marketplace"}
