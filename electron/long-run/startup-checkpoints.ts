@@ -99,14 +99,16 @@ export function legacyStartupWaitBlocksRecovery(wait: Pick<GoalWaitSubscription,
   return wait?.state === "pending" || wait?.state === "claimed";
 }
 
-function* pausedGoalCandidates(): Generator<NonNullable<ReturnType<typeof getLongRun>>> {
+function* startupCheckpointCandidates(): Generator<NonNullable<ReturnType<typeof getLongRun>>> {
   let afterId = "";
   // A UI-sized listing cap can strand older Goals. Page by stable ID instead
   // of OFFSET, because a successful recovery changes each row's status.
   while (true) {
     const ids = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
-      AND status='paused' AND execution_location='desktop-local' AND surface<>'science'
-      AND pause_reason IN ('app_closed','crash_recovery') ORDER BY id LIMIT 500`)
+      AND execution_location='desktop-local' AND host_owner_kind='desktop' AND surface<>'science'
+      AND ((status='paused' AND pause_reason IN ('app_closed','crash_recovery'))
+        OR (status='blocked' AND blocked_reason='checkpoint_continuation_failed'))
+      ORDER BY id LIMIT 500`)
       .all(afterId) as Array<{ id: string }>;
     if (!ids.length) return;
     for (const { id } of ids) {
@@ -460,8 +462,8 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
 }
 
 /** Called only after auth, plugins, IPC and queued user directions have been
- * reconciled. A host pause between settled turns is resumable; an unknown
- * native side effect or newer user direction is not permission to replay. */
+ * reconciled. A host pause or a continuation failure before dispatch can use
+ * a settled checkpoint; an uncertain effect or prior dispatch cannot replay. */
 export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispatcher): CheckpointStartupResult[] {
   try {
     assertDesktopLongRunAdmissionOpen();
@@ -477,8 +479,12 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
   const results: CheckpointStartupResult[] = [];
   // Include clean-shutdown pauses: they were already paused before boot and
   // therefore are absent from recoverInterruptedDesktopLongRunsAtStartup().
-  for (const candidate of pausedGoalCandidates()) {
-    if (candidate.surface === "science" || !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
+  for (const candidate of startupCheckpointCandidates()) {
+    const failedBeforeContinuation = candidate.status === "blocked"
+      && candidate.blockedReason === "checkpoint_continuation_failed";
+    if (candidate.surface === "science" || candidate.hostOwnerKind !== "desktop"
+      || !(failedBeforeContinuation || (candidate.status === "paused"
+        && ["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")))) continue;
     // Pending subscriptions restore observation, not ordinary inference.
     // A claimed wake without a dispatch receipt is inspectable, never replayed.
     const wait = latestGoalWaitSubscription(candidate.goalId);
@@ -494,6 +500,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       results.push({ runId: candidate.id, status: "skipped", reason });
     };
     const blockForReview = (diagnostic: string): boolean => {
+      if (failedBeforeContinuation) return false;
       const current = getLongRun(candidate.id);
       if (!current || current.status !== "paused" || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")) return false;
       try {
@@ -520,15 +527,20 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
     ]);
     let successorRunId: string | null = null;
     try {
-      const decision = reconcileHostPausedLongRuns([candidate.id])[0]?.decision;
-      if (!decision?.resume) {
-        const reason = decision && !decision.resume ? decision.reason : "run_missing";
-        if (reason === "attempt-unsettled" && blockForReview(reason)) continue;
-        refuse(reason);
-        continue;
+      if (failedBeforeContinuation) {
+        if (unsettledLongRunAttemptCount(candidate.id)) { refuse("attempt-unsettled"); continue; }
+      } else {
+        const decision = reconcileHostPausedLongRuns([candidate.id])[0]?.decision;
+        if (!decision?.resume) {
+          const reason = decision && !decision.resume ? decision.reason : "run_missing";
+          if (reason === "attempt-unsettled" && blockForReview(reason)) continue;
+          refuse(reason);
+          continue;
+        }
       }
       let checkpoint = latestTaskCheckpoint(candidate.goalId);
       if (!checkpoint) {
+        if (failedBeforeContinuation) { refuse("checkpoint_missing"); continue; }
         let preflight: ReturnType<typeof preflightMissingStartupCheckpoint>;
         try { preflight = preflightMissingStartupCheckpoint(candidate); }
         catch (error) {
@@ -564,7 +576,8 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       // before recording its outcome. The absence of invoke_started is not
       // proof that the successor never reached an external runtime.
       const priorClaim = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ?
-        AND kind = 'run.checkpoint_startup' AND json_extract(payload_json, '$.status') = 'claimed'
+        AND ((kind = 'run.checkpoint_startup' AND json_extract(payload_json, '$.status') = 'claimed')
+          OR kind = 'run.checkpoint_continuation')
         AND json_extract(payload_json, '$.checkpointId') = ? LIMIT 1`)
         .get(candidate.id, checkpoint.checkpointId);
       if (priorClaim) {
@@ -617,7 +630,10 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       // after the final state/binding checks in this host process.
       getDb().transaction(() => {
         const current = getLongRun(candidate.id);
-        if (!current || current.version !== resumeVersion || current.status !== "paused"
+        if (!current || current.version !== resumeVersion
+          || (failedBeforeContinuation
+            ? current.status !== "blocked" || current.blockedReason !== "checkpoint_continuation_failed"
+            : current.status !== "paused" || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? ""))
           || getChat(chat.id)?.goalId !== candidate.goalId) throw new Error("checkpoint_startup_state_changed");
         const currentRevision = getChatGoalRevision(candidate.goalId);
         const latestUser = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1")
