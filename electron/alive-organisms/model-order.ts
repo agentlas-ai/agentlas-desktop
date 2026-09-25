@@ -59,6 +59,8 @@ export function buildAliveModelOrder(input: {
   members: Record<"orchestrator" | "worker", Array<{ selection: RuntimeSelection }>>;
   usable: Record<"orchestrator" | "worker", RuntimeStatus[]>;
   exact?: (selection: RuntimeSelection) => boolean;
+  /** Learned light-wake facts (light-wake.ts): a member that cannot run a decision-only wake is skipped. */
+  facts?: (status: RuntimeStatus) => readonly string[];
 }): AliveModelOrderEntry[] {
   const out: AliveModelOrderEntry[] = [];
   for (const role of ["orchestrator", "worker"] as const) {
@@ -77,6 +79,8 @@ export function buildAliveModelOrder(input: {
       if (!selection) skipCode = "pool.member-unavailable";
       else if (!selection.model || !selection.source) skipCode = "pool.member-model-unknown";
       else if (input.exact && !input.exact(selection)) skipCode = "pool.member-binding-inexact";
+      else if (live && input.facts?.(live).includes("cannot-judge")) skipCode = "pool.member-no-tools-unsupported";
+      else if (live && input.facts?.(live).includes("usage-unmeasured")) skipCode = "pool.member-usage-unmeasured";
       out.push({ role, position, runtimeId: wanted.kind === "acp" && wanted.acpAgentId ? `acp:${wanted.acpAgentId}` : wanted.kind,
         model, label: (wanted.label ?? selection?.label ?? wanted.kind).toString().slice(0, 120),
         exhausted: skipCode !== null, skipCode, selection: skipCode ? null : selection,
@@ -103,7 +107,8 @@ function exactOk(selection: RuntimeSelection): boolean {
 }
 
 /** Refresh from live detection (cached by detect.ts). Called before each organism beat. */
-export async function refreshAliveModelOrder(nowMs = Date.now()): Promise<AliveModelOrderEntry[]> {
+export async function refreshAliveModelOrder(nowMs = Date.now(),
+  facts?: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]> {
   const detected = await detectRuntimes();
   const members = {
     orchestrator: listModelRoleMembers("orchestrator" as RuntimeRole),
@@ -113,7 +118,7 @@ export async function refreshAliveModelOrder(nowMs = Date.now()): Promise<AliveM
     orchestrator: rolePriorityRuntimes(detected, "orchestrator"),
     worker: members.worker.length ? rolePriorityRuntimes(detected, "worker") : [],
   };
-  const entries = buildAliveModelOrder({ members: legacyMembers(members, usable), usable, exact: exactOk });
+  const entries = buildAliveModelOrder({ members: legacyMembers(members, usable), usable, exact: exactOk, ...(facts ? { facts } : {}) });
   cached = { atMs: nowMs, entries };
   return entries;
 }

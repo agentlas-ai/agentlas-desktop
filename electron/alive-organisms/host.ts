@@ -16,6 +16,7 @@
  */
 import type Database from "better-sqlite3";
 import type { AliveAgent, AliveAttachment, AliveClockPort, AliveWakeRuntimeRecord } from "../alive-core/contracts";
+import type { RuntimeStatus } from "../../shared/types";
 import { AliveLifetimeStore, aliveStableId } from "../alive-core/lifetime-store";
 import { AliveLifetimeService } from "../alive-core/lifetime-service";
 import { GoalAlivePlayground, attachedGoalId, type GoalPlaygroundDeps } from "./goal-playground";
@@ -42,14 +43,18 @@ export interface AliveHostDeps {
   light: Pick<LightWakeDeps, "pickRunner" | "noteFailure" | "timeoutMs">;
   /** Minimum spacing between unchanged-world wakes, escalating by consecutive unchanged reviews. */
   reviewFloorsMs?: readonly number[];
+  /** Quiet period after an accepted action (the playground's own next step changes the world meanwhile). */
+  actionSpacingMs?: number;
   projectName(projectId: string): string | null;
   controllerInstalled(): boolean;
-  refreshModelOrder(): Promise<AliveModelOrderEntry[]>;
+  refreshModelOrder(facts: (status: RuntimeStatus) => readonly string[]): Promise<AliveModelOrderEntry[]>;
   cachedModelOrder(): AliveModelOrderEntry[];
   emit(event: AliveChangedEvent): void;
   registerShutdown?(stop: () => void): void;
 }
 
+/** No wake for this long after an action the goal accepted. */
+export const ALIVE_ACTION_SPACING_MS = 10 * 60_000;
 /** Spacing between model wakes while the observed world is unchanged. */
 export const ALIVE_REVIEW_FLOORS_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000] as const;
 
@@ -101,6 +106,7 @@ export class AliveOrganismHost {
         // No member can run now: a visible wait, re-checked every beat (cooldowns expire on their own).
         admission: () => aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
         // Nothing changed: never every beat. 5m → 15m → 60m between unchanged reviews; a salience change wakes now.
+        actionSpacingMs: deps.actionSpacingMs ?? ALIVE_ACTION_SPACING_MS,
         reviewFloorMs: (agent) => floors[Math.min(floors.length - 1, Math.max(0, Number(agent.state.unchangedReviews ?? 0)))] ?? 0,
       });
       return { kind, store, playground, runtime, service, releaseClock: null, beating: false, digests: new Map() };
@@ -152,7 +158,7 @@ export class AliveOrganismHost {
     if (!this.running || organism.beating) return;
     organism.beating = true;
     try {
-      try { await this.deps.refreshModelOrder(); } catch { /* the last cached order stays authoritative */ }
+      try { await this.deps.refreshModelOrder((status) => this.light.facts(status)); } catch { /* the last cached order stays authoritative */ }
       if (!this.running) return;
       // A One life ends with its Goal: suspend before the heartbeat so a finished Goal costs no model turn.
       if (kind === "one") this.suspendFinishedOneLives();
