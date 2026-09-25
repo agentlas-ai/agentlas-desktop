@@ -187,6 +187,7 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
   let code = "";
   try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty body */ }
   const providerCode = /^[a-z0-9_]{1,64}$/.test(code) ? code : `http_${response.status}`;
+  if (providerCode === "serving_reconciliation_required") return servingReconciliationFailure(locale);
   if (response.status === 401) {
     return { kind: "auth", runtime: "agentlas", source: "marker", providerCode: "sign_in_required",
       message: signInRequired(locale).message };
@@ -209,10 +210,19 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
 function streamFailure(data: unknown, locale: RunnerRequest["locale"]): RunnerFailure {
   const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown } : {};
   const code = typeof record.code === "string" && /^[a-z0-9_]{1,64}$/.test(record.code) ? record.code : "serving_failed";
+  if (code === "serving_reconciliation_required") return servingReconciliationFailure(locale);
   const message = typeof record.message === "string" && record.message ? record.message
     : locale === "ko" ? "답을 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The Agentlas model could not answer. Try again shortly.";
   return { kind: code === "insufficient_credits" ? "quota" : "exit", runtime: "agentlas", source: "marker",
     providerCode: code, message: message.slice(0, 400) };
+}
+
+function servingReconciliationFailure(locale: RunnerRequest["locale"]): RunnerFailure {
+  return { kind: "refused", runtime: "agentlas", source: "marker",
+    providerCode: "serving_reconciliation_required",
+    message: locale === "ko"
+      ? "응답과 크레딧 정산 상태를 확인해야 합니다. 이 요청을 자동 재실행하지 않습니다."
+      : "The response and credit settlement need reconciliation. This request will not be retried automatically." };
 }
 
 /** 요청 본문의 공통 칸. 사진·출력 계약은 매 왕복 같이 간다(서버는 상태를 들지 않는다). */
@@ -328,20 +338,24 @@ async function runAgentlasServingWithTools(
     if (!response.ok) return { text: accumulatedText, failure: await servingHttpFailure(response, req.locale), ...usage.settle(events) };
     let text = "";
     let done: ServingDone | null = null;
-    for await (const frame of iterServingEvents(response)) {
-      if (frame.event === "delta") {
-        const delta = (frame.data as { text?: unknown })?.text;
-        if (typeof delta === "string") {
-          text += delta;
-          events.onPartial(accumulatedText + text);
+    try {
+      for await (const frame of iterServingEvents(response)) {
+        if (frame.event === "delta") {
+          const delta = (frame.data as { text?: unknown })?.text;
+          if (typeof delta === "string") {
+            text += delta;
+            events.onPartial(accumulatedText + text);
+          }
+        } else if (frame.event === "done") {
+          done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
+        } else if (frame.event === "error") {
+          return { text: accumulatedText, failure: streamFailure(frame.data, req.locale), ...usage.settle(events) };
         }
-      } else if (frame.event === "done") {
-        done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
-      } else if (frame.event === "error") {
-        return { text: accumulatedText, failure: streamFailure(frame.data, req.locale), ...usage.settle(events) };
       }
+    } catch {
+      return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle(events) };
     }
-    if (!done) throw new Error("agentlas_serving_tool_stream_incomplete");
+    if (!done) return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle(events) };
     usage.add(done);
     if (firstRound) { reportDeliveredCapabilities(req, events, done); firstRound = false; }
     if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
@@ -418,21 +432,26 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   const usage = new ServingUsage();
   let text = "";
   let done: ServingDone | null = null;
-  for await (const frame of iterServingEvents(response)) {
-    if (frame.event === "delta") {
-      const delta = (frame.data as { text?: unknown }).text;
-      if (typeof delta === "string" && delta) {
-        text += delta;
-        events.onPartial(text);
+  try {
+    for await (const frame of iterServingEvents(response)) {
+      if (frame.event === "delta") {
+        const delta = (frame.data as { text?: unknown })?.text;
+        if (typeof delta === "string" && delta) {
+          text += delta;
+          events.onPartial(text);
+        }
+      } else if (frame.event === "done") {
+        done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
+        const final = done?.text;
+        if (typeof final === "string" && final.length > text.length) text = final;
+      } else if (frame.event === "error") {
+        return { text: "", failure: streamFailure(frame.data, req.locale) };
       }
-    } else if (frame.event === "done") {
-      done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : {};
-      const final = done.text;
-      if (typeof final === "string" && final.length > text.length) text = final;
-    } else if (frame.event === "error") {
-      return { text: "", failure: streamFailure(frame.data, req.locale) };
     }
+  } catch {
+    return { text: "", failure: servingReconciliationFailure(req.locale) };
   }
+  if (!done) return { text: "", failure: servingReconciliationFailure(req.locale) };
   if (done) {
     usage.add(done);
     reportDeliveredCapabilities(req, events, done);
@@ -443,7 +462,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
         : "The Agentlas model returned an empty answer. Try again." } };
   }
-  return { text, ...(done ? usage.settle(events) : {}) };
+  return { text, ...usage.settle(events) };
 };
 
 /** 화면에 그릴 러너 이름. 세기까지 붙여 무엇으로 돌았는지 알 수 있게 한다. */
