@@ -15,6 +15,7 @@
  * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
  */
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
+import { createHash } from "node:crypto";
 import {
   AGENTLAS_SERVING_CONTEXT_WINDOW,
   AGENTLAS_SERVING_DEFAULT_MODEL,
@@ -25,6 +26,11 @@ import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
+import { prepareMainToolLoop, runMainToolDispatch, trackToolTurnProgress } from "./local-tool-loop";
+
+const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
+const MAX_TOOL_EXCHANGES = 32;
+const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /** 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다. */
 const MAX_TOKENS: Record<string, number> = {
@@ -130,6 +136,121 @@ async function* iterServingEvents(response: Response): AsyncGenerator<{ event: s
   }
 }
 
+type ServingToolCall = { id: string; name: string; input: Record<string, unknown> };
+type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }> };
+
+function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): ServingToolCall[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("invalid_serving_tool_frame");
+  const ids = new Set<string>();
+  return value.map((raw: unknown) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
+    const call = raw as Partial<ServingToolCall>;
+    if (typeof call.id !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(call.id) || ids.has(call.id)
+      || typeof call.name !== "string" || !admitted.has(call.name)
+      || !call.input || typeof call.input !== "object" || Array.isArray(call.input))
+      throw new Error("invalid_serving_tool_frame");
+    ids.add(call.id);
+    return { id: call.id, name: call.name, input: call.input };
+  });
+}
+
+async function runAgentlasServingWithTools(
+  req: RunnerRequest,
+  events: RunnerEvents,
+  model: string,
+  context: { turns: ServingTurn[]; system: string },
+  outputReserve: number,
+  cookie: string,
+): Promise<RunnerResult> {
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
+  if (tools.length < 1 || tools.length > 100) throw new Error("science_tool_inventory_unavailable");
+  const originalByAlias = new Map<string, string>();
+  const definitions = tools.map((tool) => {
+    const original = tool.function.name;
+    const name = original.length <= 64 && /^[A-Za-z0-9_-]+$/.test(original)
+      ? original
+      : `tool_${createHash("sha256").update(original).digest("hex").slice(0, 32)}`;
+    if (originalByAlias.has(name)) throw new Error("serving_tool_name_collision");
+    originalByAlias.set(name, original);
+    return { name, description: (tool.function.description ?? original).slice(0, 4_096),
+      inputSchema: tool.function.parameters };
+  });
+  const admitted = new Set(originalByAlias.keys());
+  const toolExchanges: ServingToolExchange[] = [];
+  const seenCallIds = new Set<string>();
+  let progress = { signature: "", identicalTurns: 0 };
+  let accumulatedText = "";
+  for (let turn = 0; turn <= MAX_TOOL_EXCHANGES; turn += 1) {
+    const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, "x-agentlas-client": "desktop",
+        "accept-language": req.locale === "ko" ? "ko" : "en" },
+      body: JSON.stringify({ model, system: context.system, messages: context.turns, maxTokens: outputReserve,
+        toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges }),
+      ...(req.signal ? { signal: req.signal } : {}),
+    });
+    if (!response.ok) {
+      if (response.status === 401) throw signInRequired(req.locale);
+      let code = "";
+      try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty response */ }
+      if (code === "insufficient_credits" || response.status === 402) {
+        throw new Error(req.locale === "ko" ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
+          : "You are out of credits. Top up and try again.");
+      }
+      throw new Error(`agentlas_serving_tool_request_failed:${code || response.status}`);
+    }
+    let text = "";
+    let done: { text?: unknown; stopReason?: unknown; toolUses?: unknown } | null = null;
+    for await (const frame of iterServingEvents(response)) {
+      if (frame.event === "delta") {
+        const delta = (frame.data as { text?: unknown })?.text;
+        if (typeof delta === "string") {
+          text += delta;
+          events.onPartial(accumulatedText + text);
+        }
+      } else if (frame.event === "done") {
+        done = frame.data && typeof frame.data === "object"
+          ? frame.data as { text?: unknown; stopReason?: unknown; toolUses?: unknown }
+          : null;
+      } else if (frame.event === "error") {
+        throw new Error("agentlas_serving_tool_stream_failed");
+      }
+    }
+    if (!done) throw new Error("agentlas_serving_tool_stream_incomplete");
+    if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
+    if (done.stopReason !== "tool_use") {
+      if (done.stopReason !== "end_turn" && done.stopReason !== "stop_sequence")
+        throw new Error("invalid_serving_stop_reason");
+      if (Array.isArray(done.toolUses) && done.toolUses.length > 0) throw new Error("invalid_serving_tool_frame");
+      accumulatedText += text;
+      if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
+      events.onPartial(accumulatedText);
+      return { text: accumulatedText };
+    }
+    if (turn === MAX_TOOL_EXCHANGES) break;
+    const calls = servingToolCalls(done.toolUses, admitted);
+    for (const call of calls) {
+      if (seenCallIds.has(call.id)) throw new Error("invalid_serving_tool_frame");
+      seenCallIds.add(call.id);
+    }
+    const nextProgress = trackToolTurnProgress(progress,
+      calls.map((call) => ({ name: call.name, arguments: JSON.stringify(call.input) })));
+    progress = { signature: nextProgress.signature, identicalTurns: nextProgress.identicalTurns };
+    if (nextProgress.stalled) throw new Error("agentlas_serving_tool_loop_stalled");
+    const results: ServingToolExchange["results"] = [];
+    for (const call of calls) {
+      const result = await runMainToolDispatch(byName,
+        { providerCallId: call.id, toolName: originalByAlias.get(call.name)!, arguments: JSON.stringify(call.input) },
+        events, approval, broker);
+      results.push({ id: call.id, text: result.content.slice(0, MAX_TOOL_RESULT_CHARS), isError: result.isError });
+    }
+    toolExchanges.push({ text, calls, results });
+    accumulatedText += text;
+  }
+  return { text: accumulatedText, failure: { kind: "exit", runtime: "agentlas", source: "marker",
+    message: "Agentlas serving tool loop did not reach a final answer." } };
+}
+
 export const runAgentlasServing: Runner = async (req, events): Promise<RunnerResult> => {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw signInRequired(req.locale);
@@ -149,6 +270,9 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       ? "Agentlas 모델의 보수적 문맥 예산을 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."
       : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } };
   const { turns, system } = context;
+  if (req.mcpConfigPath && !req.untrustedNoTools) {
+    return runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
+  }
   const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
     method: "POST",
     headers: {
