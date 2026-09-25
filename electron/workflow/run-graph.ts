@@ -622,6 +622,30 @@ function hasTerminalGraphReconciliation(
   return false;
 }
 
+/**
+ * The failed run's own sealed checkpoint has no uncertain step left, and the commit
+ * that cleared them was made after the graph/execution digest changed. That review
+ * is the close of the old occurrence — a revised graph has no coordinate to resume it.
+ */
+function hasRevisedGraphReconciliationClose(
+  latestFailed: NonNullable<ReturnType<typeof getLatestFailedGraphCheckpoint>>,
+): boolean {
+  const checkpoint = latestFailed.checkpoint;
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return false;
+  const row = checkpoint as Record<string, unknown>;
+  if (typeof row.checkpointDigest !== "string" || row.graphDigest !== latestFailed.graphDigest) return false;
+  const unresolved = [row.ambiguousNodeIds, row.inFlightNodeIds];
+  if (unresolved.some((ids) => !Array.isArray(ids) || ids.length > 0)) return false;
+  const { checkpointDigest: _digest, ...payload } = row;
+  if (sha256Value(payload) !== row.checkpointDigest) return false;
+  return listRunEvents(latestFailed.runId, 500).some((event) => {
+    if (event.kind !== "workflow_reconciliation_committed" || event.automationId !== latestFailed.automationId) return false;
+    const eventPayload = event.payload as Record<string, unknown> | null;
+    return Boolean(eventPayload && eventPayload.graphRevised === true && eventPayload.simulation !== true
+      && eventPayload.checkpointDigest === row.checkpointDigest);
+  });
+}
+
 function hasTerminalGraphClose(
   latestFailed: NonNullable<ReturnType<typeof getLatestFailedGraphCheckpoint>>,
 ): boolean {
@@ -1700,7 +1724,10 @@ export async function runGraph(
         .some(([nodeId, state]) => state === "done" && effectNodeIds.has(nodeId))
       : failedRunHasCommittedEffect(latestFailed);
     if (latestFailed.graphDigest && latestFailed.graphDigest !== graphDigest) {
-      if (completedEffectFromSnapshot) {
+      // A failed occurrence whose uncertain steps were reconciled after the graph was
+      // revised is closed: it cannot resume under the new graph, so this run starts fresh
+      // (graph-reconciliation.ts loadRevisedGraphReconciliation).
+      if (completedEffectFromSnapshot && !hasRevisedGraphReconciliationClose(latestFailed)) {
         releaseCoordinateIfNotStarted();
         throw new Error(
           "automation_partial_graph_changed: a prior occurrence committed side effects under a different graph; reconciliation is required before replay.",

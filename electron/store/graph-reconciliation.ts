@@ -62,6 +62,8 @@ interface LoadedReconciliation {
   nodeStates: Record<string, WorkflowNodeRunState>;
   boundEvent: BoundEventRow | null;
   view: AutomationGraphReconciliation;
+  /** The run failed under a graph/execution digest that has since been revised. */
+  revisedGraph?: true;
 }
 
 function legacyOccurrenceId(run: LatestRunRow): string {
@@ -240,6 +242,154 @@ function boundEventForOccurrence(
   return row;
 }
 
+function stringIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => validId(id)) : [];
+}
+
+function objectKeys(value: unknown): string[] {
+  return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).filter(validId) : [];
+}
+
+/** Label/type of a node the current graph no longer has, from the newest saved version that had it. */
+function revisedNodeDescriptors(
+  automationId: string,
+  currentGraph: WorkflowGraph,
+  nodeIds: readonly string[],
+): Map<string, { label: string; type: WorkflowNode["type"] }> {
+  const found = new Map<string, { label: string; type: WorkflowNode["type"] }>();
+  const take = (graph: WorkflowGraph | null): void => {
+    for (const node of graph?.nodes ?? []) {
+      if (!node || !nodeIds.includes(node.id) || found.has(node.id)) continue;
+      found.set(node.id, { label: node.label?.trim() || node.id, type: node.type });
+    }
+  };
+  take(currentGraph);
+  if (found.size < nodeIds.length) {
+    const rows = getDb().prepare(
+      `SELECT graph_json FROM automation_graph_versions
+       WHERE automation_id = ? ORDER BY saved_at DESC, id DESC LIMIT 20`,
+    ).all(automationId) as Array<{ graph_json: string }>;
+    for (const row of rows) {
+      if (found.size >= nodeIds.length) break;
+      try { take(JSON.parse(row.graph_json) as WorkflowGraph); } catch { /* a damaged version names nothing */ }
+    }
+  }
+  return found;
+}
+
+/**
+ * ★그래프(또는 실행 필드 — 런타임·권한·도구 모드)가 **실패한 실행 뒤에 바뀌면** 그 실행의
+ *   미확인 부수효과는 영영 재조정할 수 없었다. 재조정 좌표를 "지금 그래프"로 검증했기 때문이다.
+ *
+ *   실측(설치본 DB, 2026-08-25~09-25): 모호한 실패 뒤 digest 가 바뀐 경우가 5번(자동화 2개).
+ *   f7a61706(Threads) 2026-09-23: 13:55Z 앱 재시작이 `report` 단계를 모호하게 끊었고, 15:10Z
+ *   목표 턴이 그래프를 새로 썼다(audit/engage/publish/report → inspect/strategy/content/publish/
+ *   measure). 그 뒤로 재조정은 graph_drift, 실행은 partial_graph_changed, 효과 관찰은 보류를
+ *   못 읽어(getAutomationEffectHold 가 던짐) 조용히 건너뛰었다 — 오너가 "처음부터"를 누를 때까지
+ *   예약이 멈춰 있었다. 그리고 digest 에는 runtimeSelection 이 들어 있어, 오너가 모델만 바꿔도
+ *   같은 막다른 길이 된다.
+ *
+ *   "그 단계가 바깥에서 일어났는가"는 **그 실행이 스스로 기록한 것**에 대한 질문이다 — 지금
+ *   그래프와 무관하다. 체크포인트는 자기 해시로 봉인돼 있으므로(checkpointDigest) 그래프 없이도
+ *   무결성을 검증할 수 있다. 그래서 바뀐 그래프에서는 체크포인트 자신의 노드 집합으로 검증하고,
+ *   관찰(묻기 전에 직접 본다)·오너의 재조정이 그대로 닫을 수 있게 한다. 닫힌 옛 발생은 재개하지
+ *   않는다(바뀐 그래프로 이어 붙일 좌표가 없다) — 다음 실행은 새 그래프로 새로 돈다.
+ *
+ *   잊는 것이 아니다: 결정은 workflow_node_reconciled 로 남고, 옛 실행 기록은 그대로다.
+ *   트리거 이벤트에 묶인 발생·시뮬레이션·봉인 없는 레거시 행은 지금처럼 사람 몫으로 둔다
+ *   ("unsupported" → graph_drift).
+ */
+function loadRevisedGraphReconciliation(
+  automation: Automation,
+  currentGraph: WorkflowGraph,
+  run: LatestRunRow,
+  exact?: { runId: string; occurrenceId: string },
+): LoadedReconciliation | null | "unsupported" {
+  if (run.dry_run === 1 || !run.graph_digest || !run.checkpoint_json) return "unsupported";
+  if (Buffer.byteLength(run.checkpoint_json, "utf8") > MAX_CHECKPOINT_BYTES) return "unsupported";
+  let raw: Record<string, unknown>;
+  try {
+    const value = JSON.parse(run.checkpoint_json) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "unsupported";
+    raw = value as Record<string, unknown>;
+  } catch {
+    return "unsupported";
+  }
+  if (typeof raw.occurrenceId !== "string" || raw.occurrenceId.startsWith(EVENT_OCCURRENCE_PREFIX)) return "unsupported";
+  let rawStates: unknown;
+  try { rawStates = run.node_states_json ? JSON.parse(run.node_states_json) : {}; } catch { return "unsupported"; }
+  const universe = new Set<string>([
+    ...stringIds(raw.effectNodeIds), ...stringIds(raw.completedNodeIds), ...stringIds(raw.skippedNodeIds),
+    ...stringIds(raw.inFlightNodeIds), ...stringIds(raw.ambiguousNodeIds),
+    ...objectKeys(raw.outputs), ...objectKeys(raw.nodeInputDigests), ...objectKeys(raw.toolReceipts),
+    ...objectKeys(raw.prepareReceipts), ...objectKeys(rawStates),
+  ]);
+  if (universe.size === 0) return "unsupported";
+  const blockedEdgeIds = stringIds(raw.blockedEdgeIds);
+  const checkpoint = parseGraphCheckpoint(
+    raw,
+    run.graph_digest,
+    run.occurrence_id ?? raw.occurrenceId,
+    universe,
+    new Set(blockedEdgeIds),
+    new Set(stringIds(raw.effectNodeIds)),
+  );
+  if (!checkpoint) return "unsupported";
+  if (exact && checkpoint.occurrenceId !== exact.occurrenceId) {
+    throw new Error("automation_graph_reconciliation_conflict");
+  }
+  const nodeStates = parseNodeStates(run.node_states_json ?? "{}", universe);
+  const ambiguous = new Set(checkpoint.ambiguousNodeIds);
+  const inFlight = new Set(checkpoint.inFlightNodeIds);
+  const unresolvedIds = [...universe].filter((id) => ambiguous.has(id) || inFlight.has(id)).sort();
+  if (unresolvedIds.length === 0) return null;
+  const descriptors = revisedNodeDescriptors(automation.id, currentGraph, [...universe]);
+  const anchor = [...universe][0];
+  // A self-described graph of the old run: identities only. No node declares
+  // `produces` — outputs of the old graph cannot feed the revised one.
+  const graph: WorkflowGraph = {
+    version: 1,
+    nodes: [...universe].sort().map((id) => ({
+      id,
+      type: descriptors.get(id)?.type ?? "agent",
+      position: { x: 0, y: 0 },
+      config: {},
+      label: descriptors.get(id)?.label ?? id,
+    })),
+    edges: blockedEdgeIds.map((id) => ({ id, source: anchor, target: anchor })),
+  };
+  return {
+    automation,
+    graph,
+    run,
+    checkpoint,
+    checkpointJson: run.checkpoint_json,
+    nodeStates,
+    boundEvent: null,
+    revisedGraph: true,
+    view: {
+      automationId: automation.id,
+      runId: run.id,
+      occurrenceId: checkpoint.occurrenceId,
+      graphDigest: run.graph_digest,
+      checkpointDigest: checkpoint.checkpointDigest,
+      updatedAt: checkpoint.updatedAt,
+      simulation: false,
+      triggerEvent: null,
+      graphRevisedSinceRun: true,
+      nodes: unresolvedIds.map((id) => ({
+        nodeId: id,
+        label: descriptors.get(id)?.label ?? id,
+        nodeType: descriptors.get(id)?.type ?? "agent",
+        uncertainty: ambiguous.has(id) ? "ambiguous" as const : "in_flight" as const,
+        produces: null,
+        outputRequired: false,
+        hasRecordedOutput: Object.prototype.hasOwnProperty.call(checkpoint.outputs, id),
+      })),
+    },
+  };
+}
+
 function loadReconciliation(
   automationId: string,
   exact?: { runId: string; occurrenceId: string },
@@ -266,6 +416,10 @@ function loadReconciliation(
   if (!run || run.status !== "error") return null;
 
   const currentGraphDigest = graphExecutionDigest(automation, graph);
+  if (run.graph_digest && run.graph_digest !== currentGraphDigest) {
+    const revised = loadRevisedGraphReconciliation(automation, graph, run, exact);
+    if (revised !== "unsupported") return revised;
+  }
   if (!run.graph_digest || run.graph_digest !== currentGraphDigest) {
     throw new Error("automation_graph_reconciliation_graph_drift");
   }
@@ -739,6 +893,9 @@ export function reconcileAutomationGraph(
         triggerEventStatus: eventStatus,
         restoredNextRunAt,
         simulation: loaded.run.dry_run === 1,
+        // The old occurrence cannot resume under the revised graph; this close
+        // lets the next run start fresh (run-graph hasRevisedGraphReconciliationClose).
+        ...(loaded.revisedGraph ? { graphRevised: true } : {}),
       },
     });
 
@@ -749,7 +906,7 @@ export function reconcileAutomationGraph(
       updatedAt: checkpoint.updatedAt,
       simulation: loaded.run.dry_run === 1,
       eventStatus,
-      resumeRequired: !allNodesTerminal,
+      resumeRequired: loaded.revisedGraph ? false : !allNodesTerminal,
       completedNodeIds: completedByUser,
       retryNodeIds: retryByUser,
     };

@@ -2358,6 +2358,12 @@ export interface AutomationGraphReconciliation {
   simulation: boolean;
   triggerEvent: AutomationGraphReconciliationEvent | null;
   nodes: AutomationGraphReconciliationNode[];
+  /**
+   * The run failed under a graph (or runtime/permission) that has since been
+   * revised. Its uncertain steps are still reconciled from its own sealed
+   * checkpoint; the old occurrence is closed rather than resumed.
+   */
+  graphRevisedSinceRun?: true;
 }
 
 /** Exact failed occurrence reviewed before explicitly starting a new run. */
