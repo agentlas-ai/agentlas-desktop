@@ -102,6 +102,7 @@ import { getProject } from "../store/projects";
 import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
 import { resumeGoalsWaitingOnProject } from "../long-run/blocked-goal-sweep";
+import { adoptExplicitGoalGrant } from "../long-run/explicit-goal-authority";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   admitInvocationWithStartReceipt,
@@ -2165,6 +2166,24 @@ export class InvocationService {
     let observedRuntimeErrorCode: string | null = null;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
+      /*
+       * A fresh explicit Goal (goal chip or goalMode turn) had no revision until a later sweep adopted the owner's
+       * recorded turn, so its first controller attempt carried no revision and the first verification always ended
+       * verification_goal_revision_unbound (live 2026-09-25). Adopt the same recorded grant here — this turn's
+       * invoke_started + invoke_prompt_bound are durable by now — before the attempt is stamped.
+       */
+      if (!executionContext && goalLongRun.surface !== "science" && !getChatGoalRevision(goalLongRun.goalId)) {
+        try {
+          if (adoptExplicitGoalGrant(goalLongRun.goalId)) {
+            goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
+            goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+            if (!goalLongRun || !goalLongRunTask) return;
+          }
+        } catch (error) {
+          console.warn("[long-run] explicit goal grant adoption at first turn failed:", error);
+        }
+      }
+      if (!goalLongRun || !goalLongRunTask) return;
       // A Goal revision owns a new durable task. Reusing one controller worker
       // across revisions makes the immutable task binding conflict on resume.
       // Keep retries of the same revision on one worker, while giving each
@@ -2320,6 +2339,16 @@ export class InvocationService {
         ) {
           lastControllerSelection = event.runtimeSelection;
           bindGoalControllerAttempt(event.runtimeSelection);
+        }
+        /*
+         * A goal-chip Goal gets its ledger row from the client DURING its first turn (after runtime selection:
+         * live 2026-09-25, row 12 s after invoke_started), so that turn had no controller attempt and no revision and its
+         * first verification was always verification_goal_revision_unbound. Bind as soon as the row exists.
+         */
+        if (!goalLongRun && projectionGoalId && lastControllerSelection && !goalControllerAttemptId && !goalControllerAttemptSettled
+          && !effectObservation && getLongRunByGoalId(projectionGoalId)) {
+          refreshGoalProjection();
+          bindGoalControllerAttempt(lastControllerSelection);
         }
         if (event.kind === "error" && !event.agentId && typeof event.error?.code === "string") observedRuntimeErrorCode = event.error.code;
         /*
