@@ -23,7 +23,7 @@ import styles from "./WorkFirstRunOnboarding.module.css";
  *   예전 7단계 투어는 결제로 이어지는 단계가 하나도 없었고, 모델 선택지에 Agentlas 자체 모델이
  *   빠져 있었으며, "익스퍼트"를 고르면 모델 연결을 통째로 건너뛰었다(setStep(5)).
  *   이제 첫 질문은 "어떤 AI로 일할까요?" 하나다. Agentlas 가 맨 위에 추천으로 오고, 구독을 가진
- *   사람은 그 구독을 연결한다. Agentlas 를 고르면 그 자리에서 Free/Pro 를 비교한다.
+ *   사람은 그 구독을 연결한다. Agentlas 를 고르면 공개 요금제를 비교한다.
  */
 type Choice =
   | "agentlas"
@@ -87,7 +87,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [showMore, setShowMore] = useState(false);
   /** 연결 전에 한 번 더 확인하는 작은 창. Aside 처럼 무엇이 일어나는지 한 문장으로 말한다. */
   const [confirming, setConfirming] = useState<ChoiceRow | null>(null);
-  /** Agentlas 를 고른 사람에게만 보이는 Free / Pro 비교. */
+  /** Agentlas 를 고른 사람에게만 보이는 공개 요금제 비교. */
   const [planOpen, setPlanOpen] = useState(false);
   const confirmingRef = useRef<ChoiceRow | null>(null);
   const planOpenRef = useRef(false);
@@ -154,11 +154,15 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     checking: "연결 상태 확인 중…", installing: "준비하는 중… 처음 한 번만 1~2분 걸려요", loggingIn: "열린 창에서 로그인해 주세요", signingIn: "브라우저에서 로그인해 주세요", connected: "연결됐어요", continue: "연결하지 않고 계속",
     planTitle: "Agentlas로 시작하기", planSub: "무료로 시작하고, 크레딧이 더 필요할 때 올리세요.",
     free: "Free", freeFor: "매일 쓰는 작업에", perForever: "/ 영원히",
-    freeLines: ["내 AI 구독·키 연결 무제한", "Agentlas 크레딧 월 500", "Agent Hub 에이전트 무료 사용·공유", "비공개 클라우드 에이전트 20개"],
+    freeLines: ["내 AI 구독·키 연결 무제한", "Agentlas 크레딧 월 100", "Agent Hub 에이전트 무료 사용·공유", "비공개 클라우드 에이전트 20개", "Work 프로젝트당 에이전트·팀 3개"],
     freeCta: "무료로 시작", freeNote: "무료로 시작하고 언제든 올릴 수 있어요.",
     pro: "Pro", proFor: "길고 복잡한 작업에", perMonth: "/ 월",
-    proLines: ["Free의 모든 것", "Agentlas 크레딧 월 7,600 (15배)", "비공개 클라우드 에이전트 100개", "이메일 우선 지원"],
+    proLines: ["Free의 모든 것", "Agentlas 크레딧 월 7,600", "비공개 클라우드 에이전트 100개", "Work 프로젝트당 에이전트·팀 10개", "Alive Agent 사용 가능"],
     proCta: "구독하기", proNote: "결제는 agentlas.cloud에서 진행돼요.",
+    max: "Max", maxFor: "큰 에이전트 컬렉션에",
+    maxLines: ["Agentlas 크레딧 월 45,000", "비공개 클라우드 에이전트 500개", "Work 프로젝트당 에이전트·팀 20개", "Alive Agent 사용 가능"],
+    wow: "WoW", wowFor: "가장 큰 작업 공간에",
+    wowLines: ["Agentlas 크레딧 월 100,000", "비공개 클라우드 에이전트 2,500개", "Work 프로젝트당 에이전트·팀 32개", "Alive Agent 사용 가능"],
     s2: "Agentlas에서는 이렇게 일해요.", s2sub: "필요한 전문가가 팀으로 모이고, 결과까지 확인한 뒤 끝납니다.",
     build: "작업 공간", buildSub: "프로젝트를 만들고 결과를 말하면 팀이 꾸려져요.", automation: "자동화", automationSub: "반복 작업을 자연어로 맡겨요.", hub: "Agent Hub", hubSub: "다른 사람이 만든 에이전트를 무료로 데려와요.",
     mobile: "휴대폰에서도 이어서", mobileSub: "App Store·Play Store에서 Agentlas를 설치하고, 설정 → 새 기기 연결의 QR로 붙이세요.",
@@ -187,11 +191,15 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     checking: "Checking connection…", installing: "Getting ready… first time only, 1–2 minutes", loggingIn: "Log in in the window that opened", signingIn: "Sign in in your browser", connected: "Connected", continue: "Continue without connecting",
     planTitle: "Start with Agentlas", planSub: "Start free. Upgrade when you need more credits.",
     free: "Free", freeFor: "Best for daily tasks", perForever: "/ forever",
-    freeLines: ["Bring your own AI subscription or key", "500 Agentlas credits per month", "Use and share Agent Hub agents for free", "20 private Cloud agents"],
+    freeLines: ["Bring your own AI subscription or key", "100 Agentlas credits per month", "Use and share Agent Hub agents for free", "20 private Cloud agents", "3 agents or teams per Work project"],
     freeCta: "Get started", freeNote: "Start free. Upgrade anytime.",
     pro: "Pro", proFor: "Best for longer, complex work", perMonth: "/ month",
-    proLines: ["Everything in Free", "7,600 Agentlas credits per month (15x)", "100 private Cloud agents", "Priority email support"],
+    proLines: ["Everything in Free", "7,600 Agentlas credits per month", "100 private Cloud agents", "10 agents or teams per Work project", "Alive Agent included"],
     proCta: "Subscribe", proNote: "Checkout opens on agentlas.cloud.",
+    max: "Max", maxFor: "For large agent collections",
+    maxLines: ["45,000 Agentlas credits per month", "500 private Cloud agents", "20 agents or teams per Work project", "Alive Agent included"],
+    wow: "WoW", wowFor: "For the largest workspaces",
+    wowLines: ["100,000 Agentlas credits per month", "2,500 private Cloud agents", "32 agents or teams per Work project", "Alive Agent included"],
     s2: "Here is how work happens in Agentlas.", s2sub: "The right specialists assemble as a team, and the work ends only after it is checked.",
     build: "Workspace", buildSub: "Create a project, describe the result, and a team forms.", automation: "Automation", automationSub: "Delegate repeatable work in natural language.", hub: "Agent Hub", hubSub: "Bring in agents others made — free.",
     mobile: "Continue on your phone", mobileSub: "Install Agentlas from the App Store or Play Store, then scan the QR code in Settings → Connect new device.",
@@ -617,6 +625,20 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                   <header><strong>{copy.pro}</strong><span>{copy.proFor}</span></header>
                   <div className={styles.price}><b>$19</b><span>{copy.perMonth}</span></div>
                   <ul>{copy.proLines.map((line) => <li key={line}><IconCheck size={13} />{line}</li>)}</ul>
+                  <button type="button" className={styles.next} onClick={() => leavePlan(true)}>{copy.proCta}</button>
+                  <small>{copy.proNote}</small>
+                </section>
+                <section className={styles.planCard}>
+                  <header><strong>{copy.max}</strong><span>{copy.maxFor}</span></header>
+                  <div className={styles.price}><b>$99</b><span>{copy.perMonth}</span></div>
+                  <ul>{copy.maxLines.map((line) => <li key={line}><IconCheck size={13} />{line}</li>)}</ul>
+                  <button type="button" className={styles.next} onClick={() => leavePlan(true)}>{copy.proCta}</button>
+                  <small>{copy.proNote}</small>
+                </section>
+                <section className={styles.planCard}>
+                  <header><strong>{copy.wow}</strong><span>{copy.wowFor}</span></header>
+                  <div className={styles.price}><b>$200</b><span>{copy.perMonth}</span></div>
+                  <ul>{copy.wowLines.map((line) => <li key={line}><IconCheck size={13} />{line}</li>)}</ul>
                   <button type="button" className={styles.next} onClick={() => leavePlan(true)}>{copy.proCta}</button>
                   <small>{copy.proNote}</small>
                 </section>

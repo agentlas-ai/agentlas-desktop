@@ -181,9 +181,6 @@ function normalizeAgentPool(value: ProjectAgentPoolMember[] | undefined): Projec
     seen.add(key);
     return true;
   });
-  if (normalized.length > PROJECT_AGENT_POOL_MAX) {
-    throw new Error(`[agentlas:code=project-agent-safety-limit] A project supports at most ${PROJECT_AGENT_POOL_MAX} agents and teams.`);
-  }
   return normalized;
 }
 
@@ -196,6 +193,11 @@ export function projectPoolAddsMembers(previous: ProjectAgentPoolMember[], reque
 
 function assertProjectPoolCapacity(previous: ProjectAgentPoolMember[], next: ProjectAgentPoolMember[], grant?: ProjectAgentLimitGrant): void {
   if (!projectPoolAddsMembers(previous, next)) return;
+  // A legacy pool may already exceed the current ceiling. Preserve it on
+  // metadata edits, reorder, and removals; apply the ceiling only to additions.
+  if (next.length > PROJECT_AGENT_POOL_MAX) {
+    throw new Error(`[agentlas:code=project-agent-safety-limit] A project supports at most ${PROJECT_AGENT_POOL_MAX} agents and teams.`);
+  }
   const limit = consumeProjectAgentLimitGrant(grant);
   if (limit === null) {
     throw new Error("[agentlas:code=project-agent-entitlement-unavailable] Verify your plan before adding project agents or teams.");
