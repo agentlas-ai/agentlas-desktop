@@ -56,7 +56,11 @@
   70%, 100% { transform: scale(1.5); opacity: 0; }
 }
 
-/* ── 팝오버 ─────────────────────────────── */
+/* ── 팝오버 ─────────────────────────────────
+   작성창의 다른 떠 있는 메뉴와 같은 메뉴(오너 2026-09-25 "미니멀하게 — one 드롭다운·+ 메뉴 참고").
+   아래 값은 OneShell.module.css 의 composerPopover / composerPopoverRow / composerPopoverCopy /
+   composerPopoverDivider / composerPopoverToggle 과 **같은 값**이다 — 한쪽을 바꾸면 여기도 바꾼다.
+   (그 CSS 모듈을 직접 불러오면 Work 화면이 One 전체 스타일을 싣게 되어 값만 맞춘다.) */
 .popover {
   position: fixed;
   z-index: 110;
@@ -64,330 +68,286 @@
   bottom: var(--alive-bottom, 120px);
   width: var(--alive-width, 300px);
   max-height: var(--alive-max-height, 420px);
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  display: grid;
-  gap: 10px;
-  padding: 12px;
+  padding: 6px;
   border: 1px solid var(--paper-edge);
   border-radius: 12px;
   background: var(--paper);
   color: var(--ink);
   box-shadow: 0 14px 38px rgba(20, 25, 20, 0.12);
-  font-size: 12px;
   scrollbar-width: thin;
   box-sizing: border-box;
+  /* 한국어는 낱말 가운데서 끊지 않는다. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
+.list { display: grid; min-width: 0; }
 
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+.divider { height: 1px; margin: 0 6px; background: var(--paper-3); }
+
+/* 행 — composerPopoverRow 와 같다: 22px 아이콘 칸 · 본문 · 끝 칸, 8px 모서리, 누르면 paper-3. */
+.row {
+  width: 100%;
   min-width: 0;
-}
-.headTitle {
-  min-width: 0;
-  display: flex;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-sizing: border-box;
 }
-.headTitle strong {
-  font-size: 13px;
-  font-weight: 720;
-  letter-spacing: .03em;
+button.row:hover:not(:disabled),
+button.row:focus-visible,
+.row[data-selected="true"] { background: var(--paper-3); outline: none; }
+button.row:disabled { cursor: default; }
+button.row:disabled .copy strong,
+button.row:disabled .trailing { color: var(--muted-deep); }
+.staticRow { cursor: default; align-items: start; }
+.staticRow > .icon { padding-top: 1px; }
+
+.icon {
+  min-height: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-soft);
 }
-.statusText {
+.copy { min-width: 0; display: grid; gap: 2px; }
+.copy strong,
+.titleLine strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 570;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy small {
+  overflow: hidden;
+  color: var(--muted-deep);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trailing {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  color: var(--muted-deep);
+}
+.trailing > svg { flex: 0 0 auto; }
+.row[data-selected="true"] .trailing > svg,
+.row[aria-pressed="true"] .trailing > svg { color: var(--ok); }
+.value {
   color: var(--muted-deep);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.switch {
+/* 머리 행 — 행 전체가 스위치(role=switch). 제목 옆에 상태 글, 아래 한 줄에 범위. */
+.titleLine {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.titleLine strong { flex: 0 0 auto; font-weight: 700; letter-spacing: .02em; }
+.statusText {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-deep);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statusText[data-alive-status="tokens-spent"],
+.statusText[data-alive-status="usage-unknown"] { color: var(--amber-deep); }
+.statusText[data-alive-status="blocked"] { color: var(--red-deep); }
+.scope { display: block; }
+.switchRow:disabled .toggle { opacity: .5; }
+
+/* 스위치 — composerPopoverToggle 과 같다. */
+.toggle {
   width: 34px;
   height: 20px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   padding: 2px;
-  border: 0;
   border-radius: 999px;
   background: var(--paper-3);
-  cursor: pointer;
+  box-sizing: border-box;
   transition: background 140ms ease;
 }
-.switch > span {
+.toggle > span {
   width: 16px;
   height: 16px;
   border-radius: 50%;
   background: var(--paper);
   box-shadow: 0 1px 3px rgba(25, 31, 36, .14);
+  transform: translateX(0);
   transition: transform 140ms ease;
 }
-.switch[data-on="true"] { background: var(--accent); }
-.switch[data-on="true"] > span { transform: translateX(14px); }
-.switch:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 28%, transparent); outline-offset: 1px; }
-.switch:disabled { cursor: not-allowed; opacity: .5; }
+.toggle[data-on="true"] { background: var(--accent); }
+.toggle[data-on="true"] > span { transform: translateX(14px); }
+/* 행 배경이 paper-3 일 때(hover·초점) 꺼진 스위치가 묻히지 않게 한 단계 진하게. */
+.switchRow:hover .toggle[data-on="false"],
+.switchRow:focus-visible .toggle[data-on="false"] { background: var(--paper-edge); }
 
-.scope {
-  margin: -4px 0 0;
-  color: var(--muted-deep);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 조용한 알림 행 — 배경 상자 없이 한 줄 글 + 글자 동작. */
+.notice {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px 7px;
 }
-.hint {
-  margin: 0;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: var(--fill-1);
+.noticeDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.noticeDot[data-tone="warn"] { background: var(--amber-deep); }
+.noticeText {
+  min-width: 0;
   color: var(--ink-soft);
   font-size: 11px;
   line-height: 1.4;
 }
-
-.conflict,
-.notice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  padding: 6px 4px 6px 9px;
-  border-radius: 8px;
-  background: var(--fill-1);
-  font-size: 11px;
-}
-.noticeText {
-  min-width: 0;
-  color: var(--ink-soft);
-  line-height: 1.35;
-}
-.notice { background: color-mix(in srgb, var(--amber-deep) 10%, transparent); }
-.conflictText {
-  min-width: 0;
+.noticeText strong {
+  display: inline-block;
+  max-width: 100%;
   overflow: hidden;
-  color: var(--ink-soft);
+  color: var(--ink);
+  font-weight: 570;
   text-overflow: ellipsis;
   white-space: nowrap;
+  vertical-align: bottom;
 }
-.conflictText strong { font-weight: 620; color: var(--ink); }
+/* 글자 동작 — 검은 바탕 흰 글자 단추 금지(오너 2026-09-24). */
+.textAction {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.textAction:hover,
+.textAction:focus-visible { outline: none; text-decoration: underline; text-underline-offset: 2px; }
+.textAction:disabled { opacity: .55; cursor: default; text-decoration: none; }
 
-.section {
-  display: grid;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--paper-3);
-  min-width: 0;
-}
-
-/* 예비 순서 사슬(한 줄로 이어짐): [오케 표지] 칩 › 칩 › [워커 표지] 칩 › 칩 — 지금 쓰는 칩 하나만 테두리+점,
-   소진된 칩은 점선·흐림·취소선. 역할이 바뀌는 자리에만 작은 아이콘 표지. */
-.roleMark {
-  height: 22px;
-  display: inline-grid;
-  place-items: center;
-  padding: 0 3px 0 1px;
-  color: var(--muted-deep);
-}
+/* 모델 순서 — 작은 글자 사슬. 지금 쓰는 모델만 진하게, 소진된 모델은 흐리게+취소선. */
 .chain {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 0;
+  align-items: baseline;
+  row-gap: 1px;
   margin: 0;
   padding: 0;
   list-style: none;
+  color: var(--muted-deep);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 .chainItem {
   min-width: 0;
   max-width: 100%;
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
 }
-.chainArrow {
-  padding: 0 3px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
-}
-.chainEmpty { color: var(--muted-deep); font-size: 11px; line-height: 22px; }
-.modelChip {
+.chainArrow { padding: 0 4px; color: var(--muted); }
+.chainEmpty { color: var(--muted-deep); }
+.model {
   min-width: 0;
-  max-width: 100%;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 7px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 6px;
-  background: var(--paper);
-  color: var(--ink-soft);
-  font-size: 11px;
-  box-sizing: border-box;
-}
-.modelName {
-  min-width: 0;
-  max-width: 128px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.modelChip[data-current="true"] {
-  border-color: var(--accent);
-  background: var(--fill-1);
-  color: var(--ink);
-  font-weight: 600;
-}
-.modelDot {
-  width: 5px;
-  height: 5px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--ok);
-}
-.modelChip[data-exhausted="true"] {
-  opacity: .5;
-  border-style: dashed;
-}
-.modelChip[data-exhausted="true"] .modelName { text-decoration: line-through; }
+.model[data-current="true"] { color: var(--ink); font-weight: 650; }
+.model[data-exhausted="true"] { opacity: .55; text-decoration: line-through; }
 
-.caption {
-  margin: 0;
-  color: var(--muted-deep);
-  font-size: 10px;
-  line-height: 1.35;
-}
-
-.budgetHead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--ink-soft);
-  font-size: 11px;
-  font-weight: 560;
-}
-.budgetValue {
-  color: var(--muted-deep);
-  font-variant-numeric: tabular-nums;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.bar {
-  height: 3px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--paper-3);
-}
-.bar > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent);
-  transition: width 200ms ease;
-}
-.bar[data-spent="true"] > span { background: var(--amber-deep); }
-
-.presets {
-  display: flex;
+/* 하위 목록 머리 — composerPopoverHeader 와 같은 굵기. */
+.subHead {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px;
-  min-width: 0;
+  gap: 8px;
+  padding: 0 8px;
 }
-.preset {
-  min-width: 0;
-  flex: 1 1 0;
-  height: 26px;
-  padding: 0 4px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 7px;
+.subHead strong { color: var(--ink); font-size: 13px; font-weight: 700; }
+.back {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--ink-soft);
-  font: inherit;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
-.preset:hover,
-.preset:focus-visible { background: var(--paper-3); outline: none; }
-.preset[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: var(--fill-1);
-  color: var(--ink);
-  font-weight: 620;
-}
-.preset:disabled { cursor: default; opacity: .6; }
-.custom {
-  flex: 1.3 1 0;
-  min-width: 0;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 6px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 7px;
+.back:hover,
+.back:focus-visible { background: var(--paper-3); outline: none; }
+.options { display: grid; padding-top: 6px; min-width: 0; }
+
+.customRow { cursor: text; }
+.customRow:focus-within { background: var(--paper-3); }
+.customField {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
   color: var(--muted-deep);
   font-size: 11px;
-  box-sizing: border-box;
 }
-.custom:focus-within { border-color: var(--paper-edge-strong, var(--accent)); }
-.custom input {
-  width: 100%;
-  min-width: 0;
+.customField input {
+  width: 48px;
+  padding: 0 0 1px;
   border: 0;
+  border-bottom: 1px solid var(--paper-edge);
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
   outline: none;
   -moz-appearance: textfield;
 }
-.custom input::-webkit-outer-spin-button,
-.custom input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.customField input:focus { border-bottom-color: var(--accent); }
+.customField input::placeholder { color: var(--muted); }
+.customField input::-webkit-outer-spin-button,
+.customField input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 .error {
   margin: 0;
+  padding: 4px 8px 6px 38px;
   color: var(--red-deep);
   font-size: 11px;
   line-height: 1.4;
 }
-
-.foot {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 8px;
-  border-top: 1px solid var(--paper-3);
-}
-/* 조용한 글자 단추 — 검은 바탕 흰 글자 단추 금지(오너 2026-09-24). */
-.quiet {
-  flex: 0 0 auto;
-  min-height: 26px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.quiet:hover,
-.quiet:focus-visible { background: var(--fill-1); outline: none; text-decoration: underline; text-underline-offset: 2px; }
-.quiet:disabled { opacity: .55; cursor: default; }
 
 .srOnly {
   position: absolute;
@@ -401,7 +361,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .triggerDot[data-alive-status="running"]::after { animation: none; }
-  .switch,
-  .switch > span,
-  .bar > span { transition: none; }
+  .toggle,
+  .toggle > span { transition: none; }
 }
