@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { McpInvocationRequest, RuntimeSelection } from "../../shared/types";
 import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSteerReceipt, OnePreflightSubmissionInput, OnePreflightSubmissionReceipt } from "../../shared/one-preflight-steers";
-import { getChat } from "./chats";
+import { getChat, setChatRuntimeSelection } from "./chats";
+import { getChatGoalRevision } from "./chat-goals";
 import { getDb } from "./db";
 import { getInvocationAdmission } from "./invocation-admissions";
 
@@ -48,6 +49,21 @@ function liveRuntimeJson(chatId: string): string {
   if (!chat || chat.archivedAt) throw new Error("one_preflight_chat_unavailable");
   return canonicalOnePreflightRuntime(chat.runtimeSelection);
 }
+/*
+ * A chat with no runtime pin (a seat chat inheriting its runtime) is shown in One with the owner's last explicit One
+ * model (localStorage fallback) and submits that selection, while Main compared it with the chat's pin `null` and
+ * refused with one_preflight_runtime_changed — the first submit of seat chat e07d98a2 (1.2.43 E2E) was refused this way
+ * while the picker showed Agentlas Light, and the refusal started a One recovery pass on another runtime.
+ * The submit runs what the picker shows: an UNPINNED chat adopts the shown selection as its pin (the same write as
+ * choosing it in the picker). A chat that already has a pin, or whose Goal is ongoing (runtime changes go through the
+ * Goal handoff), is never rewritten here and still fails closed.
+ */
+function adoptShownRuntimeForUnpinnedChat(chatId: string, shown: RuntimeSelection | null | undefined): void {
+  const chat = getChat(chatId);
+  if (!chat || chat.archivedAt || chat.runtimeSelection || !shown) return;
+  if (chat.goalId && getChatGoalRevision(chat.goalId)?.lifecycle === "ongoing") return;
+  setChatRuntimeSelection(chatId, { ...shown, role: "orchestrator", inherit: false });
+}
 function submissionRow(id: string): SubmissionRow | undefined {
   return getDb().prepare("SELECT * FROM one_preflight_submissions WHERE submission_id = ?")
     .get(id) as SubmissionRow | undefined;
@@ -87,6 +103,7 @@ export function beginOnePreflightSubmission(
       }
       return submissionReceipt(old);
     }
+    if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntimeForUnpinnedChat(input.chatId, input.runtimeSelection);
     if (liveRuntimeJson(input.chatId) !== runtimeJson) throw new Error("one_preflight_runtime_changed");
     const open = getDb().prepare(
       "SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1",
