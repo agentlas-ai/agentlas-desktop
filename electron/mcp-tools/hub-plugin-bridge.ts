@@ -646,7 +646,7 @@ export async function bridgeHubPluginCandidates(
     if (!manifest || manifest.mcp.length === 0) {
       // 스킬 번들은 자동 브리지가 설치하지 않는다 — 원격 메타데이터가 사람 확인 없이
       // 로컬 파일(에이전트 지시문)을 쓰게 두면 stdio 자동 실행 금지와 같은 계열의
-      // 구멍이 된다. 마켓플레이스/터미널의 명시적 설치 경로로 정직하게 안내한다.
+      // 구멍이 된다. 에이전트 허브/터미널의 명시적 설치 경로로 정직하게 안내한다.
       const hasSkillPayload = (manifest?.skills ?? []).some((skill) => skill.files.length > 0);
       receipts.push({
         slug: candidate.slug,
@@ -654,7 +654,7 @@ export async function bridgeHubPluginCandidates(
         transport: hasSkillPayload ? "skills" : "unknown",
         action: hasSkillPayload ? "needs-approval" : "skipped",
         reason: hasSkillPayload
-          ? "skill bundle — install it explicitly from the marketplace (files are never written from run-time metadata)"
+          ? "skill bundle — install it explicitly from Agent Hub (files are never written from run-time metadata)"
           : "no machine-connectable MCP endpoint in the Hub manifest",
       });
       continue;
