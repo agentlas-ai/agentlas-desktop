@@ -9,6 +9,19 @@ import { getLongRunAttemptGoalRevision } from "../store/long-runs";
 import { recordRunEvent } from "../store/run-events";
 import { captureGoalVerificationBoundary } from "./verification-boundary";
 
+/** Judge-side failures that retry the judge only (service.retryTransientGoalVerification). */
+export const TRANSIENT_GOAL_VERIFICATION_REASON_CODES: readonly string[] = [
+  "verification_effects_aborted",
+  "verification_effects_timeout",
+  "verification_effects_runner_failed",
+  "verification_effects_invalid_output",
+];
+export function goalVerificationReasonCode(error: unknown): string {
+  return error && typeof error === "object" && "reasonCode" in error
+    ? String((error as { reasonCode?: unknown }).reasonCode ?? "")
+    : error instanceof Error ? error.message : "";
+}
+
 export interface VerificationSessionBinding {
   executionId: string;
   attemptId: string;

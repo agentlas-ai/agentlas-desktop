@@ -2,6 +2,7 @@ import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
+import { goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } from "../long-run/verification-effects";
 import { withAdapterEffectContext } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
@@ -774,15 +775,7 @@ function isRetryableDecisionStoreError(error: unknown): boolean {
  * it must never replay the already completed controller turn or block the
  * person's Goal. User stop/steering still aborts the retained lifetime. */
 export function isTransientGoalVerificationError(error: unknown): boolean {
-  const reasonCode = error && typeof error === "object" && "reasonCode" in error
-    ? String((error as { reasonCode?: unknown }).reasonCode ?? "")
-    : error instanceof Error ? error.message : "";
-  return [
-    "verification_effects_aborted",
-    "verification_effects_timeout",
-    "verification_effects_runner_failed",
-    "verification_effects_invalid_output",
-  ].includes(reasonCode);
+  return TRANSIENT_GOAL_VERIFICATION_REASON_CODES.includes(goalVerificationReasonCode(error));
 }
 
 function waitForGoalVerificationRetry(delayMs: number, signal: AbortSignal): Promise<void> {

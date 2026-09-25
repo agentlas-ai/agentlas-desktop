@@ -9,7 +9,7 @@ import { readGoalPlan } from "../store/goal-plans";
 import { hostFileObservationStillHolds, namedFiles, recordHostFileObservations } from "./host-file-observation";
 import { decompositionLeaves, rollUpDecomposition, type DecompositionLeaf } from "../../shared/goal-rollup";
 import { withVerificationAccounting } from "./accounting-context";
-import { createVerificationSession } from "./verification-effects";
+import { createVerificationSession, goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } from "./verification-effects";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { judgeRequiredBatch, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
@@ -494,6 +494,7 @@ export function buildBoundedObservation(input: {
   workingFolder?: string | null;
   fullRunSummary?: Record<string, unknown>;
   fullWriteBoundary?: Record<string, unknown> | null;
+  conversation?: readonly GoalConversationEntry[];
 }): string {
   const { receipt, limit } = input;
   const size = (value: unknown) => JSON.stringify(value)?.length ?? 0;
@@ -503,12 +504,22 @@ export function buildBoundedObservation(input: {
   // 경계 감사도 집계와 같은 성질이다 — 이벤트 수와 무관하게 크기가 일정하고 항상 실린다.
   const boundary = input.fullWriteBoundary !== undefined ? input.fullWriteBoundary : auditWriteBoundary(input.events, input.workingFolder ?? null);
   const events = input.events.slice(-200);
+  // The Goal's earlier replies are clamped with the prose budget (they are delivered text, bounded like the claim).
+  // Each earlier reply shrinks with the claim's prose budget, never below what still shows a question card.
+  const conversationField = (cap: number) => input.conversation?.length ? { goalConversation: {
+    note: "This Goal's earlier replies (citable refs; for a reply-type item the delivered reply is the result) and the owner's messages (context only, not proof).",
+    entries: input.conversation.map((entry) => {
+      return { ...(entry.ref ? { ref: entry.ref } : {}), role: entry.role, createdAt: entry.createdAt,
+        text: entry.text.slice(0, cap), ...(entry.text.length > cap ? { textTruncatedByBudget: true } : {}) };
+    }) } } : {};
   const assemble = (
     assistantText: string | null,
     keptEvents: Array<Record<string, unknown>>,
     omitted: number,
+    conversationCap = 400,
   ) => ({
     receipt,
+    ...conversationField(conversationCap),
     // The digest is always present and always the same size. It, not the sample,
     // is what proves scale: "179 files" survives even when no raw event fits.
     evidenceDigest: digest,
@@ -541,7 +552,7 @@ export function buildBoundedObservation(input: {
     const assistantText = budget == null
       ? null
       : input.assistant?.text.slice(0, budget) ?? null;
-    const candidate = assemble(assistantText, events, 0);
+    const candidate = assemble(assistantText, events, 0, budget == null ? 400 : Math.max(400, Math.min(2_000, budget / 2)));
     if (size(candidate) <= limit) return JSON.stringify(candidate);
   }
   for (const previewChars of [1_200, 400, 160, 60]) {
@@ -703,6 +714,44 @@ export function exactRunAssistantResult(chatId: string, runId: string): {
 }
 
 /**
+ * The Goal's own conversation, read from the host ledger: every reply this Goal's controller invocations delivered in
+ * its chat (same revision, exact mcp_final -> durable message) and the owner's messages since the Goal's original
+ * request. For a reply-type deliverable the delivered reply IS the result, so each earlier reply is a citable
+ * `chat-message:` reference (the same ref kind the current run's reply already has; verificationReferencesResolve
+ * accepts it because the run belongs to this Goal revision). Owner messages are context only, never a ref.
+ *
+ * Measured (1.2.43 E2E, serving One automatic goal run_df235d8e): the Goal asked the owner, the owner answered, the
+ * resumed turn replied — but the verifier saw only that last reply. A sub-goal like "ask the owner which season" had
+ * no admissible host evidence (the question lived in an earlier invocation), verification stayed inconclusive, the
+ * retry turn found nothing to do and the Goal cycled ask -> block -> sweep resume -> ask without ever completing.
+ */
+export type GoalConversationEntry = { ref: string | null; role: "assistant" | "owner"; createdAt: string; text: string };
+const GOAL_CONVERSATION_MAX_ENTRIES = 12;
+export function goalConversationExchange(chatId: string, goalBinding: { goalId: string; revision: number },
+  currentRunId: string): GoalConversationEntry[] {
+  const runs = getDb().prepare(`SELECT a.invocation_run_id AS id, MIN(a.started_at) AS started FROM long_run_worker_attempts a
+    JOIN long_runs r ON r.id = a.run_id WHERE r.goal_id = ? AND a.invocation_run_id IS NOT NULL
+    GROUP BY a.invocation_run_id ORDER BY started`).all(goalBinding.goalId) as Array<{ id: string }>;
+  const entries: GoalConversationEntry[] = [];
+  for (const { id } of runs) {
+    if (id === currentRunId || !invocationMatchesGoalRevision(id, goalBinding.goalId, goalBinding.revision)) continue;
+    const prior = getInvocationRunReceipt(id);
+    if (prior?.status !== "completed" || prior.chatId !== chatId) continue;
+    const reply = exactRunAssistantResult(chatId, id);
+    if (reply?.text.trim()) entries.push({ ref: `chat-message:${reply.id}`, role: "assistant", createdAt: reply.createdAt, text: reply.text });
+  }
+  const origin = getChatGoalRevision(goalBinding.goalId)?.originalRequest?.messageId;
+  const since = origin ? (getDb().prepare("SELECT created_at FROM chat_messages WHERE id = ? AND chat_id = ?")
+    .get(origin, chatId) as { created_at: string } | undefined)?.created_at : undefined;
+  if (since) {
+    const owner = getDb().prepare(`SELECT id, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'user'
+      AND created_at > ? AND id <> ? ORDER BY created_at`).all(chatId, since, origin) as Array<{ text: string; created_at: string }>;
+    for (const row of owner) if (row.text.trim()) entries.push({ ref: null, role: "owner", createdAt: row.created_at, text: row.text });
+  }
+  return entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-GOAL_CONVERSATION_MAX_ENTRIES);
+}
+
+/**
  * Collects host-owned, durable evidence only. Model prose is deliberately not
  * a reference: it remains a claim presented to the independent judge.
  */
@@ -770,10 +819,12 @@ export function collectDurableGoalVerificationEvidence(
       reason: "concrete_evidence_missing",
     };
   }
+  const conversation = goalBinding && receipt.chatId ? goalConversationExchange(receipt.chatId, goalBinding, runId) : [];
   const refs = [
     `invocation:${runId}:completed`,
     ...priorRunIds.map((id) => `invocation:${id}:completed`),
     ...(durableAssistantResult ? [`chat-message:${durableAssistantResult.id}`] : []),
+    ...conversation.flatMap((entry) => entry.ref ? [entry.ref] : []),
     ...concrete.map((event) => `event:${event.id}`),
   ];
   return {
@@ -806,6 +857,7 @@ export function collectDurableGoalVerificationEvidence(
       },
       limit: 20_000,
       workingFolder: receipt.resultFolder?.trim() || null,
+      conversation,
     }),
     reason: "durable_evidence_ready",
   };
@@ -1230,6 +1282,7 @@ export async function verifyGoalCompletionClaim(input: {
         guidance: [
           "A confident statement by the executing model is not proof by itself.",
           "A durable assistant message can prove the delivered text exists, but cannot by itself prove tests, builds, files, browser state, publication, or other external effects.",
+          "An item whose deliverable is a reply to the owner (proof kind answer) is proven by the delivered reply itself: cite durableAssistantResult or a goalConversation entry's ref and judge that reply's content against the item exactly as written. A question the Goal had to ask the owner counts as delivered when its reply is in goalConversation. Owner messages there show what the owner asked or answered; they are context, never proof of delivery.",
           "Choose passed only when the host references and concrete observed result make the criterion reproducibly checkable.",
           "Choose failed_repairable only when evidence contradicts the criterion because of a concrete implementation, test, build, or app-interaction defect that can be fixed and re-run within the current authorized scope.",
           "Choose the matching failed_prerequisite label only when current evidence proves authentication, permission, entitlement, or an external environment must change first.",
@@ -1544,11 +1597,18 @@ export async function verifyGoalCompletionClaim(input: {
     }
     return verificationResult;
   } catch (error) {
+    /*
+     * A transient judge failure (timeout, runner failure, invalid output) is retried by the caller with the judge only.
+     * Settling this attempt "failed" also failed the Goal's task, so the retry found no open task and the Goal went
+     * straight to blocked verification_unavailable (live 2026-09-25, serving answer goal run_d7242ebd: Agentlas Light
+     * returned invalid_output once). The attempt was interrupted, not the Goal's work: the task stays open.
+     */
+    const transient = TRANSIENT_GOAL_VERIFICATION_REASON_CODES.includes(goalVerificationReasonCode(error));
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
-      state: controller.signal.aborted ? "interrupted" : "failed",
+      state: controller.signal.aborted || transient ? "interrupted" : "failed",
       sideEffectState: verificationSession?.effectState()??"none",
-      errorCode: controller.signal.aborted ? "verification_interrupted" : "verification_failed",
+      errorCode: controller.signal.aborted ? "verification_interrupted" : transient ? goalVerificationReasonCode(error) : "verification_failed",
       errorMessage: error instanceof Error ? error.message : String(error),
     });
     if (controller.signal.aborted) return null;
