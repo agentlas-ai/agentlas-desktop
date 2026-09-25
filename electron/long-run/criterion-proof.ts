@@ -175,7 +175,7 @@ export function admissibleCriterionProofRefs(contract:CriterionProofContract,ref
     });
   }
   if(contract.requiredProofKind==='download')return downloads.map(download=>download.ref);
-  if(contract.requiredProofKind==='file')return files.filter(file=>file.action===contract.requiredFileAction).map(file=>file.ref);
+  if(contract.requiredProofKind==='file')return [...new Set(files.filter(file=>!contract.requiredFileAction||file.action===contract.requiredFileAction).map(file=>file.ref))];
   if(contract.requiredProofKind==='answer')return refs.filter(ref=>ref.startsWith('chat-message:'));
   if(contract.requiredProofKind==='semantic')return refs.filter(ref=>{
     if(!ref.startsWith('event:'))return false;
