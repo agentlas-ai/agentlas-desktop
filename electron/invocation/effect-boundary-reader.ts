@@ -134,11 +134,14 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     }
     const pendingEffectRefs = [...pending].sort();
     // Failed-but-resolved tool calls: started, result observed, typed failure, and in the closed snapshot.
-    const failedIds = new Set([...tools].filter(([id, tool]) => tool.started && tool.result && tool.outcome === "failed"
+    // A typed failure whose result was observed has finished; host-loop runtimes (serving) may record the call and its
+    // result as one event with no separate start (routed R2, run d3ff01c6), which is still a finished call.
+    const failedIds = new Set([...tools].filter(([id, tool]) => tool.result && tool.outcome === "failed"
       && !settledFailures.has(id)).map(([id]) => id));
     const snapshotOnlyFailed = Boolean(operations && operations.length === tools.size
       && new Set(operations.map(operation => operation.toolId)).size === tools.size
-      && operations.every(operation => operation.toolId && tools.has(operation.toolId) && operation.startObserved
+      && operations.every(operation => operation.toolId && tools.has(operation.toolId)
+        && (operation.startObserved || (operation.outcome === "failed" && failedIds.has(operation.toolId)))
         && operation.resultObserved && operation.outcome === tools.get(operation.toolId)?.outcome
         && (operation.outcome === "succeeded" || (operation.outcome === "failed" && (failedIds.has(operation.toolId) || settledFailures.has(operation.toolId))))));
     const boundaryOnlyFailed = Boolean(effectRow && boundary && boundary.schemaVersion === "agentlas.runtime-effect-boundary.v1"
