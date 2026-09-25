@@ -6,9 +6,6 @@
 .header h2 { margin: 3px 0 0; color: var(--ink); font-size: 15px; letter-spacing: -.03em; }
 .oneRow, .row { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 8px 7px; border: 1px solid var(--paper-3); border-radius: 12px; }
 .oneRow { border-color: var(--ok-soft); background: var(--ok-soft); }
-.creditWarning { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--warn-soft); border-radius: 9px; background: var(--warn-soft); color: var(--warn); font-size: 9px; line-height: 1.4; }
-.creditWarning > span, .creditBadge { display: inline-flex; align-items: center; gap: 4px; }
-.creditWarning button { flex: none; border: 0; border-radius: 6px; padding: 3px 7px; background: var(--warn-soft); color: var(--warn); font-size: 9px; font-weight: 700; cursor: pointer; }
 .row[data-status="working"] { border-color: var(--ok-soft); background: var(--ok-soft); }
 .row[data-status="failed"] { border-color: var(--danger-soft); background: var(--danger-soft); }
 .rowCopy { display: grid; min-width: 0; flex: 1; gap: 2px; }
@@ -23,7 +20,6 @@
 .row[data-status="locked"] .statusLine i { color: var(--muted-deep); }
 .badge, .source { color: var(--ok); font-size: 8px; font-weight: 730; }
 .source { color: var(--muted-deep); }
-.creditBadge { flex: none; color: var(--warn); font-size: 8px; font-weight: 700; white-space: nowrap; }
 .sectionLabel { margin: 2px 4px -2px; color: var(--muted-deep); font-size: 9px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
 .rows { display: grid; gap: 6px; }
 .agentActions { display: flex; justify-content: center; margin: 2px 7px 5px; }

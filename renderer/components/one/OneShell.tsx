@@ -41,7 +41,6 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { AutomationStrategyApprovalSheet } from "@/components/automation/AutomationStrategyApprovalSheet";
 import { UpdateBanner } from "@/components/UpdateBanner";
-import { openPricing } from "@/components/UpgradeCta";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import {
   IconArrowUp,
@@ -7352,7 +7351,6 @@ export function OneShell() {
               onConnectTool={() => { setSettingsSheet("mcp"); }}
               onBrowseTools={() => { setSettingsSheet("plugins"); }}
               onBrowseSource={(source) => router.push(source === "cloud" ? "/library/agents?tab=cloud" : "/marketplace")}
-              onBrowseCredits={openPricing}
               onOpenConcurrency={() => setSettingsSheet("concurrency")}
               conversationResults={oneOrgConversationResults}
               historyResults={oneOrgHistoryResults}
