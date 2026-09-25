@@ -5,6 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { runHephaestus } from "../hephaestus/engine";
 import type { WorkforceSelectionResult } from "./workforce-orchestrator";
+import { getLongRunByGoalId } from "../store/long-runs";
+import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -78,6 +80,27 @@ export function resolveDesktopWorkforceGoalId(input: {
   const projectId = String(input.projectId ?? "").trim();
   if (projectId) return desktopWorkforceGoalId(`project:${projectId}`);
   return desktopWorkforceGoalId(String(input.taskId ?? "").trim() || input.chatId);
+}
+
+/**
+ * The id a NEW Goal in this chat may take. A derived id (project/task/chat hash) is a continuity key: it is reused only
+ * while its long run belongs to this chat and is still open. A terminal Goal id (completed, failed, cancelled — e.g.
+ * after 목표 삭제) or one owned by another chat is never re-attached, even for identical objective text: the new Goal
+ * gets `goal:desktop:<uuid>`. Measured (1.2.43 dev E2E): a new goal-mode objective in a One room re-attached to the
+ * cancelled goal:desktop:939ce9a0…, so no long run was created and the bar showed "목표 종료".
+ */
+export function freshGoalIdForChat(candidate: string, chatId: string): string {
+  const run = getLongRunByGoalId(candidate);
+  if (!run) return candidate;
+  if (run.rootChatId === chatId && !LONG_RUN_TERMINAL_STATUSES.has(run.status)) return candidate;
+  return `goal:desktop:${randomUUID()}`;
+}
+
+/** A chat's bound Goal that has ended (terminal long run). A goal-mode turn must start a new Goal instead of attaching. */
+export function boundGoalIsTerminal(goalId: string | null | undefined): boolean {
+  if (!goalId) return false;
+  const run = getLongRunByGoalId(goalId);
+  return Boolean(run && LONG_RUN_TERMINAL_STATUSES.has(run.status));
 }
 
 function requireAccountContext(value: unknown): AccountContext {

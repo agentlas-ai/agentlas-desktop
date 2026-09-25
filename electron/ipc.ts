@@ -214,6 +214,7 @@ import {
   completeDesktopWorkforceGoal,
   desktopWorkforceGoalId,
   resolveDesktopWorkforceGoalId,
+  freshGoalIdForChat,
   loadDesktopWorkforceGoal,
 } from "./mcp/workforce-goal-continuity";
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
@@ -4378,8 +4379,9 @@ export function registerIpcHandlers(): void {
         chatId: id,
       });
       const priorRun = getLongRunByGoalId(previousGoalId);
+      // A derived id with any prior run, or a bound Goal that has ended, never becomes the new Goal (freshGoalIdForChat).
       const goalId = !chat.goalId && priorRun
-        ? `goal:desktop:${randomUUID()}` : previousGoalId;
+        ? `goal:desktop:${randomUUID()}` : freshGoalIdForChat(previousGoalId, id);
       setChatGoalBinding(id, goalId);
       setChatContinuousMode(id, true);
       // Binding is not definition. The next explicit Goal-mode request owns
