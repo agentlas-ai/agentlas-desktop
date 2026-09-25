@@ -1,4 +1,7 @@
-import type { InstallIdentity } from "./install-identity";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { LOCAL_CANDIDATE_BUILD_INSTALL_IDENTITY, type InstallIdentity } from "./install-identity";
 import type { IpcMain } from "electron";
 import { normalizeIpcArgsInPlace } from "./ipc-args-normalize";
 import { encodeIpcErrorMessage, isIpcErrorCode } from "../shared/ipc-error-code";
@@ -6,7 +9,7 @@ import { encodeIpcErrorMessage, isIpcErrorCode } from "../shared/ipc-error-code"
 // Capture only the launch request. The environment cannot grant admission:
 // Main must supply the actual package state and validated install identity.
 const requestedAtLaunch = process.env.AGENTLAS_DEV_NO_EXTERNAL_EFFECTS === "1";
-let configured: Readonly<{ suppressed: boolean; channel: InstallIdentity["channel"]; packaged: boolean }> | null = null;
+let configured: Readonly<{ suppressed: boolean; channel: InstallIdentity["channel"]; packaged: boolean; requestedDir: string | null; userDataDir: string | null }> | null = null;
 
 /** May only suppress pre-configuration diagnostics; it never grants admission. */
 export function developmentEffectPolicyRequested(): boolean { return requestedAtLaunch; }
@@ -21,19 +24,70 @@ export class DevelopmentEffectPolicyError extends Error {
   }
 }
 
-/** Called once by Main before opening storage or starting application services. */
-export function configureDevelopmentEffectPolicy(input: { packaged: boolean; identity: InstallIdentity }): void {
+/** A fresh direct child of the OS temp root, never an existing candidate profile. */
+function validateCandidateUserDataDir(requested: string): string {
+  const refuse = (reason: string): never => {
+    throw new DevelopmentEffectPolicyError("development_effect_policy_refused", `candidate_user_data:${reason}`);
+  };
+  if (!path.isAbsolute(requested)) refuse("not_absolute");
+  try {
+    const root = fs.realpathSync(os.tmpdir());
+    // TMPDIR is mutable. On macOS, where candidate bundles are built, it
+    // cannot redefine a persistent directory as the OS temporary root.
+    if (process.platform === "darwin" && root !== "/private/tmp"
+      && !/^\/private\/var\/folders\/[^/]+\/[^/]+\/T$/.test(root)) refuse("invalid_temp_root");
+    const resolved = path.resolve(requested);
+    if (!path.basename(resolved).startsWith("agentlas-local-candidate-")) refuse("invalid_name");
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) refuse("not_directory");
+    if ((stat.mode & 0o077) !== 0) refuse("not_private");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) refuse("wrong_owner");
+    const canonical = fs.realpathSync(resolved);
+    if (path.dirname(canonical) !== root) refuse("outside_temp_root");
+    if (fs.readdirSync(canonical).length !== 0) refuse("not_empty");
+    return canonical;
+  } catch (error) {
+    if (error instanceof DevelopmentEffectPolicyError) throw error;
+    return refuse("unavailable");
+  }
+}
+
+/** Called once by Main before opening storage or starting application services.
+ * Returns the validated candidate path; a boolean alone cannot grant admission. */
+export function configureDevelopmentEffectPolicy(input: {
+  packaged: boolean;
+  identity: InstallIdentity;
+  localCandidateUserDataDir?: string | null;
+}): string | null {
   const suppressed = requestedAtLaunch;
-  if (suppressed && (input.packaged || !["dev", "qa"].includes(input.identity.channel))) {
+  const requestedDir = input.localCandidateUserDataDir?.trim() || null;
+  const marker = LOCAL_CANDIDATE_BUILD_INSTALL_IDENTITY;
+  const packagedCandidate = input.packaged && input.identity.channel === marker.channel
+    && input.identity.appName === marker.appName && input.identity.userDataNamespace === marker.userDataNamespace
+    && input.identity.keychainService === marker.keychainService && !input.identity.updatesEnabled
+    && input.identity.userDataOverride === null;
+  if ((requestedDir && (!packagedCandidate || !suppressed))
+    || (suppressed && !(packagedCandidate || (!input.packaged && ["dev", "qa"].includes(input.identity.channel))))) {
     throw new DevelopmentEffectPolicyError("development_effect_policy_refused", "startup");
   }
   if (configured) {
-    if (configured.packaged !== input.packaged || configured.channel !== input.identity.channel) {
+    if (configured.packaged !== input.packaged || configured.channel !== input.identity.channel || configured.requestedDir !== requestedDir) {
       throw new DevelopmentEffectPolicyError("development_effect_policy_refused", "reconfigure");
     }
-    return;
+    return configured.userDataDir;
   }
-  configured = Object.freeze({ suppressed, packaged: input.packaged, channel: input.identity.channel });
+  let userDataDir: string | null = null;
+  if (packagedCandidate && suppressed) {
+    if (!requestedDir) throw new DevelopmentEffectPolicyError("development_effect_policy_refused", "candidate_user_data:required");
+    // These overrides otherwise bypass userData and can reopen an owner's DB
+    // or grants even when Electron itself uses the isolated profile.
+    if (process.env.AGENTLAS_STORE_PATH?.trim() || process.env.AGENTLAS_FS_GRANT_STORE?.trim()) {
+      throw new DevelopmentEffectPolicyError("development_effect_policy_refused", "candidate_user_data:storage_override");
+    }
+    userDataDir = validateCandidateUserDataDir(requestedDir);
+  }
+  configured = Object.freeze({ suppressed, packaged: input.packaged, channel: input.identity.channel, requestedDir, userDataDir });
+  return userDataDir;
 }
 
 /** No native imports or probing. A requested but unconfigured process fails closed. */
@@ -58,7 +112,7 @@ export function developmentRendererRequestAllowed(rawUrl: string, devStartUrl?: 
     if (url.protocol === "agentlas:") return ["app", "one-artifact", "one-avatar", "chat-attachment", "localfile"].includes(url.hostname);
     if (url.protocol === "file:") return url.hostname === "";
     if (["data:", "blob:"].includes(url.protocol)) return true;
-    if (!devStartUrl) return false;
+    if (!devStartUrl || configured?.packaged) return false;
     const start = new URL(devStartUrl);
     if (!["localhost", "127.0.0.1", "[::1]"].includes(start.hostname)
       || !["http:", "https:"].includes(start.protocol)
