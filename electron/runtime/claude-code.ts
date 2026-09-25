@@ -1477,6 +1477,20 @@ const runClaudeTurn = async (
     };
 
     const toolNameById = new Map<string, string>();
+
+    /**
+
+     * Claude implements --json-schema as a synthetic "StructuredOutput" tool call: the answer channel,
+
+     * not an operation. Emitting it as a tool event made every schema-bound verifier judgment fail
+
+     * closed with verification_effects_tool_observed (isolated live run 2026-09-25, after batch
+
+     * judgments gained an output schema in 9353befb) and the Goal blocked on verification_unavailable.
+
+     */
+
+    const answerChannelToolIds = new Set<string>();
     const toolInputById = new Map<string, unknown>();
     const nativeFileProofById = new Map<string, NativeFileProofTicket>();
     const settledToolResultSignatures = new Map<string, string>();
@@ -1876,6 +1890,10 @@ const runClaudeTurn = async (
               emitPartial();
             }
           } else if (block.type === "tool_use" && block.name) {
+            if (runReq.outputSchema && block.name === "StructuredOutput") {
+              if (block.id) answerChannelToolIds.add(block.id);
+              continue;
+            }
             let argStr = "";
             try {
               argStr = JSON.stringify(block.input ?? {});
@@ -1904,6 +1922,7 @@ const runClaudeTurn = async (
             }
           } else if (block.type === "tool_result") {
             const toolId = block.tool_use_id;
+            if (toolId && answerChannelToolIds.has(toolId)) continue;
             const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
             const result = truncateUi(stringifyToolPayload(block.content));
             const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
@@ -1926,6 +1945,7 @@ const runClaudeTurn = async (
         for (const block of ev.message.content) {
           if (block.type !== "tool_result") continue;
           const toolId = block.tool_use_id;
+          if (toolId && answerChannelToolIds.has(toolId)) continue;
           const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
           const result = truncateUi(stringifyToolPayload(block.content));
           const resultSignature = JSON.stringify([toolName, result, block.is_error === true]);
