@@ -156,10 +156,14 @@ export async function prepareInvocationAutomaticGoal(input: {
     tryRecordRunEvent({ runId: input.runId, chatId: input.chatId, kind: "automatic_goal_intake", payload: {
       sourceMessageId: source.messageId, intent: decision.intent, commitment: decision.commitment,
       ...(decision.intent === "execute" ? { lifecycle: resolveGoalLifecycle(decision.lifecycle) } : {}),
+      ...(decision.turnScope ? { turnScope: decision.turnScope } : {}),
       classified: true,
       ...("attempts" in decision && decision.attempts ? { attempts: decision.attempts } : {}),
     } });
     if (decision.intent !== "execute" || decision.commitment !== "now") return { kind: "bypass", decision };
+    // A one-reply request stays an ordinary turn (owner 2026-09-25). Measured before: a one-line file
+    // write became a Goal with 17 invocations and 7 verifier attempts for work done in invocation 1.
+    if (decision.turnScope === "single") return { kind: "bypass", decision };
     stage = "admission";
     const run = admitJudgedAutomaticGoal({
       goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,

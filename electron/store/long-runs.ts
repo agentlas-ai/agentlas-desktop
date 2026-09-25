@@ -1031,6 +1031,47 @@ export function longRunOwnerHold(runId: string): boolean {
   return typeof row?.paused === "number" && (typeof row.released !== "number" || row.paused > row.released);
 }
 
+/**
+ * Host settlement of a system-admitted Goal at its retry cap (owner 2026-09-25). Two exits only:
+ *  - "settled_with_evidence": host-verified evidence exists (passed criteria with admitted refs, none
+ *    failed). Recorded as completed with this reason and the evidence refs — distinct from a verifier pass.
+ *  - "owner_review_required": no such evidence. Parked as blocked with this code; the owner's next
+ *    message or Resume continues it. Nothing automatic starts it again (the sweep skips the code).
+ */
+export const AUTO_GOAL_SETTLED_WITH_EVIDENCE = "auto_goal_settled_with_evidence";
+export const AUTO_GOAL_OWNER_REVIEW_REQUIRED = "auto_goal_owner_review_required";
+
+export function settleAutomaticGoalAtRetryCap(input: {
+  runId: string; expectedVersion: number;
+  outcome: typeof AUTO_GOAL_SETTLED_WITH_EVIDENCE | typeof AUTO_GOAL_OWNER_REVIEW_REQUIRED;
+  retries: number; evidenceRefs: readonly string[]; receiptIds: readonly string[];
+}): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(input.runId);
+    if (!current || current.version !== input.expectedVersion || current.surface === "science"
+      || !["blocked", "paused", "waiting_tool"].includes(current.status)) throw new Error("auto_goal_retry_cap_state_changed");
+    if (input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE
+      && (getChatGoalRevision(current.goalId)?.lifecycle === "ongoing" || input.evidenceRefs.length === 0)) {
+      throw new Error("auto_goal_retry_cap_settlement_not_admissible");
+    }
+    const now = new Date().toISOString();
+    const to = input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE ? "completed" : "blocked";
+    const changed = db.prepare(`UPDATE long_runs SET status = ?, pause_reason = NULL, blocked_reason = ?, paused_at = NULL,
+        completed_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = ? AND version = ?`)
+      .run(to, to === "blocked" ? input.outcome : null, to === "completed" ? now : null, now,
+        current.id, current.status, current.version);
+    if (changed.changes !== 1) throw new Error("auto_goal_retry_cap_state_changed");
+    appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+      payload: { from: current.status, to, reason: input.outcome, retries: input.retries,
+        evidenceRefs: [...input.evidenceRefs].slice(0, 32), receiptIds: [...input.receiptIds].slice(0, 32) }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  const next = getLongRun(input.runId);
+  if (!next) throw new Error("long_run_transition_readback_failed");
+  return next;
+}
+
 export function transitionLongRun(input: {
   runId: string;
   to: LongRunStatus;

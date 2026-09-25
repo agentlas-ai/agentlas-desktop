@@ -6,8 +6,9 @@ import {
   type RequiredVerdict,
 } from "../system-agents/judgment";
 
-type IntakeLabel = Exclude<GoalIntakeDecision["intent"], "execute"> | "execute_finite" | "execute_ongoing";
-const INTAKE_LABELS: readonly IntakeLabel[] = ["execute_finite", "execute_ongoing", "question", "explore", "conditional", "unknown"];
+type IntakeLabel = Exclude<GoalIntakeDecision["intent"], "execute"> | "execute_single_turn" | "execute_multi_turn" | "execute_ongoing";
+const INTAKE_LABELS: readonly IntakeLabel[] = ["execute_single_turn", "execute_multi_turn", "execute_ongoing", "question", "explore", "conditional", "unknown"];
+const FINITE_EXECUTION: ReadonlySet<IntakeLabel> = new Set(["execute_single_turn", "execute_multi_turn"]);
 export const AUTOMATIC_GOAL_INTENT_TIMEOUT_MS = 60_000;
 
 export interface AutomaticGoalIntentResolution extends GoalIntakeDecision {
@@ -37,12 +38,14 @@ export async function resolveAutomaticGoalIntent(
   if (source.role !== "user" || !source.text.trim() || options.signal?.aborted) return abstain();
   try {
     const result = await (options.judgeFn ?? judgeRequired)({
-      kind: "automatic-goal-intake-v2",
-      question: "Is the current user committing to finite work now, explicitly requesting ongoing work until they stop it, or only asking, exploring, or describing a conditional future wish?",
+      kind: "automatic-goal-intake-v3",
+      question: "Is the current user committing to finite work now (finishable in this one reply, or needing more than one turn), explicitly requesting ongoing work until they stop it, or only asking, exploring, or describing a conditional future wish?",
       labels: INTAKE_LABELS,
       input: JSON.stringify(source),
       guidance: [
-        "Choose execute_finite for an actual request to do work now with a finishable outcome, including indirect requests such as can you fix it. A difficult or lengthy task is still finite.",
+        "An actual request to do work now with a finishable outcome (including indirect requests such as can you fix it) is execute_single_turn or execute_multi_turn.",
+        "Choose execute_single_turn when the assistant can finish it within this one reply: an answer, a lookup, or an edit/creation of a few files, with nothing leaving the workspace and no acceptance criteria beyond the reply itself.",
+        "Choose execute_multi_turn when it needs more than one turn (build, iterate, test, research across many sources, long or staged work), OR has an outward effect beyond the workspace (sending, posting, publishing, purchasing, deploying, contacting someone), OR the user states acceptance criteria beyond the reply. A difficult or lengthy task is multi-turn. If unsure between the two, choose execute_multi_turn.",
         "Choose execute_ongoing only when the user explicitly requests a continuing responsibility with no final deliverable or end condition, to be retained until they stop it. Its work happens in bounded episodes separated by waits; one successful episode does not finish the goal.",
         "Judge the whole meaning, never keyword presence or the fact that the domain is SNS. A time-limited campaign or a specified target is finite. If lifetime or execution commitment is ambiguous, choose unknown rather than invent an ongoing mandate.",
         "Questions about capability or facts are question. Discussion of options without commitment is explore.",
@@ -63,10 +66,12 @@ export async function resolveAutomaticGoalIntent(
     }
     return {
       messageId: source.messageId,
-      intent: result.verdict === "execute_finite" || result.verdict === "execute_ongoing" ? "execute" : result.verdict,
-      commitment: result.verdict === "execute_finite" || result.verdict === "execute_ongoing" ? "now" : "uncertain",
-      ...(result.verdict === "execute_finite" ? { lifecycle: "finite" as const }
-        : result.verdict === "execute_ongoing" ? { lifecycle: "ongoing" as const } : {}),
+      intent: FINITE_EXECUTION.has(result.verdict) || result.verdict === "execute_ongoing" ? "execute"
+        : result.verdict as Exclude<IntakeLabel, "execute_single_turn" | "execute_multi_turn" | "execute_ongoing">,
+      commitment: FINITE_EXECUTION.has(result.verdict) || result.verdict === "execute_ongoing" ? "now" : "uncertain",
+      ...(FINITE_EXECUTION.has(result.verdict) ? { lifecycle: "finite" as const,
+          turnScope: result.verdict === "execute_single_turn" ? "single" as const : "multi" as const }
+        : result.verdict === "execute_ongoing" ? { lifecycle: "ongoing" as const, turnScope: "multi" as const } : {}),
       classification: "classified",
       ...(result.attempts ? { attempts: result.attempts } : {}),
     };

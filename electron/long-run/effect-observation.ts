@@ -23,6 +23,8 @@
  *    남기므로 재시작·재호출에도 두 번 뜨지 않는다. 결과가 모름이면 사람에게 넘기고 끝난다 — 고리 없음.
  *  - 시간 상한은 실행기가 건다(EFFECT_OBSERVATION_TIME_LIMIT_MS).
  */
+import { longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE } from "../store/long-runs";
+import { automaticGoalAtRetryCap } from "./auto-goal-retry-cap";
 import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
 import { EFFECT_OBSERVATION_MARKER, parseEffectObservationMarker, type ParsedEffectObservation } from "../../shared/effect-observation";
@@ -351,6 +353,9 @@ export function maybeDispatchEffectObservation(
   if (!observableBlockedRun(run)) {
     return { status: "skipped", reason: "not_blocked_on_uncertain_effects" };
   }
+  // An observation is a model run: an owner pause or a spent automatic retry budget stops it too.
+  if (longRunOwnerHold(run.id)) return { status: "skipped", reason: LONG_RUN_OWNER_HOLD_CODE };
+  if (automaticGoalAtRetryCap(run)) return { status: "skipped", reason: "auto_goal_retry_cap" };
   const chatId = run.rootChatId;
   const chat = chatId ? getChat(chatId) : null;
   if (!chatId || !chat || chat.goalId !== goalId) return { status: "skipped", reason: "chat_binding_changed" };

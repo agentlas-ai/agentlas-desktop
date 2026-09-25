@@ -39,8 +39,9 @@ import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, getLongRunAttemptReview, nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
-  longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
+  longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE, AUTO_GOAL_OWNER_REVIEW_REQUIRED,
 } from "../store/long-runs";
+import { automaticGoalAtRetryCap, isAutomaticGoal, settleCappedAutomaticGoal } from "./auto-goal-retry-cap";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import {
   assertDesktopLongRunAdmissionOpen, confirmDesktopLongRunResumeDispatched, desktopAppInstanceId,
@@ -263,6 +264,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   const defer = (detail: string): BlockedGoalSweepResult => ({ runId: run.id, fromReason: run.blockedReason, action: "deferred", detail });
   // An owner/user pause is a boundary: no observation, retry or resume until the owner resumes it.
   if (longRunOwnerHold(run.id)) return defer(LONG_RUN_OWNER_HOLD_CODE);
+  // A system-admitted Goal that spent its automatic retries settles (evidence) or waits for the owner.
+  if (isAutomaticGoal(run) && (run.blockedReason === AUTO_GOAL_OWNER_REVIEW_REQUIRED || automaticGoalAtRetryCap(run))) {
+    return defer(settleCappedAutomaticGoal(run, currentUiLocale() === "ko" ? "ko" : "en") ?? AUTO_GOAL_OWNER_REVIEW_REQUIRED);
+  }
 
   // 0. Deterministic end rules.
   const qa = staleQaGoalMarker(getChatGoalRevision(run.goalId)?.originalRequest.text ?? run.objective)
