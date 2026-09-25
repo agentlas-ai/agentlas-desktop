@@ -775,6 +775,108 @@ export interface McpToolCallOptions {
   /** Mutable transaction seal. First compatible Workforce call fills it; all
    * later calls must use the exact same real runtime target/version/protocol. */
   runtimePin?: McpRuntimePin;
+  /** Run-scoped connection reuse (createMcpToolCallSession). Omitted: one
+   * connection per call, exactly as before. */
+  session?: McpToolCallSession;
+}
+
+/**
+ * One MCP connection per server for the whole run, like a CLI runtime keeps.
+ *
+ * Host-loop runtimes (Agentlas serving, BYOK, local models) used to spawn and
+ * initialize a fresh stdio server for every tools/call and close it right after.
+ * The MCP lifecycle scopes server state to the connection (initialize → operation
+ * → shutdown; modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
+ * so every stateful server lost its state between calls. Measured on serving
+ * (parity QA 2026-09-25): browser_navigate https://example.com succeeded, the next
+ * browser_snapshot saw "Page URL: about:blank", and an unsafe-code approval
+ * failed as unverified-site — multi-step browsing was impossible on serving while
+ * claude-code/codex (one server process per run) completed it.
+ *
+ * Calls to one server are serialized (one boundary state per connection); a
+ * failed, timed-out or closed connection is evicted and the next call reconnects.
+ * The session closes on the run's abort signal or after idleMs without a call.
+ */
+export interface McpToolCallSession {
+  readonly closed: boolean;
+  close(): void;
+}
+
+interface McpSessionEntry {
+  client: Client;
+  transport: Transport;
+  boundary: McpToolCallBoundaryState;
+  server: InstalledMcpServer;
+  prepared?: PreparedMcpBinding;
+}
+
+class RunMcpToolCallSession implements McpToolCallSession {
+  private readonly entries = new Map<string, McpSessionEntry>();
+  private readonly locks = new Map<string, Promise<void>>();
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private isClosed = false;
+
+  constructor(private readonly idleMs: number, signal?: AbortSignal) {
+    if (signal?.aborted) this.close();
+    else signal?.addEventListener("abort", () => this.close(), { once: true });
+    this.touch();
+  }
+
+  get closed(): boolean { return this.isClosed; }
+
+  touch(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.isClosed) return;
+    this.timer = setTimeout(() => this.close(), this.idleMs);
+    this.timer.unref?.();
+  }
+
+  async acquire(key: string): Promise<() => void> {
+    const previous = this.locks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => mine);
+    this.locks.set(key, tail);
+    await previous;
+    return () => {
+      release();
+      if (this.locks.get(key) === tail) this.locks.delete(key);
+    };
+  }
+
+  take(key: string, server: InstalledMcpServer, prepared?: PreparedMcpBinding): McpSessionEntry | null {
+    const entry = this.entries.get(key);
+    if (!entry) return null;
+    // The SDK drops its transport when the connection closes (server exit included).
+    const live = (entry.client as unknown as { transport?: unknown }).transport !== undefined;
+    if (!live || entry.server !== server || entry.prepared !== prepared) { this.evict(key); return null; }
+    return entry;
+  }
+
+  put(key: string, entry: McpSessionEntry): void {
+    if (this.isClosed) return;
+    this.entries.set(key, entry);
+  }
+
+  evict(key: string): void {
+    const entry = this.entries.get(key);
+    if (!entry) return;
+    this.entries.delete(key);
+    void closeMcpClientAndTransport(entry.client, entry.transport).catch(() => {});
+  }
+
+  close(): void {
+    if (this.isClosed) return;
+    this.isClosed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    for (const key of [...this.entries.keys()]) this.evict(key);
+  }
+}
+
+export function createMcpToolCallSession(opts: { signal?: AbortSignal; idleMs?: number } = {}): McpToolCallSession {
+  return new RunMcpToolCallSession(Math.max(1_000, opts.idleMs ?? 120_000), opts.signal);
 }
 
 function workforceProtocolDigest(tools: WorkforceMcpInventoryTool[]): string | null {
@@ -801,7 +903,13 @@ async function callServerToolContentInternal(
     void client?.close().catch(() => {});
     void transport?.close().catch(() => {});
   };
-  const boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
+  let boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
+  // Hephaestus keeps its per-call runtime selection/pin checks; everything else can reuse.
+  const session = options?.session instanceof RunMcpToolCallSession && !options.session.closed
+    && server.catalogId !== HEPHAESTUS_NETWORK_CATALOG_ID && !options.runtimePin ? options.session : null;
+  const sessionKey = server.id;
+  let releaseSession: (() => void) | null = null;
+  let sessionEntry: McpSessionEntry | null = null;
   try {
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
       toolName.startsWith("workforce.");
@@ -834,19 +942,39 @@ async function callServerToolContentInternal(
             ? (options?.runtimePin?.runtimeRoot ? 1 : 2)
             : 2;
         for (let attempt = 0; attempt < maxRuntimeAttempts; attempt += 1) {
-          boundaryState.phase = "pre-request";
-          boundaryState.requestId = null;
-          const activeClient = new Client(
-            { name: "agentlas-desktop", version: electronAppVersion() },
-            { capabilities: {} },
-          );
-          client = activeClient;
-          const created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal, options?.prepared);
-          preparation.signal.throwIfAborted();
-          transport = created.transport;
-          instrumentMcpToolCallTransport(transport, boundaryState);
-          await activeClient.connect(transport);
-          preparation.signal.throwIfAborted();
+          if (session) {
+            releaseSession ??= await session.acquire(sessionKey);
+            preparation.signal.throwIfAborted();
+            sessionEntry = session.take(sessionKey, server, options?.prepared);
+          }
+          let activeClient: Client;
+          let created: CreatedTransport = { transport: null as unknown as Transport, runtimeRoot: null };
+          if (sessionEntry) {
+            activeClient = sessionEntry.client;
+            client = activeClient;
+            transport = sessionEntry.transport;
+            boundaryState = sessionEntry.boundary;
+            boundaryState.phase = "pre-request";
+            boundaryState.requestId = null;
+          } else {
+            boundaryState.phase = "pre-request";
+            boundaryState.requestId = null;
+            activeClient = new Client(
+              { name: "agentlas-desktop", version: electronAppVersion() },
+              { capabilities: {} },
+            );
+            client = activeClient;
+            created = await createTransport(server, resolved, options?.runtimePin?.runtimeRoot, preparation.signal, options?.prepared);
+            preparation.signal.throwIfAborted();
+            transport = created.transport;
+            instrumentMcpToolCallTransport(transport, boundaryState);
+            await activeClient.connect(transport);
+            preparation.signal.throwIfAborted();
+            if (session) {
+              sessionEntry = { client: activeClient, transport, boundary: boundaryState, server, prepared: options?.prepared };
+              session.put(sessionKey, sessionEntry);
+            }
+          }
 
           const checkedInventory = options?.expectedToolSchemaDigest
             ? await listCompleteToolInventory(activeClient, preparation.signal) : null;
@@ -965,7 +1093,8 @@ async function callServerToolContentInternal(
             }
             images.push({ mediaType: item.mimeType, data: item.data });
           }
-          await closeMcpClientAndTransport(activeClient, transport);
+          if (session && sessionEntry) session.touch();
+          else await closeMcpClientAndTransport(activeClient, transport);
           client = null;
           transport = null;
           return { text, images, isError: res.isError === true };
@@ -979,6 +1108,8 @@ async function callServerToolContentInternal(
     return result;
   } catch (err) {
     stop();
+    // A session connection that failed, timed out or was aborted is never reused.
+    if (session && sessionEntry) session.evict(sessionKey);
     if (client) await closeMcpProbeBounded(client, transport);
     client = null;
     transport = null;
@@ -994,6 +1125,9 @@ async function callServerToolContentInternal(
         : redactResolvedSecrets(rawMessage, resolved),
       reason,
     );
+  } finally {
+    // Assigned inside the timed closure above; TS cannot see that assignment here.
+    (releaseSession as (() => void) | null)?.();
   }
 }
 
