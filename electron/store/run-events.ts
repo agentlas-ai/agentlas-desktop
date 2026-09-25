@@ -11,6 +11,7 @@ import {
   QUESTION_CONTINUATION_REPLY_MAX_LENGTH,
   type FailureEventUi,
   type InvocationRunReceipt,
+  type InvocationRuntimeFailure,
   type McpInvocationEvent,
   type McpInvocationRequest,
   type OrchestrationTarget,
@@ -88,6 +89,21 @@ interface FailureEventRow {
   error_code: string | null;
   error_message: string;
   payload_json: string;
+}
+
+function boundedRuntimeFailure(value: unknown): InvocationRuntimeFailure | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.kind !== "quota" && candidate.kind !== "auth" && candidate.kind !== "refused") return undefined;
+  if (candidate.source !== "marker" && candidate.source !== "exit" && candidate.source !== "heuristic") return undefined;
+  const providerCode = typeof candidate.providerCode === "string" && /^[a-zA-Z0-9_.-]{1,96}$/.test(candidate.providerCode)
+    ? candidate.providerCode : undefined;
+  const retryAfterAt = candidate.kind === "quota" && typeof candidate.retryAfterAt === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate.retryAfterAt)
+    && Number.isFinite(Date.parse(candidate.retryAfterAt))
+    ? candidate.retryAfterAt : undefined;
+  return { kind: candidate.kind, source: candidate.source,
+    ...(providerCode ? { providerCode } : {}), ...(retryAfterAt ? { retryAfterAt } : {}) };
 }
 
 /**
@@ -224,11 +240,13 @@ function scienceRuntimeEventJson(event: McpInvocationEvent): string {
       },
     };
   } else if (event.kind === "error") {
+    const runtimeFailure = boundedRuntimeFailure(event.error?.runtimeFailure);
     redacted = {
       ...common,
       error: {
         code: typeof event.error?.code === "string" ? truncate(event.error.code, 160) : undefined,
         message: typeof event.error?.message === "string" ? truncate(event.error.message, 1_000) : undefined,
+        ...(runtimeFailure ? { runtimeFailure } : {}),
       },
     };
   } else if (event.kind === "final") {
@@ -1370,6 +1388,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
         status: ev.status,
       })
     : undefined;
+  const runtimeFailure = boundedRuntimeFailure(ev.error?.runtimeFailure);
   const payload = {
     eventKind: ev.kind,
     status: ev.status,
@@ -1431,6 +1450,10 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     // stop ("cancelled") from a runtime failure.
     errorCode: ev.error?.code,
     errorMessage: ev.error?.message,
+    runtimeFailureKind: runtimeFailure?.kind,
+    runtimeFailureSource: runtimeFailure?.source,
+    runtimeFailureProviderCode: runtimeFailure?.providerCode,
+    runtimeFailureRetryAfterAt: runtimeFailure?.retryAfterAt,
     reasoningPhase: ev.reasoning?.phase,
     reasoningDurationMs: ev.reasoning?.durationMs,
     // end에만 전문이 온다(delta는 live 전용 — 아래에서 원장에 안 남긴다).
@@ -1969,6 +1992,12 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     steeringEvidence,
   ) ? "steering" as const : undefined;
   const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
+  const runtimeFailure = boundedRuntimeFailure({
+    kind: terminalPayload.runtimeFailureKind,
+    source: terminalPayload.runtimeFailureSource,
+    providerCode: terminalPayload.runtimeFailureProviderCode,
+    retryAfterAt: terminalPayload.runtimeFailureRetryAfterAt,
+  });
   // 원래는 reverse().map(parse)가 결과를 찾은 뒤에도 **모든** payload를 eager하게
   // 파싱했다. 뒤에서부터 찾고 발견 즉시 멈춘다.
   let settledPayload: Record<string, unknown> | undefined;
@@ -2053,6 +2082,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       : status !== "completed" && stringPayload(terminalPayload, "errorMessage")
         ? { errorMessage: stringPayload(terminalPayload, "errorMessage") }
         : {}),
+    ...(status === "failed" && runtimeFailure ? { runtimeFailure } : {}),
     ...(interruptionCause ? { interruptionCause } : {}),
   };
 }

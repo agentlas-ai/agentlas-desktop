@@ -2805,6 +2805,10 @@ export class InvocationService {
                 resultFolder: record.resultFolder,
                 errorCode: event.error?.code,
                 errorMessage: event.error?.message,
+                runtimeFailureKind: event.error?.runtimeFailure?.kind,
+                runtimeFailureSource: event.error?.runtimeFailure?.source,
+                runtimeFailureProviderCode: event.error?.runtimeFailure?.providerCode,
+                runtimeFailureRetryAfterAt: event.error?.runtimeFailure?.retryAfterAt,
               },
             });
           }
