@@ -60,7 +60,9 @@ export interface OneHubDerivativeDraft {
   gates: {
     entitlement: OneHubDerivativeUnknownGate;
     rights: OneHubDerivativeUnknownGate;
+    /** Retained in v1 draft records only; creator settlement was permanently closed. */
     economy: OneHubDerivativeUnknownGate;
+    /** Retained in v1 draft records only; no Hub publication fee is charged. */
     fee: OneHubDerivativeUnknownGate;
     explicitPublishApproval: false;
     publishAllowed: false;

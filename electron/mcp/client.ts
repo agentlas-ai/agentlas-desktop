@@ -94,7 +94,6 @@ import { getLongRunByGoalId, recordLongRunUsage } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
-import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
@@ -1376,13 +1375,13 @@ function emitHostNotice(
 }
 
 /**
- * 프로젝트 렌트 정책의 하드 게이트(오너 규칙 2026-08-16: 모델의 자발적 협조에
+ * 프로젝트의 공개 Hub 에이전트 자동 사용 동의 게이트(모델의 자발적 협조에
  * 기대는 계약은 배선이 아니다). 프롬프트에 주입되는 정책 문장과 별개로, **자동**
  * 편성 경로가 실행 직전에 통과해야 하는 기계 관문이다 — 사용자가 명시적으로 고른
  * 로스터(추천 시트 선택, 직접 지목)는 이 함수를 거치지 않는다.
  *
- * Hub 스펙은 다음 중 하나면 통과: 이 프로젝트에서 렌트허용됨 · 활성 장기대여 중 ·
- * 사용자 프롬프트가 slug/이름을 직접 언급함. 나머지는 제외하고 고지를 남긴다.
+ * Hub 스펙은 프로젝트에서 자동 사용을 허용했거나 사용자가 직접 지목한 경우에만
+ * 통과한다. 옛 유료 장기대여 상태는 무료 Hub의 동의를 대신하지 않는다.
  */
 async function gateHubSpecsByProjectRentPolicy(input: {
   specs: BorrowedAgentSpec[];
@@ -1399,12 +1398,6 @@ async function gateHubSpecsByProjectRentPolicy(input: {
   } catch {
     allowed = new Set();
   }
-  let leased: Set<string>;
-  try {
-    leased = await activeLeasedSlugs();
-  } catch {
-    leased = new Set();
-  }
   const prompt = String(userPrompt || "").toLowerCase();
   const explicitlyNamed = (s: BorrowedAgentSpec): boolean => {
     const slug = (s.slug || "").trim().toLowerCase();
@@ -1419,20 +1412,20 @@ async function gateHubSpecsByProjectRentPolicy(input: {
       continue;
     }
     const slug = (s.slug || "").toLowerCase();
-    if (allowed.has(slug) || leased.has(slug) || explicitlyNamed(s)) kept.push(s);
+    if (allowed.has(slug) || explicitlyNamed(s)) kept.push(s);
     else dropped.push(s);
   }
   if (dropped.length) {
     const names = dropped.map((s) => s.name || s.slug).join(", ");
     emitHostNotice(sink, {
       level: "info",
-      code: "hub_rent_not_allowed",
+      code: "hub_auto_use_not_allowed",
       message: locale === "ko"
-        ? `프로젝트 렌트 정책으로 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 쓰려면 프로젝트 화면에서 [렌트허용]을 켜거나 직접 지목하세요.`
-        : `Project rent policy excluded ${dropped.length} Hub agent(s): ${names}. Enable [Allow rent] on the project screen or name them explicitly to use them.`,
+        ? `이 프로젝트에서 자동 사용을 허용하지 않은 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 프로젝트의 [자동 사용]을 켜거나 직접 지목하세요.`
+        : `This project has not enabled automatic use for ${dropped.length} Hub agent(s): ${names}. Turn on [Auto use] in the project or name them explicitly.`,
       i18n: {
-        ko: `프로젝트 렌트 정책으로 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 쓰려면 프로젝트 화면에서 [렌트허용]을 켜거나 직접 지목하세요.`,
-        en: `Project rent policy excluded ${dropped.length} Hub agent(s): ${names}. Enable [Allow rent] on the project screen or name them explicitly to use them.`,
+        ko: `이 프로젝트에서 자동 사용을 허용하지 않은 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 프로젝트의 [자동 사용]을 켜거나 직접 지목하세요.`,
+        en: `This project has not enabled automatic use for ${dropped.length} Hub agent(s): ${names}. Turn on [Auto use] in the project or name them explicitly.`,
       },
     });
   }
@@ -4023,7 +4016,7 @@ ${effectiveUserPrompt}`;
     if (!Array.isArray(rawSpecs) || !rawSpecs.length || receipt.schemaVersion !== "agentlas.desktop-workforce-selection-receipt.v1") {
       throw new Error("workforce_goal_runtime_invalid");
     }
-    // 자동 재사용 경로 — 프로젝트 렌트 정책 하드 게이트를 지나야 실행된다.
+    // 자동 재사용 경로 — 프로젝트의 공개 Hub 자동 사용 동의를 확인한다.
     const specs = await gateHubSpecsByProjectRentPolicy({
       specs: rawSpecs,
       projectId: invocationProjectId,
@@ -4033,8 +4026,8 @@ ${effectiveUserPrompt}`;
     });
     if (!specs.length) {
       throw new Error(locale === "ko"
-        ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
-        : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
+        ? "이 프로젝트에서 자동 사용을 허용한 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트의 [자동 사용]을 켜거나 에이전트를 직접 지목해 주세요."
+        : "No Hub agent is enabled for automatic use in this project. Turn on [Auto use] or name an agent explicitly.");
     }
     const execution = await runBoundTaskForceInvocation({
       req: { ...req, borrowAgents: undefined, taskForceTargets: undefined },
@@ -4263,7 +4256,7 @@ ${effectiveUserPrompt}`;
           workOrderRefinements: workforce.receipt.workOrderRefinements,
         },
       });
-      // 자동 편성(recruit) 경로 — 프로젝트 렌트 정책 하드 게이트를 지나야 실행된다.
+      // 자동 편성(recruit) 경로 — 프로젝트의 공개 Hub 자동 사용 동의를 확인한다.
       const rentGatedWorkforceSpecs = await gateHubSpecsByProjectRentPolicy({
         specs: workforce.specs,
         projectId: invocationProjectId,
@@ -4273,8 +4266,8 @@ ${effectiveUserPrompt}`;
       });
       if (!rentGatedWorkforceSpecs.length) {
         throw new Error(locale === "ko"
-          ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
-          : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
+          ? "이 프로젝트에서 자동 사용을 허용한 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트의 [자동 사용]을 켜거나 에이전트를 직접 지목해 주세요."
+          : "No Hub agent is enabled for automatic use in this project. Turn on [Auto use] or name an agent explicitly.");
       }
       const execution = await runBoundTaskForceInvocation({
         req: { ...req, userPrompt: explicitWorkforceGoal, borrowAgents: undefined, taskForceTargets: undefined },

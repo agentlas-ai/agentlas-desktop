@@ -799,7 +799,6 @@ import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
 import { readAgentPrices, setAgentPrices } from "./cloud-agents/pricing";
 import {
-  activeLeasedSlugs,
   getAgentLeaseQuote,
   listAgentLeasesCached,
   purchaseAgentLease,
@@ -7085,10 +7084,8 @@ export function registerIpcHandlers(): void {
           noHub: input.offline, // 오프라인-안전: 로컬 라우팅만
           timeoutMs: 30_000,
         });
-        // 활성 장기대여 slug 는 호출 비용 0 — 페이월/고지액이 실제 청구액을 넘보지 않게
-        // 정규화 단계에서 확정한다(리스 목록은 main 의 TTL 캐시).
-        const leasedSlugs = await activeLeasedSlugs().catch(() => new Set<string>());
-        return normalizeRecommendation(res.json, input.query, { leasedSlugs });
+        // 공개 Hub 호출은 무료이며 과거 유료 장기대여 상태를 조회할 필요가 없다.
+        return normalizeRecommendation(res.json, input.query);
       } catch {
         return normalizeRecommendation(null, input.query);
       }

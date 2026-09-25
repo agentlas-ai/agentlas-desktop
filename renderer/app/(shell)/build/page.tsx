@@ -196,10 +196,15 @@ function friendlyHephaestusMessage(raw: string, ko: boolean): string {
       ? "검토가 필요한 경고가 있습니다. 경고 내용을 확인한 뒤 다시 업로드하세요."
       : "The package has warnings that need review. Check the warnings before uploading again.";
   }
-  if (lower.includes("quota") || lower.includes("credit")) {
+  if (lower.includes("quota")) {
     return ko
-      ? "크레딧 또는 사용량 한도 때문에 멈췄습니다. 계정/크레딧 상태를 확인하세요."
-      : "Upload stopped because of credits or quota. Check account and credit status.";
+      ? "Agent Cloud 저장 한도 때문에 업로드가 멈췄습니다. 요금제의 저장 가능 에이전트 수를 확인하세요."
+      : "Upload stopped because the Agent Cloud storage limit was reached. Check your plan's agent capacity.";
+  }
+  if (lower.includes("credit")) {
+    return ko
+      ? "업로드에는 크레딧이 들지 않습니다. 이전 서버 응답이 표시되었습니다. 새로고침한 뒤 다시 시도하세요."
+      : "Uploading does not spend credits. Refresh and retry after this outdated server response.";
   }
   if (lower.includes("unauthorized") || lower.includes("not logged") || lower.includes("sign in") || /\b401\b/.test(lower)) {
     return ko

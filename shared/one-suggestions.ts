@@ -175,6 +175,7 @@ export interface OneAutomationSignal {
   preview: OneAutomationPreview;
 }
 
+/** Retired creator-commerce receipt shape, accepted only for older saved suggestions. */
 export interface OneHubEconomyAvailability {
   available: true;
   policyRef: string;
@@ -191,7 +192,8 @@ export interface OneHubDerivativeSignal {
   publicSuitabilityRef: string;
   sanitizedManifestRef: string;
   rightsReviewRef: string;
-  economy: OneHubEconomyAvailability;
+  /** @deprecated Creator settlement is permanently closed; new proposals omit this field. */
+  economy?: OneHubEconomyAvailability;
   excludedPrivateCategories: OneHubPrivateExclusion[];
 }
 
@@ -620,8 +622,9 @@ function isHubEconomy(value: unknown): value is OneHubEconomyAvailability {
 function isHubDerivativeSignal(value: unknown): value is OneHubDerivativeSignal {
   if (!isRecord(value) || !exactKeys(value, [
     "privateSourceId", "ownerVerified", "publicReleaseIntentConfirmed", "privateInputExcluded", "publicSuitability",
-    "publicSuitabilityRef", "sanitizedManifestRef", "rightsReviewRef", "economy",
+    "publicSuitabilityRef", "sanitizedManifestRef", "rightsReviewRef",
     "excludedPrivateCategories",
+    ...(Object.hasOwn(value, "economy") ? ["economy"] : []),
   ])) return false;
   return isSafeOneSuggestionId(value.privateSourceId)
     && value.ownerVerified === true
@@ -631,7 +634,7 @@ function isHubDerivativeSignal(value: unknown): value is OneHubDerivativeSignal 
     && isSafeOneSuggestionId(value.publicSuitabilityRef)
     && isSafeOneSuggestionId(value.sanitizedManifestRef)
     && isSafeOneSuggestionId(value.rightsReviewRef)
-    && isHubEconomy(value.economy)
+    && (value.economy === undefined || isHubEconomy(value.economy))
     && hasExactHubExclusions(value.excludedPrivateCategories);
 }
 
