@@ -1491,6 +1491,13 @@ const runClaudeTurn = async (
      */
 
     const answerChannelToolIds = new Set<string>();
+    /**
+     * The structured answer itself (StructuredOutput input). With --json-schema, claude 2.1.282 streams prose first
+     * (e.g. "4") and carries the schema JSON only here and in result.result; the display used to prefer the streamed
+     * prose, so every schema-bound judgment on claude returned prose and automatic-goal intake failed
+     * (automatic_goal_intake_unavailable — routed defect R1, 2026-09-25).
+     */
+    let structuredAnswer: string | null = null;
     const toolInputById = new Map<string, unknown>();
     const nativeFileProofById = new Map<string, NativeFileProofTicket>();
     const settledToolResultSignatures = new Map<string, string>();
@@ -1892,6 +1899,7 @@ const runClaudeTurn = async (
           } else if (block.type === "tool_use" && block.name) {
             if (runReq.outputSchema && block.name === "StructuredOutput") {
               if (block.id) answerChannelToolIds.add(block.id);
+              try { structuredAnswer = JSON.stringify(block.input ?? null); } catch { /* result.result still carries it */ }
               continue;
             }
             let argStr = "";
@@ -2132,7 +2140,8 @@ const runClaudeTurn = async (
         // 통째로 사라지고 인터리브 앵커가 전부 틀어진다. finalText는 델타 스트리밍이 전혀
         // 없었던 폴백(구형 CLI 등)에서만 쓴다.
         const streamed = combined();
-        const display = streamed || finalText;
+        // Schema-bound runs answer on the structured channel; prose streamed around it is not the answer.
+        const display = runReq.outputSchema ? (structuredAnswer ?? (finalText.trim() || streamed)) : (streamed || finalText);
         if (display) events.onPartial(display);
         if (req.chatId && fingerprint && sessionId) {
           if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
