@@ -408,7 +408,7 @@ export function resumeGoalsWaitingOnProject(dispatcher: EffectObservationDispatc
   try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
   const rows = getDb().prepare(`SELECT l.id FROM long_runs AS l JOIN chats AS c ON c.id = l.root_chat_id
     WHERE l.status = 'blocked' AND l.blocked_reason = ? AND c.project_id = ?
-      AND l.surface IN ('one','work') AND l.execution_location = 'desktop-local' AND l.host_owner_kind = 'desktop'
+      AND l.surface IN ('one','work') AND l.execution_location = 'desktop-local'
     ORDER BY l.updated_at LIMIT 10`).all(WORK_PROJECT_RESIDENCY_BUSY_CODE, projectId) as Array<{ id: string }>;
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: BLOCKED_GOAL_SWEEP_MAX_DISPATCHES - 1 }; // one successor: the project admits one turn
