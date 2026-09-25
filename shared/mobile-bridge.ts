@@ -128,7 +128,6 @@ export const MOBILE_BRIDGE_METHODS = [
   "hub.detail",
   "hub.invoke",
   "hub.install",
-  "hub.leasePreview",
   "billing.credits",
   "hephaestus.engineToggles",
   "hephaestus.routePreview",
@@ -137,7 +136,6 @@ export const MOBILE_BRIDGE_METHODS = [
   "agents.cloudUploadPreview",
   "agents.cloudUploadSave",
   "agents.cloudPublishHub",
-  "cloud.setHubPrices",
   "agents.cloudDelete",
   "build.start",
   "build.status",
@@ -145,7 +143,12 @@ export const MOBILE_BRIDGE_METHODS = [
   "device.revokeSelf",
 ] as const;
 
-export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
+/** Accepted only to give installed Mobile clients a terminal retirement response. */
+const MOBILE_BRIDGE_RETIRED_METHODS = ["hub.leasePreview", "cloud.setHubPrices"] as const;
+
+export type MobileBridgeMethod =
+  | (typeof MOBILE_BRIDGE_METHODS)[number]
+  | (typeof MOBILE_BRIDGE_RETIRED_METHODS)[number];
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
@@ -1963,27 +1966,6 @@ export interface MobileBridgeHubLeasePreviewDto {
   purchaseAuthorized: false;
 }
 
-export const MOBILE_BRIDGE_HUB_PRICE_KINDS = ["RENT", "INGEST", "FORK"] as const;
-export type MobileBridgeHubPriceKind = (typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number];
-
-/**
- * Legacy pricing response shape for installed Mobile clients. New Hub releases
- * are free, and the Desktop bridge returns a retirement refusal for this RPC.
- */
-export interface MobileBridgeHubPricesDto {
-  ok: true;
-  changed: boolean;
-  prices: Partial<Record<MobileBridgeHubPriceKind, number>>;
-}
-
-export interface MobileBridgeHubPriceRefusalDto {
-  code: string;
-  message: string;
-  kind?: string;
-  minCredits?: number;
-  maxCredits?: number;
-}
-
 export interface MobileBridgeCloudDeleteResultDto {
   schema: "agentlas.agent_cloud.delete.v1";
   deleted: true;
@@ -2203,7 +2185,7 @@ export type MobileBridgeRequestParseResult =
   | { ok: true; value: MobileBridgeRpcRequest }
   | { ok: false; error: MobileBridgeRpcFailure };
 
-const METHOD_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_METHODS);
+const METHOD_SET: ReadonlySet<string> = new Set([...MOBILE_BRIDGE_METHODS, ...MOBILE_BRIDGE_RETIRED_METHODS]);
 const EVENT_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_EVENT_NAMES);
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
@@ -3233,30 +3215,8 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "agents.cloudPublishHub accepts only agentLocalId, idempotencyKey, and confirmOverwrite";
     case "cloud.setHubPrices": {
-      if (!hasOnlyKeys(params, ["slug", "prices", "idempotencyKey"])) {
-        return "cloud.setHubPrices accepts only slug, prices, and idempotencyKey";
-      }
-      const base = firstError(
-        requiredString(params, "slug", 160),
-        requiredString(params, "idempotencyKey", 160),
-      );
-      if (base) return base;
-      const prices = params.prices;
-      if (!isRecord(prices) || !hasOnlyKeys(prices, MOBILE_BRIDGE_HUB_PRICE_KINDS)) {
-        return "prices accepts only RENT, INGEST, and FORK";
-      }
-      const kinds = Object.keys(prices);
-      if (kinds.length === 0) {
-        return "prices must name at least one of RENT, INGEST, or FORK";
-      }
-      for (const kind of kinds) {
-        const value = (prices as Record<string, unknown>)[kind];
-        // null removes the price; the SERVER remains the bounds authority.
-        if (value === null) continue;
-        if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) {
-          return `${kind} must be null or an integer credit amount of at least 1`;
-        }
-      }
+      // Parse an installed client's legacy frame so Main can return the
+      // explicit retirement refusal. No price shape is part of the new API.
       return null;
     }
     case "agents.cloudDelete":
