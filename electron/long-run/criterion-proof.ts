@@ -169,7 +169,8 @@ export function admissibleCriterionProofRefs(contract:CriterionProofContract,ref
       const receipt = getInvocationRunReceipt(id);
       if (receipt?.status !== 'completed' || receipt.chatId !== captured.goal.chatId
         || !['read','write','full'].includes(receipt.executionPermission ?? '')) return false;
-      try { return readInvocationEffectBoundary({invocationRunId:id,expectedChatId:captured.goal.chatId}).effects === 'settled'; }
+      // Quiesced (only typed failed-but-finished calls open) is enough to audit permission and folder scope (e160c4c9/97d33c7e).
+      try { const read = readInvocationEffectBoundary({invocationRunId:id,expectedChatId:captured.goal.chatId}); return read.effects === 'settled' || read.quiesced === true; }
       catch { return false; }
     });
   }
