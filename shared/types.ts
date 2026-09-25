@@ -6084,9 +6084,7 @@ export interface Recommendation {
   /** 전체 예상 크레딧(점추정). */
   totalEstCredits: number | null;
   totalEstCreditsRange?: [number, number];
-  /** true 면 totalEstCredits 는 총액이 아니라 하한이다 — 단가 미상(perCallCredits 없음) Hub 행이
-   *  섞여 합산에서 빠졌다는 뜻. 부분합을 총액으로 표기·비교하면 사용자에게 보여준 숫자보다
-   *  서버가 더 청구한다. 결제/페이월 소비자는 반드시 이 플래그를 함께 읽어야 한다. */
+  /** 과거 유료 Hub 견적 호환 필드. 공개 Hub 호출은 무료이며 이 값으로 결제하지 않는다. */
   totalEstCreditsPartial?: boolean;
   /** 항상 추정치임을 UI 가 명시하도록 하는 리터럴 플래그. */
   estimate: true;
@@ -6771,18 +6769,14 @@ export type CloudAgentSetPricesResult =
   | { ok: true; prices: CloudAgentPrices; changed: boolean }
   | { ok: false; code: string; message: string; kind?: string; maxCredits?: number; minCredits?: number };
 
-/**
- * Day-based prepaid agent lease (owner decision 2026-08-18). The old 24-hour
- * auto-lease is retired: RENT bills per work order, and a long-term lease is
- * bought explicitly for 1..30 days. While active, calls to that slug cost 0.
- */
+/** Closed paid-lease wire shape retained for installed-client compatibility. */
 export interface AgentLeaseQuote {
-  /** False when the account is signed out or the server could not be reached. */
+  /** Always false after marketplace settlement closure. */
   ok: boolean;
   active: boolean;
   leasedUntil: string | null;
   perDayCredits: number | null;
-  /** False → the creator does not sell long-term leases for this agent. */
+  /** Always false; creators no longer sell Hub leases. */
   leaseOffered: boolean;
   /** Machine-readable reason when the quote could not be used. */
   code?: "signed_out" | "network" | "http" | "invalid_slug" | "lease_not_offered" | string;
@@ -7107,8 +7101,7 @@ export interface AgentlasIpc {
     /** Provider allowlist와 main-owned cooldown 아래 캐시 무효화+재조회를 원자적으로 수행한다. */
     retry: (providerId: UsageRetryProviderId) => Promise<UsageRetryResult>;
   };
-  /** Agentlas Hub 크레딧 — 구독(사용 가능) 잔액과 렌트수익(이동 가능) 잔액을 함께 조회하고,
-   *  렌트수익 → 구독 일방 전송을 수행한다. 세션 쿠키로 Hub HTTP API를 main에서 호출. */
+  /** Hosted AI 사용 잔액. 과거 창작자 수익 전송 메서드는 폐쇄된 IPC 호환용으로만 남는다. */
   billing: {
     getCredits: () => Promise<HubCreditBalance>;
     transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
