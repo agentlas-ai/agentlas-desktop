@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.2.42 — 2026-09-25
+
+- **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- A goal now decides its structure before any work starts: one tactic, a list of tactics, or a
+  final goal with strategic goals and sub-goals under it. Each goal turn works on the current
+  sub-goal instead of the whole plan. The goal help in One and the goal bar in Work show that structure
+  and the current tactic in one line, with a small folded tree when there is one.
+- Goals and automations keep going after a setback. After a failure or a hold the run chose for
+  itself, the app picks the next move in one place (plan again, or try another model in your
+  pool) and records why. A run that held back without doing anything no longer counts as done.
+  A recovery run uses a different model from the one that failed, and a model counts as
+  restored only after a read-only check answers. A goal turn stopped by a usage limit continues
+  by itself shortly after the limit resets. A stop by the inactivity watchdog is no longer
+  recorded as your stop, and recovery is no longer skipped because of it. Strategy proposals no
+  longer pile up: each automation keeps one live proposal, and older drafts are replaced.
+- Goals no longer stall after their first turn. A Goal whose earlier work might have changed the
+  outside world is checked with one short read-only look that now returns a readable verdict,
+  instead of an endless re-check that never concluded; the check is capped and uses far fewer
+  tokens.
+- When you restate a Goal's target in its conversation (for example "10,000 followers and
+  1,000,000 views in 30 days"), it becomes a new Goal revision at the next turn boundary, even
+  while the Goal is waiting, and the plan is rebuilt with those numbers and the daily pace they
+  need.
+- The "needs full access" chip appears again when a read-only turn asks for more permission.
+- Two Goals in one Work project no longer resume and fail every minute with the same notice; the
+  waiting Goal resumes when the other one finishes.
+- A project Work Goal that made the right files is now verified against the project folder, and a
+  Goal started from a message without a task no longer fails on its first turn.
+- Unattended browser automations now open the site before judging it. The dedicated Agentlas
+  browser starts with no page open, and a run that only looked at that empty first page used to
+  report "the account surface is blank" and hold every step; the browser now says the page is
+  empty because nothing was opened yet and that the site should be opened first.
+- Strategy reflection no longer fails as "input too large" when a saved orchestrator model is not
+  installed where it was recorded; only models that can actually answer set the size limit.
+- Browser automations on Codex no longer stop at "browser access approval required", and a first
+  step no longer fails with "invalid transport" in isolated runs.
+- An image an automation just made can be uploaded by its browser step, and browser steps in one
+  graph take turns on the shared browser instead of closing each other's composer.
+- Parallel steps no longer stop with "restore the session"; a step that failed before starting
+  continues on a new session.
+- The outcome check has time to try a second model before a run is left unjudged.
+- Runtime Doctor repair runs for a browser-only automation stay in the automation's own browser
+  and never drive your personal Chrome. Agents now use the Agentlas browser first; other browser
+  tools (Claude's Chrome extension, a Playwright server from your own settings, Codex's bundled
+  browser plugins) are used only as a fallback.
+- In One's narrow chat column (with the result panel open), the intake card buttons, permission
+  chip, header title, and scheduled report no longer overlap, get cut off, or show machine text.
+  A model change waiting for the goal's next turn now shows as a small "pending" chip with an
+  explanation on click, instead of a warning box.
+- A Goal you start with the Goal chip in Work is no longer cancelled the first time the app
+  restarts mid-turn: its recorded goal-mode turn is kept as its permission, and after checking
+  what already happened it continues. A Goal with no recorded grant is kept for your next message
+  instead of being cancelled.
+- The goal structure view now says "Final goal · Strategic goals · Sub-goals".
+- The built-in time tool no longer fails in every Codex automation run.
+- Resuming a Claude session that has no saved conversation now starts a fresh session instead of
+  failing as a model error.
+- Preparing memory for a project no longer creates `signing/`, `credentials/`, or `.env.example`
+  in your project folder.
+
 ## 1.2.41 — 2026-09-24
 
 - **Pinned runtime** — Agentlas OS v1.2.44 at `1f6d64374502cfd5f8581ad3c1fb18691ed61b1d`; public asset `hephaestus-runtime-v1.2.44.tar.gz` has SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
