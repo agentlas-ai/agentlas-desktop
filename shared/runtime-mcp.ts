@@ -121,9 +121,15 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
   // never reads mcpConfigPath) and have no tool loop of their own. When they
   // grow one, this row — not a new hand-written list — is what changes.
   byok: null,
-  // 서빙 실행은 Agentlas 서버의 대화 창구를 지난다. 도구 왕복은 호스트(데스크탑)가
-  // 자기 도구 고리에서 돌리므로, 런타임에 MCP 설정을 건네는 칸 자체가 없다.
-  agentlas: null,
+  // 서빙 실행은 Agentlas 서버의 대화 창구를 지나지만, 도구 왕복은 호스트(데스크탑)의
+  // 도구 고리(local-tool-loop 의 prepareMainToolLoop·runMainToolDispatch)가 돈다 — codex CLI 가
+  // Responses API 위에서 하는 일과 같은 모양이다. 예전엔 null 이라 One/Work 가 이 런타임에
+  // MCP 설정을 아예 만들지 않았고, 서빙은 Agentlas 브라우저·워크포스·기억 도구 0개로 돌았다.
+  agentlas: {
+    delivery: "in-process-loop",
+    extraTransports: ["sse", "http"],
+    evidence: "electron/runtime/agentlas-serving.ts runs prepareMainToolLoop/runMainToolDispatch over the prepared MCP config and relays tool calls through /api/one/serving/chat (agentlas-serving-tools-v1)",
+  },
 };
 
 /** Can this runtime kind receive MCP servers at all? */

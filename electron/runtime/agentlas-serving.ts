@@ -23,7 +23,8 @@ import {
   isAgentlasServingModel,
 } from "../../shared/agentlas-serving";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
+import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
@@ -59,8 +60,14 @@ function signInRequired(locale: RunnerRequest["locale"]): Error {
 
 type ServingTurn = { role: "user" | "assistant"; text: string };
 
+/** Vision models bill a high-detail image at roughly 1–2k input tokens; count the upper end. */
+const IMAGE_TOKEN_ESTIMATE = 2_000;
+function imageTokenEstimate(req: RunnerRequest): number {
+  return (req.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+}
+
 function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number): { turns: ServingTurn[]; system: string } | null {
-  const system = wrapSystemPrompt(
+  const wrapped = wrapSystemPrompt(
       req.systemPrompt,
       req.locale,
       req.permission,
@@ -73,8 +80,15 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       undefined,
       req.surfaceGate,
     );
+  // The server enforces req.outputSchema by constrained decoding when it can; the
+  // instruction is the honest floor for a server that cannot (status line says which).
+  const system = req.outputSchema ? `${wrapped}\n${schemaFallbackInstruction(req.outputSchema.schema)}` : wrapped;
+  // Images are counted as a bounded per-image estimate, not as their base64 length:
+  // one ordinary screenshot's base64 alone is larger than the whole 128k window,
+  // so counting it as text refused every image turn before it was sent.
   let budget = AGENTLAS_SERVING_CONTEXT_WINDOW
-    - estimateTransportTokens(JSON.stringify({ system, current: req.userPrompt, images: req.images ?? [] }))
+    - estimateTransportTokens(JSON.stringify({ system, current: req.userPrompt }))
+    - imageTokenEstimate(req)
     - outputReserve - 256;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const compacted = compactHistoryToBudget(req.history, { historyBudgetTokens: budget, locale: req.locale });
@@ -87,7 +101,8 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       else turns.unshift({ role: "user", text: compacted.digest });
     }
     turns.push({ role: "user", text: req.userPrompt });
-    const estimated = estimateTransportTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }));
+    const estimated = estimateTransportTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
+      + imageTokenEstimate(req);
     if (estimated + outputReserve <= AGENTLAS_SERVING_CONTEXT_WINDOW) {
       if (compacted.digest) {
         events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
@@ -137,6 +152,15 @@ async function* iterServingEvents(response: Response): AsyncGenerator<{ event: s
 
 type ServingToolCall = { id: string; name: string; input: Record<string, unknown> };
 type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }> };
+type ServingDone = {
+  text?: unknown; stopReason?: unknown; toolUses?: unknown;
+  /** Token counts the server measured for this call (not the model name). Absent on older servers. */
+  usage?: { inputTokens?: unknown; outputTokens?: unknown };
+  /** How many attached images the server forwarded. Absent = the server did not accept images. */
+  imagesAccepted?: unknown;
+  /** "json_schema" when the server enforced req.outputSchema by constrained decoding. */
+  outputFormat?: unknown;
+};
 
 function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): ServingToolCall[] {
   if (!Array.isArray(value) || value.length < 1) throw new Error("invalid_serving_tool_frame");
@@ -153,6 +177,106 @@ function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): Servin
   });
 }
 
+/*
+ * 실패 원인은 기계 표식으로 넘긴다(RunnerFailure.kind/providerCode). 예전엔 한국어 문장을
+ * throw 해서 runnerFailureFromError 의 영어 정규식(credits?|sign in)에 걸리지 않았고,
+ * 크레딧 부족·로그아웃이 "exit" 로 분류돼 한도 폴백·재로그인 안내가 돌지 않았다.
+ */
+async function servingHttpFailure(response: Response, locale: RunnerRequest["locale"]): Promise<RunnerFailure> {
+  let code = "";
+  try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty body */ }
+  const providerCode = /^[a-z0-9_]{1,64}$/.test(code) ? code : `http_${response.status}`;
+  if (response.status === 401) {
+    return { kind: "auth", runtime: "agentlas", source: "marker", providerCode: "sign_in_required",
+      message: signInRequired(locale).message };
+  }
+  if (code === "insufficient_credits" || response.status === 402) {
+    return { kind: "quota", runtime: "agentlas", source: "marker", providerCode: "insufficient_credits",
+      message: locale === "ko" ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
+        : "You are out of credits. Top up and try again." };
+  }
+  if (response.status === 429) {
+    return { kind: "quota", runtime: "agentlas", source: "marker", providerCode,
+      message: locale === "ko" ? "Agentlas 모델 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도해 주세요."
+        : "The Agentlas model service is rate limited. Try again shortly." };
+  }
+  return { kind: "exit", runtime: "agentlas", source: "marker", providerCode,
+    message: locale === "ko" ? "Agentlas 모델에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+      : "Could not reach the Agentlas model service. Try again shortly." };
+}
+
+function streamFailure(data: unknown, locale: RunnerRequest["locale"]): RunnerFailure {
+  const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown } : {};
+  const code = typeof record.code === "string" && /^[a-z0-9_]{1,64}$/.test(record.code) ? record.code : "serving_failed";
+  const message = typeof record.message === "string" && record.message ? record.message
+    : locale === "ko" ? "답을 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The Agentlas model could not answer. Try again shortly.";
+  return { kind: code === "insufficient_credits" ? "quota" : "exit", runtime: "agentlas", source: "marker",
+    providerCode: code, message: message.slice(0, 400) };
+}
+
+/** 요청 본문의 공통 칸. 사진·출력 계약은 매 왕복 같이 간다(서버는 상태를 들지 않는다). */
+function servingRequestFields(req: RunnerRequest): Record<string, unknown> {
+  return {
+    ...(req.images?.length ? { images: req.images.map((image) => ({ mediaType: image.mediaType, data: image.data })) } : {}),
+    ...(req.outputSchema ? { outputSchema: { name: req.outputSchema.name, schema: req.outputSchema.schema } } : {}),
+  };
+}
+
+/** 서버가 잰 토큰을 왕복마다 더한다. 한 번이라도 빠지면 합계는 없는 것이다(0 으로 채우지 않는다). */
+class ServingUsage {
+  private input = 0;
+  private output = 0;
+  private complete = true;
+  add(done: ServingDone): void {
+    const usage = done.usage;
+    const input = usage && typeof usage.inputTokens === "number" ? usage.inputTokens : null;
+    const output = usage && typeof usage.outputTokens === "number" ? usage.outputTokens : null;
+    if (input === null || output === null || !Number.isFinite(input) || !Number.isFinite(output)) {
+      this.complete = false;
+      return;
+    }
+    this.input += Math.max(0, input);
+    this.output += Math.max(0, output);
+  }
+  settle(events: RunnerEvents): { observedUsage?: { inputTokens: number; outputTokens: number } } {
+    if (!this.complete) return {};
+    const observedUsage = { inputTokens: this.input, outputTokens: this.output };
+    events.onTerminalObservedUsage?.(observedUsage);
+    return { observedUsage };
+  }
+}
+
+/** 첫 응답에서 한 번: 사진·출력 계약이 실제로 서버에서 지켜졌는지 사실대로 알린다. */
+function reportDeliveredCapabilities(req: RunnerRequest, events: RunnerEvents, done: ServingDone): void {
+  const sentImages = req.images?.length ?? 0;
+  if (sentImages > 0 && done.imagesAccepted !== sentImages) {
+    events.onNotice?.({ level: "warning", code: "images-not-delivered",
+      message: req.locale === "ko"
+        ? "이 Agentlas 서버는 첨부한 사진을 모델에 전달하지 않았습니다. 사진 없이 답했습니다."
+        : "This Agentlas server did not forward the attached images to the model; it answered without them." });
+  }
+  if (req.outputSchema && done.outputFormat !== "json_schema") {
+    events.onStatus(req.locale === "ko" ? "출력 형식은 지시문으로만 요청했습니다(서버 강제 없음)."
+      : "Output format requested by instruction only (not server-enforced).");
+  }
+}
+
+async function postServing(body: string, cookie: string, req: RunnerRequest): Promise<Response> {
+  return fetch(`${webBaseUrl()}/api/one/serving/chat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      // 브라우저는 이 헤더를 preflight 없이 붙일 수 없다. 서버의 교차출처 관문이
+      // 이 헤더 하나로 "앱이 보낸 요청"과 "남의 사이트가 시킨 요청"을 가른다.
+      "x-agentlas-client": "desktop",
+      "accept-language": req.locale === "ko" ? "ko" : "en",
+    },
+    body,
+    ...(req.signal ? { signal: req.signal } : {}),
+  });
+}
+
 async function runAgentlasServingWithTools(
   req: RunnerRequest,
   events: RunnerEvents,
@@ -160,9 +284,13 @@ async function runAgentlasServingWithTools(
   context: { turns: ServingTurn[]; system: string },
   outputReserve: number,
   cookie: string,
-): Promise<RunnerResult> {
+): Promise<RunnerResult | null> {
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
-  if (tools.length < 1) throw new Error("science_tool_inventory_unavailable");
+  if (tools.length < 1) {
+    // A granted MCP config that yields nothing is a broken grant, not a chat turn.
+    if (req.mcpConfigPath) throw new Error("science_tool_inventory_unavailable");
+    return null;
+  }
   const originalByAlias = new Map<string, string>();
   const definitions = tools.map((tool) => {
     const original = tool.function.name;
@@ -177,39 +305,28 @@ async function runAgentlasServingWithTools(
   const admitted = new Set(originalByAlias.keys());
   const toolExchanges: ServingToolExchange[] = [];
   const seenCallIds = new Set<string>();
+  const usage = new ServingUsage();
   let previousToolOutcomeDigest = "";
   let identicalToolOutcomes = 0;
   let accumulatedText = "";
+  let firstRound = true;
   for (;;) {
     req.signal?.throwIfAborted();
-    const requestBody = JSON.stringify({ model, system: context.system, messages: context.turns, maxTokens: outputReserve,
-      toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges });
+    const textPayload = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
+      toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges };
+    const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
-    if (estimateTransportTokens(requestBody) + outputReserve + 256 > AGENTLAS_SERVING_CONTEXT_WINDOW) {
+    if (estimateTransportTokens(JSON.stringify(textPayload)) + imageTokenEstimate(req) + outputReserve + 256
+      > AGENTLAS_SERVING_CONTEXT_WINDOW) {
       return { text: accumulatedText, failure: { kind: "refused", runtime: "agentlas", source: "marker",
         providerCode: "model_context_capacity_exceeded",
         message: "The Agentlas serving tool transcript exceeds the conservative context budget." } };
     }
-    const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie, "x-agentlas-client": "desktop",
-        "accept-language": req.locale === "ko" ? "ko" : "en" },
-      body: requestBody,
-      ...(req.signal ? { signal: req.signal } : {}),
-    });
-    if (!response.ok) {
-      if (response.status === 401) throw signInRequired(req.locale);
-      let code = "";
-      try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty response */ }
-      if (code === "insufficient_credits" || response.status === 402) {
-        throw new Error(req.locale === "ko" ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
-          : "You are out of credits. Top up and try again.");
-      }
-      throw new Error(`agentlas_serving_tool_request_failed:${code || response.status}`);
-    }
+    const response = await postServing(requestBody, cookie, req);
+    if (!response.ok) return { text: accumulatedText, failure: await servingHttpFailure(response, req.locale), ...usage.settle(events) };
     let text = "";
-    let done: { text?: unknown; stopReason?: unknown; toolUses?: unknown } | null = null;
+    let done: ServingDone | null = null;
     for await (const frame of iterServingEvents(response)) {
       if (frame.event === "delta") {
         const delta = (frame.data as { text?: unknown })?.text;
@@ -218,14 +335,14 @@ async function runAgentlasServingWithTools(
           events.onPartial(accumulatedText + text);
         }
       } else if (frame.event === "done") {
-        done = frame.data && typeof frame.data === "object"
-          ? frame.data as { text?: unknown; stopReason?: unknown; toolUses?: unknown }
-          : null;
+        done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
       } else if (frame.event === "error") {
-        throw new Error("agentlas_serving_tool_stream_failed");
+        return { text: accumulatedText, failure: streamFailure(frame.data, req.locale), ...usage.settle(events) };
       }
     }
     if (!done) throw new Error("agentlas_serving_tool_stream_incomplete");
+    usage.add(done);
+    if (firstRound) { reportDeliveredCapabilities(req, events, done); firstRound = false; }
     if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
     if (done.stopReason !== "tool_use") {
       if (done.stopReason !== "end_turn" && done.stopReason !== "stop_sequence")
@@ -234,7 +351,7 @@ async function runAgentlasServingWithTools(
       accumulatedText += text;
       if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
       events.onPartial(accumulatedText);
-      return { text: accumulatedText };
+      return { text: accumulatedText, ...usage.settle(events) };
     }
     const calls = servingToolCalls(done.toolUses, admitted);
     for (const call of calls) {
@@ -264,7 +381,8 @@ async function runAgentlasServingWithTools(
 
 export const runAgentlasServing: Runner = async (req, events): Promise<RunnerResult> => {
   const cookie = getSessionCookieHeader();
-  if (!cookie) throw signInRequired(req.locale);
+  if (!cookie) return { text: "", failure: { kind: "auth", runtime: "agentlas", source: "marker",
+    providerCode: "sign_in_required", message: signInRequired(req.locale).message } };
 
   const model = servingModelId(req);
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
@@ -281,52 +399,24 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       ? "Agentlas 모델의 보수적 문맥 예산을 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."
       : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } };
   const { turns, system } = context;
-  if (req.mcpConfigPath && !req.untrustedNoTools) {
-    return runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
+  // Same admission as every host-loop runtime: tools whenever the run is not a
+  // Main-authored no-tools boundary and has either an MCP config or a workspace.
+  if (!req.untrustedNoTools && (req.mcpConfigPath || req.cwd)) {
+    const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
+    if (withTools) return withTools;
   }
-  const response = await fetch(`${webBaseUrl()}/api/one/serving/chat`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie,
-      // 브라우저는 이 헤더를 preflight 없이 붙일 수 없다. 서버의 교차출처 관문이
-      // 이 헤더 하나로 "앱이 보낸 요청"과 "남의 사이트가 시킨 요청"을 가른다.
-      "x-agentlas-client": "desktop",
-      "accept-language": req.locale === "ko" ? "ko" : "en",
-    },
-    body: JSON.stringify({
-      model,
-      system,
-      messages: turns,
-      maxTokens: outputReserve,
-    }),
-    ...(req.signal ? { signal: req.signal } : {}),
-  });
+  const response = await postServing(JSON.stringify({
+    model,
+    system,
+    messages: turns,
+    maxTokens: outputReserve,
+    ...servingRequestFields(req),
+  }), cookie, req);
+  if (!response.ok) return { text: "", failure: await servingHttpFailure(response, req.locale) };
 
-  if (!response.ok) {
-    let code = "";
-    try {
-      code = String(((await response.json()) as { code?: unknown }).code ?? "");
-    } catch {
-      /* 본문이 없을 수도 있다 */
-    }
-    if (response.status === 401) throw signInRequired(req.locale);
-    if (code === "insufficient_credits" || response.status === 402) {
-      throw new Error(
-        req.locale === "ko"
-          ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
-          : "You are out of credits. Top up and try again.",
-      );
-    }
-    throw new Error(
-      req.locale === "ko"
-        ? "Agentlas 모델에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
-        : "Could not reach the Agentlas model service. Try again shortly.",
-    );
-  }
-
+  const usage = new ServingUsage();
   let text = "";
-  let failure: string | null = null;
+  let done: ServingDone | null = null;
   for await (const frame of iterServingEvents(response)) {
     if (frame.event === "delta") {
       const delta = (frame.data as { text?: unknown }).text;
@@ -335,23 +425,24 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
         events.onPartial(text);
       }
     } else if (frame.event === "done") {
-      const final = (frame.data as { text?: unknown }).text;
+      done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : {};
+      const final = done.text;
       if (typeof final === "string" && final.length > text.length) text = final;
     } else if (frame.event === "error") {
-      const message = (frame.data as { message?: unknown }).message;
-      failure = typeof message === "string" && message ? message : null;
+      return { text: "", failure: streamFailure(frame.data, req.locale) };
     }
   }
-
-  if (failure) throw new Error(failure);
-  if (!text.trim()) {
-    throw new Error(
-      req.locale === "ko"
-        ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
-        : "The Agentlas model returned an empty answer. Try again.",
-    );
+  if (done) {
+    usage.add(done);
+    reportDeliveredCapabilities(req, events, done);
   }
-  return { text };
+  if (!text.trim()) {
+    return { text: "", failure: { kind: "exit", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
+      message: req.locale === "ko"
+        ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
+        : "The Agentlas model returned an empty answer. Try again." } };
+  }
+  return { text, ...(done ? usage.settle(events) : {}) };
 };
 
 /** 화면에 그릴 러너 이름. 세기까지 붙여 무엇으로 돌았는지 알 수 있게 한다. */

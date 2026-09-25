@@ -129,6 +129,13 @@ export interface RunnerRequest {
   /** Ignore provider-global MCP/plugins and admit only Main's per-run config. */
   isolatedMcpConfig?: true;
   /**
+   * Main-authored: `mcpConfigPath` is an owner-issued grant (Science / Alive Science) whose
+   * catalog is the whole tool surface. Host-loop runtimes must not add Desktop builtins beside
+   * it — the grant already bridges the Desktop tools it admits. Ordinary One/Work MCP configs
+   * leave this unset so the host loop gives the same builtins every in-process runtime gets.
+   */
+  mcpGrantCatalogOnly?: true;
+  /**
    * Main-authored: this run's tool authority is a single-use, per-run grant (Science: a fresh token and config file per
    * invocation, revoked when the turn settles). Such a process can never serve the next turn, so it is never pooled.
    * Measured 2026-09-20: a Science loop left one resident CLI (~0.5 GB with its MCP child) per turn, each holding a dead token.
