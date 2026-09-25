@@ -75,7 +75,6 @@ export class AliveLifetimeService {
       && !(agent.budget.tokenLimit !== null && (agent.budget.tokensUsed >= agent.budget.tokenLimit || agent.state.usageUnknown === true));
   }
   private dispatchActions(nowMs: number): void {
-    if (this.options.actionAdmission?.()) return;
     for (const reserved of this.store.pendingActions()) {
       const portFor = () => this.store.attachments(reserved.agentId)
         .find((attachment) => attachment.attachmentId === reserved.proposal.attachmentId && attachment.status === "attached");
@@ -95,6 +94,9 @@ export class AliveLifetimeService {
           } catch { /* Unknown domain acceptance keeps the exact reservation. */ }
         }
         if (settled || !this.accepting || !reserved.packet || !attachment || !port?.execute || !port.actionReceipt) continue;
+        // Receipt recovery is read-only even after access is lost. Replaying
+        // an effect is a new dispatch and needs current access.
+        if (this.options.actionAdmission?.()) continue;
         const packet = reserved.packet;
         const current = this.store.get(reserved.agentId);
         if (!current || current.controlEpoch !== reserved.controlEpoch || !this.withinGrant(current, nowMs)
@@ -108,6 +110,7 @@ export class AliveLifetimeService {
         continue;
       }
       if (!this.accepting) continue;
+      if (this.options.actionAdmission?.()) continue;
       if (!attachment || !registration || !registration.domains.includes(attachment.domain) || !port?.execute) {
         this.store.finishAction({ ok: false, actionId: reserved.actionId, code: "alive.action-binding-invalid" }, nowMs);
         continue;
