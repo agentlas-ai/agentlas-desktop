@@ -1396,6 +1396,13 @@ const runClaudeTurn = async (
     const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
+    /**
+     * `--resume` named a session the CLI never wrote to disk: an error result with zero turns
+     * ("No conversation found with session ID"). Measured 2026-09-25: an owner pause that stopped
+     * the first turn while the CLI was starting stored the init session id; the owner's Resume then
+     * failed at once as "claude error", and the Goal blocked on checkpoint_producer_no_effects.
+     */
+    let resumedConversationMissing = false;
     /** 스트림 표식이 말한 실패 — 있으면 종료코드와 무관하게 이 턴은 답이 아니다. */
     let runnerFailure: import("./runner").RunnerFailure | null = null;
     let lastEmit = 0;
@@ -1923,6 +1930,9 @@ const runClaudeTurn = async (
         // ★한도 거절은 표식이다 — 예전에는 케이스가 없어 조용히 버려졌다(분류는 순수 함수 한 곳).
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
       } else if (ev.type === "result") {
+        const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
+        if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
+          && resultShape.num_turns === 0) resumedConversationMissing = true;
         if (typeof ev.result === "string") finalText = ev.result;
         if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
         if (ev.usage) {
@@ -2051,6 +2061,19 @@ const runClaudeTurn = async (
           env: stripAgentAppMcpSecretAliases(runReq.env),
           agentAppMcpFallbackAttempted: true,
         }, events, false, observeNativeFile).then(resolve, reject);
+        return;
+      }
+      if (resumedConversationMissing && resumeSessionId && !combined() && !finalText.trim()) {
+        // Nothing ran: the stored session does not exist. Drop it and take the same one fresh
+        // retry as a failed resume (below) — never report it as a model failure.
+        broken = true;
+        if (req.chatId) clearRuntimeSession(req.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+        events.onStatus(`[runtime-session] resume_missing kind=${KIND}`);
+        if (req.unattended) {
+          reject(new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`));
+          return;
+        }
+        void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false, observeNativeFile).then(resolve, reject);
         return;
       }
       if (code === 0) {
