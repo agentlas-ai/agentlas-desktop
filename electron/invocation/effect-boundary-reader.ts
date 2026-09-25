@@ -13,6 +13,13 @@ export interface InvocationEffectBoundaryInput {
 export interface InvocationEffectBoundary {
   invocationRunId: string; terminalEventId: string | null; receiptEventId: string | null; snapshotDigest: string | null;
   terminal: boolean; effects: "settled" | "uncertain";
+  /**
+   * Verification-only projection. True when the completed invocation is fully covered and ended, and
+   * its only open effect refs are tool calls whose typed failed result was observed (for example a
+   * probe command exiting 1). Nothing is still running, so the current state can be judged; it is
+   * NOT replay/continuation authority, which still requires `effects === "settled"`.
+   */
+  quiesced?: boolean;
   artifactRefs: string[]; sourceRefs: string[]; pendingEffectRefs: string[];
 }
 interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; payload_json: string }
@@ -156,8 +163,26 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       for (const id of tools.keys()) if (!reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-missing");
     }
     const pendingEffectRefs = [...pending].sort();
+    // Failed-but-resolved tool calls: started, result observed, typed failure, and in the closed snapshot.
+    const failedIds = new Set([...tools].filter(([id, tool]) => tool.started && tool.result && tool.outcome === "failed"
+      && !settledFailures.has(id)).map(([id]) => id));
+    const snapshotOnlyFailed = Boolean(operations && operations.length === tools.size
+      && new Set(operations.map(operation => operation.toolId)).size === tools.size
+      && operations.every(operation => operation.toolId && tools.has(operation.toolId) && operation.startObserved
+        && operation.resultObserved && operation.outcome === tools.get(operation.toolId)?.outcome
+        && (operation.outcome === "succeeded" || (operation.outcome === "failed" && (failedIds.has(operation.toolId) || settledFailures.has(operation.toolId))))));
+    const boundaryOnlyFailed = Boolean(effectRow && boundary && boundary.schemaVersion === "agentlas.runtime-effect-boundary.v1"
+      && boundary.terminalEventId === terminal?.id && boundary.terminalSeq === terminal?.seq
+      && boundary.coverage === "complete" && boundary.ledgerComplete === true && Array.isArray(boundary.pendingEffectRefs)
+      && (boundary.pendingEffectRefs as unknown[]).every(ref => typeof ref === "string"
+        && [...failedIds].some(id => ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`))));
+    const explainedByFailure = (ref: string): boolean => (ref === "runtime-effect-boundary-unconfirmed" && boundaryOnlyFailed)
+      || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
+      || [...failedIds].some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
+    const quiesced = terminal?.kind === "invoke_completed" && failedIds.size > 0 && pendingEffectRefs.every(explainedByFailure);
     const result: InvocationEffectBoundary = { invocationRunId: input.invocationRunId, terminalEventId: terminal?.id ?? null, receiptEventId: effectRow?.id ?? null, snapshotDigest: null,
       terminal: Boolean(terminal), effects: pendingEffectRefs.length ? "uncertain" : "settled",
+      ...(pendingEffectRefs.length && quiesced ? { quiesced: true } : {}),
       artifactRefs: [...artifactRefs].sort(), sourceRefs: [...sourceRefs].sort(), pendingEffectRefs };
     if (terminal) {
       const digest = createHash("sha256").update(JSON.stringify({ input, terminal, effectRow, attempts,

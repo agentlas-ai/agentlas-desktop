@@ -729,7 +729,9 @@ export function collectDurableGoalVerificationEvidence(
   }
   const settledBoundary = (id: string): boolean => {
     try {
-      return !!receipt.chatId && readInvocationEffectBoundary({invocationRunId: id, expectedChatId: receipt.chatId}).effects === "settled"
+      const read = receipt.chatId ? readInvocationEffectBoundary({invocationRunId: id, expectedChatId: receipt.chatId}) : null;
+      // Quiesced (only typed failed-but-resolved calls open) is enough to judge the current state.
+      return !!read && (read.effects === "settled" || read.quiesced === true)
         && (!goalBinding || invocationMatchesGoalRevision(id, goalBinding.goalId, goalBinding.revision));
     } catch { return false; }
   };
@@ -1222,6 +1224,9 @@ export async function verifyGoalCompletionClaim(input: {
           verdict: "inconclusive" as const,
           reason: proofContracts[criterionIndex]
             ? `No current host proof satisfies the pinned criterion requirement (${proofContracts[criterionIndex].requiredProofKind}${proofContracts[criterionIndex].requiredProofKind === "download" && downloadRead.reasonCode ? `: ${downloadRead.reasonCode}` : ""}).`
+              + (proofContracts[criterionIndex].requiredProofKind === "file"
+                ? ` A host file proof is recorded only for the file tools (${proofContracts[criterionIndex].requiredFileAction === "read" ? "Read" : "Write or Edit"}); shell redirection leaves none. ${proofContracts[criterionIndex].requiredFileAction === "read" ? "Read the file with the Read tool." : "Write the exact final content again with the Write tool (idempotent), then read it back."}`
+                : "")
             : `Durable verification evidence is unavailable (${durableEvidence.reason}).`,
           recoveryClass: "unknown" as const,
           nextAction: null,
@@ -1241,7 +1246,11 @@ export async function verifyGoalCompletionClaim(input: {
     }
     // A provider may resolve despite abort. Never persist its late verdicts.
     if (controller.signal.aborted) throw controller.signal.reason;
-    verificationSession?.assertSettledEmpty();
+    // A verification that reused its pinned proof contracts and found no admissible proof makes no model
+    // dispatch at all; its honest result is the inconclusive list above. Asserting "settled and empty"
+    // on zero dispatches failed it as verification_effects_dispatch_missing -> verification_unavailable
+    // (isolated live run 2026-09-25, second verification after an owner Resume).
+    if (verificationSession && (judgments !== null || verificationSession.dispatchCount() > 0)) verificationSession.assertSettledEmpty();
     if (verificationBoundary && input.invocationRunId) {
       let current: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
       try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId); } catch { /* Refuse stale result. */ }

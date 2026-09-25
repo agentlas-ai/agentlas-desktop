@@ -35,7 +35,10 @@ export function captureGoalVerificationBoundary(goalId: string, invocationRunId:
     if (!message || message.chat_id !== chat.id || source.chatId !== chat.id || message.role !== "user" || message.text !== source.text) throw new Error("verification_source_changed");
   }
   const boundary = readInvocationEffectBoundary({ invocationRunId, expectedChatId: chat.id });
-  if (!boundary.terminal || boundary.effects !== "settled" || !boundary.receiptEventId || !boundary.snapshotDigest) throw new Error("verification_effects_unconfirmed");
+  // A probe that exited non-zero leaves a failed-but-resolved call: nothing is still running, so the current
+  // state can be judged (quiesced). Continuation replay keeps requiring fully settled effects.
+  if (!boundary.terminal || (boundary.effects !== "settled" && boundary.quiesced !== true)
+    || !boundary.receiptEventId || !boundary.snapshotDigest) throw new Error("verification_effects_unconfirmed");
   const controller = getDb().prepare(`SELECT a.id, a.invocation_run_id FROM long_run_worker_attempts a
     JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
     .get(run.id) as {id: string; invocation_run_id: string | null} | undefined;

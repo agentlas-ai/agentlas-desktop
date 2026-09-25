@@ -25,6 +25,8 @@ export interface VerificationSession {
   readonly anchorId: string;
   runStage<T>(stage: "classification" | "judgment", action: () => Promise<T>): Promise<T>;
   assertSettledEmpty(): void;
+  /** Model dispatches made so far (0 when stored contracts were reused and no proof existed). */
+  dispatchCount(): number;
   /** Effect projection for failed/interrupted worker settlement, not a verdict. */
   effectState(): "none" | "uncertain";
   /** Revokes future dispatch; does not claim that pending runners have drained. */
@@ -227,6 +229,9 @@ class EffectSession implements VerificationSession {
     return report?.complete === true && successfulTerminal && report.operationIds.length === 0
       && (report.settledFailureIds?.length ?? 0) === 0 && report.reasons.length === 0;
   }
+
+  /** How many model dispatches this verification made (0 when stored contracts were reused and no proof existed). */
+  dispatchCount(): number { return this.dispatches.length; }
 
   assertSettledEmpty(): void {
     this.checkLive();
