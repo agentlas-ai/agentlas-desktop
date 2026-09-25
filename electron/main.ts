@@ -4416,6 +4416,16 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[science-runtime] recovery failed", error);
   }
+  // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives
+  // resume on their own; wakes the previous process lost are reconciled on the first beat (hostLost).
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const { startAliveOrganisms } = await import("./alive-organisms");
+      startAliveOrganisms();
+    } catch (error) {
+      console.error("[alive-organisms] start failed", error);
+    }
+  }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   void import("./telegram/connect")
     .then(({ reconcileTelegramWorkers }) => {

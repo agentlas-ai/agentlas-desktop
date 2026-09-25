@@ -4,6 +4,7 @@ import { readScienceCollectionAuthority } from "../science-host/collection-autho
 import { resolveScienceRecoveryAuthority, freshScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { readScienceRecoveryAuthority } from "../science-host/recovery-mint";
 import { ALIVE_DECISION_OUTPUT_SCHEMA } from "../alive-decision-schema";
+import { ALIVE_GOAL_DECISION_OUTPUT_SCHEMA } from "../alive-organisms/goal-decision";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
@@ -1470,6 +1471,8 @@ export interface InvocationExecutionContext {
   source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive";
   /** An Alive wake's attached Science playground, not a Research Director turn. Main-only. */
   aliveScience?: Readonly<{ agentId: string; wakeId: string; controlEpoch: number; attachmentId: string }>;
+  /** An Alive One/Work orchestrator wake (electron/alive-organisms). Main-only; selects the goal decision schema. */
+  aliveGoal?: Readonly<{ agentId: string; wakeId: string; controlEpoch: number; domain: "work" | "one" }>;
   /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
   science?: Readonly<{
     projectId: string;
@@ -5298,6 +5301,8 @@ ${effectiveUserPrompt}`;
       ...(scienceCollectionCapability ? { scienceCollectionCapability, unattended: true as const, noSynchronousAsk: true as const } : {}),
       model: active.model ?? undefined,
       ...(isAliveControllerRun ? { outputSchema: { name: "agentlas_alive_decision_v2", schema: ALIVE_DECISION_OUTPUT_SCHEMA } } : {}),
+      // One/Work lives carry the goal action vocabulary; the Science schema above stays as it was.
+      ...(isAliveControllerRun && executionContext?.aliveGoal ? { outputSchema: { name: "agentlas_alive_goal_decision_v2", schema: ALIVE_GOAL_DECISION_OUTPUT_SCHEMA } } : {}),
       longContext: active.longContextEnabled ?? false,
       effort: req.oneMode && req.fastMode === true && active.kind === "codex"
         ? effortForSelectedModel(active, active.model, "minimal") ?? undefined

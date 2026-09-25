@@ -926,6 +926,11 @@ const api: AgentlasIpc = {
     concurrencyInfo: () => ipcRenderer.invoke("system:concurrencyInfo"),
     setConcurrency: (value: number) => ipcRenderer.invoke("system:setConcurrency", value),
   },
+  alive: {
+    getState: (input) => ipcRenderer.invoke("alive:getState", input),
+    setEnabled: (input) => ipcRenderer.invoke("alive:setEnabled", input),
+    setTokenLimit: (input) => ipcRenderer.invoke("alive:setTokenLimit", input),
+  },
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),
@@ -1300,6 +1305,12 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, chatIds: string[]) => handler(chatIds);
     ipcRenderer.on("invoke:activeChats", wrapped);
     return () => ipcRenderer.removeListener("invoke:activeChats", wrapped);
+  },
+  // Alive (AGI toggle) lifecycle: ids only; the screen re-reads alive.getState.
+  onAliveChanged: (handler: (event: import("../shared/alive").AliveChangedEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, event: import("../shared/alive").AliveChangedEvent) => handler(event);
+    ipcRenderer.on("alive:changed", wrapped);
+    return () => ipcRenderer.removeListener("alive:changed", wrapped);
   },
   // Mobile pairing lifecycle carries only a reason enum; QR nonces/tokens stay in main.
   onMobileBridgeChanged: (handler: (event: { reason: string }) => void) => {

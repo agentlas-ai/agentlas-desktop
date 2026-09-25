@@ -366,6 +366,43 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   return resume(run, dispatcher, trigger);
 }
 
+/** Host pauses an Alive orchestrator may continue. An owner pause, an approval hold and a budget stop never are. */
+export const ALIVE_CONTINUABLE_PAUSE_REASONS: ReadonlySet<string> = new Set(["agent_paused", "runtime_unavailable", "app_closed", "crash_recovery"]);
+
+/**
+ * The Alive One/Work orchestrator's `goal.continue` — the same continuation path this sweep uses, for one Goal,
+ * now, instead of waiting for the next periodic pass. It adds no new way to resume:
+ *  - a blocked Goal goes through sweepOne (QA/workspace end rules, owner amendments, effect observation before
+ *    any resume, cancel rules, scheduled retries);
+ *  - a paused Goal is continued only for a host pause (ALIVE_CONTINUABLE_PAUSE_REASONS) and with the same
+ *    guards (observation in flight, wait subscription, busy chat, running attempt, chat binding, stored grant).
+ * The fence (runId + version) is re-read here: a stale proposal is deferred, never applied to a newer state.
+ */
+export function continueGoalForAlive(runId: string, expectedVersion: number, dispatcher: EffectObservationDispatcher): BlockedGoalSweepResult {
+  const deferred = (detail: string, fromReason: string | null = null): BlockedGoalSweepResult =>
+    ({ runId, fromReason, action: "deferred", detail });
+  try { assertDesktopLongRunAdmissionOpen(); } catch { return deferred("desktop_long_run_admission_closed"); }
+  const run = getLongRun(runId);
+  if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
+    || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
+  const budget = { dispatches: 0 };
+  if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
+  if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) {
+    return deferred("alive_goal_not_continuable", run.blockedReason);
+  }
+  // A host pause the sweep already owns (runtime_unavailable → scheduled retry, refused startup pause) goes its way.
+  const swept = sweepOne(run, dispatcher, "alive", budget);
+  if (swept) return swept;
+  if (isGoalObserving(run.goalId)) return deferred("observation_in_flight");
+  const wait = latestGoalWaitSubscription(run.goalId);
+  if (wait && (wait.state === "pending" || wait.state === "claimed")) return deferred("wait_owns_next_step");
+  if (run.rootChatId && dispatcher.activeChatIds().includes(run.rootChatId)) return deferred("chat_busy");
+  if (getLongRunAttemptReview(run.id).attempts.some((attempt) => attempt.state === "running")) return deferred("attempt_running");
+  const chat = run.rootChatId ? getChat(run.rootChatId) : null;
+  if (!chat || chat.goalId !== run.goalId || !getChatGoalRevision(run.goalId)) return deferred("alive_goal_binding_missing");
+  return resume(run, dispatcher, "alive");
+}
+
 /**
  * Called once after the startup recovery passes, and every BLOCKED_GOAL_SWEEP_INTERVAL_MS while the app runs, so
  * a Goal that stops later is not left there either. Idempotent: a row that left 'blocked' is revisited only through
