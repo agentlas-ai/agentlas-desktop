@@ -356,6 +356,9 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
     run = current;
   }
 
+  // 2b. The goal's last turn asked the owner a question (typed decision request): the owner's answer resumes it through
+  // the ordinary resume-with-message path. Re-running the goal meanwhile only asks again (live 2026-09-25).
+  if (run.status === "blocked" && run.blockedReason === "goal_owner_answer_required") return defer("owner_answer_pending");
   // 2a. Its turn was refused because another turn holds this Work project: wait for that turn to end
   // (resumeGoalsWaitingOnProject is called when it settles). No model start, no retry schedule, no notice.
   if (run.status === "blocked" && run.blockedReason === WORK_PROJECT_RESIDENCY_BUSY_CODE && projectHeldByAnotherTurn(run, dispatcher)) {

@@ -3381,9 +3381,32 @@ export class InvocationService {
           // ordinary completion/retry path to keep calling the model.
           return;
         }
-        const completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
+        let completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
           : undefined);
+        /*
+         * Every goal turn end verifies, continues or stops with a coded reason — never "running" with no attempt.
+         * Measured (1.2.43 dev E2E, One chip goal run_27355a43 on Agentlas Light): an explicit Goal whose turn ended without
+         * a completion claim (7 in-turn cycles, last one asking the owner a question) stayed status=running with no live
+         * attempt: the client queued a hidden every-10m continuation and nothing on the host side scheduled anything.
+         */
+        if (!completionClaim?.claimed && !record.automaticGoalId && goalControllerAttemptId && goalLongRun
+          && goalLongRun.surface !== "science" && !controller.signal.aborted && !executionContext) {
+          const turnGoalId = goalLongRun.goalId;
+          const current = getLongRunByGoalId(turnGoalId);
+          if (current?.status === "running" && !unsettledLongRunAttemptCount(current.id)) {
+            if (record.pendingQuestion) {
+              // The turn asked the owner; the question card is the way out and answering resumes the Goal.
+              transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "goal_owner_answer_required" });
+            } else if (findAutomationByGoalId(turnGoalId)?.enabled) {
+              // Its hidden continuation owns the next step: say so instead of looking like a live turn.
+              transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host", reason: "goal_continuation_scheduled" });
+            } else {
+              completionClaim = { claimed: true, goalId: turnGoalId,
+                evidence: "Goal turn ended without a completion claim: verify the durable terminal result against all criteria." };
+            }
+          }
+        }
         if (completionClaim?.claimed && completionClaim.goalId) {
           const ongoingRevision = getChatGoalRevision(completionClaim.goalId);
           if (ongoingRevision?.lifecycle === "ongoing" && getChat(chat.id)?.goalId === completionClaim.goalId
