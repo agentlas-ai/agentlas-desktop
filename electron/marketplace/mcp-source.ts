@@ -1207,10 +1207,13 @@ export class McpSource implements MarketplaceSource {
     slug: string,
     options?: { packageHash?: string },
   ): Promise<(SeedListingFull & MarketplaceListing) | null> {
-    return this.call<(SeedListingFull & MarketplaceListing) | null>(
+    const listing = await this.call<(SeedListingFull & MarketplaceListing) | null>(
       "marketplace.get_manifest",
       { kind: "agent", slug, ...(options?.packageHash ? { packageHash: options.packageHash } : {}) },
     );
+    // The manifest path bypasses search-row normalization. Old servers can
+    // still return a retired per-call price, so close it at this boundary too.
+    return listing ? { ...listing, perCallCredits: 0 } : null;
   }
 
   getFirmBySlug(slug: string): Promise<FirmListing | null> {
