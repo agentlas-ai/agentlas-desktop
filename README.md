@@ -62,6 +62,24 @@
   <img alt="Agentlas Desktop running a CEO agent over a live org chart" src="docs/screenshot.png" width="960">
 </p>
 
+## Agent Hub and billing
+
+The Agent Hub contract in this source is free: publishing, finding, installing,
+and calling public agents do not set an agent price, debit a Hub-call credit,
+or create creator earnings. Agentlas does not offer agent sales, paid leases,
+or creator settlement. Agent Cloud is the owner's private package library;
+publishing to the public Hub is a separate choice.
+
+Agentlas subscriptions and any hosted-AI allowance are separate from public
+Hub calls. Your own model provider may charge for model usage. Earlier credit
+purchases and their refund rights remain available for historical account
+reconciliation; ending new sales does not erase those records.
+
+The dated release log below records what older versions shipped, including
+features that have since been retired. It is not a current price list or a
+promise that the installed app has received these source changes. Use the
+published release and the installed version to check delivery.
+
 ## Release log
 
 - **2026-09-25 · v1.2.42 — 목표는 구조부터 정하고, 막혀도 스스로 다음 수를 고른다** — 목표는 일을 시작하기 전에 단일 전술·전술 목록·최종목표-전략목표-하위목표 트리 중 어떤 모양인지 먼저 정하고, 매 턴은 지금 전술에 집중합니다(One 목표 도움말과 Work 목표 막대에 한 줄로 보임). 목표 대화에서 목표치를 다시 말하면 다음 턴 경계에서 목표 개정판이 되어 숫자와 하루 속도가 계획에 들어갑니다. 첫 턴 뒤 효과 확인에 막혀 끝없이 재관찰하던 목표는 짧은 읽기 전용 확인으로 판정받고 이어갑니다. 실패나 스스로 고른 보류 뒤에는 한 곳에서 다음 수(다시 계획·다른 모델로 전환)를 골라 기록하고, 아무것도 안 한 보류는 완료로 치지 않으며, 복구는 실패한 모델이 아닌 다른 모델로, 사용 한도는 리셋 뒤 스스로 이어갑니다. 무인 브라우저 자동화는 사이트를 먼저 열고 판단하고, 에이전트는 Agentlas 브라우저를 우선 쓰며, Codex 브라우저 자동화의 승인 대기·세션 복원 멈춤·판정 시간 부족·이미지 업로드·단계 간 브라우저 충돌을 고쳤습니다. 목표 칩으로 만든 목표는 재시작에 취소되지 않고 이어가며, 목표 구조 화면은 최종목표·전략목표·하위목표로 부릅니다. 권한 승격 칩, 한 프로젝트의 두 목표, 시간 도구 실패, 기록 없는 세션 재개, 좁은 대화 열의 겹침·잘림과 모델 변경 대기 표시도 고쳤습니다. Source readiness does not prove a public installer or installed update; the Releases page stays the authority. This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
