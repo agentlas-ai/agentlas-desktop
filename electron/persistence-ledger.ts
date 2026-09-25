@@ -26,14 +26,24 @@ export interface AutomationRunSettlementFacts {
   completed: boolean;
   outcome: string | null;
   reasonCode: string | null;
-  /** 호스트가 센, 바깥을 바꿀 수 있었던 도구 호출 수. */
-  actionCalls: number;
+  /**
+   * 호스트가 센 바깥 효과 수(electron/outward-effect.ts) — 게시·전송 같은 브라우저 확정, 외부 쓰기,
+   * 자기 작업 폴더 밖의 산출물 파일. 자기 메모 파일 수정·셸·탐색·필터 클릭은 세지 않는다.
+   * 실측 2026-09-24 f7a61706 18:00–23:00Z: 게시 0건인데 apply_patch(자기 playbook)·필터 탭 클릭이
+   * "행동"으로 세어져 self_hold 가 한 번도 안 걸렸다.
+   */
+  outwardEffects: number;
+  /**
+   * 이 자동화가 진행 중(ongoing) 목표의 한 회차인가. ongoing 목표는 한 회차로 "충족"되지 않으므로,
+   * 바깥 효과 0인 회차를 판정이 ok(수용)로 봐도 그것은 자기 보류다. skipped(할 일 없음)는 여전히 보류가 아니다.
+   */
+  ongoingGoal?: boolean;
 }
 
 /**
  * 자기 보류(progress.self_hold) — 호스트 사실만으로 판정한다(판정 문장이 아니라).
  *  - 실행은 끝까지 돌았다(실패가 아니다),
- *  - 바깥을 바꾼 호출이 0이다,
+ *  - 바깥 효과가 0이다(자기 메모·셸·탐색은 바깥 효과가 아니다 — outward-effect.ts),
  *  - 목표 충족이 확인되지 않았다: 판정이 미충족으로 봤거나(rejected = partial/error 판정), 판정기에 닿지
  *    못했다(unjudged). 판정이 목표 충족(accepted)·할 일 없음(skipped→accepted)·사람 필요(needs_input)·외부
  *    제약(blocked)으로 본 것은 목표 충족이거나 이유 타입이 있으므로 보류가 아니다.
@@ -45,17 +55,20 @@ export interface AutomationRunSettlementFacts {
 export function automationRunSettlementCause(facts: AutomationRunSettlementFacts): FailureCause | null {
   if (facts.reasonCode === "claimed_without_tools") return { kind: "claimed_without_tools" };
   if (!facts.completed) return null;
-  if (facts.actionCalls > 0) return null;
+  if (facts.outwardEffects > 0) return null;
   if (facts.outcome === "rejected" && facts.reasonCode === "controller_judged") return { kind: "self_hold" };
   if (facts.outcome === "unjudged") return { kind: "self_hold" };
+  // 판정 ok(수용, reasonCode 없음)이지만 바깥 효과 0 — ongoing 목표의 회차에서만 보류로 본다.
+  // skipped 는 수용이되 reasonCode 가 controller_judged 로 남는다(automation-result.ts) — 여기 안 걸린다.
+  if (facts.ongoingGoal === true && facts.outcome === "accepted" && facts.reasonCode === null) return { kind: "self_hold" };
   return null;
 }
 
-/** 마지막 진전 시각 — 바깥을 바꾸고(acting ≥ 1) 수용된 가장 최근 실행. 그 이후의 결정만 이력이다. */
+/** 마지막 진전 시각 — 바깥 효과가 있고(outward ≥ 1) 수용된 가장 최근 실행. 그 이후의 결정만 이력이다. */
 function lastProgressAt(automationId: string): string | null {
   try {
     const facts = recentAutomationRunFacts(automationId, 24).reverse();
-    const progressed = facts.find((fact) => fact.outcome === "accepted" && fact.actionCalls > 0);
+    const progressed = facts.find((fact) => fact.outcome === "accepted" && fact.outwardEffects > 0);
     return progressed?.ranAt ?? null;
   } catch {
     return null;
@@ -114,10 +127,10 @@ export function decideAndRecordAutomationPersistence(input: RecordAutomationPers
   return decision;
 }
 
-/** 이 실행에서 바깥을 바꿀 수 있었던 호출 수(호스트 영수증). 못 읽으면 null — 0으로 지어내지 않는다. */
-export function automationRunActionCalls(runId: string): number | null {
+/** 이 실행의 바깥 효과 수(호스트 영수증, outward-effect.ts). 못 읽으면 null — 0으로 지어내지 않는다. */
+export function automationRunOutwardEffects(runId: string): number | null {
   try {
-    return automationRunToolCounts(runId).actionCalls;
+    return automationRunToolCounts(runId).outwardEffects;
   } catch {
     return null;
   }

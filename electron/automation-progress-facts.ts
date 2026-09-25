@@ -19,6 +19,8 @@ import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../shared/
 import { AUTOMATION_CONTINUITY_CLOSE, AUTOMATION_CONTINUITY_OPEN } from "./automation-continuity";
 import type { PersistenceDecisionPayload } from "../shared/persistence-policy";
 import { latestAutomationPersistenceDecision } from "./persistence-ledger";
+import { summarizeOutwardEffects, type OutwardEffectKind, type OutwardToolCall } from "./outward-effect";
+import { userDataPath } from "./runtime-paths";
 
 /**
  * Browser operations that only look. This is a *progress* signal (did the run
@@ -54,19 +56,39 @@ export interface AutomationRunProgressFact {
   ranAt: string;
   status: string;
   outcome: string | null;
-  /** Distinct tool calls that could have acted on the outside world. */
+  /** Distinct tool calls that could have acted on the outside world (replay-safety sense). */
   actionCalls: number;
   /** Distinct observation-only tool calls (look, find, navigate, snapshot). */
   observationCalls: number;
   actionTools: string[];
+  /**
+   * Calls that changed something outside the agent's own workspace toward the goal (progress sense,
+   * electron/outward-effect.ts): a browser commit, an external mutation, or a deliverable file.
+   * Local notes, shell, navigation and filter clicks are not counted.
+   */
+  outwardEffects: number;
+  outwardKinds: OutwardEffectKind[];
 }
 
-/** Host receipts only: distinct acting vs observation-only tool calls of one run. */
-export function automationRunToolCounts(runId: string): { actionCalls: number; observationCalls: number; actionTools: string[] } {
+export interface AutomationRunToolCounts {
+  actionCalls: number;
+  observationCalls: number;
+  actionTools: string[];
+  outwardEffects: number;
+  outwardKinds: OutwardEffectKind[];
+}
+
+/** The host's own scratch cwd (runtime/exec agentRunCwd) — writes there are the agent's notebook. */
+export function defaultAgentScratchRoots(): string[] {
+  try { return [userDataPath("agent-cwd")]; } catch { return []; }
+}
+
+/** Host receipts only: distinct acting vs observation-only tool calls of one run, plus its outward effects. */
+export function automationRunToolCounts(runId: string, opts: { scratchRoots?: string[] } = {}): AutomationRunToolCounts {
   const rows = getDb().prepare(
     "SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 800",
   ).all(runId) as Array<{ payload_json: string | null }>;
-  const seen = new Set<string>();
+  const calls = new Map<string, OutwardToolCall>();
   let actionCalls = 0;
   let observationCalls = 0;
   const actionTools = new Set<string>();
@@ -77,8 +99,16 @@ export function automationRunToolCounts(runId: string): { actionCalls: number; o
     if (!name || isHostPreflightTool(name)) return;
     // A request and its completion share one tool id; count the call once.
     const key = typeof payload?.toolId === "string" && payload.toolId ? `${name}\0${payload.toolId}` : `${name}\0#${index}`;
-    if (seen.has(key)) return;
-    seen.add(key);
+    const evidence = payload?.runtimeEvidence as { phase?: unknown } | undefined;
+    const failed = payload?.toolIsError === true || evidence?.phase === "failed";
+    const existing = calls.get(key);
+    if (existing) {
+      // Any receipt of the call that failed means the call did nothing outside.
+      if (failed) existing.failed = true;
+      if (existing.args == null && payload?.toolArgs != null) existing.args = payload.toolArgs;
+      return;
+    }
+    calls.set(key, { name, args: payload?.toolArgs ?? null, failed });
     if (isGoalActionTool(name)) {
       actionCalls += 1;
       actionTools.add(toolLeaf(name) || name);
@@ -86,7 +116,15 @@ export function automationRunToolCounts(runId: string): { actionCalls: number; o
       observationCalls += 1;
     }
   });
-  return { actionCalls, observationCalls, actionTools: [...actionTools].slice(0, 6) };
+  const scratchRoots = opts.scratchRoots ?? defaultAgentScratchRoots();
+  const outward = summarizeOutwardEffects([...calls.values()], { scratchRoots, cwd: scratchRoots[0] ?? null });
+  return {
+    actionCalls,
+    observationCalls,
+    actionTools: [...actionTools].slice(0, 6),
+    outwardEffects: outward.outwardEffects,
+    outwardKinds: outward.kinds,
+  };
 }
 
 /** Newest-last facts for the most recent runs of one automation. */
@@ -107,16 +145,18 @@ export function recentAutomationRunFacts(automationId: string, limit = 4): Autom
 }
 
 /**
- * Consecutive most-recent completed runs that took no external action. A run
- * that failed is not counted either way (it breaks nothing and proves nothing);
- * any acting run ends the streak.
+ * Consecutive most-recent completed runs with no outward effect. A run that
+ * failed is not counted either way (it breaks nothing and proves nothing); any
+ * run that changed something outside the agent's own workspace ends the streak.
+ * Local notes and navigation do not (2026-09-24: six Threads runs "acted" only
+ * on their own playbook file and activity-filter tabs).
  */
 export function automationNoActionStreak(automationId: string, lookback = 24): number {
   const facts = recentAutomationRunFacts(automationId, lookback).reverse();
   let streak = 0;
   for (const fact of facts) {
     if (fact.status !== "ok") continue;
-    if (fact.actionCalls > 0) break;
+    if (fact.outwardEffects > 0) break;
     streak += 1;
   }
   return streak;
@@ -136,10 +176,11 @@ export function automationIdForLedgerChat(chatId: string): string | null {
 }
 
 function factLine(fact: AutomationRunProgressFact): string {
-  const acted = fact.actionCalls > 0
-    ? `${fact.actionCalls} acting tool call(s) [${fact.actionTools.join(", ")}]`
-    : "no acting tool call";
-  return `- run ${fact.ranAt}: status ${fact.status}, outcome ${fact.outcome ?? "unjudged"}, ${acted}, ${fact.observationCalls} observation call(s)`;
+  const acted = fact.outwardEffects > 0
+    ? `${fact.outwardEffects} outward effect(s) [${fact.outwardKinds.join(", ")}]`
+    : "no outward effect (local notes, shell and navigation do not count)";
+  return `- run ${fact.ranAt}: status ${fact.status}, outcome ${fact.outcome ?? "unjudged"}, ${acted}, `
+    + `${fact.actionCalls + fact.observationCalls} tool call(s) in total`;
 }
 
 const NARRATIVE_MAX_CHARS = 800;
@@ -153,7 +194,7 @@ const NARRATIVE_MAX_CHARS = 800;
 export function persistenceDirectiveLines(decision: Pick<PersistenceDecisionPayload, "cause" | "move"> | null): string[] {
   if (!decision) return [];
   const cause = decision.cause === "self_hold"
-    ? "the previous run took no acting tool call and its goal was not confirmed met (a self-chosen hold)"
+    ? "the previous run changed nothing outside its own workspace (no post, send, external write or deliverable file) and its goal was not advanced (a self-chosen hold)"
     : decision.cause === "claimed_without_tools"
       ? "the previous run claimed an outside change but the host recorded no tool call for it"
       : null;
@@ -216,7 +257,7 @@ export function buildAutomationContinuityCapsulePrompt(chatId: string, effective
     "This is the same durable automation session. Do not restart setup, and do not repeat an external action that a prior run already completed.",
     "A hold, pause, quota or waiting window chosen by an earlier run is that run's own choice, not a standing rule: decide this run from the current goal and instructions.",
     ...(facts.length > 0 ? ["Host-recorded facts from recent runs (oldest first):", ...facts.map(factLine)] : []),
-    ...(streak >= 2 ? [`Host count: the last ${streak} completed runs took no acting tool call.`] : []),
+    ...(streak >= 2 ? [`Host count: the last ${streak} completed runs changed nothing outside their own workspace.`] : []),
     ...persistence,
     ...narratives,
     AUTOMATION_CONTINUITY_CLOSE,
