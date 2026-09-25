@@ -5,7 +5,8 @@ import { getDb } from "../store/db";
 export interface AutomaticCriterionPolicy {
   version: "agentlas.automatic-criterion-policy.v1";
   scopeIndex: number;
-  evidenceIndex: number;
+  /** v1 recipe only (a fixed evidence criterion inheriting the outcome's proof kind); null for v2. */
+  evidenceIndex: number | null;
   outcomeIndex: number;
   initialInvocationRunId: string;
   currentPermission: "read" | "write" | "full";
@@ -85,10 +86,14 @@ export function automaticCriterionPolicy(goal: GoalRevision): AutomaticCriterion
     if (controllers.length !== 1) return null;
     // Reauthorization mutates authorityRefs on revision 1. Reconstruct with
     // the ORIGINAL Main start permission, not the current mutable grant.
-    const recipe = buildAutomaticGoalCriteria({ sourceText: source.text, permission: permission as string,
-      lifecycle: resolveGoalLifecycle(goal.lifecycle) });
-    if (!Array.isArray(goal.acceptanceCriteria) || goal.acceptanceCriteria.length !== recipe.length
-      || goal.acceptanceCriteria.some((criterion, index) => canonical(criterion) !== canonical(recipe[index]))) return null;
+    const recipeMatches = (version: "v1" | "v2") => {
+      const recipe = buildAutomaticGoalCriteria({ sourceText: source.text, permission: permission as string,
+        lifecycle: resolveGoalLifecycle(goal.lifecycle), recipe: version });
+      return Array.isArray(goal.acceptanceCriteria) && goal.acceptanceCriteria.length === recipe.length
+        && goal.acceptanceCriteria.every((criterion, index) => canonical(criterion) === canonical(recipe[index]));
+    };
+    const recipeVersion = recipeMatches("v2") ? "v2" : recipeMatches("v1") ? "v1" : null;
+    if (!recipeVersion) return null;
     const authorityRefs: string[] = [];
     let currentPermission = permission as "read" | "write" | "full";
     if (goal.authorityChangeReason === undefined && goal.authorityChangedAt === undefined) {
@@ -115,7 +120,7 @@ export function automaticCriterionPolicy(goal: GoalRevision): AutomaticCriterion
       authorityRefs.push(`event:${change.id}`);
       currentPermission = match[1] as "read" | "write" | "full";
     }
-    return { version: "agentlas.automatic-criterion-policy.v1", scopeIndex: 1, evidenceIndex: 2, outcomeIndex: 0,
+    return { version: "agentlas.automatic-criterion-policy.v1", scopeIndex: 1, evidenceIndex: recipeVersion === "v1" ? 2 : null, outcomeIndex: 0,
       initialInvocationRunId: intake.run_id, currentPermission,
       provenanceRefs: [`goal:${goal.goalId}:revision:1`, `chat-message:${goal.originalRequest.messageId}`,
         `event:${start.id}`, `event:${prompt.id}`, `event:${intake.id}`,

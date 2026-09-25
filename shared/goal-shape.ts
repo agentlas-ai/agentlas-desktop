@@ -398,8 +398,12 @@ export interface LiveGoalPlan {
   createdAt: string;
 }
 
-/** 트리에서 처음 활성으로 두는 전략 수(나머지는 proposed — 리뷰가 올린다). */
-export const INITIAL_ACTIVE_STRATEGIES = 3;
+/**
+ * 트리에서 처음 활성으로 두는 전략 — 계획자가 낸 전략 전부(오너 2026-09-25: 개수 하드코딩 금지).
+ * 예전엔 앞의 3개만 active 였다. 몇 개의 가설을 동시에 돌릴지는 계획자의 판단이고, 상한은
+ * GOAL_SHAPE_LIMITS.strategies(정책) 가 이미 건다. 리뷰가 retire 로 줄인다.
+ */
+export const INITIAL_ACTIVE_STRATEGIES = GOAL_SHAPE_LIMITS.strategies;
 
 /**
  * 다음에 실행할 전술을 고른다.

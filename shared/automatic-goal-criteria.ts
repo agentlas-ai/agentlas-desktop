@@ -3,7 +3,22 @@ import { goalScopeCriterion } from "./goal-scope";
 
 /** Main automatic-intake recipe. Text must remain byte-identical: recognition
  * of an existing contract is provenance checking, not permission or a verdict. */
+/**
+ * Recipe versions. v2 (owner 2026-09-25, no fixed criterion templates): the requested outcome — rolled up by the
+ * verifier from the AI's own decomposition — and the permission/working-folder scope the host audits. v1 kept two
+ * more fixed templates (evidence, delivery-validation); it is still recognized for goals created under it.
+ */
+export type AutomaticCriteriaRecipe = "v1" | "v2";
+export const CURRENT_AUTOMATIC_CRITERIA_RECIPE: AutomaticCriteriaRecipe = "v2";
+
 export function buildAutomaticGoalCriteria(input: {
+  sourceText: string; permission: string; lifecycle: GoalLifecycle; recipe?: AutomaticCriteriaRecipe;
+}): GoalCriterion[] {
+  const all = buildAutomaticGoalCriteriaV1(input);
+  return (input.recipe ?? CURRENT_AUTOMATIC_CRITERIA_RECIPE) === "v1" ? all : all.slice(0, 2);
+}
+
+function buildAutomaticGoalCriteriaV1(input: {
   sourceText: string; permission: string; lifecycle: GoalLifecycle;
 }): GoalCriterion[] {
   const ongoing = input.lifecycle === "ongoing";
