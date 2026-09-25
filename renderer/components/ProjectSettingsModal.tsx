@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { invalidateViewData } from "@/lib/view-data-cache";
+import { projectAgentLimitMessage } from "@/lib/project-agent-roster";
 import type { NewProjectSource, ProjectSettingsRequest, ProjectSettingsSection } from "@/lib/project-settings";
 import type { FsPathGrant, Project, ProjectAgentPoolMember } from "@/lib/types";
 import { IconArrowLeft, IconCheck, IconChevronRight, IconClose, IconFolder, IconGithub, IconPlus, IconUsers } from "./Icon";
@@ -195,10 +196,11 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
       invalidateViewData("dashboard.projects");
       window.dispatchEvent(new CustomEvent("agentlas:projects-changed", { detail: { projectId: saved.id } }));
       if (mounted.current) onSaved(saved);
-    } catch {
+    } catch (failure) {
+      const planMessage = projectAgentLimitMessage(failure, ko);
       reportFailure(
-        ko ? "저장하지 못했습니다. 입력은 유지되어 있으니 다시 시도해 주세요." : "Could not save. Your entries are preserved; please try again.",
-        ko ? "백그라운드 저장에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background save failed. Reopen project settings to try again.",
+        planMessage ?? (ko ? "저장하지 못했습니다. 입력은 유지되어 있으니 다시 시도해 주세요." : "Could not save. Your entries are preserved; please try again."),
+        planMessage ?? (ko ? "백그라운드 저장에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background save failed. Reopen project settings to try again."),
       );
     } finally {
       operation.current = false;

@@ -111,7 +111,7 @@ import {
   setChatWorkingFolder,
   unarchiveChat,
 } from "../store/chats";
-import { getProject, updateProject } from "../store/projects";
+import { getProject, projectPoolAddsMembers, updateProject } from "../store/projects";
 import { getFirm } from "../store/firms";
 import {
   PROJECT_AGENT_POOL_MAX,
@@ -137,7 +137,7 @@ import {
   type MobileHubMarketService,
 } from "./hub-market";
 import { getUsageSnapshot } from "../usage";
-import { getBillingCredits } from "../billing";
+import { getBillingCredits, getFreshProjectAgentLimitGrant } from "../billing";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
@@ -2375,7 +2375,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           nextPool.push(member);
         }
 
-        const updated = updateProject(project.id, { agentPool: nextPool });
+        const projectAgentGrant = projectPoolAddsMembers(project.agentPool, nextPool)
+          ? await getFreshProjectAgentLimitGrant() : undefined;
+        // The entitlement read yielded. Do not overwrite a Desktop edit made meanwhile.
+        const latest = getProject(project.id);
+        if (!latest || latest.agentPool.length !== currentKeys.length
+          || latest.agentPool.some((member, index) => projectPoolMemberKey(member) !== currentKeys[index])) {
+          throw new Error("This project's team changed on Desktop. Reload the project and try again.");
+        }
+        const updated = updateProject(project.id, { agentPool: nextPool }, { projectAgentGrant });
         this.scheduleSnapshotUpdated();
         return asJsonValue(
           await projectMobileBridgeProjectAsync(updated),
