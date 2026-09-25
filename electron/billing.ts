@@ -3,6 +3,7 @@
 // 인증은 auth.ts의 세션 쿠키를 사용한다.
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "./auth";
 import type { BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance } from "../shared/types";
+import { PROJECT_AGENT_POOL_MAX } from "../shared/project-agent-pool";
 
 const TIMEOUT_MS = 8000;
 
@@ -87,14 +88,14 @@ export interface ProjectAgentLimitGrant {
 const projectAgentGrants = new WeakSet<ProjectAgentLimitGrant>();
 const PROJECT_AGENT_GRANT_MAX_AGE_MS = 10_000;
 
+/*
+ * Work 에이전트는 무료다(오너 결정 2026-09-25, docs/2026-09-25-onboarding-redesign/PLAN.md §3·§6).
+ * 예전에는 서버 요금제의 projectAgents(Free 3 / Pro 10 …)를 받아 프로젝트 팀 크기를
+ * 막았다. 이제 요금제·로그인과 무관하게 저장소 안전 상한(32)만 적용한다. grant 모양은
+ * 그대로 두어 저장 경로(store/projects.ts)의 "한 번 쓰고 버리는" 계약을 바꾸지 않는다.
+ */
 export async function getFreshProjectAgentLimitGrant(): Promise<ProjectAgentLimitGrant> {
-  const balance = await getBillingCredits();
-  if (!balance.authenticated) throw new Error("[agentlas:code=project-agent-sign-in-required] Sign in to add project agents or teams.");
-  const limit = balance.entitlements?.projectAgents;
-  if (balance.error || !Number.isSafeInteger(limit) || limit === undefined || limit < 0 || limit > 32) {
-    throw new Error("[agentlas:code=project-agent-entitlement-unavailable] Could not verify the project agent limit. Check your connection and try again.");
-  }
-  const grant = Object.freeze({ limit, checkedAtMs: Date.now() });
+  const grant = Object.freeze({ limit: PROJECT_AGENT_POOL_MAX, checkedAtMs: Date.now() });
   projectAgentGrants.add(grant);
   return grant;
 }
