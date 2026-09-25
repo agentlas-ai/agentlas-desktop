@@ -1158,6 +1158,7 @@ function seatLabelForChat(
   taskforces: OneTaskforce[],
   org: OneOrgState | null,
   locale: "ko" | "en",
+  oneName = "One",
 ): string {
   const taskforce = taskforces.find((item) => item.chatId === chat.id);
   if (taskforce) return taskforce.title.trim() || (locale === "ko" ? "단톡방" : "Group");
@@ -1172,7 +1173,7 @@ function seatLabelForChat(
   if (snapshot) {
     return chat.seatKind === "group" && locale === "ko" ? `${snapshot} (해체됨)` : chat.seatKind === "group" ? `${snapshot} (dissolved)` : snapshot;
   }
-  return "One";
+  return oneName;
 }
 
 function directSessionAgentId(chat: Chat): string | null {
@@ -6931,10 +6932,10 @@ export function OneShell() {
   // A direct room belongs to its seated agent; the general room and a taskforce
   // synthesis belong to One. Never borrow either identity for user messages.
   const assistantSpeaker = activeTaskforce
-    ? { label: "One", tone: oneAvatarTone, status: "quiet" as const }
+    ? { label: oneDisplayName, tone: oneAvatarTone, status: "quiet" as const }
     : activeOneMember
       ? { label: activeOneMember.displayName, tone: activeOneMember.icon, status: activeOneMember.statusKind }
-      : { label: "One", tone: oneAvatarTone, status: "quiet" as const };
+      : { label: oneDisplayName, tone: oneAvatarTone, status: "quiet" as const };
   const removeAttachmentDraft = useCallback((id: string) => {
     const current = attachmentDraftsRef.current;
     const removed = current.find((item) => item.id === id);
@@ -7406,7 +7407,7 @@ export function OneShell() {
                   locale={appLocale}
                   onOpen={openConversation}
                   onRemove={removeConversation}
-                  seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
+                  seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale, oneDisplayName)}
                   running={activeChatIds.includes(row.chat.id)}
                   unavailable={directSessionUnavailable(row.chat, oneOrgState)}
                   member={oneOrgState?.members.find((member) => member.installedAgentId === row.chat!.agentId) ?? null}
@@ -7414,6 +7415,7 @@ export function OneShell() {
                     .map((agentId) => oneOrgState?.members.find((member) => member.installedAgentId === agentId))
                     .filter((member): member is OneOrgMember => Boolean(member))}
                   oneAvatarTone={oneAvatarTone}
+                  oneName={oneDisplayName}
                 />
               ) : row.task ? (
                 <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
@@ -7489,7 +7491,7 @@ export function OneShell() {
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
                 <div className={styles.taskToolbarIdentity}>
                   {activeTaskforce ? <span className={styles.taskforceToolbarPortraits} aria-hidden="true">
-                    <OneAgentPortrait status={busy ? "working" : "quiet"} label="One" tone={oneAvatarTone} size="small" />
+                    <OneAgentPortrait status={busy ? "working" : "quiet"} label={oneDisplayName} tone={oneAvatarTone} size="small" />
                     {activeTaskforce.memberAgentIds.slice(0, 2).map((agentId) => {
                       const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
                       const unavailable = memberUnavailable(member);
@@ -7508,8 +7510,8 @@ export function OneShell() {
                     />
                   ) : <OneAgentPortrait
                     status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
-                    label={activeOneMember?.displayName ?? "One"}
-                    tone={activeOneMember?.icon ?? "character:orange-dino"}
+                    label={activeOneMember?.displayName ?? oneDisplayName}
+                    tone={activeOneMember?.icon ?? oneAvatarTone}
                     size="medium"
                   />}
                   <span>
@@ -7520,7 +7522,7 @@ export function OneShell() {
                       ?? ((activeSeatDissolved || activeSeatEmpty) && activeSeat?.title?.trim() ? activeSeat.title.trim() : null)
                       ?? activeOneMember?.displayName
                       ?? (activeSeatEmpty ? previousOccupantName : null)
-                      ?? "One"}</strong>
+                      ?? oneDisplayName}</strong>
                     {activeDirectSessionUnavailable && <small data-one-session-unavailable="true">{appLocale === "ko" ? "에이전트 없음 · 기록만 열람 가능" : "Agent unavailable · history only"}</small>}
                     {!activeDirectSessionUnavailable && activeSeatDissolved && <small data-one-dissolved-badge="true">{appLocale === "ko" ? "해체됨 · 기록 보존" : "Dissolved · records kept"}</small>}
                     {!activeDirectSessionUnavailable && !activeSeatDissolved && activeSeatEmpty && <small data-one-empty-seat-badge="true">{appLocale === "ko"
@@ -7631,7 +7633,7 @@ export function OneShell() {
                 <header className={styles.homeChatHeader}>
                   <div>
                     <span className={styles.homePresence} aria-hidden="true" />
-                    <strong>One</strong>
+                    <strong>{oneDisplayName}</strong>
                     <small>{appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator"}</small>
                   </div>
                   <button type="button" data-active={homeMemoryMapOpen ? "true" : "false"} aria-pressed={homeMemoryMapOpen} onClick={() => setHomeMemoryMapOpen((value) => !value)}>
@@ -7644,7 +7646,7 @@ export function OneShell() {
                   {/* A new conversation has no task owner. Prior-task decisions
                       remain in their own threads and the existing notification UI. */}
                   <section className={styles.homeAssistantMessage} aria-labelledby="one-home-message-title">
-                    <span className={styles.homeMessageAuthor}>One</span>
+                    <span className={styles.homeMessageAuthor}>{oneDisplayName}</span>
                     <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
                   </section>
                   {firstRequestEntry === "home" && (
@@ -8094,7 +8096,7 @@ export function OneShell() {
               key={pane.id}
               chatId={pane.id}
               title={pane.title || (appLocale === "ko" ? "새 대화" : "New conversation")}
-              seatLabel={seatLabelForChat(pane, taskforces, oneOrgState, appLocale)}
+              seatLabel={seatLabelForChat(pane, taskforces, oneOrgState, appLocale, oneDisplayName)}
               locale={appLocale}
               running={activeChatIds.includes(pane.id)}
               onActivate={() => {
@@ -8877,7 +8879,7 @@ export function OneShell() {
                         className={styles.sessionSheetOpen}
                         onClick={() => { setSessionSheetOpen(false); openConversation(chat.id); }}
                       >
-                        <span className={styles.sessionSheetSeat}>{seatLabelForChat(chat, taskforces, oneOrgState, appLocale)}</span>
+                        <span className={styles.sessionSheetSeat}>{seatLabelForChat(chat, taskforces, oneOrgState, appLocale, oneDisplayName)}</span>
                         <span className={styles.sessionSheetName}>{chat.title || (appLocale === "ko" ? "새 대화" : "New conversation")}</span>
                         {/* 표시=실행 (C-D-1): 이 세션의 마지막 실행이 실제로 돈 모델. */}
                         {sessionModels[chat.id] && <span className={styles.sessionSheetHint} data-session-model="true">{sessionModels[chat.id]}</span>}
@@ -9291,7 +9293,7 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
   );
 }
 
-function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running, unavailable, member = null, groupMembers = [], oneAvatarTone = "character:orange-dino" }: {
+function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running, unavailable, member = null, groupMembers = [], oneAvatarTone = "character:orange-dino", oneName = "One" }: {
   item: Chat;
   active: boolean;
   locale: "ko" | "en";
@@ -9303,6 +9305,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
   member?: OneOrgMember | null;
   groupMembers?: OneOrgMember[];
   oneAvatarTone?: string;
+  oneName?: string;
 }) {
   const isGroup = item.seatKind === "group" || groupMembers.length > 0;
   const roomTitle = seatLabel?.trim() || briefingSourceName(item.title, locale);
@@ -9314,7 +9317,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
     <div className={styles.conversationRow} data-unavailable={unavailable ? "true" : "false"}>
       <button type="button" className={`${styles.taskButton} ${styles.sessionButton}`} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
         {isGroup ? <span className={styles.sessionGroupAvatar} aria-label={roomTitle}>
-          <OneAgentPortrait status="quiet" label="One" tone={oneAvatarTone} size="small" />
+          <OneAgentPortrait status="quiet" label={oneName} tone={oneAvatarTone} size="small" />
           {groupMembers.slice(0, 2).map((groupMember) => (
             <OneAgentPortrait key={groupMember.installedAgentId} status={groupMember.archivedAt ? "locked" : groupMember.statusKind} label={groupMember.displayName} tone={groupMember.icon} size="small" />
           ))}
