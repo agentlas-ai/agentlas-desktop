@@ -259,7 +259,7 @@ export function currentBuiltinFileProofs(input: {goalId:string;invocationRunId:s
   const goal = getChatGoalRevision(input.goalId);
   if (!goal || goal.revision !== input.goalRevision) return [];
   const effect = readInvocationEffectBoundary({invocationRunId:input.invocationRunId,expectedChatId:goal.chatId});
-  if (!effect.terminal || effect.effects !== "settled") return [];
+  if (!effect.terminal || (effect.effects !== "settled" && effect.quiesced !== true)) return [];
   const terminal = getDb().prepare("SELECT seq FROM run_events WHERE id=? AND run_id=?").get(effect.terminalEventId,input.invocationRunId) as {seq:number}|undefined;
   if (!terminal) return [];
   const rows = getDb().prepare("SELECT id,seq,kind,payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='runtime_file_observed' ORDER BY seq DESC LIMIT 65")
