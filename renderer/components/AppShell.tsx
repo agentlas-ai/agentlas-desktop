@@ -943,9 +943,9 @@ const TOUR_STEPS = [
   },
   {
     title: "Hub",
-    body: "필요한 에이전트·팀을 찾아 설치하는 곳이에요. 추가하기 전에 표시된 가격과 사용 조건을 확인할 수 있어요.",
+    body: "공개 에이전트와 팀을 무료로 찾아보고 설치하는 곳이에요. 카드를 열면 에이전트 스페이스를 볼 수 있어요.",
     bodyEn:
-      "Find and install agents and teams for your work. Review the displayed price and terms before adding them.",
+      "Find and install shared agents and teams for free. Open a card to view its Agent Space.",
   },
   {
     title: "Environment",

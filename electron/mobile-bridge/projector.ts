@@ -505,7 +505,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       // server-side cloud delete, and remote Hephaestus builds.
       "cloud-agent-actions",
       // v1 hub-publish extension: public Hub publish of the user's own
-      // registered agents plus post-publish price setting.
+      // registered agents. The old price method is refusal-only for old clients.
       "hub-publish-v1",
       "remote-build",
       ...(options.ontology?.supported ? ["ontology-chips"] : []),

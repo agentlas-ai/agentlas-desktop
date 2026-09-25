@@ -193,8 +193,7 @@ export default function CloudAgentPublishPage() {
           visibility,
           link,
           careerGraph,
-          // Only for a public listing. A private save has nothing to price —
-          // it is not on the Hub and nobody can hire it.
+          // Public slug opens the corresponding free Agent Space.
           ...(visibility === "marketplace" && res.registration?.slug
             ? { slug: res.registration.slug }
             : {}),

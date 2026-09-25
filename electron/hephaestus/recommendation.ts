@@ -139,7 +139,7 @@ export function normalizeRecommendation(
     return base({ mode: "pipeline", agents, stages, totalEstCredits: null });
   }
 
-  // ── hub_candidates → 네트워크 TF (Hub 에이전트를 빌려 로컬 실행). 실제 perCallCredits 노출. ──
+  // ── hub_candidates → 네트워크 TF. 공개 Hub 에이전트 호출은 무료. ──
   if (action === "hub_candidates") {
     const bySlug = new Map<string, Record<string, unknown>[]>();
     for (const it of asArr(asObj(decision.hub).results)) {

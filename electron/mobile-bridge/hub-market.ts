@@ -113,7 +113,8 @@ function projectListing(
     ownerName: safeNullableText(listing.ownerName, 160),
     category: safeNullableText(listing.category, 120),
     callable: listing.callable === true,
-    perCallCredits: safeFinite(listing.perCallCredits, 0, 1_000_000),
+    // Retired Hub prices remain a zero-valued compatibility field.
+    perCallCredits: 0,
     verifiedInvocations: safeFinite(listing.verifiedInvocations, 0, Number.MAX_SAFE_INTEGER),
     rating: safeFinite(listing.rating, 0, 5),
     release: releaseIdentity(listing),

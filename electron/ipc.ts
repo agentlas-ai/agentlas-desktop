@@ -2741,7 +2741,7 @@ export function registerIpcHandlers(): void {
     };
   });
 
-  // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
+  // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
   ipcMain.handle("billing:getCredits", () => getBillingCredits());
   ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
 
