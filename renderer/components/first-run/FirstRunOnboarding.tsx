@@ -12,7 +12,9 @@
  *   Chrome     → CredentialImportDialog (consent ≠ import ≠ sign-in kept)
  *   AI         → runtime.installCli / openCliLogin / detect + usage (real data only)
  *   Pro        → web checkout, then billing.getCredits re-read before "Pro"
- *   mailbox    → server entitlement `mailbox` only; absent = "coming soon"
+ *   mailbox    → agentMail.status() (server entitlement). Absent = "coming soon";
+ *                Pro+ may create an address via agentMail.issue(), shown only after
+ *                status() returns it.
  *
  * Research (owner rule: look before building):
  *   - Apple HIG, Onboarding: keep it fast and optional; ask for access in context,
@@ -26,6 +28,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { AuthSession, BillingPlanOffer, HubCreditBalance, OneProfile, RuntimeStatus, UsageSnapshot } from "@/lib/types";
+import type { AgentMailStatus } from "@shared/agent-mail";
 import { openPricing, PRICING_URL } from "@/components/UpgradeCta";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { AI_CARDS, aiCardState, usageWindowLabel, type AiCardId, type AiCardSpec, type AiCardState } from "@/lib/ai-connection-state";
@@ -183,7 +186,10 @@ function makeCopy(ko: boolean, name: string) {
     prefHint: "원칙은 적은 그대로만 지켜요. 언제든 프로필에서 고칠 수 있어요.",
     mailTitle: "에이전트에게 메일함을 줄까요?", mailSub: "에이전트만 쓰는 고유한 메일 주소예요.",
     mailName: "에이전트 전용 메일", mailSoon: "도입 예정", mailSoonBody: "Pro 이상 요금제 혜택으로 준비하고 있어요. 준비되면 설정에서 켤 수 있어요.",
-    mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: "요금제에 포함돼 있어요. 주소가 발급되면 여기에 보여요.",
+    mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: "요금제에 포함돼 있어요. 주소를 만들면 여기에 보여요.",
+    mailCreate: "메일 주소 만들기", mailCreating: "만드는 중…", mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
+    mailPlanOnly: "Pro 이상 요금제에서 쓸 수 있어요.", mailSeePlans: "Free · Pro 보기",
+    mailQuota: (n: string) => `이번 달 ${n}명까지 보낼 수 있어요.`,
     mailHint: "실제 주소는 서버에서 발급된 뒤에만 보여 드려요.",
     finish: `${name}에게 가기`, stepsLabel: "진행 단계",
     saveFailed: "저장하지 못했어요. 다시 시도해 주세요.",
@@ -233,7 +239,10 @@ function makeCopy(ko: boolean, name: string) {
     prefHint: "Principles are followed exactly as written. Edit them anytime in the profile.",
     mailTitle: "Give your agent a mailbox?", mailSub: "A unique email address only your agent uses.",
     mailName: "Agent mailbox", mailSoon: "Coming soon", mailSoonBody: "Planned as a Pro-and-above benefit. You'll be able to turn it on in Settings.",
-    mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: "Included in your plan. The address appears here once issued.",
+    mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: "Included in your plan. Create the address and it appears here.",
+    mailCreate: "Create mail address", mailCreating: "Creating…", mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
+    mailPlanOnly: "Available on Pro and above.", mailSeePlans: "See Free · Pro",
+    mailQuota: (n: string) => `Send to up to ${n} recipients this month.`,
     mailHint: "An address is shown only after the server issues it.",
     finish: `Go to ${name}`, stepsLabel: "Progress",
     saveFailed: "Could not save. Please try again.",
@@ -529,11 +538,38 @@ export function FirstRunOnboarding({
   };
 
   /* ── 08 mailbox ───────────────────────────── */
-  useEffect(() => { if (step === "mailbox" && !balance) void loadBalance(); }, [step, balance, loadBalance]);
-  const mailbox = balance?.authenticated ? balance.entitlements?.mailbox : undefined;
+  // The server owns entitlement and address (agentMail.status). Nothing is decided here,
+  // and "issued" is shown only after status() itself returns the address.
+  const [mail, setMail] = useState<AgentMailStatus | null>(null);
+  const [mailBusy, setMailBusy] = useState(false);
+  const [mailError, setMailError] = useState<string | null>(null);
+  const loadMail = useCallback(async () => {
+    const next = await api?.agentMail?.status().catch(() => null);
+    setMail(next ?? { ok: false, code: "unavailable", message: "", status: null });
+    return next ?? null;
+  }, [api]);
+  useEffect(() => { if (step === "mailbox") void loadMail(); }, [step, loadMail]);
+  const mailOk = mail && mail.ok ? mail : null;
+  const mailEntitlement = mailOk?.signedIn ? mailOk.entitlement : null;
+  const mailbox = mailOk?.mailbox ?? null;
+  const mailAddress = mailbox?.address ?? null;
+  const mailActive = mailbox?.status === "active" && Boolean(mailAddress);
+  const createMail = async () => {
+    if (!api?.agentMail || mailBusy) return;
+    setMailBusy(true); setMailError(null);
+    try {
+      const res = await api.agentMail.issue({ displayName });
+      if (!res.ok) { setMailError(res.message || res.code); return; }
+      await loadMail();
+    } catch (err) {
+      setMailError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMailBusy(false);
+    }
+  };
 
   const finish = () => {
-    const withMail = recordStep(recordRef.current, "mailbox", mailbox?.address ? "done" : "skipped");
+    const withMail = recordStep(recordRef.current, "mailbox", mailActive ? "done" : "skipped");
     persist(recordCompleted(withMail));
     onClose("/one");
   };
@@ -718,14 +754,31 @@ export function FirstRunOnboarding({
                 <div className={styles.mailRow}>
                   <div>
                     <strong>{copy.mailName}</strong>
-                    <small>{mailbox?.address ? copy.mailIssued : mailbox && (mailbox.read || mailbox.send) ? copy.mailPendingBody : copy.mailSoonBody}</small>
+                    <small>{mail === null
+                      ? copy.checking
+                      : !mailEntitlement
+                        ? copy.mailSoonBody
+                        : mailbox
+                          ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth)) : copy.mailPreparingBody)
+                          : mailEntitlement.addressLimit > 0
+                            ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit))}`
+                            : copy.mailPlanOnly}</small>
                   </div>
-                  <span className={styles.chip} data-tone={mailbox?.address ? "ok" : undefined}>
-                    {mailbox?.address ? copy.mailIssued : mailbox && (mailbox.read || mailbox.send) ? copy.mailPending : copy.mailSoon}
+                  <span className={styles.chip} data-tone={mailActive ? "ok" : undefined}>
+                    {mail === null ? copy.checking : !mailEntitlement ? copy.mailSoon : mailbox ? (mailActive ? copy.mailIssued : copy.mailPreparing) : copy.mailPending}
                   </span>
                 </div>
-                {mailbox?.address && <div className={styles.mailAddress}>{mailbox.address}</div>}
+                {mailAddress && <div className={styles.mailAddress}>{mailAddress}</div>}
+                {mailEntitlement && !mailbox && mailEntitlement.addressLimit > 0 && (
+                  <button type="button" className={`${styles.primary} ${styles.inlineAction}`} disabled={mailBusy} onClick={() => void createMail()}>
+                    {mailBusy ? copy.mailCreating : copy.mailCreate}
+                  </button>
+                )}
+                {mailEntitlement && !mailbox && mailEntitlement.addressLimit <= 0 && (
+                  <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} onClick={() => setPlansOpen(true)}>{copy.mailSeePlans}</button>
+                )}
               </div>
+              {mailError && <p className={styles.error} role="alert">{mailError}</p>}
               <p className={styles.hint}>{copy.mailHint}</p>
             </>
           )}
@@ -796,7 +849,7 @@ export function FirstRunOnboarding({
                     <li>{copy.projectAgents(num(freePlan.projectAgentLimit))}</li>
                     <li>{copy.byo}</li>
                   </ul>
-                  <button type="button" className={styles.secondary} autoFocus onClick={() => { setPlansOpen(false); complete("ai", anyAiConnected ? "done" : "skipped"); }}>{copy.freeCta}</button>
+                  <button type="button" className={styles.secondary} autoFocus onClick={() => { setPlansOpen(false); if (step === "ai") complete("ai", anyAiConnected ? "done" : "skipped"); }}>{copy.freeCta}</button>
                 </section>
                 <section className={styles.planCard} data-kind="pro" data-selected={onPaid} aria-label={proPlan.name}>
                   <h3>{proPlan.name}{currentPlanId && PAID_PLANS.has(currentPlanId) ? <span>{copy.planCurrent}</span> : null}</h3>
