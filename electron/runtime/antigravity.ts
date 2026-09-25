@@ -992,6 +992,17 @@ export function antigravityFailureKind(_error: string, providerCode?: string): R
   }
 }
 
+/** A terminal ERROR is a failure even when the provider omitted its reason. */
+export function antigravityResultFailure(state: {
+  resultStatus?: string; resultError?: string; resultErrorCode?: string;
+}): { kind: RunnerFailureKind; message: string } | null {
+  if (!state.resultError && !state.resultErrorCode && state.resultStatus?.toUpperCase() !== "ERROR") return null;
+  // Without a code or explanation, do not infer a permanent refusal or quota.
+  return { kind: state.resultError || state.resultErrorCode
+    ? antigravityFailureKind(state.resultError ?? "", state.resultErrorCode) : "exit",
+  message: state.resultError ?? "Antigravity reported an error status without a reason." };
+}
+
 /** Antigravity exit 0 완주의 실패 판별 — 순수 함수(게이트가 픽스처 주입). */
 export function antigravityExitFailure(
   stdout: string,
@@ -2475,15 +2486,11 @@ async function runPreparedAntigravity(
          * 문제인지도, 25분 뒤면 풀린다는 것도 없이. 다시 눌러도 같은 줄만 나온다.
          * 오류 필드 자체는 marker다. code가 없으면 사유 문구를 추측하지 않고 refused로 남긴다.
          */
-        const hasRuntimeFailureMarker = Boolean(
-          agyState.resultError
-          || agyState.resultErrorCode
-          || (agyState.resultRetryAfterHint && agyState.resultStatus?.toUpperCase() === "ERROR"),
-        );
-        const runtimeSaidWhy = hasRuntimeFailureMarker
+        const resultFailure = antigravityResultFailure(agyState);
+        const runtimeSaidWhy = resultFailure
           ? {
-            kind: antigravityFailureKind(agyState.resultError ?? "", agyState.resultErrorCode),
-            message: agyState.resultError ?? "Antigravity reported a structured provider failure.",
+            kind: resultFailure.kind,
+            message: resultFailure.message,
             runtime: "antigravity" as const,
             source: "marker" as const,
             ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
@@ -2554,8 +2561,7 @@ async function runPreparedAntigravity(
             }
             : {}),
         });
-      } else if (agyState.resultError || agyState.resultErrorCode
-        || (agyState.resultRetryAfterHint && agyState.resultStatus?.toUpperCase() === "ERROR")) {
+      } else if (antigravityResultFailure(agyState)) {
         /*
          * ★exit != 0 이어도 런타임이 이유를 말했으면 그 이유가 결과다.
          *
@@ -2563,11 +2569,12 @@ async function runPreparedAntigravity(
          * 예전에는 여기서 `Antigravity CLI exit 1` 로 던져 사유가 통째로 사라졌다.
          * 실패 표식으로 돌려주되, 재시도 종류는 별도 provider code가 있을 때만 구체화한다.
          */
+        const resultFailure = antigravityResultFailure(agyState)!;
         resolve({
           text: "",
           failure: {
-            kind: antigravityFailureKind(agyState.resultError ?? "", agyState.resultErrorCode),
-            message: agyState.resultError ?? "Antigravity reported a structured provider failure.",
+            kind: resultFailure.kind,
+            message: resultFailure.message,
             runtime: "antigravity",
             source: "marker",
             ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
