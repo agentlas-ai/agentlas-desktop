@@ -5257,6 +5257,7 @@ ${effectiveUserPrompt}`;
            * 세션 재사용 문맥(stable)에는 넣지 않는다.
            */
           const goalPlan = await ensureGoalShapeBeforeTurn({ goalId: activeGoalId, objective: activeGoal.objective, signal,
+            runtimeSelection: confirmedRuntime,
             onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
           }).catch((error: unknown) => { console.warn("[goal-plan] shape decision failed:", error instanceof Error ? error.message : error); return null; });
           if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null }));
