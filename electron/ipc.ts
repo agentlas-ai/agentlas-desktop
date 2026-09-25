@@ -4220,7 +4220,9 @@ export function registerIpcHandlers(): void {
       setRentAllowed(String(input?.projectId || ""), String(input?.slug || ""), input?.allowed === true),
   );
 
-  // ── agent leases (day-based, prepaid; replaces the retired 24h auto-lease) ──
+  // Legacy lease IPC remains for installed clients. Paid Hub leases and
+  // marketplace settlement are permanently closed; handlers only refuse or
+  // return an empty list, and never charge credits.
   ipcMain.handle("agentLeases:quote", (_e, slug: string) => getAgentLeaseQuote(String(slug || "")));
   ipcMain.handle(
     "agentLeases:purchase",
